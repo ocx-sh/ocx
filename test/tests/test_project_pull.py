@@ -1253,9 +1253,19 @@ hello = "{ocx.registry}/{repo}:{tag}"
     import json as _json
 
     pull_payload = _json.loads(pull.stdout)
-    # ``Paths`` serializes as an object keyed by the input identifier; one entry here.
-    assert len(pull_payload) == 1, f"expected 1 pull entry, got {pull_payload}"
-    pull_path_str = next(iter(pull_payload.values()))
+    # ``WarmedPaths`` serializes as an object keyed by the pulled identifier,
+    # each value ``{"path": ..., "kind": "package"|"shim"}``, plus one reserved
+    # sibling key ``advisories`` (always present, empty when nothing deferred).
+    assert pull_payload["advisories"] == [], (
+        f"an eager pull defers nothing, so it raises no advisories: {pull_payload}"
+    )
+    rows = {key: value for key, value in pull_payload.items() if key != "advisories"}
+    assert len(rows) == 1, f"expected 1 pull entry, got {rows}"
+    warmed = next(iter(rows.values()))
+    assert warmed["kind"] == "package", (
+        f"an eagerly pre-warmed tool reports its package root, got {warmed}"
+    )
+    pull_path_str = warmed["path"]
     pull_path = Path(pull_path_str)
     assert pull_path.name != "content", (
         f"ocx pull emitted content/ instead of package root: {pull_path_str}"

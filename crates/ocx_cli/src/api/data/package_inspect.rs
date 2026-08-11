@@ -1309,6 +1309,7 @@ mod tests {
     fn dep_node(identifier: oci::PinnedIdentifier, effective_visibility: Visibility) -> ClosureNode {
         ClosureNode {
             identifier,
+            config_digest: oci::Digest::Sha256("e".repeat(64)),
             effective_visibility: Some(effective_visibility),
             binaries: None,
             entrypoints: vec![],
@@ -1323,6 +1324,7 @@ mod tests {
     fn root_node(identifier: oci::PinnedIdentifier) -> ClosureNode {
         ClosureNode {
             identifier,
+            config_digest: oci::Digest::Sha256("e".repeat(64)),
             effective_visibility: None,
             binaries: None,
             entrypoints: vec![],

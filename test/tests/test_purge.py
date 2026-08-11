@@ -314,8 +314,8 @@ def test_purge_preserves_shared_layer_inodes(
 
     result_a = ocx.json("package", "which", short_a)
     result_b = ocx.json("package", "which", short_b)
-    root_a = Path(result_a[short_a])
-    root_b = Path(result_b[short_b])
+    root_a = Path(result_a[short_a]["path"])
+    root_b = Path(result_b[short_b]["path"])
     file_a = root_a / "content" / shared_file_rel
     file_b = root_b / "content" / shared_file_rel
 

@@ -260,6 +260,34 @@ values are ignored with a warning. Unset = unbounded (legacy default).
 The command line option [`--jobs`][arg-jobs] takes precedence over this
 variable.
 
+### `OCX_LAZY_MODE` {#ocx-lazy-mode}
+
+The lowest tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder] — whether a declared tool composes eagerly (content fetched before it reaches `PATH`) or as a shim that defers content until its first invocation.
+
+```sh
+export OCX_LAZY_MODE=always
+```
+
+Accepts `never` (the default when nothing sets any tier) or `always`, parsed case-insensitively (`Always`, `ALWAYS`, and `always` are equivalent — unlike the [`--lazy-mode`][arg-lazy-mode] flag and the `ocx.toml` key, which are both case-sensitive lowercase). An unrecognized value is ignored with a warning, the same as an unset variable — this tier is simply absent and resolution continues to the ladder's floor.
+
+Four more-specific tiers can override this variable: the [`--lazy-mode`][arg-lazy-mode] flag, `[package."<id>"]`, `[group.<name>]`, and the toolchain-level `lazy-mode` key, all in `ocx.toml`. See [Deferred Tools][in-depth-lazy-loading] for the full ladder and [Project Configuration][config-project-package] for the `ocx.toml` keys.
+
+::: warning Not forwarded to child processes
+Unlike the resolution-affecting variables listed in the box at the top of this section (binary path, offline, remote, config file, index), `OCX_LAZY_MODE` does **not** propagate from a parent `ocx` into a subprocess — it changes *when* content materializes, never *which* digest resolves, so it sits outside the forwarded set entirely. A child `ocx` invocation reads its own environment.
+:::
+
+### `OCX_LAZY_REPORT` {#ocx-lazy-report}
+
+Whether a deferred tool's first-invocation download renders progress. Read inside the hidden `ocx launcher shim` subcommand — the process a generated shim launcher execs into — never by the command that composed the environment in the first place.
+
+```sh
+export OCX_LAZY_REPORT=progress
+```
+
+Accepts `silent` (the default) or `progress`, parsed case-insensitively like [`OCX_LAZY_MODE`](#ocx-lazy-mode) above. `progress` opens a channel on the controlling terminal; where none is reachable — a Docker build, a CI runner, anything under `setsid` — it silently falls back to `silent` rather than erroring. Unrecognized values are ignored with a warning, same as unset.
+
+Three more-specific tiers can override this variable: the `--lazy-report` flag (declared only on `ocx launcher shim`; a user never types it directly), `[package."<id>"]`, and the toolchain-level `lazy-report` key, both in `ocx.toml`. There is no `[group.<name>]` tier for `lazy-report` — see [Deferred Tools][in-depth-lazy-loading] for why. Not forwarded to child processes, for the same reason as `OCX_LAZY_MODE` above.
+
 ### `OCX_INSECURE_REGISTRIES` {#ocx-insecure-registries}
 
 A comma-separated list of registry hostnames (with optional port) that should be contacted over plain HTTP instead of HTTPS.
@@ -718,6 +746,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [arg-project]: command-line.md#arg-project
 [arg-quiet]: command-line.md#arg-quiet
 [arg-remote]: command-line.md#arg-remote
+[arg-lazy-mode]: command-line.md#arg-lazy-mode
 [cmd-index-update]: command-line.md#index-update
 [cmd-package-announce]: command-line.md#package-announce
 [cmd-patch-sync]: command-line.md#patch-sync
@@ -736,6 +765,8 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [entrypoints-ref]: ../in-depth/entry-points.md
 [windows-shim-ref]: ../user-guide.md#stable-paths-windows
 [in-depth-indices-public]: ../in-depth/indices.md#public-index
+[in-depth-lazy-loading]: ../in-depth/lazy-loading.md
+[in-depth-lazy-loading-ladder]: ../in-depth/lazy-loading.md#deferred-tools-ladder
 
 <!-- reference -->
 [config-ref]: ./configuration.md
@@ -747,6 +778,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [patches-no-patches-scope]: ./configuration.md#keys-patches-no-patches
 [patches-user-guide]: ../user-guide/patches.md
 [config-project-env]: ./configuration.md#project-config-env
+[config-project-package]: ./configuration.md#project-config-package
 
 <!-- environment -->
 [env-ocx-remote]: #ocx-remote

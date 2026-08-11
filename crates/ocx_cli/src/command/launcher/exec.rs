@@ -41,20 +41,14 @@ pub struct LauncherExec {
 impl LauncherExec {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let fs = context.file_structure();
-        let packages_root = fs.packages.root();
-        // Also allow launchers materialised under the two command-scratch roots:
-        // `ocx package test` ($OCX_HOME/temp/test/) and `ocx patch test`
-        // ($OCX_HOME/temp/patch-test/) both place packages there, and the
-        // launchers bake that path as their pkg-root. An explicit two-entry
-        // allow-list on purpose — widening the guard to "anything under temp/"
-        // would defeat it, since temp/ also holds in-progress download dirs.
-        let scratch_roots = [fs.temp.package_test_root(), fs.temp.patch_test_root()];
+        let [packages_root, package_test_root, patch_test_root] = launcher_pkg_root_allow_list(fs);
+        let scratch_roots = [package_test_root, patch_test_root];
         let manager = context.manager();
 
         // Validate: pkg_root must be absolute, under $OCX_HOME/packages/ or one
         // of the scratch roots above, and contain metadata.json. Errors surface
         // as UsageError (exit 64).
-        let validated = validate_launcher_pkg_root(&self.pkg_root, packages_root, &scratch_roots).await?;
+        let validated = validate_launcher_pkg_root(&self.pkg_root, &packages_root, &scratch_roots).await?;
         // Wrap the validated package root in a PackageDir so every per-package
         // path (`content/`, `metadata.json`, ...) comes from the file-structure
         // layout accessors — the single source of truth for the package layout —
@@ -237,6 +231,30 @@ impl LauncherExec {
     }
 }
 
+/// The complete set of package roots a launcher's baked `pkg-root` may resolve
+/// inside: the install store, plus the two command-scratch roots
+/// (`ocx package test` and `ocx patch test` both materialise packages there,
+/// and a launcher inside such a package bakes that path).
+///
+/// An explicit enumeration on purpose — widening the guard to "anything under
+/// `temp/`" would defeat it, since `temp/` also holds in-progress download
+/// directories.
+///
+/// Named and returned as one fixed-arity array rather than composed inline at
+/// the call site because it has a **second producer in another crate**:
+/// `ocx_shim::core::pkg_root_allowed` restates the same three roots for the
+/// native Windows shim's E3 containment check. `ocx_lib` cannot depend on
+/// `ocx_shim` (a binary crate), so no compiler link binds the two — the entire
+/// binding is a pair of tests restating the literals, one on each side (C-018).
+/// This function is what makes the CLI half of that pair possible.
+fn launcher_pkg_root_allow_list(fs: &ocx_lib::file_structure::FileStructure) -> [PathBuf; 3] {
+    [
+        fs.packages.root().to_path_buf(),
+        fs.temp.package_test_root(),
+        fs.temp.patch_test_root(),
+    ]
+}
+
 /// Validate a package root path for use from a launcher.
 ///
 /// The path must:
@@ -335,6 +353,47 @@ mod tests {
         std::fs::create_dir_all(&pkg_dir).unwrap();
         std::fs::write(pkg_dir.join("metadata.json"), b"{}").unwrap();
         (base_dir, pkg_dir)
+    }
+
+    // ── C-018: the pkg-root allow-list, bound across both crates ─────────────
+
+    /// The CLI half of the allow-list golden.
+    ///
+    /// `ocx_lib` cannot depend on `ocx_shim` (a binary crate), so there is **no
+    /// compiler link** between the two producers of this allow-list. Its peer
+    /// is `ocx_shim::core::pkg_root_allowed` and the test that restates the
+    /// same three roots from the shim side,
+    /// `crates/ocx_shim/src/main.rs::pkg_root_allowed_matches_the_cli_allow_list`.
+    /// Together they are the entire binding: a root added, removed or renamed
+    /// on either side reds the other side's literal.
+    ///
+    /// The rows below exercise `validate_launcher_pkg_root` behaviourally over
+    /// tempdirs and restate nothing, so before this test a fourth root added
+    /// here reddened nothing on the shim side — a one-sided binding, which is
+    /// exactly the doc-comment-only sync gap C-018 exists to close.
+    ///
+    /// Restating the literals rather than importing a shared constant is
+    /// forced (no dependency edge) and is also the point: a shared constant
+    /// would make the canary self-referential.
+    #[test]
+    fn launcher_pkg_root_allow_list_matches_the_shim_allow_list() {
+        let home = tempfile::tempdir().unwrap();
+        let fs = ocx_lib::file_structure::FileStructure::with_root(home.path().to_path_buf());
+
+        let expected: Vec<PathBuf> = ["packages", "temp/test", "temp/patch-test"]
+            .iter()
+            .map(|relative| home.path().join(relative))
+            .collect();
+
+        assert_eq!(
+            launcher_pkg_root_allow_list(&fs).to_vec(),
+            expected,
+            "the launcher pkg-root allow-list is exactly $OCX_HOME/{{packages, \
+             temp/test, temp/patch-test}}. `ocx_shim::core::pkg_root_allowed` \
+             restates the same three; changing one side without the other \
+             silently desynchronises the shim's E3 containment check from the \
+             roots `launcher exec` actually accepts."
+        );
     }
 
     // ── validate_launcher_pkg_root — key contract rows ───────────────────────

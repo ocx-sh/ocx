@@ -22,7 +22,7 @@ pub use compose::{
     Origin, PositionalPackage, ResolvedTool, SelectedTool, ToolSource, check_duplicate_selection, compose_tool_set,
     expand_all_keyword, host_leaf_identifier, parse_positional, resolve_selected_tools, select_tool_set,
 };
-pub use config::{Group, PackageSettings, ProjectConfig};
+pub use config::{Group, PackageSettings, ProjectConfig, lazy_mode_for_tool};
 pub use env::{EnvValue, ProjectEnv};
 pub use error::{Error, ProjectError, ProjectErrorKind};
 pub use hash::{DECLARATION_HASH_VERSION, declaration_hash};

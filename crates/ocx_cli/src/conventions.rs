@@ -4,9 +4,11 @@
 use ocx_lib::{
     ci::CiFlavor,
     cli::{MetadataResolutionError, UsageError},
+    lazy::LazyMode,
     oci,
     package::cascade::apply::WriteOutcome,
     package::metadata::env::entry::Entry,
+    package_manager::composer::lazy_mode_for_package,
     publisher::LayerRef,
     shell::Shell,
 };
@@ -146,6 +148,48 @@ pub async fn read_published_metadata(path: &std::path::Path) -> anyhow::Result<o
 /// `ocx run`, `ocx env`, ...) applies the same default.
 pub fn platform_or_default(platform: Option<oci::Platform>) -> oci::Platform {
     platform.unwrap_or_else(|| oci::Platform::current().unwrap_or_else(oci::Platform::any))
+}
+
+/// Resolves the OCI-tier `lazy-mode` ladder for one invocation, applying
+/// `--self`'s eager override.
+///
+/// **Laziness has no meaning under `--self`.** A generated shim exists only to
+/// serve consumers — it is an INTERFACE launcher — so under the private view it
+/// is gated out along with `entrypoints/`, and a deferred package would land on
+/// `PATH` as nothing at all. The private view therefore resolves to
+/// [`LazyMode::Never`], logged at debug so the override is visible without
+/// being noise.
+///
+/// The refusal is on the **value**, not on the flags co-occurring.
+/// `--self --lazy-mode always` is two contradictory requests and is a usage
+/// error (exit 64). `--self --lazy-mode never` asks for eager twice and is
+/// accepted, as is `--self` with an `always` inherited from `OCX_LAZY_MODE` —
+/// a less-specific tier outranked by the user's own more-specific flag, which
+/// is the ladder working rather than a contradiction.
+///
+/// # Errors
+///
+/// [`UsageError`] when `self_view` is set and the CLI tier explicitly typed
+/// [`LazyMode::Always`].
+///
+/// Shared by the two OCI-tier composing commands (`ocx package env`,
+/// `ocx package exec`); the project tier resolves through
+/// `ocx_lib::project::lazy_mode_for_tool` instead, which reads the `ocx.toml`
+/// tiers this one has none of.
+pub fn resolved_lazy_mode(cli: Option<LazyMode>, self_view: bool) -> Result<LazyMode, UsageError> {
+    if self_view && cli == Some(LazyMode::Always) {
+        return Err(UsageError::new(
+            "--self and --lazy-mode always ask for contradictory things: a shim is a consumer-facing launcher, and --self selects the private view that bypasses launchers",
+        ));
+    }
+    let resolved = lazy_mode_for_package(cli);
+    if self_view && resolved == LazyMode::Always {
+        ocx_lib::log::debug!(
+            "Composing eagerly: --self selects a package's private view, which bypasses the launchers a shim is made of."
+        );
+        return Ok(LazyMode::Never);
+    }
+    Ok(resolved)
 }
 
 /// Emit shell-sourceable export lines for a slice of env entries.
@@ -410,13 +454,52 @@ pub fn cascade_repair_exit_code(
 mod tests {
     use super::{
         export_ci, infer_metadata_file, infer_receipt_file, merge_tags_file, parse_tags_file, resolve_ci_arg,
-        resolve_receipt_path, resolve_shell_arg,
+        resolve_receipt_path, resolve_shell_arg, resolved_lazy_mode,
     };
     use ocx_lib::ci::CiFlavor;
     use ocx_lib::cli::UsageError;
+    use ocx_lib::lazy::LazyMode;
     use ocx_lib::package::metadata::env::{entry::Entry, modifier::ModifierKind};
     use ocx_lib::publisher::LayerRef;
     use ocx_lib::shell::Shell;
+
+    // ── `--self` refuses a contradiction, not a co-occurrence ──────────────
+    //
+    // Both rows are independent of `OCX_LAZY_MODE`: the refusal returns before
+    // the ladder is built, and an explicit CLI tier outranks the environment
+    // one anyway. So neither asserts against ambient process state.
+
+    /// F-8: the one combination that is genuinely contradictory.
+    #[test]
+    fn self_view_refuses_an_explicitly_typed_lazy_mode_always() {
+        let error = resolved_lazy_mode(Some(LazyMode::Always), true)
+            .expect_err("--self with an explicit --lazy-mode always is a usage error");
+        let message = error.to_string();
+        assert!(
+            message.contains("contradictory"),
+            "the message must say the two REQUESTS contradict, not that the flags cannot co-occur: {message}"
+        );
+    }
+
+    /// The over-refusal a clap `conflicts_with` produced: `--self` composes
+    /// eagerly and `--lazy-mode never` asks for eager, so they agree. Rejecting
+    /// this is a false statement about the grammar.
+    #[test]
+    fn self_view_accepts_an_explicitly_typed_lazy_mode_never() {
+        assert_eq!(
+            resolved_lazy_mode(Some(LazyMode::Never), true).expect("--self and --lazy-mode never agree"),
+            LazyMode::Never
+        );
+    }
+
+    /// Without `--self`, an explicit `always` is exactly what the flag is for.
+    #[test]
+    fn lazy_mode_always_survives_when_the_self_view_is_not_selected() {
+        assert_eq!(
+            resolved_lazy_mode(Some(LazyMode::Always), false).expect("no --self, no contradiction"),
+            LazyMode::Always
+        );
+    }
 
     // ── sidecar derivation: the receipt is the metadata path's twin ────────
 

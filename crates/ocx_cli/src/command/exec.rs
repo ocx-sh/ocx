@@ -7,6 +7,7 @@ use clap::Parser;
 use ocx_lib::env;
 use ocx_lib::env::OcxConfigView;
 use ocx_lib::package::metadata::env::entry::Entry as EnvEntry;
+use ocx_lib::package_manager::composer::{ComposeRequest, Materialization};
 use ocx_lib::utility::child_process;
 
 use crate::{conventions::*, options};
@@ -27,6 +28,12 @@ pub struct Exec {
     /// enables self-view internally.
     ///
     /// See https://ocx.sh/docs/in-depth/environments#visibility-views for the full view semantics.
+    ///
+    /// Cannot be combined with `--lazy-mode always`: a generated shim is a
+    /// launcher, launchers are consumer-facing, and a package's private view
+    /// bypasses them, so those two ask for contradictory things (exit 64).
+    /// `--lazy-mode never` agrees with this view and is accepted, as is an
+    /// `always` coming from `OCX_LAZY_MODE`, which composes eagerly.
     #[clap(long = "self", default_value_t = false)]
     self_view: bool,
 
@@ -35,6 +42,20 @@ pub struct Exec {
 
     #[clap(flatten)]
     platform: options::PlatformOption,
+
+    /// Top tier of the `lazy-mode` ladder for every package this command
+    /// composes into the child environment.
+    ///
+    /// `always` composes a package as a generated shim: its declared names
+    /// reach the child's `PATH` immediately and its content downloads the first
+    /// time one of them runs. The shim directory sits *below* the package's own
+    /// `entrypoints/` and `bin/`, so a second invocation of the same name
+    /// inside the same child resolves to the materialized binary directly.
+    ///
+    /// Only this flag and `OCX_LAZY_MODE` apply here: the `ocx.toml` tiers
+    /// belong to the toolchain commands, and this one reads no project file.
+    #[clap(flatten)]
+    lazy_mode: options::LazyMode,
 
     /// Package identifiers to layer environment from.
     ///
@@ -67,11 +88,18 @@ impl Exec {
         let mut env_overrides = self.env.entries(&cwd)?;
 
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
-        let infos = manager
-            .find_or_install_all(identifiers, platform.clone(), context.concurrency())
+        let mode = resolved_lazy_mode(self.lazy_mode.mode(), self.self_view)?;
+        let requests: Vec<ComposeRequest> = identifiers
+            .into_iter()
+            .map(|identifier| ComposeRequest { identifier, mode })
+            .collect();
+        let composed = manager
+            .compose_roots(&requests, &platform, Materialization::Install, context.concurrency())
             .await?;
-        let install_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
-            infos.into_iter().map(std::sync::Arc::new).collect();
+        for advisory in &composed.advisories {
+            context.ui().warn(advisory.to_string());
+        }
+        let install_infos = composed.roots;
         // `Package`, not `Project`: this tier reads no `ocx.toml` and never
         // will. The only thing a caller can contribute here is the override it
         // typed on this invocation — that is a CLI argument, not project

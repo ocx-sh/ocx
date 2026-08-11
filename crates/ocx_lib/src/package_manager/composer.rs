@@ -25,25 +25,34 @@ use std::sync::Arc;
 use tokio::task::JoinSet;
 
 use crate::{
-    file_structure::{PackageDir, PackageStore},
+    file_structure::{PackageDir, PackageStore, ShimDir, SymlinkKind},
+    lazy::{LazyMode, LazyModeLadder},
     oci,
     package::{
-        install_info::InstallInfo,
+        install_info::{DeferredComposition, InstallInfo},
         metadata::{
             self,
             binary::{Binaries, BinaryName},
             dependency::DependencyName,
             entrypoint::{EntrypointName, Entrypoints},
-            env::{dep_context::DependencyContext, entry::Entry, modifier::ModifierKind, resolver::EnvResolver},
+            env::{
+                dep_context::DependencyContext,
+                entry::Entry,
+                modifier::ModifierKind,
+                resolver::{ContentState, EnvResolver},
+            },
             integrations::{INTEGRATION_TOKENS, IntegrationEntry},
             template::SelfEnvScope,
+            visibility::Visibility,
         },
-        resolved_package::ResolvedPackage,
+        resolved_package::{ResolvedDependency, ResolvedPackage},
     },
     package_manager::error::{DependencyError, PackageErrorKind},
 };
 
 use super::tasks::common;
+use super::tasks::common::ClosureNode;
+use super::{LazyAdvisory, PackageManager, concurrency::Concurrency};
 
 /// Result type for a single dep-load task spawned during parallel preload.
 ///
@@ -331,6 +340,15 @@ async fn compose_gated(
     let root_keys: HashSet<oci::PinnedIdentifier> = roots.iter().map(|r| r.identifier().strip_advisory()).collect();
 
     for root in roots {
+        // A deferred root's whole block — its own carriers and its closure's —
+        // resolves against package directories that do not exist yet, so the
+        // `required` path probe has nothing true to say about any of them
+        // (C-013).
+        let content_state = if root.deferred().is_some() {
+            ContentState::Deferred
+        } else {
+            ContentState::Materialized
+        };
         // Each root's TC is already flat. Iterate in topological order
         // (deps before dependents). Dep contributions emit before root's own
         // contributions per ADR Algorithm v3.
@@ -378,16 +396,17 @@ async fn compose_gated(
             visible_entries.push((visible_entries.len(), tc_entry.identifier.clone()));
         }
 
-        // Step 2: parallel-load metadata for all visible entries.
+        // Step 2: parallel-load metadata for all visible entries. Every read
+        // goes through `tc_entry_object_data`, so a deferred root's entries
+        // come from its closure and never from a package directory (C-020).
         let mut tasks: JoinSet<DepLoadResult> = JoinSet::new();
         for (idx, dep_id) in &visible_entries {
             let dep_id = dep_id.clone();
             let store = store.clone();
+            let root = Arc::clone(root);
             let idx = *idx;
             tasks.spawn(async move {
-                let dep_pkg = store.package_dir(&dep_id);
-                let dep_content = dep_pkg.content();
-                let result = common::load_object_data(&store, &dep_content).await;
+                let result = tc_entry_object_data(&root, &store, &dep_id).await;
                 match result {
                     Ok((meta, resolved)) => (idx, Ok((meta, resolved, dep_id))),
                     Err(e) => (idx, Err(e)),
@@ -465,6 +484,7 @@ async fn compose_gated(
                 &dep_content,
                 &dep_dep_contexts,
                 self_view,
+                content_state,
                 &mut entries,
             )?;
         }
@@ -528,12 +548,18 @@ async fn compose_gated(
                 );
             }
 
+            // The shim slot goes in FIRST, so it resolves LAST — consumers
+            // prepend, so `entrypoints/` > `bin/` > `shims/` (C-012). A no-op
+            // for a materialized root and under `--self`.
+            emit_shim_slot(root, self_view, &mut entries);
+
             emit_root_path_block(
                 root.metadata(),
                 root.dir(),
                 &root_content,
                 &root_dep_contexts,
                 self_view,
+                content_state,
                 &mut entries,
             )?;
         }
@@ -576,7 +602,9 @@ async fn compose_gated(
 /// Returns `Err(PackageErrorKind::EntrypointCollision { name, owners })`
 /// listing all N owners on the first collision found (deterministic via
 /// `BTreeMap` iteration). Returns `Err(PackageErrorKind::Internal)` if a
-/// referenced package's metadata cannot be loaded from `store`.
+/// referenced package's metadata cannot be read through
+/// [`tc_entry_object_data`] — from `store` for a materialized root, from the
+/// ref-linked closure for a deferred one.
 pub async fn check_entrypoints(roots: &[Arc<InstallInfo>], store: &PackageStore) -> Result<(), PackageErrorKind> {
     let mut owners: BTreeMap<EntrypointName, Vec<oci::PinnedIdentifier>> = BTreeMap::new();
     let mut seen: HashSet<oci::PinnedIdentifier> = HashSet::new();
@@ -604,8 +632,11 @@ pub async fn check_entrypoints(roots: &[Arc<InstallInfo>], store: &PackageStore)
             if !seen.insert(key) {
                 continue;
             }
-            let dep_content = store.content(&tc_entry.identifier);
-            let (dep_metadata, _dep_resolved) = common::load_object_data(store, &dep_content)
+            // Through the shared accessor, never `store.content` directly: a
+            // deferred root's TC entries have no package directory, and this
+            // gate runs on every compose of two or more roots (C-020's defect
+            // clause).
+            let (dep_metadata, _dep_resolved) = tc_entry_object_data(root, store, &tc_entry.identifier)
                 .await
                 .map_err(PackageErrorKind::Internal)?;
             if let Some(eps) = dep_metadata.entrypoints() {
@@ -697,6 +728,11 @@ fn build_dep_context_map(
 /// surfaces where it previously never ran. A package whose own metadata cannot
 /// resolve is broken regardless of who is looking.
 ///
+/// `content_state` is the second, orthogonal suppressor: a
+/// [`ContentState::Deferred`] package has no content tree by construction, so
+/// its `required` path probe is suppressed on the crossing path too (C-013) —
+/// otherwise the composed env would depend on content-cache state.
+///
 /// `is_root` selects the carrier axis exactly as [`carrier_crosses`] defines it
 /// — at the root a carrier crosses on the surface's own axis; on a dependency
 /// only its interface side crosses, on either surface.
@@ -710,12 +746,13 @@ fn emit_package_vars(
     dep_contexts: &HashMap<DependencyName, DependencyContext>,
     is_root: bool,
     self_view: bool,
+    content_state: ContentState,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
     let Some(env) = metadata.env() else {
         return Ok(());
     };
-    let resolver = EnvResolver::new(content, dep_contexts);
+    let resolver = EnvResolver::new(content, dep_contexts).with_content_state(content_state);
 
     // The private accumulator: every var resolved so far, crossing or not, in
     // declaration order. This is the scope `${self.env.KEY}` scans.
@@ -782,6 +819,7 @@ fn emit_dep_path_block(
     dep_content: &Path,
     dep_dep_contexts: &HashMap<DependencyName, DependencyContext>,
     self_view: bool,
+    content_state: ContentState,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
     // Step 1: interface-tagged env vars (includes declared bin/ PATH entry).
@@ -793,6 +831,7 @@ fn emit_dep_path_block(
         dep_dep_contexts,
         /* is_root = */ false,
         self_view,
+        content_state,
         entries,
     )?;
 
@@ -831,6 +870,7 @@ fn emit_root_path_block(
     root_content: &Path,
     root_dep_contexts: &HashMap<DependencyName, DependencyContext>,
     self_view: bool,
+    content_state: ContentState,
     entries: &mut Vec<Entry>,
 ) -> crate::Result<()> {
     // Step 1: env vars (includes declared bin/ PATH entry when present). The
@@ -841,6 +881,7 @@ fn emit_root_path_block(
         root_dep_contexts,
         /* is_root = */ true,
         self_view,
+        content_state,
         entries,
     )?;
 
@@ -997,6 +1038,517 @@ fn synth_entrypoints_path_for(pkg: &PackageDir) -> Entry {
     }
 }
 
+// ── Lazy package loading: the shim slot ─────────────────────────────────────
+//
+// A *deferred* tool composes exactly like a materialized one, with two
+// differences and no third:
+//
+//   1. One extra PATH entry — the shim directory's `bin/` — pushed **first**
+//      in that root's block (C-012).
+//   2. Its carriers are read from ref-linked config blobs instead of package
+//      directories, because it has none (C-020).
+//
+// Everything else — the surface algebra, the dep-before-root order, the
+// cross-root dedup, the collision and version-conflict gates — is the code
+// above, unchanged. That is the point: a tool that is later materialized
+// composes byte-identically to one that never deferred, so the only thing
+// deferral may change is which of the two carrier sources is read (C-013).
+
+/// Construct the synthetic `PATH ⊳ <shim-root>/bin` entry for a deferred tool
+/// (plan contracts C-003 / C-012).
+///
+/// The `bin/` subdirectory, never the shim root: a legal `binaries` claim of
+/// `["digest", "refs"]` would otherwise put a generated launcher on top of the
+/// CAS marker and the forward-ref directory.
+fn synth_shim_path_for(shim: &ShimDir) -> Entry {
+    Entry {
+        key: "PATH".to_string(),
+        value: shim.bin().to_string_lossy().into_owned(),
+        kind: ModifierKind::Path,
+        separator: None,
+    }
+}
+
+/// Push a deferred root's shim slot — the **first** entry of its block, and
+/// therefore the lowest-precedence one (plan contract C-012).
+///
+/// # Ordering invariant
+///
+/// Consumers apply entries by **prepending** (see [`emit_dep_path_block`]), so
+/// the *last* entry pushed is *first* in the resolved PATH. Pushing the shim
+/// slot before the root's declared vars and before its synthetic
+/// `entrypoints/` therefore resolves to `entrypoints/` > `bin/` > `shims/`:
+/// once the first invocation has materialized the package, the two directories
+/// that were empty paths at compose time become real and shadow the shim, so
+/// the *same* exported environment stops routing through it (S-004). A reader
+/// who assumes push order equals PATH order will invert this and make the shim
+/// shadow the real binaries — the bug this ordering exists to prevent.
+///
+/// Cross-node order is unchanged: dep blocks emit before the root's own, so the
+/// root still beats every dep.
+///
+/// The slot carries [`Entrypoints::IMPLICIT_VISIBILITY`] (INTERFACE) and
+/// crosses through the shared [`carrier_crosses`] predicate at the root
+/// (`is_root = true`), so it is **absent under `self_view = true`** — a
+/// package's own private view bypasses launchers, and a shim is nothing but a
+/// launcher. A no-op for a root that is not deferred.
+fn emit_shim_slot(root: &InstallInfo, self_view: bool, entries: &mut Vec<Entry>) {
+    if !carrier_crosses(Entrypoints::IMPLICIT_VISIBILITY, true, self_view) {
+        return;
+    }
+    if let Some(deferred) = root.deferred() {
+        entries.push(synth_shim_path_for(deferred.shim()));
+    }
+}
+
+/// One transitive-closure entry's `(metadata, resolved)` pair, from whichever
+/// carrier source the root has (plan contract C-020).
+///
+/// - Materialized root → [`common::load_object_data`] over the dep's package
+///   directory, exactly as before.
+/// - Deferred root → the pre-loaded closure member the root carries, whose
+///   metadata was read from the ref-linked config blob. **No package directory
+///   is touched**, and no completeness probe is performed beyond the shim
+///   directory's existence, which `prepare_lazy` already guarantees.
+///
+/// The single source both [`compose`] and [`check_entrypoints`] read, so
+/// neither can independently regrow the "every composed tool has a package
+/// directory" assumption C-020 names as a defect.
+///
+/// # Errors
+///
+/// Propagates the load failure for a materialized root. For a deferred root,
+/// returns `Error::package(dep_id, `[`PackageErrorKind::NotFound`]`)` — the
+/// three-layer envelope this subsystem already uses — when the closure does not
+/// carry `dep_id`: that is a shim tree whose ref-linked blobs and whose composed
+/// TC disagree, and falling back to the package store would silently compose a
+/// tool from a directory that does not exist.
+async fn tc_entry_object_data(
+    root: &InstallInfo,
+    store: &PackageStore,
+    dep_id: &oci::PinnedIdentifier,
+) -> crate::Result<(metadata::Metadata, ResolvedPackage)> {
+    let Some(deferred) = root.deferred() else {
+        return common::load_object_data(store, &store.content(dep_id)).await;
+    };
+    // No `else` branch onto the store: a closure miss is the C-020 defect
+    // condition, and answering it from a package directory that may or may not
+    // exist is precisely the fallback this accessor exists to make impossible.
+    let member = deferred
+        .member(dep_id)
+        .ok_or_else(|| crate::Error::package(dep_id.as_identifier().clone(), PackageErrorKind::NotFound))?;
+    Ok((member.metadata().clone(), member.resolved().clone()))
+}
+
+// ── Lazy package loading: resolving the ladder and building the roots ────────
+
+/// One tool to compose, with the `lazy-mode` its five-tier ladder resolved to
+/// (plan contract C-006).
+///
+/// The mode is resolved by the caller that holds the parsed options — the CLI
+/// tier is a command-line flag and no library type can see it — via
+/// [`lazy_mode_for_tool`] (project tier) or [`lazy_mode_for_package`] (OCI
+/// tier). Carrying the *resolved* mode rather than the ladder keeps
+/// [`PackageManager::compose_roots`] free of any notion of `ocx.toml`.
+#[derive(Debug, Clone)]
+pub struct ComposeRequest {
+    /// The identifier to compose, as the caller's tier resolved it.
+    pub identifier: oci::Identifier,
+    /// The resolved `lazy-mode`: [`LazyMode::Always`] defers, [`LazyMode::Never`]
+    /// materializes.
+    pub mode: LazyMode,
+}
+
+/// How a request whose resolved mode is [`LazyMode::Never`] reaches the store.
+///
+/// One variant per materialization policy the composing commands already had,
+/// so folding the lazy split into one library entry point does not quietly
+/// change what any of them does on the eager path.
+#[derive(Debug, Clone)]
+pub enum Materialization {
+    /// Resolve locally, install on a miss — the default for every composing
+    /// command (`find_or_install_all`).
+    Install,
+    /// Probe the local store only, never the registry; a miss is warned about
+    /// and omitted rather than failing (`ocx env --no-pull`).
+    LocalOnly,
+    /// Resolve through the stable install-symlink namespace
+    /// (`ocx package env --candidate` / `--current`).
+    Symlink(SymlinkKind),
+}
+
+/// A request the composing caller dropped rather than failed on (scenario
+/// S-009).
+///
+/// Warn-and-omit is a decision only the composing caller can make:
+/// `prepare_lazy` can report that a closure's metadata is not reachable, but
+/// only the caller knows whether this invocation promised to reach the network.
+#[derive(Debug)]
+pub struct ComposeOmission {
+    /// The request that was dropped, as the caller named it.
+    pub identifier: oci::Identifier,
+    /// Why it was dropped, verbatim from the probe that dropped it — the
+    /// vocabulary [`unavailable_locally`] admits, which is wider than
+    /// [`PackageErrorKind::NotFound`]: a tag no cached index answers under
+    /// `--offline` or `--frozen` is a policy block, not a not-found.
+    ///
+    /// No exit-code classification is driven off this field; a caller that ever
+    /// wants one has to fix the vocabulary first.
+    pub reason: PackageErrorKind,
+}
+
+/// The compose roots [`PackageManager::compose_roots`] produced, plus the two
+/// things only the composing caller can report.
+#[derive(Debug)]
+pub struct ComposeRoots {
+    /// One root per surviving request, **in request order** — the order every
+    /// composing command's output depends on.
+    pub roots: Vec<Arc<InstallInfo>>,
+
+    /// Advisories raised by the deferred tools' declared metadata (plan
+    /// contract C-015 (d)).
+    ///
+    /// Classified for a **deferred** tool only: an eagerly-materialized request
+    /// never reaches `prepare_lazy`, which is the fact that makes the
+    /// "deferred only" clause testable. Returned rather than logged so the
+    /// caller can serialize them under `--format json` — an advisory channel
+    /// that only reaches a log is the "settable and unreadable" defect this
+    /// plan has already caught three times.
+    pub advisories: Vec<LazyAdvisory>,
+
+    /// Requests dropped under [`Materialization::LocalOnly`] (S-009). Empty
+    /// under every other policy, where a miss is a hard error.
+    pub omitted: Vec<ComposeOmission>,
+}
+
+impl PackageManager {
+    /// Turn composition requests into compose roots, deferring the ones whose
+    /// `lazy-mode` resolved to [`LazyMode::Always`] (plan contracts C-012 /
+    /// C-013 / C-020, scenario S-009).
+    ///
+    /// Per request, in request order:
+    ///
+    /// - [`LazyMode::Never`] → materialized per `materialization`, exactly as
+    ///   the command did before this feature existed.
+    /// - [`LazyMode::Always`] → [`prepare_lazy`](Self::prepare_lazy) generates
+    ///   (or converges on) the shim tree, the closure's carriers are read back
+    ///   from its ref-linked config blobs, and the root is returned carrying a
+    ///   [`DeferredComposition`](crate::package::install_info::DeferredComposition).
+    ///   No content is downloaded and no package directory is created.
+    ///
+    /// **The result does not depend on content-cache state** (C-013): a
+    /// deferred request composes the same root whether or not `content/` is
+    /// already present, and a shim directory removed by `ocx clean` is
+    /// regenerated here. The env is a function of the lock, the resolved mode,
+    /// and metadata availability — nothing else.
+    ///
+    /// Under [`Materialization::LocalOnly`] a request whose content (eager) or
+    /// metadata (deferred) is not available locally is reported in
+    /// [`ComposeRoots::omitted`] instead of failing, and the caller warns
+    /// (S-009). Under every other policy it is an error.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::FindFailed`](super::error::Error::FindFailed) — an eager
+    ///   request could not be resolved or installed.
+    /// - [`Error::ResolveFailed`](super::error::Error::ResolveFailed) — a
+    ///   deferred request's shim tree could not be generated: its names are not
+    ///   enumerable, a claimed name is `ocx`'s own or is not a valid binary
+    ///   name (C-009), or staging/publication failed.
+    pub async fn compose_roots(
+        &self,
+        requests: &[ComposeRequest],
+        platform: &oci::Platform,
+        materialization: Materialization,
+        concurrency: Concurrency,
+    ) -> Result<ComposeRoots, super::error::Error> {
+        // Slot-indexed so both halves can run in whatever order suits them and
+        // the result still comes back in request order — the order every
+        // composing command's output depends on.
+        let mut slots: Vec<Option<Arc<InstallInfo>>> = (0..requests.len()).map(|_| None).collect();
+        let mut advisories: Vec<LazyAdvisory> = Vec::new();
+        let mut omitted: Vec<ComposeOmission> = Vec::new();
+
+        let eager: Vec<(usize, oci::Identifier)> = requests
+            .iter()
+            .enumerate()
+            .filter(|(_, request)| request.mode == LazyMode::Never)
+            .map(|(index, request)| (index, request.identifier.clone()))
+            .collect();
+
+        // The eager half runs the calling command's own policy, batched exactly
+        // as that command batched it before the lazy split existed.
+        let identifiers: Vec<oci::Identifier> = eager.iter().map(|(_, id)| id.clone()).collect();
+        match &materialization {
+            Materialization::Install => {
+                let found = self
+                    .find_or_install_all(identifiers, platform.clone(), concurrency)
+                    .await?;
+                for ((index, _), info) in eager.iter().zip(found) {
+                    slots[*index] = Some(Arc::new(info));
+                }
+            }
+            Materialization::Symlink(kind) => {
+                let found = self.find_symlink_all(identifiers, *kind).await?;
+                for ((index, _), info) in eager.iter().zip(found) {
+                    slots[*index] = Some(Arc::new(info));
+                }
+            }
+            Materialization::LocalOnly => {
+                for (index, identifier) in &eager {
+                    match self.local_root(identifier, platform).await {
+                        Ok(info) => slots[*index] = Some(Arc::new(info)),
+                        Err(kind) if unavailable_locally(&kind) => omitted.push(ComposeOmission {
+                            identifier: identifier.clone(),
+                            reason: kind,
+                        }),
+                        Err(kind) => {
+                            return Err(super::error::Error::FindFailed(vec![super::error::PackageError::new(
+                                identifier.clone(),
+                                kind,
+                            )]));
+                        }
+                    }
+                }
+            }
+        }
+
+        // The deferred half. Sequential: `prepare_lazy` is itself a bounded
+        // parallel closure walk, and one deferred tool's tree is published by a
+        // single rename, so a second fan-out here would multiply the frontier
+        // without shortening the critical path.
+        for (index, request) in requests.iter().enumerate() {
+            if request.mode != LazyMode::Always {
+                continue;
+            }
+            match self.deferred_root(&request.identifier, platform.clone()).await {
+                Ok((root, mut raised)) => {
+                    slots[index] = Some(root);
+                    advisories.append(&mut raised);
+                }
+                // Same warn-and-omit leg the eager half takes, for the same
+                // reason: under `--no-pull` a tool whose *metadata* is not local
+                // is absent, not a failure (S-009).
+                Err(kind) if matches!(materialization, Materialization::LocalOnly) && unavailable_locally(&kind) => {
+                    omitted.push(ComposeOmission {
+                        identifier: request.identifier.clone(),
+                        reason: kind,
+                    });
+                }
+                Err(kind) => {
+                    return Err(super::error::Error::ResolveFailed(vec![
+                        super::error::PackageError::new(request.identifier.clone(), kind),
+                    ]));
+                }
+            }
+        }
+
+        Ok(ComposeRoots {
+            roots: slots.into_iter().flatten().collect(),
+            advisories,
+            omitted,
+        })
+    }
+
+    /// Probe the local package store for one eager request, returning `None`
+    /// when it is simply not materialized.
+    ///
+    /// A digest-bearing identifier — every lock-pinned tool — is looked up
+    /// directly, with no index round-trip at all: the package directory is pure
+    /// path arithmetic over the digest, so resolution has nothing to add and an
+    /// absent cached leaf manifest must not turn an installed tool into a miss.
+    /// A tag-only identifier still has to resolve before it can be located.
+    ///
+    /// # Errors
+    ///
+    /// [`PackageErrorKind::NotFound`] when the package is simply not
+    /// materialized, whatever the resolve surfaced otherwise. The caller sorts
+    /// omission from failure through [`unavailable_locally`].
+    async fn local_root(
+        &self,
+        identifier: &oci::Identifier,
+        platform: &oci::Platform,
+    ) -> Result<InstallInfo, PackageErrorKind> {
+        match oci::PinnedIdentifier::try_from(identifier.clone()) {
+            Ok(pinned) => self.find_plain(&pinned).await?.ok_or(PackageErrorKind::NotFound),
+            Err(_) => self.find(identifier, platform.clone()).await,
+        }
+    }
+
+    /// Build one deferred tool's compose root: generate the shim tree, then
+    /// read its closure's carriers back from the ref-linked config blobs
+    /// (plan contract C-020).
+    ///
+    /// The returned root's own `dir()` names the package directory the shim
+    /// will materialize into. That path is pure arithmetic over the pinned
+    /// identifier, so `${installPath}` resolves to the same value before and
+    /// after the first invocation — which is what lets the entries this root
+    /// contributes stay correct across materialization without recomposing.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`prepare_lazy`](Self::prepare_lazy) surfaces, plus
+    /// [`PackageErrorKind::Internal`] when a closure member's config blob
+    /// cannot be read back from the blob store the shim tree's `refs/blobs/`
+    /// keeps reachable.
+    async fn deferred_root(
+        &self,
+        package: &oci::Identifier,
+        platform: oci::Platform,
+    ) -> Result<(Arc<InstallInfo>, Vec<LazyAdvisory>), PackageErrorKind> {
+        let prepared = self.prepare_lazy(package, platform).await?;
+        let store = &self.file_structure().packages;
+
+        // The synthesized transitive closure. Every non-root node with its
+        // composed-from-root visibility, in the walk's own deps-before-dependents
+        // order — the same shape `resolve.json` carries for a materialized
+        // package, because every consumer downstream (the surface gate, the
+        // entry-point collision gate, the fatal version-conflict gate) reads it
+        // as if it were one. A truncated TC here would compile, pass every other
+        // test, and silently disable those gates for deferred tools.
+        let mut closure: Vec<Arc<InstallInfo>> = Vec::new();
+        let mut root_dependencies: Vec<ResolvedDependency> = Vec::new();
+        let mut root_node: Option<ClosureNode> = None;
+        for node in prepared.closure {
+            if node.is_root {
+                root_node = Some(node);
+                continue;
+            }
+            root_dependencies.push(ResolvedDependency {
+                identifier: node.identifier.clone(),
+                // `None` only ever means "this is the root", which this branch
+                // has already excluded; a sealed edge is the safe reading of a
+                // visibility the walk could not compose.
+                visibility: node.effective_visibility.unwrap_or(Visibility::SEALED),
+            });
+            closure.push(Arc::new(self.closure_member(&node, store).await?));
+        }
+
+        // `walk_closure_nodes` always folds the root in last, so this is the
+        // shim tree disagreeing with its own closure. Named rather than
+        // `expect`ed: a library must not panic across an API boundary, however
+        // unreachable the state.
+        let root_node = root_node.ok_or_else(|| {
+            PackageErrorKind::Internal(crate::error::file_error(
+                prepared.shim.root(),
+                std::io::Error::other("shim closure carries no root node"),
+            ))
+        })?;
+        let metadata = self.closure_metadata(&root_node).await?;
+        let root = InstallInfo::new(
+            root_node.identifier.clone(),
+            metadata,
+            ResolvedPackage {
+                dependencies: root_dependencies,
+            },
+            store.package_dir(&root_node.identifier),
+        )
+        .with_deferred(DeferredComposition::new(prepared.shim, closure));
+
+        Ok((Arc::new(root), prepared.advisories))
+    }
+
+    /// One closure member as a compose-time [`InstallInfo`], its carriers read
+    /// from the ref-linked config blob and its `dir()` naming the package
+    /// directory the shim will materialize into (C-020).
+    ///
+    /// The member's own `ResolvedPackage` carries its **declared** dependency
+    /// edges — the only thing a consumer asks of it, since `compose` walks the
+    /// root's transitive closure and uses a dep's resolution solely to map
+    /// `${deps.NAME.installPath}` onto a pinned identifier.
+    async fn closure_member(&self, node: &ClosureNode, store: &PackageStore) -> Result<InstallInfo, PackageErrorKind> {
+        let metadata = self.closure_metadata(node).await?;
+        let resolved = ResolvedPackage {
+            dependencies: node
+                .dependencies
+                .iter()
+                .map(|edge| ResolvedDependency {
+                    identifier: edge.identifier.clone(),
+                    visibility: edge.visibility,
+                })
+                .collect(),
+        };
+        Ok(InstallInfo::new(
+            node.identifier.clone(),
+            metadata,
+            resolved,
+            store.package_dir(&node.identifier),
+        ))
+    }
+
+    /// Read one closure node's metadata back from the config blob its shim
+    /// tree's `refs/blobs/` keeps reachable — never from a package directory,
+    /// which a deferred tool does not have (C-020).
+    async fn closure_metadata(&self, node: &ClosureNode) -> Result<metadata::Metadata, PackageErrorKind> {
+        let blobs = &self.file_structure().blobs;
+        let registry = node.identifier.registry();
+        let bytes = blobs
+            .read_blob(registry, &node.config_digest)
+            .await
+            .map_err(PackageErrorKind::Internal)?
+            .ok_or_else(|| {
+                let path = blobs.path(registry, &node.config_digest);
+                PackageErrorKind::Internal(crate::error::file_error(
+                    &path,
+                    std::io::Error::from(std::io::ErrorKind::NotFound),
+                ))
+            })?;
+        let raw: metadata::Metadata = serde_json::from_slice(&bytes)
+            .map_err(|e| PackageErrorKind::Internal(crate::Error::SerializationFailure(e)))?;
+        // Same validation every other load path applies — a config blob is
+        // publisher-authored input wherever it is read from.
+        Ok(metadata::ValidMetadata::try_from(raw)
+            .map_err(PackageErrorKind::Internal)?
+            .into())
+    }
+}
+
+/// Whether a failed request means "not available on this machine" rather than
+/// "broken" — the one place [`Materialization::LocalOnly`]'s warn-and-omit leg
+/// is decided (scenario S-009).
+///
+/// Wider than [`PackageErrorKind::NotFound`] on purpose. `--no-pull` is
+/// routinely combined with `--offline` or `--frozen`, and under those a tag no
+/// cached index answers surfaces as a *policy block*, not a not-found — so a
+/// `NotFound`-only test would fail the whole compose on exactly the invocation
+/// this leg exists to keep working. Everything else (a malformed manifest, an
+/// I/O failure, a refused shim name) stays a hard error under every policy.
+fn unavailable_locally(kind: &PackageErrorKind) -> bool {
+    match kind {
+        PackageErrorKind::NotFound | PackageErrorKind::OfflineManifestMissing(_) => true,
+        PackageErrorKind::Internal(crate::Error::OfflineMode) => true,
+        PackageErrorKind::Internal(crate::Error::OciIndex(error)) => {
+            matches!(error, crate::oci::index::error::Error::PolicyResolutionBlocked { .. })
+        }
+        _ => false,
+    }
+}
+
+/// Resolve the `lazy-mode` ladder for one **OCI-tier** package (plan contract
+/// C-006).
+///
+/// Two tiers, not five: `--lazy-mode` ▸ `OCX_LAZY_MODE` ▸ floor `Never`. The
+/// three config tiers live in `ocx.toml`, and an OCI-tier command
+/// (`ocx package env`, `ocx package exec`) reads no `ocx.toml` at any tier —
+/// so they are absent here rather than silently ignored, which is the same
+/// reason `lazy-report` has no group tier.
+///
+/// The project-tier sibling is
+/// [`project::lazy_mode_for_tool`](crate::project::lazy_mode_for_tool), which
+/// lives with the config it reads. This one reads none, so it stays with its
+/// caller.
+///
+/// Resolution goes through [`LazyModeLadder::resolve_for_host`], so on Windows
+/// the answer is [`LazyMode::Never`] whatever the tiers say — scenario S-010.
+pub fn lazy_mode_for_package(cli: Option<LazyMode>) -> LazyMode {
+    LazyModeLadder {
+        cli,
+        environment: LazyMode::from_env(),
+        ..LazyModeLadder::default()
+    }
+    .resolve_for_host()
+}
+
 // ── Specification tests (Phase 3) ───────────────────────────────────────────
 //
 // These tests are authored against the ADR + plan BEFORE the implementation is
@@ -1027,8 +1579,9 @@ mod tests {
     };
 
     use super::{
-        DependencyError, DigestConflict, check_entrypoints, check_repo_digest_conflicts, collect_repo_digest_conflicts,
-        compose, compose_companion, emit_dep_path_block, emit_root_path_block, integrations_cross,
+        ContentState, DependencyError, DigestConflict, check_entrypoints, check_repo_digest_conflicts,
+        collect_repo_digest_conflicts, compose, compose_companion, emit_dep_path_block, emit_root_path_block,
+        integrations_cross,
     };
 
     const REGISTRY: &str = "example.com";
@@ -3191,6 +3744,7 @@ mod tests {
             &dep_content,
             &dep_dep_contexts,
             false,
+            ContentState::Materialized,
             &mut entries,
         )
         .expect("emit_dep_path_block must succeed");
@@ -3270,6 +3824,7 @@ mod tests {
             &dep_content,
             &dep_dep_contexts,
             false,
+            ContentState::Materialized,
             &mut entries,
         )
         .expect("emit_dep_path_block must succeed");
@@ -3348,6 +3903,7 @@ mod tests {
             &root_content,
             &root_dep_contexts,
             false, // consumer surface (default exec)
+            ContentState::Materialized,
             &mut entries,
         )
         .expect("emit_root_path_block must succeed");
@@ -3420,6 +3976,7 @@ mod tests {
             &root_content,
             &root_dep_contexts,
             true, // --self surface
+            ContentState::Materialized,
             &mut entries,
         )
         .expect("emit_root_path_block must succeed");
@@ -3889,7 +4446,15 @@ mod tests {
             dir: content.parent().unwrap().to_path_buf(),
         };
         let mut entries = Vec::new();
-        emit_root_path_block(meta, &root_dir, content, dep_contexts, self_view, &mut entries)?;
+        emit_root_path_block(
+            meta,
+            &root_dir,
+            content,
+            dep_contexts,
+            self_view,
+            ContentState::Materialized,
+            &mut entries,
+        )?;
         Ok(entries)
     }
 
@@ -3901,7 +4466,15 @@ mod tests {
         };
         let dep_contexts = DepContexts::new();
         let mut entries = Vec::new();
-        emit_dep_path_block(meta, &dep_pkg, content, &dep_contexts, self_view, &mut entries)?;
+        emit_dep_path_block(
+            meta,
+            &dep_pkg,
+            content,
+            &dep_contexts,
+            self_view,
+            ContentState::Materialized,
+            &mut entries,
+        )?;
         Ok(entries)
     }
 
@@ -4482,6 +5055,1296 @@ mod tests {
         assert!(
             message.contains("not permitted"),
             "expected the capability gate's refusal, not an undefined-reference one: {message}"
+        );
+    }
+
+    // ── WP-8 Specify: the composer's shim slot (lazy package loading) ────────
+    //
+    // Authored from `.claude/state/plans/plan_lazy_package_loading.md` before
+    // the implementation exists: C-006 (the `lazy-mode` ladders), C-012 (the
+    // shim slot and its PATH position), C-013 + S-005 (the env is a function of
+    // the lock and the mode, never of content-cache state), C-015 (d) (the
+    // advisory channel is fed by the deferred branch only), C-020 (a deferred
+    // root's carriers come from ref-linked config blobs, never a package
+    // directory) and S-009 (`--no-pull` warns and omits).
+
+    use crate::{
+        oci::{
+            Platform,
+            index::{ChainMode, Index, LocalConfig, LocalIndex},
+        },
+        package::install_info::DeferredComposition,
+        project::{Group, PackageSettings},
+    };
+
+    // `lazy_mode_for_tool` is imported from `project`, not `super`: C-006's
+    // F-10 decision puts the project-tier ladder assembler with the config it
+    // reads. Its OCI-tier sibling reads no config and stays in this module.
+    use crate::project::{ProjectConfig, lazy_mode_for_tool};
+
+    // `Entry` is already in scope from the `${self.env.KEY}` section above.
+    use super::{
+        ComposeOmission, ComposeRequest, ComposeRoots, Concurrency, LazyAdvisory, LazyMode, Materialization,
+        ModifierKind, PackageManager, ShimDir, emit_shim_slot, lazy_mode_for_package, synth_shim_path_for,
+        tc_entry_object_data,
+    };
+
+    // ── Fixtures ────────────────────────────────────────────────────────────
+
+    /// A shim directory rooted at `dir` — the shape `ShimStore::shim_dir`
+    /// hands the composer.
+    fn shim_dir_at(dir: std::path::PathBuf) -> ShimDir {
+        ShimDir { dir }
+    }
+
+    /// Bundle metadata carrying `vars` and `entrypoint_names`.
+    fn bundle_metadata(vars: Vec<Var>, entrypoint_names: &[&str]) -> metadata::Metadata {
+        let mut builder = metadata_env::EnvBuilder::new();
+        for var in vars {
+            builder.add_var(var);
+        }
+        metadata::Metadata::Bundle(bundle::Bundle {
+            binaries: None,
+            version: bundle::Version::V1,
+            strip_components: None,
+            env: builder.build(),
+            dependencies: dependency::Dependencies::default(),
+            entrypoints: Entrypoints::from_names(entrypoint_names.iter().copied()),
+            integrations: metadata::Integrations::default(),
+        })
+    }
+
+    /// A `path`-modifier env var — the carrier whose `required` leg C-013's
+    /// F-3 decision suppresses for a deferred root.
+    fn path_var(key: &str, value: &str, required: bool, visibility: Visibility) -> Var {
+        Var {
+            key: key.to_string(),
+            modifier: Modifier::Path(crate::package::metadata::env::path::Path {
+                required,
+                value: value.to_string(),
+            }),
+            visibility,
+        }
+    }
+
+    /// A `constant`-modifier env var, used purely as a source marker so a test
+    /// can tell WHICH carrier source answered.
+    fn marker_var(key: &str) -> Var {
+        Var {
+            key: key.to_string(),
+            modifier: Modifier::Constant(metadata_env::constant::Constant {
+                value: "marker".to_string(),
+            }),
+            visibility: Visibility::PUBLIC,
+        }
+    }
+
+    /// An `InstallInfo` with caller-supplied metadata whose package directory
+    /// is `<root>/<repo>` and is **not** created on disk — the state a deferred
+    /// tool is in.
+    fn install_info_with(
+        package_root: &std::path::Path,
+        repo: &str,
+        hex_char: char,
+        metadata: metadata::Metadata,
+        resolved: ResolvedPackage,
+    ) -> InstallInfo {
+        InstallInfo::new(
+            pinned(repo, hex_char),
+            metadata,
+            resolved,
+            crate::file_structure::PackageDir {
+                dir: package_root.join(repo),
+            },
+        )
+    }
+
+    /// Write a package directory `common::load_object_data` can read back.
+    fn seed_package_with_metadata(
+        store: &PackageStore,
+        id: &PinnedIdentifier,
+        metadata: &metadata::Metadata,
+        resolved: &ResolvedPackage,
+    ) {
+        let pkg_path = store.path(id);
+        std::fs::create_dir_all(pkg_path.join("content")).unwrap();
+        std::fs::write(pkg_path.join("metadata.json"), serde_json::to_string(metadata).unwrap()).unwrap();
+        std::fs::write(pkg_path.join("resolve.json"), serde_json::to_string(resolved).unwrap()).unwrap();
+    }
+
+    /// An offline `PackageManager` with no sources — every remote resolve is a
+    /// genuine local miss, which is the state S-009's `--no-pull` describes.
+    fn offline_manager(dir: &std::path::Path) -> PackageManager {
+        let fs = FileStructure::with_root(dir.to_path_buf());
+        let index = Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: fs.index.clone(),
+            }),
+            Vec::new(),
+            ChainMode::Offline,
+        );
+        PackageManager::new(fs, index, None, REGISTRY)
+    }
+
+    /// The `PATH` values in emit (push) order — the projection every C-012
+    /// ordering assertion reads.
+    fn path_values(entries: &[Entry]) -> Vec<String> {
+        entries
+            .iter()
+            .filter(|e| e.key == "PATH")
+            .map(|e| e.value.clone())
+            .collect()
+    }
+
+    // ── C-012 / C-003: the slot names `bin/`, never the shim root ───────────
+
+    /// C-003 + C-012: the emitted PATH entry is the shim's `bin/`
+    /// subdirectory. A legal `binaries` claim of `["digest", "refs"]` would
+    /// otherwise put a generated launcher on top of the CAS marker and the
+    /// forward-ref directory, so the root is never the PATH entry.
+    #[test]
+    fn the_shim_slot_entry_names_the_bin_subdirectory_never_the_shim_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = shim_dir_at(dir.path().join("shims").join("tool"));
+
+        let entry = synth_shim_path_for(&shim);
+
+        assert_eq!(entry.key, "PATH", "the shim slot is a PATH contribution");
+        assert_eq!(
+            std::path::PathBuf::from(&entry.value),
+            shim.bin(),
+            "the slot must name bin/, not the shim root (C-003)"
+        );
+        assert_ne!(
+            std::path::PathBuf::from(&entry.value),
+            shim.root(),
+            "naming the shim root would put launchers beside 'digest' and 'refs'"
+        );
+        assert!(
+            matches!(entry.kind, ModifierKind::Path),
+            "the slot must be a Path entry so consumers prepend it, got {:?}",
+            entry.kind
+        );
+    }
+
+    // ── C-012: which roots get a slot, and where in the block ───────────────
+
+    /// C-012: a deferred root contributes exactly one shim slot.
+    #[test]
+    fn a_deferred_root_contributes_its_shim_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = shim_dir_at(dir.path().join("shims").join("tool"));
+        let root = install_info_with(
+            dir.path(),
+            "tool",
+            'a',
+            bundle_metadata(Vec::new(), &[]),
+            ResolvedPackage::new(),
+        )
+        .with_deferred(DeferredComposition::new(shim.clone(), Vec::new()));
+
+        let mut entries = Vec::new();
+        emit_shim_slot(&root, false, &mut entries);
+
+        assert_eq!(
+            path_values(&entries),
+            vec![shim.bin().to_string_lossy().into_owned()],
+            "a deferred root contributes exactly its shim bin/ directory"
+        );
+    }
+
+    /// C-012: a materialized root has no shim directory, so the slot is a
+    /// no-op. Without this row an implementation that pushed unconditionally
+    /// would still pass the row above.
+    #[test]
+    fn a_materialized_root_contributes_no_shim_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = install_info_with(
+            dir.path(),
+            "tool",
+            'a',
+            bundle_metadata(Vec::new(), &[]),
+            ResolvedPackage::new(),
+        );
+
+        let mut entries = Vec::new();
+        emit_shim_slot(&root, false, &mut entries);
+
+        assert!(
+            entries.is_empty(),
+            "a root with no DeferredComposition has no shim tree to put on PATH: {entries:?}"
+        );
+    }
+
+    /// C-012: the slot carries `Entrypoints::IMPLICIT_VISIBILITY` (INTERFACE)
+    /// at the root, so it is absent under `--self` — a package's private view
+    /// bypasses launchers, and a shim is nothing but a launcher.
+    #[test]
+    fn the_shim_slot_is_absent_under_self_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = shim_dir_at(dir.path().join("shims").join("tool"));
+        let root = install_info_with(
+            dir.path(),
+            "tool",
+            'a',
+            bundle_metadata(Vec::new(), &[]),
+            ResolvedPackage::new(),
+        )
+        .with_deferred(DeferredComposition::new(shim, Vec::new()));
+
+        let mut entries = Vec::new();
+        emit_shim_slot(&root, true, &mut entries);
+
+        assert!(
+            entries.is_empty(),
+            "the shim slot is INTERFACE-gated at the root and must not reach the --self surface: {entries:?}"
+        );
+    }
+
+    /// C-012's ordering clause at the seam: the slot is pushed **before** the
+    /// root's declared vars and before its synthetic `entrypoints/`.
+    ///
+    /// Consumers apply entries by PREPENDING (`composer.rs` `emit_dep_path_block`
+    /// ordering invariant), so last-pushed is first-resolved. Pushing the slot
+    /// first therefore gives it the LOWEST precedence — `entrypoints/` >
+    /// `bin/` > `shims/` — which is the whole point: once the first invocation
+    /// has materialized the package, the real directories shadow the shim
+    /// (S-004). A reader who assumes push order equals PATH order inverts this.
+    #[test]
+    fn the_shim_slot_is_pushed_before_the_roots_own_path_carriers() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = shim_dir_at(dir.path().join("shims").join("tool"));
+        let metadata = bundle_metadata(
+            vec![path_var("PATH", "${installPath}/bin", false, Visibility::PUBLIC)],
+            &["app"],
+        );
+        let root = install_info_with(dir.path(), "tool", 'a', metadata, ResolvedPackage::new())
+            .with_deferred(DeferredComposition::new(shim.clone(), Vec::new()));
+
+        let mut entries = Vec::new();
+        emit_shim_slot(&root, false, &mut entries);
+        emit_root_path_block(
+            root.metadata(),
+            root.dir(),
+            &root.dir().content(),
+            &std::collections::HashMap::new(),
+            false,
+            ContentState::Deferred,
+            &mut entries,
+        )
+        .expect("the root's own block resolves");
+
+        let pushed = path_values(&entries);
+        assert_eq!(
+            pushed,
+            vec![
+                shim.bin().to_string_lossy().into_owned(),
+                root.dir().content().join("bin").to_string_lossy().into_owned(),
+                root.dir().entrypoints().to_string_lossy().into_owned(),
+            ],
+            "push order must be [shim bin/] [declared bin/] [entrypoints/] — which RESOLVES as \
+             entrypoints/ > bin/ > shims/ under prepend semantics (C-012)"
+        );
+    }
+
+    // ── C-020: a deferred root's carriers come from its closure ─────────────
+
+    /// C-020: the closure is keyed the way the composer dedups TC entries — on
+    /// the advisory-stripped identifier — so a tag-bearing TC entry finds the
+    /// member the walker recorded under a different tag.
+    #[test]
+    fn the_deferred_closure_is_keyed_by_the_advisory_stripped_identifier() {
+        let dir = tempfile::tempdir().unwrap();
+        let member = Arc::new(install_info_with(
+            dir.path(),
+            "dep",
+            'd',
+            bundle_metadata(Vec::new(), &[]),
+            ResolvedPackage::new(),
+        ));
+        let deferred = DeferredComposition::new(shim_dir_at(dir.path().join("shims")), vec![Arc::clone(&member)]);
+
+        let tagged = PinnedIdentifier::try_from(
+            Identifier::new_registry("dep", REGISTRY)
+                .clone_with_tag("1.2.3")
+                .clone_with_digest(sha256('d')),
+        )
+        .unwrap();
+
+        let found = deferred
+            .member(&tagged)
+            .expect("a tag-bearing TC entry must find the closure member for the same digest");
+        assert_eq!(found.identifier().digest(), sha256('d'));
+    }
+
+    /// C-020: a TC entry the closure does not carry is a disagreement between
+    /// the shim tree's ref-linked blobs and the composed TC. `None` is what
+    /// lets the caller surface it instead of reaching for a package directory
+    /// that does not exist.
+    #[test]
+    fn the_deferred_closure_has_no_member_for_a_package_it_does_not_carry() {
+        let dir = tempfile::tempdir().unwrap();
+        let member = Arc::new(install_info_with(
+            dir.path(),
+            "dep",
+            'd',
+            bundle_metadata(Vec::new(), &[]),
+            ResolvedPackage::new(),
+        ));
+        let deferred = DeferredComposition::new(shim_dir_at(dir.path().join("shims")), vec![member]);
+
+        assert!(
+            deferred.member(&pinned("other", 'e')).is_none(),
+            "a package outside the closure must not resolve to some other member"
+        );
+    }
+
+    /// C-020: for a deferred root the carriers come from the closure, even
+    /// when a package directory for the same identifier happens to exist.
+    ///
+    /// The two sources declare DIFFERENT env keys, so a fallback to the package
+    /// store is visible in the assertion rather than merely unproven.
+    #[tokio::test]
+    async fn a_deferred_roots_tc_entry_reads_its_carriers_from_the_closure_not_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let dep_id = pinned("dep", 'd');
+
+        seed_package_with_metadata(
+            &store,
+            &dep_id,
+            &bundle_metadata(vec![marker_var("FROM_PACKAGE_STORE")], &[]),
+            &ResolvedPackage::new(),
+        );
+
+        let member = Arc::new(install_info_with(
+            dir.path(),
+            "dep",
+            'd',
+            bundle_metadata(vec![marker_var("FROM_CONFIG_BLOB")], &[]),
+            ResolvedPackage::new(),
+        ));
+        let root = install_info_with(
+            dir.path(),
+            "tool",
+            'a',
+            bundle_metadata(Vec::new(), &[]),
+            ResolvedPackage {
+                dependencies: vec![ResolvedDependency {
+                    identifier: dep_id.clone(),
+                    visibility: Visibility::PUBLIC,
+                }],
+            },
+        )
+        .with_deferred(DeferredComposition::new(
+            shim_dir_at(dir.path().join("shims")),
+            vec![member],
+        ));
+
+        let (metadata, _resolved) = tc_entry_object_data(&root, &store, &dep_id)
+            .await
+            .expect("a deferred root's TC entry resolves from its closure");
+
+        let keys: Vec<&str> = metadata
+            .env()
+            .expect("the fixture declares one env var")
+            .into_iter()
+            .map(|var| var.key.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["FROM_CONFIG_BLOB"],
+            "a deferred root must read carriers from the ref-linked config blobs (C-020)"
+        );
+    }
+
+    /// C-020 control: a materialized root still reads its TC entries from the
+    /// package store. Without this row the row above is satisfied by an
+    /// implementation that never consults the store at all.
+    #[tokio::test]
+    async fn a_materialized_roots_tc_entry_reads_its_carriers_from_the_package_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let dep_id = pinned("dep", 'd');
+
+        seed_package_with_metadata(
+            &store,
+            &dep_id,
+            &bundle_metadata(vec![marker_var("FROM_PACKAGE_STORE")], &[]),
+            &ResolvedPackage::new(),
+        );
+
+        let root = install_info_with(
+            dir.path(),
+            "tool",
+            'a',
+            bundle_metadata(Vec::new(), &[]),
+            ResolvedPackage {
+                dependencies: vec![ResolvedDependency {
+                    identifier: dep_id.clone(),
+                    visibility: Visibility::PUBLIC,
+                }],
+            },
+        );
+
+        let (metadata, _resolved) = tc_entry_object_data(&root, &store, &dep_id)
+            .await
+            .expect("a materialized root's TC entry resolves from the package store");
+
+        let keys: Vec<&str> = metadata
+            .env()
+            .expect("the fixture declares one env var")
+            .into_iter()
+            .map(|var| var.key.as_str())
+            .collect();
+        assert_eq!(keys, vec!["FROM_PACKAGE_STORE"]);
+    }
+
+    /// C-020: a TC entry absent from a deferred closure is an error, never a
+    /// silent fall-back to the package store — even when the store could
+    /// answer. This is the row that reds on the tempting "try the closure,
+    /// else the store" implementation.
+    #[tokio::test]
+    async fn a_tc_entry_absent_from_a_deferred_closure_is_refused_not_read_from_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let dep_id = pinned("dep", 'd');
+
+        seed_package_with_metadata(
+            &store,
+            &dep_id,
+            &bundle_metadata(vec![marker_var("FROM_PACKAGE_STORE")], &[]),
+            &ResolvedPackage::new(),
+        );
+
+        let root = install_info_with(
+            dir.path(),
+            "tool",
+            'a',
+            bundle_metadata(Vec::new(), &[]),
+            ResolvedPackage {
+                dependencies: vec![ResolvedDependency {
+                    identifier: dep_id.clone(),
+                    visibility: Visibility::PUBLIC,
+                }],
+            },
+        )
+        .with_deferred(DeferredComposition::new(
+            shim_dir_at(dir.path().join("shims")),
+            Vec::new(),
+        ));
+
+        let error = tc_entry_object_data(&root, &store, &dep_id)
+            .await
+            .expect_err("a closure that does not carry the entry must refuse, not fall back");
+
+        let crate::Error::PackageManager(super::super::error::Error::ResolveFailed(failures)) = &error else {
+            panic!("expected a package-manager resolve failure, got {error:?}");
+        };
+        assert!(
+            matches!(failures[0].kind, PackageErrorKind::NotFound),
+            "expected NotFound for a TC entry the closure does not carry, got {:?}",
+            failures[0].kind
+        );
+    }
+
+    // ── C-012 at compose level, and the gates a deferred root must survive ──
+
+    /// C-012 end to end: `compose` puts a deferred root's shim slot BELOW its
+    /// declared `bin/` and its `entrypoints/`.
+    ///
+    /// The seam-level sibling above cannot catch a `compose` that never calls
+    /// `emit_shim_slot` at all; this row is the one that does.
+    #[tokio::test]
+    async fn compose_resolves_a_deferred_roots_path_as_entrypoints_then_bin_then_shims() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let shim = shim_dir_at(dir.path().join("shims").join("tool"));
+        let metadata = bundle_metadata(
+            vec![path_var("PATH", "${installPath}/bin", false, Visibility::PUBLIC)],
+            &["app"],
+        );
+        let root = Arc::new(
+            install_info_with(dir.path(), "tool", 'a', metadata, ResolvedPackage::new())
+                .with_deferred(DeferredComposition::new(shim.clone(), Vec::new())),
+        );
+
+        let out = compose(std::slice::from_ref(&root), &store, false).await.unwrap();
+
+        let mut resolved_order = path_values(&out.entries);
+        // Consumers prepend, so the resolved PATH is the reverse of emit order.
+        resolved_order.reverse();
+        assert_eq!(
+            resolved_order,
+            vec![
+                root.dir().entrypoints().to_string_lossy().into_owned(),
+                root.dir().content().join("bin").to_string_lossy().into_owned(),
+                shim.bin().to_string_lossy().into_owned(),
+            ],
+            "resolved PATH for a deferred root must be entrypoints/ > bin/ > shims/ (C-012)"
+        );
+    }
+
+    /// C-012: the composed env carries the shim slot on the interface surface
+    /// and **not** under `--self`.
+    ///
+    /// Both surfaces in one row deliberately: a `--self`-only assertion is a
+    /// negative over a set that is empty today and would stay green against an
+    /// implementation that never emits the slot at all.
+    #[tokio::test]
+    async fn compose_carries_the_shim_slot_on_the_interface_surface_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let shim = shim_dir_at(dir.path().join("shims").join("tool"));
+        let metadata = bundle_metadata(
+            vec![path_var("PATH", "${installPath}/bin", false, Visibility::PUBLIC)],
+            &["app"],
+        );
+        let root = Arc::new(
+            install_info_with(dir.path(), "tool", 'a', metadata, ResolvedPackage::new())
+                .with_deferred(DeferredComposition::new(shim.clone(), Vec::new())),
+        );
+        let shim_bin = shim.bin().to_string_lossy().into_owned();
+
+        let consumer = compose(std::slice::from_ref(&root), &store, false).await.unwrap();
+        assert!(
+            path_values(&consumer.entries).contains(&shim_bin),
+            "the interface surface must route through the deferred tool's launchers: {:?}",
+            consumer.entries
+        );
+
+        let self_view = compose(&[root], &store, true).await.unwrap();
+        assert!(
+            !path_values(&self_view.entries).contains(&shim_bin),
+            "--self bypasses launchers, and a shim is nothing but a launcher: {:?}",
+            self_view.entries
+        );
+    }
+
+    /// C-020's defect clause (plan F-4): `check_entrypoints` runs on every
+    /// compose of two or more roots and loads each interface-visible TC entry's
+    /// metadata. A deferred root's TC entries have no package directory, so the
+    /// multi-root gate must read them through the same closure-aware accessor
+    /// the emission walk uses — or every `ocx env` with two lazy tools fails
+    /// before a single entry is emitted.
+    #[tokio::test]
+    async fn compose_of_two_roots_one_deferred_survives_the_multi_root_entrypoint_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        let eager = Arc::new(make_install_info_with_ep(
+            dir.path(),
+            "eager",
+            'e',
+            ResolvedPackage::new(),
+            "eager-app",
+        ));
+
+        let dep_id = pinned("dep", 'd');
+        let dep_member = Arc::new(install_info_with(
+            dir.path(),
+            "dep",
+            'd',
+            bundle_metadata(Vec::new(), &["dep-app"]),
+            ResolvedPackage::new(),
+        ));
+        let deferred = Arc::new(
+            install_info_with(
+                dir.path(),
+                "deferred",
+                'f',
+                bundle_metadata(Vec::new(), &["deferred-app"]),
+                ResolvedPackage {
+                    dependencies: vec![ResolvedDependency {
+                        identifier: dep_id,
+                        visibility: Visibility::PUBLIC,
+                    }],
+                },
+            )
+            .with_deferred(DeferredComposition::new(
+                shim_dir_at(dir.path().join("shims").join("deferred")),
+                vec![dep_member],
+            )),
+        );
+
+        let out = compose(&[eager, deferred], &store, false)
+            .await
+            .expect("a deferred root's TC entry has no package directory, and that is not a failure");
+
+        assert_eq!(
+            out.admitted_entrypoints.len(),
+            3,
+            "both roots and the deferred root's interface dep must claim their launchers: {:?}",
+            out.admitted_entrypoints
+        );
+    }
+
+    /// Plan F-12: `check_repo_digest_conflicts` reads only `identifier()` and
+    /// `resolved().dependencies`, so a deferred root participates in the fatal
+    /// version-conflict gate **only if the `ResolvedPackage` synthesized from
+    /// its closure is faithful**. An empty synthesized TC compiles, passes
+    /// every other test, and silently disables the gate for every deferred
+    /// tool — an Unchecked Green by construction.
+    #[test]
+    fn two_deferred_roots_colliding_on_one_repository_at_two_digests_still_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let deferred_root = |repo: &str, hex: char, shared_hex: char| {
+            Arc::new(
+                install_info_with(
+                    dir.path(),
+                    repo,
+                    hex,
+                    bundle_metadata(Vec::new(), &[]),
+                    ResolvedPackage {
+                        dependencies: vec![ResolvedDependency {
+                            identifier: pinned("shared", shared_hex),
+                            visibility: Visibility::PUBLIC,
+                        }],
+                    },
+                )
+                .with_deferred(DeferredComposition::new(
+                    shim_dir_at(dir.path().join("shims").join(repo)),
+                    Vec::new(),
+                )),
+            )
+        };
+
+        let roots = vec![deferred_root("a", 'a', '1'), deferred_root("b", 'b', '2')];
+
+        let error = check_repo_digest_conflicts(&roots, false)
+            .expect_err("two deferred tools pinning one repository at two digests is fatal");
+
+        let DependencyError::Conflict {
+            repository,
+            identifiers,
+        } = error
+        else {
+            panic!("expected a version conflict, got {error:?}");
+        };
+        assert!(
+            repository.to_string().ends_with("shared"),
+            "the conflict must name the shared repository, got {repository}"
+        );
+        let digests: Vec<_> = identifiers.iter().map(|id| id.digest()).collect();
+        assert_eq!(
+            digests,
+            vec![sha256('1'), sha256('2')],
+            "both colliding digests must be named"
+        );
+    }
+
+    // ── C-013 / S-005: the env is not a function of content-cache state ─────
+
+    /// S-005 + C-013 (F-3 decision): `ocx env` twice, cold store then warm,
+    /// is byte-identical for a deferred root **including one that declares a
+    /// `required` path var**.
+    ///
+    /// `env/resolver.rs`'s `required && !path.exists()` probe validates an
+    /// INSTALLED tree; a deferred tool has none, so the probe's premise does
+    /// not hold and it is suppressed for a deferred root. Without the required
+    /// var this fixture would pass for a package class the feature never
+    /// supported — the whole point of the row.
+    #[tokio::test]
+    async fn compose_is_identical_cold_and_warm_for_a_deferred_root_with_a_required_path_var() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+        let shim = shim_dir_at(dir.path().join("shims").join("tool"));
+        let metadata = bundle_metadata(
+            vec![path_var("PATH", "${installPath}/bin", true, Visibility::PUBLIC)],
+            &[],
+        );
+        let root = Arc::new(
+            install_info_with(dir.path(), "tool", 'a', metadata, ResolvedPackage::new())
+                .with_deferred(DeferredComposition::new(shim, Vec::new())),
+        );
+
+        // Cold: nothing under the package directory exists yet.
+        assert!(
+            !root.dir().content().exists(),
+            "the cold leg must genuinely have no content tree"
+        );
+        let cold = compose(std::slice::from_ref(&root), &store, false)
+            .await
+            .expect("a required path var must not make a deferred compose depend on content state");
+
+        // Warm: the first invocation materialized the package.
+        std::fs::create_dir_all(root.dir().content().join("bin")).unwrap();
+        let warm = compose(&[root], &store, false).await.expect("warm compose succeeds");
+
+        assert_eq!(
+            format!("{:?}", cold.entries),
+            format!("{:?}", warm.entries),
+            "the composed env must be a function of (lock, lazy-mode, metadata availability) alone (C-013)"
+        );
+    }
+
+    // ── C-015 (d) / S-009: what `compose_roots` reports ─────────────────────
+
+    /// The shape of `compose_roots`' return, pinned at compile time: the three
+    /// channels C-015 (d) and S-009 need are `roots`, `advisories`, `omitted`.
+    /// Referenced, never run.
+    #[test]
+    fn compose_roots_returns_roots_advisories_and_omissions() {
+        async fn signature_binding(
+            manager: &PackageManager,
+            requests: &[ComposeRequest],
+            platform: &Platform,
+        ) -> (Vec<Arc<InstallInfo>>, Vec<LazyAdvisory>, Vec<ComposeOmission>) {
+            let ComposeRoots {
+                roots,
+                advisories,
+                omitted,
+            } = manager
+                .compose_roots(requests, platform, Materialization::LocalOnly, Concurrency::default())
+                .await
+                .expect("compose_roots");
+            (roots, advisories, omitted)
+        }
+
+        let _ = signature_binding;
+    }
+
+    /// S-009: under `--no-pull` a tool whose metadata is not local is warned
+    /// about and omitted — never a hard failure. Warn-and-omit is the composing
+    /// caller's decision, so the omission has to reach it as data.
+    #[tokio::test]
+    async fn local_only_omits_a_deferred_tool_whose_metadata_is_not_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = offline_manager(dir.path());
+        let request = ComposeRequest {
+            identifier: Identifier::new_registry("tool", REGISTRY),
+            mode: LazyMode::Always,
+        };
+
+        let out = manager
+            .compose_roots(
+                std::slice::from_ref(&request),
+                &Platform::any(),
+                Materialization::LocalOnly,
+                Concurrency::default(),
+            )
+            .await
+            .expect("--no-pull omits an unreachable tool rather than failing the compose (S-009)");
+
+        assert!(out.roots.is_empty(), "no root can be built for an unreachable tool");
+        assert_eq!(
+            out.omitted.len(),
+            1,
+            "the dropped tool must be reported: {:?}",
+            out.omitted
+        );
+        assert_eq!(
+            out.omitted[0].identifier.to_string(),
+            request.identifier.to_string(),
+            "the omission names the request the caller made"
+        );
+    }
+
+    /// C-015 (d): advisories are classified for a **deferred** tool only. An
+    /// eagerly-materialized request never reaches `prepare_lazy`, which is the
+    /// fact that makes the clause testable at all.
+    ///
+    /// The `roots` assertion is what keeps this from passing vacuously: an
+    /// implementation that omitted the tool entirely would also report no
+    /// advisories.
+    #[tokio::test]
+    async fn an_eagerly_materialized_tool_contributes_no_advisories() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = offline_manager(dir.path());
+        let store = manager.file_structure().packages.clone();
+
+        let eager_id = pinned("tool", 'a');
+        seed_package_with_metadata(
+            &store,
+            &eager_id,
+            // No `binaries` claim — the shape that raises `UndeclaredBinaries`
+            // when it IS classified, so silence here is a decision, not luck.
+            &bundle_metadata(Vec::new(), &["app"]),
+            &ResolvedPackage::new(),
+        );
+
+        let request = ComposeRequest {
+            identifier: eager_id.as_identifier().clone(),
+            mode: LazyMode::Never,
+        };
+
+        let out = manager
+            .compose_roots(
+                std::slice::from_ref(&request),
+                &Platform::any(),
+                Materialization::LocalOnly,
+                Concurrency::default(),
+            )
+            .await
+            .expect("a locally present package composes eagerly");
+
+        assert_eq!(
+            out.roots.len(),
+            1,
+            "the eager tool must actually be composed: {:?}",
+            out.omitted
+        );
+        assert!(
+            out.advisories.is_empty(),
+            "an eagerly-materialized tool never reaches the advisory classifier (C-015 d): {:?}",
+            out.advisories
+        );
+    }
+
+    // ── C-006: the `lazy-mode` ladders ──────────────────────────────────────
+    //
+    // Every row expects `Always`, which is never the ladder's floor, and sets
+    // every tier BELOW the one under test to `Never`. A resolver that consults
+    // the tiers in the wrong order — or consults none — answers `Never` and
+    // reds; the construction also makes each row deterministic regardless of
+    // the ambient `OCX_LAZY_MODE`.
+
+    fn tool_identifier() -> Identifier {
+        Identifier::new_registry("ns/tool", REGISTRY).clone_with_tag("1.2.3")
+    }
+
+    /// A `ProjectConfig` carrying the three config tiers C-006 gives
+    /// `lazy-mode`. `group` names the group whose table the mode lands in, so
+    /// a row can assert the tier applies only to the selected group.
+    fn ladder_config(
+        toolchain: Option<LazyMode>,
+        group: Option<(&str, LazyMode)>,
+        package: Option<(&str, LazyMode)>,
+    ) -> ProjectConfig {
+        let mut config = ProjectConfig::default();
+        if let Some(mode) = toolchain {
+            config.lazy_mode = Some(mode);
+        }
+        if let Some((name, mode)) = group {
+            config.groups.insert(
+                name.to_string(),
+                Group {
+                    lazy_mode: Some(mode),
+                    ..Group::default()
+                },
+            );
+        }
+        if let Some((key, mode)) = package {
+            config.packages.insert(
+                key.to_string(),
+                PackageSettings {
+                    no_patches: false,
+                    lazy_mode: Some(mode),
+                    lazy_report: None,
+                },
+            );
+        }
+        config
+    }
+
+    /// C-006: the CLI flag outranks every config tier.
+    #[test]
+    fn the_cli_lazy_mode_outranks_every_config_tier() {
+        let config = ladder_config(
+            Some(LazyMode::Never),
+            Some(("ci", LazyMode::Never)),
+            Some((&format!("{REGISTRY}/ns/tool"), LazyMode::Never)),
+        );
+
+        assert_eq!(
+            lazy_mode_for_tool(&config, &tool_identifier(), Some("ci"), Some(LazyMode::Always)),
+            LazyMode::Always
+        );
+    }
+
+    /// C-006: `[package."<id>"]` outranks `[group.<g>]`.
+    #[test]
+    fn the_package_tier_outranks_the_group_tier() {
+        let config = ladder_config(
+            Some(LazyMode::Never),
+            Some(("ci", LazyMode::Never)),
+            Some((&format!("{REGISTRY}/ns/tool"), LazyMode::Always)),
+        );
+
+        assert_eq!(
+            lazy_mode_for_tool(&config, &tool_identifier(), Some("ci"), None),
+            LazyMode::Always
+        );
+    }
+
+    /// C-006: `[group.<g>]` outranks the toolchain tier — and only for the
+    /// group the binding came from.
+    #[test]
+    fn the_group_tier_outranks_the_toolchain_tier() {
+        let config = ladder_config(Some(LazyMode::Never), Some(("ci", LazyMode::Always)), None);
+
+        assert_eq!(
+            lazy_mode_for_tool(&config, &tool_identifier(), Some("ci"), None),
+            LazyMode::Always,
+            "the selected group's tier applies"
+        );
+        assert_eq!(
+            lazy_mode_for_tool(&config, &tool_identifier(), None, None),
+            LazyMode::Never,
+            "a positional package has no group tier, so the toolchain tier answers"
+        );
+    }
+
+    /// C-006: the toolchain tier answers when no more specific tier is set.
+    #[test]
+    fn the_toolchain_tier_answers_when_no_more_specific_tier_is_set() {
+        let config = ladder_config(Some(LazyMode::Always), None, None);
+
+        assert_eq!(
+            lazy_mode_for_tool(&config, &tool_identifier(), None, None),
+            LazyMode::Always
+        );
+    }
+
+    /// C-006: the package tier keys on `registry/repository` with tag and
+    /// digest excluded — a config author cannot know the digest a lock pins.
+    #[test]
+    fn the_package_tier_matches_the_repository_without_its_tag() {
+        let config = ladder_config(
+            Some(LazyMode::Never),
+            None,
+            Some((&format!("{REGISTRY}/ns/tool"), LazyMode::Always)),
+        );
+
+        assert_eq!(
+            lazy_mode_for_tool(&config, &tool_identifier(), None, None),
+            LazyMode::Always
+        );
+    }
+
+    /// C-006: an unrelated `[package.*]` entry must not answer. Without this
+    /// row the one above passes for "take whatever single entry exists".
+    #[test]
+    fn a_package_entry_for_another_package_never_answers() {
+        let config = ladder_config(
+            Some(LazyMode::Never),
+            None,
+            Some((&format!("{REGISTRY}/ns/other"), LazyMode::Always)),
+        );
+
+        assert_eq!(
+            lazy_mode_for_tool(&config, &tool_identifier(), None, None),
+            LazyMode::Never
+        );
+    }
+
+    /// C-006: `OCX_LAZY_MODE` is the last tier above the floor. Without this
+    /// row an implementation that drops the environment tier entirely passes
+    /// every other ladder test.
+    #[test]
+    fn the_environment_tier_answers_when_every_config_tier_is_absent() {
+        let env = crate::test::env::lock();
+        env.set("OCX_LAZY_MODE", "always");
+
+        assert_eq!(
+            lazy_mode_for_tool(&ProjectConfig::default(), &tool_identifier(), None, None),
+            LazyMode::Always
+        );
+    }
+
+    /// C-006: the floor is the literal `Never`, reached only when every tier
+    /// above it is absent.
+    #[test]
+    fn the_ladder_floor_is_never() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_LAZY_MODE");
+
+        assert_eq!(
+            lazy_mode_for_tool(&ProjectConfig::default(), &tool_identifier(), None, None),
+            LazyMode::Never
+        );
+    }
+
+    /// C-006: the OCI tier has two tiers, not five — `ocx package env` /
+    /// `exec` read no `ocx.toml` at any tier, so the config tiers are absent
+    /// rather than silently ignored.
+    #[test]
+    fn the_oci_tier_ladder_is_the_cli_flag_then_the_environment() {
+        let env = crate::test::env::lock();
+
+        env.set("OCX_LAZY_MODE", "never");
+        assert_eq!(
+            lazy_mode_for_package(Some(LazyMode::Always)),
+            LazyMode::Always,
+            "the CLI flag outranks the environment tier"
+        );
+
+        env.set("OCX_LAZY_MODE", "always");
+        assert_eq!(
+            lazy_mode_for_package(None),
+            LazyMode::Always,
+            "the environment tier answers when the flag is absent"
+        );
+
+        env.remove("OCX_LAZY_MODE");
+        assert_eq!(lazy_mode_for_package(None), LazyMode::Never, "the floor is Never");
+    }
+
+    // ── WP-8 Implement: the two rows Specify deferred ───────────────────────
+    //
+    // Both need `prepare_lazy` to actually SUCCEED, which needs a manifest
+    // source serving a manifest plus a config blob. Specify refused to ship the
+    // fixture it could not show green (`compose_roots` was `unimplemented!()`
+    // then); with the implementation in place it is shown green here, against
+    // the shared `FakeManifestSource` promoted out of `tasks/inspect.rs` and
+    // `tasks/resolve.rs` for exactly this third caller.
+
+    /// A `Bundle`-shaped config blob with **no `binaries` key** — the
+    /// tri-state wire shape that raises `UndeclaredBinaries` when it is
+    /// classified, which is what makes the mixed-batch row below able to tell
+    /// which half of the split ran the classifier.
+    fn lazy_config(dependencies: serde_json::Value, entrypoint: &str) -> String {
+        serde_json::json!({
+            "type": "bundle",
+            "version": 1,
+            "dependencies": dependencies,
+            "entrypoints": { entrypoint: {} },
+            // A cleanly substitutable `path` value: the ONLY advisory this
+            // fixture raises is `UndeclaredBinaries`, so the mixed-batch count
+            // below measures the classifier's gating and nothing else.
+            "env": [{
+                "key": format!("{}_HOME", entrypoint.to_ascii_uppercase().replace('-', "_")),
+                "type": "path",
+                "value": "${installPath}/bin",
+                "required": false,
+                "visibility": "public",
+            }],
+        })
+        .to_string()
+    }
+
+    /// A flat image manifest referencing `config_json`'s digest, sized to its
+    /// real length. No layers — nothing on this path reads them.
+    fn lazy_manifest_json(config_digest: &crate::oci::Digest, config_json: &str) -> String {
+        format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{{"mediaType":"{media}","digest":"{config_digest}","size":{size}}},"layers":[]}}"#,
+            media = crate::MEDIA_TYPE_PACKAGE_METADATA_V1,
+            size = config_json.len(),
+        )
+    }
+
+    /// Register one closure node (manifest keyed by its own digest, plus the
+    /// config blob), returning the manifest digest a dep edge addresses it by.
+    fn register_lazy_node(
+        source: crate::test::manifest_source::FakeManifestSource,
+        config_json: &str,
+    ) -> (crate::test::manifest_source::FakeManifestSource, crate::oci::Digest) {
+        let config_digest = crate::oci::Algorithm::Sha256.hash(config_json.as_bytes());
+        let manifest_json = lazy_manifest_json(&config_digest, config_json);
+        let manifest_digest = crate::oci::Algorithm::Sha256.hash(manifest_json.as_bytes());
+        let source = source
+            .with(&manifest_digest.to_string(), manifest_json.as_bytes())
+            .with_blob(&config_digest.to_string(), config_json.as_bytes());
+        (source, manifest_digest)
+    }
+
+    /// Like [`register_lazy_node`] but also answers `tag`, so a tag-addressed
+    /// request resolves to it.
+    fn register_lazy_tagged(
+        source: crate::test::manifest_source::FakeManifestSource,
+        tag: &str,
+        config_json: &str,
+    ) -> (crate::test::manifest_source::FakeManifestSource, crate::oci::Digest) {
+        let (source, manifest_digest) = register_lazy_node(source, config_json);
+        let config_digest = crate::oci::Algorithm::Sha256.hash(config_json.as_bytes());
+        let manifest_json = lazy_manifest_json(&config_digest, config_json);
+        (source.with(tag, manifest_json.as_bytes()), manifest_digest)
+    }
+
+    /// A `PackageManager` chained to `source` under `ChainMode::Default`, so a
+    /// leaf platform manifest is recovered exactly as a live registry would
+    /// serve it (a leaf is never locally cached).
+    fn lazy_manager(dir: &std::path::Path, source: crate::test::manifest_source::FakeManifestSource) -> PackageManager {
+        let fs = FileStructure::with_root(dir.to_path_buf());
+        // With the blob store attached, exactly as `Context::try_init` builds
+        // it: `fetch_blob`'s write-through is what puts a closure node's config
+        // blob into `$OCX_HOME/blobs`, which is where the shim tree's
+        // `refs/blobs/` points and where a deferred root reads its carriers
+        // back from (C-020).
+        let index = Index::from_chained_with_content_store(
+            LocalIndex::new(LocalConfig {
+                index_store: fs.index.clone(),
+            }),
+            vec![Index::from_impl(source)],
+            ChainMode::Default,
+            fs.blobs.clone(),
+        );
+        PackageManager::new(fs, index, None, REGISTRY)
+    }
+
+    /// One `dependencies[]` entry as authored: pinned identifier, declared edge
+    /// visibility, interpolation name.
+    fn lazy_edge(identifier: &PinnedIdentifier, visibility: &str, name: &str) -> serde_json::Value {
+        serde_json::json!({ "identifier": identifier.to_string(), "visibility": visibility, "name": name })
+    }
+
+    /// C-015 (d), the mixed batch: one eager tool and one deferred tool in a
+    /// single `compose_roots`, both carrying the advisory-raising metadata
+    /// shape. The advisory appears **exactly once**, and it names the
+    /// **deferred** one.
+    ///
+    /// This is the clause's only real proof. The two halves deliberately name
+    /// DIFFERENT packages: with one identifier used twice, an implementation
+    /// that classified only the eager half would still report exactly one
+    /// advisory carrying the right name, and the row would pass for the wrong
+    /// reason. Distinct packages make both wrong implementations red — two
+    /// advisories if both halves classify, the wrong package named if only the
+    /// eager one does.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mixed_batch_raises_the_advisory_once_and_only_for_the_deferred_tool() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let deferred_config = lazy_config(serde_json::json!([]), "deferred-app");
+        let (source, deferred_manifest_digest) = register_lazy_tagged(
+            crate::test::manifest_source::FakeManifestSource::default(),
+            "1.0",
+            &deferred_config,
+        );
+        let manager = lazy_manager(dir.path(), source);
+        let store = manager.file_structure().packages.clone();
+
+        // The eager half: locally materialized, and its on-disk metadata
+        // declares no `binaries` either — so silence about it is a decision
+        // about the MODE, not about the metadata.
+        let eager_id = pinned("eager", 'e');
+        seed_package_with_metadata(
+            &store,
+            &eager_id,
+            &bundle_metadata(Vec::new(), &["eager-app"]),
+            &ResolvedPackage::new(),
+        );
+
+        let requests = vec![
+            ComposeRequest {
+                identifier: eager_id.as_identifier().clone(),
+                mode: LazyMode::Never,
+            },
+            ComposeRequest {
+                identifier: Identifier::new_registry("deferred", REGISTRY).clone_with_tag("1.0"),
+                mode: LazyMode::Always,
+            },
+        ];
+
+        let out = manager
+            .compose_roots(
+                &requests,
+                &Platform::any(),
+                Materialization::LocalOnly,
+                Concurrency::default(),
+            )
+            .await
+            .expect("a mixed batch composes both halves");
+
+        assert_eq!(
+            out.roots.len(),
+            2,
+            "both halves must compose, or the advisory count below is vacuous: omitted={:?}",
+            out.omitted
+        );
+        assert!(
+            out.roots[0].deferred().is_none() && out.roots[1].deferred().is_some(),
+            "roots come back in request order: eager first, deferred second"
+        );
+        assert_eq!(
+            out.advisories.len(),
+            1,
+            "the classifier runs for the deferred tool and for nothing else: {:?}",
+            out.advisories
+        );
+        let LazyAdvisory::UndeclaredBinaries { package } = &out.advisories[0] else {
+            panic!("expected UndeclaredBinaries, got {:?}", out.advisories[0]);
+        };
+        assert_eq!(
+            package.digest(),
+            deferred_manifest_digest,
+            "the advisory must name the DEFERRED tool, not the eager one"
+        );
+    }
+
+    /// Plan F-12, the half the Specify row could not reach: `deferred_root`
+    /// synthesizes a **faithful** `ResolvedPackage` from the walked closure.
+    ///
+    /// The existing row proves the version-conflict gate stays armed for
+    /// deferred roots and is sensitive to an empty TC; it cannot prove the
+    /// synthesis, because that needs `prepare_lazy` to succeed. An empty or
+    /// visibility-flattened synthesis compiles, passes every other test, and
+    /// silently disables the conflict gate, the entry-point collision gate and
+    /// the surface algebra for every deferred tool at once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deferred_roots_transitive_closure_is_synthesized_faithfully_from_the_walked_closure() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let dep_config = lazy_config(serde_json::json!([]), "dep-app");
+        let (source, dep_manifest_digest) =
+            register_lazy_node(crate::test::manifest_source::FakeManifestSource::default(), &dep_config);
+        let dep_id = PinnedIdentifier::try_from(
+            Identifier::new_registry("dep", REGISTRY).clone_with_digest(dep_manifest_digest.clone()),
+        )
+        .unwrap();
+
+        let root_config = lazy_config(serde_json::json!([lazy_edge(&dep_id, "public", "dep")]), "root-app");
+        let (source, root_manifest_digest) = register_lazy_tagged(source, "2.0", &root_config);
+
+        let manager = lazy_manager(dir.path(), source);
+        let request = ComposeRequest {
+            identifier: Identifier::new_registry("tool", REGISTRY).clone_with_tag("2.0"),
+            mode: LazyMode::Always,
+        };
+
+        let out = manager
+            .compose_roots(
+                std::slice::from_ref(&request),
+                &Platform::any(),
+                Materialization::Install,
+                Concurrency::default(),
+            )
+            .await
+            .expect("a deferred request composes without downloading content");
+
+        assert_eq!(out.roots.len(), 1);
+        let root = &out.roots[0];
+        assert_eq!(root.identifier().digest(), root_manifest_digest);
+        assert!(
+            !root.dir().content().exists(),
+            "no content may be materialized for a deferred root"
+        );
+
+        // The synthesized TC: the dep, at its resolved digest, carrying the
+        // visibility the walk composed from the root — not an empty vector and
+        // not a flattened one.
+        let dependencies = &root.resolved().dependencies;
+        assert_eq!(
+            dependencies.len(),
+            1,
+            "the synthesized TC must carry the closure's one dep: {dependencies:?}"
+        );
+        assert_eq!(dependencies[0].identifier.digest(), dep_manifest_digest);
+        assert_eq!(
+            dependencies[0].visibility,
+            Visibility::PUBLIC,
+            "a public edge composes to a public effective visibility"
+        );
+
+        // C-020: the member the composer will read that TC entry through is
+        // present, and its carriers came from the ref-linked config blob — the
+        // package directory for it does not exist.
+        let deferred = root.deferred().expect("a deferred request yields a deferred root");
+        let member = deferred
+            .member(&dep_id)
+            .expect("the closure carries the member its TC entry names");
+        assert!(!member.dir().content().exists());
+        let keys: Vec<String> = member
+            .metadata()
+            .env()
+            .expect("the fixture declares one env var")
+            .into_iter()
+            .map(|var| var.key.clone())
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["DEP_APP_HOME".to_string()],
+            "the member's carriers must come from its config blob"
         );
     }
 }

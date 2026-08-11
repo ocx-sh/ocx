@@ -118,6 +118,23 @@ pub mod keys {
     /// `OCX_NO_UPDATE_CHECK` — an independently silenceable concern. Explicit
     /// `ocx config update` still works when this is set.
     pub const OCX_NO_CONFIG_REFRESH: &str = "OCX_NO_CONFIG_REFRESH";
+    /// `crate::lazy::LazyMode` wire value (`never` /
+    /// `always`) — the least specific tier of the `lazy-mode` resolution
+    /// ladder (`plan_lazy_package_loading.md` C-006), below `ocx.toml`'s
+    /// toolchain/group/package tiers and the `--lazy-mode` CLI flag.
+    ///
+    /// **Not** resolution-affecting in the [`OcxConfigView`] sense: it
+    /// changes *when* a tool's content materializes, never *which* digest
+    /// resolves, so it is deliberately absent from [`OcxConfigView`] and
+    /// [`Env::apply_ocx_config`] never forwards it to a child ocx process.
+    pub const OCX_LAZY_MODE: &str = "OCX_LAZY_MODE";
+    /// `crate::lazy::LazyReport` wire value (`silent` /
+    /// `progress`) — whether a shim's first-invocation materialization
+    /// renders progress.
+    ///
+    /// **Not** resolution-affecting and **not** forwarded, same rationale as
+    /// [`OCX_LAZY_MODE`].
+    pub const OCX_LAZY_REPORT: &str = "OCX_LAZY_REPORT";
 }
 
 /// Resolution-affecting policy snapshot, taken from the running ocx's parsed
@@ -2519,6 +2536,37 @@ mod tests {
             env.get(keys::OCX_GLOBAL).is_none(),
             "cfg.global=false must clear any inherited OCX_GLOBAL"
         );
+    }
+
+    #[test]
+    fn apply_ocx_config_never_writes_the_lazy_keys() {
+        // C-006: `OCX_LAZY_MODE` / `OCX_LAZY_REPORT` are NOT
+        // resolution-affecting — they change *when* content materializes,
+        // never *which* digest resolves — so they are absent from
+        // `OcxConfigView` and a child must not receive them as forwarded
+        // config. `apply_ocx_config` therefore neither sets them (unlike
+        // OCX_FROZEN) nor scrubs them (unlike OCX_ENV, whose stale value
+        // would be a payload): it does not touch them at all.
+        let mut env = Env::clean();
+        env.apply_ocx_config(&view("/abs/ocx"));
+        // Positive control: the forwarding path really ran, so the two
+        // absence assertions below are not passing vacuously.
+        assert_eq!(env.get(keys::OCX_BINARY_PIN).unwrap(), "/abs/ocx");
+        for key in [keys::OCX_LAZY_MODE, keys::OCX_LAZY_REPORT] {
+            assert!(
+                env.get(key).is_none(),
+                "`{key}` must never be forwarded as resolution-affecting config"
+            );
+        }
+
+        // An ambient value the caller already placed on the child env is left
+        // alone — non-forwarded is not the same as scrubbed.
+        let mut env = Env::clean();
+        env.set(keys::OCX_LAZY_MODE, "always");
+        env.set(keys::OCX_LAZY_REPORT, "progress");
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert_eq!(env.get(keys::OCX_LAZY_MODE).unwrap(), "always");
+        assert_eq!(env.get(keys::OCX_LAZY_REPORT).unwrap(), "progress");
     }
 
     #[test]

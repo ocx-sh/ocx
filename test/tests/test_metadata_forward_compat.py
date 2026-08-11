@@ -246,7 +246,7 @@ def test_deps_skips_installed_dependency_with_unknown_env_modifier_type(
     ocx.json("package", "install", "--select", app.short)
 
     which_result = ocx.json("package", "which", leaf.short)
-    leaf_root = Path(which_result[leaf.short])
+    leaf_root = Path(which_result[leaf.short]["path"])
     leaf_metadata_path = leaf_root / "metadata.json"
     assert leaf_metadata_path.exists(), f"leaf metadata.json must exist at {leaf_metadata_path}"
 

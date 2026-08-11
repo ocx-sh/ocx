@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::env::ProjectEnv;
 use super::error::{ProjectError, ProjectErrorKind};
+use crate::lazy::{LazyMode, LazyModeLadder, LazyReport};
 use crate::oci::Identifier;
 use crate::oci::identifier::error::{IdentifierError, IdentifierErrorKind};
 
@@ -38,6 +39,22 @@ pub struct Group {
     /// `[group.ci.env]` into a file that declares none.
     #[serde(default, skip_serializing_if = "ProjectEnv::is_empty")]
     pub env: ProjectEnv,
+
+    /// Group-tier override of the `lazy-mode` resolution ladder
+    /// (`plan_lazy_package_loading.md` C-006). `None` means inherit from the
+    /// toolchain tier, never [`LazyMode::Never`]. Excluded from
+    /// [`super::declaration_hash`] — resolve-time policy, not a tool
+    /// binding.
+    #[serde(default, rename = "lazy-mode", skip_serializing_if = "Option::is_none")]
+    pub lazy_mode: Option<LazyMode>,
+    // There is deliberately no group-tier `lazy-report`. `lazy-mode` is decided
+    // while composing, where the selected group is known; `lazy-report` is
+    // decided inside `ocx launcher shim`, a separate process that receives a
+    // pinned identifier and a basename and has no way to learn which group
+    // composed the tool. A settable-but-unreadable tier is the defect
+    // `plan_lazy_package_loading.md` C-006 (i) exists to prevent, so the field
+    // is absent rather than ignored. See [`PackageSettings::lazy_report`] and
+    // [`ProjectConfig::lazy_report`] for the tiers that do apply.
 }
 
 /// Per-package resolve-time settings declared in `ocx.toml` under
@@ -59,6 +76,21 @@ pub struct PackageSettings {
     /// A system-required patch still applies (enforcement beats opt-out).
     #[serde(default, rename = "no-patches")]
     pub no_patches: bool,
+
+    /// Package-tier override of the `lazy-mode` resolution ladder
+    /// (`plan_lazy_package_loading.md` C-006) — the most specific config
+    /// tier, only outranked by the CLI flag. `None` means inherit from the
+    /// group/toolchain tiers, never [`LazyMode::Never`]. Excluded from
+    /// [`super::declaration_hash`] — resolve-time policy, not a tool
+    /// binding.
+    #[serde(default, rename = "lazy-mode", skip_serializing_if = "Option::is_none")]
+    pub lazy_mode: Option<LazyMode>,
+
+    /// Package-tier override of the `lazy-report` setting. `None` means
+    /// inherit from the group/toolchain tiers. Excluded from
+    /// [`super::declaration_hash`].
+    #[serde(default, rename = "lazy-report", skip_serializing_if = "Option::is_none")]
+    pub lazy_report: Option<LazyReport>,
 }
 
 /// Project-tier configuration parsed from `ocx.toml`.
@@ -123,6 +155,24 @@ pub struct ProjectConfig {
     #[serde(default, rename = "package")]
     pub packages: BTreeMap<String, PackageSettings>,
 
+    /// Toolchain-tier `lazy-mode` (`plan_lazy_package_loading.md` C-006) —
+    /// the least specific tier of the resolution ladder, only outranked by
+    /// `[group.<g>]`, `[package."<id>"]`, and the CLI flag. `None` means
+    /// fall through to `OCX_LAZY_MODE`, never [`LazyMode::Never`] — only the
+    /// ladder's own floor applies that default.
+    ///
+    /// The FIRST bare scalar fields on this struct — every other field is a
+    /// collection. This is RESOLVE-TIME POLICY, not a tool-binding
+    /// declaration: deliberately excluded from [`super::declaration_hash`]
+    /// (same rationale as `env` and `packages`).
+    #[serde(default, rename = "lazy-mode", skip_serializing_if = "Option::is_none")]
+    pub lazy_mode: Option<LazyMode>,
+
+    /// Toolchain-tier `lazy-report`. `None` means fall through to the
+    /// built-in default. Excluded from [`super::declaration_hash`].
+    #[serde(default, rename = "lazy-report", skip_serializing_if = "Option::is_none")]
+    pub lazy_report: Option<LazyReport>,
+
     /// Lazily-cached canonical declaration hash (RFC 8785 JCS + SHA-256).
     ///
     /// Populated on first call to [`Self::declaration_hash_cached`]. Mutators
@@ -160,6 +210,8 @@ impl Clone for ProjectConfig {
             env: self.env.clone(),
             groups: self.groups.clone(),
             packages: self.packages.clone(),
+            lazy_mode: self.lazy_mode,
+            lazy_report: self.lazy_report,
             declaration_hash_cache: OnceLock::new(),
         }
     }
@@ -174,6 +226,8 @@ impl PartialEq for ProjectConfig {
             && self.env == other.env
             && self.groups == other.groups
             && self.packages == other.packages
+            && self.lazy_mode == other.lazy_mode
+            && self.lazy_report == other.lazy_report
     }
 }
 
@@ -214,11 +268,23 @@ struct RawProjectConfig {
     #[serde(default, rename = "group")]
     groups: BTreeMap<String, toml::Table>,
 
-    /// Per-package settings. `PackageSettings` deserializes directly (only a
-    /// bool) — the map KEY is validated as a strict [`Identifier`] in
+    /// Per-package settings. `PackageSettings` deserializes directly — the
+    /// map KEY is validated as a strict [`Identifier`] in
     /// [`ProjectConfig::from_str_with_path`], not at the serde layer.
     #[serde(default, rename = "package")]
     package: BTreeMap<String, PackageSettings>,
+
+    /// Toolchain-tier `lazy-mode`. `LazyMode`'s own `Deserialize` already
+    /// rejects an unrecognized wire value, so — unlike `tools` — no second
+    /// validation pass is needed; [`ProjectConfig::from_str_with_path`]
+    /// copies this straight through.
+    #[serde(default, rename = "lazy-mode")]
+    lazy_mode: Option<LazyMode>,
+
+    /// Toolchain-tier `lazy-report`. Same direct-deserialize rationale as
+    /// [`Self::lazy_mode`].
+    #[serde(default, rename = "lazy-report")]
+    lazy_report: Option<LazyReport>,
 }
 
 impl ProjectConfig {
@@ -247,6 +313,7 @@ impl ProjectConfig {
                         Group {
                             tools,
                             env: ProjectEnv::default(),
+                            lazy_mode: None,
                         },
                     )
                 })
@@ -254,6 +321,10 @@ impl ProjectConfig {
             // `packages` is resolve-time policy, not a tool binding; the
             // programmatic constructor starts with no opt-outs declared.
             packages: BTreeMap::new(),
+            // Toolchain-tier lazy config is likewise resolve-time policy;
+            // the programmatic constructor starts with nothing declared.
+            lazy_mode: None,
+            lazy_report: None,
             declaration_hash_cache: OnceLock::new(),
         }
     }
@@ -304,12 +375,28 @@ impl ProjectConfig {
         self.packages
             .iter()
             .filter(|(_, settings)| settings.no_patches)
-            .filter_map(|(key, _)| {
-                Identifier::parse(key)
-                    .ok()
-                    .map(|id| format!("{}/{}", id.registry(), id.repository()))
-            })
+            .filter_map(|(key, _)| Identifier::parse(key).ok().map(|id| repository_key(&id)))
             .collect()
+    }
+
+    /// The `[package."<id>"]` settings for `identifier`, or `None` when no
+    /// entry names its repository.
+    ///
+    /// Matched on `registry/repository` with tag and digest EXCLUDED, the same
+    /// version-independent rule [`Self::no_patches_repositories`] follows — and
+    /// the only rule the wire permits for a shim: the invoked shim carries one
+    /// pinned identifier and the config author cannot know its digest.
+    ///
+    /// Consumed by `ocx launcher shim` for the `lazy-report` ladder's package
+    /// tier. A key that fails to re-parse is skipped; keys were validated as
+    /// fully-qualified [`Identifier`]s at parse time, and one that somehow
+    /// fails here could not match a package anyway.
+    pub fn package_settings(&self, identifier: &Identifier) -> Option<&PackageSettings> {
+        let wanted = repository_key(identifier);
+        self.packages
+            .iter()
+            .find(|(key, _)| Identifier::parse(key).is_ok_and(|parsed| repository_key(&parsed) == wanted))
+            .map(|(_, settings)| settings)
     }
 
     /// Resolve the project-tier `ocx.toml` and adjacent lock paths.
@@ -527,6 +614,11 @@ impl ProjectConfig {
             env,
             groups,
             packages,
+            // `LazyMode`/`LazyReport` reject an unrecognized wire value in
+            // their own `Deserialize`, so `raw`'s first pass already
+            // validated these — no second pass needed, unlike `tools`.
+            lazy_mode: raw.lazy_mode,
+            lazy_report: raw.lazy_report,
             declaration_hash_cache: OnceLock::new(),
         })
     }
@@ -534,11 +626,18 @@ impl ProjectConfig {
 
 /// Parse one `[group.<name>]` body into a [`Group`].
 ///
-/// Walks the raw table key by key: `tools` and `env` are the two recognized
-/// sub-tables; a **string**-valued key is the removed flat binding form and
-/// raises [`ProjectErrorKind::GroupHoldsDirectBinding`] naming the group and
+/// Walks the raw table key by key: `tools`, `env` and `lazy-mode` are the three
+/// recognized keys. Among unrecognized keys, a
+/// **string**-valued one is the removed flat binding form and raises
+/// [`ProjectErrorKind::GroupHoldsDirectBinding`] naming the group and
 /// pointing at `[group.<name>.tools]`; anything else raises
 /// [`ProjectErrorKind::UnknownGroupSection`] naming the offending key.
+///
+/// Key-first, not value-first: `lazy-mode` is itself
+/// string-valued (`lazy-mode = "always"`), so a value-shape check run before
+/// the key match would misclassify it as the removed flat binding form.
+/// Recognizing the key first, and reserving the string-shape check for the
+/// fallback arm, keeps both diagnoses correct.
 ///
 /// Value-first rather than a `deny_unknown_fields` derive: the group name is
 /// the outer map key and is unreachable from inside a value deserializer, so
@@ -558,12 +657,18 @@ fn parse_group(name: &str, raw: &toml::Table, path: &Path) -> Result<Group, supe
 
     let mut group = Group::default();
     for (key, value) in raw {
-        // Value shape decides first, key name second: a string is a tool
+        // Value shape decides before key name, except for the scalar
+        // settings: a string under a key that names a *sub-table* is a tool
         // binding in the removed flat form whatever it is called, so
         // `tools = "ocx.sh/tools:1"` and `bar = "ocx.sh/bar:1"` both get the
-        // migration message rather than a type error or a bogus
-        // "unknown section".
-        if value.is_str() {
+        // migration message rather than a TOML type error or a bogus
+        // "unknown section". `lazy-mode` is exempt because its value is
+        // legitimately a string. `lazy-report` is exempt for a different
+        // reason: it is a *removed* group-tier key, and routing it here would
+        // tell the user to move it under `[group.<name>.tools]`, where it is
+        // not a valid tool binding at all. Falling through to the `_` arm
+        // reports it as the unknown key it is.
+        if value.is_str() && !matches!(key.as_str(), "lazy-mode" | "lazy-report") {
             return Err(ProjectError::new(
                 path.to_path_buf(),
                 ProjectErrorKind::GroupHoldsDirectBinding {
@@ -587,6 +692,13 @@ fn parse_group(name: &str, raw: &toml::Table, path: &Path) -> Result<Group, supe
                     .try_into()
                     .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::TomlParse(e)))?;
                 group.env = parse_project_env(&format!("group.{name}.env"), &raw_env, path)?;
+            }
+            "lazy-mode" => {
+                let mode: LazyMode = value
+                    .clone()
+                    .try_into()
+                    .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::TomlParse(e)))?;
+                group.lazy_mode = Some(mode);
             }
             _ => {
                 return Err(ProjectError::new(
@@ -729,6 +841,56 @@ fn validate_package_keys(
         }
     }
     Ok(raw)
+}
+
+/// The version-independent key a `[package."<id>"]` entry is matched on:
+/// `registry/repository`, tag and digest excluded.
+///
+/// One function rather than two `format!`s so the `no-patches` opt-out and the
+/// `lazy-report` package tier cannot drift into matching on different things.
+fn repository_key(identifier: &Identifier) -> String {
+    format!("{}/{}", identifier.registry(), identifier.repository())
+}
+
+/// Resolve the `lazy-mode` ladder for one **project-tier** tool (plan contract
+/// C-006, [#302](https://github.com/ocx-sh/ocx/issues/302)).
+///
+/// Applies the full five-tier order — `--lazy-mode` ▸ `[package."<id>"]` ▸
+/// `[group.<g>]` ▸ toolchain ▸ `OCX_LAZY_MODE` ▸ floor `Never` — by filling a
+/// [`LazyModeLadder`] and resolving it. The floor lives in `resolve()` and
+/// nowhere else: every tier read here is an `Option`, and `None` means
+/// *inherit*, never `Never`.
+///
+/// Resolution goes through [`LazyModeLadder::resolve_for_host`], so on Windows
+/// the answer is [`LazyMode::Never`] whatever the tiers say — scenario S-010.
+///
+/// `group` is the selected group the binding came from (`Origin::Group(name)`);
+/// `None` for a positional package, which has no group tier. `cli` is the
+/// parsed `--lazy-mode`, which no library type can see for itself — hence a
+/// caller-supplied argument rather than another config read.
+///
+/// The package tier is matched on `registry/repository` with tag and digest
+/// excluded ([`ProjectConfig::package_settings`]) — the only rule the wire
+/// permits, since a config author cannot know the digest a lock pins.
+///
+/// Lives here, with the config it reads, because this contract makes
+/// `ProjectConfig` the owner of tiers 2-4. The OCI-tier sibling —
+/// [`lazy_mode_for_package`](crate::package_manager::composer::lazy_mode_for_package)
+/// — reads no `ocx.toml` at any tier and therefore stays with its caller.
+pub fn lazy_mode_for_tool(
+    config: &ProjectConfig,
+    identifier: &Identifier,
+    group: Option<&str>,
+    cli: Option<LazyMode>,
+) -> LazyMode {
+    LazyModeLadder {
+        cli,
+        package: config.package_settings(identifier).and_then(|s| s.lazy_mode),
+        group: group.and_then(|name| config.groups.get(name)).and_then(|g| g.lazy_mode),
+        toolchain: config.lazy_mode,
+        environment: LazyMode::from_env(),
+    }
+    .resolve_for_host()
 }
 
 #[cfg(test)]
@@ -912,6 +1074,122 @@ SOURCE_DATE_EPOCH = "0"
         );
     }
 
+    /// C-006: `lazy-mode` is excluded from the declaration hash at EVERY tier.
+    ///
+    /// The exclusion is by omission — [`super::super::hash::declaration_hash`]
+    /// reads only `config.tools` / `group.tools`, and nothing annotates these
+    /// fields as skipped. This test is therefore the *only* thing standing
+    /// between a future edit of `hash.rs` and a silent re-lock storm: laziness
+    /// is resolve-time policy, so toggling it must never invalidate
+    /// `ocx.lock`.
+    ///
+    /// The two configs differ only in the three `lazy-mode` declarations, and
+    /// the parse assertions below keep the green honest — without them a
+    /// regression that dropped the keys on the floor would satisfy the hash
+    /// assertion trivially.
+    #[test]
+    fn declaration_hash_unchanged_by_lazy_mode() {
+        let without = r#"[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[group.ci.tools]
+shellcheck = "ocx.sh/shellcheck:0.10"
+
+[package."ghcr.io/acme/cli:v1"]
+no-patches = true
+"#;
+        let with = r#"lazy-mode = "always"
+
+[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[group.ci]
+lazy-mode = "always"
+
+[group.ci.tools]
+shellcheck = "ocx.sh/shellcheck:0.10"
+
+[package."ghcr.io/acme/cli:v1"]
+no-patches = true
+lazy-mode = "always"
+"#;
+        let config_without = ProjectConfig::from_toml_str(without).expect("parse");
+        let config_with = ProjectConfig::from_toml_str(with).expect("parse");
+
+        assert_eq!(config_with.lazy_mode, Some(LazyMode::Always), "toolchain tier declared");
+        assert_eq!(
+            config_with.groups.get("ci").expect("group ci").lazy_mode,
+            Some(LazyMode::Always),
+            "group tier declared"
+        );
+        assert_eq!(
+            config_with
+                .packages
+                .get("ghcr.io/acme/cli:v1")
+                .expect("package entry")
+                .lazy_mode,
+            Some(LazyMode::Always),
+            "package tier declared"
+        );
+
+        assert_eq!(
+            crate::project::declaration_hash(&config_without),
+            crate::project::declaration_hash(&config_with),
+            "declaration hash must be invariant to lazy-mode at every tier"
+        );
+    }
+
+    /// The `lazy-report` half of [`declaration_hash_unchanged_by_lazy_mode`].
+    /// Pinned separately: a refactor that wired only one of the two keys into
+    /// the hash would leave the other test green.
+    #[test]
+    fn declaration_hash_unchanged_by_lazy_report() {
+        let without = r#"[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[group.ci.tools]
+shellcheck = "ocx.sh/shellcheck:0.10"
+
+[package."ghcr.io/acme/cli:v1"]
+no-patches = true
+"#;
+        let with = r#"lazy-report = "progress"
+
+[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[group.ci.tools]
+shellcheck = "ocx.sh/shellcheck:0.10"
+
+[package."ghcr.io/acme/cli:v1"]
+no-patches = true
+lazy-report = "progress"
+"#;
+        let config_without = ProjectConfig::from_toml_str(without).expect("parse");
+        let config_with = ProjectConfig::from_toml_str(with).expect("parse");
+
+        assert_eq!(
+            config_with.lazy_report,
+            Some(LazyReport::Progress),
+            "toolchain tier declared"
+        );
+        assert_eq!(
+            config_with
+                .packages
+                .get("ghcr.io/acme/cli:v1")
+                .expect("package entry")
+                .lazy_report,
+            Some(LazyReport::Progress),
+            "package tier declared"
+        );
+
+        assert_eq!(
+            crate::project::declaration_hash(&config_without),
+            crate::project::declaration_hash(&config_with),
+            "declaration hash must be invariant to lazy-report at both its tiers"
+        );
+    }
+
     /// Mutating the config in place after caching MUST invalidate the cache —
     /// otherwise the staleness gate would silently accept a divergent state.
     #[test]
@@ -1082,6 +1360,34 @@ CI = "1"
         let group = config.groups.get("ci").expect("group 'ci' present");
         assert!(group.tools.is_empty());
         assert!(group.env.is_empty());
+    }
+
+    /// The flat-form migration message must survive when the offending key
+    /// is `tools` or `env` itself, not just an arbitrary name like `bar`.
+    ///
+    /// Regression guard for the `lazy-mode`/`lazy-report` wiring: those two
+    /// settings are legitimately string-valued, so admitting them by
+    /// dispatching on key name *before* value shape would route
+    /// `tools = "..."` into the `[group.<name>.tools]` sub-table parse and
+    /// surface a raw TOML type error instead. `bar` alone cannot catch that
+    /// — it falls through to the same arm either way.
+    #[test]
+    fn group_direct_binding_under_subtable_key_still_reports_flat_form() {
+        for key in ["tools", "env"] {
+            let toml_str = format!("[group.ci]\n{key} = \"ocx.sh/bar:1\"\n");
+            let err = ProjectConfig::from_toml_str(&toml_str)
+                .expect_err("string-valued '{key}' under [group.ci] must reject");
+
+            #[allow(irrefutable_let_patterns)]
+            let crate::project::Error::Project(pe) = err else {
+                panic!("expected Error::Project for key {key:?}");
+            };
+            let ProjectErrorKind::GroupHoldsDirectBinding { group, binding } = &pe.kind else {
+                panic!("key {key:?} must report the flat binding form, got {:?}", pe.kind);
+            };
+            assert_eq!(group, "ci");
+            assert_eq!(binding, key);
+        }
     }
 
     /// S8: a tool binding declared directly under `[group.<name>]` (the
@@ -1668,5 +1974,210 @@ foo = "ocx.sh/foo:1"
             formatted.contains("reserved keyword"),
             "formatted error must contain 'reserved keyword'; got: {formatted:?}"
         );
+    }
+
+    // ── C-005 / C-006: lazy-mode + lazy-report at the three config tiers ────
+
+    /// `lazy-mode` parses at the toolchain (top-level scalar), `[group.<g>]`
+    /// and `[package."<id>"]` tiers, and each declaration lands in its own
+    /// struct field. Three tiers in one file so a parser that routed one
+    /// tier's value into another's field cannot pass.
+    #[test]
+    fn lazy_mode_parses_at_toolchain_group_and_package_tiers() {
+        let toml = r#"lazy-mode = "never"
+
+[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[group.ci]
+lazy-mode = "always"
+
+[group.ci.tools]
+shellcheck = "ocx.sh/shellcheck:0.10"
+
+[package."ghcr.io/acme/cli:v1"]
+lazy-mode = "always"
+"#;
+        let config = ProjectConfig::from_toml_str(toml).expect("lazy-mode parses at all three tiers");
+        assert_eq!(config.lazy_mode, Some(LazyMode::Never), "toolchain tier");
+        let group = config.groups.get("ci").expect("group 'ci' present");
+        assert_eq!(group.lazy_mode, Some(LazyMode::Always), "group tier");
+        assert_eq!(
+            group.tools.get("shellcheck").map(ToString::to_string),
+            Some("ocx.sh/shellcheck:0.10".to_string()),
+            "a group carrying lazy-mode still parses its tools sub-table"
+        );
+        assert_eq!(
+            config
+                .packages
+                .get("ghcr.io/acme/cli:v1")
+                .expect("package entry present")
+                .lazy_mode,
+            Some(LazyMode::Always),
+            "package tier"
+        );
+    }
+
+    /// The `lazy-report` mirror of the above, one tier shorter: there is no
+    /// `[group.<g>].lazy-report`.
+    #[test]
+    fn lazy_report_parses_at_toolchain_and_package_tiers() {
+        let toml = r#"lazy-report = "silent"
+
+[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[package."ghcr.io/acme/cli:v1"]
+no-patches = true
+lazy-report = "progress"
+"#;
+        let config = ProjectConfig::from_toml_str(toml).expect("lazy-report parses at both its tiers");
+        assert_eq!(config.lazy_report, Some(LazyReport::Silent), "toolchain tier");
+        let settings = config
+            .packages
+            .get("ghcr.io/acme/cli:v1")
+            .expect("package entry present");
+        assert_eq!(settings.lazy_report, Some(LazyReport::Progress), "package tier");
+        assert!(settings.no_patches, "the pre-existing package setting still parses");
+    }
+
+    /// `[group.<g>].lazy-report` is **not** a key — it is rejected, not
+    /// ignored.
+    ///
+    /// The shim process that resolves `lazy-report` never learns which group
+    /// composed the tool, so a group-tier value could only ever be written and
+    /// never read. Accepting and dropping it is exactly the settable-and-
+    /// unreadable defect the removal exists to close, so the parser has to
+    /// say so. `lazy-mode` in the same table is the positive control: it is
+    /// still a group-tier key, so the rejection below cannot come from a
+    /// parser that stopped accepting scalars in `[group.<g>]` altogether.
+    #[test]
+    fn group_tier_lazy_report_is_rejected_while_lazy_mode_is_accepted() {
+        let accepted = ProjectConfig::from_toml_str("[group.ci]\nlazy-mode = \"always\"\n")
+            .expect("[group.<g>].lazy-mode is still a recognized key");
+        assert_eq!(
+            accepted.groups.get("ci").expect("group 'ci' present").lazy_mode,
+            Some(LazyMode::Always)
+        );
+
+        let error = ProjectConfig::from_toml_str("[group.ci]\nlazy-report = \"progress\"\n")
+            .expect_err("[group.<g>].lazy-report must be refused, never silently ignored");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("lazy-report"),
+            "the diagnostic must name the offending key; got {rendered}"
+        );
+    }
+
+    /// C-006: an undeclared tier is `None` — "inherit", never
+    /// [`LazyMode::Never`]. A `#[serde(default)]` that resolved to a floor
+    /// value at parse time would make every config file an explicit `never`
+    /// declaration and strand the tiers below it.
+    #[test]
+    fn absent_lazy_settings_leave_every_tier_none() {
+        let toml = r#"[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[group.ci.tools]
+shellcheck = "ocx.sh/shellcheck:0.10"
+
+[package."ghcr.io/acme/cli:v1"]
+no-patches = true
+"#;
+        let config = ProjectConfig::from_toml_str(toml).expect("parse");
+        assert_eq!(config.lazy_mode, None);
+        assert_eq!(config.lazy_report, None);
+        let group = config.groups.get("ci").expect("group 'ci' present");
+        assert_eq!(group.lazy_mode, None);
+        let settings = config.packages.get("ghcr.io/acme/cli:v1").expect("package entry");
+        assert_eq!(settings.lazy_mode, None);
+        assert_eq!(settings.lazy_report, None);
+    }
+
+    /// C-005: an unrecognized wire value is a parse error at every tier, not a
+    /// silent default.
+    #[test]
+    fn lazy_mode_unknown_value_rejected_at_every_tier() {
+        let cases = [
+            ("toolchain", "lazy-mode = \"sometimes\"\n".to_string()),
+            ("group", "[group.ci]\nlazy-mode = \"sometimes\"\n".to_string()),
+            (
+                "package",
+                "[package.\"ghcr.io/acme/cli:v1\"]\nlazy-mode = \"sometimes\"\n".to_string(),
+            ),
+        ];
+        for (tier, toml) in cases {
+            let err = ProjectConfig::from_toml_str(&toml)
+                .err()
+                .unwrap_or_else(|| panic!("`sometimes` must be rejected at the {tier} tier"));
+            assert_kind!(err, ProjectErrorKind::TomlParse(_));
+        }
+    }
+
+    /// The `lazy-report` mirror: an unrecognized value is rejected at both of
+    /// its tiers. No group row — the key does not exist there, and its
+    /// rejection is `group_tier_lazy_report_is_rejected_while_lazy_mode_is_accepted`'s
+    /// subject rather than this test's.
+    #[test]
+    fn lazy_report_unknown_value_rejected_at_every_tier() {
+        let cases = [
+            ("toolchain", "lazy-report = \"loud\"\n".to_string()),
+            (
+                "package",
+                "[package.\"ghcr.io/acme/cli:v1\"]\nlazy-report = \"loud\"\n".to_string(),
+            ),
+        ];
+        for (tier, toml) in cases {
+            let err = ProjectConfig::from_toml_str(&toml)
+                .err()
+                .unwrap_or_else(|| panic!("`loud` must be rejected at the {tier} tier"));
+            assert_kind!(err, ProjectErrorKind::TomlParse(_));
+        }
+    }
+
+    /// Admitting two new scalar keys must not have loosened
+    /// `deny_unknown_fields`: a typo beside a valid `lazy-mode` is still a
+    /// parse error at the toolchain and package tiers.
+    #[test]
+    fn unknown_key_beside_lazy_mode_still_rejected() {
+        let toolchain = r#"lazy-mode = "always"
+lazy-mod = "always"
+"#;
+        let err = ProjectConfig::from_toml_str(toolchain).expect_err("unknown top-level key must reject");
+        assert_kind!(err, ProjectErrorKind::TomlParse(_));
+
+        let package = r#"[package."ghcr.io/acme/cli:v1"]
+lazy-mode = "always"
+bogus = true
+"#;
+        let err = ProjectConfig::from_toml_str(package).expect_err("unknown [package] key must reject");
+        assert_kind!(err, ProjectErrorKind::TomlParse(_));
+    }
+
+    /// The group tier's equivalent. `parse_group` walks the table by hand, so
+    /// its unknown-key rejection is separate code from the two
+    /// `deny_unknown_fields` derives above and needs its own proof.
+    ///
+    /// A non-string value is used deliberately: a *string*-valued unknown key
+    /// takes the `GroupHoldsDirectBinding` arm (any string under an
+    /// unrecognized key is the removed flat binding form), which is the
+    /// pre-existing contract pinned by
+    /// [`group_direct_binding_under_subtable_key_still_reports_flat_form`].
+    #[test]
+    fn unknown_non_string_key_beside_lazy_mode_in_group_still_rejected() {
+        let toml = r#"[group.ci]
+lazy-mode = "always"
+bogus = 1
+"#;
+        let err = ProjectConfig::from_toml_str(toml).expect_err("unknown [group.ci] key must reject");
+        #[allow(irrefutable_let_patterns)]
+        let crate::project::Error::Project(pe) = err else {
+            panic!("expected Error::Project");
+        };
+        let ProjectErrorKind::UnknownGroupSection { group, key } = &pe.kind else {
+            panic!("expected UnknownGroupSection, got {:?}", pe.kind);
+        };
+        assert_eq!(group, "ci");
+        assert_eq!(key, "bogus");
     }
 }

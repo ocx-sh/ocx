@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::{
-    file_structure::{CasTier, FileStructure},
+    file_structure::{CasTier, FileStructure, ShimDir},
     log, utility,
 };
 
@@ -44,9 +44,12 @@ const INDEX_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Pre-computed dependency graph with BFS reachability queries.
 ///
-/// Covers all three CAS tiers (packages, layers, blobs) in a single graph.
-/// Only packages can be roots and have outgoing edges; layers and blobs are
-/// reachable exclusively through package `refs/layers/` and `refs/blobs/` edges.
+/// Covers all four store tiers (packages, layers, blobs, shims) in a single
+/// graph. Packages and shims carry outgoing edges; layers and blobs are passive,
+/// reachable exclusively through a package's or shim's `refs/layers/` and
+/// `refs/blobs/` edges. A shim is rooted only by a lock pin — it has no incoming
+/// edge, because a shim exists precisely when the package it stands in for does
+/// not (plan contract C-014).
 pub struct ReachabilityGraph {
     pub roots: HashSet<PathBuf>,
     pub edges: HashMap<PathBuf, Vec<PathBuf>>,
@@ -58,22 +61,26 @@ pub struct ReachabilityGraph {
 }
 
 impl ReachabilityGraph {
-    /// Scan all three CAS stores, identify roots, build edges.
+    /// Scan all four stores, identify roots, build edges.
     ///
     /// Packages are probed for `refs/symlinks/` (roots), `refs/deps/` (package edges),
-    /// `refs/layers/` (layer edges), and `refs/blobs/` (blob edges). Layers and blobs
-    /// are passive entries — they have no outgoing edges and are reachable only through
-    /// package refs.
+    /// `refs/layers/` (layer edges), and `refs/blobs/` (blob edges). Shims are probed
+    /// for `refs/blobs/` only — see [`shim_entries`]. Layers and blobs are passive
+    /// entries: no outgoing edges, reachable only through a package's or shim's refs.
     ///
     /// `project_roots` supplies additional roots from registered projects' `ocx.lock`
-    /// files (Unit 6). Pass `&[]` when project-registry roots are suppressed (e.g.
-    /// `ocx clean --force`). See [`adr_clean_project_backlinks.md`].
+    /// files (Unit 6), rooted through [`extend_lock_pinned_roots`] once every tier has
+    /// been walked. Pass `&[]` when project-registry roots are suppressed (e.g.
+    /// `ocx clean --force`) — which, since a shim is held by nothing but a lock pin,
+    /// collects every shim in the store (plan contract C-014, F-3). See
+    /// [`adr_clean_project_backlinks.md`].
     pub async fn build(file_structure: &FileStructure, project_roots: &[ProjectRootDigests]) -> crate::Result<Self> {
-        // Walk all three stores in parallel.
-        let (package_dirs, layer_dirs, blob_dirs) = tokio::try_join!(
+        // Walk all four stores in parallel.
+        let (package_dirs, layer_dirs, blob_dirs, shim_dirs) = tokio::try_join!(
             file_structure.packages.list_all(),
             file_structure.layers.list_all(),
             file_structure.blobs.list_all(),
+            file_structure.shims.list_all(),
         )?;
 
         let canon_packages_root = canonicalize_or_keep(file_structure.packages.root());
@@ -119,22 +126,6 @@ impl ReachabilityGraph {
         let mut all_entries = HashMap::new();
         let mut roots_attribution: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
 
-        // Resolve project_roots digests to package-store paths and insert as
-        // additional reachability roots alongside live install symlinks. Also
-        // build roots_attribution for dry-run attribution reporting ("Held By"
-        // column in `ocx clean --dry-run`).
-        for project_root in project_roots {
-            for pinned in &project_root.digests {
-                let pkg_path = file_structure.packages.path(pinned);
-                let canon = canonicalize_or_keep(&pkg_path);
-                roots.insert(canon.clone());
-                roots_attribution
-                    .entry(canon)
-                    .or_default()
-                    .push(project_root.ocx_lock_path.clone());
-            }
-        }
-
         while let Some(result) = tasks.join_next().await {
             let (pkg_dir, is_root, pkg_edges) = result.expect("task panicked");
 
@@ -155,6 +146,27 @@ impl ReachabilityGraph {
             let blob_dir = canonicalize_or_keep(&blob.dir);
             all_entries.insert(blob_dir, CasTier::Blob);
         }
+
+        // Register shims with the PACKAGE shape — entry *and* edges — never the
+        // passive shape above. A shim directory's `refs/blobs/` links are the
+        // only thing holding a deferred tool's closure config blobs, and they
+        // are where a deferred consumer reads its env carriers from (C-014's
+        // F-1 correction; C-020).
+        for (shim_dir, blob_refs) in shim_entries(&shim_dirs, blobs_root.as_path()).await {
+            edges.insert(shim_dir.clone(), blob_refs);
+            all_entries.insert(shim_dir, CasTier::Shim);
+        }
+
+        // Root every lock-pinned identity in whichever tiers hold it. This runs
+        // *below* the drain and the passive loops because both insertions are
+        // guarded on `all_entries` membership, which is only complete here.
+        extend_lock_pinned_roots(
+            file_structure,
+            project_roots,
+            &all_entries,
+            &mut roots,
+            &mut roots_attribution,
+        );
 
         // Index-manifest retention edges. An OCI image-index manifest blob
         // (the outer multi-platform index) is not referenced by any package's
@@ -424,6 +436,97 @@ async fn read_manifest_candidate_blob(path: &Path) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// Collects the shim tier's contribution to the graph: one entry per published
+/// shim directory, paired with the `refs/blobs/` forward-refs it carries
+/// (plan contract C-014, [#302](https://github.com/ocx-sh/ocx/issues/302)).
+///
+/// **The shim tier is edge-bearing, not passive.** Layers and blobs are
+/// registered by the passive-entry loop in [`ReachabilityGraph::build`] because
+/// they have no outgoing references. A shim directory does have them: its
+/// [`refs/blobs/`](ShimDir::refs_blobs_dir) links are the only thing keeping a
+/// deferred tool's closure config blobs off the unreachable set, and the only
+/// place a consumer can read that tool's env carriers from, since no package
+/// directory exists for it (plan contract C-020). Registering a shim the way a
+/// layer is registered would root the shim and collect every blob it needs.
+///
+/// Returned paths are canonical, matching the graph's keying; each edge target
+/// is the blob **entry directory** ([`read_refs`] takes the symlink target's
+/// parent) and is dropped if it escapes `blobs_root`.
+///
+/// Sequential, deliberately: this is one `read_dir` per *deferred tool* — a set
+/// bounded by the registered locks — where the package walk's bounded fan-out
+/// exists because a package store routinely holds thousands of entries.
+async fn shim_entries(shim_dirs: &[ShimDir], blobs_root: &Path) -> Vec<(PathBuf, Vec<PathBuf>)> {
+    let mut entries = Vec::with_capacity(shim_dirs.len());
+    for shim in shim_dirs {
+        let blob_refs = read_refs(&shim.refs_blobs_dir(), blobs_root).await;
+        entries.push((canonicalize_or_keep(shim.root()), blob_refs));
+    }
+    entries
+}
+
+/// Roots every lock-pinned `(repository, digest)` in whichever tiers actually
+/// hold it, and records which `ocx.lock` contributed each root
+/// (plan contract C-014).
+///
+/// Replaces the inline project-root loop in [`ReachabilityGraph::build`] and
+/// extends it with the shim tier.
+///
+/// **Two tiers, one pin.** A pinned leaf names a package directory
+/// ([`PackageStore::path`](crate::file_structure::PackageStore::path), keyed on
+/// registry and digest with the repository deliberately dropped for cross-repo
+/// dedup) *and* a shim directory
+/// ([`ShimStore::path`](crate::file_structure::ShimStore::path), which does
+/// carry the repository). Normally exactly one of the two exists — a
+/// shim directory exists precisely when the package is absent — but both may:
+/// materializing a deferred tool never removes its shim, and plan contract C-013
+/// keeps the composer emitting the shim slot regardless of content-cache state,
+/// so a leftover shim is live, not litter.
+///
+/// **Shim liveness has no package edge to inherit.** Layers and blobs stay alive
+/// through an edge out of a materialized package directory. A deferred tool has
+/// no package directory at all, so modelling shim liveness on that pattern would
+/// collect every live shim on the first `ocx clean`. The lock pin *is* the root.
+///
+/// Both insertions are guarded on `all_entries` membership — the same guard
+/// [`GarbageCollector::build`](super::GarbageCollector::build) applies to its
+/// patch roots. A pin whose tier is absent on this machine (a foreign-platform
+/// leaf; a tool that was never deferred) must not become a root: an unwalked
+/// path can never be *collected*, but it would be *reported*, because
+/// `PackageManager::clean` turns every attribution key into a dry-run row.
+///
+/// Call this **after** `all_entries` is complete — below the passive-entry
+/// loops, not at the top of `build` where today's unguarded loop sits.
+fn extend_lock_pinned_roots(
+    file_structure: &FileStructure,
+    project_roots: &[ProjectRootDigests],
+    all_entries: &HashMap<PathBuf, CasTier>,
+    roots: &mut HashSet<PathBuf>,
+    roots_attribution: &mut HashMap<PathBuf, Vec<PathBuf>>,
+) {
+    for project_root in project_roots {
+        for pinned in &project_root.digests {
+            let tiers = [file_structure.packages.path(pinned), file_structure.shims.path(pinned)];
+            for tier_path in tiers {
+                // Canonicalize before the guard, never after: `all_entries` is
+                // canonical-keyed, so a raw probe misses whenever `$OCX_HOME`
+                // sits behind a symlink. An absent tier fails to canonicalize,
+                // falls back to the raw path, misses the guard, and is skipped
+                // — which is exactly the gate this contract wants.
+                let canonical = canonicalize_or_keep(&tier_path);
+                if !all_entries.contains_key(&canonical) {
+                    continue;
+                }
+                roots.insert(canonical.clone());
+                roots_attribution
+                    .entry(canonical)
+                    .or_default()
+                    .push(project_root.ocx_lock_path.clone());
+            }
+        }
+    }
+}
+
 /// Reads forward-refs from a refs subdirectory (deps/, layers/, or blobs/).
 ///
 /// Each symlink target is expected to be a content path inside `store_root`.
@@ -492,7 +595,7 @@ fn canonicalize_or_keep(path: &Path) -> PathBuf {
 #[cfg(test)]
 pub mod tests {
     use std::collections::{HashMap, HashSet};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::ReachabilityGraph;
     use crate::file_structure::CasTier;
@@ -735,6 +838,582 @@ pub mod tests {
         assert!(
             child_edges.contains(&index_dir),
             "the child leaf must retain its parent index blob; child_edges={child_edges:?}, want {index_dir:?}"
+        );
+    }
+
+    // ── C-014: the shim tier ───────────────────────────────────────────────
+    //
+    // Fixtures here are real directories under a *canonicalized* tempdir root.
+    // The defect class C-014 guards against is path keying — a raw path probed
+    // against a canonical-keyed map — so a hand-built path map would exercise
+    // the wrong thing (`quality-rust.md` "Cross-Platform Path Handling").
+
+    use crate::file_structure::FileStructure;
+    use crate::oci;
+
+    use super::super::ProjectRootDigests;
+
+    /// A valid SHA-256 hex built from one repeated nibble. Two fixtures with
+    /// different nibbles land in different CAS shards, which keys on the first
+    /// 32 hex characters.
+    fn digest_of(nibble: char) -> oci::Digest {
+        oci::Digest::Sha256(nibble.to_string().repeat(64))
+    }
+
+    fn pin(registry: &str, repository: &str, nibble: char) -> oci::PinnedIdentifier {
+        oci::PinnedIdentifier::try_from(
+            oci::Identifier::new_registry(repository, registry).clone_with_digest(digest_of(nibble)),
+        )
+        .expect("an identifier carrying a digest is a valid PinnedIdentifier")
+    }
+
+    /// A `FileStructure` rooted at the tempdir's **canonical** path, so an
+    /// expected value derived from a store accessor already matches the keys
+    /// `build` writes (macOS `/tmp` -> `/private/tmp`).
+    fn home(tmp: &tempfile::TempDir) -> FileStructure {
+        FileStructure::with_root(dunce::canonicalize(tmp.path()).expect("tempdir canonicalizes"))
+    }
+
+    /// Writes a blob entry (`<blob-dir>/data`) and returns its canonical entry
+    /// directory — the shape `BlobStore::list_all` reports and `read_refs`
+    /// recovers from a forward-ref target's parent.
+    async fn seed_blob(file_structure: &FileStructure, registry: &str, digest: &oci::Digest) -> PathBuf {
+        let dir = file_structure.blobs.path(registry, digest);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("data"), b"config-blob").await.unwrap();
+        super::canonicalize_or_keep(&dir)
+    }
+
+    /// Publishes a shim directory the way `prepare_lazy` does — `bin/` (the
+    /// completeness marker), the `digest` file, and one `refs/blobs/`
+    /// forward-ref per closure config blob — and returns its canonical path.
+    async fn seed_shim(
+        file_structure: &FileStructure,
+        pinned: &oci::PinnedIdentifier,
+        config_blobs: &[oci::Digest],
+    ) -> PathBuf {
+        let shim = file_structure.shims.shim_dir(pinned);
+        tokio::fs::create_dir_all(shim.bin()).await.unwrap();
+        tokio::fs::write(shim.digest_file(), pinned.digest().to_string())
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(shim.refs_blobs_dir()).await.unwrap();
+        for digest in config_blobs {
+            seed_blob(file_structure, pinned.registry(), digest).await;
+            crate::symlink::update(
+                file_structure.blobs.data(pinned.registry(), digest),
+                shim.refs_blobs_dir().join(crate::file_structure::cas_ref_name(digest)),
+            )
+            .unwrap();
+        }
+        super::canonicalize_or_keep(shim.root())
+    }
+
+    /// Creates the package directory for `pinned` — `content/` is what the
+    /// package walk classifies on — and returns its canonical path.
+    async fn seed_package(file_structure: &FileStructure, pinned: &oci::PinnedIdentifier) -> PathBuf {
+        let dir = file_structure.packages.path(pinned);
+        tokio::fs::create_dir_all(dir.join("content")).await.unwrap();
+        super::canonicalize_or_keep(&dir)
+    }
+
+    /// One `ocx.lock` pinning `digests`, in the shape `collect_project_roots`
+    /// hands to the graph builder.
+    fn lock_pinning(lock_path: &Path, digests: &[oci::PinnedIdentifier]) -> Vec<ProjectRootDigests> {
+        vec![ProjectRootDigests {
+            ocx_lock_path: lock_path.to_path_buf(),
+            digests: digests.to_vec(),
+        }]
+    }
+
+    // ── shim_entries: the shim tier is edge-bearing, not passive ───────────
+
+    /// C-014: "its `refs/blobs/` links keep the closure's config blobs
+    /// reachable". The shim tier is therefore registered with the **package**
+    /// shape — entry *and* edges — so `shim_entries` pairs each walked shim
+    /// with the blob entry directories its forward-refs name.
+    #[tokio::test]
+    async fn shim_entries_pairs_each_shim_with_its_ref_linked_config_blobs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_structure = home(&tmp);
+        let pinned = pin("example.com", "cmake", 'a');
+        let config = digest_of('b');
+        let shim_dir = seed_shim(&file_structure, &pinned, std::slice::from_ref(&config)).await;
+        let blob_dir = super::canonicalize_or_keep(&file_structure.blobs.path(pinned.registry(), &config));
+
+        let entries = super::shim_entries(
+            &file_structure.shims.list_all().await.unwrap(),
+            &super::canonicalize_or_keep(file_structure.blobs.root()),
+        )
+        .await;
+
+        assert_eq!(entries.len(), 1, "one published shim must produce exactly one entry");
+        assert_eq!(
+            entries[0].0, shim_dir,
+            "C-014: the entry is keyed by the shim's canonical directory"
+        );
+        assert_eq!(
+            entries[0].1,
+            vec![blob_dir],
+            "C-014: the shim's `refs/blobs/` forward-ref becomes an edge to the blob ENTRY dir \
+             (the target's parent), which is what keeps the closure's config blob reachable"
+        );
+    }
+
+    /// A shim that links no config blob is still an **entry**. Dropping it
+    /// would keep it out of `all_entries`, and the `all_entries`-guarded
+    /// rooting would then refuse to root a live shim — collecting it. C-008
+    /// (A1) makes the empty case legal, not exceptional.
+    #[tokio::test]
+    async fn shim_entries_reports_a_shim_with_no_config_blobs_as_an_edgeless_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_structure = home(&tmp);
+        let shim_dir = seed_shim(&file_structure, &pin("example.com", "cmake", 'a'), &[]).await;
+
+        let entries = super::shim_entries(
+            &file_structure.shims.list_all().await.unwrap(),
+            &super::canonicalize_or_keep(file_structure.blobs.root()),
+        )
+        .await;
+
+        assert_eq!(entries.len(), 1, "a shim with an empty `refs/blobs/` is still an entry");
+        assert_eq!(entries[0].0, shim_dir);
+        assert!(entries[0].1.is_empty(), "it simply carries no edges");
+    }
+
+    /// Defence in depth, matching `read_refs`: a forward-ref resolving outside
+    /// the blob store is dropped rather than becoming an edge. Paired with a
+    /// legitimate ref in the same shim so the assertion cannot pass by the
+    /// function returning nothing at all.
+    #[tokio::test]
+    async fn shim_entries_drops_a_ref_pointing_outside_the_blob_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_structure = home(&tmp);
+        let pinned = pin("example.com", "cmake", 'a');
+        let config = digest_of('b');
+        seed_shim(&file_structure, &pinned, std::slice::from_ref(&config)).await;
+        let blob_dir = super::canonicalize_or_keep(&file_structure.blobs.path(pinned.registry(), &config));
+
+        // A second forward-ref aimed at a file outside `blobs/` entirely.
+        let outside = file_structure.root().join("outside");
+        tokio::fs::create_dir_all(&outside).await.unwrap();
+        tokio::fs::write(outside.join("data"), b"not-a-blob").await.unwrap();
+        crate::symlink::update(
+            outside.join("data"),
+            file_structure
+                .shims
+                .shim_dir(&pinned)
+                .refs_blobs_dir()
+                .join("sha256_escapee"),
+        )
+        .unwrap();
+
+        let entries = super::shim_entries(
+            &file_structure.shims.list_all().await.unwrap(),
+            &super::canonicalize_or_keep(file_structure.blobs.root()),
+        )
+        .await;
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].1,
+            vec![blob_dir],
+            "the in-store ref survives and the escaping one is dropped"
+        );
+    }
+
+    // ── extend_lock_pinned_roots: one gate, two tiers ─────────────────────
+
+    /// C-014, the core clause: a shim directory is live iff its
+    /// `(repository, digest)` is in the lock-pinned root set. The pin is the
+    /// root — a deferred tool has no package directory to inherit an edge from.
+    #[tokio::test]
+    async fn extend_lock_pinned_roots_roots_a_deferred_tools_shim_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_structure = home(&tmp);
+        let pinned = pin("example.com", "cmake", 'a');
+        let shim_dir = seed_shim(&file_structure, &pinned, &[]).await;
+        let lock_path = file_structure.root().join("ocx.lock");
+
+        let all_entries = HashMap::from([(shim_dir.clone(), CasTier::Shim)]);
+        let mut roots = HashSet::new();
+        let mut attribution: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        super::extend_lock_pinned_roots(
+            &file_structure,
+            &lock_pinning(&lock_path, std::slice::from_ref(&pinned)),
+            &all_entries,
+            &mut roots,
+            &mut attribution,
+        );
+
+        assert!(
+            roots.contains(&shim_dir),
+            "C-014: the lock pin roots the shim directory; got roots={roots:?}"
+        );
+        assert_eq!(
+            attribution.get(&shim_dir),
+            Some(&vec![lock_path]),
+            "the shim root is attributed to the lock that pins it — `ocx clean --dry-run` \
+             renders that as the `Held By` column"
+        );
+        assert!(
+            !roots.contains(&super::canonicalize_or_keep(&file_structure.packages.path(&pinned))),
+            "the package tier is absent for a deferred tool, so its path must NOT be rooted: \
+             an unwalked path can never be collected, but it WOULD be reported as a phantom \
+             dry-run row"
+        );
+    }
+
+    /// The same one gate still roots the package tier — a materialized tool's
+    /// pin must keep working exactly as before the shim tier existed.
+    #[tokio::test]
+    async fn extend_lock_pinned_roots_roots_a_materialized_tools_package_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_structure = home(&tmp);
+        let pinned = pin("example.com", "cmake", 'a');
+        let package_dir = seed_package(&file_structure, &pinned).await;
+        let lock_path = file_structure.root().join("ocx.lock");
+
+        let all_entries = HashMap::from([(package_dir.clone(), CasTier::Package)]);
+        let mut roots = HashSet::new();
+        let mut attribution: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        super::extend_lock_pinned_roots(
+            &file_structure,
+            &lock_pinning(&lock_path, std::slice::from_ref(&pinned)),
+            &all_entries,
+            &mut roots,
+            &mut attribution,
+        );
+
+        assert!(
+            roots.contains(&package_dir),
+            "the package tier's rooting is unchanged; got roots={roots:?}"
+        );
+        assert!(
+            !roots.contains(&super::canonicalize_or_keep(&file_structure.shims.path(&pinned))),
+            "no shim exists for a materialized tool, so no shim path may be rooted"
+        );
+    }
+
+    /// C-013: the composer emits the shim slot **regardless of content-cache
+    /// state**, and materializing never removes the shim directory — so a tool
+    /// that was composed lazily and then materialized has both tiers on disk
+    /// and both are live. Collecting the leftover shim would make the emitted
+    /// environment a function of content-cache state, which C-013 forbids.
+    #[tokio::test]
+    async fn extend_lock_pinned_roots_roots_both_tiers_when_both_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_structure = home(&tmp);
+        let pinned = pin("example.com", "cmake", 'a');
+        let shim_dir = seed_shim(&file_structure, &pinned, &[]).await;
+        let package_dir = seed_package(&file_structure, &pinned).await;
+        let lock_path = file_structure.root().join("ocx.lock");
+
+        let all_entries = HashMap::from([
+            (shim_dir.clone(), CasTier::Shim),
+            (package_dir.clone(), CasTier::Package),
+        ]);
+        let mut roots = HashSet::new();
+        let mut attribution: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        super::extend_lock_pinned_roots(
+            &file_structure,
+            &lock_pinning(&lock_path, &[pinned]),
+            &all_entries,
+            &mut roots,
+            &mut attribution,
+        );
+
+        assert!(roots.contains(&package_dir), "the materialized package stays rooted");
+        assert!(
+            roots.contains(&shim_dir),
+            "C-013: the shim survives materialization — the next compose still emits its slot"
+        );
+    }
+
+    /// The gate stays a gate. A pin whose tier is absent on this machine (a
+    /// foreign-platform leaf, a tool never pulled) roots nothing and produces
+    /// no attribution row — otherwise `PackageManager::clean` renders a
+    /// nonexistent path as a held object in `--dry-run`.
+    #[tokio::test]
+    async fn extend_lock_pinned_roots_roots_nothing_for_a_pin_absent_from_every_tier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_structure = home(&tmp);
+        let present = pin("example.com", "cmake", 'a');
+        let absent = pin("example.com", "shfmt", 'c');
+        let shim_dir = seed_shim(&file_structure, &present, &[]).await;
+        let lock_path = file_structure.root().join("ocx.lock");
+
+        let all_entries = HashMap::from([(shim_dir.clone(), CasTier::Shim)]);
+        let mut roots = HashSet::new();
+        let mut attribution: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        super::extend_lock_pinned_roots(
+            &file_structure,
+            &lock_pinning(&lock_path, &[present, absent.clone()]),
+            &all_entries,
+            &mut roots,
+            &mut attribution,
+        );
+
+        assert_eq!(
+            roots,
+            HashSet::from([shim_dir.clone()]),
+            "only the pin that exists in a walked tier becomes a root"
+        );
+        assert_eq!(
+            attribution.keys().collect::<Vec<_>>(),
+            vec![&shim_dir],
+            "and only that pin gets an attribution row — no phantom `Held By` line for \
+             `{}` or `{}`",
+            file_structure.packages.path(&absent).display(),
+            file_structure.shims.path(&absent).display()
+        );
+    }
+
+    /// The shim root is keyed on the **logical** pinned identity — the one
+    /// `ocx.lock` stores and `prepare_lazy` publishes under (`resolved.pinned`,
+    /// Decision C2) — never on the physical transport identity an index-routed
+    /// package resolves through.
+    ///
+    /// `ocx.sh/ocx/cli` is exactly that case: a logical name the published
+    /// index routes to a different registry *and* repository, both carrying the
+    /// same digest. `ShimStore::path` puts registry and repository in the path,
+    /// so the two identities name two different directories — and a
+    /// same-registry fixture cannot tell them apart at all, which is what makes
+    /// a transport-keyed regression invisible.
+    #[tokio::test]
+    async fn extend_lock_pinned_roots_keys_the_shim_root_on_the_logical_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_structure = home(&tmp);
+        let logical = pin("ocx.sh", "ocx/cli", 'a');
+        let physical = pin("ghcr.io", "ocx-sh/ocx", 'a');
+        let logical_shim = seed_shim(&file_structure, &logical, &[]).await;
+        let physical_shim = seed_shim(&file_structure, &physical, &[]).await;
+        assert_ne!(
+            logical_shim, physical_shim,
+            "precondition: the two identities must name different directories"
+        );
+        let lock_path = file_structure.root().join("ocx.lock");
+
+        let all_entries = HashMap::from([
+            (logical_shim.clone(), CasTier::Shim),
+            (physical_shim.clone(), CasTier::Shim),
+        ]);
+        let mut roots = HashSet::new();
+        let mut attribution: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        super::extend_lock_pinned_roots(
+            &file_structure,
+            &lock_pinning(&lock_path, &[logical]),
+            &all_entries,
+            &mut roots,
+            &mut attribution,
+        );
+
+        assert_eq!(
+            roots,
+            HashSet::from([logical_shim]),
+            "the lock's logical pin roots the logical shim and only it — rooting the physical \
+             one instead would collect every index-routed package's shim on the first clean"
+        );
+    }
+
+    // ── the graph, end to end ─────────────────────────────────────────────
+
+    /// C-014's mandated red-and-green, first half: the graph must **see** a
+    /// deferred tool's shim directory as a walked `CasTier::Shim` entry, root
+    /// it from the lock pin, and reach its config blob through the shim's own
+    /// `refs/blobs/` edge.
+    ///
+    /// The `reachable()` assertion is the one that reds if the shim tier is
+    /// ever registered with the passive shape (`all_entries.insert` and nothing
+    /// else, the way layers and blobs are): a passively-registered shim is
+    /// rooted while its closure's config blobs are collected on the same run.
+    ///
+    /// The fixture's repository is deliberately deep. `ShimStore::list_all` is
+    /// unbounded by C-004's amendment, and a `max_depth` bound copied from
+    /// `package_store.rs` reports an EMPTY list — which under C-014 means
+    /// "collect every shim". This test reds if that bound ever reappears.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reachability_graph_walks_and_roots_a_deferred_tools_shim_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_structure = home(&tmp);
+        let pinned = pin("example.com", "org/project/sub/tool", 'a');
+        let config = digest_of('b');
+        let shim_dir = seed_shim(&file_structure, &pinned, std::slice::from_ref(&config)).await;
+        let blob_dir = super::canonicalize_or_keep(&file_structure.blobs.path(pinned.registry(), &config));
+        let lock_path = file_structure.root().join("ocx.lock");
+
+        let graph = ReachabilityGraph::build(&file_structure, &lock_pinning(&lock_path, &[pinned]))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            graph.all_entries.get(&shim_dir),
+            Some(&CasTier::Shim),
+            "C-014: the shim store is a walked tier; got all_entries={:?}",
+            graph.all_entries
+        );
+        assert!(
+            graph.roots.contains(&shim_dir),
+            "C-014: the lock pin roots it; got roots={:?}",
+            graph.roots
+        );
+        assert!(
+            graph.reachable().contains(&blob_dir),
+            "C-014/C-020: the closure's config blob is reachable THROUGH the shim's \
+             `refs/blobs/` edge — a passively-registered shim would leave it orphaned"
+        );
+    }
+
+    /// C-014's mandated red-and-green, second half, at the layer that decides
+    /// deletion: install nothing, compose lazily, clean — the shim directory
+    /// and its config blob survive.
+    ///
+    /// The seeded orphan blob is the positive control. Without it the two
+    /// `!contains` assertions would pass trivially on a build that never walks
+    /// the shim store at all, which is precisely today's state
+    /// (`quality-rust.md` "Negative path assertions are the trap").
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clean_keeps_a_deferred_tools_shim_dir_and_its_config_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_structure = home(&tmp);
+        let pinned = pin("example.com", "org/project/sub/tool", 'a');
+        let config = digest_of('b');
+        let shim_dir = seed_shim(&file_structure, &pinned, std::slice::from_ref(&config)).await;
+        let blob_dir = super::canonicalize_or_keep(&file_structure.blobs.path(pinned.registry(), &config));
+        let orphan_blob = seed_blob(&file_structure, "example.com", &digest_of('f')).await;
+        let lock_path = file_structure.root().join("ocx.lock");
+
+        let collector = super::super::GarbageCollector::build(
+            &file_structure,
+            &lock_pinning(&lock_path, &[pinned]),
+            &super::super::super::resolve::SitePatchRoots::default(),
+        )
+        .await
+        .unwrap();
+        let unreachable = collector.unreachable_objects();
+
+        assert!(
+            unreachable.contains(&orphan_blob),
+            "positive control: an unreferenced blob IS collected, so the assertions below \
+             are observing a live harness; got unreachable={unreachable:?}"
+        );
+        assert!(
+            !unreachable.contains(&shim_dir),
+            "C-014/S-008: a shim the lock still pins survives `ocx clean`"
+        );
+        assert!(
+            !unreachable.contains(&blob_dir),
+            "C-020: and so does the config blob it ref-links — a deferred consumer reads its \
+             env carriers from there, having no package directory to read them from"
+        );
+    }
+
+    /// A shim whose lock pin disappeared is collected, and its config blob goes
+    /// with it. Nothing keeps a shim alive by accident: `has_live_refs` roots
+    /// packages off `refs/symlinks/`, which a shim has none of, and every
+    /// package edge is confined to the package/layer/blob roots — so no package
+    /// edge can point into `shims/`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clean_collects_a_shim_whose_lock_pin_disappeared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_structure = home(&tmp);
+        let pinned = pin("example.com", "cmake", 'a');
+        let config = digest_of('b');
+        let shim_dir = seed_shim(&file_structure, &pinned, std::slice::from_ref(&config)).await;
+        let blob_dir = super::canonicalize_or_keep(&file_structure.blobs.path(pinned.registry(), &config));
+
+        let collector = super::super::GarbageCollector::build(
+            &file_structure,
+            &[],
+            &super::super::super::resolve::SitePatchRoots::default(),
+        )
+        .await
+        .unwrap();
+        let unreachable = collector.unreachable_objects();
+
+        assert!(
+            unreachable.contains(&shim_dir),
+            "an unpinned shim is garbage; got unreachable={unreachable:?}"
+        );
+        assert!(
+            unreachable.contains(&blob_dir),
+            "and its config blob is reachable only through it, so it is collected too"
+        );
+    }
+
+    /// D4 / C-014: `$OCX_HOME/.bin/` is never collected. It holds no CAS tier —
+    /// nothing enumerates it — so the guarantee is structural, and its red
+    /// state is reachable only by a future change that enumerates `.bin` as a
+    /// tier. That is exactly the regression this guard exists for; it defends
+    /// nothing wider, and the paired orphan blob (which IS deleted here) is
+    /// what keeps the `!any` assertion from being an unchecked green.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dot_bin_ocx_shim_is_never_collected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_structure = home(&tmp);
+        let published_shim_blob = file_structure.shim_bin.ensure().await.unwrap();
+        let orphan_blob = seed_blob(&file_structure, "example.com", &digest_of('f')).await;
+
+        let collector = super::super::GarbageCollector::build(
+            &file_structure,
+            &[],
+            &super::super::super::resolve::SitePatchRoots::default(),
+        )
+        .await
+        .unwrap();
+        let unreachable = collector.unreachable_objects();
+        let dot_bin = file_structure.root().join(".bin");
+
+        assert!(
+            unreachable.contains(&orphan_blob),
+            "positive control: the collector does select entries for deletion here"
+        );
+        assert!(
+            !unreachable.iter().any(|entry| entry.starts_with(&dot_bin)),
+            "D4: nothing under `$OCX_HOME/.bin/` may be selected for collection; \
+             got unreachable={unreachable:?}"
+        );
+
+        collector.delete_objects(&unreachable, false).await.unwrap();
+        assert!(
+            published_shim_blob.is_file(),
+            "the embedded shim blob survives a real collection pass"
+        );
+        assert!(
+            !orphan_blob.exists(),
+            "while the orphan blob is genuinely removed — both outcomes observed"
+        );
+    }
+
+    /// The GC collects precisely what `ShimStore::list_all` fails to report
+    /// (C-014), and a repository's segment count is variable and unbounded
+    /// (C-004's amendment) — so a `max_depth` bound on that walk is not a
+    /// partial bug but total data loss. The shallow shim is asserted alongside
+    /// the deep one because the bound copied from `package_store.rs` is short
+    /// by the whole repository component and loses both.
+    #[tokio::test]
+    async fn gc_shim_enumeration_reaches_a_deep_repository_shim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_structure = home(&tmp);
+        let shallow = seed_shim(&file_structure, &pin("example.com", "cmake", 'a'), &[]).await;
+        let deep = seed_shim(&file_structure, &pin("example.com", "org/project/sub/tool", 'b'), &[]).await;
+
+        let found: Vec<PathBuf> = file_structure
+            .shims
+            .list_all()
+            .await
+            .unwrap()
+            .iter()
+            .map(|shim| super::canonicalize_or_keep(shim.root()))
+            .collect();
+
+        assert!(
+            found.contains(&deep),
+            "a shim under a 4-segment repository must be reported; got {found:?}"
+        );
+        assert!(
+            found.contains(&shallow),
+            "and so must a shim under a 1-segment one; got {found:?}"
         );
     }
 

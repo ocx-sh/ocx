@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use tokio::task::JoinSet;
 
+use crate::file_structure::ShimBinStore;
 use crate::package::metadata::entrypoint::Entrypoints;
 
 #[cfg(windows)]
@@ -37,6 +38,11 @@ use super::safety::LauncherSafeString;
 /// `ocx launcher exec`, which reads `metadata.json` from that root and
 /// resolves `argv0` against the composed `PATH` at invocation time.
 ///
+/// `shim_bin` is the shared content-addressed store
+/// ([`crate::file_structure::FileStructure::shim_bin`]) every entry's
+/// `<name>.exe` hardlinks from on Windows — unused (and unreferenced) on
+/// other platforms, where no `.exe` is ever written.
+///
 /// # Errors
 ///
 /// Returns an error if:
@@ -44,7 +50,16 @@ use super::safety::LauncherSafeString;
 /// - Writing any launcher file fails.
 /// - The `pkg_root` contains a character unsafe for either launcher
 ///   template (see [`LauncherSafeString`]).
-pub async fn generate(pkg_root: &Path, entries: &Entrypoints, dest: &Path) -> Result<(), crate::Error> {
+/// - Publishing or hardlinking the shared Windows shim blob fails,
+///   including a cross-device `shim_bin` store (propagated unchanged, no
+///   copy fallback — see [`crate::hardlink::create`]).
+#[cfg_attr(not(windows), allow(unused_variables))]
+pub async fn generate(
+    pkg_root: &Path,
+    entries: &Entrypoints,
+    dest: &Path,
+    shim_bin: &ShimBinStore,
+) -> Result<(), crate::Error> {
     if entries.is_empty() {
         return Ok(());
     }
@@ -89,7 +104,12 @@ pub async fn generate(pkg_root: &Path, entries: &Entrypoints, dest: &Path) -> Re
             let exe_path = dest.join(format!("{name}.exe"));
             let sidecar_body = shim_sidecar_body(&pkg_root_str);
             let sidecar_path = dest.join(format!("{name}.shim"));
-            tasks.spawn(write_shim_exe_then_sidecar(exe_path, sidecar_path, sidecar_body));
+            tasks.spawn(write_shim_exe_then_sidecar(
+                shim_bin.clone(),
+                exe_path,
+                sidecar_path,
+                sidecar_body,
+            ));
         }
     }
 
@@ -132,27 +152,32 @@ async fn write_unix_launcher(path: PathBuf, body: String) -> Result<(), crate::E
     Ok(())
 }
 
-/// Writes the native Windows shim executable (`<exe_path>`) verbatim from
-/// [`crate::shim::SHIM_BYTES`], then — only after the `.exe` write has fully
-/// completed — its one-line `<sidecar_path>.shim` sidecar.
+/// Publishes the shared Windows shim blob into `shim_bin` (writing it only
+/// once, on first use — [`ShimBinStore::ensure`]) and hardlinks it to
+/// `<exe_path>`, then — only after the `.exe` link has fully landed — writes
+/// its one-line `<sidecar_path>.shim` sidecar.
 ///
-/// The two writes are sequenced (not two independent `JoinSet` tasks) so the
-/// only recoverable partial state on a mid-generate fault is
-/// `.exe`-present / `.shim`-absent (ADR E1, recoverable by re-running
-/// `generate()`), never the reverse — a `.shim` without its `.exe` is the
-/// worse state (ADR Contract 2 write-ordering postcondition, plan F-4).
+/// The link and the sidecar write are sequenced (not two independent
+/// `JoinSet` tasks) so the only recoverable partial state on a mid-generate
+/// fault is `.exe`-present / `.shim`-absent (ADR E1, recoverable by
+/// re-running `generate()`), never the reverse — a `.shim` without its
+/// `.exe` is the worse state (ADR Contract 2 write-ordering postcondition,
+/// plan F-4).
 ///
-/// `.exe` bytes are written verbatim (no transform) to preserve the
-/// Authenticode verbatim-copy property.
+/// The hardlink shares its inode with `shim_bin`'s published blob, so
+/// `<exe_path>` is byte-identical to it by construction (no transform),
+/// preserving the Authenticode verbatim-copy property. A cross-device
+/// `shim_bin` store surfaces as `io::ErrorKind::CrossesDevices` and
+/// propagates unchanged — no copy fallback (plan decision D3).
 #[cfg(windows)]
 async fn write_shim_exe_then_sidecar(
+    shim_bin: ShimBinStore,
     exe_path: PathBuf,
     sidecar_path: PathBuf,
     sidecar_body: String,
 ) -> Result<(), crate::Error> {
-    tokio::fs::write(&exe_path, crate::shim::SHIM_BYTES)
-        .await
-        .map_err(|e| crate::error::file_error(&exe_path, e))?;
+    let shim_bin_path = shim_bin.ensure().await?;
+    crate::hardlink::create(&shim_bin_path, &exe_path)?;
     write_launcher_file(sidecar_path, sidecar_body).await
 }
 
@@ -162,6 +187,7 @@ mod tests {
 
     use std::collections::BTreeMap;
 
+    use crate::file_structure::ShimBinStore;
     use crate::package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypoints};
 
     fn entries_for(names: &[&str]) -> Entrypoints {
@@ -172,6 +198,14 @@ mod tests {
         Entrypoints::new(map)
     }
 
+    /// A scratch `ShimBinStore` rooted under the test's own tempdir — never
+    /// shared with a real `FileStructure`. `generate()` only reaches into it
+    /// on Windows (`#[cfg(windows)]`), so on other platforms this is unused
+    /// beyond satisfying the signature.
+    fn shim_bin_store(tmp: &tempfile::TempDir) -> ShimBinStore {
+        ShimBinStore::new(tmp.path().join("shim_bin"))
+    }
+
     // ── Empty Entrypoints — no files generated ────────────────────────────
 
     #[tokio::test]
@@ -180,8 +214,11 @@ mod tests {
         let pkg_root = tmp.path().join("pkg");
         let dest = pkg_root.join("entrypoints");
         let entrypoints = entries_for(&[]);
+        let shim_bin = shim_bin_store(&tmp);
 
-        super::generate(&pkg_root, &entrypoints, &dest).await.unwrap();
+        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
+            .await
+            .unwrap();
         assert!(
             !dest.exists(),
             "entrypoints/ dir must not be created for empty entrypoints"
@@ -197,8 +234,11 @@ mod tests {
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
         let entrypoints = entries_for(&["cmake"]);
+        let shim_bin = shim_bin_store(&tmp);
 
-        super::generate(&pkg_root, &entrypoints, &dest).await.unwrap();
+        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
+            .await
+            .unwrap();
         assert!(dest.join("cmake").exists(), "unix launcher must be created");
         // Cutover: no `.cmd` is ever emitted on any platform. On Windows the
         // launcher is `<name>.exe` + `<name>.shim` (asserted by the
@@ -220,8 +260,11 @@ mod tests {
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
         let entrypoints = entries_for(&["cmake"]);
+        let shim_bin = shim_bin_store(&tmp);
 
-        super::generate(&pkg_root, &entrypoints, &dest).await.unwrap();
+        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
+            .await
+            .unwrap();
         let mode = std::fs::metadata(dest.join("cmake")).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o755, "unix launcher must be mode 0755");
     }
@@ -246,11 +289,12 @@ mod tests {
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
         let entrypoints = entries_for(&["cmake"]);
+        let shim_bin = shim_bin_store(&tmp);
 
         // First call
-        let _ = super::generate(&pkg_root, &entrypoints, &dest).await;
+        let _ = super::generate(&pkg_root, &entrypoints, &dest, &shim_bin).await;
         // Second call — must not error due to already-existing files
-        let _ = super::generate(&pkg_root, &entrypoints, &dest).await;
+        let _ = super::generate(&pkg_root, &entrypoints, &dest, &shim_bin).await;
         // Both calls should return Ok(()).
     }
 
@@ -272,8 +316,9 @@ mod tests {
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
         let entrypoints = entries_for(&["cmake"]);
+        let shim_bin = shim_bin_store(&tmp);
 
-        let err = super::generate(&pkg_root, &entrypoints, &dest)
+        let err = super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
             .await
             .expect_err("pkg_root with unsafe character must be rejected");
         match err {
@@ -326,8 +371,11 @@ mod tests {
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
         let entrypoints = entries_for(&["cmake"]);
+        let shim_bin = shim_bin_store(&tmp);
 
-        super::generate(&pkg_root, &entrypoints, &dest).await.unwrap();
+        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
+            .await
+            .unwrap();
 
         assert!(dest.join("cmake").exists(), "unix launcher must be created");
         assert!(
@@ -353,8 +401,11 @@ mod tests {
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
         let entrypoints = entries_for(&["cmake"]);
+        let shim_bin = shim_bin_store(&tmp);
 
-        super::generate(&pkg_root, &entrypoints, &dest).await.unwrap();
+        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
+            .await
+            .unwrap();
 
         let written = tokio::fs::read(dest.join("cmake.exe")).await.unwrap();
         assert_eq!(
@@ -374,8 +425,11 @@ mod tests {
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
         let entrypoints = entries_for(&["cmake"]);
+        let shim_bin = shim_bin_store(&tmp);
 
-        super::generate(&pkg_root, &entrypoints, &dest).await.unwrap();
+        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
+            .await
+            .unwrap();
 
         let sidecar = tokio::fs::read(dest.join("cmake.shim")).await.unwrap();
         let expected = format!("{}\n", pkg_root.to_string_lossy());
@@ -413,8 +467,9 @@ mod tests {
         // then fail, simulating a mid-generate fault on the 2nd shim write.
         tokio::fs::create_dir_all(dest.join("cmake.shim")).await.unwrap();
         let entrypoints = entries_for(&["cmake"]);
+        let shim_bin = shim_bin_store(&tmp);
 
-        let result = super::generate(&pkg_root, &entrypoints, &dest).await;
+        let result = super::generate(&pkg_root, &entrypoints, &dest, &shim_bin).await;
         assert!(
             result.is_err(),
             "generate() must surface the failed `.shim` write as an error"
@@ -450,8 +505,11 @@ mod tests {
         tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
         let dest = pkg_root.join("entrypoints");
         let entrypoints = entries_for(&["cmake"]);
+        let shim_bin = shim_bin_store(&tmp);
 
-        super::generate(&pkg_root, &entrypoints, &dest).await.unwrap();
+        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
+            .await
+            .unwrap();
 
         assert!(dest.join("cmake").exists(), "unix launcher must still be created");
         assert!(
@@ -466,6 +524,90 @@ mod tests {
             !dest.join("cmake.shim").exists(),
             "no `.shim` sidecar off Windows (emission cfg-gated)"
         );
+    }
+
+    /// C-002: off Windows no `.exe` is emitted, so [`ShimBinStore::ensure`]
+    /// must never be reached — the store root stays absent. Without this, an
+    /// implementation that publishes the blob unconditionally (before the
+    /// `cfg`-gated per-entry work) would litter `$OCX_HOME/.bin/ocx-shim/`
+    /// with a zero-byte `.exe` on every Linux/macOS install, and nothing else
+    /// in this file would notice.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn generate_does_not_touch_the_shim_bin_store_off_windows() {
+        let tmp = tempdir().unwrap();
+        let pkg_root = tmp.path().join("pkg");
+        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
+        let dest = pkg_root.join("entrypoints");
+        let entrypoints = entries_for(&["cmake"]);
+        let shim_bin = shim_bin_store(&tmp);
+
+        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
+            .await
+            .unwrap();
+
+        assert!(
+            !shim_bin.root().exists(),
+            "the shared shim blob store must not be created off Windows — no \
+             `.exe` is emitted there, so nothing may publish into it"
+        );
+    }
+
+    /// C-002 (#301): each `<name>.exe` is a **hardlink** to the one blob in the
+    /// shared store, not an independent copy — one inode, one Authenticode
+    /// signature, one Defender scan regardless of how many names a package
+    /// declares.
+    ///
+    /// Link identity is observed by mutating the store's blob in place
+    /// (`fs::write` truncates the existing inode rather than replacing it) and
+    /// reading the change back through every emitted `.exe`. Byte-equality
+    /// alone cannot distinguish a hardlink from a copy — which is the whole
+    /// point of #301 — and the Windows metadata APIs that expose a file index
+    /// (`windows_by_handle`) are unstable, so this is the portable identity
+    /// probe.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn generate_hardlinks_every_exe_to_the_one_shared_store_blob() {
+        const MUTATED: &[u8] = b"mutated-through-the-shared-inode";
+
+        let tmp = tempdir().unwrap();
+        let pkg_root = tmp.path().join("pkg");
+        tokio::fs::create_dir_all(pkg_root.join("content")).await.unwrap();
+        let dest = pkg_root.join("entrypoints");
+        let names = ["cmake", "ctest", "cpack"];
+        let entrypoints = entries_for(&names);
+        let shim_bin = shim_bin_store(&tmp);
+
+        super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
+            .await
+            .unwrap();
+
+        // The store is flat and holds exactly one blob for the running arch,
+        // however many names were generated.
+        let mut blobs: Vec<std::path::PathBuf> = std::fs::read_dir(shim_bin.root())
+            .expect("the shim blob store root must exist after generate()")
+            .map(|entry| entry.expect("readable directory entry").path())
+            .collect();
+        blobs.sort();
+        assert_eq!(
+            blobs.len(),
+            1,
+            "one shared blob backs all {} names, never one per entry",
+            names.len()
+        );
+
+        std::fs::write(&blobs[0], MUTATED).expect("the store blob must be writable in place");
+
+        for name in names {
+            let exe = dest.join(format!("{name}.exe"));
+            assert_eq!(
+                tokio::fs::read(&exe).await.unwrap(),
+                MUTATED,
+                "`{name}.exe` must share the store blob's inode — an in-place \
+                 mutation of the blob is visible through a hardlink and \
+                 invisible through a copy"
+            );
+        }
     }
 
     #[cfg(not(windows))]

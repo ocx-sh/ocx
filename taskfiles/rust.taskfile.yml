@@ -42,20 +42,44 @@ tasks:
       Runs all Rust-specific checks sequentially (fail-fast):
         1. cargo fmt --check
         2. cargo clippy
-        3. hawkeye license headers
-        4. cargo-deny license audit
-        5. cargo-about third-party notice freshness
-        6. cargo build --release
-        7. cargo nextest run
+        3. cargo check on both Windows MSVC targets
+        4. hawkeye license headers
+        5. cargo-deny license audit
+        6. cargo-about third-party notice freshness
+        7. cargo build --release
+        8. cargo nextest run
       Use during review-fix loops when only Rust code changed.
     cmds:
       - task: format:check
       - task: clippy:check
+      - task: check:windows-cfg
       - task: license:check
       - task: license:deps
       - task: license:notice:check
       - task: build
       - task: test:unit
+
+  check:windows-cfg:
+    desc: Type-check the cfg(windows)-only code the host gate cannot see
+    summary: |
+      `ocx_shim::run` is `#[cfg(windows)]` and `main.rs` carries
+      `#![cfg_attr(not(windows), allow(dead_code))]`, so a host `cargo check`
+      compiles none of it AND suppresses dead-code errors the Windows build
+      treats as hard errors under `-D warnings`. This is not hypothetical: a
+      host-clean check hid two real errors that only the MSVC targets caught.
+
+      `cargo check` does no linking, and both `*-pc-windows-msvc` targets have
+      std installed via rustup — so this needs neither xwin nor zig, unlike
+      `check:windows` (which cross-*builds* the whole workspace through Docker
+      and stays the gate for the rest of the crates).
+
+      Scoped to `ocx_shim` deliberately: it is the only crate whose primary
+      code path exists solely under `cfg(windows)`, and it has no dependencies
+      off Windows, so this costs seconds rather than a workspace metadata pass.
+    sources: *rust-sources
+    cmds:
+      - cargo check -p ocx_shim --locked --all-targets --target x86_64-pc-windows-msvc
+      - cargo check -p ocx_shim --locked --all-targets --target aarch64-pc-windows-msvc
 
   format:check:
     desc: Check Rust formatting

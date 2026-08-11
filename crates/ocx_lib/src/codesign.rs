@@ -169,14 +169,26 @@ async fn file_inode(_path: &Path) -> Option<u64> {
 
 // -- Signing ------------------------------------------------------------------
 
+/// Absolute paths to the two Apple-shipped tools this module drives.
+///
+/// Absolute and not bare names on purpose. These run **inside** package
+/// extraction, which `ocx launcher shim` drives with an inherited `PATH` that
+/// contains the shim directory of the package being extracted — so a package
+/// claiming a binary named `xattr` or `codesign` would put its own launcher
+/// ahead of `/usr/bin` and have it spawned here, once per Mach-O file, with
+/// no download left to gate it. Both live at these paths in every macOS base
+/// install; a `PATH` lookup buys nothing and costs the whole trust boundary.
+const XATTR_BIN: &str = "/usr/bin/xattr";
+const CODESIGN_BIN: &str = "/usr/bin/codesign";
+
 fn codesign_available() -> bool {
-    which::which("codesign").is_ok()
+    std::path::Path::new(CODESIGN_BIN).is_file()
 }
 
 /// Remove quarantine extended attributes from the content directory.
 /// Fails silently — the attribute may not exist.
 async fn remove_quarantine(content_path: &Path) {
-    let result = tokio::process::Command::new("xattr")
+    let result = tokio::process::Command::new(XATTR_BIN)
         .args(["-dr", "com.apple.quarantine"])
         .arg(content_path)
         .stdin(std::process::Stdio::null())
@@ -244,7 +256,7 @@ async fn sign_binary(path: &Path) {
 /// Failures are logged at DEBUG level — callers are responsible for logging at WARN
 /// if all retry attempts are exhausted.
 async fn try_codesign(args: &[&str], path: &Path) -> bool {
-    let result = tokio::process::Command::new("codesign")
+    let result = tokio::process::Command::new(CODESIGN_BIN)
         .args(args)
         .arg(path)
         .stdin(std::process::Stdio::null())

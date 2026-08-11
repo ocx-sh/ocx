@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use ocx_lib::oci;
-use ocx_lib::project::expand_all_keyword;
+use ocx_lib::project::{expand_all_keyword, lazy_mode_for_tool};
 
 use crate::api;
 use crate::app::project_context::load_project_with_lock;
@@ -50,6 +50,17 @@ pub struct Pull {
 
     #[clap(flatten)]
     pub platform: options::PlatformOption,
+
+    /// Top tier of the `lazy-mode` ladder for every locked tool this command
+    /// pre-warms.
+    ///
+    /// This command composes nothing, so `always` changes *what* is pre-warmed
+    /// rather than what reaches `PATH`: a tool it applies to gets its metadata,
+    /// its dependency closure's config blobs and its generated launchers, and
+    /// no content. The content downloads the first time one of those launchers
+    /// runs, in whatever environment a later `ocx run` or `ocx env` composes.
+    #[clap(flatten)]
+    pub lazy_mode: options::LazyMode,
 }
 
 impl Pull {
@@ -114,14 +125,88 @@ impl Pull {
 
         // ── Phase 5: pull + report ───────────────────────────────────────
 
+        // The lazy split. This command composes nothing, so `always` changes
+        // *what* is pre-warmed: a deferred tool gets its metadata closure and
+        // its generated launchers, and no content. Deliberately NOT routed
+        // through `compose_roots`: the eager half here is `pull_all`, the
+        // pre-warm primitive, not the find-or-install a composing command runs.
+        //
         // `pull_all` short-circuits on an empty slice (returns `Ok(vec![])`),
         // so an unmatched group filter or an empty lock both exit 0 with
         // an empty report — there is nothing to pre-warm, that is not a
         // failure.
+        let mut modes: Vec<ocx_lib::lazy::LazyMode> = Vec::with_capacity(identifiers.len());
+        for (tool, identifier) in selected.iter().zip(identifiers.iter()) {
+            modes.push(lazy_mode_for_tool(
+                &ctx.config,
+                identifier,
+                Some(tool.group.as_str()),
+                self.lazy_mode.mode(),
+            ));
+        }
+        let eager: Vec<oci::Identifier> = identifiers
+            .iter()
+            .zip(modes.iter())
+            .filter(|(_, mode)| **mode == ocx_lib::lazy::LazyMode::Never)
+            .map(|(identifier, _)| identifier.clone())
+            .collect();
         let info = context
             .manager()
-            .pull_all(&identifiers, platform, context.concurrency())
+            .pull_all(&eager, platform.clone(), context.concurrency())
             .await?;
+        // Keyed rather than positional: the report walks `identifiers`, which
+        // interleaves both halves, so a positional cursor into the eager
+        // results would depend on `pull_all` returning exactly one entry per
+        // input — a guarantee worth reading off the data instead of asserting.
+        let eager_paths: std::collections::HashMap<&oci::Identifier, &_> = eager.iter().zip(info.iter()).collect();
+
+        // Both halves, in lock order, so the report stays a single ordered walk
+        // over `identifiers`.
+        let mut warmed: Vec<api::data::warmed_paths::WarmedPath> = Vec::with_capacity(identifiers.len());
+        let mut advisories: Vec<ocx_lib::package_manager::LazyAdvisory> = Vec::new();
+        for (identifier, mode) in identifiers.iter().zip(modes.iter()) {
+            let entry = if *mode == ocx_lib::lazy::LazyMode::Never {
+                // A pre-warm that produced no result for an identifier it was
+                // handed is a bug in `pull_all`, not something to report a
+                // fabricated path for — skip it rather than guess.
+                let Some(info) = eager_paths.get(identifier) else {
+                    continue;
+                };
+                api::data::warmed_paths::WarmedPath {
+                    package: identifier.to_string(),
+                    path: info.dir().root().to_path_buf(),
+                    kind: api::data::path_kind::PathKind::Package,
+                }
+            } else {
+                let prepared = context
+                    .manager()
+                    .prepare_lazy(identifier, platform.clone())
+                    .await
+                    .map_err(|kind| {
+                        ocx_lib::package_manager::error::Error::ResolveFailed(vec![
+                            ocx_lib::package_manager::error::PackageError::new(identifier.clone(), kind),
+                        ])
+                    })?;
+                // Both channels, never one: stderr is the human read of a
+                // warning, and `--format json` is the machine read C-015 asks
+                // for. A producer that only warned would put this command's
+                // advisories out of reach of the tooling ocx is a backend for,
+                // while its `ocx env` twin serialized the identical fact.
+                for advisory in &prepared.advisories {
+                    context.ui().warn(advisory.to_string());
+                }
+                advisories.extend(prepared.advisories);
+                // The shim directory, not the package directory: this run
+                // created the former and did not create the latter, and a
+                // machine-read `path` must name what exists.
+                api::data::warmed_paths::WarmedPath {
+                    package: identifier.to_string(),
+                    path: prepared.shim.root().to_path_buf(),
+                    kind: api::data::path_kind::PathKind::Shim,
+                }
+            };
+            warmed.push(entry);
+        }
 
         // Re-save the lock with same bytes to advance its mtime, so direnv
         // re-fires after a successful pull. The `tools_content_equal` guard
@@ -137,15 +222,8 @@ impl Pull {
             )
             .await?;
 
-        let entries: Vec<api::data::paths::PathEntry> = identifiers
-            .iter()
-            .zip(info.iter())
-            .map(|(id, info)| api::data::paths::PathEntry {
-                package: id.to_string(),
-                path: info.dir().root().to_path_buf(),
-            })
-            .collect();
-        let paths = api::data::paths::Paths::new(entries);
+        let paths = api::data::warmed_paths::WarmedPaths::new(warmed)
+            .with_advisories(api::data::env::LazyAdvisoryReport::from_advisories(&advisories));
         context.api().report(&paths)?;
 
         Ok(ExitCode::SUCCESS)

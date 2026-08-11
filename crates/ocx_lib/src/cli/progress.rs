@@ -69,6 +69,35 @@ impl ProgressManager {
         }
     }
 
+    /// A manager that renders bars on the process's **controlling terminal**,
+    /// degrading to [`disabled`](Self::disabled) when none is reachable.
+    ///
+    /// Deliberately not [`stderr`](Self::stderr): a tool invoked by `make`, or
+    /// by any wrapper that captures stderr, still has a controlling terminal,
+    /// and that is the channel a long transfer has to render on — writing into
+    /// the wrapped tool's own stderr stream would corrupt it, and skipping it
+    /// because stderr is a pipe leaves the user staring at a silent hang.
+    ///
+    /// Opening it fails, and must degrade rather than error, in exactly the
+    /// environments this is best-effort for: `ENXIO` under `setsid`, in Docker
+    /// builds and on CI runners is the common case, not the exception.
+    pub async fn controlling_terminal() -> Self {
+        // `open(2)` on a terminal can block (carrier detect on a serial
+        // console), so the probe runs off the runtime rather than on it.
+        match tokio::task::spawn_blocking(open_controlling_terminal).await {
+            Ok(Some(term)) => Self {
+                multi: Some(Arc::new(indicatif::MultiProgress::with_draw_target(
+                    indicatif::ProgressDrawTarget::term_like(Box::new(term)),
+                ))),
+            },
+            Ok(None) => Self::disabled(),
+            Err(join_error) => {
+                crate::log::debug!("Progress disabled: the controlling-terminal probe failed: {join_error}");
+                Self::disabled()
+            }
+        }
+    }
+
     /// A no-op manager. Every guard method does nothing.
     pub fn disabled() -> Self {
         Self { multi: None }
@@ -152,6 +181,55 @@ impl ProgressManager {
             multi: self.multi.clone(),
         }
     }
+}
+
+/// Opens the controlling terminal as an `indicatif` draw target, or `None`
+/// when the process has none.
+///
+/// Blocking — call it from [`spawn_blocking`](tokio::task::spawn_blocking).
+///
+/// `console::Term` is the draw target rather than a hand-written one: it
+/// already owns the cursor-movement, width-probing and line-clearing that
+/// `indicatif::TermLike` asks for, and `read_write_pair` builds one over an
+/// arbitrary file descriptor. The `is_term` check is what makes a `/dev/tty`
+/// that opened but is not a terminal (a redirected slave, a captured pty)
+/// degrade instead of writing escape sequences into a file.
+#[cfg(unix)]
+fn open_controlling_terminal() -> Option<console::Term> {
+    let write = match std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") {
+        Ok(file) => file,
+        Err(error) => {
+            crate::log::debug!("Progress disabled: no controlling terminal ({error})");
+            return None;
+        }
+    };
+    // `read_write_pair` wants both halves; the read side is never used for
+    // drawing, but `Term`'s feature probes read the write half's descriptor.
+    let read = match write.try_clone() {
+        Ok(file) => file,
+        Err(error) => {
+            crate::log::debug!("Progress disabled: cannot duplicate the controlling terminal ({error})");
+            return None;
+        }
+    };
+    let term = console::Term::read_write_pair(read, write);
+    term.is_term().then_some(term)
+}
+
+/// Windows has no controlling-terminal draw target yet, so `progress` degrades
+/// to silence there.
+///
+/// `console::Term` exposes no constructor over an arbitrary console handle
+/// (`read_write_pair` is `#[cfg(unix)]`), and hand-rolling a VT `TermLike` over
+/// `CONOUT$` would mean owning terminal rendering. Unreachable in this phase
+/// regardless: `LazyModeLadder::resolve_for_host` forces `LazyMode::Never` on
+/// Windows, so nothing is ever deferred and no shim can trigger a
+/// materialization that would render. Give it its `CONOUT$` arm in the same
+/// change that lands the Windows shim producer and lifts that floor.
+#[cfg(windows)]
+fn open_controlling_terminal() -> Option<console::Term> {
+    crate::log::debug!("Progress disabled: this phase opens no controlling terminal on Windows");
+    None
 }
 
 /// RAII body for a bar guard.

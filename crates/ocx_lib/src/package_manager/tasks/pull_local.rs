@@ -1125,12 +1125,13 @@ mod tests {
     // same digest: the first call (leader) performs the actual write; concurrent
     // callers (waiters) receive Ok(()) WITHOUT re-executing the write.
     //
-    // Asserts the coalescing property via the `BlobStore::WRITE_BLOB_CALL_COUNT`
-    // test-only AtomicUsize: after two concurrent calls resolve, the counter
-    // must equal exactly 1. Without this assertion, content-addressing alone
-    // would make "both calls return Ok" a passing condition even when no dedup
-    // happens — masking a regression that would otherwise cost a duplicate
-    // download per concurrent caller in `ocx_mirror`.
+    // Asserts the coalescing property via `BlobStore::write_call_count` — a
+    // test-only counter owned by THIS store instance (and shared with its
+    // clones): after two concurrent calls resolve, it must read exactly 1.
+    // Without this assertion, content-addressing alone would make "both calls
+    // return Ok" a passing condition even when no dedup happens — masking a
+    // regression that would otherwise cost a duplicate download per concurrent
+    // caller in `ocx_mirror`.
     //
     // Uses a `tokio::sync::Barrier` to force both async tasks to reach
     // `stage_blob_bytes` before either advances, ensuring the leader/waiter
@@ -1140,20 +1141,7 @@ mod tests {
     async fn pull_coordinator_coalesces_concurrent_same_digest_writers() {
         use crate::{file_structure::BlobStore, oci::Algorithm};
         use std::sync::Arc;
-        use std::sync::atomic::Ordering;
         use tokio::sync::Barrier;
-
-        // Serialise against sibling tests that also call `BlobStore::write_blob`
-        // (the Windows-cfg `write_blob_retries_*` tests). The counter is a
-        // process-global static; cargo runs tests in parallel within a single
-        // binary by default, so a sibling write_blob caller would inflate the
-        // observed delta. The lock is the single sanctioned serializer.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
-        // Capture the call-count BASELINE before any work, then assert on the
-        // DELTA at the end. Under the test lock, no sibling write_blob caller
-        // can interpose.
-        let baseline = crate::file_structure::WRITE_BLOB_CALL_COUNT.load(Ordering::SeqCst);
 
         let dir = tempfile::tempdir().unwrap();
         let store = BlobStore::new(dir.path().join("blobs"));
@@ -1206,16 +1194,15 @@ mod tests {
         assert_eq!(written, bytes, "blob data must equal the written bytes");
 
         // Singleflight coalescing: exactly ONE invocation of BlobStore::write_blob
-        // across both concurrent callers. A delta > 1 means dedup failed and
-        // duplicate work was performed.
-        let delta = crate::file_structure::WRITE_BLOB_CALL_COUNT
-            .load(Ordering::SeqCst)
-            .saturating_sub(baseline);
+        // across both concurrent callers. A count > 1 means dedup failed and
+        // duplicate work was performed. The counter belongs to this store alone,
+        // so no sibling test can perturb it.
+        let writes = store.write_call_count();
         assert_eq!(
-            delta, 1,
-            "PullCoordinator must coalesce: expected exactly 1 NEW call to BlobStore::write_blob across both \
-             concurrent same-digest writers; got delta={delta}. A regression that removes singleflight or calls \
-             write_blob directly would surface here as delta >= 2."
+            writes, 1,
+            "PullCoordinator must coalesce: expected exactly 1 call to BlobStore::write_blob across both \
+             concurrent same-digest writers; got {writes}. A regression that removes singleflight or calls \
+             write_blob directly would surface here as >= 2."
         );
     }
 

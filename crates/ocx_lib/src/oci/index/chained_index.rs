@@ -2763,12 +2763,6 @@ mod chain_refs_tests {
     /// blob (the index-home flat blob CAS has been retired, `adr_index_indirection.md` B2).
     #[tokio::test(flavor = "multi_thread")]
     async fn chained_fetch_blob_cache_hit_no_source_call() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). This test seeds the
-        // cache via `BlobStore::write_blob` directly, which increments it; holding
-        // this lock prevents our call from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
         let blobs = BlobStore::new(cache_dir.path().join("blobs"));
@@ -2883,11 +2877,6 @@ mod chain_refs_tests {
     /// short-circuits on any existing non-empty target without re-hashing).
     #[tokio::test(flavor = "multi_thread")]
     async fn chained_fetch_blob_corrupt_online_heals_via_source_refetch() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static) — this test's
-        // write-through calls `BlobStore::write_blob` directly.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let cache_dir = TempDir::new().unwrap();
         let cache = make_local_index(&cache_dir);
         let blobs = BlobStore::new(cache_dir.path().join("blobs"));
@@ -2986,12 +2975,6 @@ mod chain_refs_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn chained_fetch_blob_corrupt_online_heal_write_failure_still_returns_verified_bytes() {
         use std::os::unix::fs::PermissionsExt;
-
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static) — this test's
-        // (failed) write-through attempt still calls the shared `persist_bytes`
-        // helper.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
 
         /// RAII guard that restores directory permissions on drop so a test
         /// failure doesn't leave a read-only dir behind and break `TempDir`

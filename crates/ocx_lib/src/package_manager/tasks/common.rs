@@ -590,6 +590,20 @@ pub async fn wire_selection(
     // Both `current` and `candidates/{tag}` target the package root.
     let pkg_root = info.dir().dir.as_path();
 
+    // A deferred root's package directory has not been created — the shim tree
+    // creates it on first invocation — so pointing `candidates/{tag}` or
+    // `current` at it would publish a dangling install into the one namespace
+    // users address by name. No live path mints one here (`--lazy-mode` is off
+    // `install`/`select` by contract, and only `compose_roots` builds a deferred
+    // root), so this refuses a state the flag grammar already prevents — which
+    // is the point: the type, not the grammar, is what a future caller meets.
+    if info.deferred().is_some() {
+        return Err(PackageErrorKind::Internal(crate::error::file_error(
+            pkg_root,
+            std::io::Error::other("refusing to point an install symlink at a deferred package"),
+        )));
+    }
+
     // The host-only gate (issue #179): `candidates/{tag}` and `current` are
     // per-repo, platform-agnostic paths that platformless readers (`ocx package
     // which`, project env) expect to resolve to host-runnable content. A
@@ -704,6 +718,692 @@ pub fn rollback_symlink(rm: &ReferenceManager, forward_path: &Path, prior_target
             }
         }
     }
+}
+
+// ── Metadata-only dependency closure walker (ADR D3) ────────────────────────
+//
+// Shared by two genuinely different callers, which is why it lives here rather
+// than inside either of them: `inspect --deps` projects the node list into a
+// report (`Surface` / `ClosureConflicts`), and `prepare_lazy` derives a shim
+// name set from it (plan contract C-008 (a), which forbids a second walker).
+// The *projection* stays in `inspect.rs` — it is report shape, not walk.
+
+/// Phase-1 gather concurrency bound — caps how many per-node fetches
+/// [`gather_closure_nodes`]'s admission queue spawns at once over the closure
+/// frontier (ADR D3 panel W5). Codex C2: this bounds SPAWNED tasks, not just
+/// running fetch bodies — see `gather_closure_nodes`'s doc.
+pub(super) const CLOSURE_FETCH_CONCURRENCY: usize = 8;
+
+/// One node of a metadata-only dependency closure.
+#[derive(Debug)]
+pub struct ClosureNode {
+    /// Digest-addressed; advisory tag preserved for display.
+    pub identifier: oci::PinnedIdentifier,
+    /// Digest of the node's OCX metadata config blob, in the same registry as
+    /// [`identifier`](Self::identifier) — pair the two to address it
+    /// (`BlobStore::data(node.identifier.registry(), &node.config_digest)`).
+    ///
+    /// Carried because a *deferred* tool has no package directory: its config
+    /// blobs are reachable only through the shim tree's `refs/blobs/`, and the
+    /// generation task has no second walk to re-derive them from (plan
+    /// contracts C-008 / C-014 / C-020). `inspect` ignores it.
+    pub config_digest: oci::Digest,
+    /// Composed from the root via `Visibility::through_edge`/`merge`. `None`
+    /// iff `is_root` — the composed-from-root axis is undefined for the root
+    /// itself (the wire key is absent exactly when `root: true`).
+    pub effective_visibility: Option<metadata::visibility::Visibility>,
+    /// Tri-state, straight from the node's `Bundle.binaries`: key absent on
+    /// the wire means undeclared; `Some(empty)` means the publisher asserts
+    /// zero interface executables.
+    pub binaries: Option<metadata::Binaries>,
+    /// The node's declared entrypoint map keys.
+    pub entrypoints: Vec<metadata::EntrypointName>,
+    /// The node's own env vars, each carrying its declared visibility so the
+    /// interface (`has_interface`) and private (`has_private`) surface
+    /// projections can filter per-axis at aggregate time.
+    pub env: Vec<ClosureEnvVar>,
+    /// The node's declared integration namespace keys, in `BTreeMap` order.
+    /// Keys only — see `inspect::Surface::integrations` for why no payload.
+    pub integrations: Vec<String>,
+    /// The node's own declared dependency edges (as authored).
+    pub dependencies: Vec<ClosureEdge>,
+    pub is_root: bool,
+}
+
+/// One declared environment variable of a [`ClosureNode`]: the key, its
+/// modifier kind (path vs constant), and its declared visibility (which surface
+/// axes it crosses). The value is deliberately absent — a `${installPath}`-
+/// templated value is only concrete after install, and the surface summary is a
+/// "what keys" claim, not a resolved environment.
+#[derive(Debug, Clone)]
+pub struct ClosureEnvVar {
+    pub key: String,
+    pub kind: metadata::env::modifier::ModifierKind,
+    /// The declared separator for a `list`-kind var; `None` for every other
+    /// kind. Package metadata requires `list` to carry one, so this is only
+    /// ever `None` for a non-list var — declaration order is preserved and
+    /// there is no cross-node agreement to settle here, unlike the applied
+    /// entries `ocx env` composes.
+    pub separator: Option<String>,
+    pub visibility: metadata::visibility::Visibility,
+}
+
+/// A declared dependency edge (as authored), carrying its declared visibility.
+#[derive(Debug, Clone)]
+pub struct ClosureEdge {
+    pub identifier: oci::PinnedIdentifier,
+    /// The DECLARED edge visibility (goal #2 — "dependencies state their
+    /// linkage visibility"), as distinct from [`ClosureNode::effective_visibility`]
+    /// (the composed-from-root visibility).
+    pub visibility: metadata::visibility::Visibility,
+    pub name: metadata::dependency::DependencyName,
+}
+
+/// One gathered closure node: its RESOLVED pinned identity (the
+/// platform-selected child for an image-index-pinned dep, unchanged for a
+/// flat dep — Codex C1, matches install-time resolution — `pull.rs`'s
+/// `info.identifier()` is likewise the resolved identity, never the index),
+/// its config-blob digest, its validated metadata, and its own declared
+/// dependency edges. [`gather_closure_nodes`]'s output element type.
+type GatheredClosureNode = (
+    oci::PinnedIdentifier,
+    oci::Digest,
+    metadata::ValidMetadata,
+    Vec<ClosureEdge>,
+);
+
+/// A [`GatheredClosureNode`] tagged with its spawn slot and the edge's
+/// DECLARED identity (as authored — may differ from the gathered node's
+/// resolved identity for an image-index-pinned dep), so completion order
+/// (nondeterministic per `JoinSet::join_next`) can be re-sorted back into
+/// deterministic spawn order (quality-rust.md JoinSet rule) and
+/// [`gather_closure_nodes`]'s declared→resolved alias can be built.
+type SlottedClosureNode = (
+    usize,
+    oci::PinnedIdentifier,
+    oci::PinnedIdentifier,
+    oci::Digest,
+    metadata::ValidMetadata,
+    Vec<ClosureEdge>,
+);
+
+/// Stages `pinned`'s raw manifest bytes into the machine-global blob store
+/// when not already local — mirrors [`stage_and_link_chain_blobs`]'s
+/// `ChainRole::Manifest` step (`adr_index_indirection.md` A3/B2: the local
+/// index never caches a leaf, only dispatch objects; `$OCX_HOME/blobs` is the
+/// sanctioned content-cache home). No ref-link: the walker has no installed
+/// package directory to link into, so the staged blob is an unreferenced
+/// cache entry — `ocx clean` may reclaim it, same as any other cache-warming
+/// write. Shared by the root's own fetch and each dep's fetch
+/// ([`fetch_closure_node`]).
+///
+/// # Errors
+///
+/// Returns an error if the manifest cannot be fetched, fails its digest
+/// re-verification, or cannot be written to the blob store.
+pub async fn stage_leaf_manifest(
+    fs: &file_structure::FileStructure,
+    index: &oci::index::Index,
+    pinned: &oci::PinnedIdentifier,
+) -> Result<(), PackageErrorKind> {
+    if blob_needs_fetch(fs, pinned).await?
+        && let Some((bytes, _, _)) = index
+            .fetch_manifest_raw_bytes(pinned.as_identifier())
+            .await
+            .map_err(PackageErrorKind::Internal)?
+    {
+        // `fetch_manifest_raw_bytes` verifies the source's returned bytes are
+        // self-consistent with the digest the source computed, never against
+        // the digest actually requested (CWE-345) — re-verify against
+        // `pinned`'s own digest before this write, mirroring
+        // `stage_chain_blobs`'s identical check for the same seam.
+        verify_requested_digest(pinned, &bytes)?;
+        fs.blobs
+            .write_blob(pinned.registry(), &pinned.digest(), &bytes)
+            .await
+            .map_err(PackageErrorKind::Internal)?;
+    }
+    Ok(())
+}
+
+/// Two-phase metadata-only closure walker: Phase 1 parallel metadata gather
+/// (I/O-bound, via [`gather_closure_nodes`]), Phase 2 pure visibility fold
+/// (via [`fold_effective_visibility`]).
+///
+/// Returns the flat, deduped node list in transitive-closure order (deps
+/// before dependents, root last). Diamonds appear once with the most-open
+/// merged visibility. Projecting that list onto a surface is the caller's
+/// concern, not this walk's.
+///
+/// `root_config_digest` is the root's own metadata config-blob digest, which
+/// only the caller that fetched the root manifest has; every other node's is
+/// read during the gather.
+///
+/// Fail-closed: any single node error aborts the whole closure — a partial
+/// closure must never render as a complete one.
+///
+/// # Errors
+///
+/// See `adr_inspect_metadata_closure.md` Error Taxonomy: dep manifest/config
+/// absent under offline policy → `PackageErrorKind::Internal(crate::Error::OfflineMode)`;
+/// dep genuinely absent with a source consulted → `PackageErrorKind::NotFound`;
+/// malformed / wrong-media-type / over-cap config → the existing
+/// [`load_config_metadata`] errors; dep image-index child with no platform
+/// match → `PackageErrorKind::FeatureMismatch`.
+pub async fn walk_closure_nodes(
+    fs: &file_structure::FileStructure,
+    index: &oci::index::Index,
+    offline: bool,
+    root_pinned: &oci::PinnedIdentifier,
+    root_metadata: &metadata::ValidMetadata,
+    root_config_digest: oci::Digest,
+    platform: &oci::Platform,
+) -> Result<Vec<ClosureNode>, PackageErrorKind> {
+    let frontier = closure_edges_from_metadata(root_metadata);
+    let (gathered, resolved_identity) = gather_closure_nodes(fs, index, offline, frontier, platform).await?;
+    Ok(fold_effective_visibility(
+        root_pinned,
+        root_metadata,
+        root_config_digest,
+        gathered,
+        &resolved_identity,
+    ))
+}
+
+/// Per-gather invariants shared by every spawned fetch — grouped so `spawn`
+/// stays under the arg-count lint instead of taking each field separately.
+struct GatherContext<'a> {
+    fs: &'a file_structure::FileStructure,
+    index: &'a oci::index::Index,
+    offline: bool,
+    platform: &'a oci::Platform,
+}
+
+/// Phase 1 — parallel metadata gather. BFS the DAG from `frontier` (the
+/// root's declared dependency edges, deduped by advisory-stripped
+/// DECLARED-identity), fetching each *unique* edge's node concurrently
+/// through a bounded ADMISSION QUEUE: discovered edges wait in `pending`
+/// until fewer than [`CLOSURE_FETCH_CONCURRENCY`] fetches are spawned, so the
+/// bound caps outstanding tasks, not merely running fetch bodies (Codex C2 —
+/// the prior `Semaphore` only gated the fetch body, so a wide frontier still
+/// spawned every edge's task immediately). Digest-addressed edges make
+/// cycles impossible, so the BFS always terminates. Fail-closed: any node
+/// fetch error aborts the whole gather.
+///
+/// Per-node fetch: `fetch_manifest(dep.identifier, IndexOperation::Resolve)`
+/// then [`load_config_metadata`] for an image manifest, or platform-select the
+/// child then [`load_config_metadata`] for a dep pinned to an image index (ADR
+/// D3 "Per-node fetch").
+///
+/// Returns each gathered node's RESOLVED pinned identifier, its config-blob
+/// digest, its [`metadata::ValidMetadata`], and its own declared dependency
+/// edges (feeding [`fold_effective_visibility`]) — deduped by RESOLVED
+/// identity, since two different declared edges (a direct edge and an
+/// image-index edge) can resolve to the same digest (Codex C1). Also returns
+/// the declared→resolved alias map [`fold_effective_visibility`] needs to
+/// translate a [`ClosureEdge`] (always as-authored) to the node it actually
+/// reached.
+async fn gather_closure_nodes(
+    fs: &file_structure::FileStructure,
+    index: &oci::index::Index,
+    offline: bool,
+    frontier: Vec<ClosureEdge>,
+    platform: &oci::Platform,
+) -> Result<
+    (
+        Vec<GatheredClosureNode>,
+        HashMap<oci::PinnedIdentifier, oci::PinnedIdentifier>,
+    ),
+    PackageErrorKind,
+> {
+    let context = GatherContext {
+        fs,
+        index,
+        offline,
+        platform,
+    };
+    let mut visited: HashSet<oci::PinnedIdentifier> = HashSet::new();
+    let mut tasks: JoinSet<Result<SlottedClosureNode, PackageErrorKind>> = JoinSet::new();
+    let mut next_slot = 0usize;
+    // Discovered edges not yet admitted into `tasks` — `admit` drains this
+    // up to the concurrency bound; slot numbers are assigned at DISCOVERY
+    // time (below), independent of admission order, so the final ordering
+    // stays deterministic regardless of scheduling.
+    let mut pending: std::collections::VecDeque<(usize, ClosureEdge)> = std::collections::VecDeque::new();
+
+    // Spawns one fetch for `edge` into slot `slot`. A plain function (not a
+    // closure) so it can be called from `admit` without fighting the borrow
+    // checker over a captured `&mut JoinSet`.
+    fn spawn(
+        tasks: &mut JoinSet<Result<SlottedClosureNode, PackageErrorKind>>,
+        context: &GatherContext<'_>,
+        slot: usize,
+        edge: ClosureEdge,
+    ) {
+        let fs = context.fs.clone();
+        let index = context.index.clone();
+        let offline = context.offline;
+        let platform = context.platform.clone();
+        tasks.spawn(async move {
+            let declared = edge.identifier.clone();
+            let (resolved_pinned, config_digest, metadata, edges) =
+                fetch_closure_node(&fs, &index, offline, &declared, &platform).await?;
+            Ok((slot, declared, resolved_pinned, config_digest, metadata, edges))
+        });
+    }
+
+    // Admits queued edges into `tasks` up to the concurrency bound — the
+    // admission bound itself (Codex C2), enforced by never having more than
+    // `CLOSURE_FETCH_CONCURRENCY` tasks spawned at once, rather than a
+    // `Semaphore` gating only the fetch body inside an already-spawned task.
+    fn admit(
+        tasks: &mut JoinSet<Result<SlottedClosureNode, PackageErrorKind>>,
+        context: &GatherContext<'_>,
+        pending: &mut std::collections::VecDeque<(usize, ClosureEdge)>,
+    ) {
+        while tasks.len() < CLOSURE_FETCH_CONCURRENCY {
+            let Some((slot, edge)) = pending.pop_front() else {
+                break;
+            };
+            spawn(tasks, context, slot, edge);
+        }
+    }
+
+    for edge in frontier {
+        if visited.insert(edge.identifier.strip_advisory()) {
+            let slot = next_slot;
+            next_slot += 1;
+            pending.push_back((slot, edge));
+        }
+    }
+    admit(&mut tasks, &context, &mut pending);
+
+    // Results indexed by spawn slot for deterministic ordering
+    // (quality-rust.md JoinSet rule) — `join_next` completion order is
+    // otherwise nondeterministic.
+    let mut slots: Vec<Option<GatheredClosureNode>> = Vec::new();
+    // Declared (as-authored) identity → RESOLVED identity, built as each
+    // fetch completes. `fold_effective_visibility` needs this because a
+    // `ClosureEdge` always names the DECLARED identity, which for an
+    // image-index-pinned dep differs from the node it resolved to.
+    let mut resolved_identity: HashMap<oci::PinnedIdentifier, oci::PinnedIdentifier> = HashMap::new();
+    // RESOLVED identities already gathered (Codex C1/C2 post-selection
+    // dedup). The `visited` check above dedups by DECLARED edge identity,
+    // which cannot see that two different declared edges (e.g. a direct edge
+    // and an image-index edge selecting the same child) resolve to the same
+    // digest — this second, post-fetch check catches that and drops the
+    // duplicate fetch's node instead of inserting a second one (double
+    // counting its claims / manufacturing a false repo conflict downstream).
+    let mut resolved_seen: HashSet<oci::PinnedIdentifier> = HashSet::new();
+    while let Some(joined) = tasks.join_next().await {
+        // Fail-closed: the `?`s below return early on the first node error,
+        // dropping `tasks` — `JoinSet::drop` aborts every task still
+        // in-flight, so a partial closure is never observed by the caller.
+        let (slot, declared, resolved_pinned, config_digest, metadata, edges) =
+            joined.map_err(|_| PackageErrorKind::TaskPanicked)??;
+        resolved_identity.insert(declared.strip_advisory(), resolved_pinned.strip_advisory());
+
+        for child_edge in &edges {
+            if visited.insert(child_edge.identifier.strip_advisory()) {
+                let slot = next_slot;
+                next_slot += 1;
+                pending.push_back((slot, child_edge.clone()));
+            }
+        }
+
+        // Drop a duplicate resolution instead of inserting a second node;
+        // `slots[slot]` stays `None` and is filtered out below. Still worth
+        // discovering `edges` above regardless of the outcome here — content
+        // addressing guarantees a duplicate's declared deps are byte-identical
+        // to the first resolution's, so `visited` already no-ops any re-spawn.
+        if resolved_seen.insert(resolved_pinned.strip_advisory()) {
+            if slot >= slots.len() {
+                slots.resize_with(slot + 1, || None);
+            }
+            slots[slot] = Some((resolved_pinned, config_digest, metadata, edges));
+        }
+
+        admit(&mut tasks, &context, &mut pending);
+    }
+
+    Ok((slots.into_iter().flatten().collect(), resolved_identity))
+}
+
+/// Per-node fetch for the closure walker (ADR D3 "Per-node fetch"): fetches
+/// `dep_pinned`'s manifest via the same `IndexOperation::Resolve` routing
+/// `inspect`'s default mode uses (local-first, write-through on miss), loads
+/// its OCX metadata, and returns the node's RESOLVED identity plus its
+/// config-blob digest, its metadata and its own declared dependency edges.
+///
+/// A dep pinned to an image index (hand-authored — ordinary `ocx package
+/// create` always pins a platform-manifest digest, `dependency_pinning.rs`)
+/// platform-selects the child before loading its config; the returned
+/// identity is the SELECTED CHILD's digest — `dep_pinned`'s own advisory tag
+/// is preserved on it (`Index::fetch_candidates` derives the candidate via
+/// `identifier.clone_with_digest`, so the tag survives selection unchanged)
+/// — matching install-time resolution (`pull.rs`'s `info.identifier()` is
+/// likewise the platform-selected identity, never the index digest; Codex
+/// C1). The authored index reference stays visible, unchanged, on the
+/// parent's [`ClosureEdge`] — only the node's own identity and the gather-time
+/// dedup key move to the resolved child.
+async fn fetch_closure_node(
+    fs: &file_structure::FileStructure,
+    index: &oci::index::Index,
+    offline: bool,
+    dep_pinned: &oci::PinnedIdentifier,
+    platform: &oci::Platform,
+) -> Result<
+    (
+        oci::PinnedIdentifier,
+        oci::Digest,
+        metadata::ValidMetadata,
+        Vec<ClosureEdge>,
+    ),
+    PackageErrorKind,
+> {
+    let dep_identifier = dep_pinned.as_identifier().clone();
+    let manifest = match index
+        .fetch_manifest(&dep_identifier, oci::index::IndexOperation::Resolve)
+        .await
+        .map_err(PackageErrorKind::Internal)?
+    {
+        Some((_, manifest)) => manifest,
+        None => return Err(closure_fetch_miss(offline)),
+    };
+
+    let (resolved_pinned, image) = match manifest {
+        oci::Manifest::Image(img) => (dep_pinned.clone(), img),
+        oci::Manifest::ImageIndex(_) => {
+            let selected = match index
+                .select(&dep_identifier, platform, oci::index::IndexOperation::Resolve)
+                .await
+                .map_err(PackageErrorKind::Internal)?
+            {
+                oci::index::SelectResult::Found(id) => id,
+                oci::index::SelectResult::Ambiguous(candidates) => {
+                    return Err(PackageErrorKind::SelectionAmbiguous(candidates));
+                }
+                oci::index::SelectResult::NotFound => return Err(PackageErrorKind::NotFound),
+                oci::index::SelectResult::FeatureMismatch {
+                    host_features,
+                    available,
+                } => {
+                    return Err(PackageErrorKind::FeatureMismatch {
+                        host_features,
+                        available,
+                    });
+                }
+            };
+            let child_pinned =
+                oci::PinnedIdentifier::try_from(selected.clone()).map_err(|_| PackageErrorKind::DigestMissing)?;
+            let image = match index
+                .fetch_manifest(&selected, oci::index::IndexOperation::Resolve)
+                .await
+                .map_err(PackageErrorKind::Internal)?
+            {
+                Some((_, oci::Manifest::Image(img))) => img,
+                // A selected child that is itself an image index, or that
+                // vanished between select and fetch, is not a valid OCI
+                // dependency shape — mirrors the "absent child digest" row
+                // of the ADR Error Taxonomy.
+                Some((_, oci::Manifest::ImageIndex(_))) | None => return Err(closure_fetch_miss(offline)),
+            };
+            (child_pinned, image)
+        }
+    };
+
+    stage_leaf_manifest(fs, index, &resolved_pinned).await?;
+
+    let config_digest = config_blob_digest(&image)?;
+    let metadata = load_config_metadata(index, &resolved_pinned, &image).await?;
+    let edges = closure_edges_from_metadata(&metadata);
+    Ok((resolved_pinned, config_digest, metadata, edges))
+}
+
+/// The digest of an image manifest's config descriptor — the OCX metadata
+/// blob. A descriptor whose `digest` string does not parse is a corrupt
+/// manifest, not a missing one, so the structured `DigestError` is carried
+/// (still classifies to `DataError`/65).
+///
+/// # Errors
+///
+/// Returns an error if the config descriptor's digest string is malformed.
+pub fn config_blob_digest(image: &oci::ImageManifest) -> Result<oci::Digest, PackageErrorKind> {
+    oci::Digest::try_from(image.config.digest.as_str()).map_err(|e| PackageErrorKind::Internal(crate::Error::from(e)))
+}
+
+/// Resolves a closure-frontier manifest miss to the correct error, matching
+/// the ADR D3 Error Taxonomy: a policy block under `--offline` (no source
+/// was allowed to be consulted), or a genuine not-found when a source could
+/// have been (or was) consulted.
+fn closure_fetch_miss(offline: bool) -> PackageErrorKind {
+    if offline {
+        PackageErrorKind::Internal(crate::Error::OfflineMode)
+    } else {
+        PackageErrorKind::NotFound
+    }
+}
+
+/// Builds a node's declared dependency edges (as authored) from its
+/// validated metadata — the wire-shape source for [`ClosureEdge`], shared by
+/// every gather call site and by the root's own `dependencies` field.
+fn closure_edges_from_metadata(metadata: &metadata::ValidMetadata) -> Vec<ClosureEdge> {
+    metadata
+        .dependencies()
+        .iter()
+        .map(|dep| ClosureEdge {
+            identifier: dep.identifier.clone(),
+            visibility: dep.visibility,
+            name: dep.name(),
+        })
+        .collect()
+}
+
+/// Phase 2 — pure visibility fold (no I/O). Computes each gathered node's
+/// effective visibility as seen from the root by folding
+/// `Visibility::through_edge` down every path from the root and
+/// `Visibility::merge`-ing at diamonds — the identical algorithm
+/// [`crate::package::resolved_package::ResolvedPackage::with_dependencies`]
+/// applies to an installed transitive closure, sourced here from `gathered`
+/// metadata instead of `resolve.json`.
+///
+/// Returns the flat, deduped node list in topological order (deps before
+/// dependents, root last) — `root_pinned`'s own node carries
+/// `effective_visibility: None` and `is_root: true` (the composed-from-root
+/// axis is undefined for the root itself).
+fn fold_effective_visibility(
+    root_pinned: &oci::PinnedIdentifier,
+    root_metadata: &metadata::ValidMetadata,
+    root_config_digest: oci::Digest,
+    gathered: Vec<GatheredClosureNode>,
+    resolved_identity: &HashMap<oci::PinnedIdentifier, oci::PinnedIdentifier>,
+) -> Vec<ClosureNode> {
+    let by_identity: HashMap<oci::PinnedIdentifier, GatheredClosureNode> = gathered
+        .into_iter()
+        .map(|entry| (entry.0.strip_advisory(), entry))
+        .collect();
+
+    // Bottom-up (post-order) DFS: each node's own `ResolvedPackage` needs its
+    // direct children's already-computed `ResolvedPackage`s, exactly as the
+    // install pipeline computes `resolve.json` while recursively pulling
+    // deps (`pull.rs`). `order` collects the post-order visitation sequence
+    // — deps before dependents, by construction.
+    let mut resolved: HashMap<oci::PinnedIdentifier, ResolvedPackage> = HashMap::new();
+    let mut order: Vec<oci::PinnedIdentifier> = Vec::new();
+    let root_edges = closure_edges_from_metadata(root_metadata);
+    for edge in &root_edges {
+        let resolved_key = resolved_edge_identity(resolved_identity, edge);
+        visit_closure_node(
+            &resolved_key,
+            &by_identity,
+            resolved_identity,
+            &mut resolved,
+            &mut order,
+        );
+    }
+
+    // Root's own `ResolvedPackage`, built the same way, yields every
+    // descendant's effective visibility as seen from the root — the
+    // identical algorithm `ResolvedPackage::with_dependencies` applies at
+    // install time, sourced here from gathered metadata instead of
+    // `resolve.json`. Keyed by RESOLVED identity (Codex C1) — `with_dependencies`
+    // dedups by its identifier argument, so a declared identity here would
+    // fragment a single package into two entries whenever a dep is pinned to
+    // an image index.
+    let root_children: Vec<(oci::PinnedIdentifier, ResolvedPackage, metadata::visibility::Visibility)> = root_edges
+        .iter()
+        .map(|edge| {
+            let resolved_key = resolved_edge_identity(resolved_identity, edge);
+            let child_resolved = resolved.get(&resolved_key).cloned().unwrap_or_default();
+            (resolved_key, child_resolved, edge.visibility)
+        })
+        .collect();
+    let effective: HashMap<oci::PinnedIdentifier, metadata::visibility::Visibility> = ResolvedPackage::new()
+        .with_dependencies(root_children)
+        .dependencies
+        .into_iter()
+        .map(|dep| (dep.identifier.strip_advisory(), dep.visibility))
+        .collect();
+
+    let mut nodes: Vec<ClosureNode> = order
+        .into_iter()
+        .map(|key| {
+            let (identifier, config_digest, metadata, edges) = by_identity
+                .get(&key)
+                .expect("fold_effective_visibility only visits keys populated by gather_closure_nodes");
+            let effective_visibility = Some(
+                *effective
+                    .get(&key)
+                    .expect("every gathered node is reachable from root by construction"),
+            );
+            ClosureNode {
+                identifier: identifier.clone(),
+                config_digest: config_digest.clone(),
+                effective_visibility,
+                binaries: metadata.binaries().cloned(),
+                entrypoints: metadata
+                    .entrypoints()
+                    .map(|entries| entries.names().cloned().collect())
+                    .unwrap_or_default(),
+                env: closure_env_vars(metadata),
+                integrations: closure_integrations(metadata),
+                dependencies: edges.clone(),
+                is_root: false,
+            }
+        })
+        .collect();
+
+    // Root last — the composed-from-root axis is undefined for the root
+    // itself, so `effective_visibility` stays `None` (panel W3).
+    nodes.push(ClosureNode {
+        identifier: root_pinned.clone(),
+        config_digest: root_config_digest,
+        effective_visibility: None,
+        binaries: root_metadata.binaries().cloned(),
+        entrypoints: root_metadata
+            .entrypoints()
+            .map(|entries| entries.names().cloned().collect())
+            .unwrap_or_default(),
+        env: closure_env_vars(root_metadata),
+        integrations: closure_integrations(root_metadata),
+        dependencies: root_edges,
+        is_root: true,
+    });
+
+    nodes
+}
+
+/// A node's own declared env vars as [`ClosureEnvVar`]s, each carrying its
+/// visibility — UNFILTERED, so both surface projections can gate per-axis at
+/// aggregate time. Declaration order is preserved. The metadata-only source
+/// for the composer's two-env emission gate
+/// (`var.visibility.has_interface()` / `has_private()`).
+fn closure_env_vars(metadata: &metadata::ValidMetadata) -> Vec<ClosureEnvVar> {
+    metadata
+        .env()
+        .into_iter()
+        .flatten()
+        .map(|var| ClosureEnvVar {
+            key: var.key.clone(),
+            // `ValidMetadata` (the parameter type) rejects every modifier type
+            // this binary does not know, so no `Unknown` survives to here.
+            kind: metadata::env::modifier::ModifierKind::try_from(&var.modifier)
+                .expect("ValidMetadata rejects unknown modifier types before any closure walk"),
+            separator: match &var.modifier {
+                metadata::env::modifier::Modifier::List(list) => list.separator.clone(),
+                _ => None,
+            },
+            visibility: var.visibility,
+        })
+        .collect()
+}
+
+/// A node's own declared integration NAMESPACE keys, in `BTreeMap` order.
+///
+/// Keys only — the payload is deliberately absent for the same reason
+/// [`closure_env_vars`] drops env values: a closure node is not installed, so
+/// `${installPath}` has no value and an interpolated payload would be a
+/// half-truth. Unfiltered, like `closure_env_vars`; the surface gate
+/// (`composer::integrations_cross`) applies at aggregate time in
+/// `inspect::project_surface`.
+fn closure_integrations(metadata: &metadata::ValidMetadata) -> Vec<String> {
+    metadata
+        .integrations()
+        .iter()
+        .map(|(namespace, _)| namespace.to_owned())
+        .collect()
+}
+
+/// Translates a declared [`ClosureEdge`]'s identity to the RESOLVED identity
+/// [`gather_closure_nodes`] actually gathered a node under (Codex C1) — the
+/// platform-selected child for an image-index-pinned dep, unchanged for a
+/// flat dep. Every edge reachable from root has an alias entry by
+/// construction (`gather_closure_nodes` populates one per fetch it completes,
+/// and it completes a fetch for every edge the BFS discovers).
+fn resolved_edge_identity(
+    resolved_identity: &HashMap<oci::PinnedIdentifier, oci::PinnedIdentifier>,
+    edge: &ClosureEdge,
+) -> oci::PinnedIdentifier {
+    resolved_identity
+        .get(&edge.identifier.strip_advisory())
+        .cloned()
+        .expect("gather_closure_nodes populates the alias map for every edge reachable from root")
+}
+
+/// Post-order DFS over `key`'s declared edges, memoizing each visited node's
+/// own [`ResolvedPackage`] (its transitive closure as seen from itself) into
+/// `resolved` and recording deps-before-dependents visitation order in
+/// `order`. A no-op once `key` is already memoized — every node is visited
+/// at most once regardless of how many edges reach it (diamond dedup).
+/// `key` and every memoization key here are RESOLVED identities (Codex C1) —
+/// `resolved_identity` translates each child edge's declared identity before
+/// recursing, so two different declared edges resolving to the same digest
+/// (a direct edge and an image-index edge selecting it) memoize to the SAME
+/// entry instead of computing the fold twice.
+fn visit_closure_node(
+    key: &oci::PinnedIdentifier,
+    by_identity: &HashMap<oci::PinnedIdentifier, GatheredClosureNode>,
+    resolved_identity: &HashMap<oci::PinnedIdentifier, oci::PinnedIdentifier>,
+    resolved: &mut HashMap<oci::PinnedIdentifier, ResolvedPackage>,
+    order: &mut Vec<oci::PinnedIdentifier>,
+) {
+    if resolved.contains_key(key) {
+        return;
+    }
+    let (_, _, _, edges) = by_identity
+        .get(key)
+        .expect("gather_closure_nodes populates by_identity for every edge reachable from root");
+    let children: Vec<(oci::PinnedIdentifier, ResolvedPackage, metadata::visibility::Visibility)> = edges
+        .iter()
+        .map(|edge| {
+            let child_key = resolved_edge_identity(resolved_identity, edge);
+            visit_closure_node(&child_key, by_identity, resolved_identity, resolved, order);
+            let child_resolved = resolved.get(&child_key).cloned().unwrap_or_default();
+            (child_key, child_resolved, edge.visibility)
+        })
+        .collect();
+    resolved.insert(key.clone(), ResolvedPackage::new().with_dependencies(children));
+    order.push(key.clone());
 }
 
 #[cfg(test)]
@@ -903,6 +1603,49 @@ mod tests {
             std::fs::read_link(&candidate_path).unwrap(),
             host_target,
             "foreign install must not clobber the host candidate slot"
+        );
+    }
+
+    /// Plan F-2: a **deferred** `InstallInfo` is refused by the install-symlink
+    /// writer, and refused before anything is written.
+    ///
+    /// `candidates/{tag}` and `current` are the namespace users address by
+    /// name; a deferred root's package directory does not exist yet, so a link
+    /// into it is a dangling install. No live path produces one today — the
+    /// guard is what keeps that true when a future caller reaches for
+    /// `wire_selection` with whatever `compose_roots` handed it.
+    #[tokio::test]
+    async fn wire_selection_refuses_a_deferred_install_info() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let fs = FileStructure::with_root(tempdir.path().to_path_buf());
+        let (tagged, info) = install_info_fixture(&fs).await;
+
+        // Control: the same fixture wires cleanly when it is not deferred, so
+        // the refusal below cannot be attributed to the fixture.
+        super::wire_selection(&fs, &tagged, &info, true, true)
+            .await
+            .expect("a materialized package wires its symlinks");
+        let candidate_path = fs.symlinks.candidate(&tagged);
+        let materialized_target = std::fs::read_link(&candidate_path).expect("the control wrote a candidate");
+
+        let deferred = info.with_deferred(crate::package::install_info::DeferredComposition::new(
+            crate::file_structure::ShimDir {
+                dir: tempdir.path().join("shims").join("tool"),
+            },
+            Vec::new(),
+        ));
+
+        let error = super::wire_selection(&fs, &tagged, &deferred, true, true)
+            .await
+            .expect_err("a deferred package has no directory to point a symlink at");
+        assert!(
+            matches!(error, super::PackageErrorKind::Internal(_)),
+            "expected an internal refusal, got {error:?}"
+        );
+        assert_eq!(
+            std::fs::read_link(&candidate_path).unwrap(),
+            materialized_target,
+            "the refusal must leave the existing candidate untouched"
         );
     }
 

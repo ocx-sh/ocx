@@ -24,6 +24,7 @@ pub mod patch_publish;
 pub mod patch_sync;
 pub mod patch_test;
 pub mod patch_why;
+pub mod path_kind;
 pub mod paths;
 pub mod pull_dry_run;
 pub mod push;
@@ -34,6 +35,7 @@ pub mod self_update;
 pub mod status;
 pub mod tag;
 pub mod version;
+pub mod warmed_paths;
 
 /// Neutralizes terminal-control sequences in an untrusted name bound for an
 /// operator's screen (CWE-150).

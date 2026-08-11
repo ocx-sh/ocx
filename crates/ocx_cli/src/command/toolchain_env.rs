@@ -68,8 +68,14 @@ use ocx_lib::{
     env,
     oci::Platform,
     package::metadata::env::entry::Entry,
-    package_manager::{AdmittedClaims, PatchProvenance},
-    project::{ALL_GROUP, DEFAULT_GROUP, ProjectLock, compose_tool_set, expand_all_keyword, lock::lock_path_for},
+    package_manager::{
+        AdmittedClaims, PatchProvenance,
+        composer::{ComposeRequest, ComposeRoots, Materialization},
+    },
+    project::{
+        ALL_GROUP, DEFAULT_GROUP, Origin, ProjectLock, ResolvedTool, compose_tool_set, expand_all_keyword,
+        lazy_mode_for_tool, lock::lock_path_for,
+    },
 };
 
 use crate::{
@@ -176,6 +182,20 @@ pub struct ToolchainEnv {
     #[clap(flatten)]
     pull: options::Pull,
 
+    /// Top tier of the `lazy-mode` ladder for every tool this command composes.
+    ///
+    /// `always` composes a tool as a generated shim: its declared names reach
+    /// `PATH` immediately and its content downloads on first use. The shim
+    /// directory sits *below* the tool's own `entrypoints/` and `bin/` in the
+    /// composed `PATH`, so the same exported environment stops routing through
+    /// it once the first invocation has materialized the package.
+    ///
+    /// Combined with `--no-pull`, a tool whose metadata is not already local
+    /// is reported on stderr and omitted, exactly as a not-materialised tool
+    /// is on the eager path.
+    #[clap(flatten)]
+    lazy_mode: options::LazyMode,
+
     /// Annotate each entry with its origin package or companion identifier.
     ///
     /// When `[patches]` is configured, companion overlay entries are appended
@@ -190,6 +210,56 @@ pub struct ToolchainEnv {
 }
 
 impl ToolchainEnv {
+    /// The materialization policy this command applies to a tool whose
+    /// `lazy-mode` resolved to `never`.
+    ///
+    /// The `--[no-]pull` pair, restated as the library's vocabulary: the eager
+    /// default installs on a miss, `--no-pull` probes the local store only and
+    /// warns-and-omits a miss. Folding the choice into one value is what lets
+    /// the lazy split reuse this command's existing policy instead of growing a
+    /// second one beside it — and it is the same value that decides whether a
+    /// *deferred* tool whose metadata is not local is an error or an omission
+    /// (S-009).
+    ///
+    /// The global tier ignores this: it never installs by contract.
+    fn materialization(&self) -> Materialization {
+        if self.pull.enabled(true) {
+            Materialization::Install
+        } else {
+            Materialization::LocalOnly
+        }
+    }
+
+    /// Report what only this command can report about the deferred tools it
+    /// composed: the omissions (S-009) and the advisories (C-015 (d)).
+    ///
+    /// Omissions go to stderr through the user interface, in the same shape and
+    /// with the same remedy as the eager `--no-pull` warning above them, so a
+    /// caller cannot tell from the message which half of the split dropped a
+    /// tool — only that it is absent and how to get it.
+    ///
+    /// Advisories are raised only for **deferred** tools, which is the fact
+    /// that makes C-015 (d)'s "deferred tool only" clause testable: an
+    /// eagerly-materialized tool never reaches `prepare_lazy`, so it can
+    /// contribute none.
+    fn report_deferred(&self, context: &crate::app::Context, composed: &ComposeRoots, tools: &[ResolvedTool]) {
+        for omission in &composed.omitted {
+            // Named by binding, not by identifier: this is the same sentence
+            // the eager path printed before the lazy split existed, and a user
+            // reads `ocx.toml` in binding names.
+            let name = tools
+                .iter()
+                .find(|tool| tool.identifier == omission.identifier)
+                .map_or_else(|| omission.identifier.to_string(), |tool| tool.binding.clone());
+            context.ui().warn(format!(
+                "{name} not installed; run `ocx pull` to fetch or drop --no-pull"
+            ));
+        }
+        for advisory in &composed.advisories {
+            context.ui().warn(advisory.to_string());
+        }
+    }
+
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // Reject empty comma segments (`-g ci,,lint`) BEFORE any tier split or
         // config load (parse-level, mirrors `run`/`pull` Phase A).
@@ -217,6 +287,11 @@ impl ToolchainEnv {
         // clap's `Option<Platform>` `--platform` field already enforces at
         // most one value, so the default-to-host fallback is all that's left.
         let target = platform_or_default(self.platform.platform.clone());
+
+        // Advisories raised by the deferred half of the project tier, kept for
+        // the structured report below (C-015: warning-only, but readable —
+        // a channel that only reaches a log is not a channel).
+        let mut advisories: Vec<ocx_lib::package_manager::LazyAdvisory> = Vec::new();
 
         // ── Resolve entries: one global path, one project path ───────────────
         // Root `--global` / `OCX_GLOBAL` (already folded into the context via
@@ -275,50 +350,39 @@ impl ToolchainEnv {
             // surfaces `NoHostLeaf` (exit 78) from `compose_tool_set`.
             let composed = compose_tool_set(&ctx.config, Some(&ctx.lock), &expanded, &[], &target)?;
 
+            // One entry point for both halves of the lazy split: a tool whose
+            // resolved `lazy-mode` is `always` gets a generated shim tree and
+            // reaches `PATH` without its content; every other tool takes this
+            // command's own materialization policy, unchanged.
+            //
+            // `--no-pull` routes through an offline `PackageManager` clone so
+            // any incidental index lookup (V1 legacy locks walk the cached
+            // index->manifest chain) stays local — a not-materialised tool is
+            // warned about and omitted, never fetched.
             let manager = context.manager();
-            let infos: Vec<Arc<ocx_lib::package::install_info::InstallInfo>> = if self.pull.enabled(true) {
-                // Default: resolve + install-on-miss, a SINGLE batched install
-                // (mirror run.rs). A lock-pinned tool already in the object
-                // store resolves locally with no network (cache-first on the
-                // pinned digest); only a genuine miss falls through to the
-                // registry to materialise it.
-                let identifiers: Vec<ocx_lib::oci::Identifier> =
-                    composed.into_iter().map(|tool| tool.identifier).collect();
-                manager
-                    .find_or_install_all(identifiers, target.clone(), context.concurrency())
-                    .await?
-                    .into_iter()
-                    .map(Arc::new)
-                    .collect()
-            } else {
-                // `--no-pull`: probe the local object store only, never the
-                // registry. An offline `PackageManager` clone forces any
-                // incidental index lookup (V1 legacy locks walk the cached
-                // index->manifest chain; V2 locks read the pinned leaf
-                // directly) to stay local, so a not-materialised tool is warned
-                // about on stderr and omitted (mirrors `direnv export`); any
-                // other find failure stays a hard error.
-                let offline = manager.offline_view(context.local_index().clone());
-                let mut infos = Vec::with_capacity(composed.len());
-                for tool in &composed {
-                    match offline.find(&tool.identifier, target.clone()).await {
-                        Ok(info) => infos.push(Arc::new(info)),
-                        Err(ocx_lib::package_manager::error::PackageErrorKind::NotFound) => {
-                            context.ui().warn(format!(
-                                "{} not installed; run `ocx pull` to fetch or drop --no-pull",
-                                tool.binding
-                            ));
-                        }
-                        Err(kind) => {
-                            return Err(ocx_lib::package_manager::error::Error::FindFailed(vec![
-                                ocx_lib::package_manager::error::PackageError::new(tool.identifier.clone(), kind),
-                            ])
-                            .into());
-                        }
-                    }
-                }
-                infos
+            let materialization = self.materialization();
+            let requests: Vec<ComposeRequest> = composed
+                .iter()
+                .map(|tool| ComposeRequest {
+                    identifier: tool.identifier.clone(),
+                    mode: lazy_mode_for_tool(
+                        &ctx.config,
+                        &tool.identifier,
+                        group_of(&tool.origin),
+                        self.lazy_mode.mode(),
+                    ),
+                })
+                .collect();
+            let composing = match materialization {
+                Materialization::LocalOnly => manager.offline_view(context.local_index().clone()),
+                _ => manager.clone(),
             };
+            let roots = composing
+                .compose_roots(&requests, &target, materialization, context.concurrency())
+                .await?;
+            self.report_deferred(&context, &roots, &composed);
+            advisories = roots.advisories;
+            let infos: Vec<Arc<ocx_lib::package::install_info::InstallInfo>> = roots.roots;
             // Per-package opt-out from the in-scope project `ocx.toml`, plus
             // its `[env]`, each selected group's `[env]`, and `--env` last —
             // stages 4-6, assembled exactly as `ocx run` assembles them.
@@ -405,14 +469,21 @@ impl ToolchainEnv {
         let entrypoints = api::data::env::BinaryAttribution::from_pairs(&attribution.entrypoints);
         let integrations = api::data::env::IntegrationAttribution::from_pairs(&attribution.integrations);
 
-        context.api().report(&api::data::env::EnvVars::new(
-            env_data,
-            binaries,
-            entrypoints,
-            integrations,
-        ))?;
+        context.api().report(
+            &api::data::env::EnvVars::new(env_data, binaries, entrypoints, integrations)
+                .with_advisories(api::data::env::LazyAdvisoryReport::from_advisories(&advisories)),
+        )?;
 
         Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// The group tier of the `lazy-mode` ladder for one selected tool, or `None`
+/// for a positional package — which has no group and therefore no group tier.
+fn group_of(origin: &Origin) -> Option<&str> {
+    match origin {
+        Origin::Group(name) => Some(name.as_str()),
+        Origin::Explicit => None,
     }
 }
 

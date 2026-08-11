@@ -29,8 +29,10 @@ use std::process::ExitCode;
 use clap::Parser;
 use ocx_lib::env;
 use ocx_lib::package::metadata::env::entry::Entry;
+use ocx_lib::package_manager::composer::{ComposeRequest, Materialization};
 use ocx_lib::project::{
-    DEFAULT_GROUP, check_duplicate_selection, expand_all_keyword, resolve_selected_tools, select_tool_set,
+    DEFAULT_GROUP, Origin, check_duplicate_selection, expand_all_keyword, lazy_mode_for_tool, resolve_selected_tools,
+    select_tool_set,
 };
 use ocx_lib::utility::child_process;
 
@@ -63,6 +65,17 @@ pub struct Run {
 
     #[clap(flatten)]
     pub env: options::EnvOverride,
+
+    /// Top tier of the `lazy-mode` ladder for every tool this command composes
+    /// into the child environment.
+    ///
+    /// `always` composes a tool as a generated shim: its declared names reach
+    /// the child's `PATH` immediately and its content downloads the first time
+    /// one of them runs. The shim directory sits *below* the tool's own
+    /// `entrypoints/` and `bin/`, so a second invocation of the same name
+    /// inside the same child resolves to the materialized binary directly.
+    #[clap(flatten)]
+    pub lazy_mode: options::LazyMode,
 
     /// Binding names to compose into the child env. Each name must
     /// resolve unambiguously inside the selected scope. Only the named
@@ -185,12 +198,32 @@ impl Run {
 
         let manager = context.manager();
 
-        let identifiers: Vec<_> = resolved.iter().map(|r| r.identifier.clone()).collect();
-        let infos = manager
-            .find_or_install_all(identifiers, host.clone(), context.concurrency())
+        // One entry point for both halves of the lazy split: a tool whose
+        // resolved `lazy-mode` is `always` reaches the child's `PATH` as a
+        // generated shim with no content downloaded; every other tool is
+        // installed-on-miss exactly as before.
+        let requests: Vec<ComposeRequest> = resolved
+            .iter()
+            .map(|tool| ComposeRequest {
+                identifier: tool.identifier.clone(),
+                mode: lazy_mode_for_tool(
+                    &ctx.config,
+                    &tool.identifier,
+                    match &tool.origin {
+                        Origin::Group(name) => Some(name.as_str()),
+                        Origin::Explicit => None,
+                    },
+                    self.lazy_mode.mode(),
+                ),
+            })
+            .collect();
+        let composed = manager
+            .compose_roots(&requests, &host, Materialization::Install, context.concurrency())
             .await?;
-        let install_infos: Vec<std::sync::Arc<ocx_lib::package::install_info::InstallInfo>> =
-            infos.into_iter().map(std::sync::Arc::new).collect();
+        for advisory in &composed.advisories {
+            context.ui().warn(advisory.to_string());
+        }
+        let install_infos = composed.roots;
         // Per-package opt-out set from the project `ocx.toml` (`no-patches`):
         // opted-out bases get no companion overlay unless the tier is
         // system-required. `run.rs` does not need the patch boundary index.

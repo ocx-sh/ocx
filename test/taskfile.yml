@@ -277,9 +277,11 @@ tasks:
   doc-scripts:drift:
     desc: >-
       Run the full doc-script drift gate for ALL # doc: scripts (registry-backed
-      executor + static binding/parser/publish collections). Deploy-CI only —
-      NOT wired into `task verify` / `task` per the ADR cost-lever (registry
-      provisioning is too expensive for the per-commit loop).
+      executor + static binding/parser/publish collections). A convenience
+      subset-runner, not a separate CI-only gate: every module it names here is
+      already collected unconditionally by `test:parallel` (see that task's
+      `sources:` comment above), so this is the same gate scoped down to iterate
+      on doc scripts without the rest of the acceptance suite.
     cmds:
       - task: build
         vars:

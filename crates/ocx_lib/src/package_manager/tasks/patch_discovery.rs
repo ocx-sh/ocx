@@ -2538,12 +2538,6 @@ mod tests {
     /// Traceability: Fix 4 — CAS integrity re-verification in `load_descriptor_from_cas`.
     #[tokio::test(flavor = "multi_thread")]
     async fn fix4_corrupted_manifest_blob_rejected_with_digest_mismatch() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`:
-        // this test calls BlobStore::write_blob, which increments the process-global
-        // WRITE_BLOB_CALL_COUNT. Holding this lock prevents concurrent calls from
-        // inflating the delta measured by the coalescing test.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use crate::oci::Algorithm;
 
         let dir = TempDir::new().unwrap();
@@ -2619,7 +2613,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn fix4_corrupted_layer_blob_rejected_with_digest_mismatch() {
         // Same serialisation guard as `fix4_corrupted_manifest_blob_rejected_with_digest_mismatch`.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
 
         use crate::oci::Algorithm;
 

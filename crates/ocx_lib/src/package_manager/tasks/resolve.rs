@@ -2448,9 +2448,10 @@ mod spec_tests {
     use super::ChainRole;
     use crate::{
         file_structure::{FileStructure, IndexStore},
-        oci::index::{ChainMode, Index, IndexImpl, LocalConfig, LocalIndex},
+        oci::index::{ChainMode, Index, LocalConfig, LocalIndex},
         oci::{self, Algorithm, Digest, Identifier},
         package_manager::PackageManager,
+        test::manifest_source::FakeManifestSource,
     };
 
     const REGISTRY: &str = "example.com";
@@ -2486,72 +2487,6 @@ mod spec_tests {
             ChainMode::Offline,
         );
         PackageManager::new(fs, index, None, REGISTRY)
-    }
-
-    /// A minimal fake source serving a fixed set of `(tag-or-digest) ->
-    /// bytes` entries, keyed by tag for a tag-addressed lookup or by digest
-    /// string for a digest-addressed one (the platform-selected child of an
-    /// image index). Used with `ChainMode::Default` so `PackageManager::resolve()`
-    /// can recover a LEAF platform manifest — a leaf is never locally cached
-    /// (A3), so an offline-only pre-seeded fixture cannot answer a `resolve()`
-    /// call for content that names one; this fake source drives the same
-    /// absent-dispatch recovery path a live registry would.
-    #[derive(Clone, Default)]
-    struct FakeManifestSource {
-        entries: std::collections::HashMap<String, (Vec<u8>, Digest, oci::Manifest)>,
-    }
-
-    impl FakeManifestSource {
-        fn with(mut self, key: &str, bytes: &[u8]) -> Self {
-            let digest = Algorithm::Sha256.hash(bytes);
-            let manifest = serde_json::from_slice(bytes).unwrap();
-            self.entries.insert(key.to_string(), (bytes.to_vec(), digest, manifest));
-            self
-        }
-
-        fn lookup(&self, identifier: &Identifier) -> Option<(Vec<u8>, Digest, oci::Manifest)> {
-            let key = match identifier.digest() {
-                Some(digest) => digest.to_string(),
-                None => identifier.tag_or_latest().to_string(),
-            };
-            self.entries.get(&key).cloned()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl IndexImpl for FakeManifestSource {
-        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
-            Ok(Vec::new())
-        }
-        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
-            Ok(None)
-        }
-        async fn fetch_manifest(
-            &self,
-            identifier: &Identifier,
-            _op: crate::oci::index::IndexOperation,
-        ) -> crate::Result<Option<(Digest, oci::Manifest)>> {
-            Ok(self.lookup(identifier).map(|(_, digest, manifest)| (digest, manifest)))
-        }
-        async fn fetch_manifest_digest(
-            &self,
-            identifier: &Identifier,
-            _op: crate::oci::index::IndexOperation,
-        ) -> crate::Result<Option<Digest>> {
-            Ok(self.lookup(identifier).map(|(_, digest, _)| digest))
-        }
-        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
-            Ok(None)
-        }
-        async fn fetch_manifest_raw_bytes(
-            &self,
-            identifier: &Identifier,
-        ) -> crate::Result<Option<(Vec<u8>, Digest, oci::Manifest)>> {
-            Ok(self.lookup(identifier))
-        }
-        fn box_clone(&self) -> Box<dyn IndexImpl> {
-            Box::new(self.clone())
-        }
     }
 
     /// Build a `PackageManager` chained to `source` under `ChainMode::Default`
@@ -3312,11 +3247,6 @@ mod phase4_spec_tests {
     /// Traceability: C1 global-last invariant (live companion override path).
     #[tokio::test(flavor = "multi_thread")]
     async fn c1_live_companion_entry_appended_after_root_var_proves_global_last() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -3471,9 +3401,6 @@ mod phase4_spec_tests {
     /// region (`patch_start + provenance.len()` brackets it exactly).
     #[tokio::test(flavor = "multi_thread")]
     async fn companion_matching_multiple_bases_projects_once() {
-        // Serialise against other WRITE_BLOB_CALL_COUNT users (process-global static).
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -3611,9 +3538,6 @@ mod phase4_spec_tests {
     /// versions through exactly once apiece.
     #[tokio::test(flavor = "multi_thread")]
     async fn same_companion_repo_at_two_tags_projects_both_versions() {
-        // Serialise against other WRITE_BLOB_CALL_COUNT users (process-global static).
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -3784,9 +3708,6 @@ mod phase4_spec_tests {
     /// Traceability: C3 visibility tiering on the live companion-overlay path.
     #[tokio::test(flavor = "multi_thread")]
     async fn patch_on_private_dep_overlaid_only_under_self_view() {
-        // Serialise against other WRITE_BLOB_CALL_COUNT users (process-global static).
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -4040,11 +3961,6 @@ mod phase4_spec_tests {
     /// Traceability: Interface-only / no-private-leak invariant (live projection path).
     #[tokio::test(flavor = "multi_thread")]
     async fn no_private_leak_live_companion_private_var_excluded_by_interface_projection() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -4253,11 +4169,6 @@ mod phase4_spec_tests {
     /// Traceability: C7 fail-closed; F1 regression.
     #[tokio::test(flavor = "multi_thread")]
     async fn c7_required_companion_not_installed_locally_returns_err() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -4372,10 +4283,6 @@ mod phase4_spec_tests {
     /// descriptor-load fan-out (F4).
     #[tokio::test(flavor = "multi_thread")]
     async fn a8_overlay_emission_order_tracks_admitted_order_under_parallel_load() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static).
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, patch_descriptor_id};
         use crate::oci::Algorithm;
         use crate::package::metadata::env::entry::Entry;
@@ -4534,11 +4441,6 @@ mod phase4_spec_tests {
     /// Traceability: F6 — pkg-specific override semantic; merge_companions last-wins.
     #[tokio::test(flavor = "multi_thread")]
     async fn f6_pkg_specific_descriptor_overrides_global_companion_required_flag() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id, patch_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -4684,11 +4586,6 @@ mod phase4_spec_tests {
     /// (env-value ordering, not just required-flag override).
     #[tokio::test(flavor = "multi_thread")]
     async fn f6b_pkg_specific_companion_env_value_overrides_global_companion_on_shared_key() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id, patch_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -4867,11 +4764,6 @@ mod phase4_spec_tests {
     /// Traceability: C1 global-last (Modifier::Path variant); F7 regression.
     #[tokio::test(flavor = "multi_thread")]
     async fn f7_c1_global_last_holds_for_path_modifier() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::{
             oci::Algorithm,
@@ -5059,11 +4951,6 @@ mod phase4_spec_tests {
     /// Traceability: Fix 2 — fail-closed cap consistency with Phase 3.
     #[tokio::test(flavor = "multi_thread")]
     async fn fix2_required_tier_over_cap_returns_err() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id, patch_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -5193,11 +5080,6 @@ mod phase4_spec_tests {
     /// Traceability: Fix 2 — non-required tier + over-cap → warn + truncate.
     #[tokio::test(flavor = "multi_thread")]
     async fn fix2_non_required_tier_over_cap_warns_and_truncates() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -5294,11 +5176,6 @@ mod phase4_spec_tests {
     /// Traceability: Fix 3 — cache None re-triggers required fail-closed check.
     #[tokio::test(flavor = "multi_thread")]
     async fn fix3_required_companion_missing_fails_closed_even_on_cache_hit() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -5425,11 +5302,6 @@ mod phase4_spec_tests {
     /// Traceability: schema regression + C7 fail-closed on real root-document path.
     #[tokio::test(flavor = "multi_thread")]
     async fn schema_regression_required_companion_root_document_envelope_missing_package_returns_err() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -5534,11 +5406,6 @@ mod phase4_spec_tests {
     /// Traceability: schema regression — real path resolves + env surfaces.
     #[tokio::test(flavor = "multi_thread")]
     async fn schema_regression_required_companion_fully_installed_env_appears_in_overlay() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
 
@@ -5654,11 +5521,6 @@ mod phase4_spec_tests {
     /// not recursive through resolve_env).
     #[tokio::test]
     async fn companion_projection_via_plain_compose_has_no_recursive_overlay() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let store = make_store(dir.path());
 
@@ -5925,11 +5787,6 @@ mod phase4_spec_tests {
     /// neither applied nor reported missing (fail-OPEN).
     #[tokio::test(flavor = "multi_thread")]
     async fn offline_view_required_missing_companion_fails_closed() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let patch_config = crate::config::patch::ResolvedPatchConfig {
             system_required: false,
@@ -6535,12 +6392,6 @@ mod phase5a_spec_tests {
     /// Traceability: Phase 5A spec test 1.
     #[tokio::test(flavor = "multi_thread")]
     async fn resolve_site_patch_roots_with_installed_base_and_companion_returns_roots() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (and any sibling test that reads WRITE_BLOB_CALL_COUNT). The counter is a
-        // process-global static; holding this lock ensures our write_blob calls (via
-        // `seed_global_descriptor_with_companion`) do not inflate its delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let patch_config = test_patch_config();
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
@@ -6621,8 +6472,6 @@ mod phase5a_spec_tests {
     /// freeze that read through its own snapshot could never record live state.
     #[tokio::test(flavor = "multi_thread")]
     async fn site_patch_roots_retain_the_snapshot_pinned_companion_for_garbage_collection() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let patch_config = test_patch_config();
         let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
@@ -6711,8 +6560,6 @@ mod phase5a_spec_tests {
     /// those blobs are GC roots too once a sync has advanced the record.
     #[tokio::test(flavor = "multi_thread")]
     async fn site_patch_roots_retain_the_snapshot_pinned_descriptor_blobs() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let patch_config = test_patch_config();
         let base_id = Identifier::new_registry("cmake", REGISTRY).clone_with_tag("3.28");
@@ -6804,7 +6651,6 @@ mod phase5a_spec_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn resolve_site_patch_roots_is_network_free_under_remote_chain_mode() {
         // Same serialisation guard as the companion spec test above.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
 
         let dir = TempDir::new().unwrap();
         let patch_config = test_patch_config();
@@ -6912,11 +6758,6 @@ mod phase5a_spec_tests {
     /// Traceability: Phase 5A spec test 6 (scoped-rule regression).
     #[tokio::test(flavor = "multi_thread")]
     async fn resolve_site_patch_roots_scoped_rule_matches_reconstructed_base_id() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let patch_config = test_patch_config();
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
@@ -7030,11 +6871,6 @@ mod phase5a_spec_tests {
     /// scoped rule against a port-containing registry exposes it.
     #[tokio::test(flavor = "multi_thread")]
     async fn resolve_site_patch_roots_recovers_real_registry_for_port_containing_base() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`
-        // (WRITE_BLOB_CALL_COUNT is a process-global static). Holding this lock
-        // prevents concurrent write_blob calls from inflating the coalescing-test delta.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let patch_config = test_patch_config();
         let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
@@ -7188,12 +7024,6 @@ mod phase5b_spec_tests {
     /// `build_site_patch_set`.
     #[tokio::test(flavor = "multi_thread")]
     async fn snapshot_digest_wins_over_live_tag_lookup_in_compose() {
-        // Serialise against `pull_coordinator_coalesces_concurrent_same_digest_writers`:
-        // `seed_global_descriptor_with_companion` calls `write_blob`, which increments
-        // the process-global `WRITE_BLOB_CALL_COUNT`. Holding this lock prevents our
-        // calls from inflating the delta observed by the coalescing test.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let patch_config = test_patch_config();
 
@@ -7294,7 +7124,6 @@ mod phase5b_spec_tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn without_snapshot_live_tag_is_used() {
         // Same serialisation guard as the snapshot preference test above.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
 
         let dir = TempDir::new().unwrap();
         let patch_config = test_patch_config();
@@ -7359,9 +7188,6 @@ mod phase5b_spec_tests {
     async fn freeze_round_trip_keeps_both_tags_of_one_companion_repository() {
         use super::super::patch_discovery::{PatchTagMap, global_descriptor_id};
         use crate::oci::Algorithm;
-
-        // Serialise against other WRITE_BLOB_CALL_COUNT users (process-global static).
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
 
         let dir = TempDir::new().unwrap();
         let patch_config = test_patch_config();
@@ -7500,8 +7326,6 @@ mod phase5b_spec_tests {
     /// result must be `frozen` — the advance is invisible.
     #[tokio::test(flavor = "multi_thread")]
     async fn frozen_descriptor_selection_ignores_post_freeze_sync() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let patch_config = test_patch_config();
         let store = make_manager(&dir).file_structure().packages.clone();
@@ -7731,10 +7555,6 @@ mod phase5d_spec_tests {
     /// ADR §"Per-package opt-out".
     #[tokio::test(flavor = "multi_thread")]
     async fn opted_out_base_with_non_system_required_tier_has_no_overlay() {
-        // `seed_installed_global_companion` calls `write_blob`; serialise against
-        // the process-global `WRITE_BLOB_CALL_COUNT` consumers.
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let config = patch_config(false);
         let manager = make_manager(&dir).with_patches(Some(config.clone()));
@@ -7772,8 +7592,6 @@ mod phase5d_spec_tests {
     /// scopes (C7 enforcement)" + §"Per-package opt-out" exception.
     #[tokio::test(flavor = "multi_thread")]
     async fn opted_out_base_with_system_required_tier_keeps_overlay() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let config = patch_config(true);
         let manager = make_manager(&dir).with_patches(Some(config.clone()));
@@ -7812,8 +7630,6 @@ mod phase5d_spec_tests {
     /// skips the overlay; an absent key leaves the overlay intact.
     #[tokio::test(flavor = "multi_thread")]
     async fn base_not_opted_out_keeps_overlay() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let config = patch_config(false);
         let manager = make_manager(&dir).with_patches(Some(config.clone()));
@@ -7853,8 +7669,6 @@ mod phase5d_spec_tests {
     /// Traces: ADR §"D3 honest no-project boundary"; Contract 1 case (c).
     #[tokio::test(flavor = "multi_thread")]
     async fn no_project_context_equals_project_empty_for_non_opted_base() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let config = patch_config(false);
         let manager = make_manager(&dir).with_patches(Some(config.clone()));
@@ -7922,8 +7736,6 @@ mod phase5d_spec_tests {
     /// Contract 1 case (e).
     #[tokio::test(flavor = "multi_thread")]
     async fn no_project_context_still_applies_system_required_tier() {
-        let _serialize = crate::file_structure::WRITE_BLOB_TEST_LOCK.lock().await;
-
         let dir = TempDir::new().unwrap();
         let config = patch_config(true);
         let manager = make_manager(&dir).with_patches(Some(config.clone()));

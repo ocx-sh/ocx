@@ -17,7 +17,7 @@ def test_find_returns_package_root(
     # find (default) returns the package-store package root; the candidate
     # symlink also targets the package root, so resolving the symlink
     # yields the same path.
-    find_path = Path(find_result[pkg.short])
+    find_path = Path(find_result[pkg.short]["path"])
     assert find_path == candidate.resolve()
     assert (find_path / "content").is_dir()
     assert (find_path / "metadata.json").is_file()
@@ -31,7 +31,7 @@ def test_find_candidate_returns_candidate_symlink(
     ocx.json("package", "install", pkg.short)
 
     find_result = ocx.json("package", "which", "--candidate", pkg.short)
-    candidate = Path(find_result[pkg.short])
+    candidate = Path(find_result[pkg.short]["path"])
 
     expected = (
         Path(ocx.env["OCX_HOME"])
@@ -52,7 +52,7 @@ def test_find_current_returns_current_symlink(
     ocx.json("package", "install", "-s", pkg.short)
 
     find_result = ocx.json("package", "which", "--current", pkg.short)
-    current = Path(find_result[pkg.short])
+    current = Path(find_result[pkg.short]["path"])
 
     expected = (
         Path(ocx.env["OCX_HOME"])
@@ -90,7 +90,7 @@ def test_find_returns_package_path_not_layer(
     ocx.json("package", "install", pkg.short)
 
     find_result = ocx.json("package", "which", pkg.short)
-    find_path = Path(find_result[pkg.short])
+    find_path = Path(find_result[pkg.short]["path"])
 
     # `ocx package which` (without `--candidate`/`--current`) returns the raw
     # package-store package-root path directly — it is built from OCX_HOME

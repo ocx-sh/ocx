@@ -71,7 +71,7 @@ def _find_content_path(ocx: OcxRunner, short: str) -> Path:
     so call sites that exercise installed files keep their natural shape.
     """
     result = ocx.json("package", "which", short)
-    return Path(result[short]) / "content"
+    return Path(result[short]["path"]) / "content"
 
 
 def _build_fixed_pkg_dir(tmp_path: Path, subdir: str) -> Path:

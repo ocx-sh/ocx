@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 from uuid import uuid4
 
-from src.runner import OcxRunner, PackageInfo, current_platform
+from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -177,6 +177,74 @@ def inspect_entry(payload: dict, name: str) -> dict:
 def inspect_names(payload: dict) -> list[str]:
     """The ``name`` of every entry in an inspect report, in emitted order."""
     return [entry["name"] for entry in payload["packages"]]
+
+
+# ---------------------------------------------------------------------------
+# Project files
+# ---------------------------------------------------------------------------
+
+
+def write_ocx_toml(project_dir: Path, body: str) -> Path:
+    """Write ``body`` to ``project_dir/ocx.toml`` and return the file's path."""
+    path = project_dir / "ocx.toml"
+    path.write_text(body)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Deferred (lazy) tools — the shim store
+# ---------------------------------------------------------------------------
+
+
+def shim_bin_dirs(ocx: OcxRunner, repo: str) -> list[Path]:
+    """Every published shim launcher directory belonging to ``repo``.
+
+    A shim directory lives at
+    ``$OCX_HOME/shims/<registry-slug>/<repo-path>/<algo>/<2hex>/<30hex>/`` and
+    is complete exactly when its ``bin/`` child exists — the same marker the
+    producer writes last and the GC walker classifies on. The repository IS in
+    this path (unlike the package store, which keys on registry + digest
+    alone), so scoping the walk to one repository is enough to identify a
+    package's shims without knowing its digest.
+
+    ``ocx clean`` removes the shim directory but leaves its now-empty CAS
+    ancestors behind, so absence must be read off ``bin/``, never off the
+    repository subtree.
+    """
+    root = ocx.ocx_home / "shims" / registry_dir(ocx.registry)
+    for segment in repo.split("/"):
+        root = root / segment
+    if not root.is_dir():
+        return []
+    return sorted(path for path in root.rglob("bin") if path.is_dir())
+
+
+def assert_shim_dir_exists(ocx: OcxRunner, repo: str, why: str) -> Path:
+    """Assert ``repo`` owns exactly one shim tree, and return its ``bin/``.
+
+    Exactly one, not "at least one": a test publishes a single version per
+    repository, so a second tree means a stale digest was left behind rather
+    than converged on.
+    """
+    found = shim_bin_dirs(ocx, repo)
+    assert len(found) == 1, (
+        f"{why}: expected exactly one shim `bin/` for {repo} under "
+        f"{ocx.ocx_home / 'shims'}; found {[str(p) for p in found]}"
+    )
+    return found[0]
+
+
+def assert_shim_dir_absent(ocx: OcxRunner, repo: str, why: str) -> None:
+    """Assert ``repo`` owns no shim tree.
+
+    Only meaningful when the same test has already seen
+    :func:`assert_shim_dir_exists` succeed for ``repo`` — otherwise an empty
+    result is indistinguishable from a probe looking in the wrong place.
+    """
+    found = shim_bin_dirs(ocx, repo)
+    assert found == [], (
+        f"{why}: {repo} must own no shim `bin/`; found {[str(p) for p in found]}"
+    )
 
 
 def make_package(

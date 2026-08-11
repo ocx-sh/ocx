@@ -42,6 +42,7 @@ pub mod error;
 pub mod file_structure;
 pub mod forge;
 pub mod hardlink;
+pub mod lazy;
 pub mod log;
 pub mod managed_config;
 pub mod oci;

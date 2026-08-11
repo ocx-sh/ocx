@@ -239,7 +239,7 @@ def test_direct_launcher_exec_rejects_conflicting_list_separators(
     ocx.plain("package", "install", pkg.short)
 
     which = ocx.json("package", "which", pkg.short)
-    pkg_root = which[pkg.short] if isinstance(which, dict) else which
+    pkg_root = which[pkg.short]["path"]
     result = ocx.run("launcher", "exec", str(pkg_root), "--", "hello", format=None, check=False)
 
     assert result.returncode == EXIT_DATA_ERR, (
