@@ -268,6 +268,7 @@ mod tests {
             dependencies: Dependencies::default(),
             entrypoints: Entrypoints::default(),
             binaries,
+            integrations: crate::package::metadata::Integrations::default(),
         })
     }
 
