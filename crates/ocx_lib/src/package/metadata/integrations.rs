@@ -9,9 +9,9 @@
 //! grammar, the map's size, and the well-formedness of its own interpolation
 //! tokens inside a string leaf — and never the contents. It also never merges:
 //! two packages declaring one namespace produce two composed rows, and the
-//! consuming application adjudicates. The name imports the `devcontainer.json`
-//! expectation and refuses it: that `integrations` merges, this one
-//! concatenates.
+//! consuming application adjudicates — where `devcontainer.json`'s closest
+//! analogue, `customizations`, merges every Feature's contribution into one
+//! object per tool.
 //!
 //! ADR: `adr_package_integrations.md`.
 

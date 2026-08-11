@@ -7,8 +7,8 @@ what it actually **prints**.
 `integrations` is a map of namespace → opaque JSON. OCX validates the
 container (key grammar, size caps, its own `${...}` tokens) and never the
 contents, and it **never merges**: two packages declaring one namespace
-produce two rows, and the consuming application adjudicates. The name imports
-the `devcontainer.json` expectation and refuses it.
+produce two rows, and the consuming application adjudicates — where
+`devcontainer.json`'s closest analogue, `customizations`, merges.
 
 Every output block below was captured from a real run against the local
 `registry:2`. Paths and digests will differ on your machine; the shapes will

@@ -165,10 +165,10 @@ asked for.
 
 Package metadata can declare vendor-namespaced configuration blocks for tools OCX has no model for at all — an editor extension list, a devcontainer fragment, a JetBrains plugin set. See [Integrations][metadata-integrations] in the metadata reference for the field's grammar, namespace-key rules, size caps, and interpolation. This section covers what composition does with those blocks once [`ocx env`][cmd-env-root] and [`ocx package env`][cmd-package-env] assemble them.
 
-**Composition never merges.** Two packages that declare the same namespace produce two independent rows in the output, never one combined row. [devcontainer.json][devcontainer-integrations] takes the opposite approach — merging every [Feature][devcontainer-features]'s `integrations` contribution into a single object per tool — and OCX deliberately does not follow it; see [No Merge, Ever][metadata-integrations-no-merge] for the full comparison. A consumer that needs to reconcile two blocks does so itself; OCX never picks a winner or combines fields on its behalf.
+**Composition never merges.** Two packages that declare the same namespace produce two independent rows in the output, never one combined row. [devcontainer.json][devcontainer-customizations] takes the opposite approach — merging every [Feature][devcontainer-features]'s `customizations` contribution into a single object per tool — and OCX deliberately does not follow it; see [No Merge, Ever][metadata-integrations-no-merge] for the full comparison. A consumer that needs to reconcile two blocks does so itself; OCX never picks a winner or combines fields on its behalf.
 
 :::info Why not merge, like devcontainer.json does?
-Merging means someone has to resolve a conflict when two contributions disagree — devcontainer.json leaves that decision to whichever tool reads the merged object. OCX has no way to know which of two colliding `settings` objects should win, so instead of guessing it keeps both, each attributed to the package that declared it. The name is borrowed from devcontainer.json; the merge behavior is not.
+Merging means someone has to resolve a conflict when two contributions disagree — devcontainer.json leaves that decision to whichever tool reads the merged object. OCX has no way to know which of two colliding `settings` objects should win, so instead of guessing it keeps both, each attributed to the package that declared it.
 :::
 
 ### Row Shape {#integrations-row-shape}
@@ -184,13 +184,13 @@ The composed JSON envelope carries `integrations` as a fourth top-level array, a
     {
       "namespace": "com.microsoft.vscode",
       "package": "kitware/cmake:3.28@sha256:aaaa…",
-      "value": { "extensions": ["rust-lang.rust-analyzer"] }
+      "payload": { "extensions": ["rust-lang.rust-analyzer"] }
     }
   ]
 }
 ```
 
-`namespace` is the declared key; `package` is the canonical resolved identifier of the package that declared it (a tag may be absent — a digest-pinned identifier is legal); `value` is that package's payload, fully [interpolated][metadata-integrations-interpolation] against that package's *own* `${installPath}`, never the composing root's. The array is present, with attribution, even when composing a single package — it is never collapsed to a bare object, so the one filter idiom that works against a multi-package composition (`.integrations[] | select(.namespace=="…")`) is the only idiom anyone needs to learn.
+`namespace` is the declared key; `package` is the canonical resolved identifier of the package that declared it (a tag may be absent — a digest-pinned identifier is legal); `payload` is that package's block, fully [interpolated][metadata-integrations-interpolation] against that package's *own* `${installPath}`, never the composing root's. The array is present, with attribution, even when composing a single package — it is never collapsed to a bare object, so the one filter idiom that works against a multi-package composition (`.integrations[] | select(.namespace=="…")`) is the only idiom anyone needs to learn.
 
 Two packages declaring `com.microsoft.vscode` therefore produce two rows with identical `namespace` but different `package` — an array whose length exceeds its distinct-namespace count is the visible proof nothing merged.
 
@@ -212,7 +212,7 @@ The [interface-surface rule](#integrations-interface-surface) applies unchanged 
 
 ### Absent from `--shell` and `--ci` {#integrations-shell-ci}
 
-Neither [`--shell`][cmd-env-root] nor `--ci` output carries a `integrations` representation. A shell export line and a CI sink's key/value pair have no shape for an arbitrary JSON payload, and inventing one — a serialized blob packed into an env var — would be a second wire format for data the JSON envelope above already has one for. Only `--format json` carries the array.
+Neither [`--shell`][cmd-env-root] nor `--ci` output carries an `integrations` representation. A shell export line and a CI sink's key/value pair have no shape for an arbitrary JSON payload, and inventing one — a serialized blob packed into an env var — would be a second wire format for data the JSON envelope above already has one for. Only `--format json` carries the array.
 
 ## Composition Order {#composition-order}
 
@@ -300,7 +300,7 @@ Project and group `[env]` entries have no visibility axis at all — a project i
 [volta]: https://volta.sh/
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [bazel-rules]: https://bazel.build/extending/rules
-[devcontainer-integrations]: https://containers.dev/implementors/json_reference/
+[devcontainer-customizations]: https://containers.dev/implementors/json_reference/
 [devcontainer-features]: https://containers.dev/implementors/features
 
 <!-- commands -->

@@ -833,9 +833,7 @@ reject:
 
 ## Integrations {#integrations}
 
-The name `integrations` is borrowed from [devcontainer.json's `integrations` property][devcontainer-integrations], but the behavior underneath it is not. Devcontainer merges the blocks contributed by every [Feature][devcontainer-features] into one object per tool; OCX never merges anything. Each declaring package's block stays exactly what that package wrote, attributed to that package, and handed unmodified to whichever tool reads it.
-
-Some tools have configuration OCX has no model for at all — a list of editor extensions, a JetBrains plugin set, a devcontainer fragment, a language-server setting block. Before this field, a publisher's only options were to fork the `metadata.json` format or ship a side-channel file consumers had to know to look for. `integrations` gives every publisher one reserved place to write vendor-specific configuration, keyed by a namespace, without OCX ever needing to understand what is inside.
+Some tools have configuration OCX has no model for at all — a list of editor extensions, a JetBrains plugin set, a [devcontainer][devcontainer-customizations] fragment, a language-server setting block. Before this field, a publisher's only options were to fork the `metadata.json` format or ship a side-channel file consumers had to know to look for. `integrations` gives every publisher one reserved place to write vendor-specific configuration, keyed by a namespace, without OCX ever needing to understand what is inside.
 
 ```json
 {
@@ -858,13 +856,13 @@ An absent `integrations` field and an explicit `{}` are the same state. Unlike [
 
 ### No Merge, Ever {#integrations-no-merge}
 
-::: info Compare with devcontainer.json
-[devcontainer.json's `integrations` property][devcontainer-integrations] is designed to be merged: when a dev container composes several [Features][devcontainer-features], each feature's `integrations.vscode.extensions` array is concatenated into one list, and each feature's `integrations.vscode.settings` object is merged into one settings object. A tool implementor is expected to write that merge logic.
-
-OCX's `integrations` shares the name and the reverse-DNS-namespace idea, and nothing else — OCX never merges two packages' contributions, not their extensions lists, not their settings objects, not anything. If two packages in a dependency graph both declare `com.microsoft.vscode`, both blocks exist, each attributed to its own package, and the consuming application decides what to do with two of them. This is also why `extensions` was rejected as the field name during design: it collides head-on with `integrations.vscode.extensions` from the very first VS Code use case.
-:::
+If two packages in a dependency graph both declare `com.microsoft.vscode`, both blocks exist, each attributed to its own package, and the consuming application decides what to do with two of them. OCX merges nothing — not their extensions lists, not their settings objects, not anything.
 
 This mirrors [Cargo's `[package.metadata.<tool>]` table][cargo-metadata-table]: Cargo reserves the namespace, ignores the contents entirely — no unused-key warning, no schema — and leaves interpretation to whichever tool the key names. `integrations` makes the same trade for OCX packages.
+
+::: info Compare with devcontainer.json
+The closest analogue is [devcontainer.json's `customizations` property][devcontainer-customizations], and it takes the opposite approach: when a dev container composes several [Features][devcontainer-features], each feature's `customizations.vscode.extensions` array is concatenated into one list and its `customizations.vscode.settings` object merged into one settings object, leaving a tool implementor to write that merge logic. OCX takes the reverse-DNS-namespace idea and not the merge.
+:::
 
 ### Namespace Keys {#integrations-namespace}
 
@@ -899,13 +897,13 @@ These caps are **raise-only**. `metadata.json` is a read-path format — an alre
 
 ### Interpolation {#integrations-interpolation}
 
-A `integrations` payload gets the same interpolation engine as [`env`](#env) values, resolved inside every string in the payload — object values, array elements, nested at any depth — never inside object keys, and never touching numbers, booleans, or `null`. That engine is a closed namespace (see [Interpolation Tokens](#env-interpolation)): a `${…}` it does not recognise is refused, not passed through.
+An `integrations` payload gets the same interpolation engine as [`env`](#env) values, resolved inside every string in the payload — object values, array elements, nested at any depth — never inside object keys, and never touching numbers, booleans, or `null`. That engine is a closed namespace (see [Interpolation Tokens](#env-interpolation)): a `${…}` it does not recognise is refused, not passed through.
 
 - **`${installPath}`**, and its exact alias **`${self.installPath}`**, resolve to the *declaring* package's own content directory — never the consuming root's, even when the payload propagates to a consumer through the dependency graph. See [Aliases](#env-interpolation-self).
 - **`${deps.NAME.installPath}`** resolves to a direct dependency's content directory, the same as in `env`. A `${deps.NAME}` naming a dependency the package does not declare is invalid metadata and rejected at publish time, exactly like an unresolvable reference in an `env` value.
 - All three install-path bodies accept the optional **`:native`** / **`:posix`** render modifier described in [Render Modifiers](#env-interpolation-render) — `${self.installPath:posix}` is how a payload destined for a Windows-hosted VS Code `settings.json` gets forward slashes instead of backslashes.
 - **`$${installPath}`** (a doubled `$`) escapes to the literal text `${installPath}` — the only way to emit a literal `${…}` OCX would otherwise try to resolve.
-- **Every other `${...}` token is refused, not passed through.** `${workspaceFolder}`, [VS Code's `${env:VAR}`][vscode-variables], and devcontainer's own [`${localEnv:VAR}` / `${containerEnv:VAR}`][devcontainer-integrations] are not in OCX's closed vocabulary. Writing one bare fails with exit 65, naming the token: refused by [`ocx package create`][cmd-package-create] / [`push`][cmd-package-push] at publish time, and again at composition ([`ocx env`][cmd-env-root] / [`ocx package exec`][cmd-exec] / [`ocx run`][cmd-run]). Read-only paths — [`pull`][cmd-package-pull], [`install`][cmd-package-install], [`inspect`][cmd-package-inspect] — echo an unrecognised token verbatim instead of refusing it. A payload destined for one of these tools escapes it instead: `$${workspaceFolder}` publishes as the literal text `${workspaceFolder}`, left for the downstream tool to resolve on its own turn.
+- **Every other `${...}` token is refused, not passed through.** `${workspaceFolder}`, [VS Code's `${env:VAR}`][vscode-variables], and devcontainer's own [`${localEnv:VAR}` / `${containerEnv:VAR}`][devcontainer-vars] are not in OCX's closed vocabulary. Writing one bare fails with exit 65, naming the token: refused by [`ocx package create`][cmd-package-create] / [`push`][cmd-package-push] at publish time, and again at composition ([`ocx env`][cmd-env-root] / [`ocx package exec`][cmd-exec] / [`ocx run`][cmd-run]). Read-only paths — [`pull`][cmd-package-pull], [`install`][cmd-package-install], [`inspect`][cmd-package-inspect] — echo an unrecognised token verbatim instead of refusing it. A payload destined for one of these tools escapes it instead: `$${workspaceFolder}` publishes as the literal text `${workspaceFolder}`, left for the downstream tool to resolve on its own turn.
 
 ```json
 {
@@ -1096,7 +1094,7 @@ If you published packages before the visibility-default flip, their untagged env
 [cmake-genex]: https://cmake.org/cmake/help/latest/manual/cmake-generator-expressions.7.html
 [terraform-strings]: https://developer.hashicorp.com/terraform/language/expressions/strings
 [devcontainer-vars]: https://containers.dev/implementors/json_reference/
-[devcontainer-integrations]: https://containers.dev/implementors/json_reference/
+[devcontainer-customizations]: https://containers.dev/implementors/json_reference/
 [devcontainer-features]: https://containers.dev/implementors/features
 [cargo-metadata-table]: https://doc.rust-lang.org/cargo/reference/manifest.html#the-metadata-table
 [trojan-source]: https://trojansource.codes/

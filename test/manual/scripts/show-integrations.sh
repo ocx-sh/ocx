@@ -166,10 +166,10 @@ ocx package env --ci=gitlab "${ROOT_A}" | assert_no_namespace "--ci=gitlab"
 
 banner "5. two roots, one namespace — two rows, never merged"
 cat <<'EOF'
-custom-tool and custom-other both declare `com.microsoft.vscode`. The name
-imports the devcontainer.json expectation and refuses it: that integrations
-merges, this one concatenates. Three rows for one key below (both roots plus
-the companion) — the consuming application adjudicates, not ocx.
+custom-tool and custom-other both declare `com.microsoft.vscode`. Where
+devcontainer.json's closest analogue, customizations, merges, this one
+concatenates. Three rows for one key below (both roots plus the companion)
+— the consuming application adjudicates, not ocx.
 EOF
 ocx_jq '.integrations | map(select(.namespace == "com.microsoft.vscode"))' \
     --format json package env "${ROOT_A}" "${ROOT_B}"

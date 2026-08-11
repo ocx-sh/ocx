@@ -3409,8 +3409,8 @@ Default, single manifest (`@digest` or flat tag) — metadata plus layers:
           { "key": "ZLIB_ROOT", "type": "constant", "package": "registry/zlib@sha256:bbbb…" }
         ],
         "integrations": [
-          { "name": "com.microsoft.vscode", "package": "registry/cmake:3.28@sha256:cccc…" },
-          { "name": "com.jetbrains", "package": "registry/zlib@sha256:bbbb…" }
+          { "namespace": "com.microsoft.vscode", "package": "registry/cmake:3.28@sha256:cccc…" },
+          { "namespace": "com.jetbrains", "package": "registry/zlib@sha256:bbbb…" }
         ],
         "binaries_complete": false
       },
@@ -3791,7 +3791,7 @@ Print the resolved environment variables for one or more OCI-tier packages.
 
 Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain`). Plain format outputs an aligned table with `Key`, `Type` and `Value` columns. JSON format (`ocx --format json package env`) outputs `{"entries": [...], "binaries": [...], "entrypoints": [...], "integrations": [...], "advisories": [...]}`. `entries` is unchanged from before this field existed. `binaries` and `entrypoints` are top-level sibling arrays — not nested inside `entries` — of `{"name": "...", "package": "..."}` objects: one entry per admitted package's declared [executables][reference-binaries] (`binaries`) or [entry points][entry-points] (`entrypoints`). `package` is the canonical resolved identifier that declared the claim (`registry/repo[:tag]@digest` — the tag may be absent, so a tagless digest-pinned form is legal). Both arrays are always present, possibly empty.
 
-`integrations` is a fourth top-level sibling array of `{"namespace": "...", "package": "...", "value": ...}` objects — one row per (declaring package, [integration namespace][reference-integrations]) pair, `value` the interpolated payload OCX never interprets or merges. Two packages declaring the same namespace produce two rows, never one merged row — a row count exceeding the distinct-namespace count is the visible proof nothing merged. The array is present, with attribution, even for a single root package — it is never collapsed to a bare object or omitted. Like `binaries`/`entrypoints`, it is always `[]` under `--self` (integrations reach only the interface surface a consumer sees) and never appears in `--shell`/`--ci` output. See [Integrations][reference-integrations] for the field's grammar, size caps, and interpolation rules.
+`integrations` is a fourth top-level sibling array of `{"namespace": "...", "package": "...", "payload": ...}` objects — one row per (declaring package, [integration namespace][reference-integrations]) pair, `payload` the interpolated block OCX never interprets or merges. Two packages declaring the same namespace produce two rows, never one merged row — a row count exceeding the distinct-namespace count is the visible proof nothing merged. The array is present, with attribution, even for a single root package — it is never collapsed to a bare object or omitted. Like `binaries`/`entrypoints`, it is always `[]` under `--self` (integrations reach only the interface surface a consumer sees) and never appears in `--shell`/`--ci` output. See [Integrations][reference-integrations] for the field's grammar, size caps, and interpolation rules.
 
 `advisories` is a fifth top-level sibling array of `{"kind": "...", "package": "...", "key": "...", "message": "..."}` objects, one per [deferred tool][in-depth-lazy-loading] whose declared metadata could not be fully validated at compose time (`key` is present only for the two variants that name an environment variable) — always present, empty unless a package composed with [`--lazy-mode always`](#arg-lazy-mode) triggered one; warning-only, never a compose failure.
 
