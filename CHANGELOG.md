@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.8] - 2026-08-11
+
+### Added
+
+- Snapshot a whole registry into a servable local index *(index)*
+- --json is shorthand for --format json *(cli)*
+- Every `${…}` in package metadata follows one grammar *(package)* **BREAKING**
+- Compose vendor-namespaced package integrations with per-package attribution *(env)*
+- -g and -r short forms for --global and --remote *(cli)*
+- Tools can join PATH without downloading their content *(lazy)* **BREAKING**
+
+### Changed
+
+- Release binary is 44% smaller (33 MB -&gt; 19 MB) *(dist)*
+
+### Documentation
+
+- Address packages by their two-segment hosted-index name everywhere
+- Document the unified interpolation token grammar
+- Ocx env and which links land on the section they name
+
+### Fixed
+
+- Removing a tool no longer warns it was never installed *(remove)*
+- Every generated .exe hardlinks the one shared Windows shim blob *(launcher)*
+- A failed torn-blob repair no longer reports success *(shim)*
+- A nested bar no longer aborts the process when its parent is gone *(progress)*
+- Reconcile the blob-store test seam with main's tests *(rebase)*
+- Three suites still assumed pre-shim shapes and Linux-only errnos *(test)*
+- Package test refuses a layer archive it cannot name a media type for *(package)*
+
 ## [0.5.7] - 2026-08-07
 
 ### Added
@@ -23,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Companions resolve live under --frozen — frozen scopes to the package tier *(patch)*
 - --frozen refuses index update — the package tier's discovery verb *(index)*
 - Snapshot keys companions by tag so two tags of one repository survive a freeze *(patch)* **BREAKING**
+
+### Release
+
+- V0.5.7
 
 ## [0.5.6] - 2026-08-06
 
@@ -878,6 +913,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.5.8]: https://github.com/ocx-sh/ocx/compare/v0.5.7..v0.5.8
 [0.5.7]: https://github.com/ocx-sh/ocx/compare/v0.5.6..v0.5.7
 [0.5.6]: https://github.com/ocx-sh/ocx/compare/v0.5.5..v0.5.6
 [0.5.5]: https://github.com/ocx-sh/ocx/compare/v0.5.4..v0.5.5
