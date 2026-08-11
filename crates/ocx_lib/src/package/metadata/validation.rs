@@ -13,6 +13,11 @@
 //!   with a version remedy instead of running with a silently wrong environment.
 //! - `validate_env_list_entries` — enforces the wire contract for `list`
 //!   entries: a separator is present, foldable, and does not edge its value.
+//! - `validate_integrations` — the integrations *container*: the namespace
+//!   key grammar and the two size caps. Never the payload's contents. Runs
+//!   last: the two gates above each report a fault the reader cannot work
+//!   around, and an integrations fault is publisher hygiene that must not
+//!   shadow them.
 //!
 //! [`validate_for_publish`] is the strict gate on top of it, run by
 //! `ocx package create` / `ocx package push` where a publisher is present:
@@ -25,6 +30,11 @@
 //! - `validate_entrypoint_args` — scans every `args` element in every
 //!   entrypoint and refuses the token classes `Usage::EntryPointArgs` does not
 //!   permit.
+//! - `validate_integration_tokens` — the same scan over every string leaf of
+//!   every integrations payload. A payload is opaque to OCX, but its `${…}`
+//!   is not: the grammar is closed (D3), so a token OCX does not recognise is
+//!   refused there exactly as it is in an env value, and `$${…}` is how a
+//!   payload spells a literal `${…}` for its own consumer.
 //!
 //! Refusing an unrecognised token on a *read* path is what D14 removes: an ocx
 //! meeting a token it does not know still shows the package, and refuses only
@@ -66,9 +76,10 @@ impl TryFrom<Metadata> for ValidMetadata {
 
     /// # Errors
     ///
-    /// Returns an error if an env var declares an unknown modifier `type`, or
-    /// if a `list` entry is missing its separator, declares an unusable one, or
-    /// carries a value that separator edges.
+    /// Returns an error if an env var declares an unknown modifier `type`, if a
+    /// `list` entry is missing its separator, declares an unusable one, or
+    /// carries a value that separator edges, or if an integrations namespace
+    /// key is unusable or a payload is over its size cap.
     fn try_from(metadata: Metadata) -> Result<Self, Self::Error> {
         // Runs first: an unknown modifier type means the reader is too old for
         // this package, which is the answer the user needs — reporting a
@@ -76,6 +87,10 @@ impl TryFrom<Metadata> for ValidMetadata {
         // fix the wrong thing.
         validate_env_modifier_types(&metadata)?;
         validate_env_list_entries(&metadata)?;
+        // Runs last: the two gates above each report a fault the *reader*
+        // cannot work around (wrong ocx version, unfoldable list). A
+        // integrations fault is publisher hygiene and must not shadow either.
+        validate_integrations(&metadata)?;
         Ok(Self(metadata))
     }
 }
@@ -92,12 +107,16 @@ impl TryFrom<Metadata> for ValidMetadata {
 ///
 /// Everything [`ValidMetadata::try_from`] returns, plus an unrecognised
 /// `${…}`, a `${deps.*}` token naming an undeclared or ambiguous dependency or
-/// an unsupported field, and a token class an entrypoint `args` element may
-/// not carry.
+/// an unsupported field, and a token class an entrypoint `args` element or a
+/// integrations payload may not carry.
 pub fn validate_for_publish(metadata: Metadata) -> Result<ValidMetadata, crate::Error> {
     let valid = ValidMetadata::try_from(metadata)?;
     validate_env_tokens(&valid)?;
     validate_entrypoint_args(&valid)?;
+    // Last for the same reason `validate_integrations` is last in the
+    // structural chain: a payload fault is publisher hygiene, and must not
+    // shadow a fault in the env or entrypoint surfaces the package runs on.
+    validate_integration_tokens(&valid)?;
     Ok(valid)
 }
 
@@ -137,6 +156,33 @@ fn build_name_and_collision_maps<'a>(
     }
 
     (name_map, collision_map)
+}
+
+/// A [`std::io::Write`] that counts the bytes written to it and keeps none.
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0 += buffer.len();
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The compact-serialized byte length of `value`, measured without allocating
+/// it.
+///
+/// The size caps below need the length and nothing else, and they sit on
+/// [`ValidMetadata::try_from`] — every metadata load, once per admitted package
+/// per `ocx env` / `run` / `direnv export`. `serde_json::to_vec(…).len()` would
+/// heap-allocate the whole document there to throw it away.
+fn serialized_len<T: serde::Serialize + ?Sized>(value: &T) -> Result<usize, serde_json::Error> {
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.0)
 }
 
 /// Rejects the first env var whose modifier `type` this binary does not know.
@@ -382,6 +428,157 @@ pub(super) fn validate_entrypoint_args(metadata: &Metadata) -> Result<(), crate:
                     },
                 }
                 .into());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates the integrations *container* — the namespace keys and the two
+/// size caps, never a payload's contents.
+///
+/// Per namespace, in lexicographic order: the key grammar, then the
+/// per-namespace size cap. The per-package cap is checked once at the end, so a
+/// single oversized namespace is always named ahead of a generic total.
+///
+/// Structural, which is why it runs on every ingress path rather than only at
+/// publish: a key the terminal cannot print safely and a payload over the cap
+/// are faults the *reader* meets too, and both caps sit on the read path (they
+/// are raise-only for exactly that reason). A payload's `${…}` tokens are the
+/// publish gate's concern instead — see [`validate_integration_tokens`],
+/// which is where an env value's tokens are checked as well (D14).
+///
+/// Pure syntax: no filesystem access, no network, no dependency resolution.
+///
+/// # Errors
+///
+/// [`crate::package::error::Error::IntegrationNamespaceInvalid`],
+/// [`crate::package::error::Error::IntegrationTooLarge`], or
+/// [`crate::package::error::Error::IntegrationsTooLarge`] for the first
+/// offending namespace.
+pub(super) fn validate_integrations(metadata: &Metadata) -> Result<(), crate::Error> {
+    use super::super::error::Error;
+    use super::integrations::{MAX_INTEGRATION_NAMESPACE_BYTES, MAX_INTEGRATIONS_BYTES, validate_namespace};
+
+    let integrations = metadata.integrations();
+    if integrations.is_empty() {
+        return Ok(());
+    }
+
+    // The braces of the whole map. Each namespace below adds its own framing as
+    // it is measured, so the per-package total costs no second serialization
+    // pass over payloads this loop has already walked. The key goes through
+    // `serde_json` like any other value — only the punctuation a JSON object
+    // interposes (`{`, `:`, `,`, `}`) is counted here, never an escaping rule.
+    // Pinned byte-for-byte against `serde_json`'s own measurement by the
+    // per-package boundary pair in the tests below.
+    let mut total = "{}".len();
+
+    for (position, (namespace, payload)) in integrations.iter().enumerate() {
+        validate_namespace(namespace)?;
+
+        // Compact re-serialization, so the measurement is independent of the
+        // source document's whitespace and key ordering. Inclusive boundary.
+        let size = serialized_len(payload)?;
+        if size > MAX_INTEGRATION_NAMESPACE_BYTES {
+            return Err(Error::IntegrationTooLarge {
+                namespace: namespace.to_owned(),
+                size,
+                max: MAX_INTEGRATION_NAMESPACE_BYTES,
+            }
+            .into());
+        }
+
+        // `"key":payload`, plus the `,` that precedes every entry but the first.
+        total += serialized_len(namespace)? + ":".len() + size + usize::from(position > 0);
+    }
+
+    if total > MAX_INTEGRATIONS_BYTES {
+        return Err(Error::IntegrationsTooLarge {
+            size: total,
+            max: MAX_INTEGRATIONS_BYTES,
+        }
+        .into());
+    }
+
+    Ok(())
+}
+
+/// Validates the `${…}` tokens inside integrations payloads at publish time.
+///
+/// Every token in every string **leaf** of every payload must be recognised by
+/// [`scanner::scan`], must belong to a class this surface permits, and — for
+/// `${deps.NAME.installPath}` — must name a declared, non-ambiguous direct
+/// dependency. Object keys, numbers, booleans and nulls are not leaves, so this
+/// can only fire where interpolation would actually run.
+///
+/// The recogniser is the one every other surface uses, which is the whole point:
+/// the grammar is closed (D3), so a payload's `${workspaceFolder}` is refused
+/// here exactly as an env value's is, and `$${workspaceFolder}` is how a payload
+/// publishes that literal for its own consumer. OCX still reads nothing about
+/// what the payload *means* — only its own vocabulary inside it.
+///
+/// `${self.env.KEY}` is refused as [`TemplateError::DisallowedToken`], by the
+/// same `INTEGRATION_TOKENS` capability set the compose-time resolvers carry:
+/// a private env value must not become an interface-surface JSON payload. The
+/// two share one constant because only compose is reachable for a package a
+/// hostile registry published — this gate is where a publisher's typo is caught,
+/// never where the rule is enforced. Refusing is also the reversible direction,
+/// since the accept set may only grow.
+///
+/// Pure syntax + reference check: no filesystem access, no network, no
+/// dependency resolution.
+///
+/// # Errors
+///
+/// [`crate::package::error::Error::IntegrationInterpolation`] for the first
+/// offending namespace, in lexicographic order.
+pub(super) fn validate_integration_tokens(metadata: &Metadata) -> Result<(), crate::Error> {
+    use super::super::error::Error;
+    use super::integrations::{INTEGRATION_TOKENS, string_leaves};
+
+    let integrations = metadata.integrations();
+    if integrations.is_empty() {
+        return Ok(());
+    }
+
+    // The same direct-only name map `validate_env_tokens` builds — a payload
+    // token resolves against the declaring package's own `dependencies`, never
+    // transitively.
+    let (name_map, collision_map) = build_name_and_collision_maps(metadata.dependencies());
+    // The same constant the compose-time resolvers apply. This gate never runs
+    // against a package published by a hostile registry, so it is the copy that
+    // may not drift rather than the one that enforces.
+    let allowed = INTEGRATION_TOKENS;
+
+    for (namespace, payload) in integrations.iter() {
+        for leaf in string_leaves(payload) {
+            let segments = scanner::scan(leaf).map_err(|source| Error::IntegrationInterpolation {
+                namespace: namespace.to_owned(),
+                source,
+            })?;
+
+            if let Some(token) = first_disallowed_token(&segments, allowed) {
+                return Err(Error::IntegrationInterpolation {
+                    namespace: namespace.to_owned(),
+                    source: TemplateError::DisallowedToken {
+                        token: token.to_owned(),
+                    },
+                }
+                .into());
+            }
+
+            for segment in &segments {
+                let Segment::Token(token) = segment else {
+                    continue;
+                };
+                check_token_reference(token, &name_map, &collision_map).map_err(|source| {
+                    Error::IntegrationInterpolation {
+                        namespace: namespace.to_owned(),
+                        source,
+                    }
+                })?;
             }
         }
     }
@@ -647,6 +844,29 @@ mod tests {
         assert!(
             message.contains("upgrade ocx"),
             "the version gap outranks the template fault: {message}"
+        );
+    }
+
+    /// C-007: `validate_integrations` runs LAST in the chain — an unknown
+    /// modifier type (a reader-version gap) must outrank an integrations
+    /// namespace fault (publisher hygiene). If the ordering were reversed, a
+    /// publisher who fixed only the namespace would still be stuck on a var
+    /// this reader cannot parse at all, with no error pointing at it.
+    #[test]
+    fn unknown_modifier_type_is_reported_before_a_integrations_fault() {
+        let doc = serde_json::json!({
+            "type": "bundle",
+            "version": 1,
+            "env": [{"key": "NEWTYPE", "type": "frobnicate", "value": "a"}],
+            "integrations": {"": "invalid empty namespace"},
+        });
+        let meta: Metadata = serde_json::from_value(doc).unwrap();
+        let message = ValidMetadata::try_from(meta)
+            .expect_err("both faults are fatal")
+            .to_string();
+        assert!(
+            message.contains("upgrade ocx"),
+            "the version gap outranks the integrations fault: {message}"
         );
     }
 
@@ -945,6 +1165,49 @@ mod tests {
         );
     }
 
+    // C-009b: an ESCAPED dep token in an arg is a literal the engine emits
+    // verbatim, never a reference it resolves — so the publish-time gate must
+    // accept it. The dep is deliberately undeclared: nothing resolves it, which
+    // is exactly the point of the escape.
+    #[test]
+    fn entrypoint_arg_escaped_deps_token_accepted() {
+        let meta = make_metadata_with_entrypoints(r#"{"run":{"args":["$${deps.notdeclared.installPath}"]}}"#);
+        assert!(
+            validate_for_publish(meta).is_ok(),
+            "an escaped $${{deps.*}} arg is a literal and must be accepted at publish time"
+        );
+    }
+
+    // Companion to the test above: skipping an escaped occurrence must not make
+    // the scan give up. A value that spells a literal before a real token is
+    // still rejected, and the reported token is the *real* one.
+    //
+    // Asserts on the structured `DisallowedToken` payload, not on the rendered
+    // message: the message echoes the whole `arg`, so both token spellings appear
+    // in it either way and a substring check could not tell the two apart.
+    #[test]
+    fn entrypoint_arg_escaped_then_real_deps_token_still_rejected() {
+        let meta = make_metadata_with_entrypoints(
+            r#"{"run":{"args":["$${deps.literal.installPath} ${deps.real.installPath}"]}}"#,
+        );
+        let err =
+            validate_for_publish(meta).expect_err("an unescaped ${deps.*} after an escaped one must still be rejected");
+        let crate::Error::Package(package_error) = err else {
+            panic!("expected a package error, got: {err:?}");
+        };
+        let crate::package::error::Error::EntrypointArgInterpolation {
+            source: TemplateError::DisallowedToken { token },
+            ..
+        } = *package_error
+        else {
+            panic!("expected EntrypointArgInterpolation/DisallowedToken, got: {package_error:?}");
+        };
+        assert_eq!(
+            token, "${deps.real.installPath}",
+            "the unescaped token must be the one reported, not the escaped literal"
+        );
+    }
+
     // Happy path — ${installPath} in entrypoint args must be accepted (Ok).
     #[test]
     fn entrypoint_arg_install_path_ok() {
@@ -1137,6 +1400,459 @@ mod tests {
         assert_eq!(
             token, "${self.env.TOOL_HOME}",
             "the refused token must be named verbatim"
+        );
+    }
+
+    // ── C-005 / C-006: the integrations container (ingress chain) ─────────
+    //
+    // `validate_integrations` is wired into `ValidMetadata::try_from`'s
+    // chain, last in the sequence (see the ordering comment where the chain
+    // is defined, above). These tests exercise it through the PUBLIC
+    // end-to-end contract — `ValidMetadata::try_from` — rather than calling
+    // the `pub(super)` function directly, so they also pin its position at
+    // the end of that chain, and that the container checks are ingress-time
+    // rather than publish-time.
+
+    fn metadata_with_integrations(integrations: serde_json::Value) -> Metadata {
+        let doc = serde_json::json!({
+            "type": "bundle",
+            "version": 1,
+            "integrations": integrations,
+        });
+        serde_json::from_value(doc).expect("valid bundle metadata")
+    }
+
+    fn metadata_with_deps_and_integrations(deps_json: &str, integrations: serde_json::Value) -> Metadata {
+        let doc_str =
+            format!(r#"{{"type":"bundle","version":1,"dependencies":[{deps_json}],"integrations":{integrations}}}"#);
+        serde_json::from_str(&doc_str).unwrap_or_else(|e| panic!("bad test JSON: {e}\n{doc_str}"))
+    }
+
+    /// A JSON string value whose compact serialization is exactly `target`
+    /// bytes (an ASCII payload — one byte per char plus the two quote bytes).
+    ///
+    /// `assert_eq!`, not `debug_assert_eq!`: the whole C-006 boundary pair rests
+    /// on this helper being byte-exact, and `task rust:test` runs nextest in
+    /// `--release`, where a `debug_assert` never executes at all.
+    fn string_value_of_exact_bytes(target: usize) -> serde_json::Value {
+        let value = serde_json::Value::String("a".repeat(target - 2));
+        assert_eq!(serde_json::to_vec(&value).unwrap().len(), target);
+        value
+    }
+
+    /// An integrations map whose compact serialization is exactly `target`
+    /// bytes, spread over namespaces that each stay within the per-namespace
+    /// cap — so the fixture exercises the per-package cap and nothing else.
+    ///
+    /// Sized by measuring with `serde_json` at every step, never by
+    /// reconstructing the framing the code under test derives. That is the
+    /// point: the fixture and the implementation must arrive at the same number
+    /// from opposite directions.
+    fn integrations_of_exact_bytes(target: usize) -> serde_json::Value {
+        use crate::package::metadata::integrations::MAX_INTEGRATION_NAMESPACE_BYTES;
+
+        let measure = |map: &serde_json::Map<String, serde_json::Value>| {
+            serde_json::to_vec(&serde_json::Value::Object(map.clone()))
+                .unwrap()
+                .len()
+        };
+
+        // Fill with at-cap namespaces while another one still fits under the
+        // target, then let one final payload absorb the remainder.
+        let mut map = serde_json::Map::new();
+        while measure(&map) + MAX_INTEGRATION_NAMESPACE_BYTES < target {
+            map.insert(
+                format!("com.example.{}", map.len()),
+                string_value_of_exact_bytes(MAX_INTEGRATION_NAMESPACE_BYTES),
+            );
+        }
+
+        // An ASCII payload grows the whole map one byte per character, so the
+        // deficit measured with an empty last payload is exactly how many
+        // characters it needs.
+        //
+        // The remainder key carries a quote, a backslash and non-ASCII text —
+        // all legal in a namespace (the grammar refuses only control, bidi and
+        // whitespace characters), and all measured differently by a key length
+        // taken in bytes than by one taken through `serde_json`.
+        let last = "com.\"quoted\"\\微软".to_owned();
+        map.insert(last.clone(), serde_json::Value::String(String::new()));
+        let deficit = target - measure(&map);
+        assert!(
+            deficit + 2 <= MAX_INTEGRATION_NAMESPACE_BYTES,
+            "the remainder namespace must stay within its own cap, or the fixture stops isolating the per-package one"
+        );
+        map.insert(last, string_value_of_exact_bytes(deficit + 2));
+
+        let value = serde_json::Value::Object(map);
+        assert_eq!(
+            serde_json::to_vec(&value).unwrap().len(),
+            target,
+            "the fixture must land on the target exactly"
+        );
+        value
+    }
+
+    // ── C-005 / C-019: the key grammar fires at ingress, not only at publish ─
+
+    /// The namespace key grammar runs on **every** ingress path, like the two
+    /// size caps beside it. It was pinned only directly against
+    /// `validate_namespace` and end-to-end at publish, so dropping the
+    /// `validate_namespace` call out of `validate_integrations` reddened
+    /// nothing at this layer — the caps kept the function alive and its key
+    /// check unobserved.
+    ///
+    /// A bare control character, because it is refused today and stays refused
+    /// whatever the rest of the grammar settles on.
+    #[test]
+    fn an_invalid_namespace_key_is_refused_at_ingress() {
+        use crate::package::error::Error as PackageError;
+
+        let meta = metadata_with_integrations(serde_json::json!({ "com.exa\nmple": "payload" }));
+        let error =
+            ValidMetadata::try_from(meta).expect_err("a control character in a namespace key must fail at ingress");
+
+        let crate::Error::Package(package_error) = &error else {
+            panic!("expected a package error, got: {error}");
+        };
+        let PackageError::IntegrationNamespaceInvalid { namespace, reason } = package_error.as_ref() else {
+            panic!("expected IntegrationNamespaceInvalid, got: {package_error}");
+        };
+        assert_eq!(namespace, "com.exa\nmple", "the refusal must name the offending key");
+        assert!(reason.contains("control"), "must name the fault: {reason}");
+    }
+
+    // ── C-006: per-namespace and per-package cap boundaries ─────────────────
+
+    #[test]
+    fn namespace_payload_at_the_cap_boundary_is_accepted() {
+        use crate::package::metadata::integrations::MAX_INTEGRATION_NAMESPACE_BYTES;
+
+        let meta = metadata_with_integrations(serde_json::json!({
+            "com.example": string_value_of_exact_bytes(MAX_INTEGRATION_NAMESPACE_BYTES),
+        }));
+        assert!(
+            ValidMetadata::try_from(meta).is_ok(),
+            "a namespace payload of exactly the cap must pass (inclusive boundary)"
+        );
+    }
+
+    #[test]
+    fn namespace_payload_one_byte_over_the_cap_is_rejected() {
+        use crate::package::metadata::integrations::MAX_INTEGRATION_NAMESPACE_BYTES;
+
+        let meta = metadata_with_integrations(serde_json::json!({
+            "com.example": string_value_of_exact_bytes(MAX_INTEGRATION_NAMESPACE_BYTES + 1),
+        }));
+        let err = ValidMetadata::try_from(meta).expect_err("one byte over the per-namespace cap must fail");
+        assert!(
+            format!("{err}").contains("com.example"),
+            "must name the offending namespace: {err}"
+        );
+    }
+
+    #[test]
+    fn over_cap_namespace_payload_exits_with_data_error() {
+        use crate::cli::{ClassifyExitCode, ExitCode};
+        use crate::package::metadata::integrations::MAX_INTEGRATION_NAMESPACE_BYTES;
+
+        let meta = metadata_with_integrations(serde_json::json!({
+            "com.example": string_value_of_exact_bytes(MAX_INTEGRATION_NAMESPACE_BYTES + 1),
+        }));
+        let error = ValidMetadata::try_from(meta).expect_err("over cap must fail");
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+    }
+
+    #[test]
+    fn total_integrations_map_over_the_per_package_cap_is_rejected_even_when_every_namespace_is_within_its_own_cap() {
+        use crate::package::error::Error as PackageError;
+        use crate::package::metadata::integrations::{MAX_INTEGRATION_NAMESPACE_BYTES, MAX_INTEGRATIONS_BYTES};
+
+        // Every namespace at (not over) the per-namespace cap, enough of them
+        // that the combined size exceeds the per-package cap — isolates the
+        // per-package check from the per-namespace one. Count derived from
+        // the constants (ceiling + 1 buffer) so a future cap change can't
+        // silently shrink the fixture back under the line it's meant to cross.
+        let per_namespace = MAX_INTEGRATION_NAMESPACE_BYTES;
+        let count = MAX_INTEGRATIONS_BYTES.div_ceil(per_namespace) + 1;
+        assert!(
+            count * per_namespace > MAX_INTEGRATIONS_BYTES,
+            "fixture must actually exceed the per-package cap"
+        );
+        let mut map = serde_json::Map::new();
+        for i in 0..count {
+            map.insert(format!("com.example.{i}"), string_value_of_exact_bytes(per_namespace));
+        }
+        let meta = metadata_with_integrations(serde_json::Value::Object(map));
+
+        let error = ValidMetadata::try_from(meta).expect_err("total over the per-package cap must fail");
+
+        // The structured variant, not the rendered prose: an alternation over
+        // two substrings of one message goes green for the per-NAMESPACE error
+        // too (it also carries a `max` and the word "limit"), which is the one
+        // confusion this test exists to rule out.
+        let crate::Error::Package(package_error) = &error else {
+            panic!("expected a package error, got: {error}");
+        };
+        let PackageError::IntegrationsTooLarge { size, max } = package_error.as_ref() else {
+            panic!("expected IntegrationsTooLarge, got: {package_error}");
+        };
+        assert_eq!(*max, MAX_INTEGRATIONS_BYTES, "the per-package cap must be reported");
+        assert!(
+            *size > *max,
+            "the reported size must be the one that broke the cap: {size} vs {max}"
+        );
+    }
+
+    /// The whole-map measurement is assembled from the per-namespace passes
+    /// rather than serializing the map a second time, so it has to agree with
+    /// `serde_json` byte for byte. This leg and the one below are the proof:
+    /// the fixture is sized by `serde_json` itself, so a single miscounted
+    /// framing byte (a dropped comma, a colon, the braces) moves the boundary
+    /// and reds one of the two.
+    #[test]
+    fn a_integrations_map_at_the_per_package_cap_boundary_is_accepted() {
+        use crate::package::metadata::integrations::MAX_INTEGRATIONS_BYTES;
+
+        let meta = metadata_with_integrations(integrations_of_exact_bytes(MAX_INTEGRATIONS_BYTES));
+        assert!(
+            ValidMetadata::try_from(meta).is_ok(),
+            "a map of exactly the per-package cap must pass (inclusive boundary)"
+        );
+    }
+
+    /// The failing half of the pair — and the byte-identity assertion: the
+    /// reported size must be exactly one over the cap, which is only true if the
+    /// derived total equals what `serde_json` would have measured.
+    #[test]
+    fn a_integrations_map_one_byte_over_the_per_package_cap_is_rejected() {
+        use crate::package::error::Error as PackageError;
+        use crate::package::metadata::integrations::MAX_INTEGRATIONS_BYTES;
+
+        let meta = metadata_with_integrations(integrations_of_exact_bytes(MAX_INTEGRATIONS_BYTES + 1));
+        let error = ValidMetadata::try_from(meta).expect_err("one byte over the per-package cap must fail");
+
+        let crate::Error::Package(package_error) = &error else {
+            panic!("expected a package error, got: {error}");
+        };
+        let PackageError::IntegrationsTooLarge { size, max } = package_error.as_ref() else {
+            panic!("expected IntegrationsTooLarge, got: {package_error}");
+        };
+        assert_eq!(*max, MAX_INTEGRATIONS_BYTES);
+        assert_eq!(
+            *size,
+            MAX_INTEGRATIONS_BYTES + 1,
+            "the measured total must match serde_json's own byte for byte"
+        );
+    }
+
+    #[test]
+    fn a_single_over_cap_namespace_is_reported_before_the_total_cap() {
+        use crate::package::metadata::integrations::MAX_INTEGRATION_NAMESPACE_BYTES;
+
+        // Four namespaces safely under their own cap, plus one namespace that
+        // is BOTH individually over its own cap AND (combined with the other
+        // four) pushes the map's total over the per-package cap too. C-006
+        // requires the per-namespace error to win — BTreeMap declaration
+        // order puts "aaa.*" before "zzz.offender".
+        let mut map = serde_json::Map::new();
+        for i in 0..4 {
+            map.insert(format!("aaa.safe.{i}"), string_value_of_exact_bytes(7_000));
+        }
+        map.insert(
+            "zzz.offender".to_owned(),
+            string_value_of_exact_bytes(MAX_INTEGRATION_NAMESPACE_BYTES + 100),
+        );
+        let meta = metadata_with_integrations(serde_json::Value::Object(map));
+
+        let err = ValidMetadata::try_from(meta).expect_err("must fail");
+        assert!(
+            format!("{err}").contains("zzz.offender"),
+            "the per-namespace offender must be named, not a generic total-size error: {err}"
+        );
+    }
+
+    // ── C-007 step 3: payload tokens at the publish gate ───────────────────
+    //
+    // A payload's `${…}` runs through the same scanner an env value's does, at
+    // the same place: `validate_for_publish`. These tests therefore call the
+    // publish gate — asserting them on `ValidMetadata::try_from` would be a
+    // green that could never go red, since the ingress chain deliberately does
+    // not look at tokens at all (D14).
+
+    #[test]
+    fn integrations_referencing_a_declared_dependency_is_accepted() {
+        let meta = metadata_with_deps_and_integrations(
+            &dep_json("cmake", None),
+            serde_json::json!({ "com.example": "${deps.cmake.installPath}" }),
+        );
+        assert!(validate_for_publish(meta).is_ok());
+    }
+
+    #[test]
+    fn integrations_referencing_an_undeclared_dependency_is_rejected() {
+        let meta = metadata_with_deps_and_integrations(
+            &dep_json("cmake", None),
+            serde_json::json!({ "com.example": "${deps.ninja.installPath}" }),
+        );
+        let err = validate_for_publish(meta).expect_err("undeclared dep ref must be rejected");
+        assert!(format!("{err}").contains("ninja"), "expected ninja in error: {err}");
+    }
+
+    #[test]
+    fn integrations_referencing_an_unsupported_field_is_rejected() {
+        let meta = metadata_with_deps_and_integrations(
+            &dep_json("cmake", None),
+            serde_json::json!({ "com.example": "${deps.cmake.version}" }),
+        );
+        let err = validate_for_publish(meta).expect_err("unsupported field must be rejected");
+        assert!(format!("{err}").contains("version"), "expected 'version' named: {err}");
+    }
+
+    #[test]
+    fn integrations_dep_reference_found_in_a_nested_string_leaf_is_checked() {
+        // The reference check walks every STRING LEAF of the payload, not
+        // just a bare-string namespace value.
+        let meta = metadata_with_deps_and_integrations(
+            &dep_json("cmake", None),
+            serde_json::json!({ "com.example": { "settings": { "path": "${deps.ninja.installPath}" } } }),
+        );
+        let err = validate_for_publish(meta).expect_err("nested undeclared dep ref must be rejected");
+        assert!(format!("{err}").contains("ninja"), "expected ninja named: {err}");
+    }
+
+    #[test]
+    fn integrations_dep_reference_found_in_an_array_leaf_is_checked() {
+        // The reference check walks every STRING LEAF including one inside a
+        // JSON array — `collect_string_leaves`'s `Value::Array` arm
+        // (`integrations.rs`), which no other fixture in this module or
+        // `integrations.rs` exercises (the existing nested-leaf test above
+        // uses an object, never an array).
+        let meta = metadata_with_deps_and_integrations(
+            &dep_json("cmake", None),
+            serde_json::json!({ "com.example": { "paths": ["${deps.ninja.installPath}"] } }),
+        );
+        let err = validate_for_publish(meta).expect_err("array-leaf undeclared dep ref must be rejected");
+        assert!(format!("{err}").contains("ninja"), "expected ninja named: {err}");
+    }
+
+    #[test]
+    fn integrations_without_any_deps_token_needs_no_declared_dependencies() {
+        let meta = metadata_with_integrations(serde_json::json!({ "com.example": "no tokens here" }));
+        assert!(validate_for_publish(meta).is_ok());
+    }
+
+    // ── D3/D14 in a payload: read it at ingress, refuse it at publish ───────
+
+    /// The one document both legs below are asserted over. A payload carrying a
+    /// token OCX does not recognise: readable, unpublishable.
+    ///
+    /// [`Metadata`] is not `Clone`, so each leg parses this fixture again.
+    fn foreign_token_payload() -> Metadata {
+        metadata_with_integrations(serde_json::json!({ "com.example": "${workspaceFolder}/x" }))
+    }
+
+    /// The grammar is closed (D3), so a payload's foreign token is refused at
+    /// publish exactly as an env value's is — the sibling leg of
+    /// `an_unrecognised_token_passes_ingress_and_is_refused_at_publish` above,
+    /// on the surface that used to pass such a token through byte-identical.
+    ///
+    /// The ingress leg is what keeps the read path permissive: `pull` and
+    /// `inspect` route through `ValidMetadata::try_from`, and a refusal there
+    /// would leave the read-only surfaces nothing to show.
+    #[test]
+    fn a_foreign_token_in_a_payload_passes_ingress_and_is_refused_at_publish() {
+        assert!(
+            ValidMetadata::try_from(foreign_token_payload()).is_ok(),
+            "ingress must accept an unrecognised token, or the read-only surfaces have nothing to read"
+        );
+
+        let message = validate_for_publish(foreign_token_payload())
+            .expect_err("the publish gate must refuse an unrecognised token in a payload")
+            .to_string();
+        assert!(
+            message.contains("${workspaceFolder}"),
+            "the refusal must name the token verbatim: {message}"
+        );
+        assert!(
+            message.contains("com.example"),
+            "the refusal must name the offending namespace: {message}"
+        );
+    }
+
+    /// The escape is how a payload emits a token its *own* consumer resolves:
+    /// a VS Code block spells `$${workspaceFolder}` and the consumer receives
+    /// the literal. Without this leg the refusal above is indistinguishable
+    /// from refusing every payload that mentions `workspaceFolder` at all.
+    #[test]
+    fn an_escaped_foreign_token_in_a_payload_publishes() {
+        let meta = metadata_with_integrations(serde_json::json!({ "com.example": "$${workspaceFolder}/x" }));
+        assert!(
+            validate_for_publish(meta).is_ok(),
+            "$${{…}} is the only way to publish a literal ${{…}}, so it must publish"
+        );
+    }
+
+    /// `${self.env.*}` is refused on this surface as `DisallowedToken`, not as
+    /// a reference that resolves to nothing: a payload is interpolated by a
+    /// resolver built without `with_self_env`, so the token names an empty
+    /// scope and would exit 65 on every consumer.
+    ///
+    /// Asserted on the variant, which is what makes it falsifiable — drop the
+    /// capability gate and the document *publishes*, because a payload carries
+    /// no self-env scope for a reference check to fail against.
+    #[test]
+    fn a_self_env_token_in_a_payload_is_refused_as_disallowed() {
+        use crate::package::error::Error as PackageError;
+
+        let meta = metadata_with_integrations(serde_json::json!({ "com.example": "${self.env.TOOL_HOME}" }));
+        let error = validate_for_publish(meta).expect_err("${self.env.*} in a payload must be refused");
+
+        let crate::Error::Package(package_error) = &error else {
+            panic!("expected a package error, got: {error}");
+        };
+        let PackageError::IntegrationInterpolation { namespace, source } = package_error.as_ref() else {
+            panic!("expected IntegrationInterpolation, got: {package_error}");
+        };
+        assert_eq!(namespace, "com.example", "the refusal must name the namespace");
+        let TemplateError::DisallowedToken { token } = source else {
+            panic!("expected TemplateError::DisallowedToken, got: {source:?}");
+        };
+        assert_eq!(
+            token, "${self.env.TOOL_HOME}",
+            "the refused token must be named verbatim"
+        );
+    }
+
+    #[test]
+    fn escaped_dep_token_in_a_integrations_payload_is_not_checked_as_a_reference() {
+        // C-009b: a `$${deps.…}` is a literal the scanner emits verbatim, never
+        // a token — so an undeclared name inside one must not be reported as
+        // `UnknownDependencyRef`. No declared dependencies at all, so the
+        // unescaped form of this same payload fails loudly.
+        let meta = metadata_with_integrations(serde_json::json!({ "com.example": "$${deps.notdeclared.installPath}" }));
+        assert!(
+            validate_for_publish(meta).is_ok(),
+            "an escaped dep token referencing an undeclared dependency must not be checked as a reference"
+        );
+    }
+
+    // ── C-009b / D10: `$${...}` escape — validation-side regression ─────────
+    //
+    // The escape is the scanner's (`template/scanner.rs`, rule R1). This pins
+    // the validation-side consequence: the publish gate must read an escaped
+    // token as a literal rather than refuse it as an unrecognised one.
+
+    #[test]
+    fn an_escaped_unknown_token_in_an_env_value_publishes() {
+        // `$${installPath}` would NOT discriminate — its inner body is a token
+        // the gate accepts either way. `$${foo}` does: unescaped, `${foo}` is
+        // refused as an unknown token (see `unknown_placeholder_in_env_value_rejected`
+        // above), so this leg goes red the moment the escape stops being read.
+        let meta = make_metadata(&dep_json("cmake", None), &constant_env("X", "$${foo}"));
+        assert!(
+            validate_for_publish(meta).is_ok(),
+            "an escaped ${{foo}} in an env value must publish clean, not be rejected as an unknown token"
         );
     }
 }

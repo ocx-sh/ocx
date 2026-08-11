@@ -32,8 +32,9 @@ use crate::{conventions, options};
 ///   transitive dependencies in transitive-closure order, each with its
 ///   effective visibility) and `surface` (the `interface` and `private`
 ///   projections - the binaries, entrypoints and env keys that would land on
-///   PATH for a consumer versus internally). Plain output adds a `closure`
-///   branch with a flat dependency list and the two surface summaries. On a
+///   PATH for a consumer versus internally, plus each side's declared
+///   integration namespaces). Plain output adds a `closure` branch with a
+///   flat dependency list and the two surface summaries. On a
 ///   multi-platform reference, `--closure` first platform-selects (honoring
 ///   `-p/--platform`) to read the declared dependencies, so the output is the
 ///   same platform-selected body `--resolve` produces, with the closure
@@ -72,8 +73,9 @@ pub struct PackageInspect {
     /// dependencies in transitive-closure order, each with its effective
     /// visibility) and `surface` (the `interface` and `private` projections -
     /// the binaries, entrypoints and env keys that would land on PATH for a
-    /// consumer versus internally). Plain output adds a `closure` branch with a
-    /// flat dependency list and the two surface summaries.
+    /// consumer versus internally, plus each side's declared integration
+    /// namespaces). Plain output adds a `closure` branch with a flat
+    /// dependency list and the two surface summaries.
     ///
     /// For a multi-platform reference, `--closure` first selects a platform
     /// (honoring `-p/--platform`, the host platform by default) to read the

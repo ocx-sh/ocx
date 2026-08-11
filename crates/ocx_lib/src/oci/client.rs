@@ -4911,6 +4911,7 @@ mod tests {
                     dependencies: Default::default(),
                     entrypoints: Default::default(),
                     binaries: None,
+                    integrations: Default::default(),
                 }),
                 platform: "linux/amd64".parse().unwrap(),
             };
@@ -5003,6 +5004,7 @@ mod tests {
                     dependencies: Default::default(),
                     entrypoints: Default::default(),
                     binaries: None,
+                    integrations: Default::default(),
                 }),
                 platform: "linux/amd64".parse().unwrap(),
             };
@@ -5039,6 +5041,7 @@ mod tests {
                     dependencies: Default::default(),
                     entrypoints: Default::default(),
                     binaries: None,
+                    integrations: Default::default(),
                 }),
                 platform: "linux/amd64".parse().unwrap(),
             };
@@ -5099,6 +5102,7 @@ mod tests {
                 env: Default::default(),
                 dependencies: Default::default(),
                 entrypoints: Default::default(),
+                integrations: Default::default(),
             })
         }
 
@@ -5258,6 +5262,7 @@ mod tests {
                     dependencies: Default::default(),
                     entrypoints: Default::default(),
                     binaries: None,
+                    integrations: Default::default(),
                 }),
                 platform: "linux/amd64".parse().unwrap(),
             }
@@ -5523,6 +5528,7 @@ mod tests {
                     dependencies: Default::default(),
                     entrypoints: Default::default(),
                     binaries: None,
+                    integrations: Default::default(),
                 }),
                 platform: "linux/amd64".parse().unwrap(),
             }

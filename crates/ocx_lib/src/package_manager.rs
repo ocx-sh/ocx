@@ -292,7 +292,7 @@ pub use tasks::patch_discovery::PatchDiscoveryMode;
 pub use tasks::patch_publish::PatchPublishReport;
 pub use tasks::patch_sync::PatchSyncReport;
 pub use tasks::resolve::{
-    AdmittedBinaries, ChainBlob, ChainRole, EnvScope, PatchOverlay, PatchProvenance, PatchRootScope, ResolvedChain,
+    AdmittedClaims, ChainBlob, ChainRole, EnvScope, PatchOverlay, PatchProvenance, PatchRootScope, ResolvedChain,
     SitePatchRoots,
 };
 pub use tasks::update_check::{SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult};

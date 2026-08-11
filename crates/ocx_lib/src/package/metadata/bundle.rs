@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
-use super::{binary::Binaries, dependency::Dependencies, entrypoint::Entrypoints, env};
+use super::{binary::Binaries, dependency::Dependencies, entrypoint::Entrypoints, env, integrations::Integrations};
 
 /// Known versions of the bundle metadata format.
 ///
@@ -76,6 +76,16 @@ pub struct Bundle {
     /// different meaning here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binaries: Option<Binaries>,
+
+    /// Vendor-namespaced configuration blocks for tools OCX does not model.
+    /// Keys are namespaces (reverse-DNS by convention, not enforced); values
+    /// are opaque JSON OCX never interprets, merges, or validates the contents
+    /// of. Absent and empty are the SAME state — the `Entrypoints`/`Env`/
+    /// `Dependencies` skip pattern, deliberately NOT `binaries`' `Option`
+    /// tri-state, because nothing here distinguishes "declares none" from "did
+    /// not say".
+    #[serde(default, skip_serializing_if = "Integrations::is_empty")]
+    pub integrations: Integrations,
 }
 
 impl Bundle {
@@ -111,6 +121,52 @@ mod tests {
             vars[0].visibility,
             Visibility::PRIVATE,
             "absent Var.visibility must default to private",
+        );
+    }
+
+    // ── C-001: `Bundle.integrations` — absent ≡ empty ──────────────────────
+    //
+    // `#[serde(skip_serializing_if = "Integrations::is_empty")]` calls
+    // `Integrations::is_empty()` internally during serialization — the
+    // tests below pin that absent and explicit `{}` both deserialize to
+    // empty, and that an empty map is omitted again on serialize.
+
+    #[test]
+    fn bundle_without_a_integrations_field_parses_to_an_empty_map() {
+        let json = r#"{"version": 1}"#;
+        let bundle: Bundle = serde_json::from_str(json).expect("metadata parses");
+        assert!(bundle.integrations.is_empty(), "absent field must deserialize to empty");
+    }
+
+    #[test]
+    fn bundle_with_an_explicit_empty_integrations_object_is_also_empty() {
+        let json = r#"{"version": 1, "integrations": {}}"#;
+        let bundle: Bundle = serde_json::from_str(json).expect("metadata parses");
+        assert!(
+            bundle.integrations.is_empty(),
+            "explicit {{}} must be treated as empty, same as absent"
+        );
+    }
+
+    #[test]
+    fn a_bundle_with_empty_integrations_omits_the_field_on_serialize() {
+        let json = r#"{"version": 1}"#;
+        let bundle: Bundle = serde_json::from_str(json).expect("metadata parses");
+        let reserialized = serde_json::to_string(&bundle).expect("serializes");
+        assert!(
+            !reserialized.contains("\"integrations\""),
+            "empty integrations must be omitted, not emitted as {{}}: {reserialized}"
+        );
+    }
+
+    #[test]
+    fn a_bundle_with_declared_integrations_includes_the_field_on_serialize() {
+        let json = r#"{"version": 1, "integrations": {"com.example": "value"}}"#;
+        let bundle: Bundle = serde_json::from_str(json).expect("metadata parses");
+        let reserialized = serde_json::to_string(&bundle).expect("serializes");
+        assert!(
+            reserialized.contains("\"integrations\""),
+            "a non-empty integrations map must be present on serialize: {reserialized}"
         );
     }
 }

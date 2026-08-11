@@ -161,6 +161,59 @@ resolves in full or the composition refuses, independent of who is asking or whi
 asked for.
 :::
 
+## Integrations {#integrations}
+
+Package metadata can declare vendor-namespaced configuration blocks for tools OCX has no model for at all — an editor extension list, a devcontainer fragment, a JetBrains plugin set. See [Integrations][metadata-integrations] in the metadata reference for the field's grammar, namespace-key rules, size caps, and interpolation. This section covers what composition does with those blocks once [`ocx env`][cmd-env-root] and [`ocx package env`][cmd-package-env] assemble them.
+
+**Composition never merges.** Two packages that declare the same namespace produce two independent rows in the output, never one combined row. [devcontainer.json][devcontainer-integrations] takes the opposite approach — merging every [Feature][devcontainer-features]'s `integrations` contribution into a single object per tool — and OCX deliberately does not follow it; see [No Merge, Ever][metadata-integrations-no-merge] for the full comparison. A consumer that needs to reconcile two blocks does so itself; OCX never picks a winner or combines fields on its behalf.
+
+:::info Why not merge, like devcontainer.json does?
+Merging means someone has to resolve a conflict when two contributions disagree — devcontainer.json leaves that decision to whichever tool reads the merged object. OCX has no way to know which of two colliding `settings` objects should win, so instead of guessing it keeps both, each attributed to the package that declared it. The name is borrowed from devcontainer.json; the merge behavior is not.
+:::
+
+### Row Shape {#integrations-row-shape}
+
+The composed JSON envelope carries `integrations` as a fourth top-level array, alongside `entries`, `binaries`, and `entrypoints` — never nested inside `entries`:
+
+```json
+{
+  "entries": [ … ],
+  "binaries": [ … ],
+  "entrypoints": [ … ],
+  "integrations": [
+    {
+      "namespace": "com.microsoft.vscode",
+      "package": "kitware/cmake:3.28@sha256:aaaa…",
+      "value": { "extensions": ["rust-lang.rust-analyzer"] }
+    }
+  ]
+}
+```
+
+`namespace` is the declared key; `package` is the canonical resolved identifier of the package that declared it (a tag may be absent — a digest-pinned identifier is legal); `value` is that package's payload, fully [interpolated][metadata-integrations-interpolation] against that package's *own* `${installPath}`, never the composing root's. The array is present, with attribution, even when composing a single package — it is never collapsed to a bare object, so the one filter idiom that works against a multi-package composition (`.integrations[] | select(.namespace=="…")`) is the only idiom anyone needs to learn.
+
+Two packages declaring `com.microsoft.vscode` therefore produce two rows with identical `namespace` but different `package` — an array whose length exceeds its distinct-namespace count is the visible proof nothing merged.
+
+### Ordering {#integrations-ordering}
+
+Rows follow the same admitted-set walk order [Composition Order](#composition-order) below uses for `entries`: for each root, its admitted dependencies first in topological order, then the root itself; roots in the order the tool set produced them. Within one package's own contribution, namespaces are ordered lexicographically. A dependency reached by two different roots (a diamond) contributes once, at its first-seen position — the same cross-root dedup `binaries` and `entrypoints` already apply.
+
+### Interface Surface Only {#integrations-interface-surface}
+
+Integrations reach only the [interface surface](#visibility-surfaces) at every depth — `--self` always composes `"integrations": []`, whether from [`ocx package env --self`][cmd-package-env] or a generated [launcher's][cmd-launcher-exec] internal self view (forced, never exposed as a flag). This differs from `binaries` and `entrypoints`, whose surface membership follows the two-axis [visibility][reference-visibility] each declared entry carries; an integrations block has no `visibility` field of its own, because the field belongs to the interface surface structurally rather than by a declared axis. A dependency reached only through a `private` edge still contributes nothing on either surface — the same edge rule that already governs when its `env` vars cross.
+
+### Patch Companions Contribute Too {#integrations-companions}
+
+A [patch companion][patches-how] declaring `integrations` contributes them exactly the way an ordinary package does — a companion is a package loaded into the environment, and no carrier gives it exceptional rules. The row's `package` field names the **companion's** own identifier, never the base it was admitted for, so a consumer can always distinguish a site-policy contribution from one belonging to the package it asked for. A companion matched against several bases contributes once, matching the dedup its `env` entries already get.
+
+This is what makes a site-wide `com.microsoft.vscode` proxy or CA-bundle setting expressible: site policy publishes it once as a companion instead of every package author restating it.
+
+The [interface-surface rule](#integrations-interface-surface) applies unchanged and is not evaluated per contributor — under `--self` the array is empty regardless of who declared what. Declining a companion is the existing [`no-patches`][patches-no-patches-guide] opt-out, which drops an optional companion whole (its `env` along with its integrations); a required companion is required on the same terms its `env` already is.
+
+### Absent from `--shell` and `--ci` {#integrations-shell-ci}
+
+Neither [`--shell`][cmd-env-root] nor `--ci` output carries a `integrations` representation. A shell export line and a CI sink's key/value pair have no shape for an arbitrary JSON payload, and inventing one — a serialized blob packed into an env var — would be a second wire format for data the JSON envelope above already has one for. Only `--format json` carries the array.
+
 ## Composition Order {#composition-order}
 
 When multiple packages contribute to an environment (via `ocx run -g GROUP1,GROUP2` or `ocx package exec PKG1 PKG2`), env entries are **prepended** — the last tool walked has its `PATH` entries placed **first** in the resolved `PATH`. In `-g` argument order, groups listed **later** win PATH lookup.
@@ -247,6 +300,8 @@ Project and group `[env]` entries have no visibility axis at all — a project i
 [volta]: https://volta.sh/
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [bazel-rules]: https://bazel.build/extending/rules
+[devcontainer-integrations]: https://containers.dev/implementors/json_reference/
+[devcontainer-features]: https://containers.dev/implementors/features
 
 <!-- commands -->
 [cmd-add]: ./command-line.md#add
@@ -262,6 +317,7 @@ Project and group `[env]` entries have no visibility axis at all — a project i
 [cmd-package-env]: ./command-line.md#package-env
 [cmd-package-test]: ./command-line.md#package-test
 [cmd-patch-test]: ./command-line.md#patch-test
+[cmd-launcher-exec]: ./command-line.md#launcher-exec
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global
@@ -280,8 +336,13 @@ Project and group `[env]` entries have no visibility axis at all — a project i
 [metadata-env-interpolation]: ./metadata.md#env-interpolation
 [metadata-env-self-env]: ./metadata.md#env-interpolation-self-env
 [metadata-env-path]: ./metadata.md#env-path
+[metadata-integrations]: ./metadata.md#integrations
+[metadata-integrations-no-merge]: ./metadata.md#integrations-no-merge
+[metadata-integrations-interpolation]: ./metadata.md#integrations-interpolation
+[reference-visibility]: ./metadata.md#dependencies-visibility
 
 <!-- internal -->
 [user-guide-global]: ../user-guide.md#global-toolchain
+[patches-how]: ../user-guide/patches.md#patches-how
 [in-depth-project-composition]: ../in-depth/project.md#running-composition-order
 [patches-no-patches-guide]: ../user-guide/patches.md#patches-no-patches

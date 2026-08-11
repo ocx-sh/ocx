@@ -1045,6 +1045,7 @@ mod tests {
                 dependencies: dependency::Dependencies::default(),
                 entrypoints: Entrypoints::default(),
                 binaries: None,
+                integrations: Default::default(),
             });
             package::info::Info {
                 identifier: test_identifier().clone_with_tag(tag),

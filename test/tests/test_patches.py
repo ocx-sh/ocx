@@ -1069,6 +1069,172 @@ def test_show_patches_attributes_the_overlay_and_not_the_project_env(
     )
 
 
+# ---------------------------------------------------------------------------
+# Scenario 7c: adr_package_integrations.md S-013 / C-017 — a companion
+# contributes integrations exactly the way a package does
+# ---------------------------------------------------------------------------
+
+
+def test_patch_companion_contributes_integrations(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
+) -> None:
+    """S-013 / C-017: a companion's ``integrations`` reach ``ocx env``,
+    attributed to the companion, exactly as a package's own do.
+
+    Rationale (ADR C-017, reversed): patches are just packages loaded into the
+    environment, so a companion gets no exceptional carrier rules. The earlier
+    contract discarded them to avoid "policy injection", but that forbade the
+    inert carrier while permitting the powerful one — a companion's ``env``
+    already changes how every process in the shell behaves, while a
+    integrations payload does nothing until a consumer reads its namespace.
+
+    Three assertions, each load-bearing:
+
+    * the companion's ``env`` overlay entry proves the companion mechanism
+      engaged at all (not a blanket regression elsewhere);
+    * the base package's OWN namespace is the positive control — it proves the
+      array is populated, so the companion's row is a real contribution rather
+      than an array that happens to contain everything;
+    * the companion row's ``package`` names the companion, proving attribution
+      is the companion's own identifier and not the base's.
+    """
+    companion_repo = _unique_repo("integrations_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    make_package(
+        ocx, companion_repo, "1.0.0", tmp_path,
+        bins=[],
+        env=[
+            {
+                "key": "INTEGRATIONS_COMPANION_CA",
+                "type": "constant",
+                "value": "/etc/ssl/integrations-companion-ca.pem",
+                "visibility": "interface",
+            }
+        ],
+        integrations={
+            "com.example.companion": {"marker": "COMPANION_PAYLOAD"},
+        },
+        new=True,
+        cascade=True,
+        # Env-only, binary-free companions publish `any` (adr_platform_model_
+        # unification.md D1) so they survive install regardless of host
+        # platform — the same convention `_make_companion` follows.
+        platform="any",
+    )
+
+    base_pkg = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True,
+        integrations={"com.example.base": {"k": "v"}},
+    )
+    descriptor_path = tmp_path / "integrations_companion_descriptor.json"
+    _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
+    _write_config(ocx, registry)
+    _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
+
+    # Install base -> companion auto-discovered and installed.
+    ocx.plain("package", "install", base_pkg.short)
+
+    result = ocx.json("package", "env", base_pkg.short)
+    entries = result["entries"]
+    assert any(e["key"] == "INTEGRATIONS_COMPANION_CA" for e in entries), (
+        f"sanity: the companion's interface env var must reach the composed "
+        f"env, proving the companion mechanism actually engaged; got keys: "
+        f"{[e['key'] for e in entries]}"
+    )
+
+    rows = result["integrations"]
+    namespaces = {row["namespace"] for row in rows}
+    assert namespaces == {"com.example.base", "com.example.companion"}, (
+        f"the base package's OWN integration (positive control) and the "
+        f"companion's (C-017, reversed) must both appear; got {namespaces}"
+    )
+
+    companion_row = next(row for row in rows if row["namespace"] == "com.example.companion")
+    assert companion_repo in companion_row["package"], (
+        f"the companion's contribution must be attributed to the COMPANION's "
+        f"own identifier, not the base's; got {companion_row['package']!r}"
+    )
+    assert companion_row["payload"] == {"marker": "COMPANION_PAYLOAD"}, (
+        f"the companion's payload must arrive intact; got {companion_row['payload']!r}"
+    )
+
+    # `--self` is the private surface; integrations are an interface-only
+    # carrier, so NEITHER the base's own nor the companion's may appear. The
+    # gate is one predicate applied to the whole composition — a companion
+    # leaking here would mean it took a path the base did not.
+    self_view = ocx.json("package", "env", base_pkg.short, "--self")
+    assert self_view["integrations"] == [], (
+        f"`--self` is the private surface and carries no integrations from "
+        f"any contributor; got {self_view['integrations']}"
+    )
+    # Positive control for the empty assertion above: the companion's ENV
+    # still crosses `--self` (only its integrations carrier is gated) —
+    # this is the other half of the C-017 coherence argument. Without this,
+    # a future change that gated the whole companion overlay by `self_view`
+    # would leave `integrations == []` green while deleting the premise
+    # the design record rests on.
+    self_entries = self_view["entries"]
+    assert any(e["key"] == "INTEGRATIONS_COMPANION_CA" for e in self_entries), (
+        f"the companion's env var must still reach `--self` even though its "
+        f"integrations do not; got keys: {[e['key'] for e in self_entries]}"
+    )
+
+
+def test_patch_companion_integrations_appear_once_across_several_bases(
+    ocx: OcxRunner, tmp_path: Path, registry: str
+) -> None:
+    """A companion matched for several admitted bases contributes its
+    integrations ONCE — the carrier sibling of
+    ``test_global_companion_appears_once_when_it_matches_several_bases``.
+
+    Counted, not membership-tested: a set of namespaces would stay green
+    against duplicate rows, which is exactly the regression this guards.
+    """
+    companion_repo = _unique_repo("dedup_cust_companion")
+    companion_fq = f"{registry}/{companion_repo}:1.0.0"
+    make_package(
+        ocx, companion_repo, "1.0.0", tmp_path,
+        bins=[],
+        env=[
+            {
+                "key": "DEDUP_CUST_CA",
+                "type": "constant",
+                "value": "/etc/ssl/dedup-cust-ca.pem",
+                "visibility": "interface",
+            }
+        ],
+        integrations={"com.example.dedup": {"marker": "once"}},
+        new=True,
+        cascade=True,
+        platform="any",
+    )
+
+    descriptor_path = tmp_path / "dedup_cust_descriptor.json"
+    _write_descriptor(
+        descriptor_path,
+        rules=[{"match": "*", "packages": [companion_fq], "required": True}],
+    )
+    _write_config(ocx, registry)
+
+    publish = ocx.run(
+        "patch", "publish", "--descriptor", str(descriptor_path), "--global",
+        format=None, check=False,
+    )
+    assert publish.returncode == 0, f"--global publish failed:\n{publish.stderr}"
+
+    base1 = make_package(ocx, _unique_repo("dedup_cust_base1"), "1.0.0", tmp_path, new=True, cascade=True)
+    base2 = make_package(ocx, _unique_repo("dedup_cust_base2"), "1.0.0", tmp_path, new=True, cascade=True)
+    ocx.plain("package", "install", base1.short)
+    ocx.plain("package", "install", base2.short)
+
+    rows = ocx.json("package", "env", base1.short, base2.short)["integrations"]
+    dedup_count = sum(1 for row in rows if row["namespace"] == "com.example.dedup")
+    assert dedup_count == 1, (
+        f"a companion matching both bases must contribute exactly one "
+        f"com.example.dedup row; got {dedup_count}. integrations: {rows}"
+    )
+
+
 def test_no_patches_opt_out_honored_across_launcher_in_run(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:

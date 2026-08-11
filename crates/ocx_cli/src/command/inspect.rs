@@ -83,9 +83,9 @@ fn declared_identifier(config: &ProjectConfig, tool: &SelectedTool) -> oci::Iden
 /// it, which needs no registry at all. Use `--resolve` to select this host's
 /// leaf and emit its metadata and OCI resolution chain, and `--closure` for the
 /// transitive dependency set plus the binaries, entrypoints and env keys that
-/// would land on `PATH`. Because `--closure` sees the whole selection at once,
-/// it also reports collisions between two different tools before either is
-/// installed.
+/// would land on `PATH`, and each side's declared integration namespaces.
+/// Because `--closure` sees the whole selection at once, it also reports
+/// collisions between two different tools before either is installed.
 ///
 /// Needs a current `ocx.lock` (exit 78 when absent, 65 when it no longer
 /// matches `ocx.toml`) - without a pin there is no stable answer. For the
@@ -119,8 +119,9 @@ pub struct Inspect {
     /// Adds a `closure` object per binding holding its transitive dependencies
     /// and the `interface` / `private` surface projections - the binaries,
     /// entrypoints and env keys that would reach a consumer versus stay
-    /// internal. Reading declared dependencies means selecting a leaf, so this
-    /// implies the same platform selection `--resolve` performs.
+    /// internal, plus each side's declared integration namespaces. Reading
+    /// declared dependencies means selecting a leaf, so this implies the same
+    /// platform selection `--resolve` performs.
     #[clap(long)]
     closure: bool,
 

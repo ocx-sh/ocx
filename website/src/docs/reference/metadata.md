@@ -37,6 +37,7 @@ The metadata file is a JSON object with a `type` discriminator. Currently only t
 | `dependencies` | array | No | [Package dependencies](#dependencies). |
 | `entrypoints` | object | No | [Named entry points](#entry-points), keyed by command name. |
 | `binaries` | array | No | [Declared executable names the package puts on `PATH`](#executables). |
+| `integrations` | object | No | [Vendor-namespaced configuration blocks for tools OCX does not model](#integrations). |
 
 ::: details Why a type discriminator?
 The `type` field allows future metadata formats (e.g. `"manifest"`, `"virtual"`) without
@@ -830,6 +831,118 @@ reject:
   platform-specific resolve step (see [A Claim, Not a Guarantee](#executables-claim)), never to
   the metadata.
 
+## Integrations {#integrations}
+
+The name `integrations` is borrowed from [devcontainer.json's `integrations` property][devcontainer-integrations], but the behavior underneath it is not. Devcontainer merges the blocks contributed by every [Feature][devcontainer-features] into one object per tool; OCX never merges anything. Each declaring package's block stays exactly what that package wrote, attributed to that package, and handed unmodified to whichever tool reads it.
+
+Some tools have configuration OCX has no model for at all — a list of editor extensions, a JetBrains plugin set, a devcontainer fragment, a language-server setting block. Before this field, a publisher's only options were to fork the `metadata.json` format or ship a side-channel file consumers had to know to look for. `integrations` gives every publisher one reserved place to write vendor-specific configuration, keyed by a namespace, without OCX ever needing to understand what is inside.
+
+```json
+{
+  "$schema": "https://ocx.sh/schemas/metadata/v1.json",
+  "type": "bundle",
+  "version": 1,
+  "integrations": {
+    "com.microsoft.vscode": {
+      "extensions": ["rust-lang.rust-analyzer"],
+      "settings": { "rust-analyzer.server.path": "${installPath}/bin/rust-analyzer" }
+    },
+    "com.jetbrains": { "plugins": ["com.jetbrains.rust"] }
+  }
+}
+```
+
+Each key in the `integrations` object is a namespace a publisher owns; each value is arbitrary JSON — an object, an array, a string, a number, or `null`. OCX stores it, enforces the two constraints below (a well-formed key, a size cap), resolves its own `${...}` tokens inside any string value, and carries the whole map through the dependency graph unread. It never looks inside a payload to interpret, validate, merge, or flag a conflict between two packages that declare the same namespace — that non-interpretation is the entire point of the field. What a `com.microsoft.vscode` block should contain, and what a consuming tool does when it finds one from two different packages, is that tool's business, not OCX's.
+
+An absent `integrations` field and an explicit `{}` are the same state. Unlike [`binaries`](#executables-none-vs-empty), nothing here distinguishes "declares none" from "never said."
+
+### No Merge, Ever {#integrations-no-merge}
+
+::: info Compare with devcontainer.json
+[devcontainer.json's `integrations` property][devcontainer-integrations] is designed to be merged: when a dev container composes several [Features][devcontainer-features], each feature's `integrations.vscode.extensions` array is concatenated into one list, and each feature's `integrations.vscode.settings` object is merged into one settings object. A tool implementor is expected to write that merge logic.
+
+OCX's `integrations` shares the name and the reverse-DNS-namespace idea, and nothing else — OCX never merges two packages' contributions, not their extensions lists, not their settings objects, not anything. If two packages in a dependency graph both declare `com.microsoft.vscode`, both blocks exist, each attributed to its own package, and the consuming application decides what to do with two of them. This is also why `extensions` was rejected as the field name during design: it collides head-on with `integrations.vscode.extensions` from the very first VS Code use case.
+:::
+
+This mirrors [Cargo's `[package.metadata.<tool>]` table][cargo-metadata-table]: Cargo reserves the namespace, ignores the contents entirely — no unused-key warning, no schema — and leaves interpretation to whichever tool the key names. `integrations` makes the same trade for OCX packages.
+
+### Namespace Keys {#integrations-namespace}
+
+A namespace key is validated far more loosely than it looks. The convention is reverse-DNS — `com.microsoft.vscode`, `com.jetbrains`, `sh.ocx.completions` — but OCX does not enforce reverse-DNS shape. It only refuses a key that could not function as a JSON object key or as plain-text terminal output at all:
+
+| Rule | Rejects |
+|---|---|
+| Non-empty | `""` |
+| At most 128 bytes | a 129-byte key |
+| No control characters (C0, DEL, and C1: `U+0000`–`U+001F`, `U+007F`, `U+0080`–`U+009F`) | `"a\nb"`, a key containing a raw newline or tab |
+| No invisible characters — general category `Cf` **and** the `Default_Ignorable_Code_Point` property, since neither contains the other | a key containing `U+202E` (right-to-left override), `U+200B` (zero-width space), `U+FEFF` (byte-order mark), or `U+3164` (Hangul filler, the classic blank character) |
+| No Unicode whitespace, not just ASCII spaces | `"com.foo bar"`, a key containing `U+00A0` (no-break space) |
+
+Everything else is legal. `vscode`, `VSCode`, `com.微软`, `a`, `x/y`, and `123` all pass — case is preserved, and `Foo` and `foo` are two distinct namespaces. Non-ASCII namespaces are not restricted by this rule: `com.微软` and `com.café` are refused by nothing here, since none of their characters is invisible.
+
+The invisible-character rule exists because a namespace key is printed verbatim into plain-text output. Without it, a key could be crafted to *display* as a different namespace than the one a consumer actually matches against — the bidirectional-override corner of `Cf` is the same rendering trick documented by [Trojan Source][trojan-source] for source code. OCX refuses two whole properties rather than a codepoint list, because a hand-maintained list goes stale against every Unicode release and this grammar can only ever be loosened once a package publishes: a zero-width space, a byte-order mark, or a Hangul filler hidden inside a key is just as invisible to a human comparing two namespaces on screen. An invalid key is rejected wherever `metadata.json` is validated — [`ocx package create`][cmd-package-create] / [`push`][cmd-package-push], and every later read — with exit 65, naming the offending key.
+
+::: warning `sh.ocx.` is reserved by convention, not by code
+OCX declares its own first-party namespaces under the `sh.ocx.` prefix (e.g. `sh.ocx.completions`). Nothing in the grammar above refuses a third-party key that starts with `sh.ocx.` — the same documented-not-validated stance the reverse-DNS convention itself takes. Third-party packages must not publish under `sh.ocx.*`; today nothing stops them from doing so.
+:::
+
+### Size Caps {#integrations-caps}
+
+| Cap | Limit |
+|---|---|
+| One namespace's payload | 8 KiB |
+| The whole `integrations` map | 32 KiB |
+
+Both are measured as compact (whitespace-free) JSON: the per-namespace cap over that one payload, the per-package cap over the whole map including every key and its surrounding punctuation. A namespace over its own cap is rejected first; if every namespace individually fits but the map as a whole does not, the per-package error fires. Both are enforced everywhere `metadata.json` is validated, exit 65.
+
+These caps are **raise-only**. `metadata.json` is a read-path format — an already-published package must keep resolving on every future `ocx` — so lowering either cap would un-resolve a package that published successfully under today's limit. Raising costs nothing: a package that could not publish under a lower cap simply was never published.
+
+### Interpolation {#integrations-interpolation}
+
+A `integrations` payload gets the same interpolation engine as [`env`](#env) values, resolved inside every string in the payload — object values, array elements, nested at any depth — never inside object keys, and never touching numbers, booleans, or `null`. That engine is a closed namespace (see [Interpolation Tokens](#env-interpolation)): a `${…}` it does not recognise is refused, not passed through.
+
+- **`${installPath}`**, and its exact alias **`${self.installPath}`**, resolve to the *declaring* package's own content directory — never the consuming root's, even when the payload propagates to a consumer through the dependency graph. See [Aliases](#env-interpolation-self).
+- **`${deps.NAME.installPath}`** resolves to a direct dependency's content directory, the same as in `env`. A `${deps.NAME}` naming a dependency the package does not declare is invalid metadata and rejected at publish time, exactly like an unresolvable reference in an `env` value.
+- All three install-path bodies accept the optional **`:native`** / **`:posix`** render modifier described in [Render Modifiers](#env-interpolation-render) — `${self.installPath:posix}` is how a payload destined for a Windows-hosted VS Code `settings.json` gets forward slashes instead of backslashes.
+- **`$${installPath}`** (a doubled `$`) escapes to the literal text `${installPath}` — the only way to emit a literal `${…}` OCX would otherwise try to resolve.
+- **Every other `${...}` token is refused, not passed through.** `${workspaceFolder}`, [VS Code's `${env:VAR}`][vscode-variables], and devcontainer's own [`${localEnv:VAR}` / `${containerEnv:VAR}`][devcontainer-integrations] are not in OCX's closed vocabulary. Writing one bare fails with exit 65, naming the token: refused by [`ocx package create`][cmd-package-create] / [`push`][cmd-package-push] at publish time, and again at composition ([`ocx env`][cmd-env-root] / [`ocx package exec`][cmd-exec] / [`ocx run`][cmd-run]). Read-only paths — [`pull`][cmd-package-pull], [`install`][cmd-package-install], [`inspect`][cmd-package-inspect] — echo an unrecognised token verbatim instead of refusing it. A payload destined for one of these tools escapes it instead: `$${workspaceFolder}` publishes as the literal text `${workspaceFolder}`, left for the downstream tool to resolve on its own turn.
+
+```json
+{
+  "integrations": {
+    "com.example": {
+      "toolPath": "${installPath}/bin/tool",
+      "literalToken": "$${installPath}",
+      "editorVariable": "$${workspaceFolder}/config"
+    }
+  }
+}
+```
+
+Resolved for a package installed at `/home/u/.ocx/packages/.../content`, that payload becomes `"toolPath": "/home/u/.ocx/packages/.../content/bin/tool"`, `"literalToken": "${installPath}"`, and `"editorVariable": "${workspaceFolder}/config"` — the doubled `$` in the source collapses to a single literal `${…}` in the resolved payload, unchanged from there on. Writing `editorVariable` as a bare `"${workspaceFolder}/config"` instead is refused at exit 65: `workspaceFolder` is not a body this engine recognises.
+
+A payload that is not an object at all — a bare string, an array, a number, or `null` — is legal too. A bare string is a single value and is interpolated the same way: `"integrations": { "com.example": "${installPath}/notes.txt" }` is valid metadata.
+
+### The `schemaVersion` Convention {#integrations-schema-version}
+
+OCX places no schema-versioning requirement on a payload's contents. If a namespace's own format needs to evolve, the recommended — never enforced — convention is a top-level `"schemaVersion"` key inside that namespace's own payload:
+
+```json
+{
+  "integrations": {
+    "com.example": { "schemaVersion": 2, "setting": "value" }
+  }
+}
+```
+
+OCX never reads this key; it exists purely as a hint the consuming tool can check before parsing the rest of the payload.
+
+### Who Can Declare Them {#integrations-declarers}
+
+Any package a composition admits, including a [patch companion][patches-guide]. A companion is a package loaded into the environment, so it contributes `integrations` on exactly the terms every other package does — no separate rule, no separate opt-out.
+
+That makes site policy expressible where it belongs. A proxy setting, an internal CA bundle, or an extension allowlist that applies to every project on a machine is published once as a companion instead of restated by every package author. Each row names the declaring package, so a companion's contribution is always distinguishable from the one belonging to the package you asked for. Details and the surface rules live in [Env Composition][env-composition-integrations].
+
 ## Extraction {#extraction}
 
 ### `strip_components` {#extraction-strip-components}
@@ -897,6 +1010,7 @@ The metadata format carries an integer `version` field reserved for future schem
 - `dependencies` — optional package dependencies, digest-pinned in the published form. Each entry carries an `identifier`, optional `name` override (used as `NAME` in `${deps.NAME.installPath}` tokens), and optional `visibility` controlling env propagation through the chain. See [Dependencies](#dependencies).
 - `entrypoints` — optional object keyed by the invocable name. Each value object carries two optional fields. `command`: the binary the generated launcher dispatches to when it differs from the invocable name (e.g. expose `fmt` while running `cargo-fmt`); follows the same slug constraint as the key (`[a-z0-9][a-z0-9_-]*`, at most 64 bytes); not interpolated; omitted means the invocable name is the dispatch target. `args`: array of fixed leading arguments prepended before user-supplied arguments at dispatch time; each element is one argv token; `${installPath}` is interpolated per element; `${deps.*}` tokens are rejected at publish time; omitted or empty are wire-identical — the field is absent in the serialized form when the array is empty.
 - `binaries` — optional array of bare executable-name strings, sorted and unique: a publisher-declared, unverified claim of executables the package puts on `PATH`. Absent means undeclared; `[]` means the publisher asserts zero. Never lists a dependency's executables, and never lists an `entrypoints` launcher name. See [Executables](#executables).
+- `integrations` — optional object mapping a namespace key to an arbitrary JSON payload OCX never interprets, merges, or validates the contents of. Absent and `{}` are the same state. Namespace keys reject only unusable shapes (empty, over 128 bytes, control characters, Unicode whitespace, invisible characters — general category `Cf` together with the `Default_Ignorable_Code_Point` property) — reverse-DNS is a documented convention, not an enforced grammar. Capped at 8 KiB per namespace and 32 KiB per package (compact JSON, raise-only). String values are interpolated with the same closed-vocabulary engine as `env` — `${installPath}` / `${self.installPath}` / `${deps.NAME.installPath}`, each with an optional `:native`/`:posix` render modifier, and a `$${...}` escape to a literal token; an unrecognised `${...}` is refused at exit 65, not passed through. See [Integrations](#integrations).
 
 Visibility model:
 
@@ -956,6 +1070,7 @@ Behavioral changes made within `version: 1` since the initial release:
 | **Dependency manifest pinning** | The authoring sidecar accepts a digest-optional dependency identifier — `ocx package create --platform` resolves it against the selected index and pins the manifest digest directly on the identifier, the same shape for a concrete platform or `any`. The published digest must reference a platform manifest, never an OCI Image Index — see [Manifest Pins, Never Index Pins](#dependencies-manifest-pins). `ocx package push` rejects an index-pinned or unpinned dependency (exit 65). |
 | **Declared executables** | New optional `binaries` field: a sorted, unique array of bare executable-name strings, publisher-declared and unverified. Additive — absent is wire-identical to every package published before this field existed. `None` and `[]` are deliberately distinct wire states (unlike `entrypoints`, which collapses absent and empty). See [Executables](#executables). |
 | **`list` env type** | New `list` modifier type for option-list variables: appends instead of replacing or prepending, removing any earlier occurrence of the same contribution first. Carries a new `separator` field, required for `list` entries and rejected on `path`/`constant`. Additive — packages using only `path`/`constant` are unaffected. See [List Variables](#env-list). |
+| **Vendor integrations** | New optional `integrations` field: a namespace-keyed map of opaque JSON blocks for tools OCX does not model, never interpreted, merged, or validated beyond a namespace-key grammar and a size cap. Additive — absent is wire-identical to every package published before this field existed, and absent/`{}` are the same state. See [Integrations](#integrations). |
 
 ::: warning These changes affect existing packages
 If you published packages before the visibility-default flip, their untagged env entries will no longer appear on the consumer surface. Add `"visibility": "public"` explicitly to vars that consumers should see.
@@ -981,6 +1096,11 @@ If you published packages before the visibility-default flip, their untagged env
 [cmake-genex]: https://cmake.org/cmake/help/latest/manual/cmake-generator-expressions.7.html
 [terraform-strings]: https://developer.hashicorp.com/terraform/language/expressions/strings
 [devcontainer-vars]: https://containers.dev/implementors/json_reference/
+[devcontainer-integrations]: https://containers.dev/implementors/json_reference/
+[devcontainer-features]: https://containers.dev/implementors/features
+[cargo-metadata-table]: https://doc.rust-lang.org/cargo/reference/manifest.html#the-metadata-table
+[trojan-source]: https://trojansource.codes/
+[vscode-variables]: https://code.visualstudio.com/docs/editor/variables-reference
 
 <!-- schema -->
 [schema-url]: /schemas/metadata/v1.json
@@ -990,6 +1110,8 @@ If you published packages before the visibility-default flip, their untagged env
 [env-composition]: ../in-depth/environments.md
 [env-composition-edge-filter]: ../in-depth/environments.md#edge-filter
 [env-composition-list]: ./env-composition.md#composition-order-list
+[env-composition-integrations]: ./env-composition.md#integrations-companions
+[patches-guide]: ../user-guide/patches.md#patches
 [in-depth-project-lock]: ../in-depth/project.md#lock
 [in-depth-project-lock-format]: ../in-depth/project.md#lock-format
 

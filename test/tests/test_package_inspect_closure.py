@@ -354,19 +354,70 @@ def test_inspect_closure_entrypoints_admitted_to_surface(
     assert interface["binaries_complete"] is True
 
 
-def _attr_by_digest(items: list[dict]) -> list[tuple[str, str]]:
-    """(name, digest) pairs for a surface's binaries/entrypoints attribution.
+def test_inspect_closure_integrations_node_list_and_plain_rendering(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """S-010 / C-016: a closure node carries its OWN declared namespace keys
+    (no payload — a closure node is not installed, so ``${installPath}`` has
+    no value), in lexicographic (``BTreeMap``) order; plain mode names the
+    namespace under the tree, never the payload (D15)."""
+    dep = make_package(
+        ocx, f"{unique_repo}_dep", "1.0.0", tmp_path,
+        integrations={
+            "com.zzz.second": {"marker": "PAYLOAD_MUST_NOT_APPEAR_7e2c"},
+            "com.aaa.first": {"k": "v"},
+        },
+    )
+    root = make_package(
+        ocx, unique_repo, "1.0.0", tmp_path,
+        binaries=[],
+        dependencies=[_dep_entry(ocx, dep, visibility="public")],
+    )
+
+    data = inspect_entry(
+        ocx.json("package", "inspect", "--closure", root.short), root.short
+    )
+
+    dep_node = _node(data["closure"]["deps"], f"{unique_repo}_dep")
+    assert dep_node["integrations"] == ["com.aaa.first", "com.zzz.second"], (
+        "a closure node's own integrations must be its declared namespace "
+        f"keys, lexicographically ordered — got {dep_node.get('integrations')}"
+    )
+
+    plain = ocx.plain("package", "inspect", "--closure", root.short)
+    assert plain.returncode == 0, plain.stderr
+    assert "com.aaa.first" in plain.stdout, plain.stdout
+    assert "com.zzz.second" in plain.stdout, plain.stdout
+    assert "PAYLOAD_MUST_NOT_APPEAR_7e2c" not in plain.stdout, plain.stdout
+
+
+def _digest_of(identifier: str | None) -> str:
+    """Extract the ``@sha256:...`` suffix from an identifier, or the whole
+    string if none is present.
 
     Compares by digest rather than the full identifier string so a tag-bearing
     ``repo:tag@digest`` (as `env` reports) matches the same node however inspect
     spells it — the invariant is *which package*, not its string form.
     """
+    match = re.search(r"@(sha256:[0-9a-f]+)", identifier or "")
+    return match.group(1) if match else (identifier or "")
 
-    def digest(ident: str | None) -> str:
-        match = re.search(r"@(sha256:[0-9a-f]+)", ident or "")
-        return match.group(1) if match else (ident or "")
 
-    return sorted((item["name"], digest(item.get("package"))) for item in items)
+def _attr_by_digest(items: list[dict]) -> list[tuple[str, str]]:
+    """(name, digest) pairs for a surface's binaries/entrypoints attribution."""
+    return sorted((item["name"], _digest_of(item.get("package"))) for item in items)
+
+
+def _integrations_by_digest(items: list[dict]) -> list[tuple[str, str]]:
+    """(namespace, digest) pairs for an integrations attribution list.
+
+    One helper for both envelopes: the closure ``SurfaceOut`` shape
+    (``{namespace, package}``, D16) and the composed ``EnvVars`` shape
+    (``{namespace, package, payload}``, C-014) spell the key the same way, so the
+    oracle below compares like with like instead of translating between two
+    names for one concept.
+    """
+    return sorted((item["namespace"], _digest_of(item.get("package"))) for item in items)
 
 
 def test_inspect_closure_surface_equals_env_and_env_self(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> None:
@@ -387,7 +438,10 @@ def test_inspect_closure_surface_equals_env_and_env_self(ocx: OcxRunner, unique_
     """
     pub_path = {"key": "PATH", "type": "path", "value": "${installPath}/bin", "visibility": "public"}
 
-    leaf_a = make_package(ocx, f"{unique_repo}_leafa", "1.0.0", tmp_path, bins=["leaf-a"], env=[pub_path])
+    leaf_a = make_package(
+        ocx, f"{unique_repo}_leafa", "1.0.0", tmp_path, bins=["leaf-a"], env=[pub_path],
+        integrations={"com.example.leafa": {"note": "from leaf-a"}},
+    )
     leaf_b = make_package(
         ocx, f"{unique_repo}_leafb", "1.0.0", tmp_path,
         bins=["leaf-b"],
@@ -410,6 +464,7 @@ def test_inspect_closure_surface_equals_env_and_env_self(ocx: OcxRunner, unique_
             _dep_entry(ocx, leaf_a, visibility="public"),
             _dep_entry(ocx, leaf_b, visibility="private"),
         ],
+        integrations={"com.example.app": {"note": "from app"}},
     )
 
     # `env` composes from installed packages; install pulls the whole closure.
@@ -444,6 +499,43 @@ def test_inspect_closure_surface_equals_env_and_env_self(ocx: OcxRunner, unique_
     env_self_keys = {entry["key"] for entry in env_self["entries"]}
     assert "LEAF_B_SECRET" not in insp_private_keys, insp_private_keys
     assert "LEAF_B_SECRET" not in env_self_keys, env_self_keys
+
+    # S-010 / C-016: the same oracle for `integrations` — app and leaf_a
+    # each declare one namespace (leaf_a is admitted via TWO paths: public
+    # from app directly, and interface through mid, so this also proves
+    # cross-root/cross-path dedup on the integrations carrier). Compared
+    # by the (namespace, package) SET, never the payload — the closure
+    # carries no payload (C-016).
+    # D16: the closure row spells the key `namespace`, the same word the flat
+    # env envelope uses. Asserted on the raw row before the oracle compares
+    # them: the helper below would raise `KeyError` on a regression to `name`,
+    # but a crash names the line, not the contract.
+    for row in surface["interface"]["integrations"]:
+        assert "namespace" in row, f"D16: the closure integrations key is `namespace`, got {row}"
+        assert "name" not in row, f"D16: `name` is the binaries/entrypoints spelling, got {row}"
+        assert "value" not in row, f"C-016: the closure envelope is payload-free, got {row}"
+
+    insp_iface_integrations = _integrations_by_digest(surface["interface"]["integrations"])
+    env_consumer_integrations = _integrations_by_digest(env_consumer["integrations"])
+    assert insp_iface_integrations == env_consumer_integrations
+    # Non-empty on purpose: an equality between two EMPTY lists would pass
+    # under an implementation that never populates the array at all — see
+    # subsystem-tests.md "Unfalsifiable Greens".
+    assert insp_iface_integrations, (
+        "the interface surface must actually carry the declared namespaces, "
+        "not merely agree with env on being empty"
+    )
+    assert {namespace for namespace, _ in insp_iface_integrations} == {
+        "com.example.app", "com.example.leafa",
+    }, insp_iface_integrations
+
+    insp_private_integrations = _integrations_by_digest(surface["private"]["integrations"])
+    env_self_integrations = _integrations_by_digest(env_self["integrations"])
+    assert insp_private_integrations == env_self_integrations == [], (
+        f"D4: --self / the private surface must carry ZERO integrations, "
+        f"even though the interface surface (asserted above) is non-empty; "
+        f"insp={insp_private_integrations} env_self={env_self_integrations}"
+    )
 
 
 def test_inspect_closure_entrypoint_conflict_reports_payload_and_exits_65(
