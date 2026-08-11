@@ -20,5 +20,15 @@
       "value": "${installPath}/certs/corp-ca.pem",
       "visibility": "interface"
     }
-  ]
+  ],
+  "integrations": {
+    "com.microsoft.vscode": {
+      "declaredBy": "corp-ca-bundle",
+      "settings": {
+        "http.systemCertificates": true,
+        "http.proxyStrictSSL": true,
+        "customTool.caBundle": "${self.installPath}/certs/corp-ca.pem"
+      }
+    }
+  }
 }

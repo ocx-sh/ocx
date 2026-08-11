@@ -15,11 +15,19 @@ input via `tests/test_scenarios_smoke.py`).
 ```
 test/manual/
 ├── README.md                 ← this file
+├── PATCHES.md                ← patch tier: companions, descriptors, freeze/sync
+├── INTEGRATIONS.md         ← `integrations`: what it prints, with real output
 ├── packages/                 ← source trees, one per package shape
+├── projects/                 ← toolchain-tier demo projects (ocx.toml + generated lock)
 ├── scripts/
 │   ├── env.sh                ← source to point at localhost:5000
 │   ├── bootstrap.sh          ← idempotent build + push of every package
-│   └── teardown.sh           ← rm -rf $OCX_HOME (with confirm)
+│   ├── teardown.sh           ← rm -rf $OCX_HOME (with confirm)
+│   ├── setup-patches.sh      ← patch rig: companions, bases, descriptors, config
+│   ├── teardown-patches.sh   ← remove patch rig state
+│   ├── setup-integrations.sh     ← integrations rig (delegates to setup-patches.sh)
+│   ├── show-integrations.sh      ← nine-section guided output tour (asserts, not just prints)
+│   └── teardown-integrations.sh  ← remove integrations rig state
 ├── announce-e2e/             ← Track D announce gate against the REAL index
 │   ├── README.md             ← runbook, prerequisites, per-driver walkthrough
 │   ├── PLAYBOOKS.md          ← three failure playbooks
@@ -94,6 +102,10 @@ Two mechanics worth knowing before reading the table:
 | `dojo/deps-app` | 1 | `app` | mid (interface) + leaf-b (private) + leaf-a (private) | surface visibility (`--self`); the leaf-a edge makes the closure a **diamond** (also reachable through mid) |
 | `dojo/cross-layer-entrypoint` | 1 | `wrap-leaf-a` | leaf-a (interface) | `${deps.NAME.installPath}` template |
 | `dojo/baked-args-demo` | 1 | `hello-script` | — | baked `args` with `${installPath}` interpolation; ships `content/scripts/hello.sh` (committed), no dep required |
+
+The `dojo/custom-*` packages are published by `scripts/setup-integrations.sh`
+rather than `bootstrap.sh` — they belong to their own rig, documented in
+[`INTEGRATIONS.md`](INTEGRATIONS.md).
 
 ---
 

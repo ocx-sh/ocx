@@ -1,0 +1,31 @@
+{
+  "type": "bundle",
+  "version": 1,
+  "env": [
+    {
+      "key": "PATH",
+      "type": "path",
+      "required": true,
+      "value": "${installPath}/bin",
+      "visibility": "public"
+    },
+    {
+      "key": "CUSTOM_OTHER_HOME",
+      "type": "constant",
+      "value": "${installPath}",
+      "visibility": "public"
+    }
+  ],
+  "entrypoints": {
+    "custom-other": {}
+  },
+  "integrations": {
+    "com.microsoft.vscode": {
+      "declaredBy": "custom-other",
+      "settings": {
+        "customOther.executable": "${self.installPath}/bin/custom-other"
+      },
+      "extensions": ["ocx.custom-other"]
+    }
+  }
+}
