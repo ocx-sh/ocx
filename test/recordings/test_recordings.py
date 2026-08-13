@@ -35,17 +35,6 @@ class ScriptFixture(TypedDict):
     commands: list[str]
     path: Path
 
-# Setups whose scripts run in a publisher work directory so that
-# `ocx package create` / `package push` can use relative paths like
-# `build/`, `metadata.json`. The recorder silently `cd`s to
-# ``provider.work_dir`` (SP8) before the first typed command so the cast
-# does not leak the long pytest tmp path.
-# States whose region commands use relative paths in the provider work dir
-# (publisher build trees; the maintainer's authored descriptor.json), so the
-# recorder must cd there before the first typed command.
-_PUBLISHER_STATES = {"setup:publisher", "setup:patches-maintainer"}
-
-
 # Python 3.14 warns on forkpty() in a multi-threaded process.  Under
 # ``pytest -n auto`` every xdist worker carries an execnet receiver thread,
 # so the process is multi-threaded when pexpect.spawn() -> ptyprocess ->
@@ -84,15 +73,18 @@ def test_record(
         registry_slug + "/": "",
     }
 
-    # Publisher cd-hack: cd to the directory the provider's setup function
-    # actually wrote its inputs into (SP8: provider.work_dir).  For the
-    # publisher state this is tmp_path/_state (not tmp_path itself), so
-    # relative paths like build/ and metadata.json resolve correctly.
-    if meta.state in _PUBLISHER_STATES:
-        work_dir = provider.work_dir if provider.work_dir is not None else tmp_path
-        recorder.silent_setup(f"cd {shlex.quote(str(work_dir))}")
-        sanitize_map[str(work_dir) + "/"] = ""
-        sanitize_map[str(work_dir)] = ""
+    # Replay the scenario working directory the scripts themselves establish
+    # with `cd "$SCENARIO_TMP"` — that prelude sits outside the cast region
+    # (CA5) and is therefore never typed, so without this the shell would keep
+    # pytest's cwd (the repo's `test/`) and project-scoped commands would find
+    # the repository's own ocx.toml instead of the scenario's.  For publisher
+    # states the provider's work dir is tmp_path/_state (SP8), which is where
+    # relative paths like build/ and metadata.json resolve.  The cd is silent
+    # and the path is sanitized so the cast never leaks the pytest tmp path.
+    work_dir = provider.work_dir if provider.work_dir is not None else tmp_path
+    recorder.silent_setup(f"cd {shlex.quote(str(work_dir))}")
+    sanitize_map[str(work_dir) + "/"] = ""
+    sanitize_map[str(work_dir)] = ""
 
     # Inject the StateProvider env projection into the persistent PTY shell so
     # `$PKG_*` / `$REPO_*` / `$SCENARIO_TMP` etc. resolve in replayed commands
