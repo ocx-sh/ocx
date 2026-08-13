@@ -21,6 +21,15 @@ const members = [
       { icon: 'gitlab', link: 'https://gitlab.com/michael-herwig' },
       { icon: 'spotify', link: 'https://open.spotify.com/user/1170878827?si=9c507e1cf5684d2a' },
     ]
+  },
+  {
+    avatar: '/team/kate.jpg',
+    name: 'Katherine Draheim',
+    title: 'Marketing & Community Lead',
+    links: [
+      { icon: 'linkedin', link: 'https://www.linkedin.com/in/katherine-draheim/' },
+      { icon: 'github', link: 'https://www.github.com/kathescode' },
+    ]
   }
 ]
 </script>
