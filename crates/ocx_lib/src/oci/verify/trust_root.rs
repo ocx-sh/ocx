@@ -18,11 +18,10 @@
 //!
 //! Construction paths:
 //!
-//! - [`TrustRoot::load_from_pem`] — one or more `CERTIFICATE` PEM blocks
-//!   (Fulcio CA only; no Rekor key, no CTFE key). The `--trust-root` seam.
 //! - [`TrustRoot::load_trusted_root_json`] — a Sigstore `TrustedRoot` JSON
 //!   document: Fulcio CAs, CTFE keys and the pinned Rekor key. The
-//!   `--tuf-root` / `OCX_SIGSTORE_TUF_ROOT` air-gapped seam. No network.
+//!   `--trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT` / `[trust.sigstore]`
+//!   air-gapped seam. No network.
 //! - [`TrustRoot::from_material`] — rebuild from the trust-root cache.
 //! - [`TrustRoot::load_embedded`] — the public-good Sigstore root, fetched and
 //!   verified over TUF by `sigstore`'s `tough`-backed client.
@@ -181,47 +180,6 @@ impl TrustRoot {
         })
     }
 
-    /// Load Fulcio trust anchors from PEM-encoded bytes.
-    ///
-    /// Parses every `CERTIFICATE` block; at least one must be present and every
-    /// one must parse as X.509. Pins no Rekor key and no CTFE key — this seam
-    /// exists for an operator who has only their CA bundle.
-    ///
-    /// # Errors
-    /// [`VerifyErrorKind::TrustRootLoad`] when the input is not UTF-8, is not
-    /// valid PEM, carries no `CERTIFICATE` block, or carries one whose body is
-    /// not a parseable certificate.
-    pub fn load_from_pem(pem_bytes: &[u8]) -> Result<Self, VerifyErrorKind> {
-        let pem_str = std::str::from_utf8(pem_bytes).map_err(|_| {
-            VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::PemParseFailed {
-                detail: "input is not valid UTF-8".to_string(),
-            })
-        })?;
-
-        let parsed = pem::parse_many(pem_str).map_err(|e| {
-            VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::PemParseFailed {
-                detail: format!("malformed PEM: {e}"),
-            })
-        })?;
-
-        let mut der_certs: Vec<Vec<u8>> = Vec::new();
-        for block in parsed.into_iter().filter(|b| b.tag() == "CERTIFICATE") {
-            let bytes = block.contents().to_vec();
-            parse_certificate(&bytes)
-                .map_err(|detail| VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::PemParseFailed { detail }))?;
-            der_certs.push(bytes);
-        }
-
-        if der_certs.is_empty() {
-            return Err(VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::NoCertificateBlocks));
-        }
-
-        Ok(Self {
-            der_certs,
-            ..Self::default()
-        })
-    }
-
     /// Rebuild trust material from the trust-root cache.
     ///
     /// No validation beyond what the cache round-tripped: the material was
@@ -245,7 +203,8 @@ impl TrustRoot {
     /// public-good TUF repository serves. Certificate-authority and log-key
     /// validity windows are applied by that codec, not re-derived here.
     ///
-    /// This is the `--tuf-root` / `OCX_SIGSTORE_TUF_ROOT` air-gapped seam: it
+    /// This is the `--trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT` /
+    /// `[trust.sigstore]` air-gapped seam: it
     /// performs no TUF fetch and no metadata-expiry check, because the operator
     /// supplied the document out of band. [`TrustRoot::load_embedded`] is the
     /// path that does verify TUF metadata.
@@ -394,56 +353,15 @@ mod tests {
             .expect("der")
     }
 
-    fn cert_pem(der: &[u8]) -> Vec<u8> {
-        pem::encode(&pem::Pem::new("CERTIFICATE", der.to_vec())).into_bytes()
-    }
-
-    // A CERTIFICATE PEM block whose body is `SEQUENCE { INTEGER 1 }` — valid
-    // DER, never a certificate. The previous hand-rolled length checker
-    // accepted this; a real X.509 parse does not.
-    const NOT_A_CERTIFICATE_PEM: &[u8] = b"\
------BEGIN CERTIFICATE-----\n\
-MAMCAQE=\n\
------END CERTIFICATE-----\n";
+    // A CERTIFICATE body that is `SEQUENCE { INTEGER 1 }` — valid DER, never a
+    // certificate. A structural byte check accepts it; a real X.509 parse does
+    // not, and a chain builder handed it as an anchor would choke later.
+    const NOT_A_CERTIFICATE_DER: &[u8] = &[0x30, 0x03, 0x02, 0x01, 0x01];
 
     #[test]
-    fn load_from_pem_succeeds_with_a_real_certificate() {
-        let der = real_cert_der();
-        let tr = TrustRoot::load_from_pem(&cert_pem(&der)).expect("valid PEM must parse");
-        assert_eq!(tr.der_certs(), &[der], "the anchor must round-trip byte-for-byte");
-    }
-
-    #[test]
-    fn load_from_pem_loads_multiple_certificates() {
-        let (a, b) = (real_cert_der(), real_cert_der());
-        let two = [cert_pem(&a), cert_pem(&b)].concat();
-        let tr = TrustRoot::load_from_pem(&two).expect("two certs must parse");
-        assert_eq!(tr.der_certs().len(), 2, "two cert blocks expected");
-    }
-
-    #[test]
-    fn load_from_pem_empty_returns_trust_root_load_error() {
-        match TrustRoot::load_from_pem(b"") {
-            Err(VerifyErrorKind::TrustRootLoad(_)) => {}
-            other => panic!("expected TrustRootLoad, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn load_from_pem_no_cert_blocks_returns_trust_root_load_error() {
-        let non_cert = b"-----BEGIN PUBLIC KEY-----\nFAKE\n-----END PUBLIC KEY-----\n";
-        match TrustRoot::load_from_pem(non_cert) {
-            Err(VerifyErrorKind::TrustRootLoad(_)) => {}
-            other => panic!("expected TrustRootLoad, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn load_from_pem_rejects_der_that_is_not_a_certificate() {
-        // The regression this whole reshape exists for: well-formed DER that a
-        // structural byte check waves through, and a trust anchor a chain
-        // builder would then choke on.
-        match TrustRoot::load_from_pem(NOT_A_CERTIFICATE_PEM) {
+    fn load_trusted_root_json_rejects_der_that_is_not_a_certificate() {
+        let doc = trusted_root_json(NOT_A_CERTIFICATE_DER, true);
+        match TrustRoot::load_trusted_root_json(&doc) {
             Err(VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::PemParseFailed { detail })) => {
                 assert!(
                     detail.contains("invalid X.509 certificate in trust root"),
@@ -452,16 +370,6 @@ MAMCAQE=\n\
             }
             other => panic!("expected TrustRootLoad(PemParseFailed), got: {other:?}"),
         }
-    }
-
-    #[test]
-    fn load_from_pem_pins_no_rekor_or_ctfe_key() {
-        let tr = TrustRoot::load_from_pem(&cert_pem(&real_cert_der())).expect("valid PEM");
-        assert!(
-            tr.rekor_public_key_pem().is_none(),
-            "a bare Fulcio PEM pins no Rekor key"
-        );
-        assert!(tr.ctfe_key_map().is_empty(), "a bare Fulcio PEM pins no CTFE key");
     }
 
     /// Build a `TrustedRoot` JSON document the way `test/sigstore/generate-trusted-root.py`

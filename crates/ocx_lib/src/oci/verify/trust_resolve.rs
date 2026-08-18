@@ -10,11 +10,23 @@
 //! one place makes that gate a single source of truth. The CLI command layers
 //! flag-vs-env override resolution and per-identifier error tagging on top.
 //!
-//! Precedence: `--tuf-root`/`OCX_SIGSTORE_TUF_ROOT` (Fulcio CA + pinned Rekor
-//! key) → `--trust-root`/`OCX_SIGSTORE_TRUST_ROOT` (Fulcio-CA PEM, no Rekor
-//! key) → the fresh trust-root cache for this Rekor instance → the public-good
-//! root fetched over TUF. Offline additionally requires the resolved material
-//! to carry a pinned Rekor key, and never reaches the TUF fetch.
+//! Precedence, cheapest-to-override first:
+//!
+//! 1. `--trusted-root` flag,
+//! 2. `OCX_SIGSTORE_TRUSTED_ROOT`,
+//! 3. `[trust.sigstore] trusted_root` / `trusted_root_json` from `config.toml`,
+//! 4. `$OCX_HOME/sigstore/trusted-root.json` (convention path, no config),
+//! 5. the fresh trust-root cache for this Rekor instance,
+//! 6. the public-good root fetched over TUF.
+//!
+//! Rungs 1 and 2 arrive already collapsed into one path (the CLI passes
+//! `flag.or(env)`; auto-verify passes the env value). Offline additionally
+//! requires the resolved material to carry a pinned Rekor key, and never
+//! reaches the TUF fetch.
+//!
+//! Rungs 1–3 name material the operator asked for, so a missing or unreadable
+//! file is an error. Rung 4 is a convention: absent means "not configured this
+//! way" and falls through, while an unreadable *present* file still fails.
 
 use std::path::{Path, PathBuf};
 
@@ -22,21 +34,27 @@ use super::error::{TrustRootLoadReason, VerifyErrorKind};
 use super::trust_cache::TrustRootCache;
 use super::trust_root::TrustRoot;
 use crate::file_structure::StateStore;
+use crate::trust::SigstoreTrust;
 
-/// Resolve the trust root from the supplied overrides, then the trust-root
-/// cache, then the embedded root — enforcing the offline pinned-Rekor-key gate.
+/// Resolve the trust root from the supplied overrides, then the configured
+/// `[trust.sigstore]` material, the `$OCX_HOME` convention path, the trust-root
+/// cache, and finally the embedded root — enforcing the offline
+/// pinned-Rekor-key gate on every rung.
 ///
-/// `tuf_override` / `pem_override` are the already-resolved override paths (the
-/// CLI passes `flag.or(env)`, auto-verify passes the env value). `state` owns the
+/// `explicit_override` is the already-resolved flag-or-env path (rungs 1–2).
+/// `sigstore` is the merged `[trust.sigstore]` table, `home_trusted_root` the
+/// `$OCX_HOME/sigstore/trusted-root.json` convention path. `state` owns the
 /// trust-root cache layout; `rekor_cache_key` keys it by Rekor authority.
 ///
 /// # Errors
 /// Returns the [`VerifyErrorKind`] describing the failure (asset read failure,
-/// PEM/JSON parse failure, offline-with-no-pinned-key, or a failed TUF fetch).
-/// Callers tag it with the target identifier.
+/// a `trusted_root` / `trusted_root_json` ambiguity, JSON parse failure,
+/// offline-with-no-pinned-key, or a failed TUF fetch). Callers tag it with the
+/// target identifier.
 pub async fn resolve_trust_root(
-    tuf_override: Option<&Path>,
-    pem_override: Option<&Path>,
+    explicit_override: Option<&Path>,
+    sigstore: Option<&SigstoreTrust>,
+    home_trusted_root: Option<&Path>,
     state: &StateStore,
     rekor_cache_key: &str,
     offline: bool,
@@ -47,22 +65,50 @@ pub async fn resolve_trust_root(
         })
     };
 
-    // 1. TUF trusted-root JSON override (Fulcio CA + pinned Rekor key).
-    if let Some(path) = tuf_override {
+    // 1+2. `--trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT`, already collapsed.
+    if let Some(path) = explicit_override {
         let json_path = trusted_root_json_path(path).await;
         let bytes = tokio::fs::read(&json_path).await.map_err(read_err)?;
         let root = TrustRoot::load_trusted_root_json(&bytes)?;
         return enforce_offline_rekor_key(root, offline);
     }
 
-    // 2. Fulcio-CA PEM override (no Rekor key — fetched online, or pinned from cache).
-    if let Some(path) = pem_override {
-        let bytes = tokio::fs::read(path).await.map_err(read_err)?;
-        let root = TrustRoot::load_from_pem(&bytes)?;
-        return enforce_offline_rekor_key(root, offline);
+    // 3. `[trust.sigstore]` from the operator `config.toml` tiers. The two
+    //    spellings are checked for ambiguity before either is read, so a
+    //    misconfigured file fails the same way whichever one would have won.
+    if let Some(sigstore) = sigstore {
+        if sigstore.trusted_root.is_some() && sigstore.trusted_root_json.is_some() {
+            return Err(VerifyErrorKind::TrustRootLoad(
+                TrustRootLoadReason::AmbiguousTrustRootConfig,
+            ));
+        }
+        if let Some(json) = sigstore.trusted_root_json.as_deref() {
+            let root = TrustRoot::load_trusted_root_json(json.as_bytes())?;
+            return enforce_offline_rekor_key(root, offline);
+        }
+        if let Some(path) = sigstore.trusted_root.as_deref() {
+            let json_path = trusted_root_json_path(path).await;
+            let bytes = tokio::fs::read(&json_path).await.map_err(read_err)?;
+            let root = TrustRoot::load_trusted_root_json(&bytes)?;
+            return enforce_offline_rekor_key(root, offline);
+        }
     }
 
-    // 3. Fresh trust-root cache for this Rekor instance (Fulcio + Rekor key).
+    // 4. `$OCX_HOME/sigstore/trusted-root.json` — the drop-a-file convention.
+    //    Absent falls through to the cache; present-but-unreadable does not,
+    //    or a permission problem would masquerade as "not configured".
+    if let Some(path) = home_trusted_root {
+        match tokio::fs::read(path).await {
+            Ok(bytes) => {
+                let root = TrustRoot::load_trusted_root_json(&bytes)?;
+                return enforce_offline_rekor_key(root, offline);
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(read_err(source)),
+        }
+    }
+
+    // 5. Fresh trust-root cache for this Rekor instance (Fulcio + Rekor key).
     //    A normal cache entry always carries a Rekor key, but route it through
     //    the same offline gate so a hand-edited keyless entry still yields the
     //    actionable error rather than a deeper Rekor failure.
@@ -70,7 +116,7 @@ pub async fn resolve_trust_root(
         return enforce_offline_rekor_key(cached.into_trust_root(), offline);
     }
 
-    // 4. Nothing cached or supplied. Offline cannot fall back to the online
+    // 6. Nothing cached or supplied. Offline cannot fall back to the online
     //    TUF fetch — fail with the remedy.
     if offline {
         return Err(VerifyErrorKind::TrustRootLoad(
@@ -92,11 +138,11 @@ fn enforce_offline_rekor_key(root: TrustRoot, offline: bool) -> Result<TrustRoot
     Ok(root)
 }
 
-/// Resolve a `--tuf-root` value to the trusted-root JSON file: the path itself
-/// when it is a file, or `<dir>/trusted_root.json` when it names a directory.
+/// Resolve a trusted-root override to the JSON file itself: the path as given
+/// when it names a file, or `<dir>/trusted_root.json` when it names a directory.
 ///
 /// Uses async `tokio::fs::metadata` — the sync `Path::is_dir` would block the
-/// runtime worker on every `--tuf-root`/`OCX_SIGSTORE_TUF_ROOT` resolution.
+/// runtime worker on every trusted-root resolution.
 async fn trusted_root_json_path(path: &Path) -> PathBuf {
     let is_dir = tokio::fs::metadata(path).await.map(|m| m.is_dir()).unwrap_or(false);
     if is_dir {
@@ -117,7 +163,7 @@ mod tests {
     async fn offline_with_no_material_fails_closed_with_remedy() {
         let tmp = tempfile::tempdir().unwrap();
         let state = StateStore::new(tmp.path().join("state"));
-        let result = resolve_trust_root(None, None, &state, "rekor.example", true).await;
+        let result = resolve_trust_root(None, None, None, &state, "rekor.example", true).await;
         assert!(
             matches!(
                 result,
@@ -140,17 +186,10 @@ mod tests {
     async fn keyless_cache_entry_diverges_between_offline_and_online() {
         let tmp = tempfile::tempdir().unwrap();
         let state = StateStore::new(tmp.path().join("state"));
-        let entry = TrustRootCache {
-            rekor_authority: "rekor.example".into(),
-            fulcio_der_certs: vec![vec![0x30, 0x00]],
-            ctfe_keys: std::collections::BTreeMap::new(),
-            rekor_public_key_pem: None,
-            cached_at: std::time::SystemTime::now(),
-            ttl_seconds: 3600,
-        };
+        let entry = keyless_cache_entry();
         entry.write_cache(&state).await.unwrap();
 
-        let offline = resolve_trust_root(None, None, &state, "rekor.example", true).await;
+        let offline = resolve_trust_root(None, None, None, &state, "rekor.example", true).await;
         assert!(
             matches!(
                 offline,
@@ -161,7 +200,7 @@ mod tests {
             "offline + keyless cache must be OfflineTrustMaterialUnavailable, got {offline:?}"
         );
 
-        let online = resolve_trust_root(None, None, &state, "rekor.example", false)
+        let online = resolve_trust_root(None, None, None, &state, "rekor.example", false)
             .await
             .expect("online must accept a keyless cache entry");
         assert_eq!(
@@ -169,5 +208,156 @@ mod tests {
             1,
             "the cached anchor must survive the resolve"
         );
+    }
+
+    /// Both spellings of the same decision is a configuration error, not a
+    /// silent pick — and it is refused before either is read, so the failure
+    /// does not depend on which file happens to exist.
+    #[tokio::test]
+    async fn both_trusted_root_spellings_is_a_config_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+        let sigstore = SigstoreTrust {
+            trusted_root: Some(tmp.path().join("absent.json")),
+            trusted_root_json: Some("{}".to_string()),
+            ..SigstoreTrust::default()
+        };
+        let result = resolve_trust_root(None, Some(&sigstore), None, &state, "rekor.example", false).await;
+        assert!(
+            matches!(
+                result,
+                Err(VerifyErrorKind::TrustRootLoad(
+                    TrustRootLoadReason::AmbiguousTrustRootConfig
+                ))
+            ),
+            "both spellings must be AmbiguousTrustRootConfig, got {result:?}"
+        );
+    }
+
+    /// An absent `$OCX_HOME/sigstore/trusted-root.json` is "not configured this
+    /// way", so the ladder continues to the cache rung below it. Shown against
+    /// a cache entry that only the fall-through can reach.
+    #[tokio::test]
+    async fn absent_home_trusted_root_falls_through_to_the_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+        keyless_cache_entry().write_cache(&state).await.unwrap();
+
+        let home = tmp.path().join("home/sigstore/trusted-root.json");
+        let resolved = resolve_trust_root(None, None, Some(&home), &state, "rekor.example", false)
+            .await
+            .expect("an absent convention path must not stop the ladder");
+        assert_eq!(
+            resolved.der_certs().len(),
+            1,
+            "the cache rung below the convention path must have supplied the anchor"
+        );
+    }
+
+    /// The converse of the test above: a *present* but unreadable convention
+    /// file is a real failure, never a silent fall-through — otherwise a
+    /// permission problem would look identical to "no file here".
+    #[tokio::test]
+    async fn unparseable_home_trusted_root_does_not_fall_through() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+        // A reachable cache entry, so a fall-through would SUCCEED and the
+        // assertion below can only pass by the convention rung failing loudly.
+        keyless_cache_entry().write_cache(&state).await.unwrap();
+
+        let home = tmp.path().join("trusted-root.json");
+        tokio::fs::write(&home, b"not json at all").await.unwrap();
+        let result = resolve_trust_root(None, None, Some(&home), &state, "rekor.example", false).await;
+        assert!(
+            matches!(result, Err(VerifyErrorKind::TrustRootLoad(_))),
+            "a present-but-broken convention file must fail, got {result:?}"
+        );
+    }
+
+    /// One Fulcio anchor, no Rekor key — the shape both cache-rung tests need.
+    fn keyless_cache_entry() -> TrustRootCache {
+        TrustRootCache {
+            rekor_authority: "rekor.example".into(),
+            fulcio_der_certs: vec![vec![0x30, 0x00]],
+            ctfe_keys: std::collections::BTreeMap::new(),
+            rekor_public_key_pem: None,
+            cached_at: std::time::SystemTime::now(),
+            ttl_seconds: 3600,
+        }
+    }
+
+    /// Rung 1 over rung 3. Both rungs are wired to fail, with *different*
+    /// errors, so the error kind names which one ran: reaching the config
+    /// tier at all would report `AmbiguousTrustRootConfig` instead.
+    #[tokio::test]
+    async fn the_explicit_override_is_consulted_before_the_config_tier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+        keyless_cache_entry().write_cache(&state).await.unwrap();
+
+        let explicit = tmp.path().join("absent-explicit.json");
+        let sigstore = SigstoreTrust {
+            trusted_root: Some(tmp.path().join("also-absent.json")),
+            trusted_root_json: Some("{}".to_string()),
+            ..SigstoreTrust::default()
+        };
+        let result = resolve_trust_root(Some(&explicit), Some(&sigstore), None, &state, "rekor.example", false).await;
+        assert!(
+            matches!(
+                result,
+                Err(VerifyErrorKind::TrustRootLoad(
+                    TrustRootLoadReason::AssetReadFailed { .. }
+                ))
+            ),
+            "the explicit override must be read first, got {result:?}"
+        );
+    }
+
+    /// Rung 3 over rung 4, same discriminating-error technique: the convention
+    /// path holds material that fails with a *different* kind, so a config tier
+    /// that was skipped would be visible in the error.
+    #[tokio::test]
+    async fn the_config_tier_is_consulted_before_the_home_convention_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+        keyless_cache_entry().write_cache(&state).await.unwrap();
+
+        let home = tmp.path().join("trusted-root.json");
+        tokio::fs::write(&home, b"not json at all").await.unwrap();
+        let sigstore = SigstoreTrust {
+            trusted_root: Some(tmp.path().join("absent.json")),
+            trusted_root_json: Some("{}".to_string()),
+            ..SigstoreTrust::default()
+        };
+        let result = resolve_trust_root(None, Some(&sigstore), Some(&home), &state, "rekor.example", false).await;
+        assert!(
+            matches!(
+                result,
+                Err(VerifyErrorKind::TrustRootLoad(
+                    TrustRootLoadReason::AmbiguousTrustRootConfig
+                ))
+            ),
+            "[trust.sigstore] must be consulted before the convention path, got {result:?}"
+        );
+    }
+
+    /// A `[trust.sigstore]` carrying neither spelling is not a configured trust
+    /// root — it says something about Fulcio/Rekor URLs and nothing about the
+    /// anchor — so the ladder continues past it rather than failing.
+    #[tokio::test]
+    async fn a_url_only_config_tier_does_not_stop_the_ladder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+        keyless_cache_entry().write_cache(&state).await.unwrap();
+
+        let sigstore = SigstoreTrust {
+            fulcio_url: Some("https://fulcio.corp.example".to_string()),
+            rekor_url: Some("https://rekor.corp.example".to_string()),
+            ..SigstoreTrust::default()
+        };
+        let resolved = resolve_trust_root(None, Some(&sigstore), None, &state, "rekor.example", false)
+            .await
+            .expect("a URL-only [trust.sigstore] must not stop the ladder");
+        assert_eq!(resolved.der_certs().len(), 1, "the cache rung supplied the anchor");
     }
 }

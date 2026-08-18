@@ -35,6 +35,8 @@
 //! matching that consumes a resolved [`CompiledPolicy`] lives in
 //! `oci::verify::identity`. See `.claude/artifacts/adr_trust_policy.md`.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::log;
@@ -45,6 +47,15 @@ pub struct TrustConfig {
     /// The declared policies. Empty when `[trust]` is present but lists none.
     #[serde(default)]
     pub policy: Vec<TrustPolicy>,
+
+    /// Sigstore trust material for a self-hosted stack (`[trust.sigstore]`).
+    ///
+    /// Read from the operator `config.toml` tiers only. The project `ocx.toml`
+    /// also deserializes into [`TrustConfig`], but its `sigstore` sub-table is
+    /// never consulted: a repository that could name its own Fulcio CA would
+    /// verify its own signatures, which is the whole trust decision.
+    #[serde(default)]
+    pub sigstore: Option<SigstoreTrust>,
 }
 
 impl TrustConfig {
@@ -62,6 +73,135 @@ impl TrustConfig {
     pub fn lock_as_system(&mut self) {
         for policy in &mut self.policy {
             policy.system_locked = true;
+        }
+        if let Some(sigstore) = self.sigstore.as_mut() {
+            sigstore.lock_as_system();
+        }
+    }
+
+    /// Merge `other` (the higher-precedence tier) into `self`.
+    ///
+    /// The two halves of `[trust]` merge by opposite rules, which is why this
+    /// is a method and not a field-wise fold at the call site. `[[trust.policy]]`
+    /// **array-appends** — every tier's entries pool into one set and masking
+    /// happens at resolution time ([`resolve`]). `[trust.sigstore]` is scalar
+    /// and cannot: two Fulcio CAs is not a merge, it is an ambiguity, so it
+    /// **replaces** field-by-field and honours the system lock, following the
+    /// [`RegistryDefaults`](crate::config::RegistryDefaults) precedent.
+    pub fn merge(&mut self, other: TrustConfig) {
+        self.policy.extend(other.policy);
+        if let Some(other_sigstore) = other.sigstore {
+            match self.sigstore.as_mut() {
+                Some(sigstore) => sigstore.merge(other_sigstore),
+                None => self.sigstore = Some(other_sigstore),
+            }
+        }
+    }
+}
+
+/// The `[trust.sigstore]` sub-table: where verification gets its trust root
+/// when the stack is self-hosted rather than the Sigstore public good.
+///
+/// Every field is optional and the whole sub-table may be absent — omitting it
+/// reproduces the public-good behaviour exactly. Its purpose is fleet
+/// distribution: an operator running an internal Fulcio/Rekor publishes one
+/// `config.toml` through the `[managed]` tier and every machine verifies
+/// against the internal CA with no env var and no file copy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct SigstoreTrust {
+    /// Path to a Sigstore trusted-root JSON, or a directory holding
+    /// `trusted_root.json`.
+    ///
+    /// A relative path resolves against the directory of the `config.toml`
+    /// that declared it — rewritten to absolute at load time, so the same
+    /// value means the same file regardless of the process working directory.
+    /// Mutually exclusive with [`Self::trusted_root_json`].
+    #[serde(default)]
+    pub trusted_root: Option<PathBuf>,
+
+    /// The trusted-root document inlined verbatim.
+    ///
+    /// This is the form a fleet receives: `ocx config push` reads a path-form
+    /// [`Self::trusted_root`] at publish time and inlines it here, because a
+    /// path on the operator's disk means nothing on a consumer's. Mutually
+    /// exclusive with [`Self::trusted_root`].
+    #[serde(default)]
+    pub trusted_root_json: Option<String>,
+
+    /// Default Fulcio base URL for `ocx package sign` when `--fulcio-url` is
+    /// omitted.
+    #[serde(default)]
+    pub fulcio_url: Option<String>,
+
+    /// Default Rekor base URL for `ocx package sign` / `verify` when
+    /// `--rekor-url` is omitted.
+    #[serde(default)]
+    pub rekor_url: Option<String>,
+
+    /// Runtime provenance marker: declared at the SYSTEM config scope
+    /// (`/etc/ocx/config.toml`), making the whole sub-table non-overridable by
+    /// the user, home, or managed tiers.
+    ///
+    /// Never serialized on either side — set by the loader via
+    /// [`TrustConfig::lock_as_system`], not read from disk. The skip is the
+    /// security boundary: a managed-config payload writing
+    /// `system_locked = true` parses as an unknown key and is dropped, so it
+    /// cannot promote its own trust root to system authority.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub system_locked: bool,
+}
+
+impl SigstoreTrust {
+    /// Mark this sub-table as system-scope — non-overridable by lower tiers.
+    ///
+    /// Unconditional, like
+    /// [`RegistryDefaults::lock_as_system`](crate::config::RegistryDefaults::lock_as_system):
+    /// there is no opt-out field to gate on, and an operator who pins a trust
+    /// root at `/etc` has said everything that needs saying.
+    pub fn lock_as_system(&mut self) {
+        self.system_locked = true;
+    }
+
+    /// Merge `other` (higher precedence) into `self`, field-by-field.
+    ///
+    /// A system-locked `self` ignores every lower-tier override — the lock is
+    /// per-table, not per-field. The flag is ADOPTED from `other` for the same
+    /// reason [`RegistryConfig::merge`](crate::config::RegistryConfig::merge)
+    /// adopts it: the system tier folds in as `other` on the very first merge,
+    /// so without the adoption the lock would be dropped before it ever
+    /// applied.
+    pub fn merge(&mut self, other: SigstoreTrust) {
+        if self.system_locked {
+            return;
+        }
+        self.system_locked = other.system_locked;
+        // A trust root is one decision in two spellings: taking either field
+        // from a higher tier must drop the other, or a tier that switches from
+        // a path to an inline document would leave both set and trip the XOR.
+        if other.trusted_root.is_some() || other.trusted_root_json.is_some() {
+            self.trusted_root = other.trusted_root;
+            self.trusted_root_json = other.trusted_root_json;
+        }
+        if other.fulcio_url.is_some() {
+            self.fulcio_url = other.fulcio_url;
+        }
+        if other.rekor_url.is_some() {
+            self.rekor_url = other.rekor_url;
+        }
+    }
+
+    /// Rewrite a relative [`Self::trusted_root`] to be absolute against
+    /// `config_dir` — the directory of the `config.toml` that declared it.
+    ///
+    /// Called by the config loader once per file tier, so `/etc/ocx/config.toml`
+    /// and `$OCX_HOME/config.toml` each anchor their own relative paths and the
+    /// process working directory never enters into it.
+    pub fn anchor_relative_root(&mut self, config_dir: &std::path::Path) {
+        if let Some(path) = self.trusted_root.as_ref()
+            && path.is_relative()
+        {
+            self.trusted_root = Some(config_dir.join(path));
         }
     }
 }
@@ -379,6 +519,8 @@ pub enum TrustPolicyError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn policy(scope: &str, identity: Option<&str>, regexp: Option<&str>, issuer: &str) -> TrustPolicy {
@@ -573,6 +715,7 @@ system_locked = true
                 policy("ghcr.io/acme/*", Some("a"), None, "iss"),
                 policy("ghcr.io/other/*", Some("b"), None, "iss"),
             ],
+            sigstore: None,
         };
         config.lock_as_system();
         assert!(config.policy.iter().all(|policy| policy.system_locked));
@@ -744,5 +887,146 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
         let root: Root = toml::from_str(toml).expect("unknown top-level field is tolerated, not rejected");
         assert_eq!(root.trust.policy.len(), 1);
         assert_eq!(root.trust.policy[0].scope, "ghcr.io/acme/*");
+    }
+
+    #[test]
+    fn sigstore_trust_tolerates_unknown_fields_from_newer_ocx() {
+        // Third fleet forward-compat guard, one nesting level below the two
+        // above: the unknown key sits inside `[trust.sigstore]`. Neither
+        // sibling test can catch a `deny_unknown_fields` restored on
+        // `SigstoreTrust` — one exercises `TrustPolicy`, the other
+        // `TrustConfig` itself.
+        let toml = r#"
+[trust.sigstore]
+trusted_root = "sigstore/trusted-root.json"
+future_field = "added by a newer ocx"
+"#;
+        #[derive(Deserialize)]
+        struct Root {
+            trust: TrustConfig,
+        }
+        let root: Root = toml::from_str(toml).expect("unknown field inside [trust.sigstore] is tolerated");
+        let sigstore = root.trust.sigstore.expect("sub-table parses");
+        assert_eq!(
+            sigstore.trusted_root.as_deref(),
+            Some(Path::new("sigstore/trusted-root.json"))
+        );
+    }
+
+    #[test]
+    fn system_scope_sigstore_survives_a_lower_tier_override() {
+        // `[[trust.policy]]` pools across tiers; a scalar trust root cannot —
+        // two Fulcio CAs is an ambiguity, not a merge. Follows the
+        // `[registry]` precedent: system scope replaces AND locks.
+        let mut system = TrustConfig {
+            sigstore: Some(SigstoreTrust {
+                fulcio_url: Some("https://fulcio.corp.example".to_string()),
+                ..SigstoreTrust::default()
+            }),
+            ..TrustConfig::default()
+        };
+        system.lock_as_system();
+
+        let home = TrustConfig {
+            sigstore: Some(SigstoreTrust {
+                fulcio_url: Some("https://fulcio.attacker.example".to_string()),
+                ..SigstoreTrust::default()
+            }),
+            ..TrustConfig::default()
+        };
+
+        let mut merged = system;
+        merged.merge(home);
+        assert_eq!(
+            merged.sigstore.expect("sigstore survives").fulcio_url.as_deref(),
+            Some("https://fulcio.corp.example"),
+            "a system-locked [trust.sigstore] is not overridable by a lower tier"
+        );
+    }
+
+    #[test]
+    fn a_higher_tier_switching_trust_root_spelling_clears_the_other() {
+        // The trust root is ONE decision in two spellings. A tier that moves
+        // from a path to an inline document must not leave both fields set —
+        // that is exactly the ambiguity the resolver refuses with exit 78, and
+        // it would be reached through a merge nobody wrote by hand.
+        let user = TrustConfig {
+            sigstore: Some(SigstoreTrust {
+                trusted_root: Some(PathBuf::from("/etc/ocx/sigstore/trusted-root.json")),
+                rekor_url: Some("https://rekor.corp.example".to_string()),
+                ..SigstoreTrust::default()
+            }),
+            ..TrustConfig::default()
+        };
+        let home = TrustConfig {
+            sigstore: Some(SigstoreTrust {
+                trusted_root_json: Some("{}".to_string()),
+                ..SigstoreTrust::default()
+            }),
+            ..TrustConfig::default()
+        };
+
+        let mut merged = user;
+        merged.merge(home);
+        let sigstore = merged.sigstore.expect("sigstore survives");
+        assert_eq!(
+            sigstore.trusted_root, None,
+            "the path spelling is dropped, not left alongside"
+        );
+        assert_eq!(sigstore.trusted_root_json.as_deref(), Some("{}"));
+        assert_eq!(
+            sigstore.rekor_url.as_deref(),
+            Some("https://rekor.corp.example"),
+            "an unrelated field the higher tier said nothing about survives"
+        );
+    }
+
+    #[test]
+    fn absent_sigstore_in_a_higher_tier_leaves_the_lower_one_standing() {
+        let user = TrustConfig {
+            sigstore: Some(SigstoreTrust {
+                fulcio_url: Some("https://fulcio.corp.example".to_string()),
+                ..SigstoreTrust::default()
+            }),
+            ..TrustConfig::default()
+        };
+        let mut merged = user;
+        merged.merge(TrustConfig::default());
+        assert_eq!(
+            merged.sigstore.expect("sigstore survives").fulcio_url.as_deref(),
+            Some("https://fulcio.corp.example"),
+            "a tier that says nothing about sigstore must not clear it"
+        );
+    }
+
+    #[test]
+    fn anchor_relative_root_resolves_against_the_declaring_config_dir() {
+        // The whole point of the relative form: `/etc/ocx/config.toml` naming
+        // `sigstore/trusted-root.json` means `/etc/ocx/sigstore/...`, never
+        // a path relative to whatever directory the process happens to be in.
+        let mut sigstore = SigstoreTrust {
+            trusted_root: Some(PathBuf::from("sigstore/trusted-root.json")),
+            ..SigstoreTrust::default()
+        };
+        sigstore.anchor_relative_root(Path::new("/etc/ocx"));
+        assert_eq!(
+            sigstore.trusted_root.as_deref(),
+            Some(Path::new("/etc/ocx/sigstore/trusted-root.json"))
+        );
+    }
+
+    #[test]
+    fn anchor_relative_root_leaves_an_absolute_path_alone() {
+        let absolute = if cfg!(windows) {
+            PathBuf::from("C:/opt/sigstore/trusted-root.json")
+        } else {
+            PathBuf::from("/opt/sigstore/trusted-root.json")
+        };
+        let mut sigstore = SigstoreTrust {
+            trusted_root: Some(absolute.clone()),
+            ..SigstoreTrust::default()
+        };
+        sigstore.anchor_relative_root(Path::new("/etc/ocx"));
+        assert_eq!(sigstore.trusted_root.as_deref(), Some(absolute.as_path()));
     }
 }

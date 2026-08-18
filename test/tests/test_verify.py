@@ -7,9 +7,9 @@ Contract source: ``.claude/artifacts/adr_oci_referrers_signing_v1.md``
 ``.claude/state/plans/plan_slice1_sign_and_verify.md``.
 
 Trust-root seam: verify runs against the local stack's trusted-root JSON
-(``--tuf-root``), which carries the Fulcio CA and the pinned Rekor key. The one
-exception is the Rekor-unavailable test, which must supply the CA alone so the
-Rekor key fetch actually happens and can fail.
+(``--trusted-root``), which carries the Fulcio CA and the pinned Rekor key. The
+one exception is the Rekor-unavailable test, which supplies a document with no
+pinned Rekor key so the key fetch actually happens and can fail.
 """
 from __future__ import annotations
 
@@ -46,22 +46,17 @@ def _verify(
     identity: str | None = None,
     issuer: str | None = None,
     rekor_url: str | None = None,
-    trust_root: Path | None = None,
-    tuf_root: Path | None = None,
+    trusted_root: Path | None = None,
     platform: str | None = None,
     json_format: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``package verify``, defaulting every knob to the stack's own values.
 
-    ``trust_root`` swaps the trusted-root JSON for a CA-only PEM. ``tuf_root``
-    keeps the JSON form but points at a different document — the way to vary
-    what the trust material carries without losing the CT log key.
+    ``trusted_root`` points at a different trusted-root document — the way to
+    vary what the trust material carries without losing the CT log key.
     """
     env = dict(ocx.env)
-    root = ["--tuf-root", str(tuf_root or stack.trust_root)]
-    if trust_root is not None:
-        env["OCX_SIGSTORE_TRUST_ROOT"] = str(trust_root)
-        root = []
+    root = ["--trusted-root", str(trusted_root or stack.trust_root)]
     return subprocess.run(
         [
             str(ocx.binary),
@@ -460,9 +455,7 @@ def test_verify_rekor_unavailable_exits_83(
     Distinguished from ``RekorSetInvalid`` (exit 65) because retry MAY help
     here — the service is down, not a crypto failure. The trust root carries the
     CA and the CT log key but no pinned Rekor key, on purpose: a pinned key
-    would make the lookup unnecessary and there would be nothing to fail, while
-    a bare CA PEM has no CT log key and is refused (exit 78) before the run ever
-    reaches Rekor.
+    would make the lookup unnecessary and there would be nothing to fail.
     """
     pkg = published_package
     _sign(ocx, sigstore_stack, identity_token, pkg)
@@ -470,7 +463,7 @@ def test_verify_rekor_unavailable_exits_83(
     verify = _verify(
         ocx, sigstore_stack, pkg,
         rekor_url=adversarial.unreachable_rekor_url(),
-        tuf_root=sigstore_stack.trusted_root_without_rekor_key(tmp_path),
+        trusted_root=sigstore_stack.trusted_root_without_rekor_key(tmp_path),
     )
     assert verify.returncode == 83, (
         f"expected exit 83 (RekorUnavailable), got {verify.returncode}\n"

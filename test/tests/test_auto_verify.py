@@ -12,7 +12,7 @@ install fail-closed (no package-store or symlink state). No policy → no verify
 
 Because install/pull carry no `--rekor-url` flag, auto-verify uses the DEFAULT
 public Rekor endpoint — so these tests pin the local stack's Rekor key via
-`OCX_SIGSTORE_TUF_ROOT`, the same air-gapped seam `test_offline_verify.py`
+`OCX_SIGSTORE_TRUSTED_ROOT`, the same air-gapped seam `test_offline_verify.py`
 exercises. That pin is what makes the tests hermetic AND what makes them
 falsifiable: the SET was signed by the local Rekor, so a verify that reached the
 public endpoint instead would fail against a key that never signed it.
@@ -77,7 +77,7 @@ def _assert_no_partial_state(ocx: OcxRunner, pkg: PackageInfo) -> None:
 
 def _tuf(stack: SigstoreStack) -> dict[str, str]:
     """Env pinning the Rekor key so auto-verify needs no default-Rekor fetch."""
-    return {"OCX_SIGSTORE_TUF_ROOT": str(stack.trusted_root_json)}
+    return {"OCX_SIGSTORE_TRUSTED_ROOT": str(stack.trusted_root_json)}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

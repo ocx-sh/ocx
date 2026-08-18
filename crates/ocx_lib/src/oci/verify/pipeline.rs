@@ -1284,8 +1284,9 @@ mod tests {
 
     #[tokio::test]
     async fn verify_refuses_a_trust_root_carrying_no_ct_log_key() {
-        // A bare Fulcio CA PEM (`--trust-root ca.pem`) has anchors but no CT log
-        // key. `sigstore` builds an empty keyring from it without complaint and
+        // A trust root carrying anchors but no CT log key — the shape a
+        // hand-assembled document produces. `sigstore` builds an empty keyring
+        // from it without complaint and
         // then fails every SCT check, so the pipeline refuses up front with the
         // remedy instead. Exit 78 (config), not 65 (bad signature).
         let (_key, cert) = self_signed_cert();

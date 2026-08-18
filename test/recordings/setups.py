@@ -691,13 +691,13 @@ def signing(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[
     dex, Fulcio, Rekor, TesseraCT, Trillian — so the recorded cast shows a real
     Fulcio certificate and a real transparency-log entry, not a mock.
 
-    The stack's addresses reach the script as `$FULCIO` / `$REKOR` /
-    `$TRUST_ROOT` rather than as literals, because the compose ports are
-    overridable (`OCX_TEST_FULCIO_PORT` and friends) and the trust root lives at
-    a path no reader would type. The docs page carries the concrete values.
+    The stack's addresses reach the script as `$FULCIO` / `$REKOR` rather than
+    as literals, because the compose ports are overridable
+    (`OCX_TEST_FULCIO_PORT` and friends). The docs page carries the concrete
+    values.
 
     The identity token arrives as `OCX_IDENTITY_TOKEN` and the self-hosted CA
-    as `OCX_SIGSTORE_TUF_ROOT` — the same two channels a CI job uses, and the
+    as `OCX_SIGSTORE_TRUSTED_ROOT` — the same two channels a CI job uses, and the
     reason the cast's sign and verify lines carry neither flag.
 
     The `[[trust.policy]]` written here is what lets the cast's verify line omit
@@ -722,8 +722,7 @@ def signing(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[
         {
             "FULCIO": f"http://localhost:{os.environ.get('OCX_TEST_FULCIO_PORT', '5555')}",
             "REKOR": f"http://localhost:{os.environ.get('OCX_TEST_REKOR_PORT', '3000')}",
-            "TRUST_ROOT": str(SIGSTORE_DIR),
-            "OCX_SIGSTORE_TUF_ROOT": str(SIGSTORE_DIR),
+            "OCX_SIGSTORE_TRUSTED_ROOT": str(SIGSTORE_DIR),
             "OCX_IDENTITY_TOKEN": token,
         }
     )

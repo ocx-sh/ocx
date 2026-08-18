@@ -10,9 +10,10 @@
 //!
 //! Wired end to end by [`pipeline::VerifyPipeline`]. Read-only throughout —
 //! every registry call routes through the mirror-aware read seam. The
-//! embedded TUF trust root is still stubbed, so `--trust-root` /
-//! `OCX_SIGSTORE_TRUST_ROOT` is required; see `signing.md` "Current
-//! Limitations". Design record:
+//! A self-hosted stack supplies its trust root out of band — `--trusted-root`,
+//! `OCX_SIGSTORE_TRUSTED_ROOT`, `[trust.sigstore]`, or
+//! `$OCX_HOME/sigstore/trusted-root.json`; see
+//! `self-hosted-sigstore.md`. Design record:
 //! [`adr_oci_referrers_signing_v1.md`](../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md).
 
 // `error` is `pub` — `VerifyError`/`VerifyErrorKind` are bound by the CLI layer.
