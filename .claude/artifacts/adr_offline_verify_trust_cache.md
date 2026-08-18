@@ -101,3 +101,54 @@ material ⇒ verify offline; none ⇒ the documented fail-vs-skip policy.
   returning 503 from fake Rekor and still passing offline).
 - The TOFU Rekor-key hole is closed whenever trust material provides the key.
 - Real TUF fetch/refresh + bundle-local-CAS air-gap remain honestly deferred.
+
+## Amendment (2026-08-19) — six-rung ladder, `--trusted-root`, `[trust.sigstore]`
+
+Supersedes the "`OCX_SIGSTORE_TUF_ROOT` override" and "Trust-material precedence
+(verify)" sections above. Everything else in this ADR stands.
+
+**1. `--trust-root` deleted.** Rung 2 loaded a Fulcio PEM into a trust root with an
+empty CT-key map, and `verify/pipeline.rs` unconditionally refuses that — so the
+flag exited 78 on every invocation that reached it. It could not succeed. Deleted
+with `TrustRoot::load_from_pem`, no shim and no alias; `OCX_SIGSTORE_TRUST_ROOT`
+went with it. Neither ever shipped (PR #203 was still open), so this is not a CLI
+break.
+
+**2. `--tuf-root` renamed `--trusted-root`; `OCX_SIGSTORE_TUF_ROOT` renamed
+`OCX_SIGSTORE_TRUSTED_ROOT`.** The old name claimed a TUF fetch the flag never
+performed — it reads a static trusted-root JSON. TUF runs only on the
+public-good path (`TrustRoot::load_embedded`).
+
+**3. The ladder grows from four rungs to six**, first hit wins:
+
+1. `--trusted-root` flag
+2. `OCX_SIGSTORE_TRUSTED_ROOT`
+3. `[trust.sigstore]` in the operator `config.toml` — `trusted_root` (path,
+   anchored to the declaring file's directory) XOR `trusted_root_json` (inlined)
+4. `$OCX_HOME/sigstore/trusted-root.json` — convention path
+5. trust-root cache (`state/trust_root/<rekor-slug>.json`, 24h TTL)
+6. public-good root over TUF (`load_embedded`; unreachable offline)
+
+Rungs 1–3 are operator-named: a named file that does not exist is an error, never
+a fall-through. Rung 4 is a convention: absent falls through, present-and-unreadable
+fails. `enforce_offline_rekor_key` still gates every rung, and offline still never
+reaches rung 6.
+
+**4. `[trust.sigstore]` is a new sub-table on `[trust]`**, read from the operator
+`config.toml` tiers only — the project `ocx.toml` deserializes it and it is never
+consulted, because a repository that could name its own Fulcio CA would verify its
+own signatures. It locks per-table at system scope (the `[registry]` precedent, not
+`[[trust.policy]]`'s pooling — two Fulcio CAs is an ambiguity, not a merge), and the
+two trust-root spellings are coupled so a tier switching from path to inline drops
+the other rather than leaving a stale pair.
+
+**5. Fleet distribution.** `ocx config push` inlines a path-form `trusted_root` as
+`trusted_root_json` at publish time, so a fleet payload names no path on anyone's
+disk. Two guards follow: a payload carrying `trusted_root_json` requires a
+digest-pinned `[managed] source` (otherwise the trust root arrives over the channel
+it exists to verify), and a path-form `trusted_root` arriving from the managed tier
+is ignored with a warning.
+
+Docs: `website/src/docs/in-depth/self-hosted-sigstore.md` (new),
+`in-depth/signing.md#trust-root`, `reference/configuration.md#keys-trust-sigstore`,
+`reference/environment.md#ocx-sigstore-trusted-root`.
