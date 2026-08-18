@@ -217,27 +217,17 @@ Token precedence for `ocx package sign` (highest to lowest):
 OIDC identity tokens expire quickly (typically under 10 minutes). Do not store a token in a long-lived environment or secret manager entry — fetch a fresh token immediately before calling `ocx package sign`.
 :::
 
-### `OCX_SIGSTORE_TRUST_ROOT` {#ocx-sigstore-trust-root}
+### `OCX_SIGSTORE_TRUSTED_ROOT` {#ocx-sigstore-trusted-root}
 
-Path to a PEM file of [Fulcio][fulcio] CA certificate(s) that [`ocx package verify`][cmd-package-verify] validates the signing certificate chain against. Equivalent to the `--trust-root` flag; the flag takes precedence when both are set.
+Path to a Sigstore [trusted-root][sigstore-tuf] JSON document — or a directory containing `trusted_root.json` — that [`ocx package verify`][cmd-package-verify] loads its trust material from. Equivalent to the `--trusted-root` flag; the flag takes precedence when both are set.
 
-A PEM carries only the Fulcio CA — not the certificate-transparency log key and not the [Rekor][rekor] public key.
+A trusted root carries three things together: the [Fulcio][fulcio] CA certificate(s), the certificate-transparency log keys, and the pinned [Rekor][rekor] public key. All three are load-bearing — a Fulcio certificate embeds a Signed Certificate Timestamp that the verifier checks against the CT log's key, so trust material carrying CA anchors alone is refused up front with exit `78` and the message `trust root carries no CT log key`.
 
-::: danger A bare CA PEM cannot verify anything
-A Fulcio certificate embeds a Signed Certificate Timestamp that the verifier checks against the CT log's key. With anchors alone that check has no key, so verify refuses up front with exit `78` and the message `trust root carries no CT log key`. Use [`OCX_SIGSTORE_TUF_ROOT`](#ocx-sigstore-tuf-root) with a trusted-root JSON, which carries the anchors, the CT log keys and the pinned Rekor key together.
-:::
-
-When neither this variable nor `--tuf-root` nor a fresh cache is available, verify fetches the public-good Sigstore trust root over [TUF][sigstore-tuf], caching the metadata under `$OCX_HOME/state/tuf/`.
-
-This variable affects only the local verify operation and is **not** forwarded to subprocess children.
-
-### `OCX_SIGSTORE_TUF_ROOT` {#ocx-sigstore-tuf-root}
-
-Path to a Sigstore [trusted-root][sigstore-tuf] JSON document — or a directory containing `trusted_root.json` — that [`ocx package verify`][cmd-package-verify] loads its trust material from. Equivalent to the `--tuf-root` flag; the flag takes precedence, and both win over [`OCX_SIGSTORE_TRUST_ROOT`](#ocx-sigstore-trust-root).
-
-Unlike a bare Fulcio PEM, a trusted-root JSON carries the Fulcio CA certificate(s), the certificate-transparency log keys **and** the pinned [Rekor][rekor] public key, so verification needs no fetch at all. This is the air-gapped seam: point it at a local trust-root mirror and verify against a private Sigstore deployment with no Sigstore-services network. The file is read as-is — supplying it deliberately bypasses the [TUF][sigstore-tuf] fetch that runs when no override and no cache are present, so keeping it current is the operator's job.
+This is the air-gapped seam: point it at a local trust-root mirror and verify against a private Sigstore deployment with no Sigstore-services network. The file is read as-is — supplying it deliberately bypasses the [TUF][sigstore-tuf] fetch that runs when no override, no configured trust root, and no cache are present, so keeping it current is the operator's job.
 
 Combined with [`OCX_OFFLINE`](#ocx-offline), this is the fully offline path: the pinned Rekor key means the Signed Entry Timestamp verifies without contacting Rekor.
+
+This variable is one rung of a six-rung ladder: the `--trusted-root` flag, this variable, `[trust.sigstore]` in `config.toml`, `$OCX_HOME/sigstore/trusted-root.json`, the trust-root cache under `$OCX_HOME/state/trust_root/`, and finally the public-good Sigstore root fetched over [TUF][sigstore-tuf] (cached under `$OCX_HOME/state/tuf/`). Setting an env var on every machine is the most expensive way to reach a private stack — for a fleet, publish the trust root once and let it arrive through configuration instead: see [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
 
 This variable affects only the local verify operation and is **not** forwarded to subprocess children.
 
@@ -583,7 +573,7 @@ When set to a [truthy value](#truthy-values), OCX skips the policy-gated automat
 
 By default, when a [`[[trust.policy]]`][cmd-trust-policy] covers a package being installed, OCX verifies its Sigstore signature at the metadata-first seam — after the manifest resolves, before any layer downloads — and aborts the install fail-closed if verification fails. This variable is the CI-wide opt-out. When a policy-covered package is skipped this way, OCX logs a single `WARN` per invocation so the bypass is never silent.
 
-The per-command `--no-verify` flag mirrors this variable and **wins over it**: `--verify` on the command line re-enables verification even when `OCX_NO_VERIFY` is truthy. The opt-out is forwarded to subprocess children (a launcher-spawned child install inherits the same CI-wide setting), unlike the local-only [`OCX_SIGSTORE_TRUST_ROOT`](#ocx-sigstore-trust-root) / [`OCX_SIGSTORE_TUF_ROOT`](#ocx-sigstore-tuf-root).
+The per-command `--no-verify` flag mirrors this variable and **wins over it**: `--verify` on the command line re-enables verification even when `OCX_NO_VERIFY` is truthy. The opt-out is forwarded to subprocess children (a launcher-spawned child install inherits the same CI-wide setting), unlike the local-only [`OCX_SIGSTORE_TRUSTED_ROOT`](#ocx-sigstore-trusted-root).
 
 When no `[[trust.policy]]` covers a package, verification does not run regardless of this variable — trust is opt-in. See the [user guide][guide-auto-verify] for the full model.
 
@@ -593,7 +583,7 @@ When set to a [truthy value](#truthy-values), OCX disables all network access. T
 
 Combined with [`OCX_REMOTE`](#ocx-remote), enables [pinned-only mode][cmd-pinned-only-mode]: no source contact, no local writes, and any tag-addressed resolution that cannot be satisfied locally errors instead of falling back.
 
-For [`ocx package verify`][cmd-package-verify], offline scopes to the **Sigstore trust services** — the Rekor-key fetch and TUF — not the artifact registry, which verify still reads the signature from (a local mirror, in air-gapped deployments). Offline verify reuses cached or supplied trust material and must have a pinned Rekor key, so it comes from [`OCX_SIGSTORE_TUF_ROOT`](#ocx-sigstore-tuf-root), or from the `$OCX_HOME/state/trust_root/` cache a prior online verify wrote. With no such material, verify fails with exit 78 naming the remedy — it never silently skips verification.
+For [`ocx package verify`][cmd-package-verify], offline scopes to the **Sigstore trust services** — the Rekor-key fetch and TUF — not the artifact registry, which verify still reads the signature from (a local mirror, in air-gapped deployments). Offline verify reuses cached or supplied trust material and must have a pinned Rekor key, so it comes from [`OCX_SIGSTORE_TRUSTED_ROOT`](#ocx-sigstore-trusted-root) or one of the other trust-root rungs, or from the `$OCX_HOME/state/trust_root/` cache a prior online verify wrote. With no such material, verify fails with exit 78 naming the remedy — it never silently skips verification.
 
 ### `OCX_PROJECT` {#ocx-project}
 
@@ -802,6 +792,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cmd-package-env]: command-line.md#package-env
 [cmd-env-root]: command-line.md#env-root
 [cmd-trust-policy]: configuration.md#keys-trust
+[in-depth-self-hosted-sigstore]: ../in-depth/self-hosted-sigstore.md
 [guide-auto-verify]: ../user-guide.md#supply-chain-auto-verify
 [arg-color]: command-line.md#arg-color
 [arg-config]: command-line.md#arg-config

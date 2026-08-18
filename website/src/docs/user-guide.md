@@ -1001,7 +1001,7 @@ ocx package sign -p linux/amd64 registry.example/pkg:1.0
 
 ### Verify what you install {#supply-chain-verification}
 
-[`ocx package verify`][cmd-package-verify] checks a previously published signature against an expected certificate identity and OIDC issuer. Supply them as flags for a one-off check — there is no default, because verification is meaningless without specifying whose signature you trust. Against public Sigstore that is all you need: the trust root is fetched and verified over TUF. Pass [`--tuf-root`][env-sigstore-tuf-root] only for a private or self-hosted Sigstore deployment.
+[`ocx package verify`][cmd-package-verify] checks a previously published signature against an expected certificate identity and OIDC issuer. Supply them as flags for a one-off check — there is no default, because verification is meaningless without specifying whose signature you trust. Against public Sigstore that is all you need: the trust root is fetched and verified over TUF. For a private or self-hosted Sigstore deployment you also have to say where the trust root comes from — pass [`--trusted-root`][env-sigstore-trusted-root], or configure it once and never pass it again ([Self-hosted Sigstore][in-depth-self-hosted-sigstore]).
 
 ```shell
 ocx package verify \
@@ -1021,18 +1021,18 @@ Verifying a signature normally reaches out to Sigstore's public trust services t
 
 The key insight is that verification has two separate network surfaces. One is the registry the artifact and its signature live in; in an air-gapped setup that is a local mirror you already run. The other is the Sigstore trust services. Only the second is what `--offline` removes for verify — the registry is still read.
 
-So you supply the trust material locally. A [Sigstore trusted-root JSON][env-sigstore-tuf-root] carries both the Fulcio CA and the pinned Rekor key, so nothing is fetched:
+So you supply the trust material locally. A [Sigstore trusted-root JSON][env-sigstore-trusted-root] carries the Fulcio CA, the certificate-transparency log keys and the pinned Rekor key together, so nothing is fetched:
 
 ```shell
 ocx --offline package verify \
   -p linux/amd64 \
-  --tuf-root /etc/ocx/trusted_root.json \
+  --trusted-root /etc/ocx/trusted_root.json \
   --certificate-identity ci@example.com \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   registry.internal/pkg:1.0
 ```
 
-Alternatively, a successful online verify caches the trust material it used, so a later [`--offline`][arg-offline] verify against the same Rekor instance reuses it — no `--tuf-root` needed.
+Alternatively, a successful online verify caches the trust material it used, so a later [`--offline`][arg-offline] verify against the same Rekor instance reuses it — no `--trusted-root` needed. And on a fleet, nobody passes the flag at all: the trust root is distributed once through configuration. See [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
 
 :::warning Offline verify never skips
 If you go offline with no trusted-root file and no cached material, verify fails with exit 78 and names the remedy. It never silently treats "cannot reach the trust service" as "verified" — an unverifiable package is an error, not a pass.
@@ -1051,10 +1051,10 @@ identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/h
 oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
 
-Declare it in a `config.toml` tier (system, user, or `$OCX_HOME`) or in the project's `ocx.toml`, and `ocx package verify` resolves the identity automatically — no identity flags needed for any package under `ghcr.io/acme/` (the [`--tuf-root`][env-sigstore-tuf-root] requirement from [above](#supply-chain-verification) still applies):
+Declare it in a `config.toml` tier (system, user, or `$OCX_HOME`) or in the project's `ocx.toml`, and `ocx package verify` resolves the identity automatically — no identity flags needed for any package under `ghcr.io/acme/` (the trust-root requirement from [above](#supply-chain-verification) still applies):
 
 ```shell
-ocx package verify -p linux/amd64 --tuf-root /etc/ocx/trusted_root.json ghcr.io/acme/tool:1.0
+ocx package verify -p linux/amd64 --trusted-root /etc/ocx/trusted_root.json ghcr.io/acme/tool:1.0
 ```
 
 The two locations are not interchangeable: an operator's `config.toml` policy always wins over a project's `ocx.toml` policy for a package it covers, even if the project's scope is narrower. A project `ocx.toml` only adds trust for packages the operator hasn't already pinned — it can never override or narrow an operator's pin. See [Tier precedence][config-trust] in the configuration reference for the full rule.
@@ -1096,7 +1096,7 @@ Trust stays opt-in, and it is opt-in *per scope*. A package outside every `[[tru
 
 Sometimes you need to skip the check anyway — a mirror with no referrers support, a package you're debugging. Pass `--no-verify` to skip it for one invocation, or set [`OCX_NO_VERIFY`][env-no-verify] for a CI-wide opt-out; `--verify` re-enables the check for one invocation even with the environment variable set, since the flag always wins. Either bypass logs one `WARN` per invocation — a skipped check is visible in the logs, never silent.
 
-Under [`--offline`][arg-offline] a policy-covered install needs its trust material locally: a [Sigstore trusted-root JSON][env-sigstore-tuf-root] you supplied, or the cache a prior online verify wrote to `$OCX_HOME/state/trust_root/` — offline never reaches the TUF fetch. With neither available, the install fails closed with exit `78` instead of installing something it couldn't check — the same rule [Air-gapped verification](#supply-chain-offline) above describes for the standalone command.
+Under [`--offline`][arg-offline] a policy-covered install needs its trust material locally: a [Sigstore trusted-root JSON][env-sigstore-trusted-root] you supplied, or the cache a prior online verify wrote to `$OCX_HOME/state/trust_root/` — offline never reaches the TUF fetch. With neither available, the install fails closed with exit `78` instead of installing something it couldn't check — the same rule [Air-gapped verification](#supply-chain-offline) above describes for the standalone command.
 
 ::: tip Learn more
 [Command-line reference → `package install`][cmd-package-install] and [`package pull`][cmd-package-pull] — the full auto-verify contract, options table, and exit codes.
@@ -1303,7 +1303,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [arg-index]: ./reference/command-line.md#arg-index
 
 <!-- environment -->
-[env-sigstore-tuf-root]: ./reference/environment.md#ocx-sigstore-tuf-root
+[env-sigstore-trusted-root]: ./reference/environment.md#ocx-sigstore-trusted-root
 [env-ocx-no-completions]: ./reference/environment.md#ocx-no-completions
 [env-ocx-binary-pin]: ./reference/environment.md#ocx-binary-pin
 [env-ocx-home]: ./reference/environment.md#ocx-home
@@ -1379,3 +1379,4 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [in-depth-project-multi-project-retention]: ./in-depth/project.md#multi-project-retention
 [in-depth-project-running]: ./in-depth/project.md#running
 [in-depth-signing]: ./in-depth/signing.md
+[in-depth-self-hosted-sigstore]: ./in-depth/self-hosted-sigstore.md
