@@ -124,7 +124,7 @@ ocx env cmake:3.28                  # Print resolved environment variables
 ocx select cmake:3.28               # Set "current" to this version
 ocx package push my/cmake:3.28 cmake.tar.xz --cascade  # Publish
 ocx package sign -p linux/amd64 my/cmake:3.28            # Keyless Sigstore sign via OCI Referrers
-ocx package verify -p linux/amd64 my/cmake:3.28 \        # Keyless verify (needs --trust-root/--tuf-root; embedded root stubbed)
+ocx package verify -p linux/amd64 my/cmake:3.28 \        # Keyless verify (self-hosted stack: --trusted-root or [trust.sigstore])
   --certificate-identity you@example.com \
   --certificate-oidc-issuer https://github.com/login/oauth
 ocx clean                           # GC all unreferenced objects

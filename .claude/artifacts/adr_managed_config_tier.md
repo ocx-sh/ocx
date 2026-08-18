@@ -302,6 +302,35 @@ Canonical list of 29 criteria lives in the plan: `.claude/state/plans/plan_manag
 
 Differentiator row sibling to #9: "Centrally managed corporate config as OCI artifact — mirrors/patches/registry policy refreshed from one operator-controlled source." Reinforces Principle #7 (Private-first). Lands with implementation, not speculatively.
 
+## Amendment (2026-08-19) — `[trust.sigstore]` publish-time inlining
+
+Two new obligations on the tier, from the self-hosted-Sigstore work
+(`adr_offline_verify_trust_cache.md`, Amendment 2026-08-19). No change to the
+wire shape, the seed fence, the snapshot format, or the precedence position.
+
+**1. `ocx config push` inlines the trusted root.** When the payload's
+`[trust.sigstore]` names a path-form `trusted_root`, `config push` reads that
+file, validates it parses as a Sigstore trusted root, and publishes it as
+`trusted_root_json`. This is a pre-publish transform on the TOML (via
+`toml_edit`, so comments survive) — not a new layer, not a new media type. The
+published payload therefore names no path on anyone's disk, which is what makes
+it fleet-safe.
+
+**2. Two guards on the consuming side.**
+
+- A managed payload carrying `trusted_root_json` is honoured **only** when the
+  `[managed] source` seed is digest-pinned. A tag-pinned seed means the trust
+  root would arrive over the very channel it exists to verify; the circularity
+  has to be broken by a pinned seed, not by policy. Otherwise the field is
+  ignored with a warning.
+- A path-form `trusted_root` arriving from the managed tier is always ignored
+  with a warning — same posture as the existing one-hop `[managed]` strip: a
+  fleet payload cannot name a path on someone else's machine.
+
+The payload cap is unchanged. `MAX_MANAGED_CONFIG_BYTES` is 64 KiB and a
+trusted root measures ~2 KB (`test/sigstore/trusted_root.json`), leaving ~60 KiB
+of headroom — the raise the plan proposed was unnecessary and was not made.
+
 ## Links
 
 - Plan: `.claude/state/plans/plan_managed_config.md`
