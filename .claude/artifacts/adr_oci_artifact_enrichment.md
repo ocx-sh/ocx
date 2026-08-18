@@ -400,3 +400,37 @@ Extended existing commands:
 - [AWS ECR OCI 1.1 Support](https://aws.amazon.com/blogs/opensource/diving-into-oci-image-and-distribution-1-1-support-in-amazon-ecr/)
 - [Red Hat Quay Referrers API](https://www.redhat.com/en/blog/announcing-open-container-initiativereferrers-api-quayio-step-towards-enhanced-security-and-compliance)
 - [ORAS Compatible Registries](https://oras.land/docs/compatible_oci_registries/)
+
+---
+
+## Amendment 2026-04-19 — Phase 5 (Signature Support) pulled into v1
+
+**Status:** Proposed
+**Trigger:** `/swarm-plan max 24` (issue #24) post-handoff user feedback — verify-only scope ships a half-product because users must still use `cosign` to produce the signatures that `ocx verify` discovers. A feature-complete v1 requires signing and verification to land together so each iteration delivers a standalone usable loop.
+
+### What changes
+
+Phase 5 (Signature Support) as originally scoped ("design signing scheme", "keyless Sigstore consideration") is no longer deferred. Cosign keyless signing (`ocx package sign`) and enforcing verification (`ocx verify`) land as the **first shippable slice** of the referrer infrastructure, ahead of or alongside the read-only SBOM / external-signature discovery work.
+
+The five-phase rollout in the original body of this ADR is superseded on the signature axis by a slice-based roadmap defined in `adr_oci_referrers_discovery.md`. Other phases (annotations, `_desc` tag, SBOM read-only discovery, external-referrer discovery) keep their existing scope and order — only the signing half-product is being promoted.
+
+### Why this amendment rather than a new ADR
+
+- The original Phase 5 decision — "use cosign compatibility first; add Notation later" — still holds; only its scheduling is changing.
+- No design decision in the parent ADR is being reversed. Media types (`application/vnd.oci.empty.v1+json` config + cosign bundle layer), subject-targeting semantics (per-platform ImageManifest digest), registry capability detection, and "no tag fallback on push" all stand.
+- The child ADR `adr_oci_referrers_discovery.md` carries the detailed signing + verification contracts and the Decisions A/B/C/D already recorded there.
+
+### What stays deferred explicitly
+
+- **Notation signatures** — no production Rust library exists; key-based cosign compatibility may land before Notation support.
+- **DSSE / in-toto attestations** — sigstore-rs v0.13.0 does not support signing DSSE envelopes.
+- **Trust-policy files** — v1 uses `--certificate-identity` / `--certificate-oidc-issuer` CLI flags for enforcement; a policy-file shape is a v2 concern captured in the child ADR's deferred findings.
+- **Write-side fallback tags for GHCR/Docker Hub** — read-side fallback is the split-stance decision (child ADR Decision A3); push-side fallback remains deferred, matching this parent ADR's original stance for the push path.
+
+### Scope impact on existing architecture
+
+Additions to `oci::Client` that Phase 3 of this ADR already planned (`push_referrer`, `list_referrers`, `pull_referrer`) are brought forward; the OIDC/Fulcio/Rekor orchestration lives above the transport layer in a new `ocx_lib::signing` module wired through `Context`. No change to the `_desc` tag design, no change to annotation usage, no change to the registry compat matrix.
+
+### Next step
+
+Child ADR `adr_oci_referrers_discovery.md` and its associated plan artifacts (`plan_oci_referrers_*`) are being re-scoped into two slices under the orchestrator's follow-up `/swarm-plan`. This amendment exists so that any future reviewer sees the scheduling change at the parent level.

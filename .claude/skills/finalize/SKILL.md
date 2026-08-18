@@ -1,8 +1,8 @@
 ---
 name: finalize
-description: Use when the user says "finalize", "/finalize", "prepare this branch for main", "clean up history", "squash the branch", or landing a branch on `main`. Rewrites Checkpoint working-phase commits into clean Conventional Commits before fast-forward merge. Flags: `--squash-all`, `--dry-run`.
+description: Use when the user says "finalize", "/finalize", "prepare this branch for main", "clean up history", "squash the branch", or landing a branch on `main`. Rewrites Checkpoint commits into clean Conventional Commits before fast-forward merge.
 user-invocable: true
-disable-model-invocation: true
+disable-model-invocation: false
 argument-hint: "[--squash-all | --dry-run]"
 triggers:
   - "finalize"

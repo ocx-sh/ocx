@@ -57,7 +57,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 
 | Language | Quality rule | Related |
 |---|---|---|
-| Rust | [quality-rust.md](./rules/quality-rust.md) | [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md), [arch-principles.md](./rules/arch-principles.md), [quality-core.md](./rules/quality-core.md), [subsystem-deps.md](./rules/subsystem-deps.md) |
+| Rust | [quality-rust.md](./rules/quality-rust.md) | [rust-quality.md](./rules/rust-quality.md), [rust-cargo.md](./rules/rust-cargo.md), [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md), [arch-principles.md](./rules/arch-principles.md), [quality-core.md](./rules/quality-core.md), [subsystem-deps.md](./rules/subsystem-deps.md) |
 | Python (acceptance tests) | [quality-python.md](./rules/quality-python.md) | [subsystem-tests.md](./rules/subsystem-tests.md) |
 | TypeScript (website) | [quality-typescript.md](./rules/quality-typescript.md) | [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md) |
 | Bash (tasks, hooks) | [quality-bash.md](./rules/quality-bash.md) | — |
@@ -85,8 +85,9 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 
 | Edit path | Rules that auto-load |
 |---|---|
-| `**/*.rs` | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) (+ [arch-principles.md](./rules/arch-principles.md) under `crates/**`, `external/**`) |
+| `**/*.rs` | [rust-quality.md](./rules/rust-quality.md), [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) (+ [arch-principles.md](./rules/arch-principles.md) under `crates/**`, `external/**`) |
 | `**/Cargo.toml`, `**/Cargo.lock` | [quality-rust.md](./rules/quality-rust.md) |
+| `**/Cargo.toml`, `**/rustfmt.toml`, `**/deny.toml`, `**/rust-toolchain.toml` | [rust-cargo.md](./rules/rust-cargo.md) |
 | `Cargo.toml`, `crates/*/Cargo.toml`, `deny.toml`, `.licenserc.toml` | [subsystem-deps.md](./rules/subsystem-deps.md) |
 | `crates/ocx_lib/src/oci/**` | + [subsystem-oci.md](./rules/subsystem-oci.md) |
 | `crates/ocx_lib/src/file_structure/**`, `file_structure.rs`, `reference_manager.rs`, `symlink.rs` | + [subsystem-file-structure.md](./rules/subsystem-file-structure.md) |
@@ -151,6 +152,8 @@ Exempt from overlap detection (intended broad coupling):
 | Planning a feature (multi-agent) | `swarm-plan` |
 | Executing a feature (multi-agent) | `swarm-execute` |
 | Adversarial review | `swarm-review` |
+| One issue end-to-end (design→build→review→merge→consistency) | `swarm-loop` |
+| Whole milestone: split into issues + drive on a long-living branch | `swarm-x` |
 | Releases | (see [workflow-release.md](./rules/workflow-release.md)) |
 | AI config maintenance | `meta-maintain-config`, `meta-validate-context` |
 | Roadmap sync | `ocx-sync-roadmap` |
