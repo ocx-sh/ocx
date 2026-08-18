@@ -14,8 +14,19 @@
 //!
 //! | Function | Concerns | Testable |
 //! |---|---|---|
-//! | [`validate_managed_config_payload`] | Pure: size cap, TOML parse as [`crate::config::Config`], `[managed]` rejection | Unit-testable with synthetic bytes |
-//! | [`publish_managed_config`] | I/O + network: stage, bundle, push (cascade-aware) | Acceptance test |
+//! | [`validate_managed_config_payload`] | Pure: size cap, TOML parse as [`crate::config::Config`], `[managed]` rejection, `[trust.sigstore]` XOR | Unit-testable with synthetic bytes |
+//! | [`inline_trusted_root`] | Pure: rewrite a path-form `trusted_root` into `trusted_root_json` | Unit-testable with synthetic text |
+//! | [`publish_managed_config`] | I/O + network: read the trust root, stage, bundle, push (cascade-aware) | Acceptance test |
+//!
+//! ## Why the trust root is inlined at publish time
+//!
+//! `[trust.sigstore] trusted_root = "…"` names a path on the **operator's**
+//! machine. A fleet adopting the published payload has no such file, and the
+//! loader deliberately ignores a path-form `trusted_root` arriving from the
+//! managed tier — so publishing one unchanged would ship a silently inert
+//! trust root. [`publish_managed_config`] therefore reads the file, proves it
+//! parses as a Sigstore trusted root, and republishes it as the self-contained
+//! `trusted_root_json` string the fleet can actually consume.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -83,6 +94,34 @@ pub enum ManagedConfigPublishError {
     #[error("managed config payload must not contain a [managed] section")]
     ContainsManagedSection,
 
+    /// The payload's `[trust.sigstore]` declares both `trusted_root` and
+    /// `trusted_root_json`. Publishing either silently discards the other, and
+    /// which one wins is not predictable from the file.
+    #[error("managed config payload declares both trusted_root and trusted_root_json in [trust.sigstore]: keep one")]
+    AmbiguousTrustRoot,
+
+    /// Reading the trusted-root file named by `[trust.sigstore] trusted_root`
+    /// failed. The path is resolved relative to the payload's own directory.
+    #[error("failed to read trusted root '{}' named by [trust.sigstore] trusted_root", path.display())]
+    TrustedRootReadFailed {
+        /// The resolved trusted-root path that could not be read.
+        path: PathBuf,
+        /// The underlying I/O failure.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// The file named by `[trust.sigstore] trusted_root` is not a usable
+    /// Sigstore trusted root. Caught here rather than on every machine in the
+    /// fleet after adoption.
+    #[error("trusted root '{}' is not a usable Sigstore trusted root: {detail}", path.display())]
+    TrustedRootInvalid {
+        /// The resolved trusted-root path.
+        path: PathBuf,
+        /// What the trust-root loader rejected.
+        detail: String,
+    },
+
     /// Staging the payload into the temporary publish directory failed.
     #[error("failed to stage managed config payload for publishing")]
     StageFailed {
@@ -123,10 +162,12 @@ impl crate::cli::ClassifyExitCode for ManagedConfigPublishError {
     fn classify(&self) -> Option<crate::cli::ExitCode> {
         match self {
             // Payload rejections are operator config mistakes.
-            Self::PayloadTooLarge { .. } | Self::InvalidToml { .. } | Self::ContainsManagedSection => {
-                Some(crate::cli::ExitCode::ConfigError)
-            }
-            Self::ReadFailed { source, .. } => Some(match source.kind() {
+            Self::PayloadTooLarge { .. }
+            | Self::InvalidToml { .. }
+            | Self::ContainsManagedSection
+            | Self::AmbiguousTrustRoot
+            | Self::TrustedRootInvalid { .. } => Some(crate::cli::ExitCode::ConfigError),
+            Self::ReadFailed { source, .. } | Self::TrustedRootReadFailed { source, .. } => Some(match source.kind() {
                 std::io::ErrorKind::NotFound => crate::cli::ExitCode::NotFound,
                 std::io::ErrorKind::PermissionDenied => crate::cli::ExitCode::PermissionDenied,
                 _ => crate::cli::ExitCode::IoError,
@@ -155,7 +196,8 @@ impl crate::cli::ClassifyExitCode for ManagedConfigPublishError {
 ///    be adopted),
 /// 2. parses as [`crate::config::Config`] (unknown **top-level** sections are
 ///    tolerated for forward compatibility, matching the loader's posture),
-/// 3. carries no `[managed]` section.
+/// 3. carries no `[managed]` section,
+/// 4. does not declare both `[trust.sigstore]` trust-root spellings at once.
 ///
 /// Returns the payload as text so a caller that needs to look at it again
 /// ([`crate::managed_config::preview_managed_config`]) reuses this UTF-8
@@ -165,7 +207,8 @@ impl crate::cli::ClassifyExitCode for ManagedConfigPublishError {
 ///
 /// [`ManagedConfigPublishError::PayloadTooLarge`],
 /// [`ManagedConfigPublishError::InvalidToml`],
-/// [`ManagedConfigPublishError::ContainsManagedSection`].
+/// [`ManagedConfigPublishError::ContainsManagedSection`],
+/// [`ManagedConfigPublishError::AmbiguousTrustRoot`].
 pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<&str, ManagedConfigPublishError> {
     use serde::de::Error as _;
 
@@ -184,7 +227,58 @@ pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<&str, ManagedConf
     if parsed.managed.is_some() {
         return Err(ManagedConfigPublishError::ContainsManagedSection);
     }
+    if let Some(sigstore) = parsed.trust.as_ref().and_then(|trust| trust.sigstore.as_ref())
+        && sigstore.trusted_root.is_some()
+        && sigstore.trusted_root_json.is_some()
+    {
+        return Err(ManagedConfigPublishError::AmbiguousTrustRoot);
+    }
     Ok(text)
+}
+
+/// The path-form trust root a payload declares, if any.
+///
+/// Split out from [`inline_trusted_root`] so the caller can skip the file read
+/// entirely for the overwhelmingly common payload that names no trust root.
+#[must_use]
+pub fn declared_trusted_root(text: &str) -> Option<PathBuf> {
+    let parsed: crate::config::Config = toml::from_str(text).ok()?;
+    parsed.trust?.sigstore?.trusted_root
+}
+
+/// Rewrites a payload's path-form `[trust.sigstore] trusted_root` into the
+/// self-contained `trusted_root_json` string, leaving everything else — key
+/// order, comments, spacing — byte-identical.
+///
+/// Pure: `json` is the already-read, already-validated trusted-root document.
+/// A payload with no `[trust.sigstore] trusted_root` is returned unchanged, so
+/// this is safe to call unconditionally.
+///
+/// # Errors
+///
+/// [`ManagedConfigPublishError::InvalidToml`] when the payload does not parse
+/// as TOML — which [`validate_managed_config_payload`] has already ruled out
+/// for every caller in this module.
+pub fn inline_trusted_root(text: &str, json: &str) -> Result<String, ManagedConfigPublishError> {
+    use serde::de::Error as _;
+
+    let mut document =
+        text.parse::<toml_edit::DocumentMut>()
+            .map_err(|error| ManagedConfigPublishError::InvalidToml {
+                source: toml::de::Error::custom(error),
+            })?;
+    let Some(sigstore) = document
+        .get_mut("trust")
+        .and_then(|trust| trust.get_mut("sigstore"))
+        .and_then(toml_edit::Item::as_table_like_mut)
+    else {
+        return Ok(text.to_string());
+    };
+    if sigstore.remove("trusted_root").is_none() {
+        return Ok(text.to_string());
+    }
+    sigstore.insert("trusted_root_json", toml_edit::value(json));
+    Ok(document.to_string())
 }
 
 // ── Publish orchestration ─────────────────────────────────────────────────────
@@ -196,6 +290,10 @@ pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<&str, ManagedConf
 /// metadata JSON file involved), and pushes via [`Publisher::push`] /
 /// [`Publisher::push_cascade`]. The caller is responsible for
 /// [`Publisher::ensure_auth`].
+///
+/// A `[trust.sigstore] trusted_root` naming a local file is read (relative to
+/// `config_path`'s own directory), proved loadable as a Sigstore trusted root,
+/// and inlined as `trusted_root_json` — see the module docs for why.
 ///
 /// # Errors
 ///
@@ -212,7 +310,41 @@ pub async fn publish_managed_config(
             path: config_path.to_path_buf(),
             source,
         })?;
-    validate_managed_config_payload(&bytes)?;
+    let text = validate_managed_config_payload(&bytes)?;
+    let bytes = match declared_trusted_root(text) {
+        None => bytes.clone(),
+        Some(declared) => {
+            // Relative to the payload's own directory, exactly as the loader
+            // anchors it when reading a local `config.toml`.
+            let path = if declared.is_relative() {
+                config_path.parent().unwrap_or(Path::new(".")).join(&declared)
+            } else {
+                declared
+            };
+            let json =
+                tokio::fs::read(&path)
+                    .await
+                    .map_err(|source| ManagedConfigPublishError::TrustedRootReadFailed {
+                        path: path.clone(),
+                        source,
+                    })?;
+            // Prove it loads before a whole fleet adopts it. `load_trusted_root_json`
+            // is the same entry point verification uses, so "publish succeeded"
+            // means "every consumer can build a trust root from this".
+            crate::oci::verify::TrustRoot::load_trusted_root_json(&json).map_err(|kind| {
+                ManagedConfigPublishError::TrustedRootInvalid {
+                    path: path.clone(),
+                    detail: kind.to_string(),
+                }
+            })?;
+            let json =
+                std::str::from_utf8(&json).map_err(|utf8_error| ManagedConfigPublishError::TrustedRootInvalid {
+                    path: path.clone(),
+                    detail: utf8_error.to_string(),
+                })?;
+            inline_trusted_root(text, json)?.into_bytes()
+        }
+    };
 
     // Stage as `config.toml` in a temp dir so the archive entry name is
     // canonical no matter what the operator's input file is called.
@@ -371,5 +503,100 @@ mod tests {
             crate::cli::classify_error(&err as &(dyn std::error::Error + 'static)),
             ExitCode::PolicyBlocked
         );
+    }
+
+    #[test]
+    fn validate_rejects_both_trust_root_spellings() {
+        let toml = r#"
+[trust.sigstore]
+trusted_root = "sigstore/trusted-root.json"
+trusted_root_json = "{}"
+"#;
+        let error = validate_managed_config_payload(toml.as_bytes()).expect_err("XOR is enforced");
+        assert!(matches!(error, ManagedConfigPublishError::AmbiguousTrustRoot));
+        assert_eq!(error.classify(), Some(ExitCode::ConfigError));
+    }
+
+    #[test]
+    fn validate_accepts_either_trust_root_spelling_alone() {
+        for toml in [
+            "[trust.sigstore]\ntrusted_root = \"sigstore/trusted-root.json\"\n",
+            "[trust.sigstore]\ntrusted_root_json = \"{}\"\n",
+        ] {
+            validate_managed_config_payload(toml.as_bytes()).expect("one spelling alone is fine");
+        }
+    }
+
+    #[test]
+    fn declared_trusted_root_finds_the_path_form_only() {
+        assert_eq!(
+            declared_trusted_root("[trust.sigstore]\ntrusted_root = \"sigstore/trusted-root.json\"\n"),
+            Some(PathBuf::from("sigstore/trusted-root.json"))
+        );
+        assert_eq!(
+            declared_trusted_root("[trust.sigstore]\ntrusted_root_json = \"{}\"\n"),
+            None,
+            "an already-inline payload needs no read"
+        );
+        assert_eq!(declared_trusted_root("[registry]\ndefault = \"ghcr.io\"\n"), None);
+    }
+
+    #[test]
+    fn inline_trusted_root_swaps_the_path_for_the_document() {
+        let payload = "[trust.sigstore]\ntrusted_root = \"sigstore/trusted-root.json\"\nrekor_url = \"https://rekor.corp.example\"\n";
+        let rewritten = inline_trusted_root(payload, "{\"mediaType\":\"x\"}").expect("rewrite");
+
+        assert!(
+            !rewritten.contains("trusted_root ="),
+            "the operator path must not survive: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("trusted_root_json ="),
+            "the document replaces it: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("rekor_url = \"https://rekor.corp.example\""),
+            "every untouched key is preserved: {rewritten}"
+        );
+
+        // And what comes out still validates — the rewrite cannot mint the
+        // very ambiguity `validate_managed_config_payload` refuses.
+        let parsed = validate_managed_config_payload(rewritten.as_bytes()).expect("rewritten payload is publishable");
+        let sigstore = toml::from_str::<crate::config::Config>(parsed)
+            .expect("parses")
+            .trust
+            .expect("trust")
+            .sigstore
+            .expect("sigstore");
+        assert_eq!(sigstore.trusted_root, None);
+        assert_eq!(sigstore.trusted_root_json.as_deref(), Some("{\"mediaType\":\"x\"}"));
+    }
+
+    #[test]
+    fn inline_trusted_root_preserves_operator_comments() {
+        // The reason this goes through `toml_edit` rather than a serde
+        // round-trip: an operator's `config.toml` is hand-authored, and a
+        // publish step that silently ate their comments would be noticed once,
+        // in the worst way.
+        let payload = "# corporate trust root, rotated quarterly\n[trust.sigstore]\ntrusted_root = \"root.json\"\n";
+        let rewritten = inline_trusted_root(payload, "{}").expect("rewrite");
+        assert!(
+            rewritten.contains("# corporate trust root, rotated quarterly"),
+            "the comment survives: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn inline_trusted_root_leaves_a_payload_with_no_path_form_untouched() {
+        for payload in [
+            "[registry]\ndefault = \"ghcr.io\"\n",
+            "[trust.sigstore]\ntrusted_root_json = \"{}\"\n",
+        ] {
+            assert_eq!(
+                inline_trusted_root(payload, "{}").expect("rewrite"),
+                payload,
+                "byte-identical when there is nothing to inline"
+            );
+        }
     }
 }

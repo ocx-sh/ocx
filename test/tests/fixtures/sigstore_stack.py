@@ -47,17 +47,8 @@ class SigstoreStack:
     #: inside it names the address Fulcio resolves. ocx never dials the issuer,
     #: it only compares the string, so the two never have to agree.
     issuer: str
-    #: Directory holding `trusted_root.json`; what `--tuf-root` takes.
+    #: Directory holding `trusted_root.json`; what `--trusted-root` takes.
     trust_root: Path
-
-    @property
-    def fulcio_ca_pem(self) -> Path:
-        """The Fulcio CA alone — what `--trust-root`/`OCX_SIGSTORE_TRUST_ROOT` takes.
-
-        It carries no Rekor public key, so verify must fetch that key and cache
-        it. That is the only route to the trust-cache population path.
-        """
-        return self.trust_root / "keys" / "fulcio-ca.crt.pem"
 
     @property
     def trusted_root_json(self) -> Path:
@@ -95,7 +86,7 @@ class SigstoreStack:
         return [
             "--platform", platform or current_platform(),
             "--rekor-url", self.rekor_url,
-            "--tuf-root", str(self.trust_root),
+            "--trusted-root", str(self.trust_root),
             "--certificate-identity", self.identity,
             "--certificate-oidc-issuer", self.issuer,
         ]

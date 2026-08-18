@@ -188,9 +188,13 @@ impl Config {
         // system-tier `ghcr.io/acme/*` pin — it may only join that pin's
         // ANY-of set by declaring the same scope. Non-system tiers still mask
         // each other by specificity as above.
+        //
+        // `[trust.sigstore]` is the opposite case and merges by the opposite
+        // rule — replace-and-lock, per `TrustConfig::merge`. Two Fulcio CAs is
+        // not a pooled ANY-of set, it is an ambiguity.
         if let Some(other_trust) = other.trust {
             match self.trust.as_mut() {
-                Some(self_trust) => self_trust.policy.extend(other_trust.policy),
+                Some(self_trust) => self_trust.merge(other_trust),
                 None => self.trust = Some(other_trust),
             }
         }

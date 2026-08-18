@@ -10,7 +10,7 @@ set -euo pipefail
 # local Sigstore stack (dex, Fulcio, Rekor, TesseraCT, Trillian), written the
 # [[trust.policy]] pin that makes the verify lines flag-free, and put the
 # dex identity token in OCX_IDENTITY_TOKEN and the stack's CA in
-# OCX_SIGSTORE_TUF_ROOT — the two channels a CI job uses, which is why the
+# OCX_SIGSTORE_TRUSTED_ROOT — the two channels a CI job uses, which is why the
 # lines below carry neither flag.
 # $FULCIO / $REKOR address the stack; the docs page carries the concrete values.
 

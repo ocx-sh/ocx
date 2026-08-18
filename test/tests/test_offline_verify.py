@@ -54,7 +54,7 @@ def _verify(
 ) -> subprocess.CompletedProcess[str]:
     """Run ``package verify``. The trust root comes from ``extra_env`` only.
 
-    No ``--tuf-root`` flag: every test here is about what the *environment*
+    No ``--trusted-root`` flag: every test here is about what the *environment*
     supplies, which is what an air-gapped deployment actually configures.
     """
     return subprocess.run(
@@ -96,7 +96,7 @@ def test_online_verify_populates_cache_then_offline_verify_succeeds(
 
     Step 2 (online verify) TOFU-fetches the Rekor key and caches it with the
     Fulcio CA under ``$OCX_HOME/state/trust_root/``. The relay is then closed.
-    Step 4 (``OCX_OFFLINE=1``, no ``OCX_SIGSTORE_TRUST_ROOT``) must succeed purely
+    Step 4 (``OCX_OFFLINE=1``, no ``OCX_SIGSTORE_TRUSTED_ROOT``) must succeed purely
     from the cache — if it fetched the Rekor key it would be refused and exit 83.
     Both runs address the same relay, so the cache entry is the same one.
     """
@@ -110,7 +110,7 @@ def test_online_verify_populates_cache_then_offline_verify_succeeds(
     online = _verify(
         ocx, sigstore_stack, pkg,
         rekor_url=rekor.url,
-        extra_env={"OCX_SIGSTORE_TUF_ROOT": str(sigstore_stack.trusted_root_without_rekor_key(tmp_path))},
+        extra_env={"OCX_SIGSTORE_TRUSTED_ROOT": str(sigstore_stack.trusted_root_without_rekor_key(tmp_path))},
     )
     assert online.returncode == 0, f"online verify (cache populate) failed: {online.stderr}"
 
@@ -152,7 +152,7 @@ def test_offline_verify_from_warm_cache_still_enforces_identity(
     online = _verify(
         ocx, sigstore_stack, pkg,
         rekor_url=rekor.url,
-        extra_env={"OCX_SIGSTORE_TUF_ROOT": str(sigstore_stack.trusted_root_without_rekor_key(tmp_path))},
+        extra_env={"OCX_SIGSTORE_TRUSTED_ROOT": str(sigstore_stack.trusted_root_without_rekor_key(tmp_path))},
     )
     assert online.returncode == 0, f"online verify (cache populate) failed: {online.stderr}"
 
@@ -197,17 +197,17 @@ def test_offline_verify_without_trust_material_fails_not_skips(
         f"offline verify without trust material must fail with exit 78 (never skip), "
         f"got {result.returncode}\nstderr: {result.stderr.strip()}"
     )
-    assert "--tuf-root" in result.stderr or "online verify" in result.stderr, (
+    assert "--trusted-root" in result.stderr or "online verify" in result.stderr, (
         f"error must name the remedy, got: {result.stderr.strip()}"
     )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# OCX_SIGSTORE_TUF_ROOT override pins the Rekor key — no fetch (online)
+# OCX_SIGSTORE_TRUSTED_ROOT override pins the Rekor key — no fetch (online)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_tuf_root_override_pins_rekor_key_no_fetch(
+def test_trusted_root_override_pins_rekor_key_no_fetch(
     ocx: OcxRunner,
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
@@ -215,7 +215,7 @@ def test_tuf_root_override_pins_rekor_key_no_fetch(
 ) -> None:
     """A trusted-root JSON supplies the Rekor key, so verify never fetches it.
 
-    Verify addresses a dead Rekor port. With ``OCX_SIGSTORE_TUF_ROOT`` pointing
+    Verify addresses a dead Rekor port. With ``OCX_SIGSTORE_TRUSTED_ROOT`` pointing
     at a local trusted-root JSON (Fulcio CA + pinned Rekor key), it must still
     succeed — proving the key came from the file, not the endpoint, and that no
     TUF network fetch is required.
@@ -226,26 +226,26 @@ def test_tuf_root_override_pins_rekor_key_no_fetch(
     result = _verify(
         ocx, sigstore_stack, pkg,
         rekor_url=adversarial.unreachable_rekor_url(),
-        extra_env={"OCX_SIGSTORE_TUF_ROOT": str(sigstore_stack.trusted_root_json)},
+        extra_env={"OCX_SIGSTORE_TRUSTED_ROOT": str(sigstore_stack.trusted_root_json)},
     )
     assert result.returncode == 0, (
-        f"verify with OCX_SIGSTORE_TUF_ROOT must succeed without a Rekor fetch, got "
+        f"verify with OCX_SIGSTORE_TRUSTED_ROOT must succeed without a Rekor fetch, got "
         f"{result.returncode}\nstderr: {result.stderr.strip()}"
     )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Fully air-gapped: OCX_OFFLINE + OCX_SIGSTORE_TUF_ROOT, no Sigstore network
+# Fully air-gapped: OCX_OFFLINE + OCX_SIGSTORE_TRUSTED_ROOT, no Sigstore network
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_tuf_root_offline_air_gapped_verify(
+def test_trusted_root_offline_air_gapped_verify(
     ocx: OcxRunner,
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
     identity_token: Path,
 ) -> None:
-    """OCX_OFFLINE + OCX_SIGSTORE_TUF_ROOT verifies with zero Sigstore network.
+    """OCX_OFFLINE + OCX_SIGSTORE_TRUSTED_ROOT verifies with zero Sigstore network.
 
     Install first (populates the local index so the tag resolves offline), sign,
     then verify against a dead Rekor port with ``OCX_OFFLINE=1`` + a trusted-root
@@ -258,7 +258,7 @@ def test_tuf_root_offline_air_gapped_verify(
     result = _verify(
         ocx, sigstore_stack, pkg,
         rekor_url=adversarial.unreachable_rekor_url(),
-        extra_env={"OCX_OFFLINE": "1", "OCX_SIGSTORE_TUF_ROOT": str(sigstore_stack.trusted_root_json)},
+        extra_env={"OCX_OFFLINE": "1", "OCX_SIGSTORE_TRUSTED_ROOT": str(sigstore_stack.trusted_root_json)},
     )
     assert result.returncode == 0, (
         f"air-gapped verify (OCX_OFFLINE + TUF root) must succeed, got "

@@ -397,6 +397,8 @@ impl ConfigLoader {
             );
         }
 
+        Self::guard_managed_sigstore_trust(&mut parsed, &resolved.source);
+
         let mut accumulator = accumulator;
         accumulator.merge(parsed);
         Ok((
@@ -405,6 +407,35 @@ impl ConfigLoader {
             Some(resolved),
             ManagedSnapshotState::Applied,
         ))
+    }
+
+    /// Strips the two `[trust.sigstore]` trust-root forms a remote payload is
+    /// not entitled to set, each for its own reason.
+    ///
+    /// `trusted_root` names a path on the **publisher's** disk. On a fleet
+    /// machine it either does not exist or — worse — resolves to some unrelated
+    /// local file. `ocx config push` inlines it as `trusted_root_json` at
+    /// publish time precisely so this case never has to be honoured.
+    ///
+    /// `trusted_root_json` is honoured only behind a **digest-pinned**
+    /// `[managed] source`. Otherwise the trust root arrives over the very
+    /// channel it exists to verify, and a registry able to move the tag can
+    /// swap the CA. The circularity is broken by a pinned seed, not by policy.
+    fn guard_managed_sigstore_trust(parsed: &mut Config, source: &crate::oci::Identifier) {
+        let Some(sigstore) = parsed.trust.as_mut().and_then(|trust| trust.sigstore.as_mut()) else {
+            return;
+        };
+        if sigstore.trusted_root.take().is_some() {
+            log::warn!(
+                "managed-config payload for '{source}' set [trust.sigstore] trusted_root to a local path; ignored (a                  remote payload cannot name a path on this machine — publish with `ocx config push`, which inlines                  the file as trusted_root_json)"
+            );
+        }
+        if sigstore.trusted_root_json.is_some() && source.digest().is_none() {
+            sigstore.trusted_root_json = None;
+            log::warn!(
+                "managed-config payload for '{source}' carries [trust.sigstore] trusted_root_json but the [managed]                  source is not digest-pinned; ignored (pin the source to a digest so the trust root cannot be                  swapped by whoever can move the tag)"
+            );
+        }
     }
 
     /// Discover the ordered list of config files to load (lowest precedence
@@ -764,6 +795,7 @@ impl ConfigLoader {
             if path == Self::system_path().as_path() {
                 Self::apply_system_locks(&mut parsed);
             }
+            Self::anchor_relative_paths(&mut parsed, path);
             config.merge(parsed);
         }
         Ok(config)
@@ -815,6 +847,26 @@ impl ConfigLoader {
         }
     }
 
+    /// Resolve every path a config file declares relative to *that file's*
+    /// directory, before it merges into the accumulator.
+    ///
+    /// Runs per tier, so `/etc/ocx/config.toml` and `$OCX_HOME/config.toml`
+    /// each anchor their own values and the answer never depends on the
+    /// process working directory — a config read by a daemon, a CI runner and
+    /// an interactive shell must name the same file.
+    ///
+    /// Only `[trust.sigstore] trusted_root` participates today. Every other
+    /// path-valued key in the tree is either already absolute by contract or
+    /// resolved by its own consumer.
+    fn anchor_relative_paths(parsed: &mut Config, config_path: &Path) {
+        let Some(dir) = config_path.parent() else {
+            return;
+        };
+        if let Some(sigstore) = parsed.trust.as_mut().and_then(|trust| trust.sigstore.as_mut()) {
+            sigstore.anchor_relative_root(dir);
+        }
+    }
+
     /// System config: `/etc/ocx/config.toml`.
     pub fn system_path() -> PathBuf {
         PathBuf::from("/etc/ocx/config.toml")
@@ -848,6 +900,18 @@ impl ConfigLoader {
     /// `$OCX_HOME/config.toml`, falling back to `~/.ocx/config.toml`.
     pub fn home_path() -> Option<PathBuf> {
         Self::home_dir().map(|d| d.join("config.toml"))
+    }
+
+    /// `$OCX_HOME/sigstore/trusted-root.json`, falling back to
+    /// `~/.ocx/sigstore/trusted-root.json`.
+    ///
+    /// The convention path in the trust-root ladder: drop the file there and
+    /// verification finds it with no flag, no env var and no config entry.
+    /// Deliberately NOT under `state/` — that subtree is TTL-bound runtime
+    /// state the tool writes and may discard, whereas this is a durable
+    /// operator-supplied asset nothing but the operator removes.
+    pub fn home_sigstore_trusted_root_path() -> Option<PathBuf> {
+        Self::home_dir().map(|d| d.join("sigstore").join("trusted-root.json"))
     }
 }
 
@@ -2954,6 +3018,101 @@ mod tests {
             folded.registries.unwrap()["corp"].index.as_deref(),
             Some("https://system-locked-index.example"),
             "a system-locked [registries.<name>] entry must survive a managed-payload redirection attempt"
+        );
+    }
+
+    // ── [trust.sigstore] anchoring + managed-tier guards ─────────────────────
+
+    #[tokio::test]
+    async fn relative_trusted_root_anchors_to_the_declaring_config_dir_not_the_cwd() {
+        // The bug this guards is silent: with no anchoring, a relative
+        // `trusted_root` resolves against the process working directory, so
+        // verification finds the right file whenever the operator happens to
+        // run from `/etc/ocx` and mysteriously stops when they cd elsewhere.
+        // The tempdir is deliberately NOT the CWD — a test run from inside it
+        // would pass either way.
+        let dir = TempDir::new().expect("tempdir");
+        let path = write_config(
+            &dir,
+            "config.toml",
+            "[trust.sigstore]\ntrusted_root = \"sigstore/trusted-root.json\"\n",
+        );
+
+        let config = ConfigLoader::load_and_merge(&[path]).await.expect("load");
+        let sigstore = config.trust.expect("trust").sigstore.expect("sigstore");
+        let anchored = sigstore.trusted_root.expect("trusted_root");
+        assert!(
+            anchored.is_absolute(),
+            "anchored to an absolute path: {}",
+            anchored.display()
+        );
+        assert_eq!(anchored, dir.path().join("sigstore").join("trusted-root.json"));
+    }
+
+    #[tokio::test]
+    async fn absolute_trusted_root_survives_loading_unchanged() {
+        let dir = TempDir::new().expect("tempdir");
+        let absolute = dir.path().join("elsewhere").join("trusted-root.json");
+        let path = write_config(
+            &dir,
+            "config.toml",
+            &format!(
+                "[trust.sigstore]\ntrusted_root = \"{}\"\n",
+                absolute.display().to_string().replace('\\', "\\\\")
+            ),
+        );
+
+        let config = ConfigLoader::load_and_merge(&[path]).await.expect("load");
+        let sigstore = config.trust.expect("trust").sigstore.expect("sigstore");
+        assert_eq!(sigstore.trusted_root.as_deref(), Some(absolute.as_path()));
+    }
+
+    fn managed_payload_after_guard(payload: &str, source: &str) -> crate::trust::SigstoreTrust {
+        let mut parsed: Config = toml::from_str(payload).expect("payload parses");
+        let source: crate::oci::Identifier = source.parse().expect("identifier parses");
+        ConfigLoader::guard_managed_sigstore_trust(&mut parsed, &source);
+        parsed.trust.expect("trust").sigstore.expect("sigstore")
+    }
+
+    #[test]
+    fn managed_tier_ignores_a_path_form_trusted_root() {
+        // A fleet payload naming `/home/operator/sigstore/root.json` is naming
+        // a path on someone else's disk. `ocx config push` inlines it, so a
+        // payload that still carries the path form was not published through
+        // the supported route.
+        let sigstore = managed_payload_after_guard(
+            "[trust.sigstore]\ntrusted_root = \"/home/operator/root.json\"\nrekor_url = \"https://rekor.corp.example\"\n",
+            "ghcr.io/acme/config@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        assert_eq!(sigstore.trusted_root, None, "the path form is stripped");
+        assert_eq!(
+            sigstore.rekor_url.as_deref(),
+            Some("https://rekor.corp.example"),
+            "the rest of the payload still applies"
+        );
+    }
+
+    #[test]
+    fn managed_tier_ignores_an_inline_trust_root_behind_an_unpinned_source() {
+        // Without a digest pin the trust root arrives over the channel it
+        // exists to verify: whoever can move the tag can swap the CA.
+        let sigstore = managed_payload_after_guard(
+            "[trust.sigstore]\ntrusted_root_json = \"{}\"\n",
+            "ghcr.io/acme/config:v1",
+        );
+        assert_eq!(sigstore.trusted_root_json, None);
+    }
+
+    #[test]
+    fn managed_tier_honours_an_inline_trust_root_behind_a_digest_pin() {
+        let sigstore = managed_payload_after_guard(
+            "[trust.sigstore]\ntrusted_root_json = \"{}\"\n",
+            "ghcr.io/acme/config@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        assert_eq!(
+            sigstore.trusted_root_json.as_deref(),
+            Some("{}"),
+            "a digest-pinned seed breaks the circularity, so the payload is honoured"
         );
     }
 }

@@ -18,10 +18,10 @@
 //! optional only when such a policy matches, and are required otherwise.
 //!
 //! This command resolves the identifier, validates `--rekor-url` (SSRF guard),
-//! resolves the trust root in precedence order — `--tuf-root` /
-//! `OCX_SIGSTORE_TUF_ROOT` (a trusted-root JSON with a pinned Rekor key), then
-//! `--trust-root` / `OCX_SIGSTORE_TRUST_ROOT` (a Fulcio-CA PEM), then the fresh
-//! trust-root cache, then the Sigstore TUF root fetched over the network — and drives the verify
+//! resolves the trust root in precedence order — `--trusted-root` /
+//! `OCX_SIGSTORE_TRUSTED_ROOT`, then `[trust.sigstore]` from `config.toml`,
+//! then `$OCX_HOME/sigstore/trusted-root.json`, then the fresh trust-root
+//! cache, then the Sigstore TUF root fetched over the network — and drives the verify
 //! pipeline through the [`PackageManager`](ocx_lib::package_manager) facade
 //! (`verify_one`), which runs the full state machine and returns a
 //! [`VerificationReport`].
@@ -42,7 +42,6 @@ use anyhow::Context as _;
 use clap::Parser;
 
 use ocx_lib::Error as LibError;
-use ocx_lib::file_structure::StateStore;
 use ocx_lib::oci;
 use ocx_lib::oci::endpoint::{DEFAULT_REKOR_URL, validate_sigstore_url};
 use ocx_lib::oci::verify::{TrustRoot, VerifyError, VerifyErrorKind};
@@ -96,26 +95,17 @@ pub struct PackageVerify {
     #[clap(long = "no-cache")]
     no_cache: bool,
 
-    /// Trust-root override: a PEM file of Fulcio CA certificate(s).
-    ///
-    /// Points verification at a custom Fulcio CA PEM for a private Sigstore
-    /// instance. A PEM carries neither the Rekor public key nor the CT-log
-    /// key, and verification refuses a trust root without a CT-log key, so a
-    /// PEM alone is not enough: pass --tuf-root for material carrying both.
-    /// The flag takes precedence over the OCX_SIGSTORE_TRUST_ROOT env var.
-    #[clap(long = "trust-root", value_name = "PATH")]
-    trust_root: Option<std::path::PathBuf>,
-
     /// Trust-root override: a Sigstore trusted-root JSON (or a directory holding
     /// trusted_root.json).
     ///
-    /// Supplies both the Fulcio CA and the pinned Rekor public key for
-    /// air-gapped verification against a local trust-root mirror. No TUF network
-    /// fetch is performed. Takes precedence over --trust-root and the
-    /// OCX_SIGSTORE_TUF_ROOT env var (the flag wins). See
-    /// https://ocx.sh/docs/in-depth/signing#offline-verification
-    #[clap(long = "tuf-root", value_name = "PATH")]
-    tuf_root: Option<std::path::PathBuf>,
+    /// Supplies the Fulcio CA, the CT-log key and the pinned Rekor public key
+    /// for air-gapped verification against a local trust-root mirror. No TUF
+    /// network fetch is performed. Takes precedence over the
+    /// OCX_SIGSTORE_TRUSTED_ROOT env var and over [trust.sigstore] in
+    /// config.toml. See
+    /// https://ocx.sh/docs/in-depth/self-hosted-sigstore
+    #[clap(long = "trusted-root", value_name = "PATH")]
+    trusted_root: Option<std::path::PathBuf>,
 
     /// Package identifier to verify (`registry/repo:tag[@digest]`).
     identifier: options::Identifier,
@@ -155,7 +145,7 @@ impl PackageVerify {
         // plain string and the CLI need not name `url::Url`.
         let rekor_cache_key = ocx_lib::oci::verify::trust_cache::cache_key_for_rekor(&rekor_url);
         let trust_root = self
-            .resolve_trust_root(&identifier, &context.file_structure().state, &rekor_cache_key, offline)
+            .resolve_trust_root(&context, &identifier, &rekor_cache_key, offline)
             .await?;
 
         // Resolve the identity constraints: flag override (exact pair), or the
@@ -260,31 +250,30 @@ impl PackageVerify {
     /// Resolve the trust root in precedence order, offline-aware.
     ///
     /// Layers flag-vs-env override resolution on the shared
-    /// [`ocx_lib::oci::verify::resolve_trust_root`] ladder (`--tuf-root` /
-    /// `OCX_SIGSTORE_TUF_ROOT` → `--trust-root` / `OCX_SIGSTORE_TRUST_ROOT` →
-    /// trust-root cache → embedded root, with the offline pinned-Rekor-key
-    /// gate). The flag wins over the env for each override; the shared ladder is
-    /// the single source of truth for the offline gate (auto-verify reuses it).
-    /// Any failure is tagged with the target identifier.
+    /// [`ocx_lib::oci::verify::resolve_trust_root`] ladder (`--trusted-root` /
+    /// `OCX_SIGSTORE_TRUSTED_ROOT` → `[trust.sigstore]` → the
+    /// `$OCX_HOME/sigstore/trusted-root.json` convention path → trust-root
+    /// cache → embedded root, with the offline pinned-Rekor-key gate). The flag
+    /// wins over the env; the shared ladder is the single source of truth for
+    /// every rung below that (auto-verify reuses it). Any failure is tagged
+    /// with the target identifier.
     async fn resolve_trust_root(
         &self,
+        context: &crate::app::Context,
         identifier: &oci::Identifier,
-        state: &StateStore,
         rekor_cache_key: &str,
         offline: bool,
     ) -> anyhow::Result<TrustRoot> {
-        let tuf_override = self
-            .tuf_root
+        let explicit = self
+            .trusted_root
             .clone()
-            .or_else(|| std::env::var_os("OCX_SIGSTORE_TUF_ROOT").map(std::path::PathBuf::from));
-        let pem_override = self
-            .trust_root
-            .clone()
-            .or_else(|| std::env::var_os("OCX_SIGSTORE_TRUST_ROOT").map(std::path::PathBuf::from));
+            .or_else(|| std::env::var_os("OCX_SIGSTORE_TRUSTED_ROOT").map(std::path::PathBuf::from));
+        let home_trusted_root = ocx_lib::ConfigLoader::home_sigstore_trusted_root_path();
         ocx_lib::oci::verify::resolve_trust_root(
-            tuf_override.as_deref(),
-            pem_override.as_deref(),
-            state,
+            explicit.as_deref(),
+            context.config_trust_sigstore(),
+            home_trusted_root.as_deref(),
+            &context.file_structure().state,
             rekor_cache_key,
             offline,
         )

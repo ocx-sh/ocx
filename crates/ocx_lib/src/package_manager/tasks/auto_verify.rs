@@ -72,10 +72,14 @@ pub struct AutoVerify {
     offline: bool,
     /// State store owning the capability + trust-root cache layouts.
     state: StateStore,
-    /// `OCX_SIGSTORE_TUF_ROOT` override captured at construction.
-    tuf_root_env: Option<PathBuf>,
-    /// `OCX_SIGSTORE_TRUST_ROOT` override captured at construction.
-    pem_root_env: Option<PathBuf>,
+    /// `OCX_SIGSTORE_TRUSTED_ROOT` override captured at construction.
+    trusted_root_env: Option<PathBuf>,
+    /// Operator `[trust.sigstore]` from `config.toml`, captured at construction.
+    sigstore_trust: Option<trust::SigstoreTrust>,
+    /// `$OCX_HOME/sigstore/trusted-root.json` convention path, if `$OCX_HOME`
+    /// resolved. Passed in rather than read here so the ladder stays free of
+    /// environment reads and a test can point it anywhere.
+    home_trusted_root: Option<PathBuf>,
     /// User opted out of verification (resolved `--no-verify` / `OCX_NO_VERIFY`,
     /// flag wins over env).
     user_opted_out: bool,
@@ -99,10 +103,12 @@ pub struct AutoVerifyInput {
     pub offline: bool,
     /// State store owning the capability + trust-root cache layouts.
     pub state: StateStore,
-    /// `OCX_SIGSTORE_TUF_ROOT` override, if set.
-    pub tuf_root_env: Option<PathBuf>,
-    /// `OCX_SIGSTORE_TRUST_ROOT` override, if set.
-    pub pem_root_env: Option<PathBuf>,
+    /// `OCX_SIGSTORE_TRUSTED_ROOT` override, if set.
+    pub trusted_root_env: Option<PathBuf>,
+    /// Operator `[trust.sigstore]` from `config.toml`, if configured.
+    pub sigstore_trust: Option<trust::SigstoreTrust>,
+    /// `$OCX_HOME/sigstore/trusted-root.json` convention path, if resolvable.
+    pub home_trusted_root: Option<PathBuf>,
     /// Resolved user opt-out.
     pub user_opted_out: bool,
 }
@@ -118,8 +124,9 @@ impl AutoVerify {
             rekor_url: input.rekor_url,
             offline: input.offline,
             state: input.state,
-            tuf_root_env: input.tuf_root_env,
-            pem_root_env: input.pem_root_env,
+            trusted_root_env: input.trusted_root_env,
+            sigstore_trust: input.sigstore_trust,
+            home_trusted_root: input.home_trusted_root,
             user_opted_out: input.user_opted_out,
             trust_root: Arc::new(OnceCell::new()),
             warned: Arc::new(AtomicBool::new(false)),
@@ -194,8 +201,9 @@ impl PackageManager {
             .trust_root
             .get_or_try_init(|| async {
                 let root = resolve_trust_root(
-                    auto_verify.tuf_root_env.as_deref(),
-                    auto_verify.pem_root_env.as_deref(),
+                    auto_verify.trusted_root_env.as_deref(),
+                    auto_verify.sigstore_trust.as_ref(),
+                    auto_verify.home_trusted_root.as_deref(),
                     &auto_verify.state,
                     &cache_key_for_rekor(&auto_verify.rekor_url),
                     auto_verify.offline,
@@ -328,8 +336,9 @@ mod tests {
             rekor_url,
             offline: false,
             state,
-            tuf_root_env: None,
-            pem_root_env: None,
+            trusted_root_env: None,
+            sigstore_trust: None,
+            home_trusted_root: None,
             user_opted_out: false,
         });
         let manager = PackageManager::new(file_structure, index, None, REGISTRY).with_auto_verify(Some(auto_verify));

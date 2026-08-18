@@ -477,6 +477,7 @@ impl Context {
                 .clone();
             build_auto_verify(
                 operator_policies,
+                config.trust.as_ref().and_then(|t| t.sigstore.clone()),
                 &client,
                 options.offline,
                 file_structure.state.clone(),
@@ -831,6 +832,13 @@ impl Context {
         &self.config_trust.policy
     }
 
+    /// Operator-tier `[trust.sigstore]` from the merged `config.toml` — the
+    /// self-hosted Fulcio/Rekor trust root a fleet ships instead of every
+    /// machine carrying a file or an env var.
+    pub fn config_trust_sigstore(&self) -> Option<&ocx_lib::trust::SigstoreTrust> {
+        self.config_trust.sigstore.as_ref()
+    }
+
     pub fn file_structure(&self) -> &file_structure::FileStructure {
         &self.file_structure
     }
@@ -972,12 +980,14 @@ fn build_registry_client(
 /// Attached once on the manager (every install surface inherits it). Carries the
 /// always-available registry client (verify reads the signature referrer from
 /// the registry even under `--offline`), the offline flag, the
-/// `OCX_SIGSTORE_TUF_ROOT` / `OCX_SIGSTORE_TRUST_ROOT` overrides, and the
+/// `OCX_SIGSTORE_TRUSTED_ROOT` override, the operator `[trust.sigstore]` block,
+/// the `$OCX_HOME/sigstore/trusted-root.json` convention path, and the
 /// `OCX_NO_VERIFY` opt-out default (install/pull refine it from their flag).
 /// OCI-tier gating uses the operator `config.toml` set only; the project
 /// `ocx.toml` pool stays empty (no new OCI-tier carve-out).
 fn build_auto_verify(
     operator_policies: Vec<ocx_lib::trust::TrustPolicy>,
+    sigstore_trust: Option<ocx_lib::trust::SigstoreTrust>,
     registry_client: &oci::Client,
     offline: bool,
     state: StateStore,
@@ -988,7 +998,7 @@ fn build_auto_verify(
     }
     // Compile-time-constant, known-valid URL — validated (not parsed by name) so
     // the CLI never names `url::Url`. Unused when the trust root pins the Rekor
-    // key (the `OCX_SIGSTORE_TUF_ROOT` / offline path).
+    // key (the `OCX_SIGSTORE_TRUSTED_ROOT` / offline path).
     let rekor_url = oci::endpoint::validate_sigstore_url(oci::endpoint::DEFAULT_REKOR_URL, "rekor")
         .expect("built-in default Rekor URL is valid");
     Some(package_manager::AutoVerify::new(package_manager::AutoVerifyInput {
@@ -1002,8 +1012,9 @@ fn build_auto_verify(
         rekor_url,
         offline,
         state,
-        tuf_root_env: std::env::var_os("OCX_SIGSTORE_TUF_ROOT").map(PathBuf::from),
-        pem_root_env: std::env::var_os("OCX_SIGSTORE_TRUST_ROOT").map(PathBuf::from),
+        trusted_root_env: std::env::var_os("OCX_SIGSTORE_TRUSTED_ROOT").map(PathBuf::from),
+        sigstore_trust,
+        home_trusted_root: ocx_lib::ConfigLoader::home_sigstore_trusted_root_path(),
         user_opted_out,
     }))
 }

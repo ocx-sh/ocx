@@ -61,7 +61,7 @@ def _verify(
             *(cert_flags or []),
             "--platform", current_platform(),
             "--rekor-url", stack.rekor_url,
-            "--tuf-root", str(stack.trust_root),
+            "--trusted-root", str(stack.trust_root),
             pkg.short,
         ],
         capture_output=True,
