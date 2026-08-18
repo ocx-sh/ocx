@@ -763,6 +763,84 @@ always overrides any policy — an exact-match pair, unchanged from flag-only ve
 Passing neither flag with no matching scope, or passing only one of the two flags, is a usage
 error. See the [`package verify` exit codes][cmd-package-verify] for the full behavior.
 
+
+### `[trust.sigstore]` {#keys-trust-sigstore}
+
+Where [`ocx package verify`][cmd-package-verify] gets its trust root when the
+[Sigstore][sigstore] stack is self-hosted rather than the public good, and which
+Fulcio/Rekor endpoints [`ocx package sign`][cmd-package-sign] talks to by default.
+
+```toml
+[trust.sigstore]
+trusted_root = "sigstore/trusted-root.json"    # path, relative to THIS config file
+fulcio_url   = "https://fulcio.corp.example"
+rekor_url    = "https://rekor.corp.example"
+```
+
+Every field is optional and the whole sub-table may be absent — omitting it
+reproduces public-good behaviour exactly. It is read from the `config.toml` tiers
+only: the project `ocx.toml` also parses a `[trust]` section (for
+[`[[trust.policy]]`](#keys-trust)), but its `sigstore` sub-table is never
+consulted. A repository that could name its own Fulcio CA would be verifying its
+own signatures, which is the entire trust decision.
+
+#### Fields {#keys-trust-sigstore-fields}
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `trusted_root` | string | Path to a Sigstore trusted-root JSON, or a directory holding `trusted_root.json`. A **relative path resolves against the directory of the `config.toml` that declared it** — rewritten to absolute at load time, so the value means the same file regardless of the process working directory. Mutually exclusive with `trusted_root_json` |
+| `trusted_root_json` | string | The trusted-root document inlined verbatim. This is the form a fleet receives — see [Publishing to a fleet](#keys-trust-sigstore-publish). Mutually exclusive with `trusted_root` |
+| `fulcio_url` | string | Default [Fulcio][fulcio] base URL for `ocx package sign` when `--fulcio-url` is omitted |
+| `rekor_url` | string | Default [Rekor][rekor] base URL for `ocx package sign` / `verify` when `--rekor-url` is omitted |
+
+Setting both `trusted_root` and `trusted_root_json` is a configuration error —
+exit `78`, `trust_root_load`. One trust root, one spelling.
+
+#### Where it sits in the ladder {#keys-trust-sigstore-ladder}
+
+Verify resolves its trust root through six rungs, first hit wins:
+
+1. `--trusted-root` on [`ocx package verify`][cmd-package-verify]
+2. [`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root]
+3. `[trust.sigstore] trusted_root` / `trusted_root_json` — this section
+4. `$OCX_HOME/sigstore/trusted-root.json` — a convention path, no config needed
+5. The trust-root cache under `$OCX_HOME/state/trust_root/`, written by a prior online verify
+6. The public-good Sigstore root, fetched over TUF
+
+Rungs 1–3 are operator-named: a file that does not exist is an error, not a
+fall-through. Rung 4 is a convention: absent falls through, but present-and-unreadable
+fails. See [Self-hosted Sigstore][in-depth-self-hosted-sigstore] for choosing among them.
+
+#### System-locked {#keys-trust-sigstore-system-lock}
+
+Declared at the **system** scope (`/etc/ocx/config.toml`), the whole sub-table
+becomes non-overridable — the user, `$OCX_HOME`, and [`[managed]`](#keys-managed)
+tiers cannot replace any of its fields. The lock is per-table, not per-field: a
+lower tier cannot supply a `rekor_url` alongside a system `trusted_root`.
+
+This follows the [`[registry]`](#keys-registry) precedent rather than the
+[`[[trust.policy]]`](#keys-trust-merge) one, because a scalar trust root cannot
+pool: two Fulcio CAs is not a merge, it is an ambiguity. Where the sub-table is
+*not* system-locked, higher tiers replace field by field — with the two trust-root
+spellings coupled, so a tier switching from a path to an inline document drops the
+path rather than leaving both set.
+
+#### Publishing to a fleet {#keys-trust-sigstore-publish}
+
+A path on the operator's disk means nothing on a consumer's, so
+[`ocx config push`][cmd-config-push] reads a path-form `trusted_root` at publish
+time, validates that it parses as a Sigstore trusted root, and publishes it as
+`trusted_root_json`. Comments, key order and every other field survive the rewrite.
+
+The loader enforces the other half on the consuming side:
+
+- A path-form `trusted_root` arriving from the [`[managed]`](#keys-managed) tier is
+  **ignored with a warning**. A remote payload cannot name a path on this machine.
+- A `trusted_root_json` arriving from a `[managed]` source that is **not
+  digest-pinned** is ignored with a warning. Otherwise the trust root arrives over
+  the very channel it exists to verify; the circularity is broken by pinning the
+  seed, not by policy.
+
 ## Environment Variable Override Table {#env-overrides}
 
 This table shows which OCX environment variables map to config file fields. Variables not listed here have no config equivalent.
@@ -1007,6 +1085,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [cmd-config-update]: ./command-line.md#config-update
 [cmd-config-push]: ./command-line.md#config-push
 [cmd-package-verify]: ./command-line.md#package-verify
+[cmd-package-sign]: ./command-line.md#package-sign
 
 <!-- environment -->
 [env-ocx-home]: ./environment.md#ocx-home
@@ -1041,3 +1120,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-no-modify-path]: ./environment.md#ocx-no-modify-path
 [env-ocx-binary-pin]: ./environment.md#ocx-binary-pin
 [xdg-basedir]: ./environment.md#external-xdg-config-home
+[env-sigstore-trusted-root]: ./environment.md#ocx-sigstore-trusted-root
+[in-depth-self-hosted-sigstore]: ../in-depth/self-hosted-sigstore.md
+[fulcio]: https://github.com/sigstore/fulcio
+[rekor]: https://github.com/sigstore/rekor

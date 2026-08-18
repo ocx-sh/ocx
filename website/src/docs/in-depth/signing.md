@@ -17,17 +17,21 @@ Signing a published package, verifying it against a pinned identity, then verify
 
 ## Trust Root {#trust-root}
 
-OCX verifies [Fulcio][fulcio] certificates against a trust root, and verifies the [Rekor][rekor] Signed Entry Timestamp against Rekor's public key. It resolves this material in precedence order:
+OCX verifies [Fulcio][fulcio] certificates against a trust root, and verifies the [Rekor][rekor] Signed Entry Timestamp against Rekor's public key. Against public Sigstore this needs no configuration at all — the material arrives over [TUF][sigstore-tuf]. Against a self-hosted stack it has to come from somewhere you control, and OCX resolves it through six rungs, first hit wins:
 
-- **`--tuf-root <PATH>`** on `ocx package verify`, or the [`OCX_SIGSTORE_TUF_ROOT`][env-sigstore-tuf-root] environment variable (the flag wins) — a Sigstore [trusted-root][sigstore-tuf] JSON (or a directory holding `trusted_root.json`), loaded by `TrustRoot::load_trusted_root_json`. It supplies both the Fulcio CA **and** the pinned Rekor key, so verification needs no network fetch. This is the air-gapped seam.
-- **`--trust-root <PATH>`**, or the [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root] environment variable (the flag wins) — a PEM file of one or more `CERTIFICATE` blocks, loaded by `TrustRoot::load_from_pem`. It carries the Fulcio CA **only**: no certificate-transparency log key and no Rekor key. See the warning below — on its own it verifies nothing.
-- **The trust-root cache** — a successful online verify writes the Fulcio CA, the CT log keys and the Rekor key it used to `$OCX_HOME/state/trust_root/`, so a later verify (including [`--offline`][env-offline]) reuses them. See [Offline and Air-Gapped Verification](#offline-verification).
-- **The public-good root over TUF** — with no override and no cache, `TrustRoot::load_embedded` fetches and verifies the [Sigstore TUF][sigstore-tuf] trust root through [sigstore-rs][sigstore-rs]'s `tough`-backed client, caching the TUF metadata under `$OCX_HOME/state/tuf/`. This is the default for packages signed against public Sigstore, and it needs network — `--offline` never reaches it (see [Offline and Air-Gapped Verification](#offline-verification)).
+1. **`--trusted-root <PATH>`** on `ocx package verify` — a Sigstore [trusted-root][sigstore-tuf] JSON, or a directory holding `trusted_root.json`.
+2. **[`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root]** — the same value as an environment variable; the flag wins.
+3. **[`[trust.sigstore]`][config-trust-sigstore]** in the operator `config.toml` — `trusted_root` (a path, relative to that config file) or `trusted_root_json` (the document inlined). This is the rung a fleet uses, because a `config.toml` can itself be distributed.
+4. **`$OCX_HOME/sigstore/trusted-root.json`** — a convention path. Drop the file there and nothing needs configuring.
+5. **The trust-root cache** — a successful online verify writes the Fulcio CA, the CT log keys and the Rekor key it used to `$OCX_HOME/state/trust_root/`, so a later verify (including [`--offline`][env-offline]) reuses them. See [Offline and Air-Gapped Verification](#offline-verification).
+6. **The public-good root over TUF** — with no override, no configured root and no cache, `TrustRoot::load_embedded` fetches and verifies the [Sigstore TUF][sigstore-tuf] trust root through [sigstore-rs][sigstore-rs]'s `tough`-backed client, caching the TUF metadata under `$OCX_HOME/state/tuf/`. This is the default for packages signed against public Sigstore, and it needs network — `--offline` never reaches it.
 
-:::warning A bare CA PEM cannot verify anything
-A Fulcio certificate carries an embedded Signed Certificate Timestamp, and the verifier checks that SCT against the CT log's public key. A `--trust-root` PEM carries anchors and no log key, so verification of any real certificate would fail on the SCT check. OCX refuses up front with exit 78 (`ConfigError`) and the message `trust root carries no CT log key`, rather than surfacing it later as a signature failure.
+Rungs 1–3 are operator-named: a file that does not exist is an error, not a fall-through. Rung 4 is a convention: absent falls through to the cache, but present-and-unreadable fails. Which rung to use is a deployment decision — see [Self-hosted Sigstore][in-depth-self-hosted-sigstore] for the trade-offs.
 
-Use `--tuf-root` with a Sigstore trusted-root JSON, which carries the anchors, the CT log keys and the pinned Rekor key together. Produce one for a self-hosted stack with `cosign trusted-root create`, or with `test/sigstore/generate-trusted-root.py` in this repository.
+:::warning A bare CA certificate is not a trust root
+A Fulcio certificate carries an embedded Signed Certificate Timestamp, and the verifier checks that SCT against the CT log's public key. Trust material carrying CA anchors and no log key would fail on the SCT check for every real certificate, so OCX refuses it up front with exit 78 (`ConfigError`) and the message `trust root carries no CT log key`, rather than surfacing it later as a signature failure.
+
+A Sigstore trusted-root JSON carries the anchors, the CT log keys and the pinned Rekor key together; that is the only shape any rung accepts. Produce one for a self-hosted stack with `cosign trusted-root create`, or with `test/sigstore/generate-trusted-root.py` in this repository.
 :::
 
 ## Referrers Capability Cache {#referrers-cache}
@@ -125,7 +129,7 @@ Two deployments, one command surface. What changes between them is where the tru
 
 ### Public Sigstore {#public-good}
 
-The default, and the case that needs no configuration. [Fulcio][fulcio] and [Rekor][rekor] run as the [Sigstore public-good instance][sigstore-public-good]; the trust root arrives over [TUF][sigstore-tuf] on first use and caches under `$OCX_HOME/state/tuf/`. Neither `--fulcio-url` nor `--rekor-url` is passed, and neither is a trust-root flag:
+The default, and the case that needs no configuration. [Fulcio][fulcio] and [Rekor][rekor] run as the [Sigstore public-good instance][sigstore-public-good]; the trust root arrives over [TUF][sigstore-tuf] on first use and caches under `$OCX_HOME/state/tuf/`. Neither `--fulcio-url` nor `--rekor-url` is passed, and neither is `--trusted-root`:
 
 ```sh
 ocx package sign -p linux/amd64 registry.example.com/acme/mytool:1.0.0
@@ -138,32 +142,22 @@ Public Sigstore writes every certificate it issues, and every entry it logs, to 
 
 ### Self-hosted Sigstore {#self-hosted}
 
-A self-hosted stack is Fulcio and Rekor plus what they depend on: a certificate-transparency log, [Trillian][trillian] behind it, and an OIDC provider to mint identities. This repository runs exactly that as the acceptance suite's fixture — seven services in `test/docker-compose.yml` under the `sigstore` profile ([dex][dex], Fulcio, Rekor, [TesseraCT][tesseract], two Trillian services, MySQL). It is what the recording at the top of this page talks to, and `test/sigstore/README.md` documents it.
+Fulcio and Rekor plus what they depend on: a certificate-transparency log, [Trillian][trillian] behind it, and an OIDC provider to mint identities. This repository runs exactly that as the acceptance suite's fixture — seven services in `test/docker-compose.yml` under the `sigstore` profile ([dex][dex], Fulcio, Rekor, [TesseraCT][tesseract], two Trillian services, MySQL). It is what the recording at the top of this page talks to, and `test/sigstore/README.md` documents it.
 
 ```sh
 cd test && docker compose --profile sigstore up -d
 ```
 
-A self-hosted CA is in no TUF root, so the trust material has to be produced once and handed to `verify`. Either tool writes it:
+Three things change relative to public Sigstore. The endpoints are addressed with `--fulcio-url` and `--rekor-url` — **flags only**, no environment variable for either. The trust root has to be produced once, because a self-hosted CA is in no TUF root:
 
 ```sh
 cosign trusted-root create --certificate-chain fulcio-ca.crt.pem --out trusted_root.json
 python3 test/sigstore/generate-trusted-root.py    # what this repo uses
 ```
 
-From there, three inputs address the stack. The endpoints are **flags only** — there is no environment variable for either — while the identity token and the trust root each have one, which is what lets a pipeline pass them without ever putting a token in `argv`:
+And the identity comes from *your* issuer rather than `oauth2.sigstore.dev` — which is the part that decides whether the stack can run air-gapped at all.
 
-```sh
-export OCX_SIGSTORE_TUF_ROOT=$PWD/test/sigstore          # dir holding trusted_root.json
-export OCX_IDENTITY_TOKEN="$(python3 test/sigstore/get-token.py)"
-
-ocx package sign -p linux/amd64 \
-  --fulcio-url http://localhost:5555 \
-  --rekor-url http://localhost:3000 \
-  acme/mytool:1.0.0
-```
-
-`validate_sigstore_url` accepts `http://` here only because both endpoints are loopback; a self-hosted stack on any other host must be `https://`, and its address must clear the SSRF floor — see [Custom Sigstore endpoints](#offline-verification) at the end of this page.
+`validate_sigstore_url` accepts `http://` for a loopback endpoint only; a self-hosted stack on any other host must be `https://`, and its address must clear the SSRF floor — see [Custom Sigstore endpoints](#offline-verification) at the end of this page.
 
 #### Pin the identity once {#self-hosted-policy}
 
@@ -180,6 +174,8 @@ oidc_issuer = "http://dex:5556/dex"
 The issuer here is the address **inside** the compose network, not the one the host dials — the token's `iss` claim names the URL its issuer answered at when Fulcio validated it. OCX only ever compares that string; it never dials the issuer, so the two do not have to agree.
 
 Once the policy is in place it is also what makes verification automatic on `install` and `pull` — see [Verify by default][guide-auto-verify].
+
+**Running this for a fleet is its own page.** Which OIDC issuer to point Fulcio at (GitHub Actions, GitHub Enterprise Server, GitLab, generic OIDC), what each one costs in egress, how the trusted root reaches every machine without setting an environment variable on each, and why `identity_regexp` is an authorization boundary rather than a convenience — all of it is in [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
 
 ## Signing from CI {#ci}
 
@@ -222,11 +218,12 @@ The consuming side is a verify step, and it wants the pin rather than the flags:
 ```yaml
 - run: ocx package verify -p linux/amd64 registry.example.com/acme/mytool:1.0.0
   env:
-    # Self-hosted only — public Sigstore needs no trust-root override.
-    OCX_SIGSTORE_TUF_ROOT: ${{ github.workspace }}/trust/trusted_root.json
+    # Self-hosted only — public Sigstore needs no trust-root override, and a
+    # fleet should get this from configuration rather than a per-job env var.
+    OCX_SIGSTORE_TRUSTED_ROOT: ${{ github.workspace }}/trust/trusted_root.json
 ```
 
-Broader CI wiring — toolchain-tier installs, environment export, the GitLab equivalents — is in [CI Integration][guide-ci].
+Broader CI wiring — toolchain-tier installs, environment export, the GitLab equivalents — is in [CI Integration][guide-ci]. Pointing a **private** Fulcio at these same issuers, instead of public Sigstore, is [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
 
 ## Slice Boundary {#slice-boundary}
 
@@ -242,7 +239,6 @@ The acceptance suite runs against a real Sigstore deployment — Fulcio, Rekor, 
 
   This is a dated dependency, not a static gap: it holds only while the log you sign against speaks v1. The moment an instance — the public-good deployment or your own — serves v2, every **new** signature it issues verifies as exit 83 here, and signatures already in a v1 log keep verifying. Treat a planned Rekor upgrade as a blocking prerequisite on [#107][gh-107], and pin the Rekor URL you verify against rather than following an instance through a migration.
 - **No DSSE attestations.** `ocx package attest` does not exist, and the verify path rejects a DSSE-envelope bundle with exit 79 (`NoUsableBundle`). Deferred until sigstore-rs ships DSSE support.
-- **A bare `--trust-root` PEM verifies nothing** — see the warning under [Trust Root](#trust-root). Use `--tuf-root`.
 - **Discovery does not interoperate with cosign** — see [cosign Interoperability](#cosign-interop).
 
 :::tip Automatic verification at install time
@@ -260,15 +256,15 @@ Verifying an artifact means reading it — and its signature — from the regist
 
 There are two offline paths:
 
-- **Supplied trust root.** Pass [`--tuf-root <trusted_root.json>`][env-sigstore-tuf-root] (or the `OCX_SIGSTORE_TUF_ROOT` env var). A Sigstore trusted-root JSON carries both the Fulcio CA and the pinned Rekor public key, so the SET verifies with no fetch. This is the air-gapped seam: point it at a local trust-root mirror.
+- **Supplied trust root.** Any of the first four rungs of the [trust-root ladder](#trust-root) — `--trusted-root`, [`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root], [`[trust.sigstore]`][config-trust-sigstore], or `$OCX_HOME/sigstore/trusted-root.json`. A Sigstore trusted-root JSON carries the Fulcio CA, the CT log keys and the pinned Rekor public key together, so the SET verifies with no fetch. This is the air-gapped seam: point it at a local trust-root mirror, or ship it through configuration — see [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
 - **Cached trust root.** A successful **online** `ocx package verify` writes the Fulcio CA and the Rekor key it used to `$OCX_HOME/state/trust_root/<rekor-authority>.json` (24-hour TTL). A later `--offline` verify against the same Rekor instance reuses that cache with no fetch.
 
-Offline verify requires a **pinned Rekor key** — a bare `--trust-root` PEM does not carry one. When no cached or supplied trust material is available offline, verify fails with exit 78 (`ConfigError`) naming the remedy; it never silently skips verification.
+Offline verify requires a **pinned Rekor key**, which is why the trust material has to be a full trusted-root JSON and not a bare CA certificate. When no cached or supplied trust material is available offline, verify fails with exit 78 (`ConfigError`) naming the remedy; it never silently skips verification.
 
 ```sh
 # Air-gapped: pin both the Fulcio CA and the Rekor key from a local mirror.
 ocx --offline package verify -p linux/amd64 registry.internal/cmake:3.28 \
-  --tuf-root /etc/ocx/trusted_root.json \
+  --trusted-root /etc/ocx/trusted_root.json \
   --certificate-identity ci@example.com \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -337,8 +333,9 @@ The same SSRF floor that guards registry traffic guards these endpoints: a URL i
 
 <!-- environment -->
 [env-identity-token]: ../reference/environment.md#ocx-identity-token
-[env-sigstore-trust-root]: ../reference/environment.md#ocx-sigstore-trust-root
-[env-sigstore-tuf-root]: ../reference/environment.md#ocx-sigstore-tuf-root
+[env-sigstore-trusted-root]: ../reference/environment.md#ocx-sigstore-trusted-root
+[config-trust-sigstore]: ../reference/configuration.md#keys-trust-sigstore
+[in-depth-self-hosted-sigstore]: ./self-hosted-sigstore.md
 [env-offline]: ../reference/environment.md#ocx-offline
 
 <!-- user guide -->

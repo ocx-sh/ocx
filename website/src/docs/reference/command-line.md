@@ -3800,9 +3800,9 @@ In GitHub Actions, the `ACTIONS_ID_TOKEN_REQUEST_TOKEN` variable is present auto
 
 #### `verify` {#package-verify}
 
-Verifies a [Sigstore][sigstore] keyless signature attached to a package manifest via [OCI Referrers][oci-referrers-spec]. The command fetches the [Sigstore bundle v0.3][sigstore-bundle] referrer for the target, verifies the [Fulcio][fulcio] certificate chain against a supplied trust root (see `--tuf-root` / `--trust-root` below), verifies the [Rekor][rekor] Signed Entry Timestamp (SET), verifies the signature over the subject manifest digest, and checks the certificate identity and OIDC issuer against the identity you either supply as flags or have pinned in a [`[[trust.policy]]`][config-trust] entry. All five checks must pass for the command to exit 0.
+Verifies a [Sigstore][sigstore] keyless signature attached to a package manifest via [OCI Referrers][oci-referrers-spec]. The command fetches the [Sigstore bundle v0.3][sigstore-bundle] referrer for the target, verifies the [Fulcio][fulcio] certificate chain against a supplied trust root (see `--trusted-root` below), verifies the [Rekor][rekor] Signed Entry Timestamp (SET), verifies the signature over the subject manifest digest, and checks the certificate identity and OIDC issuer against the identity you either supply as flags or have pinned in a [`[[trust.policy]]`][config-trust] entry. All five checks must pass for the command to exit 0.
 
-`--offline` (or [`OCX_OFFLINE`][env-offline]) scopes to the Sigstore trust services — the Rekor-key fetch and TUF — not the registry: verify still fetches the target and its signature referrer from the registry in every mode. Offline verify requires a pinned Rekor key from `--tuf-root` or a fresh trust-root cache entry; see [Offline and Air-Gapped Verification][signing-offline] for the full model.
+`--offline` (or [`OCX_OFFLINE`][env-offline]) scopes to the Sigstore trust services — the Rekor-key fetch and TUF — not the registry: verify still fetches the target and its signature referrer from the registry in every mode. Offline verify requires a pinned Rekor key from `--trusted-root` (or one of the other trust-root rungs) or a fresh trust-root cache entry; see [Offline and Air-Gapped Verification][signing-offline] for the full model.
 
 `--certificate-identity` and `--certificate-oidc-issuer` are optional — but only when a [`[[trust.policy]]`][config-trust] scope covers the target (see [Identity resolution](#package-verify-identity) below). Keyless verification is meaningless without an identity from one source or the other.
 
@@ -3826,8 +3826,7 @@ ocx package verify [OPTIONS] --platform <PLATFORM> \
 | `--certificate-identity` | — | *(policy-resolved)* | Expected certificate SAN (Subject Alternative Name), exact match. Optional when a [`[[trust.policy]]`][config-trust] scope covers the target; when given, overrides any policy and requires `--certificate-oidc-issuer` too. Examples: `you@example.com`, `https://github.com/org/repo/.github/workflows/build.yml@refs/heads/main` |
 | `--certificate-oidc-issuer` | — | *(policy-resolved)* | Expected OIDC issuer URL, exact match. Used together with `--certificate-identity` — passing one without the other is a usage error. Examples: `https://github.com/login/oauth`, `https://token.actions.githubusercontent.com` |
 | `--rekor-url` | — | `https://rekor.sigstore.dev` | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
-| `--tuf-root` | — | *(none)* | Path to a Sigstore [trusted-root][sigstore-tuf] JSON (or a directory holding `trusted_root.json`) — supplies both the [Fulcio][fulcio] CA and the pinned [Rekor][rekor] public key, so no Rekor-key fetch is needed. Takes precedence over `--trust-root`. Equivalent env var: [`OCX_SIGSTORE_TUF_ROOT`][env-sigstore-tuf-root]; the flag wins. The air-gapped seam — required for [`--offline`](#arg-offline) verify unless a fresh trust-root cache entry already exists |
-| `--trust-root` | — | *(public-good root over TUF)* | Path to a PEM file of [Fulcio][fulcio] CA certificate(s) to validate the leaf chain against. The PEM carries no certificate-transparency log key, so it alone cannot check the SCT embedded in a real Fulcio certificate: verify refuses it with exit 78. Supply `--tuf-root` instead — it carries both the Fulcio CA and the pinned [Rekor][rekor] key. Equivalent env var: [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root]; the flag wins. See [Current limitations][signing-limitations] |
+| `--trusted-root` | — | *(public-good root over TUF)* | Path to a Sigstore [trusted-root][sigstore-tuf] JSON (or a directory holding `trusted_root.json`) — supplies the [Fulcio][fulcio] CA, the certificate-transparency log keys and the pinned [Rekor][rekor] public key together, so no Rekor-key fetch is needed. Equivalent env var: [`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root]; the flag wins. Highest rung of the trust-root ladder — see [Self-hosted Sigstore][in-depth-self-hosted-sigstore] for the config-driven alternatives. Required for [`--offline`](#arg-offline) verify unless another rung already supplies a pinned Rekor key |
 | `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
 
 #### Identity resolution {#package-verify-identity}
@@ -3839,10 +3838,10 @@ Two ways to tell `ocx package verify` whose signature to accept:
 
 Supplying exactly one of the two flags is a usage error (exit 64) rejected by the argument parser (clap `requires`) *before* verification runs — a `--certificate-identity` without a matching `--certificate-oidc-issuer`, or vice versa, cannot express a valid match. Because it is caught at parse time it produces a bare usage error with **no** JSON envelope and no `error.detail` (it is not the `no_identity_provided` case). Supplying neither flag with no `[[trust.policy]]` scope covering the target is also exit 64, but *that* one is the `NoIdentityProvided` verify error (it does carry an envelope): there is no identity to check the signature against.
 
-:::warning `--trust-root` alone cannot verify
-`ocx package verify` runs the full pipeline end-to-end — referrer discovery, [Fulcio][fulcio] chain, SCT, [Rekor][rekor] SET and inclusion proof, subject-digest signature, identity and issuer match. With no `--tuf-root` / `--trust-root` and no cached trust material it fetches the public-good trust root over [TUF][sigstore-tuf].
+:::warning A bare Fulcio CA is not a trust root
+`ocx package verify` runs the full pipeline end-to-end — referrer discovery, [Fulcio][fulcio] chain, SCT, [Rekor][rekor] SET and inclusion proof, subject-digest signature, identity and issuer match. With no trust root supplied by any rung of the ladder and no cached trust material, it fetches the public-good trust root over [TUF][sigstore-tuf].
 
-A `--trust-root` / [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root] PEM carries Fulcio anchors but no certificate-transparency log key, so it cannot check the SCT embedded in any real Fulcio certificate: verify refuses it with exit 78. Use `--tuf-root` / [`OCX_SIGSTORE_TUF_ROOT`][env-sigstore-tuf-root] with a trusted-root JSON instead. See [Current limitations][signing-limitations].
+A Fulcio certificate embeds a Signed Certificate Timestamp that the verifier checks against the CT log's key, so trust material carrying CA anchors alone cannot verify anything — verify refuses it with exit 78 and the message `trust root carries no CT log key`. A Sigstore trusted-root JSON carries the anchors, the CT log keys and the pinned Rekor key together; that is the only shape `--trusted-root` accepts. See [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
 :::
 
 **Exit codes**
@@ -3854,7 +3853,7 @@ A `--trust-root` / [`OCX_SIGSTORE_TRUST_ROOT`][env-sigstore-trust-root] PEM carr
 | 64 | `NoIdentityProvided` — neither `--certificate-identity` nor `--certificate-oidc-issuer` was given and no [`[[trust.policy]]`][config-trust] scope covers the target (a lone flag is instead rejected at parse time as a bare usage error, with no envelope) |
 | 65 | Data integrity failure: signature invalid, subject digest mismatch, certificate chain invalid, Rekor SET invalid (bundle tampered), Rekor transparency-log body does not bind to the bundle (spliced SET), the signature candidate examination cap was reached before a valid signature was found, or bundle parse failed |
 | 77 | Certificate identity or OIDC issuer mismatch |
-| 78 | Trust root unavailable or failed to load — includes [`--offline`](#arg-offline) verify with no pinned Rekor key available (no `--tuf-root` and no fresh trust-root cache entry); the message names the remedy |
+| 78 | Trust root unavailable or failed to load — includes [`--offline`](#arg-offline) verify with no pinned Rekor key available (no `--trusted-root`, no configured trust root, and no fresh trust-root cache entry); the message names the remedy |
 | 78 | `TrustPolicyInvalid` — the [`[[trust.policy]]`][config-trust] entry matched for this target sets both `identity` and `identity_regexp`, sets neither, or its `identity_regexp` fails to compile |
 | 78 | `ForbiddenRegistryTarget` — the target registry is refused by policy before any verification is attempted |
 | 79 | No signatures found for target, no usable Sigstore bundle among referrers, or no manifest for the requested `--platform` under the target image index |
@@ -3935,7 +3934,7 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 | `rekor_unavailable` | 83 | Rekor transparency log unavailable during verify |
 | `bundle_parse_failed` | 65 | Bundle is not valid Sigstore bundle v0.3 or is corrupted JSON |
 | `trust_root_unavailable` | 78 | Embedded TUF trust root asset not present in this build (Slice 1) |
-| `trust_root_load` | 78 | Trust root failed to load — malformed PEM, no certificate blocks, TUF fetch failed, or [`--offline`](#arg-offline) verify with no pinned Rekor key available (supply `--tuf-root`, or run an online verify first to populate the cache) |
+| `trust_root_load` | 78 | Trust root failed to load — malformed trusted-root JSON, no CT log key, TUF fetch failed, or [`--offline`](#arg-offline) verify with no pinned Rekor key available (supply `--trusted-root`, or run an online verify first to populate the cache) |
 | `forbidden_registry_target` | 78 | The target registry is refused by policy before any verification is attempted |
 | `no_identity_provided` | 64 | No identity to verify against: both certificate flags omitted and no [`[[trust.policy]]`][config-trust] scope matched the target. (A lone flag is a clap parse error — still exit 64, but with no envelope and no `detail`.) |
 | `trust_policy_invalid` | 78 | A matched [`[[trust.policy]]`][config-trust] entry is malformed — identity XOR violation, or an `identity_regexp` that does not compile |
@@ -3947,13 +3946,13 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 ```shell
 ocx package verify \
   -p linux/amd64 \
-  --tuf-root /etc/ocx/trusted_root.json \
+  --trusted-root /etc/ocx/trusted_root.json \
   --certificate-identity https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   registry.example/pkg:1.0
 ```
 
-With no `--tuf-root`/`--trust-root` and no fresh trust-root cache entry, verify fetches the public-good trust root over [TUF][sigstore-tuf] — `--tuf-root` here pins a self-hosted or private deployment's own trust material instead. See [Current limitations][signing-limitations].
+With no trust root from any rung of the ladder and no fresh trust-root cache entry, verify fetches the public-good trust root over [TUF][sigstore-tuf] — `--trusted-root` here pins a self-hosted or private deployment's own trust material instead. Passing it on every invocation is the most expensive rung; [Self-hosted Sigstore][in-depth-self-hosted-sigstore] covers the config-driven alternatives. See also [Current limitations][signing-limitations].
 
 **Example — verify with a `[[trust.policy]]` covering the target, no flags**
 
@@ -3966,7 +3965,7 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
 
 ```shell
-ocx package verify -p linux/amd64 --tuf-root /etc/ocx/trusted_root.json registry.example/pkg:1.0
+ocx package verify -p linux/amd64 --trusted-root /etc/ocx/trusted_root.json registry.example/pkg:1.0
 ```
 
 See the [configuration reference][config-trust] for the full schema, scope matching, and rotation semantics.
@@ -4007,7 +4006,7 @@ The same gate applies to **every** command that fetches a package, not just `ins
 
 A package outside every policy's scope is not verified — trust is opt-in, and OCX logs an `INFO` line noting the skip. This opt-in is per scope: a covered package's transitive dependencies are verified only if a policy also covers *their* scope. When a policy does cover the package, a failed check exits with the same taxonomy [`package verify`][cmd-package-verify] uses: `65` for a tampered bundle, `77` for a certificate identity or issuer mismatch, `78` for a trust-root or policy configuration problem, `79` for no signature found.
 
-Pass `--no-verify` (below), or set [`OCX_NO_VERIFY`][env-no-verify] for a CI-wide opt-out, to skip a policy-covered package's verification; the flag wins when both are set, and the bypass logs a single `WARN` per invocation. Under [`--offline`][arg-offline] (or [`OCX_OFFLINE`][env-offline]), verification reuses whatever trust material is already local — [`OCX_SIGSTORE_TUF_ROOT`][env-sigstore-tuf-root] or a warm `$OCX_HOME/state/trust_root/` cache entry — and fails closed with exit `78` when neither is available, rather than installing an artifact it could not check. See [Verify by default][guide-auto-verify] in the user guide for the full model.
+Pass `--no-verify` (below), or set [`OCX_NO_VERIFY`][env-no-verify] for a CI-wide opt-out, to skip a policy-covered package's verification; the flag wins when both are set, and the bypass logs a single `WARN` per invocation. Under [`--offline`][arg-offline] (or [`OCX_OFFLINE`][env-offline]), verification reuses whatever trust material is already local — a trust root from any rung of the ladder ([`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root], [`[trust.sigstore]`][config-trust-sigstore], `$OCX_HOME/sigstore/trusted-root.json`) or a warm `$OCX_HOME/state/trust_root/` cache entry — and fails closed with exit `78` when neither is available, rather than installing an artifact it could not check. See [Verify by default][guide-auto-verify] in the user guide for the full model.
 
 **Usage**
 
@@ -4812,10 +4811,12 @@ or a registry error) — the report then degrades to a local-state-only summary
 [in-depth-indices-servable]: ../in-depth/indices.md#servable
 [in-depth-lazy-loading]: ../in-depth/lazy-loading.md
 [in-depth-lazy-loading-ladder]: ../in-depth/lazy-loading.md#deferred-tools-ladder
+[config-trust-sigstore]: ./configuration.md#keys-trust-sigstore
 [signing-limitations]: ../in-depth/signing.md#current-limitations
 [signing-offline]: ../in-depth/signing.md#offline-verification
 [signing-deferred]: ../in-depth/signing.md#deferred-future-work
 [signing-cosign-interop]: ../in-depth/signing.md#cosign-interop
+[in-depth-self-hosted-sigstore]: ../in-depth/self-hosted-sigstore.md
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global
@@ -4845,8 +4846,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [env-github-path]: ./environment.md#external-github-path
 [env-gitlab-ci]: ./environment.md#external-gitlab-ci
 [env-identity-token]: ./environment.md#ocx-identity-token
-[env-sigstore-trust-root]: ./environment.md#ocx-sigstore-trust-root
-[env-sigstore-tuf-root]: ./environment.md#ocx-sigstore-tuf-root
+[env-sigstore-trusted-root]: ./environment.md#ocx-sigstore-trusted-root
 [env-offline]: ./environment.md#ocx-offline
 [env-no-verify]: ./environment.md#ocx-no-verify
 
