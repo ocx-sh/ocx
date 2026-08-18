@@ -56,3 +56,16 @@ workarounds = [
   "rustls",
   "wasmtime",
 ]
+
+# `sigstore` ships a single `LICENSE` (Apache-2.0 with the appendix filled in).
+# Without this pin the crate lands in one license group locally and another on
+# CI, from the same sources and the same cargo-about version — the freshness
+# check then fails on a notice that was generated correctly. A clarification is
+# authoritative over both local harvesting and clearlydefined.io, so the file is
+# named once, checksummed, and the grouping stops depending on the machine.
+[sigstore.clarify]
+license = "Apache-2.0"
+
+[[sigstore.clarify.files]]
+path = "LICENSE"
+checksum = "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1"

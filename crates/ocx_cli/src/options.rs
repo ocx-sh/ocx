@@ -29,4 +29,4 @@ pub use lazy_mode::LazyMode;
 pub use lazy_report::LazyReport;
 pub use platform::PlatformOption;
 pub use pull::Pull;
-pub use verify::Verify;
+pub use verify::{SignatureVerify, Verify};

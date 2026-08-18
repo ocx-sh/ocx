@@ -23,16 +23,39 @@
 # own fixtures before reading them and mostly passes — against a registry it did
 # not start, which it then fills with test packages.
 services:
+  # Primary registry — zot (CNCF project-zot), an OCI Distribution 1.1 registry
+  # with a NATIVE Referrers API: GET /v2/<name>/referrers/<digest> plus the
+  # OCI-Subject response header on a manifest push that carries a `subject`.
+  #
+  # Why zot and not registry:2 / registry:3?  distribution (BOTH v2 and v3) does
+  # NOT implement the Referrers API — it relies on the referrers TAG-schema
+  # fallback.  OCX is referrers-only (no tag fallback by design, #106), so the
+  # supply-chain sign/verify path (#194) and the referrers smoke test require a
+  # registry that serves the real endpoint.  Verified empirically for #195:
+  # registry:3 (distribution 3.1.1) returns Go's "404 page not found" on
+  # /referrers/ and omits OCI-Subject on push; zot returns OCI-Subject and a
+  # populated referrers index.  Pinned to a multi-arch tag (linux/amd64 +
+  # linux/arm64).  Config is mounted read-only from ./zot-config.json.
   registry:
-    image: registry:2
+    image: ghcr.io/project-zot/zot:v2.1.18
     ports:
       - "${OCX_TEST_REGISTRY_PORT:-5000}:5000"
+    volumes:
+      - ./zot-config.json:/etc/zot/config.json:ro
 
-  # Mirror registry — a second registry:2 instance used by test_mirror.py to
-  # simulate a corporate artifact-manager remote/proxy repository.  Session-
-  # scoped via the `mirror_registry` fixture in test/conftest.py.  Gated
-  # behind the same OCX_TESTS_NO_REGISTRY skip flag so a single-registry
-  # or Windows runner that never starts docker-compose is not broken.
+  # Legacy registry — registry:2 (distribution v2).  The SINGLE registry:2
+  # instance in this file; it serves two roles:
+  #   1. Mirror-test target (test_oci_registry_mirror.py, `mirror_registry`
+  #      fixture) — a second writable registry that simulates a corporate
+  #      artifact-manager remote/proxy repository.
+  #   2. Permanent referrers-NEGATIVE fixture (test_referrers_capability.py,
+  #      #106, `legacy_registry` fixture) — a real registry WITHOUT the
+  #      Referrers API, so the ReferrersUnsupported path (exit 84) is exercised
+  #      against a genuine v2 registry rather than a mock.
+  # Session-scoped via the `mirror_registry` / `legacy_registry` fixtures in
+  # test/conftest.py.  Gated behind the same OCX_TESTS_NO_REGISTRY skip flag as
+  # the primary so a single-registry or Windows runner that never starts
+  # docker-compose is not broken.
   mirror-registry:
     image: registry:2
     ports:
@@ -58,3 +81,208 @@ services:
       - "8474:8474"
     profiles:
       - bench
+
+  # ---------------------------------------------------------------------------
+  # Sigstore stack — `sigstore` profile.
+  #
+  # Seven services that together are a complete, self-hosted Sigstore: an OIDC
+  # issuer, a CA, a CT log, and a transparency log with its Merkle backend. They
+  # replace the in-repo Sigstore fake, whose divergence from real Fulcio hid a
+  # live defect for the whole life of the branch (the deprecated `.1.1` issuer
+  # OID: the fake DER-wrapped it, Fulcio does not, so identity pinning could
+  # never have matched against a real CA — see #206).
+  #
+  # Profile-isolated exactly like `bench` above: plain `docker compose up -d`
+  # and any run that does not pass `--profile sigstore` starts none of it, so
+  # the ordinary acceptance cycle pays nothing.
+  #
+  # Ports follow the same override convention as the registries:
+  #   OCX_TEST_DEX_PORT      OIDC issuer     (default 5556)
+  #   OCX_TEST_FULCIO_PORT   Fulcio HTTP     (default 5555)
+  #   OCX_TEST_REKOR_PORT    Rekor HTTP      (default 3000)
+  #   OCX_TEST_CT_PORT       CT log HTTP     (default 6962)
+  #
+  # READINESS IS NOT A COMPOSE HEALTHCHECK for four of these. The Fulcio, Rekor,
+  # TesseraCT and Trillian images are distroless: no shell, no curl, no wget, so
+  # an HTTP healthcheck cannot run *inside* them and a `test:` line here would be
+  # a green that never ran. Readiness is polled from the host by the bring-up
+  # helper, which is also where a failure produces a usable message. Only mysql
+  # and dex — which do ship a shell — carry one, and they are the two that
+  # everything else genuinely orders behind.
+  #
+  # Key material under ./sigstore/keys is committed, non-secret and test-only;
+  # ./sigstore/README.md explains why and how to regenerate it.
+
+  # OIDC issuer. Mints the identity token Fulcio exchanges for a certificate.
+  # The `iss` claim is the in-network URL `http://dex:5556/dex` — that string is
+  # what `--certificate-oidc-issuer` must match, even though the host fetches the
+  # token over localhost. ocx never dials the issuer; Fulcio does, from inside
+  # the compose network, where the name resolves.
+  dex:
+    image: dexidp/dex:v2.45.1
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ./sigstore/dex-config.yaml:/etc/dex/config.yaml:ro
+    ports:
+      - "${OCX_TEST_DEX_PORT:-5556}:5556"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5556/dex/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    profiles:
+      - sigstore
+
+  # Certificate Transparency log. TesseraCT (static-ct-api) rather than the
+  # legacy CTFE: CTFE needs its own Trillian tree and a second MySQL schema,
+  # TesseraCT's POSIX backend needs a directory. One fewer moving part for the
+  # same guarantee — Fulcio submits the pre-certificate here and embeds the
+  # returned SCT in the leaf, which is what makes SCT verification testable.
+  # Pinned by digest: the only tag published is `latest`.
+  sigstore-ct:
+    image: ghcr.io/transparency-dev/tesseract/posix@sha256:43eb48155084176854634ac5a4d649b454162e8d004da5c4d518da137504116e
+    # Writes to /ctdata; the image's default user cannot.
+    user: "0"
+    command:
+      - -origin=ocx-test
+      - -path_prefix=ocx-test
+      - -private_key=/keys/ct.key.pem
+      - -roots_pem_file=/keys/fulcio-ca.crt.pem
+      - -storage_dir=/ctdata
+      - -http_endpoint=0.0.0.0:6962
+      - -trace_fraction=0
+      # The test CA has no meaningful validity window; without this the log
+      # refuses every certificate as being outside its accepted range.
+      - -not_after_start=2020-01-01T00:00:00Z
+    volumes:
+      - ./sigstore/keys:/keys:ro
+      - ctdata:/ctdata
+    ports:
+      - "${OCX_TEST_CT_PORT:-6962}:6962"
+    profiles:
+      - sigstore
+
+  # Fulcio — the short-lived-certificate CA. `fileca` mode with the committed
+  # test CA, so no PKCS#11 or cloud KMS is involved.
+  fulcio:
+    image: ghcr.io/sigstore/fulcio:v1.8.8
+    command:
+      - serve
+      - --host=0.0.0.0
+      - --port=5555
+      - --grpc-port=5554
+      - --ca=fileca
+      - --fileca-cert=/keys/fulcio-ca.crt.pem
+      - --fileca-key=/keys/fulcio-ca.enc.pem
+      - --fileca-key-passwd=ocxtest
+      - --ct-log-url=http://sigstore-ct:6962/ocx-test
+      - --ct-log-public-key-path=/keys/ct.pub.pem
+      - --config-path=/etc/fulcio/config.json
+    volumes:
+      - ./sigstore/keys:/keys:ro
+      - ./sigstore/fulcio-config.json:/etc/fulcio/config.json:ro
+    ports:
+      - "${OCX_TEST_FULCIO_PORT:-5555}:5555"
+    depends_on:
+      dex:
+        condition: service_healthy
+      sigstore-ct:
+        condition: service_started
+    profiles:
+      - sigstore
+
+  # Trillian's storage. Same image the Trillian project uses in its own CI, so
+  # the schema arrives already migrated.
+  sigstore-mysql:
+    image: gcr.io/trillian-opensource-ci/db_server:v1.4.0
+    environment:
+      MYSQL_ROOT_PASSWORD: zaphod
+      MYSQL_DATABASE: test
+      MYSQL_USER: test
+      MYSQL_PASSWORD: zaphod
+    # `mysqladmin ping` answers during this image's *temporary* server phase,
+    # while the Trillian schema in docker-entrypoint-initdb.d is still loading —
+    # a green there is indistinguishable from a database Trillian cannot use.
+    # Querying a schema table as the application user is the first check that
+    # can only pass once init has finished.
+    healthcheck:
+      test: ["CMD", "mysql", "-h", "127.0.0.1", "-utest", "-pzaphod", "test",
+             "-e", "SELECT 1 FROM Trees LIMIT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+    profiles:
+      - sigstore
+
+  # Trillian log server — the Merkle-tree read/write RPC surface Rekor sits on.
+  trillian-log-server:
+    # Self-heal a lost start race: without this a single failed dial at
+    # boot leaves the container dead until the readiness gate times out.
+    restart: on-failure
+    image: gcr.io/trillian-opensource-ci/log_server:v1.7.2
+    command:
+      - --storage_system=mysql
+      - --mysql_uri=test:zaphod@tcp(sigstore-mysql:3306)/test
+      - --rpc_endpoint=0.0.0.0:8090
+      - --http_endpoint=0.0.0.0:8091
+      - --alsologtostderr
+    depends_on:
+      sigstore-mysql:
+        condition: service_healthy
+    profiles:
+      - sigstore
+
+  # Trillian log signer — sequences queued leaves into the tree. Without it a
+  # Rekor entry is accepted but never integrated, so it never gains an inclusion
+  # proof and the SET stays unverifiable. `--force_master` because there is no
+  # election backend in a single-node stack.
+  trillian-log-signer:
+    # Self-heal a lost start race: without this a single failed dial at
+    # boot leaves the container dead until the readiness gate times out.
+    restart: on-failure
+    image: gcr.io/trillian-opensource-ci/log_signer:v1.7.2
+    command:
+      - --storage_system=mysql
+      - --mysql_uri=test:zaphod@tcp(sigstore-mysql:3306)/test
+      - --rpc_endpoint=0.0.0.0:8090
+      - --http_endpoint=0.0.0.0:8091
+      - --force_master
+      - --alsologtostderr
+    depends_on:
+      sigstore-mysql:
+        condition: service_healthy
+    profiles:
+      - sigstore
+
+  # Rekor — the transparency log ocx writes the signature entry to and reads the
+  # inclusion proof + SET back from.
+  rekor:
+    # Self-heal a lost start race: without this a single failed dial at
+    # boot leaves the container dead until the readiness gate times out.
+    restart: on-failure
+    image: ghcr.io/sigstore/rekor/rekor-server:v1.4.2
+    command:
+      - serve
+      - --trillian_log_server.address=trillian-log-server
+      - --trillian_log_server.port=8090
+      - --rekor_server.address=0.0.0.0
+      - --rekor_server.signer=/keys/rekor.key.pem
+      - --search_index.storage_provider=mysql
+      - --search_index.mysql.dsn=test:zaphod@tcp(sigstore-mysql:3306)/test
+      - --enable_retrieve_api=true
+      - --port=3000
+    volumes:
+      - ./sigstore/keys:/keys:ro
+    ports:
+      - "${OCX_TEST_REKOR_PORT:-3000}:3000"
+    depends_on:
+      trillian-log-server:
+        condition: service_started
+    profiles:
+      - sigstore
+
+volumes:
+  # TesseraCT's POSIX-backend tree state. Named rather than a bind mount so a
+  # `docker compose down -v` genuinely resets the log; a stale tree against
+  # freshly regenerated keys fails in a way that reads as a Fulcio bug.
+  ctdata:

@@ -9,6 +9,21 @@ ignore = [
   "RUSTSEC-2024-0436",
   # REMOVE when 'cargo tree -i fxhash' is empty after a starlark family bump — fxhash unmaintained (transitive via starlark_map), RUSTSEC-2025-0057 informational-only.
   "RUSTSEC-2025-0057",
+  # REMOVE when 'cargo tree -i proc-macro-error2' is empty — proc-macro-error2 unmaintained (transitive via oci-client → oci-spec → getset), RUSTSEC-2026-0173 informational-only, no safe upgrade available.
+  "RUSTSEC-2026-0173",
+  # REMOVE when 'cargo tree -e normal -i rsa' is empty — rsa (Marvin timing
+  # sidechannel, RUSTSEC-2023-0071) is pulled transitively via
+  # sigstore -> openidconnect for OIDC JWT (RS256) public-key verification.
+  # It cannot be dropped by feature selection: openidconnect is gated on
+  # sigstore's `oauth`, which `fulcio` requires, which `sign`/`verify` require,
+  # which `bundle` requires — so any bundle-capable build carries it. That makes
+  # the command above the only honest removal condition; it goes empty when
+  # sigstore drops openidconnect or openidconnect drops rsa, not on our say-so.
+  # OCX signs and verifies with ECDSA P-256 only
+  # (adr_oci_referrers_signing_v1.md S1-A) and holds no RSA private key; the
+  # attack targets RSA private-key decryption timing, not the public verify path
+  # OCX exercises. No safe upgrade exists (per the advisory).
+  "RUSTSEC-2023-0071",
 ]
 
 [licenses]
@@ -38,6 +53,22 @@ confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
+# One TLS backend, enforced by the manifest rather than by a reviewer noticing.
+# OCX is rustls-only (`reqwest`/`sigstore` are pinned `default-features = false`
+# with the `rustls` feature); nothing in the graph reaches these today, so this
+# list exists purely to make a transitive reintroduction a build failure instead
+# of a silent second crypto stack. A C-linked OpenSSL would also break the
+# static cross-compiled release targets.
+deny = [
+  { name = "openssl" },
+  { name = "openssl-sys" },
+  { name = "native-tls" },
+  # Superseded crates that a dependency bump could quietly pull back in.
+  { name = "structopt" },   # folded into clap 3; archived 2022-01
+  { name = "async-std" },   # discontinued upstream; a second async runtime is never right
+  { name = "error-chain" },
+  { name = "failure" },
+]
 
 [sources]
 unknown-registry = "deny"

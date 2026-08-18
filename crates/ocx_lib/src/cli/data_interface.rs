@@ -247,7 +247,12 @@ impl DataInterface {
                 header = header.render(GAP, theme.header());
             }
             let style = Self::cell_style(widths[c], col.alignment, Some(theme.header()));
-            header = header.render(col.header.as_ref(), &style);
+            // `&*` and not `.as_ref()`: these fields are `Cow<'_, str>`, and
+            // `typed-path` (via tough, via sigstore's `sigstore-trust-root`)
+            // adds a second `AsRef` impl for `Cow<'_, str>`, so the target
+            // type stops being inferable. Trait impls are global -- nothing
+            // here imports typed-path and the ambiguity still lands.
+            header = header.render(&*col.header, &style);
         }
         header.end_line();
 
@@ -357,8 +362,8 @@ impl DataInterface {
             // would cut the outer style).
             line = line.plain(" ").render("·", theme.chrome()).plain(" ");
             line = match &ann.style {
-                Some(style) => line.render(ann.text.as_ref(), style),
-                None => line.plain(ann.text.as_ref()),
+                Some(style) => line.render(&*ann.text, style),
+                None => line.plain(&*ann.text),
             };
         }
         line.end_line();

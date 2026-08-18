@@ -88,6 +88,26 @@ pub struct LocalIndex {
     /// recorded, absence included; a refusal is an error, never a cached state.
     /// Shared across clones, since a clone reads the same index home.
     gated_sources: Arc<RwLock<HashSet<String>>>,
+    /// Every configured namespace's `[registries."<ns>"].trusted_hosts` SSRF
+    /// exemption (ocx#218), keyed by namespace — the operator's answer to
+    /// "where may this namespace's traffic go", read from config in
+    /// `context.rs` exactly as `allow_yanked` above is.
+    ///
+    /// Held here because this type MINTS the physical pointer that needs
+    /// judging: [`Self::physical_reference`] returns the committed root's
+    /// `repository`, which is remote-controlled data (a copied index tree is a
+    /// supported distribution mechanism, `adr_index_indirection.md` A2), and
+    /// [`ChainedIndex::guard_local_physical`](super::chained_index) applies the
+    /// SSRF floor to it against this set. Riding along with the local index
+    /// rather than each chained construction is what makes every chain that
+    /// reads this copy — the default one, the lock-scoped update index, `ocx
+    /// patch test`'s scratch chain, `PackageManager::offline_view` — judge a
+    /// local answer against the same exemption without a construction site
+    /// being able to forget it.
+    ///
+    /// Empty for constructions that thread no config (tests, `IndexSync`),
+    /// which then guard every rewritten host.
+    trusted_hosts: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl LocalIndex {
@@ -96,6 +116,7 @@ impl LocalIndex {
             index_store: config.index_store,
             allow_yanked: false,
             gated_sources: Arc::new(RwLock::new(HashSet::new())),
+            trusted_hosts: std::collections::HashMap::new(),
         }
     }
 
@@ -106,6 +127,29 @@ impl LocalIndex {
     pub fn with_allow_yanked(mut self, allow_yanked: bool) -> Self {
         self.allow_yanked = allow_yanked;
         self
+    }
+
+    /// Sets the configured per-namespace `trusted_hosts` sets — see the field
+    /// doc. Consuming builder for the same reason as
+    /// [`Self::with_allow_yanked`]: only `context.rs` opts in, from the merged
+    /// config, and every other construction site stays a single `new(..)` call.
+    pub fn with_trusted_hosts(mut self, trusted_hosts: std::collections::HashMap<String, Vec<String>>) -> Self {
+        self.trusted_hosts = trusted_hosts;
+        self
+    }
+
+    /// The `trusted_hosts` SSRF exemption the operator configured for
+    /// `registry`, or empty when they configured none.
+    ///
+    /// Keyed on the registry, which for a configured source is its namespace
+    /// (`OcxIndex::serves_registry` is `registry == self.namespace`), so this
+    /// answers with the same value `context.rs` handed that namespace's
+    /// `OcxIndex` and its `ssrf_guard` — one config field, three copies, no
+    /// second notion. Read by
+    /// [`ChainedIndex::guard_local_physical`](super::chained_index) when
+    /// judging a physical pointer minted from this copy.
+    pub fn trusted_hosts_for(&self, registry: &str) -> &[String] {
+        self.trusted_hosts.get(registry).map_or(&[], Vec::as_slice)
     }
 
     /// The index store backing this local index — the effective index home

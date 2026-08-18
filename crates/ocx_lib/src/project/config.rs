@@ -172,6 +172,15 @@ pub struct ProjectConfig {
     /// built-in default. Excluded from [`super::declaration_hash`].
     #[serde(default, rename = "lazy-report", skip_serializing_if = "Option::is_none")]
     pub lazy_report: Option<LazyReport>,
+    /// Identity-pinned verification policies; `[[trust.policy]]` in TOML.
+    ///
+    /// Like [`Self::packages`], this is resolve-time policy — NOT a tool
+    /// binding — so it is excluded from [`super::declaration_hash`] (a policy
+    /// edit must not invalidate `ocx.lock`). Consumed by `ocx package verify`,
+    /// where it pools (array-append) with the `config.toml` tiers. See
+    /// `crate::trust`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<crate::trust::TrustConfig>,
 
     /// Lazily-cached canonical declaration hash (RFC 8785 JCS + SHA-256).
     ///
@@ -212,6 +221,7 @@ impl Clone for ProjectConfig {
             packages: self.packages.clone(),
             lazy_mode: self.lazy_mode,
             lazy_report: self.lazy_report,
+            trust: self.trust.clone(),
             declaration_hash_cache: OnceLock::new(),
         }
     }
@@ -228,6 +238,7 @@ impl PartialEq for ProjectConfig {
             && self.packages == other.packages
             && self.lazy_mode == other.lazy_mode
             && self.lazy_report == other.lazy_report
+            && self.trust == other.trust
     }
 }
 
@@ -285,6 +296,11 @@ struct RawProjectConfig {
     /// [`Self::lazy_mode`].
     #[serde(default, rename = "lazy-report")]
     lazy_report: Option<LazyReport>,
+    /// Trust policies (`[[trust.policy]]`). Parsed directly (no per-entry
+    /// identifier validation — the scope is a prefix pattern, not an
+    /// [`Identifier`]).
+    #[serde(default)]
+    trust: Option<crate::trust::TrustConfig>,
 }
 
 impl ProjectConfig {
@@ -325,8 +341,16 @@ impl ProjectConfig {
             // the programmatic constructor starts with nothing declared.
             lazy_mode: None,
             lazy_report: None,
+            trust: None,
             declaration_hash_cache: OnceLock::new(),
         }
+    }
+
+    /// The trust policies declared in this project's `ocx.toml` (empty when no
+    /// `[trust]` section is present).
+    #[must_use]
+    pub fn trust_policies(&self) -> &[crate::trust::TrustPolicy] {
+        self.trust.as_ref().map_or(&[], |trust| trust.policy.as_slice())
     }
 
     /// Lazily cached canonical declaration hash for this config.
@@ -619,6 +643,7 @@ impl ProjectConfig {
             // validated these — no second pass needed, unlike `tools`.
             lazy_mode: raw.lazy_mode,
             lazy_report: raw.lazy_report,
+            trust: raw.trust,
             declaration_hash_cache: OnceLock::new(),
         })
     }
@@ -938,6 +963,34 @@ cmake = "ocx.sh/cmake:3.28"
         assert_eq!(cached, standalone, "cached must equal the free-function output");
         // Second call returns the same cached value (cheap path).
         assert_eq!(cached, config.declaration_hash_cached());
+    }
+
+    /// `[[trust.policy]]` parses in an `ocx.toml` (the `deny_unknown_fields`
+    /// guard must not reject it) and, like `[package]`, is resolve-time policy
+    /// EXCLUDED from the declaration hash — so adding a policy never
+    /// invalidates `ocx.lock`.
+    #[test]
+    fn trust_policy_parses_and_does_not_affect_declaration_hash() {
+        let base = r#"[tools]
+cmake = "ocx.sh/cmake:3.28"
+"#;
+        let with_policy = r#"[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[[trust.policy]]
+scope = "ocx.sh/*"
+identity = "https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/tags/v1"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+"#;
+        let base_config = ProjectConfig::from_toml_str(base).expect("parse base");
+        let policy_config = ProjectConfig::from_toml_str(with_policy).expect("parse with policy");
+        assert_eq!(policy_config.trust_policies().len(), 1);
+        assert!(base_config.trust_policies().is_empty());
+        assert_eq!(
+            crate::project::declaration_hash(&base_config),
+            crate::project::declaration_hash(&policy_config),
+            "trust policy must not perturb the lock-invalidating declaration hash",
+        );
     }
 
     // ── [package] per-package settings ──────────────────────────────────────
@@ -1826,6 +1879,52 @@ bad = "ocx.sh/CMAKE:3.28"
             .await
             .expect_err("oversized config must reject");
         assert_kind!(err, ProjectErrorKind::FileTooLarge { .. });
+    }
+
+    /// A checked-in `ocx.toml` cannot declare the trust-sensitive `OCX_*`
+    /// variables — not in `[env]`, not in a group's — because both sit in the
+    /// namespace `crate::env::is_reserved_ocx_key` reserves.
+    ///
+    /// `OCX_NO_VERIFY` turns off the policy-gated auto-verify on install/pull
+    /// and is forwarded to every child ocx; `OCX_IDENTITY_TOKEN` is a bearer
+    /// credential. Either one declarable from a project file would let a
+    /// repository silently disable signature verification for everyone who runs
+    /// a tool out of it.
+    ///
+    /// Built from the `keys::` constants rather than string literals: the gate
+    /// matches on the `OCX_` prefix, so respelling either variable outside that
+    /// prefix moves it out of the gate's reach without touching the gate. That
+    /// is the failure this test exists to catch, alongside the gate itself
+    /// being weakened.
+    #[test]
+    fn project_env_cannot_declare_trust_sensitive_ocx_keys() {
+        for key in [crate::env::keys::OCX_NO_VERIFY, crate::env::keys::OCX_IDENTITY_TOKEN] {
+            for scope in ["env", "group.ci.env"] {
+                let toml_str = format!("[{scope}]\n{key} = \"1\"\n");
+                let Err(err) = ProjectConfig::from_toml_str(&toml_str) else {
+                    panic!("[{scope}] must reject the reserved key {key}");
+                };
+                assert_eq!(
+                    <crate::project::Error as crate::cli::ClassifyExitCode>::classify(&err),
+                    Some(crate::cli::ExitCode::ConfigError),
+                    "a reserved-key declaration is a config fault (exit 78)"
+                );
+
+                #[allow(irrefutable_let_patterns)]
+                let crate::project::Error::Project(project_error) = err else {
+                    panic!("expected Error::Project");
+                };
+                let ProjectErrorKind::EnvReservedKey {
+                    scope: reported_scope,
+                    key: reported_key,
+                } = &project_error.kind
+                else {
+                    panic!("expected EnvReservedKey, got {:?}", project_error.kind);
+                };
+                assert_eq!(reported_scope, scope, "the error must name the table to edit");
+                assert_eq!(reported_key, key);
+            }
+        }
     }
 
     // ── resolve() contract tests ─────────────────────────────────────────────

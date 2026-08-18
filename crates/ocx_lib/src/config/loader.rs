@@ -775,18 +775,21 @@ impl ConfigLoader {
     /// ignores all lower-tier overrides (including an untrusted
     /// managed-config payload).
     ///
-    /// Covers all five lockable sections: `[patches]` (lock is conditional
+    /// Covers all six lockable sections: `[patches]` (lock is conditional
     /// inside `PatchConfig::lock_as_system`), `[registry]` (unconditional),
     /// each `[registries.<name>]` entry (unconditional, per name — closes
     /// the indirection `resolved_default_registry` resolves through), each
     /// `[mirrors."<host>"]` entry (per host, per role — `MirrorConfig::lock_as_system`
     /// locks only the `registry`/`index` role(s) that entry actually declares,
-    /// `adr_index_indirection.md` F5b), and `[managed]`
+    /// `adr_index_indirection.md` F5b), `[managed]`
     /// (required-gated inside `ManagedConfig::lock_as_system`, like
     /// `[patches]` — a system-scope `required = true` seed must not be
     /// loosenable/clearable by the home tier's fence; ADR Decision G,
-    /// criterion 13). Extracted so the section coverage is unit-testable
-    /// without writing to `/etc`.
+    /// criterion 13), and `[trust]` (unconditional, per `[[trust.policy]]`
+    /// entry — a locked policy pins the specificity level for the scopes it
+    /// matches, so a lower tier may only join its ANY-of set at equal
+    /// specificity, never outbid it with a narrower scope). Extracted so the
+    /// section coverage is unit-testable without writing to `/etc`.
     fn apply_system_locks(parsed: &mut Config) {
         if let Some(patches) = parsed.patches.as_mut() {
             patches.lock_as_system();
@@ -806,6 +809,9 @@ impl ConfigLoader {
         }
         if let Some(managed) = parsed.managed.as_mut() {
             managed.lock_as_system();
+        }
+        if let Some(trust) = parsed.trust.as_mut() {
+            trust.lock_as_system();
         }
     }
 
@@ -1416,6 +1422,44 @@ mod tests {
             Some("https://index.corp"),
             "a system-locked [registries.\"ocx.sh\"] entry must not be overridable by a lower tier"
         );
+    }
+
+    /// The trust analogue of the sibling test above, and the seam the
+    /// system-tier trust lock depends on. `[trust]` is the one section that
+    /// array-appends, so the lock rides on each `[[trust.policy]]` entry and
+    /// has to survive `Config::merge`'s `Vec::extend` across the real fold
+    /// order — built-in ▸ system ▸ user ▸ managed payload ▸ `--config`
+    /// overlay. Both halves are covered on their own
+    /// (`lock_as_system_marks_every_declared_policy`,
+    /// `system_locked_pin_refuses_a_more_specific_unlocked_entry`); the join
+    /// is what this pins. Lose the flag anywhere in the fold and the narrower
+    /// lower-tier scope wins by most-specific-wins — the escalation path the
+    /// lock closed.
+    #[test]
+    fn a_system_locked_trust_policy_survives_the_accumulator_fold() {
+        let mut system: Config = toml::from_str(
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nidentity = \"system-ci\"\noidc_issuer = \"iss\"\n",
+        )
+        .expect("system tier must parse");
+        ConfigLoader::apply_system_locks(&mut system);
+
+        let mut accumulator = ConfigLoader::builtin_defaults();
+        accumulator.merge(system);
+        for lower in [
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nidentity = \"user-Y\"\noidc_issuer = \"iss\"\n",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nidentity = \"managed-Z\"\noidc_issuer = \"iss\"\n",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nidentity = \"overlay-W\"\noidc_issuer = \"iss\"\n",
+        ] {
+            accumulator.merge(toml::from_str(lower).expect("lower tier must parse"));
+        }
+
+        let resolved = crate::trust::resolve(accumulator.trust_policies(), "ghcr.io/acme/tool");
+        assert_eq!(
+            resolved.len(),
+            1,
+            "a narrower lower-tier scope must not outbid the system pin after the fold"
+        );
+        assert_eq!(resolved[0].identity.as_deref(), Some("system-ci"));
     }
 
     /// `local_only` is cloned from the same accumulator as `merged`, so the
@@ -2827,6 +2871,7 @@ mod tests {
             "[registries.corp]\nindex = \"https://registry.corp.example\"\n",
             "[mirrors]\n\"docker.io\" = \"https://mirror.corp.example\"\n",
             "[managed]\nsource = \"corp/managed-config:stable\"\nrequired = true\n",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nidentity = \"ci@acme.example\"\noidc_issuer = \"https://iss.example\"\n",
         ))
         .unwrap();
 
@@ -2852,6 +2897,10 @@ mod tests {
         assert!(
             config.managed.unwrap().system_locked,
             "[managed] must lock (criterion 13)"
+        );
+        assert!(
+            config.trust.unwrap().policy.iter().all(|policy| policy.system_locked),
+            "every [[trust.policy]] entry must lock"
         );
     }
 

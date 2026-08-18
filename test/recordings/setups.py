@@ -7,12 +7,20 @@ Shell scripts reference a setup via ``# setup: <name>``.
 from __future__ import annotations
 
 import json
+import os
 import stat
 from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
-from src.helpers import make_package
+from src.helpers import (
+    SIGSTORE_DIR,
+    SIGSTORE_IDENTITY,
+    SIGSTORE_ISSUER,
+    make_package,
+    mint_identity_token,
+    start_sigstore_stack,
+)
 from src.registry import push_raw_config_package
 from src.runner import OcxRunner, PackageInfo, current_platform
 
@@ -675,6 +683,65 @@ def managed_config_ci(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[
     return {"kitware/cmake": [cmake]}
 
 
+
+def signing(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
+    """One published package, the real Sigstore stack, and a trust policy.
+
+    Brings up the same `sigstore` compose profile the acceptance suite uses —
+    dex, Fulcio, Rekor, TesseraCT, Trillian — so the recorded cast shows a real
+    Fulcio certificate and a real transparency-log entry, not a mock.
+
+    The stack's addresses reach the script as `$FULCIO` / `$REKOR` /
+    `$TRUST_ROOT` rather than as literals, because the compose ports are
+    overridable (`OCX_TEST_FULCIO_PORT` and friends) and the trust root lives at
+    a path no reader would type. The docs page carries the concrete values.
+
+    The identity token arrives as `OCX_IDENTITY_TOKEN` and the self-hosted CA
+    as `OCX_SIGSTORE_TUF_ROOT` — the same two channels a CI job uses, and the
+    reason the cast's sign and verify lines carry neither flag.
+
+    The `[[trust.policy]]` written here is what lets the cast's verify line omit
+    `--certificate-identity` / `--certificate-oidc-issuer`; the cast `cat`s the
+    file so the pin is on screen rather than hidden in this fixture.
+
+    The package is pinned to `linux/amd64` rather than the host platform so the
+    `-p` flag on screen is the same on every machine that records the cast.
+    """
+    start_sigstore_stack()
+    token = mint_identity_token(tmp_path / "identity-token").read_text().strip()
+
+    repository = f"{ocx.registry}/{prefix}acme/mytool"
+    (ocx.ocx_home / "config.toml").write_text(
+        "[[trust.policy]]\n"
+        f'scope = "{repository}"\n'
+        f'identity = "{SIGSTORE_IDENTITY}"\n'
+        f'oidc_issuer = "{SIGSTORE_ISSUER}"\n'
+    )
+
+    ocx.env.update(
+        {
+            "FULCIO": f"http://localhost:{os.environ.get('OCX_TEST_FULCIO_PORT', '5555')}",
+            "REKOR": f"http://localhost:{os.environ.get('OCX_TEST_REKOR_PORT', '3000')}",
+            "TRUST_ROOT": str(SIGSTORE_DIR),
+            "OCX_SIGSTORE_TUF_ROOT": str(SIGSTORE_DIR),
+            "OCX_IDENTITY_TOKEN": token,
+        }
+    )
+
+    mytool_env = [
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+    ]
+    return {
+        "acme/mytool": [
+            make_package(
+                ocx, f"{prefix}acme/mytool", "1.0.0", tmp_path, bins=["mytool"],
+                env=mytool_env, platform="linux/amd64",
+            ),
+        ],
+    }
+
+
 SetupFn = Callable[[OcxRunner, Path, str], dict[str, list[PackageInfo]]]
 
 SETUPS: dict[str, SetupFn] = {
@@ -689,4 +756,5 @@ SETUPS: dict[str, SetupFn] = {
     "patches-maintainer": patches_maintainer,
     "managed-config-onboard": managed_config_onboard,
     "managed-config-ci": managed_config_ci,
+    "signing": signing,
 }

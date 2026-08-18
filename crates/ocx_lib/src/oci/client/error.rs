@@ -112,6 +112,13 @@ pub enum ClientError {
     /// An internal library error (e.g. codesign, archive processing).
     #[error("{0}")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// The registry does not implement the OCI Referrers API and has no
+    /// fallback-tag referrers index. Distinct from [`Self::Registry`] and
+    /// [`Self::RegistryTransient`]: the registry is reachable and answering,
+    /// the endpoint simply is not served — a rerun can never change that.
+    #[error("registry {registry} does not support the OCI Referrers API")]
+    ReferrersUnsupported { registry: String },
 }
 
 impl ClientError {
@@ -214,6 +221,10 @@ impl ClassifyExitCode for ClientError {
             // the same pull usually succeeds on retry, so it is TempFail rather
             // than DataError.
             Self::ShortBlobRead { .. } => ExitCode::TempFail,
+            // A registry that does not serve the Referrers API is answering
+            // correctly about a capability it lacks — never transient, and not
+            // a data fault either, so it carries its own code.
+            Self::ReferrersUnsupported { .. } => ExitCode::ReferrersUnsupported,
             Self::DigestMismatch { .. }
             | Self::DecompressionCapExceeded { .. }
             | Self::UnexpectedManifestType

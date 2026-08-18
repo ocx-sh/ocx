@@ -41,18 +41,31 @@ jobs:
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # `cache: false`: the restored cargo cache carries a pruned `registry/src`,
+      # so a cached run starts from an arbitrary subset of the crate sources
+      # this job reads. Deterministic input beats the saved download time.
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache: false
+      # cargo-about reproduces each crate's own LICENSE file, so those files
+      # have to be on disk: `fetch` is what unpacks them under `registry/src`,
+      # and this job compiles nothing that would otherwise do it.
+      - name: Fetch crate sources
+        run: cargo fetch --locked
       - name: Install cargo-deny
         uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
         with:
           tool: cargo-deny
       - name: Check dependency licenses
         run: task rust:license:deps
-      - name: Install cargo-about
-        uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
-        with:
-          tool: cargo-about
+      # cargo-about is built from source here rather than installed as a
+      # prebuilt binary, because `task rust:license:notice` builds it the same
+      # way locally (`cargo install --locked --features cli`) and the committed
+      # notice has to be reproducible from the command that regenerates it.
+      # The published binary is a musl build whose grouping of `sigstore`
+      # disagreed with the glibc build's, which is a difference in the tool,
+      # not in the dependency graph.
       # LICENSE-THIRD-PARTY.md is committed and ships inside every release
       # archive and OCX package, so a dependency change that nobody
       # regenerated must fail here rather than ship a notice that omits a

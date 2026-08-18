@@ -675,18 +675,32 @@ mod tests {
         let stop_for_reader = stop.clone();
         let reader = std::thread::spawn(move || {
             let mut iters = 0;
-            while !stop_for_reader.load(std::sync::atomic::Ordering::SeqCst) && iters < 1000 {
-                let mut locked =
+            let mut observed = 0usize;
+            // The cap is a hang guard, not a budget: the reader stops when the
+            // writers signal `stop`. Capping it at the writer count let a fast
+            // reader exhaust its rounds before the first write landed.
+            while !stop_for_reader.load(std::sync::atomic::Ordering::SeqCst) && iters < 1_000_000 {
+                iters += 1;
+                // Losing the lock race is not the property under test. A hundred
+                // back-to-back writers on a loaded runner can starve the reader
+                // past the timeout, and panicking there asserts "the reader
+                // always wins within 5s" -- which this test never meant to
+                // claim. Skip the round; the `observed` assertion below is what
+                // keeps a fully starved reader from passing vacuously.
+                let Ok(mut locked) =
                     LockedFile::open_exclusive_blocking_with_timeout(&path_for_reader, Duration::from_secs(5))
-                        .expect("reader acquires exclusive lock");
+                else {
+                    continue;
+                };
                 let bytes = locked.read_bytes_blocking().expect("reader reads under lock");
                 if !bytes.is_empty() {
                     let _: serde_json::Value =
                         serde_json::from_slice(&bytes).expect("locked reader never observes torn JSON");
+                    observed += 1;
                 }
                 drop(locked);
-                iters += 1;
             }
+            observed
         });
         let s = store.clone();
         let r = runtime.clone();
@@ -695,7 +709,11 @@ mod tests {
             r.block_on(s.put(&format!("reg{i}.example"), &cred)).expect("put");
         }
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
-        reader.join().expect("reader join");
+        let observed = reader.join().expect("reader join");
+        assert!(
+            observed > 0,
+            "the reader never completed a locked read of non-empty content, so the torn-JSON check never ran"
+        );
     }
 
     // ─── delete ───

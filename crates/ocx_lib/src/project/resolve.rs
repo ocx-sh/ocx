@@ -848,6 +848,7 @@ fn classify(client: &ClientError) -> ClientFailure {
         | ClientError::LayerSizeExceeded { .. }
         | ClientError::Serialization(_)
         | ClientError::InvalidEncoding(_)
+        | ClientError::ReferrersUnsupported { .. }
         | ClientError::Internal(_) => ClientFailure::Other,
     }
 }

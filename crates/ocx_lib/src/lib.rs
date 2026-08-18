@@ -57,6 +57,7 @@ pub mod setup;
 pub mod shell;
 pub mod shim;
 pub mod symlink;
+pub mod trust;
 pub mod utility;
 
 pub use error::Error;

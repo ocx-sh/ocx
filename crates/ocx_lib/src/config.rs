@@ -96,6 +96,16 @@ pub struct Config {
     /// Absent → no managed tier configured (opt-in, seeded by
     /// `ocx self setup --managed-config`).
     pub managed: Option<ManagedConfig>,
+
+    /// Identity-pinned verification policies (`[[trust.policy]]`).
+    ///
+    /// Unlike every other section, trust policies **array-append** across the
+    /// `config.toml` tiers rather than replace (see [`Config::merge`]) — the
+    /// operator (config.toml) trust set is the union of system/user/`$OCX_HOME`.
+    /// At verify time this operator set takes precedence over the project
+    /// `ocx.toml` (`crate::trust::resolve_tiered`). Consumed by
+    /// `ocx package verify`. See `crate::trust` and `adr_trust_policy.md`.
+    pub trust: Option<crate::trust::TrustConfig>,
 }
 
 /// Global registry-subsystem settings (`[registry]` section).
@@ -163,6 +173,33 @@ impl Config {
                 None => self.managed = Some(other_managed),
             }
         }
+        // Trust policies APPEND across tiers at storage level (union): this
+        // extends the vec, it never drops or replaces an earlier tier's entry
+        // outright. Masking happens at resolution time instead, in
+        // `trust::resolve`, which keeps only the matches at the winning
+        // specificity level — so a later tier's MORE SPECIFIC scope displaces
+        // an earlier tier's broader pin, and only entries at *equal*
+        // specificity combine as ANY-of (rotation).
+        //
+        // The system tier is exempt: `apply_system_locks` marks its entries
+        // `system_locked`, and a locked policy that matches the target FIXES
+        // the specificity level, so a `ghcr.io/acme/tool` entry from the user
+        // tier (or the untrusted managed payload) can no longer mask a
+        // system-tier `ghcr.io/acme/*` pin — it may only join that pin's
+        // ANY-of set by declaring the same scope. Non-system tiers still mask
+        // each other by specificity as above.
+        if let Some(other_trust) = other.trust {
+            match self.trust.as_mut() {
+                Some(self_trust) => self_trust.policy.extend(other_trust.policy),
+                None => self.trust = Some(other_trust),
+            }
+        }
+    }
+
+    /// The declared trust policies (empty when no `[trust]` section is set).
+    #[must_use]
+    pub fn trust_policies(&self) -> &[crate::trust::TrustPolicy] {
+        self.trust.as_ref().map_or(&[], |trust| trust.policy.as_slice())
     }
 
     /// Return [`RegistryDefaults::default`] as a literal prefix.
@@ -550,6 +587,25 @@ mod tests {
         // → returns the literal name (the only supported behavior — §6).
         let config: Config = toml::from_str("[registry]\ndefault = \"ocx.sh\"").unwrap();
         assert_eq!(config.resolved_default_registry(), Some("ocx.sh"));
+    }
+
+    #[test]
+    fn merge_trust_policies_appends_across_tiers() {
+        // Lower tier pins one scope; higher tier adds another. Both survive —
+        // trust policies pool (union), they do not replace like scalars do.
+        let mut lower: Config =
+            toml::from_str("[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nidentity = \"a\"\noidc_issuer = \"iss\"")
+                .unwrap();
+        let higher: Config =
+            toml::from_str("[[trust.policy]]\nscope = \"ghcr.io/other/*\"\nidentity = \"b\"\noidc_issuer = \"iss\"")
+                .unwrap();
+        lower.merge(higher);
+        assert_eq!(lower.trust_policies().len(), 2);
+    }
+
+    #[test]
+    fn trust_policies_empty_when_absent() {
+        assert!(Config::default().trust_policies().is_empty());
     }
 
     #[test]

@@ -73,11 +73,11 @@ jobs:
     name: Generate Recordings
     needs: build-binary
     runs-on: ubuntu-latest
-    services:
-      registry:
-        image: registry:2
-        ports:
-          - 5000:5000
+    # No `services:` registry here on purpose. The harness brings the registry up
+    # itself via `test/docker-compose.yml` — zot, because signing needs the OCI 1.1
+    # Referrers API that `registry:2` does not serve — and a service already bound
+    # to 5000 makes `start_registry` skip compose, leaving zot and the `sigstore`
+    # profile (Fulcio, Rekor, dex, ...) unstarted.
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -140,11 +140,11 @@ jobs:
     name: Doc Scripts Drift Gate
     needs: build-binary
     runs-on: ubuntu-latest
-    services:
-      registry:
-        image: registry:2
-        ports:
-          - 5000:5000
+    # No `services:` registry here on purpose. The harness brings the registry up
+    # itself via `test/docker-compose.yml` — zot, because signing needs the OCI 1.1
+    # Referrers API that `registry:2` does not serve — and a service already bound
+    # to 5000 makes `start_registry` skip compose, leaving zot and the `sigstore`
+    # profile (Fulcio, Rekor, dex, ...) unstarted.
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

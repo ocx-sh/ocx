@@ -375,6 +375,16 @@ impl Index {
     ///
     /// [`error::Error::Ssrf`] when the physical host resolves into a forbidden
     /// range without a `trusted_hosts` entry, or cannot be resolved at all.
+    /// The `trusted_hosts` escape hatch configured for `registry`.
+    ///
+    /// Exposed so the Sigstore trust-service dial guard
+    /// ([`oci::endpoint::resolve_sigstore_url`](crate::oci::endpoint::resolve_sigstore_url))
+    /// reads the same operator-configured allowlist the registry guard reads,
+    /// rather than minting a second config surface for the same question.
+    pub fn trusted_hosts_for(&self, registry: &str) -> &[String] {
+        self.inner.trusted_hosts_for(registry)
+    }
+
     pub async fn guard_physical_dial(&self, logical: &oci::Identifier, physical: &oci::Identifier) -> Result<()> {
         if physical.registry() == logical.registry() {
             return Ok(());

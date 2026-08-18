@@ -1,0 +1,10 @@
+#:schema https://grimoire.rs/schemas/grimoire-config.schema.json
+[options]
+clients = ["claude"]
+
+[bundles]
+rust-essentials = "ghcr.io/ocx-sh/lore/rust-essentials:latest"
+
+[skills]
+
+[rules]

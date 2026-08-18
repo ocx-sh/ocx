@@ -18,6 +18,7 @@ SETUPS (recordings/setups.py):
   publisher     — exercised by recordings suite (package-create.sh, ...)
   patches-consumer   — exercised by recordings suite (patches__consumer.sh)
   patches-maintainer — exercised by recordings suite (patches__maintainer.sh)
+  signing            — exercised by recordings suite (signing.sh)
 
 SCENARIOS (src/scenarios/__init__.py):
   BasicPackage     — exercised by test_scenarios_smoke (smoke/, offline/ scripts)
@@ -31,7 +32,7 @@ Only `dependencies` (SETUPS) is uncovered by the existing suites.
 All six Scenario subclasses are covered via test_scenarios_smoke.
 
 This file characterises:
-1. The SETUPS registry keys (all 9 must be present).
+1. The SETUPS registry keys (every canonical name must be present).
 2. The SCENARIOS registry keys (all 6 must be present).
 3. The `dependencies` setup function — observable shape of the returned dict
    (package-dict keys + basic PackageInfo structure).
@@ -55,11 +56,11 @@ from src.scenarios import SCENARIOS, Scenario
 
 
 def test_setups_registry_has_all_expected_keys() -> None:
-    """SETUPS must contain the 11 canonical setup names."""
+    """SETUPS must contain the 12 canonical setup names."""
     expected = {
         "basic", "multi-version", "full-catalog", "variants", "dependencies",
         "deps-visibility", "publisher", "patches-consumer", "patches-maintainer",
-        "managed-config-onboard", "managed-config-ci",
+        "managed-config-onboard", "managed-config-ci", "signing",
     }
     assert set(SETUPS.keys()) == expected, (
         f"SETUPS keys changed — adapter contract broken.\n"

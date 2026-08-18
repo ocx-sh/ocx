@@ -93,11 +93,13 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "std", "fmt
 # OCI / HTTP
 oci-client = "0.17"
 # Plain-HTTPS client for the static-file index.ocx.sh source (root / dispatch
-# objects / catalog fetches that never touch the OCI distribution API). Already
-# in the tree transitively via the `oci-client` fork — this direct edge adds no
-# new crate. `rustls` matches the fork's exact TLS feature so cargo feature
-# unification yields ONE rustls provider, not two (`adr_index_indirection.md` F).
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# objects / catalog fetches that never touch the OCI distribution API) and for
+# the hand-rolled Fulcio/Rekor calls (sigstore's own clients require an SCT +
+# a different wire shape than the offline fake stack). Already in the tree
+# transitively via the `oci-client` fork — this direct edge adds no new crate.
+# `rustls` matches the fork's exact TLS feature so cargo feature unification
+# yields ONE rustls provider, not two (`adr_index_indirection.md` F).
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset", "http2"] }
 # Mozilla CA roots compiled into the binary so TLS works without a system
 # trust store (minimal container / CI runner without ca-certificates).
 webpki-root-certs = "1"
@@ -109,6 +111,24 @@ base64 = "0.22.1"
 secrecy = "0.10.3"
 docker_credential = "1.3"
 rpassword = "7.5.3"
+zeroize = { version = "1.8", features = ["derive"] }
+pem = "3.0.6"
+url = { version = "2.5.8", features = ["serde"] }
+
+# Keyless Sigstore signing (issue #194). `default-features = false` + `rustls-tls`
+# avoids native-tls/openssl — the workspace is rustls-only. The RustCrypto crates
+# below are pinned to sigstore 0.14's versions so shared types (x509_cert::CertReq,
+# pki_types::CertificateDer, the protobuf Bundle) interoperate with sigstore's
+# Fulcio client and `ManualTrustRoot`. See research_sigstore_rs_spike.md.
+sigstore = { version = "0.14.0", default-features = false, features = ["bundle", "rustls-tls"] }
+sigstore_protobuf_specs = "0.5.1"
+# Named directly only so `oci/verify/trust_root.rs` can spell `CertificateDer`
+# in its `sigstore::trust::TrustRoot` impl. Already in the graph via rustls;
+# this edge adds no crate. `sigstore` renames it to `pki_types`, so match that.
+pki-types = { package = "rustls-pki-types", version = "1" }
+p256 = { version = "0.13.2", features = ["ecdsa", "pem", "pkcs8"] }
+x509-cert = { version = "0.2.5", features = ["builder", "pem"] }
+ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
 
 # Compression / archive
 flate2 = "1.1.9"

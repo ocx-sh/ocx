@@ -12,6 +12,7 @@ mod app;
 mod build_receipt;
 mod command;
 mod conventions;
+mod error_envelope;
 mod options;
 
 #[tokio::main]
