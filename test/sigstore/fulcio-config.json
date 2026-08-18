@@ -1,0 +1,9 @@
+{
+  "OIDCIssuers": {
+    "http://dex:5556/dex": {
+      "IssuerURL": "http://dex:5556/dex",
+      "ClientID": "ocx-test",
+      "Type": "email"
+    }
+  }
+}

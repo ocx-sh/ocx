@@ -32,8 +32,10 @@ pub mod removed;
 pub mod script_run;
 pub mod self_setup;
 pub mod self_update;
+pub mod signature;
 pub mod status;
 pub mod tag;
+pub mod verification;
 pub mod version;
 pub mod warmed_paths;
 

@@ -551,7 +551,217 @@ A `[managed]` section inside the fetched payload itself is stripped before merge
 
 #### System-lock interaction {#keys-managed-system-lock}
 
-`[managed]` merges through the same [`Config::merge`](#precedence-merge) fold as every other tier, so a system-scope lock on [`[registry]`](#keys-registry-system-lock), [`[registries.<name>]`](#keys-registries-system-lock), or [`[mirrors]`](#keys-mirrors-system-lock) is never overridable by a managed payload — the lock applies before the managed tier's content is folded in, the same as it applies to any lower tier. `[managed]` also carries its own lock: a system-scope `[managed]` declaration with `required = true` (the default) is itself non-overridable by any lower tier, mirroring [`[patches]`'s system-required posture](#keys-patches-scopes).
+`[managed]` merges through the same [`Config::merge`](#precedence-merge) fold as every other tier, so a system-scope lock on [`[registry]`](#keys-registry-system-lock), [`[registries.<name>]`](#keys-registries-system-lock), or [`[mirrors]`](#keys-mirrors-system-lock) is never overridable by a managed payload — the lock applies before the managed tier's content is folded in, the same as it applies to any lower tier. `[managed]` also carries its own lock: a system-scope `[managed]` declaration with `required = true` (the default) is itself non-overridable by any lower tier, mirroring [`[patches]`'s system-required posture](#keys-patches-scopes). [`[[trust.policy]]`](#keys-trust) locks differently, because it pools instead of replacing: a system-scope policy [governs the scopes it matches alone](#keys-trust-system-lock), so a managed payload can neither outbid it with a narrower scope nor enroll a signer alongside it — it can only pin scopes the system tier never mentions.
+### `[[trust.policy]]` {#keys-trust}
+
+[`ocx package verify`][cmd-package-verify] checks a [Sigstore][sigstore] signature's
+certificate against an expected identity and OIDC issuer, supplied either as flags
+(`--certificate-identity` / `--certificate-oidc-issuer`) or, once declared here, resolved
+automatically for any package whose identifier falls under a policy's scope.
+
+```toml
+[[trust.policy]]
+scope       = "ghcr.io/acme/*"
+identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+```
+
+`[[trust.policy]]` is an array-of-tables — declare one entry per accepted signer per scope.
+It is valid in every `config.toml` tier ([system, user, `$OCX_HOME`](#file-locations)) **and**
+in the project `ocx.toml`. Reading it from `ocx.toml` is a deliberate exception: every other
+OCI-tier command ignores `ocx.toml` entirely, but a trust policy is a security posture the
+checkout owner controls, not toolchain-binding resolution. The two sources are not equal
+peers, though — see [Tier precedence](#keys-trust-merge) below.
+
+#### Fields {#keys-trust-fields}
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `scope` | string | yes | Package prefix this policy applies to, e.g. `"ghcr.io/acme/*"`. See [Scope matching](#keys-trust-scope). |
+| `identity` | string | XOR with `identity_regexp` | Exact expected certificate SAN (byte-equal). |
+| `identity_regexp` | string | XOR with `identity` | Regex the certificate SAN must match in full. See [Regex identities](#keys-trust-regex). |
+| `oidc_issuer` | string | yes | Exact expected OIDC issuer URL (byte-equal). No regex form in this release — issuer URLs are stable. |
+
+Exactly one of `identity` / `identity_regexp` must be set — both present, or both absent, is a
+configuration error. Unknown keys are ignored, like everywhere else in `config.toml`: a file
+written for a newer ocx must still load on an older one, so a typo'd key (e.g. `scop`) is
+silently dropped rather than rejected. What still fails the entry is a missing **required**
+field — a policy without `scope` or `oidc_issuer` is a parse error, and one that ends up with
+neither `identity` nor `identity_regexp` is rejected when the policy compiles, never silently
+treated as "trust anything".
+
+#### Scope matching {#keys-trust-scope}
+
+A scope matches the target's canonical `registry/repository` (tag and digest stripped) on
+**path-segment boundaries** — for the two safe forms below. A scope with no `*` matches the
+exact package or a package directly under it: `scope = "ghcr.io/acme/tool"` matches
+`ghcr.io/acme/tool` and `ghcr.io/acme/tool/plugin`, but **not** `ghcr.io/acme/tool-cli` (and
+`scope = "ghcr.io/acme"` never matches `ghcr.io/acmecorp`). A trailing `/*` is the explicit
+subtree glob (`scope = "ghcr.io/acme/*"` covers everything under `ghcr.io/acme/`, but not
+`ghcr.io/acmecorp`). An empty scope is a catch-all.
+
+:::warning A mid-string `*` is a substring match, not segment-bounded
+Segment-boundary matching holds only for the no-wildcard and trailing-`/*` forms. A `*`
+placed anywhere else globs on the literal text before it, with no `/` boundary enforced:
+`scope = "ghcr.io/acme*"` matches `ghcr.io/acmecorp` and `ghcr.io/acme-evil` because it is a
+plain literal-prefix (substring) match on `ghcr.io/acme`. Prefer `ghcr.io/acme/*` (or a bare
+`ghcr.io/acme`) unless you specifically intend the substring behavior.
+:::
+
+When more than one policy's scope matches a target, the **longest** literal prefix wins:
+
+```toml
+[[trust.policy]]                          # literal prefix "ghcr.io/acme/" (13 chars)
+scope       = "ghcr.io/acme/*"
+identity    = "ci@acme.example"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+
+[[trust.policy]]                          # literal prefix "ghcr.io/acme/secret-tool" (24 chars)
+scope       = "ghcr.io/acme/secret-tool"
+identity    = "release-bot@acme.example"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+```
+
+Verifying `ghcr.io/acme/secret-tool:1.0` only accepts `release-bot@acme.example` — the
+narrower policy wins outright, and the broader `ghcr.io/acme/*` policy still governs every
+other package under that prefix.
+
+Among policies tied at the **same** winning specificity, evaluation is **ANY-of**: the
+signature passes if it satisfies any one of them. This is what makes signer rotation possible
+without a downtime window — declare both the old and the new identity at the same scope, and
+either one verifies until the old entry is removed:
+
+```toml
+[[trust.policy]]                          # both scopes tie at "ghcr.io/acme/" (13 chars)
+scope       = "ghcr.io/acme/*"
+identity    = "old-ci@acme.example"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+
+[[trust.policy]]
+scope       = "ghcr.io/acme/*"
+identity    = "new-ci@acme.example"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+```
+
+#### Regex identities {#keys-trust-regex}
+
+`identity_regexp` compiles to an **anchored, full-string** match, not a substring search — a
+pattern must match the entire certificate SAN, start to end. This mirrors [cosign][cosign]'s
+`--certificate-identity-regexp` semantics and rules out a pattern like `acme` accidentally
+matching `evil-acme-lookalike`.
+
+```toml
+[[trust.policy]]
+scope           = "ghcr.io/acme/*"
+identity_regexp = "^https://github\\.com/acme/.*/\\.github/workflows/release\\.yml@refs/tags/v[0-9.]+$"
+oidc_issuer     = "https://token.actions.githubusercontent.com"
+```
+
+`identity_regexp` is useful when the SAN embeds a variable path component — a [GitHub
+Actions][github-actions-docs] workflow SAN carries the git ref it ran on
+(`…/release.yml@refs/heads/main`), so pinning one exact ref with `identity` would lock out
+every other branch or tag that same workflow signs from.
+
+#### Tier precedence: operator-authoritative, not pooled {#keys-trust-merge}
+
+Every other section on this page [replaces](#precedence-merge) at higher-precedence tiers.
+Within the `config.toml` tiers themselves, `[[trust.policy]]` is the one exception — policies
+**array-append** (pool) across system, user, and `$OCX_HOME` instead of the nearest tier
+winning:
+
+```
+system config.toml  →  user config.toml  →  $OCX_HOME config.toml
+```
+
+Call the pooled result of those three tiers the **operator trust set**. The project
+`ocx.toml`'s policies are **not** pooled into that set — they sit behind it, at lower
+priority:
+
+- If **any** operator policy matches the target package, only the operator trust set is
+  evaluated; the project `ocx.toml` is **ignored** for that package, no matter how
+  specific its scope is.
+- Only when **no** operator policy matches does the project `ocx.toml` apply. A project
+  can therefore **add** trust for scopes the operator has not governed, but it can never
+  step in front of a scope the operator already pins.
+
+Within whichever set is chosen, [most-specific-wins + ANY-of resolution](#keys-trust-scope)
+still applies — signer rotation works within the operator set, and separately within the
+project set, but the two sets never mix for one target.
+
+::: tip A project `ocx.toml` cannot weaken an operator policy
+This is a deliberate security property: because the operator trust set wins outright
+whenever it matches, a compromised or careless project `ocx.toml` cannot override or
+narrow an operator-pinned identity by declaring a more specific scope. `ocx.toml` can only
+extend trust to packages the operator has left ungoverned.
+:::
+
+#### System-locked {#keys-trust-system-lock}
+
+Pooling makes the three `config.toml` tiers peers on storage, but not on authority. A
+policy declared at the [system scope](#file-locations) is locked, unconditionally and per
+entry: for every scope it matches, it **governs alone**. Entries from the user,
+`$OCX_HOME`, and [managed](#keys-managed) tiers are refused for those scopes — a narrower
+scope cannot take over, and an equally specific one cannot join the accepted set either.
+
+::: code-group
+```toml [/etc/ocx/config.toml]
+# literal prefix "ghcr.io/acme/" — 13 chars, locked
+[[trust.policy]]
+scope       = "ghcr.io/acme/*"
+identity    = "ci@acme.example"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+```
+
+```toml [a lower tier]
+# literal prefix "ghcr.io/acme/tool" — 17 chars
+[[trust.policy]]
+scope       = "ghcr.io/acme/tool"
+identity    = "someone-else@example.test"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+```
+:::
+
+Verifying `ghcr.io/acme/tool:1.0` accepts `ci@acme.example` only. Without the lock the
+narrower entry would win outright by [most-specific-wins](#keys-trust-scope). With it, every
+lower-tier entry matching the pinned scope is discarded — a longer literal prefix, a shorter
+one (`ghcr.io/*`, say), and an exact tie at 13 characters alike.
+
+Rotation therefore happens in the system tier: declare the outgoing and incoming identities
+as two locked entries, and both are accepted for the overlap window.
+
+```toml [/etc/ocx/config.toml]
+[[trust.policy]]
+scope       = "ghcr.io/acme/*"
+identity    = "ci@acme.example"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+
+[[trust.policy]]                          # same scope, second accepted signer
+scope       = "ghcr.io/acme/*"
+identity    = "ci-2027@acme.example"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+```
+
+::: warning What the lock does and does not reach
+The lock is per scope, not fleet-wide. It governs the scopes its own entries match, and
+nothing else: a lower tier is still free to pin any scope the system tier never mentions —
+`ghcr.io/other/*` in the example above — and does so with full authority there. A lock on
+`ghcr.io/acme/*` is not a statement about the rest of the registry.
+
+Within a locked scope, though, no lower tier can **add** a signer, **narrow** the scope to
+carve one package out, or **displace** the operator's identity. Whoever writes the user
+tier, `$OCX_HOME`, or the [managed-config](#keys-managed) payload cannot enroll a signer
+that [`ocx package verify`][cmd-package-verify] will accept there; a refused entry is
+reported at debug level naming the pin that discarded it, so an operator whose policy went
+nowhere is not left staring at an identity mismatch.
+:::
+
+#### No matching policy, no flags {#keys-trust-no-match}
+
+`--certificate-identity` / `--certificate-oidc-issuer` on [`ocx package verify`][cmd-package-verify]
+are optional exactly when a `[[trust.policy]]` scope matches the target. Passing both flags
+always overrides any policy — an exact-match pair, unchanged from flag-only verification.
+Passing neither flag with no matching scope, or passing only one of the two flags, is a usage
+error. See the [`package verify` exit codes][cmd-package-verify] for the full behavior.
 
 ## Environment Variable Override Table {#env-overrides}
 
@@ -760,6 +970,9 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [yaml-ls]: https://github.com/redhat-developer/yaml-language-server
 [nexus-docs]: https://help.sonatype.com/en/proxy-repository.html
 [docker-login]: https://docs.docker.com/reference/cli/docker/login/
+[sigstore]: https://www.sigstore.dev/
+[cosign]: https://github.com/sigstore/cosign
+[github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 
 <!-- schemas -->
 [schema-config]: https://ocx.sh/schemas/config/v1.json
@@ -793,6 +1006,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [cmd-self-update]: ./command-line.md#self-update
 [cmd-config-update]: ./command-line.md#config-update
 [cmd-config-push]: ./command-line.md#config-push
+[cmd-package-verify]: ./command-line.md#package-verify
 
 <!-- environment -->
 [env-ocx-home]: ./environment.md#ocx-home

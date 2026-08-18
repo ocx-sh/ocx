@@ -257,6 +257,9 @@ DECLARED_PACKAGES: dict[str, dict[str, str]] = {
     "setup:managed-config-ci": {
         "kitware/cmake": "kitware/cmake:3.28",
     },
+    "setup:signing": {
+        "acme/mytool": "acme/mytool:1.0.0",
+    },
     # ---- scenario family (src.scenarios.SCENARIOS) ----
     "scenario:BasicPackage": {
         "hello": "hello:1.0.0",

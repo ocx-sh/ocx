@@ -1,0 +1,55 @@
+{
+  "certificateAuthorities": [
+    {
+      "certChain": {
+        "certificates": [
+          {
+            "rawBytes": "MIIBxjCCAWugAwIBAgIURyQ7Q7tYlF6VJqChHK15YYsx6rowCgYIKoZIzj0EAwIwMDERMA8GA1UECgwIb2N4IHRlc3QxGzAZBgNVBAMMEm9jeCB0ZXN0IGZ1bGNpbyBDQTAeFw0yNjA4MTcyMjQ3NThaFw0zNjA4MTQyMjQ3NThaMDAxETAPBgNVBAoMCG9jeCB0ZXN0MRswGQYDVQQDDBJvY3ggdGVzdCBmdWxjaW8gQ0EwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASBW+lKkSOzTTd01x+u6hpjZ0OMSskAwa7tDmjpTVaDRpNIgpQw2jrEJn+l3ZrgkQ/gPKzNThqM/BoN612vMlbyo2MwYTAdBgNVHQ4EFgQUZIazLdRfbq9gubTgszBLOl3+UUMwHwYDVR0jBBgwFoAUZIazLdRfbq9gubTgszBLOl3+UUMwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYwCgYIKoZIzj0EAwIDSQAwRgIhAK2LeZQAzRi2rTlJPPij5DI4daYATctFhMTPCfhTzf3JAiEAwYycMsOdtD+gerlwfxS92f+5NXGZz7kM/FSrXpr8Up4="
+          }
+        ]
+      },
+      "subject": {
+        "commonName": "ocx test fulcio CA",
+        "organization": "ocx test"
+      },
+      "uri": "http://localhost:5555",
+      "validFor": {
+        "start": "1970-01-01T00:00:00Z"
+      }
+    }
+  ],
+  "ctlogs": [
+    {
+      "baseUrl": "http://localhost:6962/ocx-test",
+      "hashAlgorithm": "SHA2_256",
+      "logId": {
+        "keyId": "mehqH08sk+toRIkgyLu7t9TLOtPIVO5kjXEbnbGM9pE="
+      },
+      "publicKey": {
+        "keyDetails": "PKIX_ECDSA_P256_SHA_256",
+        "rawBytes": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEDZB/EDp38WhTO3RoL9yZa95Qgdk+ng/Cm13ji26arjwGJVG0ljS9aJwuGUUJrzYGnW4J8yDUCHisFLCX05UevQ==",
+        "validFor": {
+          "start": "1970-01-01T00:00:00Z"
+        }
+      }
+    }
+  ],
+  "mediaType": "application/vnd.dev.sigstore.trustedroot+json;version=0.1",
+  "timestampAuthorities": [],
+  "tlogs": [
+    {
+      "baseUrl": "http://localhost:3000",
+      "hashAlgorithm": "SHA2_256",
+      "logId": {
+        "keyId": "GT1l8/oK0fAx4xTD+xfIK5q1DKZzlBQIf7Kv4gz6WVw="
+      },
+      "publicKey": {
+        "keyDetails": "PKIX_ECDSA_P256_SHA_256",
+        "rawBytes": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEYZpFhJXA5TEzBzXIF2G3mu3usUu+IIxKfxk5nzFL7CE2/n9PFyp3CwbpIakaruGtvztbfC/EfUltJCbQN9sECA==",
+        "validFor": {
+          "start": "1970-01-01T00:00:00Z"
+        }
+      }
+    }
+  ]
+}

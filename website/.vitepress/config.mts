@@ -96,6 +96,7 @@ export default defineConfig({
             { text: "Entry Points", link: "/docs/in-depth/entry-points" },
             { text: "Deferred Tools", link: "/docs/in-depth/lazy-loading" },
             { text: "CI Integration", link: "/docs/in-depth/ci" },
+            { text: "Signing", link: "/docs/in-depth/signing" },
           ],
         },
         {

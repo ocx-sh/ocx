@@ -1,0 +1,36 @@
+# dex — the OIDC issuer for the local Sigstore stack. Test-only.
+#
+# The issuer URL is the in-network name (`dex:5556`) because that is the URL
+# Fulcio uses to fetch discovery + JWKS, and it is what lands in the token's
+# `iss` claim -- so it is also what `[[trust.policy]]` pins as
+# certificate-oidc-issuer. The host reaches the token endpoint through the
+# published port instead; nothing on the host needs the issuer URL to resolve.
+issuer: http://dex:5556/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+oauth2:
+  # Lets the acceptance suite mint an ID token with a plain password grant,
+  # i.e. one curl, no browser, no callback server.
+  passwordConnector: local
+  skipApprovalScreen: true
+
+staticClients:
+  - id: ocx-test
+    secret: ocx-test-secret
+    name: ocx acceptance tests
+    public: false
+    redirectURIs:
+      - http://localhost:0/callback
+
+enablePasswordDB: true
+staticPasswords:
+  # bcrypt of "ocxtest"
+  - email: ocx-test@example.com
+    hash: "$2b$10$Uv.Vjpn7C1ztz7vVtdfl3.wqZwUkAsu/QSAozjOY6lwW17KcEUT7C"
+    username: ocx-test
+    userID: "00000000-0000-0000-0000-000000000001"

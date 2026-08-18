@@ -79,7 +79,7 @@ pub async fn dispatch(argv: Vec<OsString>, opts: &ContextOptions) -> anyhow::Res
     // so they correctly fall through to the plugin path below.
     let name_str = name.to_string_lossy();
     if argv.get(1).map(|a| a == "--help").unwrap_or(false)
-        && let Some(mut sub) = crate::app::Cli::command().find_subcommand(name_str.as_ref()).cloned()
+        && let Some(mut sub) = crate::app::Cli::command().find_subcommand(&*name_str).cloned()
     {
         sub.print_help()?;
         // clap's print_help() omits trailing newline

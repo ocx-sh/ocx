@@ -32,15 +32,33 @@ pub struct Api {
     format: options::FormatMode,
     data: DataInterface,
     quiet: bool,
+    /// Set once a report has actually been printed to stdout. Shared across
+    /// clones so the app-level error-envelope wrapper can tell "this failure
+    /// already produced the command's stdout document" (report-then-fail
+    /// commands like `package push --announce-file`) from "stdout is empty and
+    /// the envelope is the document" — stdout must carry exactly one JSON
+    /// document either way.
+    reported: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Api {
     pub fn new(format: options::FormatMode, data: DataInterface, quiet: bool) -> Self {
-        Self { format, data, quiet }
+        Self {
+            format,
+            data,
+            quiet,
+            reported: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 
     pub fn data(&self) -> &DataInterface {
         &self.data
+    }
+
+    /// Shared handle answering whether any report reached stdout — survives
+    /// the `Context` move into `Command::execute`.
+    pub fn reported_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.reported)
     }
 
     /// Renders `item` to stdout in the configured format, unless quiet mode is
@@ -54,6 +72,7 @@ impl Api {
             options::FormatMode::Json => item.print_json(&self.data)?,
             options::FormatMode::Plain => item.print_plain(&self.data),
         }
+        self.reported.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 

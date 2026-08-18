@@ -80,6 +80,68 @@ def start_registry(registry: str) -> None:
     raise RuntimeError(f"Registry at {registry} did not become reachable")
 
 
+SIGSTORE_DIR = COMPOSE_FILE.parent / "sigstore"
+_WAIT_FOR_STACK = SIGSTORE_DIR / "wait-for-stack.py"
+
+
+def start_sigstore_stack(timeout: float = 300.0) -> None:
+    """Bring up the `sigstore` compose profile and block until it answers.
+
+    Readiness is delegated to ``sigstore/wait-for-stack.py`` rather than
+    reimplemented here. That script is also what the self-hosting documentation
+    hands an operator, so a second copy of the endpoint list is the one that
+    would go stale — and it is the copy the suite would be trusting.
+    """
+    subprocess.run(
+        ["docker", "compose", "-f", str(COMPOSE_FILE), "--profile", "sigstore", "up", "-d"],
+        check=True,
+        capture_output=True,
+    )
+    done = subprocess.run(
+        [sys.executable, str(_WAIT_FOR_STACK), "--timeout", str(timeout)],
+        capture_output=True,
+        text=True,
+    )
+    if done.returncode != 0:
+        raise RuntimeError(
+            "the sigstore compose profile did not come up:\n"
+            + done.stdout
+            + done.stderr
+        )
+
+
+#: The dex identity the local stack mints, and the `iss` claim it writes.
+#: In-network issuer URL: the host fetches over localhost, but the claim names
+#: the address Fulcio resolves. ocx never dials the issuer, it compares strings.
+SIGSTORE_IDENTITY = "ocx-test@example.com"
+SIGSTORE_ISSUER = "http://dex:5556/dex"
+
+
+def mint_identity_token(target: Path) -> Path:
+    """Write a fresh dex OIDC token to ``target`` and return it.
+
+    `ocx package sign` has no `--identity-token <VALUE>` flag by design — a
+    token in argv is world-readable in /proc — so the token reaches it as a
+    file, and the file must not be group- or world-readable or sign refuses it.
+    """
+    token = subprocess.run(
+        [
+            sys.executable,
+            str(SIGSTORE_DIR / "get-token.py"),
+            "--port",
+            os.environ.get("OCX_TEST_DEX_PORT", "5556"),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if token.count(".") != 2:
+        raise RuntimeError(f"dex did not return a JWT: {token[:80]!r}")
+    target.write_text(token)
+    target.chmod(0o600)
+    return target
+
+
 # ---------------------------------------------------------------------------
 # Package publishing
 # ---------------------------------------------------------------------------

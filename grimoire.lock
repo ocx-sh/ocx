@@ -1,0 +1,37 @@
+skill = []
+agent = []
+
+[metadata]
+lock_version = 1
+declaration_hash_version = 1
+declaration_hash = "sha256:ab336cd06935567b6ef67120a47077e51a8d34b7cceb3d3d4f93678d9ee96bbb"
+generated_by = "grim 0.13.0"
+generated_at = "2026-08-17T22:04:58Z"
+
+[[rule]]
+name = "rust-cargo"
+pinned = "ghcr.io/ocx-sh/lore/rust-cargo@sha256:92d04c3338fa8e7e474eeddf02038c88fa82e44d1ec8fd1095221ae52fddc4ac"
+bundle = "ghcr.io/ocx-sh/lore/rust-essentials"
+bundle_tag = "latest"
+
+[[rule]]
+name = "rust-quality"
+pinned = "ghcr.io/ocx-sh/lore/rust-quality@sha256:39f5455aadd3ce6dff3b085aab28454b95a7a681ec3de6fadb14a84014a81e65"
+bundle = "ghcr.io/ocx-sh/lore/rust-essentials"
+bundle_tag = "latest"
+
+[[bundle]]
+name = "rust-essentials"
+repo = "ghcr.io/ocx-sh/lore/rust-essentials"
+tag = "latest"
+pinned = "ghcr.io/ocx-sh/lore/rust-essentials@sha256:f7568c69419e77418eac29fd4d6bae9fcaa6ebee2b73df1d84ecfed5b0484722"
+
+[[bundle.member]]
+kind = "rule"
+name = "rust-cargo"
+id = "ghcr.io/ocx-sh/lore/rust-cargo:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "rust-quality"
+id = "ghcr.io/ocx-sh/lore/rust-quality:latest"

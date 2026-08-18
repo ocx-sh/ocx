@@ -158,7 +158,7 @@ fn emit_activation(shell: Shell, bin_path: &std::path::Path, completion: Option<
 /// containing no shell variable references or metacharacters.
 fn emit_path_prepend(shell: Shell, bin_path: &std::path::Path) {
     let path_str = bin_path.to_string_lossy();
-    if let Some(line) = shell.export_path("PATH", path_str.as_ref()) {
+    if let Some(line) = shell.export_path("PATH", &*path_str) {
         println!("{line}");
     }
 }
@@ -324,7 +324,7 @@ mod tests {
         let path = PathBuf::from("/tmp/known/.ocx/symlinks/ocx_sh/ocx/cli/current/content/bin");
         // Use Shell::export_path directly to mirror what emit_path_prepend emits.
         let line = Shell::Bash
-            .export_path("PATH", path.to_string_lossy().as_ref())
+            .export_path("PATH", path.to_string_lossy())
             .expect("valid env-var name");
         assert!(
             line.contains("/tmp/known"),
@@ -344,7 +344,7 @@ mod tests {
     fn path_prepend_batch_absolute_path() {
         let path = PathBuf::from(r"C:\Users\test\.ocx\symlinks\ocx_sh\ocx\cli\current\content\bin");
         let line = Shell::Batch
-            .export_path("PATH", path.to_string_lossy().as_ref())
+            .export_path("PATH", path.to_string_lossy())
             .expect("valid env-var name");
         assert!(
             line.contains("ocx_sh"),

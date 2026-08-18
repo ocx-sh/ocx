@@ -9,6 +9,14 @@ import pytest
 from src.helpers import make_package
 from src.runner import OcxRunner, PackageInfo
 
+# Re-export the real Sigstore stack fixtures (`sigstore` compose profile) so the
+# signing modules can consume them by name without importing directly.
+from tests.fixtures.sigstore_stack import (  # noqa: F401
+    SigstoreStack,
+    identity_token,
+    sigstore_stack,
+)
+
 
 @pytest.fixture()
 def unique_repo(request: pytest.FixtureRequest) -> str:

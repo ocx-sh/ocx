@@ -428,7 +428,7 @@ mod tests {
         let resolver = TemplateResolver::new(self_dir.path(), &contexts);
 
         let dep_path = dep_dir.path().to_string_lossy();
-        assert_eq!(resolver.resolve("${deps.dep1.installPath}").unwrap(), dep_path.as_ref(),);
+        assert_eq!(resolver.resolve("${deps.dep1.installPath}").unwrap(), &*dep_path,);
     }
 
     // 4. Mixed ${installPath} and ${deps.NAME.installPath} in one template are both resolved.
@@ -478,12 +478,12 @@ mod tests {
 
         // Sanity: each substituted prefix appears exactly once in the output.
         assert_eq!(
-            resolved.matches(self_path.as_ref()).count(),
+            resolved.matches(&*self_path).count(),
             1,
             "${{installPath}} must be substituted exactly once: {resolved:?}"
         );
         assert_eq!(
-            resolved.matches(dep_path.as_ref()).count(),
+            resolved.matches(&*dep_path).count(),
             1,
             "${{deps.a.installPath}} must be substituted exactly once: {resolved:?}"
         );
@@ -624,8 +624,7 @@ mod tests {
         let install = dir.path().to_string_lossy();
         let result = resolver.resolve("${installPath}").unwrap();
         assert_eq!(
-            result,
-            install.as_ref(),
+            result, &*install,
             "bare '${{installPath}}' must resolve to exactly the install path; got {result:?}"
         );
     }
@@ -674,8 +673,7 @@ mod tests {
         let dep_path = dep_dir.path().to_string_lossy();
         let result = resolver.resolve("${deps.dep1.installPath}").unwrap();
         assert_eq!(
-            result,
-            dep_path.as_ref(),
+            result, &*dep_path,
             "Usage::Environment must resolve ${{deps.*}} tokens (env path unchanged)"
         );
     }
@@ -701,7 +699,7 @@ mod tests {
         let template = "--prefix=${installPath}:${installPath}/bin";
         let result = resolver.resolve(template).unwrap();
         assert_eq!(
-            result.matches(install.as_ref()).count(),
+            result.matches(&*install).count(),
             2,
             "both occurrences of ${{installPath}} in a single element must be substituted; \
              template={template:?} resolved={result:?}"
@@ -929,7 +927,7 @@ mod tests {
         );
         let dep_path = dep_dir.path().to_string_lossy();
         assert!(
-            !resolved.contains(dep_path.as_ref()),
+            !resolved.contains(&*dep_path),
             "the dependency path must not appear at all: {resolved:?}"
         );
         // The old reading's exact signature: the escape half-consumed, leaving a

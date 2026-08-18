@@ -352,23 +352,29 @@ impl ChainedIndex {
     /// distribution mechanism (`adr_index_indirection.md` A2), so a committed
     /// root's `repository` is remote-controlled data.
     ///
-    /// Two carve-outs, both narrow and both load-bearing:
+    /// One carve-out, narrow and load-bearing: **not a rewrite**
+    /// (`physical.registry() == logical.registry()`). Every OCX-authored
+    /// *derived* root names the identifier's own registry, as does a published
+    /// root for a registry-backed package. The pull was always going to that
+    /// host — with no index in the picture at all — so there is nothing the
+    /// index added and nothing to judge. Guarding it would refuse every private
+    /// registry that has worked since before indices existed, including ones
+    /// whose namespace declares no `index` and therefore has no source to carry
+    /// a `trusted_hosts` exemption.
     ///
-    /// - **Not a rewrite** (`physical.registry() == logical.registry()`). Every
-    ///   OCX-authored *derived* root names the identifier's own registry, as does
-    ///   a published root for a registry-backed package. The pull was always
-    ///   going to that host — with no index in the picture at all — so there is
-    ///   nothing the index added and nothing to judge. Guarding it would refuse
-    ///   every private registry that has worked since before indices existed,
-    ///   including ones whose namespace declares no `index` and therefore has no
-    ///   source to carry a `trusted_hosts` exemption.
-    /// - **`ChainMode::Offline`**. The offline context builds **no OCI client at
-    ///   all** (`context.rs`: `options.offline` ⇒ `remote_client = None`), so no
-    ///   request can follow the answer and there is nothing to guard. It also
-    ///   builds no sources, so `trusted_hosts` is unreachable by construction and
-    ///   validating would refuse a legitimate private registry with no way to
-    ///   allow it. Skipping additionally keeps [`oci::ssrf::resolve_and_validate`](crate::oci::ssrf::resolve_and_validate)'s
-    ///   DNS out of the one mode defined by having no network.
+    /// **`ChainMode::Offline` is NOT a carve-out.** It used to be, on the
+    /// premise that offline builds no OCI client (so nothing could follow the
+    /// answer) and no sources (so `trusted_hosts` was unreachable). Both halves
+    /// are false now: `context.rs` builds the registry client in every mode so
+    /// `ocx package verify` can read a signature referrer under `--offline`
+    /// (verify's offline semantics scope to the Sigstore trust services, not the
+    /// artifact registry), and the exemption reaches this type straight from
+    /// config on the local index ([`LocalIndex::with_trusted_hosts`]) rather
+    /// than only through a source.
+    /// Offline is in fact the shape with the *weakest* other protection — no
+    /// source answer to prefer, so the local root always decides — and an
+    /// air-gapped deployment pointing at a private mirror is served by declaring
+    /// `[registries."<ns>"].trusted_hosts`, exactly as online.
     ///
     /// Called **after** the local read, never before: an early return placed
     /// ahead of it returns `Ok(None)`, which the caller reads as "no rewrite" and
@@ -389,7 +395,7 @@ impl ChainedIndex {
     /// into a forbidden range without a `trusted_hosts` entry, or when a lookup
     /// failure cannot be tolerated ([`is_plain_dns_name`]).
     async fn guard_local_physical(&self, logical: &oci::Identifier, physical: &oci::Identifier) -> Result<()> {
-        if self.mode == ChainMode::Offline || physical.registry() == logical.registry() {
+        if physical.registry() == logical.registry() {
             return Ok(());
         }
         let (host, port) = oci::ssrf::split_host_port(physical.registry());
@@ -1434,7 +1440,32 @@ impl index_impl::IndexImpl for ChainedIndex {
     /// at resolve time, [`Index::guard_physical_dial`] at the dial site — reads
     /// that one value. Keyed on the registry (ownership) like
     /// [`Self::kind_for_registry`], never on per-name jurisdiction.
+    /// The `trusted_hosts` set configured for `registry` — the SSRF escape hatch
+    /// the operator declared for that namespace, or empty when they declared
+    /// none.
+    ///
+    /// Read from the local index's own config-threaded set first
+    /// ([`LocalIndex::with_trusted_hosts`]), then from the owning source's
+    /// construction input. Both are copies of the SAME
+    /// `[registries."<ns>"].trusted_hosts` value — `context.rs` reads it from
+    /// config and hands one copy to `OcxIndex`, one to that namespace's
+    /// `ssrf_guard`, and one to the local index — so for a namespace that has a
+    /// source they answer identically. The local index's copy is what makes the
+    /// answer available when there is **no** source to ask: `--offline` builds
+    /// none at all, and a source that declared a name outside its jurisdiction
+    /// is never consulted. It travels with the local index precisely because
+    /// every chain that can mint a local answer is built from one, so no
+    /// construction site can forget it. The source scan stays for chains whose
+    /// local index threads no config (unit fakes).
+    ///
+    /// Keyed on the registry (ownership) like [`Self::kind_for_registry`], never
+    /// on per-name jurisdiction — a name the owning index's grammar cannot
+    /// express is still that operator's namespace and must keep their exemption.
     fn trusted_hosts_for(&self, registry: &str) -> &[String] {
+        let configured = self.local_index.trusted_hosts_for(registry);
+        if !configured.is_empty() {
+            return configured;
+        }
         self.sources
             .iter()
             .find(|source| source.serves_registry(registry))
@@ -4661,23 +4692,125 @@ mod chain_refs_tests {
         assert_eq!(physical.registry(), private);
     }
 
-    /// `--offline` builds no OCI client at all, so nothing can follow the
-    /// answer — and it builds no sources, so `trusted_hosts` is unreachable and
-    /// guarding would refuse a legitimate private registry with no way to allow
-    /// it. The carve-out is asserted on the exact input the guarded mode refuses.
+    /// A local index carrying the operator's configured `trusted_hosts` for
+    /// `namespace` — what `context.rs` threads in from
+    /// `[registries."<ns>"].trusted_hosts`.
+    fn local_index_trusting(dir: &TempDir, namespace: &str, hosts: &[&str]) -> LocalIndex {
+        make_local_index(dir).with_trusted_hosts(HashMap::from([(
+            namespace.to_string(),
+            hosts.iter().map(|host| (*host).to_string()).collect::<Vec<_>>(),
+        )]))
+    }
+
+    /// **`--offline` is guarded too.** It used to be a carve-out on the premise
+    /// that offline builds no OCI client (nothing could follow the answer) and
+    /// no sources (no `trusted_hosts` to read). Both halves are false:
+    /// `context.rs` builds the registry client in every mode so `ocx package
+    /// verify` can read a signature referrer offline, and the exemption now
+    /// rides the local index. Offline is in fact the shape with the weakest
+    /// other protection — no source answer to prefer, so the local root always
+    /// decides.
+    ///
+    /// The forbidden target is a **real listening socket**, so removing the
+    /// guard is a live repro rather than a type assertion: the returned address
+    /// is dialled and the connection accepted, and the failure says so.
     #[tokio::test(flavor = "multi_thread")]
-    async fn offline_answers_the_local_root_without_the_dns_bearing_pre_flight() {
+    async fn an_offline_local_root_pointing_at_loopback_is_refused_without_a_trusted_hosts_entry() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let forbidden = listener.local_addr().unwrap();
+
         let dir = TempDir::new().unwrap();
         let cache = make_local_index(&dir);
-        seed_root_pointing_at(&cache, REGISTRY, "127.0.0.1:5999/evil/pkg").await;
+        seed_root_pointing_at(&cache, REGISTRY, &format!("{forbidden}/evil/pkg")).await;
+
+        let chained = Index::from_chained(cache, vec![], ChainMode::Offline);
+        match chained.physical_reference(&digest_only_id()).await {
+            Err(crate::Error::OciIndex(super::super::error::Error::Ssrf(
+                crate::oci::ssrf::SsrfError::ForbiddenTarget { .. },
+            ))) => {}
+            Err(other) => panic!("expected an SSRF refusal of the loopback target, got: {other:?}"),
+            Ok(None) => panic!("the local root answers; `Ok(None)` would mean the read itself regressed"),
+            Ok(Some(physical)) => {
+                let dialled = tokio::net::TcpStream::connect(forbidden).await;
+                panic!(
+                    "offline physical_reference handed the pull the forbidden target '{physical}'; \
+                     a connection to {forbidden} {}",
+                    if dialled.is_ok() {
+                        "WAS ACCEPTED"
+                    } else {
+                        "failed (the socket died first)"
+                    }
+                );
+            }
+        }
+    }
+
+    /// The other direction, and the reason the floor cannot simply refuse every
+    /// private target offline: an air-gapped deployment legitimately points at a
+    /// private mirror. Declaring `[registries."<ns>"].trusted_hosts` is what
+    /// makes it work — the same exemption, and the same CIDR grammar, that
+    /// `OcxIndex` applies to its own answers online.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_offline_private_mirror_is_allowed_when_the_namespace_declares_it_trusted() {
+        let dir = TempDir::new().unwrap();
+        let cache = local_index_trusting(&dir, REGISTRY, &["10.0.0.0/8"]);
+        seed_root_pointing_at(&cache, REGISTRY, "10.0.0.7/private/cmake").await;
 
         let chained = Index::from_chained(cache, vec![], ChainMode::Offline);
         let physical = chained
             .physical_reference(&digest_only_id())
             .await
-            .expect("offline has no client to guard, so the pre-flight is skipped")
-            .expect("the committed root still answers");
-        assert_eq!(physical.registry(), "127.0.0.1:5999");
+            .expect("a declared trusted_hosts entry must admit the air-gapped private mirror")
+            .expect("the committed root answers");
+        assert_eq!(physical.registry(), "10.0.0.7");
+    }
+
+    /// The exemption is keyed per namespace, never a union: one namespace's
+    /// declaration must not admit a forbidden target under another's. This is
+    /// also the negative half of the air-gapped case — the identical root is
+    /// refused when the operator has NOT declared it for this namespace.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_trusted_hosts_entry_for_another_namespace_never_exempts_this_one() {
+        let dir = TempDir::new().unwrap();
+        let cache = local_index_trusting(&dir, "other.example.com", &["10.0.0.0/8"]);
+        seed_root_pointing_at(&cache, REGISTRY, "10.0.0.7/private/cmake").await;
+
+        let chained = Index::from_chained(cache, vec![], ChainMode::Offline);
+        let error = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .expect_err("another namespace's exemption must not widen this one");
+        assert!(
+            matches!(
+                error,
+                crate::Error::OciIndex(super::super::error::Error::Ssrf(
+                    crate::oci::ssrf::SsrfError::ForbiddenTarget { .. }
+                ))
+            ),
+            "expected a ForbiddenTarget refusal, got: {error:?}"
+        );
+    }
+
+    /// Guarding offline must not break the steady state it exists in: a warm
+    /// store, no working resolver, and a root naming a genuine DNS host. The
+    /// lookup fails, [`is_plain_dns_name`] tolerates it, and the resolve
+    /// proceeds — refusing here would re-raise the exit-69 bug the local
+    /// fallback was added to fix. On a machine that CAN resolve, the same host
+    /// passes the floor as an ordinary public address; either way the answer is
+    /// the physical address, never a refusal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_offline_root_naming_an_unresolvable_dns_host_still_answers() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        seed_root_pointing_at(&cache, REGISTRY, "registry.invalid/mirrored/cmake").await;
+
+        let chained = Index::from_chained(cache, vec![], ChainMode::Offline);
+        let physical = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .expect("a DNS lookup failure on a plain DNS name is tolerated, not a refusal")
+            .expect("the committed root answers");
+        assert_eq!(physical.registry(), "registry.invalid");
     }
 
     /// The guard's **tolerated lookup failure** arm ([`is_plain_dns_name`]): a

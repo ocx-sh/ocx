@@ -98,6 +98,9 @@ async-compression.workspace = true
 liblzma.workspace = true
 # SyncIoBridge — AsyncRead → sync Read bridge at spawn_blocking boundary (Phase 3).
 tokio-util.workspace = true
+url.workspace = true
+zeroize.workspace = true
+pem.workspace = true
 
 # Embedded Starlark engine — exact-pinned family (see root Cargo.toml comment).
 starlark.workspace = true
@@ -110,6 +113,32 @@ starlark_derive.workspace = true
 allocative.workspace = true
 # ELF PT_INTERP parsing — libc-family host detection (os.features).
 elf.workspace = true
+
+# Keyless Sigstore signing (issue #194) — see workspace Cargo.toml for the
+# feature/version rationale (including why `native-tls` must stay off).
+#
+# Features are added here rather than at the workspace declaration because they
+# unify additively with it; `serde_json` above uses the same shape.
+#
+# `sigstore-trust-root` is the only one of these that changes the dependency
+# graph: it pulls `tough` (TUF client) for the embedded Sigstore root, which
+# `oci/verify/trust_root.rs` needs. `sign`/`verify`/`fulcio`/`rekor` are already
+# implied by `bundle` in sigstore 0.14.0 (`bundle = ["sign", "verify"]`, and both
+# list `fulcio` + `rekor`), and are named anyway: the requirement is a caret, so
+# a 0.14.x that narrowed `bundle` would silently drop a capability this milestone
+# depends on. Naming them costs nothing in the graph and closes that class.
+sigstore = { workspace = true, features = [
+  "sign",
+  "verify",
+  "fulcio",
+  "rekor",
+  "sigstore-trust-root",
+] }
+sigstore_protobuf_specs.workspace = true
+pki-types.workspace = true
+p256.workspace = true
+x509-cert.workspace = true
+ed25519-dalek.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
