@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- **Status:** Approved (supersedes the single-track verify+SBOM design) — R1 fix pass applied 2026-04-19 (see Amendment Log); status unchanged.
+- **Status:** SUPERSEDED (2026-08-20) — never implemented; zero code shipped from this design. Superseded by the milestone-4 revision recorded in `plan_milestone_split_supply_chain.md` (2026-07-09 split + 2026-08-20 amendment) and by `adr_sbom_attestations.md`. Key reversals: root-level `ocx sbom` is dead (package-tier `ocx package sbom` only, per the shipped `ocx package sign`/`verify` precedent); legacy cosign tag-based discovery (`.sig`/`.att` probes) is dead (referrers-only, cosign >= 3.0 floor, ADR S1-F); SPDX parsing is deferred (attach parity accepts spdx/spdxjson predicates, parse/summarize is CycloneDX-only); the separate referrer-index cache under `blobs/<registry>/.referrers/` is dead (shipped capability cache lives at `state/referrers/`). Historical record below is unchanged.
 - **Date:** 2026-04-19
 - **Deciders:** OCX core maintainers
 - **Issue:** [#24 — OCI referrers API for signature and SBOM discovery](https://github.com/ocx-sh/ocx/issues/24)

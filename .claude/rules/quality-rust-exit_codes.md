@@ -90,7 +90,7 @@ pub enum ExitCode {
     /// verify fails if Rekor is needed for SET presence but the log itself is
     /// unreachable). Invalid Rekor SET content maps to `DataError = 65`, not here —
     /// that is a data-integrity failure, not a service availability failure.
-    RekorUnavailable = 83,
+    TransparencyLogUnavailable = 83,
     /// Registry does not implement the OCI Referrers API and has no fallback-tag
     /// referrers index. The operation cannot proceed — discovery fails hard rather
     /// than silently returning empty results. Tool-specific.

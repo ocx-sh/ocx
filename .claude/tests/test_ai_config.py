@@ -1987,8 +1987,10 @@ class TestSubsystemCliCommandsTableCoverage:
         "package_describe": "package describe",
         "package_info": "package info",
         "package_inspect": "package inspect",
+        "package_attest": "package attest",
         "package_pull": "package pull",
         "package_push": "package push",
+        "package_sbom": "package sbom",
         "package_announce": "package announce",
         # `cascade check` / `cascade repair` are two levels below `package`; the
         # table cell parser keeps the first two tokens, so both map to the same
@@ -2044,6 +2046,9 @@ class TestSubsystemCliCommandsTableCoverage:
         # two leaves are documented individually.
         "index_common",
         "package_cascade",
+        # `package_sign_common.rs` = shared OIDC/signing helpers for
+        # `package sign` and `package attest` (not a command).
+        "package_sign_common",
         # `app.rs` / `command.rs` rooted dispatchers (not commands themselves).
     }
 
