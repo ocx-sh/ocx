@@ -2009,4 +2009,165 @@ Stated so it is not read as an oversight, and so the docs can say it plainly
 | OCX self-dogfooding SBOM attestation | D6 — GHCR has no Referrers API. |
 | A `--no-canonical-tag`-derived subject digest | D-f (amended 2026-08-20) — the derivation problem is closed by construction: `AttestPipeline` resolves its per-platform target via index indirection, never from `canonical_tags`. `platform_digests` was never built. |
 
+# Part VI — Unsigned SBOM Parity (owner ruling 2026-08-20)
+
+D-e stated the verify-unconditional rule for `ocx package sbom` and reserved
+unverified enumeration as Not Doing. The owner has since ruled a narrower
+carve-out: an SBOM attached with **no signing identity available** is not an
+unverified instance of the *same* claim a signed attestation makes — it is a
+different, weaker claim (a raw referrer, not an in-toto Statement), and it
+inherits exactly the trust of the unsigned package it describes. Requiring a
+stronger floor for the package's own metadata than for the executable artifact
+sitting beside it was backwards. This section is the decision record for that
+carve-out; it does not reopen D-e's rule for **signed** attestations, which
+stays verify-unconditional with no `--no-verify` escape.
+
+**The polarity predicate.** `ocx package attest` / `ocx package push --sbom`
+sign iff a signing identity is *visible* before any network call —
+`DispatchingTokenProvider::has_signing_material()` (override token present, or
+an ambient CI environment detected). Three outcomes, not two:
+
+| Signal | Outcome |
+|---|---|
+| Override token, or ambient CI detected | **Signed.** A subsequent acquisition failure (Fulcio/Rekor unreachable, ambient token exchange rejected) is a hard error — the run never falls back to an unsigned attach. Downgrading there would let a CI job configured for OIDC silently publish an identity-less artifact that looks attached either way; a misconfigured pipeline must fail loudly, not degrade quietly. |
+| Nothing visible | **Unsigned.** The predicate document is pushed verbatim as the referrer payload, typed by its own SBOM media type (`artifactType`) — no DSSE envelope, no Fulcio certificate, no Rekor entry. This is the `cosign attach sbom` / `oras attach` / `syft attest --output` wire shape: foreign tools can read an ocx-attached unsigned SBOM and vice versa. **Residual risk:** GitHub Actions ambient detection (`oidc_ambient_inline.rs`) requires both `ACTIONS_ID_TOKEN_REQUEST_URL` and `ACTIONS_ID_TOKEN_REQUEST_TOKEN` — variables GitHub injects only when the workflow step is granted `id-token: write`. A job whose permission was dropped is therefore not detected at all, not detected-then-failed: it lands here, publishing unsigned at exit 0, indistinguishable on the wire from a job that never intended to sign. This is the accepted posture per the owner's polarity ruling, not a gap the hard-error row (below) covers — the visible signal is `signed: false` in the JSON/plain-text report and the stderr warning `sbom --output` prints for a lone unverified match. |
+| Signing material visible, but the predicate type has no SBOM media type (e.g. `slsaprovenance1`) | **Hard error before any network call** (`SignErrorKind::UnsignedTypeUnsupported`, exit 64) when the mode would otherwise be unsigned — an unsigned provenance statement is worthless (no identity, no builder attribution) and the referrer would have nowhere to record its type without a DSSE envelope. Signed provenance is unaffected. |
+
+Detection is exactly `has_signing_material()` — never a network call, never the
+browser OAuth prompt (a *prompt for* an identity is not *evidence of* one). The
+polarity is decided once, before the pipeline's floor checks and before any
+socket opens, so an operator can predict which artifact shape a given
+invocation will produce purely from the environment it runs in.
+
+**Wire shape (unsigned).** `artifactType` on the referrer manifest is one of
+three constants in `oci/referrer/media_types.rs`, chosen from the resolved
+predicate type: `application/vnd.cyclonedx+json` (`cyclonedx`),
+`application/spdx+json` (`spdxjson` and any full-URI spelling of the SPDX
+predicate — the JSON form is what every producer in the wild writes),
+`text/spdx` (`spdx`, the tag-value serialization). No `dev.sigstore.bundle.*`
+annotations are written — those three keys describe a bundle this referrer
+does not carry, and writing them would make an unsigned document look signed
+in a listing, which is exactly the confusion the `artifactType` split exists
+to prevent.
+
+**Read side (draft, superseded below).** The original design for this section
+read `ocx package sbom` as always listing both trust classes in one view, with
+`--output` preferring a verified match over an unverified one when both were
+present. The owner's same-day mode-matrix ruling (see the addendum after
+Scope, below) replaced this with two mutually exclusive modes: verified and
+unverified entries never coexist in one listing, so the verified-preferred
+precedence described here never actually fires and is retained in the shipped
+code only as unreachable defensive ordering, not as documented behaviour. Read
+the addendum for the contract that ships.
+
+**`ocx package attest` / `push` reporting.** Both gain `signed: bool`; the
+three certificate fields are omitted, not emitted empty, when `signed` is
+`false`. `push`'s existing `attestation.signed` field (already `bool` per
+D-f's `AttestationOutcome::Succeeded`) is unchanged in shape — this section
+just confirms it now has two live values instead of one always-`true` one.
+
+**Rejected alternatives.**
+
+- **An explicit `--unsigned` flag.** Rejected for breaking homogeneity with
+  `ocx package push` and `ocx package sign`, neither of which has a flag
+  meaning "don't bother with identity" — both either have a credential or they
+  fail. Attest's polarity already mirrors push exactly (sign when material is
+  present, refuse — not degrade — when it is required and absent); adding a
+  flag here would make attest the one verb in the family whose trust floor is
+  a command-line opinion rather than a fact about the environment.
+- **Silent downgrade to unsigned on an ambient-detected-but-failed
+  acquisition.** Rejected outright, not merely deferred: a CI runner that
+  detects as (say) GitHub Actions but whose OIDC token exchange then fails
+  (a misconfigured audience) has a configuration bug, not an absence of intent
+  to sign. Publishing an unsigned artifact in that case would look identical,
+  on the wire, to a job that never intended to sign at all — masking exactly
+  the failure an operator needs to see. The hard-error path (see the polarity
+  table above) is what keeps CI misconfiguration loud. A dropped
+  `id-token: write` permission is a different case — it is never detected at
+  all, so it does not reach this hard-error path; see the residual-risk note
+  under the Unsigned row above.
+
+**Scope.** The unsigned path exists only for the SBOM predicate types already
+enumerated in `oci/attest/predicate.rs`'s `sbom_artifact_type` — CycloneDX and
+both SPDX serializations. It does not generalize to provenance, vulnerability
+scans, `link`, `openvex`, or `custom`: none of those have a foreign-tool raw
+wire convention to interoperate with, and an unsigned provenance or vuln
+statement carries no attribution worth publishing at all (hence the hard
+floor above). Extending the unsigned path to a new predicate family is a new
+ADR row, not an inferred consequence of this one.
+
+## Addendum — the read-side demand/permissive contract (owner ruling 2026-08-20)
+
+The Read side draft above shipped and immediately raised the question the
+owner's original polarity ruling had left open for the *reader*: the attach
+side already resolves cleanly on "is a signing identity visible," but nothing
+said what a *reader* holding a matching `[[trust.policy]]` should get back
+when the only candidate on the subject is unsigned. The draft's
+verified-preferred-with-fallback answer — list the unsigned document anyway,
+just ranked below a verified one if both exist — meant a policy match was
+advisory: an operator who configured a policy naming who must sign could
+still be handed an unsigned document with no signal beyond a stderr line. The
+owner ruled this backwards the same day: **a policy match is either enforced
+or it is not asked for; it is never a soft preference.**
+
+**The ruling, as shipped.** `ocx package sbom` resolves one of exactly two
+modes per invocation — never a blend — via the free function
+`resolve_mode(requested: Option<VerificationMode>, policies_empty: bool)` in
+`package_sbom.rs`:
+
+- **Demand** — `--verify`, or the default whenever `--certificate-identity`
+  plus `--certificate-oidc-issuer` are given, or `resolve_policies_lenient`
+  (which consults both CLI identity flags and
+  `context.config_trust_policies()`, i.e. the operator's `[[trust.policy]]`
+  tier) resolves at least one policy. Runs the exact pipeline `verify
+  --attestation` does. **Policy-present plus unsigned-only is now a hard
+  refusal, not a listed row with a warning**: `refuse_unsigned` in
+  `oci/verify/pipeline.rs` blanket-rejects by `artifactType` alone, with zero
+  referrer-content fetch, and reports `VerifyErrorKind::UnsignedRejectedByPolicy`
+  (slug `unsigned_rejected_by_policy`, exit 77) — promoted from a `refused` row
+  to the command's own top-level error when the unsigned attach is the only
+  candidate on the subject (`best_failure()`), reported as a `refused` entry
+  beside a verified match otherwise. `--verify` with no identity source
+  anywhere — no certificate flags, no matching policy — is
+  `VerifyErrorKind::NoIdentityProvided` (`no_identity_provided`, exit 64): a
+  demand with nothing to check against is a usage error, not a silent
+  downgrade.
+- **Permissive** — `--no-verify`, or the default when neither an identity
+  flag nor a matching policy resolves. No cryptography runs at all:
+  `scan_unverified` fetches *both* raw attachments and signed bundles, and a
+  signed bundle's DSSE payload is extracted the same uninspected way a raw
+  attachment's bytes are — every entry lists `verified: false`, with no
+  signer fields, regardless of which kind it actually was. This is the mode
+  that makes `ocx package sbom` usable for a consumer who has configured no
+  Sigstore trust material at all: refusing them a read until they set one up
+  would turn the command into a wall for exactly the audience most likely to
+  need it — someone auditing a dependency they did not build.
+
+**The flag pair.** `--verify`/`--no-verify` are `overrides_with` on each
+other, last-wins — the same convention every other `--x`/`--no-x` pair in
+ocx uses (Naming both is not an error; whichever is typed later decides.)
+`--no-verify` additionally `conflicts_with_all` the certificate identity
+flags: supplying an identity while asking not to check it is contradictory,
+not overridden, so that pairing is a clap parse error regardless of order.
+
+**Consequence for mode exclusivity.** Because Demand mode refuses rather than
+downgrades, and Permissive mode never verifies anything, a single listing
+can never contain both a `verified: true` and a `verified: false` entry —
+`summary.verification` (`"verified"` or `"unverified"`) names the mode for
+the whole run, and a caller can branch on that field alone rather than
+inspecting rows. This is also why the Read-side draft's cross-trust-class
+`--output` precedence (verified preferred over unverified) is now dead code
+in practice: the two kinds no longer appear together for it to choose
+between.
+
+**Rejected alternative: serving unverified content under an active identity
+demand.** This is the Read-side draft itself, named explicitly as the
+rejected prior design. Its failure mode: a `[[trust.policy]]` pin — the
+exact mechanism an operator uses to say "packages from this repository must
+be signed by this identity" — became decorative the moment an unsigned
+attach could satisfy a read anyway, differing only by a rank and a stderr
+line easy to miss in a script that only checks the exit code. Demand mode's
+refusal restores the policy's enforcement meaning: if it matches, only a
+verified result satisfies the read, full stop.
+
 
