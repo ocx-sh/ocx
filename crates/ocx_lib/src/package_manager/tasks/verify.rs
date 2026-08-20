@@ -105,6 +105,10 @@ impl PackageManager {
             // trust-root gate. Closed by S-009/S-016 (WP10b), once
             // `--attestation` lands (WP9b).
             content: opts.content,
+            // `ocx package verify` exists to verify: there is no permissive
+            // form of it, and the pipeline's ANY-of entry point never reads
+            // this field.
+            verification: crate::oci::verify::VerificationMode::Demand,
         };
         let result = VerifyPipeline::run(opts.client, context)
             .await

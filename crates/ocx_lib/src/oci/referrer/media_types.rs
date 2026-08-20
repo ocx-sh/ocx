@@ -12,6 +12,31 @@
 /// signature referrer manifest.
 pub const SIGSTORE_BUNDLE_V03: &str = "application/vnd.dev.sigstore.bundle.v0.3+json";
 
+/// CycloneDX JSON SBOM, used as the `artifactType` on an **unsigned** SBOM
+/// referrer manifest and as its layer's `mediaType`.
+///
+/// The unsigned attach path writes the SBOM document itself as the referrer
+/// payload and types it by what it is, which is what `cosign attach sbom`,
+/// `oras attach` and `syft attest --output` all do. A signed attach keeps
+/// [`SIGSTORE_BUNDLE_V03`] instead: there the payload is a bundle, and the
+/// SBOM's own type is the DSSE `predicateType` inside it.
+pub const SBOM_CYCLONEDX: &str = "application/vnd.cyclonedx+json";
+
+/// SPDX in its JSON serialization (`spdxjson`).
+pub const SBOM_SPDX_JSON: &str = "application/spdx+json";
+
+/// SPDX in its tag-value text serialization (`spdx`).
+///
+/// The one SBOM type here that is not JSON, which is why the read path treats
+/// a referrer payload as opaque bytes rather than as a `RawValue`.
+pub const SBOM_SPDX_TEXT: &str = "text/spdx";
+
+/// Every artifact type an unsigned SBOM referrer may declare.
+///
+/// The read path filters a listing against this set and refuses a payload
+/// layer typed outside it; the attach path picks one entry per `--type`.
+pub const SBOM_ARTIFACT_TYPES: &[&str] = &[SBOM_CYCLONEDX, SBOM_SPDX_JSON, SBOM_SPDX_TEXT];
+
 /// Empty OCI config media type per the empty-descriptor convention
 /// (OCI image spec §"Guidelines for Empty Descriptors").
 pub const EMPTY_CONFIG: &str = "application/vnd.oci.empty.v1+json";

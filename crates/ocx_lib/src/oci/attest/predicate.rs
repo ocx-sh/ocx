@@ -17,6 +17,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::value::RawValue;
 
+use crate::oci::referrer::media_types::{SBOM_CYCLONEDX, SBOM_SPDX_JSON, SBOM_SPDX_TEXT};
+
 const URI_CYCLONEDX: &str = "https://cyclonedx.org/bom";
 const URI_SPDX: &str = "https://spdx.dev/Document";
 const URI_SLSA_PROVENANCE_V02: &str = "https://slsa.dev/provenance/v0.2";
@@ -186,6 +188,47 @@ pub fn is_provenance(predicate_type: &PredicateType) -> bool {
 /// The floor is attach-only.
 pub(crate) fn is_provenance_below_v1(predicate_type: &PredicateType) -> bool {
     predicate_type.uri() == URI_SLSA_PROVENANCE_V02
+}
+
+/// The `artifactType` an **unsigned** SBOM referrer carries for this predicate
+/// type, or `None` when the type is not an SBOM at all.
+///
+/// An unsigned attach has no DSSE envelope to carry a `predicateType`, so the
+/// referrer is typed by the document's own media type instead — what `cosign
+/// attach sbom`, `oras attach` and `syft` all write. `None` is the entire floor
+/// on that path: a predicate with no SBOM media type has nowhere to record what
+/// it is, and is refused rather than published as an untyped blob.
+///
+/// The one dispatch in this file that reads the **variant** rather than the
+/// resolved URI, and it has to: `spdx` and `spdxjson` share one predicateType
+/// URI and do not share a serialization, so the URI cannot tell tag-value text
+/// from JSON. A full-URI spelling of the SPDX predicate resolves to the JSON
+/// form — the one every producer in the wild writes.
+pub(crate) fn sbom_artifact_type(predicate_type: &PredicateType) -> Option<&'static str> {
+    match predicate_type {
+        PredicateType::Spdx => Some(SBOM_SPDX_TEXT),
+        PredicateType::SpdxJson => Some(SBOM_SPDX_JSON),
+        other => match other.uri() {
+            URI_CYCLONEDX => Some(SBOM_CYCLONEDX),
+            URI_SPDX => Some(SBOM_SPDX_JSON),
+            _ => None,
+        },
+    }
+}
+
+/// The `predicateType` URI an unsigned referrer's `artifactType` stands for, or
+/// `None` when it is not an SBOM type.
+///
+/// The inverse of [`sbom_artifact_type`] over the URIs it can express — not over
+/// its inputs, because the two SPDX serializations collapse onto one URI. This
+/// is what labels an unverified listing entry and what `--type` narrows against,
+/// so an unsigned entry is narrowed by exactly the value a signed one carries.
+pub(crate) fn sbom_predicate_type_uri(artifact_type: &str) -> Option<&'static str> {
+    match artifact_type {
+        SBOM_CYCLONEDX => Some(URI_CYCLONEDX),
+        SBOM_SPDX_JSON | SBOM_SPDX_TEXT => Some(URI_SPDX),
+        _ => None,
+    }
 }
 
 pub fn builder_id<'a>(predicate_type: &PredicateType, predicate: &'a serde_json::Value) -> Option<&'a str> {

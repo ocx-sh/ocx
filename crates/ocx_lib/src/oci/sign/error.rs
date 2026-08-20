@@ -230,6 +230,24 @@ pub enum SignErrorKind {
     #[error("offline attestation is not supported")]
     OfflineAttestRefused,
 
+    /// An unsigned attach was asked for a predicate type that has no SBOM
+    /// media type to carry it.
+    ///
+    /// Exit 64 (`UsageError`), the same code and the same reasoning as
+    /// [`Self::ProvenanceVersionUnsupported`]: the offending value came from
+    /// the invocation. An unsigned referrer records what it is in its
+    /// `artifactType` and nowhere else, so a provenance or custom predicate has
+    /// no place to state its type — the fix is to supply a signing identity,
+    /// not a different file.
+    #[error(
+        "unsigned attach supports SBOM predicate types only, not {predicate_type}; \
+         supply an OIDC identity to attach it as a signed attestation"
+    )]
+    UnsignedTypeUnsupported {
+        /// The predicateType the requested `--type` resolved to.
+        predicate_type: String,
+    },
+
     /// Catch-all for Fulcio/Rekor HTTP errors outside the codes above.
     ///
     /// Exit 1 (`Failure`). Carries the underlying error via `#[source]` so
@@ -256,7 +274,9 @@ impl ClassifyErrorKind for SignErrorKind {
             | Self::OfflineSignRefused
             | Self::OfflineAttestRefused
             | Self::IdentityTokenFilePermissive { .. } => ExitCode::PermissionDenied,
-            Self::InvalidEndpointUrl { .. } | Self::ProvenanceVersionUnsupported { .. } => ExitCode::UsageError,
+            Self::InvalidEndpointUrl { .. }
+            | Self::ProvenanceVersionUnsupported { .. }
+            | Self::UnsignedTypeUnsupported { .. } => ExitCode::UsageError,
             Self::Internal(_) => ExitCode::Failure,
         }
     }
@@ -281,6 +301,7 @@ impl ClassifyErrorKind for SignErrorKind {
             Self::PredicateTooLarge { .. } => "predicate_too_large",
             Self::ProvenanceVersionUnsupported { .. } => "provenance_version_unsupported",
             Self::OfflineAttestRefused => "offline_attest_refused",
+            Self::UnsignedTypeUnsupported { .. } => "unsigned_type_unsupported",
             Self::Internal(_) => "internal",
         }
     }
@@ -547,6 +568,12 @@ mod tests {
                 },
             ),
             ("offline_attest_refused", OfflineAttestRefused),
+            (
+                "unsigned_type_unsupported",
+                UnsignedTypeUnsupported {
+                    predicate_type: "https://slsa.dev/provenance/v1".into(),
+                },
+            ),
             ("internal", Internal(Box::new(std::io::Error::other("test")))),
         ];
 
@@ -559,7 +586,7 @@ mod tests {
         // against 12 arms. Closing that gap needs variant enumeration.
         assert_eq!(
             pairs.len(),
-            17,
+            18,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
 

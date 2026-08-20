@@ -389,6 +389,7 @@ impl PackagePush {
         Ok(crate::api::data::push::AttestationOutcome::Succeeded {
             referrer_digest: result.referrer_digest.to_string(),
             predicate_type: result.predicate_type,
+            signed: result.signed,
         })
     }
 }

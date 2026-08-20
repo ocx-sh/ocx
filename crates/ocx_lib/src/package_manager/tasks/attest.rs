@@ -17,7 +17,7 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use crate::oci;
-use crate::oci::attest::pipeline::{AttestContext, AttestPipeline, AttestResult};
+use crate::oci::attest::pipeline::{AttestContext, AttestMode, AttestPipeline, AttestResult};
 use crate::oci::attest::predicate::PredicateType;
 use crate::oci::sign::{DispatchingTokenProvider, KeylessSigner, SignError, SignErrorKind};
 use crate::package_manager::error::{PackageError, PackageErrorKind};
@@ -106,9 +106,21 @@ impl PackageManager {
         let signer = KeylessSigner::new();
         let trusted_hosts = self.index().trusted_hosts_for(package.registry()).to_vec();
         let token_provider = DispatchingTokenProvider::new(opts.identity_token, opts.no_tty, trusted_hosts);
+        // Polarity: sign iff a signing identity is *visible*. An override token
+        // or a detected ambient CI identity means signed, and a failure to
+        // redeem it stays a hard error — a downgrade there would publish an
+        // identity-less artifact from a job configured for OIDC, and the
+        // referrer would look attached either way. Only the total absence of
+        // signing material reaches the unsigned attach, which is where both
+        // verbs used to dead-end at exit 77.
+        let mode = match token_provider.has_signing_material() {
+            true => AttestMode::Signed,
+            false => AttestMode::Unsigned,
+        };
         let context = AttestContext {
             identifier: package,
             platform,
+            mode,
             signer: &signer,
             token_provider: &token_provider,
             predicate_type: &opts.predicate_type,

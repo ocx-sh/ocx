@@ -122,6 +122,32 @@ impl DispatchingTokenProvider {
             trusted_hosts,
         }
     }
+
+    /// Whether a signing identity is visible without acquiring one.
+    ///
+    /// Detection only — never a token exchange, never a network call, and
+    /// deliberately not the browser flow, which is a *prompt* for identity
+    /// rather than evidence of one. `ocx package attest` and
+    /// `ocx package push --sbom` use this to choose between a signed attach and
+    /// an unsigned one, so it must answer without side effects and without
+    /// committing to either.
+    ///
+    /// The polarity is one-way on purpose: `true` here means the run signs, and
+    /// a later acquisition failure is a hard error. Falling back to an unsigned
+    /// attach at that point would silently downgrade a CI job configured for
+    /// OIDC — the artifact would publish, look attached, and carry no identity.
+    pub fn has_signing_material(&self) -> bool {
+        self.override_token.is_some() || self.detect_ambient().is_some()
+    }
+
+    /// The ambient chain: the inline env-inspection provider, then the
+    /// `ambient-id` wrapper. Shared by [`Self::has_signing_material`] and
+    /// [`TokenProvider::acquire`] so the two cannot drift into disagreeing
+    /// about whether an environment has an identity.
+    fn detect_ambient(&self) -> Option<Box<dyn TokenProvider>> {
+        super::oidc_ambient_inline::InlineAmbientProvider::detect(&self.trusted_hosts)
+            .or_else(|| super::oidc_ambient::AmbientIdProvider::detect(&self.trusted_hosts))
+    }
 }
 
 #[async_trait]
@@ -138,8 +164,7 @@ impl TokenProvider for DispatchingTokenProvider {
         // 2. Ambient providers (CI). The inline env-inspection provider is the
         //    active path; the `ambient-id` wrapper is a documented v2 seam that
         //    currently reports "not applicable".
-        let ambient = super::oidc_ambient_inline::InlineAmbientProvider::detect(&self.trusted_hosts)
-            .or_else(|| super::oidc_ambient::AmbientIdProvider::detect(&self.trusted_hosts));
+        let ambient = self.detect_ambient();
         if let Some(provider) = ambient
             && let Ok(token) = provider.acquire(audience).await
         {
@@ -153,5 +178,53 @@ impl TokenProvider for DispatchingTokenProvider {
             });
         }
         super::oidc_browser::BrowserOauthProvider::new().acquire(audience).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oci::sign::oidc_ambient::AmbientIdProvider;
+    use crate::oci::sign::oidc_ambient_inline::InlineAmbientProvider;
+
+    /// An override token IS the signing material, and it short-circuits every
+    /// ambient read — so this row is deterministic wherever it runs.
+    ///
+    /// `--no-tty` is a browser-suppression policy, not evidence of identity, so
+    /// it must not move the answer in either direction.
+    #[test]
+    fn an_override_token_is_signing_material_whatever_the_tty_policy_says() {
+        for no_tty in [true, false] {
+            let provider = DispatchingTokenProvider::new(Some(Zeroizing::new("jwt".into())), no_tty, Vec::new());
+            assert!(
+                provider.has_signing_material(),
+                "an override token is an identity; no_tty={no_tty}",
+            );
+        }
+    }
+
+    /// Without an override the answer is exactly what ambient detection says,
+    /// and nothing else — in particular not the browser flow, which is a prompt
+    /// *for* an identity rather than evidence of one.
+    ///
+    /// Environment-dependent by construction: detection reads CI variables, and
+    /// this asserts against the two providers directly rather than against a
+    /// literal, so it states the contract without assuming whether the runner
+    /// is a CI configured for OIDC. Off such a runner — where this is normally
+    /// written and run — the expected value is `false`, so a
+    /// `has_signing_material` hardwired to `true` reds here.
+    #[test]
+    fn without_an_override_the_answer_is_ambient_detection_alone() {
+        let ambient = InlineAmbientProvider::detect(&[])
+            .or_else(|| AmbientIdProvider::detect(&[]))
+            .is_some();
+        for no_tty in [true, false] {
+            let provider = DispatchingTokenProvider::new(None, no_tty, Vec::new());
+            assert_eq!(
+                provider.has_signing_material(),
+                ambient,
+                "the browser flow must not count as signing material; no_tty={no_tty}",
+            );
+        }
     }
 }

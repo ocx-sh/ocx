@@ -14,6 +14,7 @@ mod lazy_mode;
 mod lazy_report;
 mod platform;
 mod pull;
+mod verification;
 mod verify;
 
 pub use bin_scan::{BinScan, BinScanMode};
@@ -29,4 +30,5 @@ pub use lazy_mode::LazyMode;
 pub use lazy_report::LazyReport;
 pub use platform::PlatformOption;
 pub use pull::Pull;
+pub use verification::Verification;
 pub use verify::{SignatureVerify, Verify};

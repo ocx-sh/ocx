@@ -29,6 +29,8 @@
 use serde_json::value::RawValue;
 use url::Url;
 
+use std::collections::BTreeMap;
+
 use super::predicate::{self, PredicateType};
 use super::statement;
 use crate::file_structure::StateStore;
@@ -43,7 +45,7 @@ use crate::oci::referrer::media_types::{
 };
 use crate::oci::sign::bundle::BUNDLE_V03_MEDIA_TYPE;
 use crate::oci::sign::{SignError, SignErrorKind, Signer, TokenProvider};
-use crate::oci::{Descriptor, Digest, Identifier, OCI_IMAGE_MEDIA_TYPE, Platform, native};
+use crate::oci::{Algorithm, Descriptor, Digest, Identifier, OCI_IMAGE_MEDIA_TYPE, Platform, native};
 
 /// Manifest media types accepted when fetching the per-platform target.
 const ACCEPTED_MANIFEST_TYPES: &[&str] = &[
@@ -51,12 +53,38 @@ const ACCEPTED_MANIFEST_TYPES: &[&str] = &[
     "application/vnd.docker.distribution.manifest.v2+json",
 ];
 
+/// Whether the attach publishes a signed bundle or the raw document.
+///
+/// Chosen by the caller from what signing material is *visible*
+/// ([`DispatchingTokenProvider::has_signing_material`](crate::oci::sign::DispatchingTokenProvider::has_signing_material)),
+/// never from whether acquiring one succeeded: an override token or a detected
+/// ambient CI identity means [`Self::Signed`], and a failure to redeem it is a
+/// hard error. Downgrading there would publish an identity-less artifact from a
+/// job configured for OIDC, and the referrer would look attached either way.
+///
+/// [`Self::Unsigned`] is reached only when there is no signing intent at all —
+/// which is where `ocx package attest` and `ocx package push --sbom` used to
+/// exit 77 with `no_ambient_no_tty`. `ocx package sign` has no unsigned form and
+/// still refuses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttestMode {
+    /// DSSE-sign the in-toto Statement and publish it as a Sigstore bundle v0.3
+    /// referrer.
+    Signed,
+    /// Publish the predicate document itself as the referrer payload, typed by
+    /// its own SBOM media type. No Fulcio, no Rekor, no DSSE.
+    Unsigned,
+}
+
 /// Context passed into [`AttestPipeline::run`] — all external dependencies.
 pub struct AttestContext<'a> {
     /// Target identifier (`registry/repo:tag[@digest]`).
     pub identifier: &'a Identifier,
     /// Platform selector for multi-platform manifests.
     pub platform: &'a Platform,
+    /// Whether to sign. Both dependencies below are read in
+    /// [`AttestMode::Signed`] only.
+    pub mode: AttestMode,
     /// Signer producing the DSSE-enveloped bundle.
     pub signer: &'a dyn Signer,
     /// OIDC token provider (override → ambient → browser dispatch).
@@ -88,16 +116,36 @@ pub struct AttestResult {
     /// The RESOLVED predicateType URI (D-c) — echoed in the report so alias
     /// resolution is visible rather than surprising.
     pub predicate_type: String,
-    /// Digest of the pushed Sigstore bundle blob.
+    /// Digest of the pushed referrer payload blob: the Sigstore bundle under
+    /// [`AttestMode::Signed`], the SBOM document itself under
+    /// [`AttestMode::Unsigned`].
     pub bundle_digest: Digest,
     /// Digest of the pushed referrer manifest.
     pub referrer_digest: Digest,
     /// Full OCI descriptor of the pushed referrer manifest.
     pub referrer_descriptor: Descriptor,
+    /// Whether the referrer carries a signature. `false` means the document was
+    /// attached as-is, with no identity behind it.
+    pub signed: bool,
     /// Cert SAN (identity) that signed the Statement — the OIDC subject.
-    pub certificate_identity: String,
+    /// `None` on an unsigned attach, where no certificate was ever issued.
+    pub certificate_identity: Option<String>,
     /// Cert issuer (`--certificate-oidc-issuer` comparand) — the OIDC issuer.
-    pub certificate_oidc_issuer: String,
+    /// `None` on an unsigned attach.
+    pub certificate_oidc_issuer: Option<String>,
+}
+
+/// The referrer's single payload layer: the bytes, their digest, and what
+/// types them.
+///
+/// Grouped rather than passed as three positionals so [`AttestPipeline::push_referrer`]
+/// stays under the argument limit and so the digest cannot drift from the bytes
+/// it was computed over — the digest is the blob's registry address, and a
+/// swapped pair of adjacent arguments would type-check.
+struct ReferrerPayload {
+    bytes: Vec<u8>,
+    digest: Digest,
+    media_type: &'static str,
 }
 
 /// Attest pipeline entry point.
@@ -145,6 +193,16 @@ impl AttestPipeline {
         //    Dispatch is on the RESOLVED URI, so a full-URI `--type` spelling
         //    hits the floor exactly as the alias does.
         let predicate_type = ctx.predicate_type.uri().to_owned();
+        // 1a. The unsigned floor, ahead of the provenance one because in
+        //     unsigned mode it is the more specific answer: without a DSSE
+        //     envelope the referrer's `artifactType` is the only place the
+        //     document's type can be recorded, so a type with no SBOM media
+        //     type cannot be attached at all — at any provenance version.
+        //     Pure function of `--type` and the mode, so it costs no network
+        //     and, like the floor below, no credential.
+        if ctx.mode == AttestMode::Unsigned && predicate::sbom_artifact_type(ctx.predicate_type).is_none() {
+            return Err(SignErrorKind::UnsignedTypeUnsupported { predicate_type });
+        }
         if predicate::is_provenance_below_v1(ctx.predicate_type) {
             return Err(SignErrorKind::ProvenanceVersionUnsupported {
                 resolved: predicate_type,
@@ -153,16 +211,24 @@ impl AttestPipeline {
 
         // 2. SSRF floor for the trust services (CWE-918). The CLI boundary
         //    validated these URLs as *strings*; this is where we find out where
-        //    they actually resolve, before anything dials them. Attesting
+        //    they actually resolve, before anything dials them. A signed attach
         //    always reaches Fulcio and Rekor, so both are guarded.
-        let trusted = ctx.index.trusted_hosts_for(ctx.identifier.registry());
-        for (url, flag) in [(ctx.fulcio_url, "--fulcio-url"), (ctx.rekor_url, "--rekor-url")] {
-            crate::oci::endpoint::resolve_sigstore_url(url, trusted)
-                .await
-                .map_err(|error| SignErrorKind::InvalidEndpointUrl {
-                    endpoint: flag.into(),
-                    reason: crate::oci::endpoint::UrlRejection::from(error),
-                })?;
+        //
+        //    Skipped in unsigned mode, and that is not a relaxation: the
+        //    unsigned tail dials neither service, so resolving them would make
+        //    an attach that touches no Sigstore endpoint depend on DNS for two
+        //    hosts it will never open a socket to. The registry-side dial guard
+        //    below is unconditional.
+        if ctx.mode == AttestMode::Signed {
+            let trusted = ctx.index.trusted_hosts_for(ctx.identifier.registry());
+            for (url, flag) in [(ctx.fulcio_url, "--fulcio-url"), (ctx.rekor_url, "--rekor-url")] {
+                crate::oci::endpoint::resolve_sigstore_url(url, trusted)
+                    .await
+                    .map_err(|error| SignErrorKind::InvalidEndpointUrl {
+                        endpoint: flag.into(),
+                        reason: crate::oci::endpoint::UrlRejection::from(error),
+                    })?;
+            }
         }
 
         let transport = client.transport();
@@ -236,91 +302,178 @@ impl AttestPipeline {
         //    to. A mirror's referrers support says nothing about the upstream's.
         Self::ensure_referrers_supported(transport, &ctx, &write_image, &subject_digest).await?;
 
-        // 5. Acquire the OIDC token.
-        let token = ctx.token_provider.acquire("sigstore").await?;
-
-        // 6. Build the in-toto Statement and sign it as a DSSE envelope. One
-        //    instant serves both the signed cosign wrapper and the `created`
-        //    annotation below, so a `SOURCE_DATE_EPOCH` run stamps the same
-        //    value in both places.
-        let now = bundle_now();
-        let statement = statement::build(
-            physical.repository(),
-            &subject_digest,
-            ctx.predicate_type,
-            ctx.predicate,
-            now,
-        )?;
-        let statement_bytes = serde_json::to_vec(&statement).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
-        let bundle = ctx
-            .signer
-            .sign_dsse(&statement_bytes, &token, ctx.fulcio_url, ctx.rekor_url)
-            .await?;
-
-        // 7. Push the referrer's blobs: the OCI empty-config blob (the
-        //    manifest's `config` descriptor points at it) and the bundle blob
-        //    (the `layers[0]` payload). A spec-strict registry rejects the
-        //    manifest with MANIFEST_INVALID if either is absent, so both land
-        //    before the manifest PUT.
-        let no_progress: std::sync::Arc<dyn Fn(u64) + Send + Sync> = std::sync::Arc::new(|_| ());
-        let empty_config_digest =
-            Digest::try_from(EMPTY_CONFIG_DIGEST).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
-        transport
-            .push_blob(
-                &write_image,
-                EMPTY_CONFIG_PAYLOAD.to_vec(),
-                &empty_config_digest,
-                no_progress.clone(),
-            )
-            .await
-            .map_err(map_client_error)?;
-        transport
-            .push_blob(&write_image, bundle.bytes.clone(), &bundle.digest, no_progress)
-            .await
-            .map_err(map_client_error)?;
-
-        // 8. Build + push the referrer manifest (subject -> target).
+        // 5. Build the subject descriptor both modes attach to. Its `size` is
+        //    the length of the bytes bound to the resolved digest above.
         let subject_descriptor = Descriptor {
             media_type: OCI_IMAGE_MEDIA_TYPE.to_string(),
             digest: subject_digest.to_string(),
             size: subject_bytes.len() as i64,
             ..Descriptor::default()
         };
-        let bundle_descriptor = Descriptor {
-            media_type: BUNDLE_V03_MEDIA_TYPE.to_string(),
-            digest: bundle.digest.to_string(),
-            size: bundle.bytes.len() as i64,
+
+        // 6. Publish. The two modes diverge here and only here: what the
+        //    referrer's one layer holds, what types it, and whether the run
+        //    touches a credential at all.
+        match ctx.mode {
+            AttestMode::Signed => {
+                // Acquire the OIDC token. A failure is terminal: the mode was
+                // chosen because signing material was visible, and falling back
+                // to an unsigned attach would publish an identity-less artifact
+                // from a job configured for OIDC.
+                let token = ctx.token_provider.acquire("sigstore").await?;
+
+                // Build the in-toto Statement and sign it as a DSSE envelope.
+                // One instant serves both the signed cosign wrapper and the
+                // `created` annotation below, so a `SOURCE_DATE_EPOCH` run
+                // stamps the same value in both places.
+                let now = bundle_now();
+                let statement = statement::build(
+                    physical.repository(),
+                    &subject_digest,
+                    ctx.predicate_type,
+                    ctx.predicate,
+                    now,
+                )?;
+                let statement_bytes =
+                    serde_json::to_vec(&statement).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+                let bundle = ctx
+                    .signer
+                    .sign_dsse(&statement_bytes, &token, ctx.fulcio_url, ctx.rekor_url)
+                    .await?;
+
+                // cosign parity (ADR D1): an attestation referrer carries the
+                // same `artifactType` a signature does and is told apart by
+                // `content: dsse-envelope`, with the RESOLVED predicateType as
+                // the third annotation. The set is a one-way door — the
+                // manifest's SHA-256 *is* the referrer's registry address.
+                let annotations = bundle_annotations(&bundle_created(now), BUNDLE_CONTENT_DSSE, Some(&predicate_type));
+                let payload = ReferrerPayload {
+                    digest: bundle.digest.clone(),
+                    bytes: bundle.bytes,
+                    media_type: BUNDLE_V03_MEDIA_TYPE,
+                };
+                let (referrer_digest, referrer_descriptor) = Self::push_referrer(
+                    transport,
+                    &write_image,
+                    &subject_digest,
+                    subject_descriptor,
+                    SIGSTORE_BUNDLE_V03,
+                    payload,
+                    Some(annotations),
+                )
+                .await?;
+
+                Ok(AttestResult {
+                    subject_digest,
+                    predicate_type,
+                    bundle_digest: bundle.digest,
+                    referrer_digest,
+                    referrer_descriptor,
+                    signed: true,
+                    certificate_identity: Some(bundle.certificate_identity),
+                    certificate_oidc_issuer: Some(bundle.certificate_oidc_issuer),
+                })
+            }
+            AttestMode::Unsigned => {
+                // `Some` by construction — step 1a returned early otherwise,
+                // and nothing since could have changed `--type`. Returned
+                // rather than asserted: a panic in library code is never the
+                // better half of that trade.
+                let artifact_type = predicate::sbom_artifact_type(ctx.predicate_type).ok_or_else(|| {
+                    SignErrorKind::UnsignedTypeUnsupported {
+                        predicate_type: predicate_type.clone(),
+                    }
+                })?;
+
+                // The document travels verbatim, exactly as the signed path
+                // splices it into the Statement: whatever whitespace, key order
+                // and number spelling the predicate file held is what a reader
+                // gets back, and its SHA-256 is what addresses the blob.
+                let document = ctx.predicate.get().as_bytes().to_vec();
+                let payload = ReferrerPayload {
+                    digest: Algorithm::Sha256.hash(&document),
+                    bytes: document,
+                    media_type: artifact_type,
+                };
+                let payload_digest = payload.digest.clone();
+                // No annotations at all. The three `dev.sigstore.bundle.*` keys
+                // describe a bundle this referrer does not carry, and writing
+                // them would make an unsigned document look like a signed one
+                // in a listing — the exact confusion the artifactType split
+                // exists to prevent. `cosign attach sbom` writes none either.
+                let (referrer_digest, referrer_descriptor) = Self::push_referrer(
+                    transport,
+                    &write_image,
+                    &subject_digest,
+                    subject_descriptor,
+                    artifact_type,
+                    payload,
+                    None,
+                )
+                .await?;
+
+                Ok(AttestResult {
+                    subject_digest,
+                    predicate_type,
+                    bundle_digest: payload_digest,
+                    referrer_digest,
+                    referrer_descriptor,
+                    signed: false,
+                    certificate_identity: None,
+                    certificate_oidc_issuer: None,
+                })
+            }
+        }
+    }
+
+    /// Push the referrer's blobs, then its manifest, and return the manifest's
+    /// digest and descriptor.
+    ///
+    /// Both modes land here: a spec-strict registry (zot) rejects the manifest
+    /// with `MANIFEST_INVALID` unless the OCI empty-config blob and the payload
+    /// blob are both already present, so both are pushed before the manifest
+    /// PUT. What differs between the modes is only what the payload *is*.
+    async fn push_referrer(
+        transport: &dyn OciTransport,
+        write_image: &native::Reference,
+        subject_digest: &Digest,
+        subject: Descriptor,
+        artifact_type: &str,
+        payload: ReferrerPayload,
+        annotations: Option<BTreeMap<String, String>>,
+    ) -> Result<(Digest, Descriptor), SignErrorKind> {
+        let no_progress: std::sync::Arc<dyn Fn(u64) + Send + Sync> = std::sync::Arc::new(|_| ());
+        let empty_config_digest =
+            Digest::try_from(EMPTY_CONFIG_DIGEST).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+        transport
+            .push_blob(
+                write_image,
+                EMPTY_CONFIG_PAYLOAD.to_vec(),
+                &empty_config_digest,
+                no_progress.clone(),
+            )
+            .await
+            .map_err(map_client_error)?;
+        let payload_descriptor = Descriptor {
+            media_type: payload.media_type.to_string(),
+            digest: payload.digest.to_string(),
+            size: payload.bytes.len() as i64,
             ..Descriptor::default()
         };
-        // cosign parity (ADR D1): an attestation referrer carries the same
-        // `artifactType` a signature does and is told apart by
-        // `content: dsse-envelope`, with the RESOLVED predicateType as the
-        // third annotation. The set is a one-way door — the manifest's SHA-256
-        // *is* the referrer's registry address.
-        let annotations = bundle_annotations(&bundle_created(now), BUNDLE_CONTENT_DSSE, Some(&predicate_type));
-        let manifest = ReferrerManifest::build(
-            subject_descriptor,
-            SIGSTORE_BUNDLE_V03,
-            bundle_descriptor,
-            Some(annotations),
-        );
+        transport
+            .push_blob(write_image, payload.bytes, &payload.digest, no_progress)
+            .await
+            .map_err(map_client_error)?;
+
+        let manifest = ReferrerManifest::build(subject, artifact_type, payload_descriptor, annotations);
         let manifest_bytes = manifest.to_canonical_json()?;
         let referrer_descriptor = transport
-            .push_referrer_manifest(&write_image, &subject_digest, &manifest_bytes, OCI_IMAGE_MEDIA_TYPE)
+            .push_referrer_manifest(write_image, subject_digest, &manifest_bytes, OCI_IMAGE_MEDIA_TYPE)
             .await
             .map_err(map_client_error)?;
         let referrer_digest =
             Digest::try_from(referrer_descriptor.digest.as_str()).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
-
-        Ok(AttestResult {
-            subject_digest,
-            predicate_type,
-            bundle_digest: bundle.digest,
-            referrer_digest,
-            referrer_descriptor,
-            certificate_identity: bundle.certificate_identity,
-            certificate_oidc_issuer: bundle.certificate_oidc_issuer,
-        })
+        Ok((referrer_digest, referrer_descriptor))
     }
 
     /// Confirm the registry serves the OCI Referrers API, consulting (and
@@ -609,16 +762,22 @@ mod tests {
     }
 
     /// Counts acquisitions, so a refusal test can assert the credential path
-    /// was never entered — not merely that no request was sent.
+    /// was never entered — not merely that no request was sent. `fails` makes
+    /// it a CI whose OIDC configuration is broken: detection said an identity
+    /// was there, redeeming it does not work.
     #[derive(Clone, Default)]
     struct CountingTokenProvider {
         acquisitions: Arc<Mutex<usize>>,
+        fails: bool,
     }
 
     #[async_trait::async_trait]
     impl TokenProvider for CountingTokenProvider {
         async fn acquire(&self, _: &str) -> Result<OidcToken, SignErrorKind> {
             *self.acquisitions.lock().expect("counter lock") += 1;
+            if self.fails {
+                return Err(SignErrorKind::OidcTokenRejected);
+            }
             Ok(OidcToken::new(jwt_with_payload(
                 &serde_json::json!({ "sub": "me@example.com", "iss": "https://issuer.example" }),
             )))
@@ -691,16 +850,40 @@ mod tests {
     /// `predicate` is the verbatim JSON text the caller's `--predicate` file
     /// would have held.
     async fn drive_attest(predicate_type: PredicateType, predicate: &str, offline: bool) -> Run {
-        drive_attest_with(RecordingTransport::default(), predicate_type, predicate, offline).await
+        drive_attest_with(
+            RecordingTransport::default(),
+            AttestMode::Signed,
+            predicate_type,
+            predicate,
+            offline,
+            false,
+        )
+        .await
     }
 
-    /// `drive_attest` with the transport injected, so a test can drive one that
-    /// misbehaves.
+    /// `drive_attest` on the unsigned tail: no signer, no token, no Sigstore.
+    async fn drive_unsigned(predicate_type: PredicateType, predicate: &str) -> Run {
+        drive_attest_with(
+            RecordingTransport::default(),
+            AttestMode::Unsigned,
+            predicate_type,
+            predicate,
+            false,
+            false,
+        )
+        .await
+    }
+
+    /// `drive_attest` with the transport, the mode and the credential outcome
+    /// injected, so a test can drive a misbehaving transport, the unsigned
+    /// tail, or a signed run whose identity cannot be redeemed.
     async fn drive_attest_with(
         transport: RecordingTransport,
+        mode: AttestMode,
         predicate_type: PredicateType,
         predicate: &str,
         offline: bool,
+        token_fails: bool,
     ) -> Run {
         let logical = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
         // A public IP literal, not a name: the pipeline resolves the physical
@@ -719,7 +902,10 @@ mod tests {
         let rekor_url = Url::parse("http://127.0.0.1:3000").expect("rekor url");
         let platform = Platform::any();
         let signer = RecordingSigner::default();
-        let token_provider = CountingTokenProvider::default();
+        let token_provider = CountingTokenProvider {
+            fails: token_fails,
+            ..CountingTokenProvider::default()
+        };
         let predicate: Box<RawValue> = serde_json::from_str(predicate).expect("predicate is JSON");
 
         let result = AttestPipeline::run(
@@ -727,6 +913,7 @@ mod tests {
             AttestContext {
                 identifier: &logical,
                 platform: &platform,
+                mode,
                 signer: &signer,
                 token_provider: &token_provider,
                 predicate_type: &predicate_type,
@@ -1042,7 +1229,15 @@ mod tests {
             served_subject_digest: Some(Algorithm::Sha256.hash(b"a different manifest").to_string()),
             ..RecordingTransport::default()
         };
-        let run = drive_attest_with(transport, PredicateType::CycloneDx, PREDICATE, false).await;
+        let run = drive_attest_with(
+            transport,
+            AttestMode::Signed,
+            PredicateType::CycloneDx,
+            PREDICATE,
+            false,
+            false,
+        )
+        .await;
 
         let Err(error) = run.result else {
             panic!("attest must refuse a subject manifest served under the wrong digest");
@@ -1084,6 +1279,236 @@ mod tests {
         assert!(
             calls.iter().all(|call| call.ends_with(":8.8.8.8")),
             "no transport call may target the logical index host, got: {calls:?}",
+        );
+    }
+
+    // ── The unsigned tail ──────────────────────────────────────────────────
+
+    /// The wire shape of an unsigned attach: the SBOM document *is* the
+    /// referrer payload, and the `artifactType` is what says so. A signed
+    /// attach records the document's type in the DSSE `predicateType` inside a
+    /// bundle; with no bundle there is nowhere else to put it, so the
+    /// artifactType and the layer mediaType carry it and must agree.
+    #[tokio::test]
+    async fn an_unsigned_attach_publishes_the_document_typed_by_its_own_media_type() {
+        let run = drive_unsigned(PredicateType::CycloneDx, PREDICATE).await;
+        let result = run.result.expect("an unsigned attach needs no credential");
+        let manifest = run.transport.pushed_referrer();
+
+        assert_eq!(
+            manifest["artifactType"].as_str(),
+            Some("application/vnd.cyclonedx+json"),
+            "an unsigned SBOM referrer is typed by the document, not by a bundle",
+        );
+        assert_eq!(
+            manifest["layers"][0]["mediaType"].as_str(),
+            Some("application/vnd.cyclonedx+json"),
+            "the payload layer carries the same type the referrer advertises",
+        );
+        assert_eq!(
+            manifest["layers"][0]["digest"].as_str(),
+            Some(Algorithm::Sha256.hash(PREDICATE.as_bytes()).to_string().as_str()),
+            "the layer digest addresses the verbatim predicate bytes",
+        );
+        assert_eq!(
+            manifest["subject"]["digest"].as_str(),
+            Some(subject_digest().to_string().as_str()),
+        );
+        assert!(!result.signed, "nothing signed this");
+        assert_eq!(result.certificate_identity, None, "no certificate was ever issued");
+        assert_eq!(result.certificate_oidc_issuer, None);
+        assert_eq!(result.predicate_type, "https://cyclonedx.org/bom");
+    }
+
+    /// No `dev.sigstore.*` keys, and no `annotations` object at all.
+    ///
+    /// The three bundle annotations describe a bundle this referrer does not
+    /// carry, so writing them would make an unsigned document indistinguishable
+    /// from a signed one in a listing — which is the confusion the artifactType
+    /// split exists to prevent. Absence is asserted as absence of the *key*,
+    /// because the manifest's SHA-256 is the referrer's registry address and
+    /// `"annotations": null` is different bytes.
+    #[tokio::test]
+    async fn an_unsigned_referrer_carries_no_sigstore_annotations_at_all() {
+        let run = drive_unsigned(PredicateType::CycloneDx, PREDICATE).await;
+        run.result.expect("run succeeded");
+        let manifest = run.transport.pushed_referrer();
+
+        assert!(
+            !manifest
+                .as_object()
+                .expect("manifest is an object")
+                .contains_key("annotations"),
+            "an unsigned referrer writes no annotations key: {manifest}",
+        );
+        // The positive control, so this cannot pass by annotations having been
+        // dropped everywhere: the signed tail still writes all three.
+        let signed = drive_ok(PredicateType::CycloneDx).await;
+        assert_eq!(annotations(&signed.transport.pushed_referrer()).len(), 3);
+    }
+
+    /// An unsigned attach touches neither the credential path nor the signer.
+    /// It is not merely that no Sigstore request is sent — the token is never
+    /// resolved, so a run with no identity available cannot fail on one.
+    #[tokio::test]
+    async fn an_unsigned_attach_resolves_no_token_and_signs_nothing() {
+        let run = drive_unsigned(PredicateType::CycloneDx, PREDICATE).await;
+        run.result.expect("run succeeded");
+
+        assert_eq!(run.acquisitions, 0, "the unsigned tail must not resolve a token");
+        assert!(
+            run.signer.signed.lock().expect("recorder lock").is_empty(),
+            "the unsigned tail must not sign anything",
+        );
+        // The blobs still land: a spec-strict registry rejects the manifest
+        // unless the empty config and the payload are both already present.
+        let pushes = run
+            .transport
+            .calls()
+            .into_iter()
+            .filter(|call| call.starts_with("push_blob"))
+            .count();
+        assert_eq!(pushes, 2, "the empty config and the document are both pushed");
+    }
+
+    /// The predicate travels verbatim into the blob, exactly as the signed path
+    /// splices it into the Statement. `--output` on the read side promises the
+    /// bytes back unchanged, and a re-serialization here would break that
+    /// silently — the digest would still be self-consistent.
+    #[tokio::test]
+    async fn an_unsigned_attach_pushes_the_predicate_bytes_verbatim() {
+        // Spelled so a `Value` round-trip is observable: a trailing-zero float
+        // and a non-alphabetical key order.
+        const SPELLED: &str = r#"{"zeta":1,"alpha":1.50}"#;
+        let run = drive_unsigned(PredicateType::CycloneDx, SPELLED).await;
+        let result = run.result.expect("run succeeded");
+
+        assert_eq!(
+            result.bundle_digest,
+            Algorithm::Sha256.hash(SPELLED.as_bytes()),
+            "the payload digest must address the caller's own bytes, not a re-serialization",
+        );
+    }
+
+    /// `spdx` and `spdxjson` share one predicateType URI and do not share a
+    /// serialization, so the unsigned map is the one dispatch that reads the
+    /// variant. Both rows are needed: a map that answered `application/spdx+json`
+    /// for everything would pass a single-row test.
+    #[tokio::test]
+    async fn the_two_spdx_spellings_attach_under_different_media_types() {
+        let cases = [
+            (PredicateType::Spdx, "text/spdx"),
+            (PredicateType::SpdxJson, "application/spdx+json"),
+            (PredicateType::CycloneDx, "application/vnd.cyclonedx+json"),
+        ];
+        for (predicate_type, expected) in cases {
+            let run = drive_unsigned(predicate_type.clone(), PREDICATE).await;
+            run.result.expect("run succeeded");
+            let manifest = run.transport.pushed_referrer();
+            assert_eq!(
+                manifest["artifactType"].as_str(),
+                Some(expected),
+                "{predicate_type:?} must attach as {expected}",
+            );
+        }
+    }
+
+    /// The unsigned floor: a predicate type with no SBOM media type has nowhere
+    /// to record what it is, so it cannot be attached unsigned at all. 64, not
+    /// 65 — the offending value came from the invocation, and the fix is to
+    /// supply an identity rather than a different file.
+    #[tokio::test]
+    async fn an_unsigned_attach_refuses_every_predicate_type_that_is_not_an_sbom() {
+        let refused = [
+            PredicateType::SlsaProvenance,
+            PredicateType::SlsaProvenance1,
+            PredicateType::Custom,
+            PredicateType::Vuln,
+            PredicateType::Uri("https://example.test/whatever".to_string()),
+        ];
+        for predicate_type in refused {
+            let run = drive_unsigned(predicate_type.clone(), PREDICATE).await;
+            let Err(error) = run.result else {
+                panic!("{predicate_type:?} has no SBOM media type and must be refused");
+            };
+            let SignErrorKind::UnsignedTypeUnsupported { predicate_type: named } = &error.kind else {
+                panic!("expected the unsigned floor for {predicate_type:?}, got: {error}");
+            };
+            assert_eq!(named, predicate_type.uri(), "the refusal names the resolved type");
+            assert_eq!(classify_error(&error), ExitCode::UsageError, "for {predicate_type:?}");
+            assert!(
+                error.kind.to_string().contains("supply an OIDC identity"),
+                "the refusal must name the fix, got: {}",
+                error.kind,
+            );
+            assert!(
+                run.transport.calls().is_empty(),
+                "the floor must refuse before any traffic, got: {:?}",
+                run.transport.calls(),
+            );
+        }
+    }
+
+    /// The converse half, and the reason the floor cannot simply refuse
+    /// everything: every SBOM spelling passes it.
+    #[tokio::test]
+    async fn an_unsigned_attach_accepts_every_sbom_predicate_type() {
+        for predicate_type in [PredicateType::CycloneDx, PredicateType::Spdx, PredicateType::SpdxJson] {
+            let run = drive_unsigned(predicate_type.clone(), PREDICATE).await;
+            assert!(
+                run.result.is_ok(),
+                "{predicate_type:?} is an SBOM type and must attach, got: {:?}",
+                run.result.err().map(|e| e.to_string()),
+            );
+        }
+    }
+
+    /// The floor is scoped to the unsigned mode: a signed attach still accepts
+    /// the same non-SBOM types it always did. Without this the floor could have
+    /// been written mode-blind and both this file's provenance tests and the
+    /// one above would still pass.
+    #[tokio::test]
+    async fn the_unsigned_floor_does_not_reach_a_signed_attach() {
+        for predicate_type in [PredicateType::SlsaProvenance1, PredicateType::Custom] {
+            let run = drive_attest(predicate_type.clone(), PREDICATE, false).await;
+            assert!(
+                run.result.is_ok(),
+                "{predicate_type:?} must still attach when signed, got: {:?}",
+                run.result.err().map(|e| e.to_string()),
+            );
+        }
+    }
+
+    /// No silent downgrade. A run that chose the signed mode did so because a
+    /// signing identity was visible; if redeeming it fails, the attach fails.
+    /// Falling back to unsigned here would publish an identity-less artifact
+    /// from a job configured for OIDC, and the referrer would look attached
+    /// either way — the failure would surface only when someone tried to verify
+    /// it, long after the bytes were immutable.
+    #[tokio::test]
+    async fn a_signed_attach_whose_identity_cannot_be_redeemed_publishes_nothing() {
+        let run = drive_attest_with(
+            RecordingTransport::default(),
+            AttestMode::Signed,
+            PredicateType::CycloneDx,
+            PREDICATE,
+            false,
+            true,
+        )
+        .await;
+
+        let Err(error) = run.result else {
+            panic!("an unredeemable identity must fail the attach, never downgrade it");
+        };
+        assert!(
+            matches!(error.kind, SignErrorKind::OidcTokenRejected),
+            "the credential failure must surface as itself, got: {error}",
+        );
+        assert_eq!(run.acquisitions, 1, "the run did try to redeem the identity");
+        let calls = run.transport.calls();
+        assert!(
+            !calls.iter().any(|call| call.starts_with("push_")),
+            "nothing may be published after the identity failed, got: {calls:?}",
         );
     }
 

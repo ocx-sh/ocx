@@ -38,7 +38,8 @@ mod tlog;
 pub use dsse::VerifiedAttestation;
 pub use error::{VerifyError, VerifyErrorKind};
 pub use pipeline::{
-    AttestationMatch, AttestationScan, RefusedCandidate, VerifyContentMode, VerifyContext, VerifyPipeline, VerifyResult,
+    AttestationMatch, AttestationScan, RefusedCandidate, UnverifiedSbom, VerificationMode, VerifyContentMode,
+    VerifyContext, VerifyPipeline, VerifyResult,
 };
 pub use trust_cache::TrustRootCache;
 pub use trust_resolve::resolve_trust_root;

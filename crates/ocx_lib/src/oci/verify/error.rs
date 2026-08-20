@@ -105,6 +105,19 @@ pub enum VerifyErrorKind {
     #[error("certificate OIDC issuer mismatch")]
     IssuerMismatch,
 
+    /// An SBOM was attached with no signature, and this run demands one.
+    ///
+    /// Exit 77 (`PermissionDenied`), the same code as an identity mismatch and
+    /// for the same reason: the policy names who must have signed, and a raw
+    /// attachment has no signer at all. `DataError` would be wrong — the
+    /// document may be perfectly well-formed; it is the trust class that the
+    /// policy refuses.
+    #[error(
+        "SBOM referrer is attached without a signature, and verification is required; \
+         pass --no-verify to list it unverified"
+    )]
+    UnsignedRejectedByPolicy,
+
     /// Cert chain does not verify against TUF root.
     ///
     /// Exit 65 (`DataError`). TUF root out of date, or cert is forged.
@@ -427,6 +440,25 @@ pub enum VerifyErrorKind {
         not_after: String,
     },
 
+    /// An **unsigned** SBOM referrer's payload layer declared a media type
+    /// outside the SBOM set.
+    ///
+    /// Exit 65 (`DataError`). An unsigned referrer records what it carries in
+    /// its `artifactType` and its layer's `mediaType`, and nothing signs either
+    /// — so a layer typed outside the set is the one structural claim the read
+    /// path can check, and an unreadable blob under an SBOM `artifactType` is
+    /// refused rather than listed as an SBOM.
+    ///
+    /// Distinct from [`Self::PayloadTypeUnsupported`], which is the DSSE
+    /// envelope's `payloadType` inside a *signed* bundle: same shape of
+    /// complaint, different document, and a script that conflated them would
+    /// draw the wrong conclusion about whether a signature was involved.
+    #[error("unsupported SBOM payload media type: {media_type}")]
+    SbomMediaTypeUnsupported {
+        /// The layer `mediaType` the referrer declared.
+        media_type: String,
+    },
+
     /// The attestation envelope exceeded `MAX_ATTESTATION_ENVELOPE_BYTES`.
     ///
     /// Exit 65 (`DataError`).
@@ -589,7 +621,9 @@ impl ClassifyErrorKind for VerifyErrorKind {
             | Self::NoUsableBundle
             | Self::TargetNotFound { .. }
             | Self::AttestationNotFound => ExitCode::NotFound,
-            Self::IdentityMismatch | Self::IssuerMismatch => ExitCode::PermissionDenied,
+            Self::IdentityMismatch | Self::IssuerMismatch | Self::UnsignedRejectedByPolicy => {
+                ExitCode::PermissionDenied
+            }
             Self::CertChainInvalid
             | Self::SignatureInvalid
             | Self::SubjectDigestMismatch
@@ -619,6 +653,7 @@ impl ClassifyErrorKind for VerifyErrorKind {
             | Self::UnsupportedTlogEntryKind { .. }
             | Self::TlogBindingMismatch
             | Self::CertificateValidityWindow { .. }
+            | Self::SbomMediaTypeUnsupported { .. }
             | Self::AttestationTooLarge { .. }
             | Self::AttestationPayloadTooLarge { .. }
             | Self::TooManyAttestations { .. }
@@ -643,6 +678,7 @@ impl ClassifyErrorKind for VerifyErrorKind {
             Self::NoUsableBundle => "no_usable_bundle",
             Self::CandidateLimitExhausted { .. } => "candidate_limit_exhausted",
             Self::IdentityMismatch => "identity_mismatch",
+            Self::UnsignedRejectedByPolicy => "unsigned_rejected_by_policy",
             Self::IssuerMismatch => "issuer_mismatch",
             Self::CertChainInvalid => "cert_chain_invalid",
             Self::SignatureInvalid => "signature_invalid",
@@ -673,6 +709,7 @@ impl ClassifyErrorKind for VerifyErrorKind {
             Self::UnsupportedTlogEntryKind { .. } => "unsupported_tlog_entry_kind",
             Self::TlogBindingMismatch => "tlog_binding_mismatch",
             Self::CertificateValidityWindow { .. } => "certificate_validity_window",
+            Self::SbomMediaTypeUnsupported { .. } => "sbom_media_type_unsupported",
             Self::AttestationTooLarge { .. } => "attestation_too_large",
             Self::AttestationPayloadTooLarge { .. } => "attestation_payload_too_large",
             Self::TooManyAttestations { .. } => "too_many_attestations",
@@ -732,6 +769,14 @@ mod tests {
             ExitCode::PermissionDenied
         );
         assert_eq!(VerifyErrorKind::IssuerMismatch.exit_code(), ExitCode::PermissionDenied);
+        // An unsigned attachment under a policy that demands a signature is
+        // the same class of refusal as the wrong signer, and scripts branch on
+        // 77 for exactly that: "the artifact exists, the trust decision said
+        // no". 79 would tell them to go looking for an attach that happened.
+        assert_eq!(
+            VerifyErrorKind::UnsignedRejectedByPolicy.exit_code(),
+            ExitCode::PermissionDenied
+        );
     }
 
     #[test]
@@ -1058,6 +1103,7 @@ mod tests {
             ("no_usable_bundle", NoUsableBundle),
             ("candidate_limit_exhausted", CandidateLimitExhausted { unexamined: 2 }),
             ("identity_mismatch", IdentityMismatch),
+            ("unsigned_rejected_by_policy", UnsignedRejectedByPolicy),
             ("issuer_mismatch", IssuerMismatch),
             ("cert_chain_invalid", CertChainInvalid),
             ("signature_invalid", SignatureInvalid),
@@ -1162,6 +1208,12 @@ mod tests {
                 },
             ),
             (
+                "sbom_media_type_unsupported",
+                SbomMediaTypeUnsupported {
+                    media_type: "application/octet-stream".into(),
+                },
+            ),
+            (
                 "attestation_too_large",
                 AttestationTooLarge {
                     limit: 1024,
@@ -1193,7 +1245,7 @@ mod tests {
         // all. Closing that gap needs variant enumeration.
         assert_eq!(
             pairs.len(),
-            40,
+            42,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
 

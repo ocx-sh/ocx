@@ -356,6 +356,29 @@ pub(super) async fn resolve_policies(
     certificate_identity: Option<&str>,
     certificate_oidc_issuer: Option<&str>,
 ) -> anyhow::Result<Vec<CompiledPolicy>> {
+    let compiled = resolve_policies_lenient(context, identifier, certificate_identity, certificate_oidc_issuer).await?;
+    if compiled.is_empty() {
+        return Err(VerifyError::new(identifier.clone(), VerifyErrorKind::NoIdentityProvided).into());
+    }
+    Ok(compiled)
+}
+
+/// [`resolve_policies`] without the empty-set refusal: no matching policy is
+/// an empty `Vec`, not an error.
+///
+/// The split exists because "no identity source" is a *question* for
+/// `ocx package sbom`, not a verdict. Its default mode reads the empty set as
+/// "nobody asked for verification here, so read permissively", where
+/// `ocx package verify` and an explicit `--verify` read the same emptiness as
+/// "you demanded verification and named nothing to verify against" (exit 64).
+/// One resolution, two readings — the alternative is a second copy of the
+/// tiered-precedence walk that drifts on the first fix.
+pub(super) async fn resolve_policies_lenient(
+    context: &crate::app::Context,
+    identifier: &oci::Identifier,
+    certificate_identity: Option<&str>,
+    certificate_oidc_issuer: Option<&str>,
+) -> anyhow::Result<Vec<CompiledPolicy>> {
     if let (Some(identity), Some(issuer)) = (certificate_identity, certificate_oidc_issuer) {
         return Ok(vec![CompiledPolicy::exact(identity.to_owned(), issuer.to_owned())]);
     }
@@ -364,12 +387,8 @@ pub(super) async fn resolve_policies(
     let project_policies = project_trust_policies(context).await?;
     // Operator tier (config.toml) is authoritative; the project ocx.toml
     // only adds trust for scopes the operator has not governed.
-    let compiled = trust::resolve_tiered(context.config_trust_policies(), &project_policies, &target)
-        .map_err(|kind| VerifyError::new(identifier.clone(), VerifyErrorKind::from(kind)))?;
-    if compiled.is_empty() {
-        return Err(VerifyError::new(identifier.clone(), VerifyErrorKind::NoIdentityProvided).into());
-    }
-    Ok(compiled)
+    trust::resolve_tiered(context.config_trust_policies(), &project_policies, &target)
+        .map_err(|kind| VerifyError::new(identifier.clone(), VerifyErrorKind::from(kind)).into())
 }
 
 /// The project `ocx.toml` trust policies for the in-effect project (empty

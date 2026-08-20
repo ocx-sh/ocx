@@ -49,11 +49,35 @@ pub struct SbomListingReport {
     pub refused: Vec<RefusedEntry>,
 }
 
+/// Which trust contract the whole listing was produced under.
+///
+/// A script needs this to read the rows correctly: `unverified` rows mean two
+/// different things depending on it. Under [`Self::Verified`] an unverified row
+/// cannot occur at all (an unsigned attachment is refused, not listed), so
+/// every entry carries a checked signature. Under [`Self::Unverified`] nothing
+/// was checked and every entry is unverified regardless of whether a publisher
+/// signed it — a signed SBOM read this way is reported exactly like an
+/// unsigned one, because this run has no evidence to tell them apart.
+///
+/// Deliberately the same vocabulary as the per-entry `verified` flag rather
+/// than the internal mode names, so one word means one thing at both levels.
+#[derive(Debug, Serialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum ListingVerification {
+    /// Signatures were checked against the resolved policies.
+    Verified,
+    /// Nothing was checked; every row is unverified.
+    Unverified,
+}
+
 /// The counts and the status a script branches on.
 #[derive(Debug, Serialize)]
 pub struct ListingSummary {
     /// `success` when nothing was refused, `partial_failure` otherwise.
     pub status: &'static str,
+    /// Which trust contract produced this listing. See
+    /// [`ListingVerification`].
+    pub verification: ListingVerification,
     /// Mirrors the process exit code. Always 0 here, as a posture rather than
     /// as an unreachability claim: a refusal beside a listing is a partial
     /// failure the caller is told about and still exits 0 for, and under
@@ -62,10 +86,15 @@ pub struct ListingSummary {
     /// exits non-zero — `AttestationNotFound` (79) — and it never reaches a
     /// report at all.
     pub exit_code: u8,
-    /// `verified + refused` — every candidate the scan examined.
+    /// `verified + unverified + refused` — every candidate the scan examined.
     pub total: usize,
     /// Attestations that passed every check.
     pub verified: usize,
+    /// Documents no signature was checked for. Counted apart from
+    /// [`Self::verified`] so a script branches on the trust class instead of
+    /// filtering the array — an unverified document is a real answer to "what
+    /// SBOMs does this carry" and not a real answer to "who vouches for them".
+    pub unverified: usize,
     /// Candidates examined and refused.
     pub refused: usize,
 }
@@ -73,18 +102,30 @@ pub struct ListingSummary {
 /// One verified attestation.
 #[derive(Debug, Serialize)]
 pub struct SbomEntry {
-    /// predicateType read from the **signed** payload, never an annotation.
+    /// predicateType. Read out of the **signed** payload when
+    /// [`Self::verified`]; derived from the referrer's `artifactType`
+    /// otherwise, since an unsigned referrer states its type nowhere else.
     pub predicate_type: String,
-    /// The target digest the signed Statement was proven to bind.
+    /// Whether a signature was verified over this document.
+    ///
+    /// `false` means the SBOM was attached raw, with no identity behind it:
+    /// the registry served bytes and said what they are. The three fields
+    /// below are then absent rather than empty.
+    pub verified: bool,
+    /// The target digest. Proven bound by the signed Statement when
+    /// [`Self::verified`]; claimed by the referrer otherwise.
     pub subject_digest: String,
-    /// Digest of the OCI referrer manifest carrying the verified bundle.
+    /// Digest of the OCI referrer manifest carrying the document.
     pub referrer_digest: String,
     /// Certificate SAN (identity) embedded in the Fulcio cert.
-    pub certificate_identity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate_identity: Option<String>,
     /// Certificate OIDC issuer embedded in the Fulcio cert.
-    pub certificate_oidc_issuer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate_oidc_issuer: Option<String>,
     /// Rekor integrated time, RFC 3339 with an explicit `Z` (PLAT-31).
-    pub signed_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_at: Option<String>,
     /// Populated only under `--summary`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<SbomSummaryOut>,
@@ -135,8 +176,23 @@ pub struct RefusedEntry {
 
 impl SbomListingReport {
     /// Assemble a listing from already-rendered entries and refusals.
-    pub fn new(entries: Vec<SbomEntry>, refused: Vec<RefusedEntry>) -> Self {
+    pub fn new(verification: ListingVerification, entries: Vec<SbomEntry>, refused: Vec<RefusedEntry>) -> Self {
+        let verified = entries.iter().filter(|entry| entry.verified).count();
+        // An asserted invariant, not a derivation: `verification` names the
+        // mode that *ran*, so an empty demanded listing still says `verified`
+        // and deriving the field from the rows would silently rename it
+        // `unverified`. What must never happen is the reverse — a demanded run
+        // emitting an unverified row — because the summary would then vouch for
+        // a document nothing checked. True by construction today (a demanded
+        // scan refuses unsigned attachments rather than listing them, and its
+        // `unverified` vector is always empty), and this makes a regression
+        // that quietly changes that loud in test and debug builds.
+        debug_assert!(
+            verification == ListingVerification::Unverified || verified == entries.len(),
+            "a demanded listing must carry no unverified rows",
+        );
         let summary = ListingSummary {
+            verification,
             status: if refused.is_empty() {
                 "success"
             } else {
@@ -144,7 +200,11 @@ impl SbomListingReport {
             },
             exit_code: 0,
             total: entries.len() + refused.len(),
-            verified: entries.len(),
+            verified,
+            // Subtraction rather than a second filter pass: the two counts
+            // partition `entries` by construction, so deriving one from the
+            // other is what keeps them summing to `entries.len()`.
+            unverified: entries.len() - verified,
             refused: refused.len(),
         };
         Self {
@@ -207,10 +267,26 @@ impl SbomEntry {
     /// sanitizer call per column — the count-form guard's known evasion is two
     /// sanitized values paying for a third raw one in the same expression.
     fn describe_plain(&self) -> String {
-        let mut detail = format!(
-            "{} ({}) signed {}",
-            self.certificate_identity, self.certificate_oidc_issuer, self.signed_at
-        );
+        // An unverified row leads with what it is, because the only thing an
+        // operator must not do is read it as one of the signed ones. A blank
+        // identity column would read as a rendering failure instead.
+        //
+        // Keyed on `verified`, which IS the trust class, never on whether the
+        // three signing fields happen to be populated: those are a projection
+        // of the trust class, so deriving it back from them would let one
+        // missing field silently relabel a verified document as unverified.
+        let mut detail = match (self.verified, &self.certificate_identity, &self.certificate_oidc_issuer) {
+            (true, Some(identity), Some(issuer)) => {
+                let signed_at = self.signed_at.as_deref().unwrap_or("an unknown time");
+                format!("{identity} ({issuer}) signed {signed_at}")
+            }
+            (true, _, _) => "verified".to_string(),
+            // Not "attached without a signature": under --no-verify a signed
+            // publisher's bundle reads out here too, and nothing distinguishes
+            // it from a raw attachment because nothing checked either. What
+            // was and was not done is the only claim that holds for both.
+            (false, _, _) => "UNVERIFIED - no signature was checked".to_string(),
+        };
         if let Some(summary) = &self.summary {
             detail.push_str(&format!(
                 ", CycloneDX {} with {} component(s)",
@@ -252,13 +328,81 @@ mod tests {
     fn entry(identity: &str) -> SbomEntry {
         SbomEntry {
             predicate_type: "https://cyclonedx.org/bom".into(),
+            verified: true,
             subject_digest: "sha256:aaaa".into(),
             referrer_digest: "sha256:bbbb".into(),
-            certificate_identity: identity.into(),
-            certificate_oidc_issuer: "https://token.actions.githubusercontent.com".into(),
-            signed_at: "2026-08-19T10:00:00Z".into(),
+            certificate_identity: Some(identity.into()),
+            certificate_oidc_issuer: Some("https://token.actions.githubusercontent.com".into()),
+            signed_at: Some("2026-08-19T10:00:00Z".into()),
             summary: None,
         }
+    }
+
+    /// The unsigned twin: same document, nothing vouching for it.
+    fn unverified_entry(referrer_digest: &str) -> SbomEntry {
+        SbomEntry {
+            predicate_type: "https://cyclonedx.org/bom".into(),
+            verified: false,
+            subject_digest: "sha256:aaaa".into(),
+            referrer_digest: referrer_digest.into(),
+            certificate_identity: None,
+            certificate_oidc_issuer: None,
+            signed_at: None,
+            summary: None,
+        }
+    }
+
+    /// The two counts partition the entries, and the plain row for an
+    /// unverified document says so where an operator reads it.
+    ///
+    /// The mixed fixture is synthetic — neither mode emits both classes in one
+    /// listing — because the subject here is the counting arithmetic, not a
+    /// reachable listing. The mode is `Unverified` and must stay so: the
+    /// constructor asserts that a *demanded* listing carries no unverified row,
+    /// which is the direction where a wrong summary would vouch for a document
+    /// nothing checked.
+    #[test]
+    fn the_summary_partitions_entries_by_trust_class() {
+        let report = SbomListingReport::new(
+            ListingVerification::Unverified,
+            vec![entry("signer@example.com"), unverified_entry("sha256:cccc")],
+            Vec::new(),
+        );
+
+        assert_eq!(report.summary.verified, 1);
+        assert_eq!(report.summary.unverified, 1);
+        assert_eq!(
+            report.summary.verified + report.summary.unverified,
+            report.entries.len(),
+            "the two counts must partition the entries, not overlap or leak",
+        );
+
+        let [_, _, detail] = report.plain_rows();
+        assert!(
+            detail[0].contains("signer@example.com"),
+            "the verified row still names its signer: {detail:?}"
+        );
+        assert!(
+            detail[1].contains("UNVERIFIED"),
+            "an unverified row must say so rather than render a blank identity: {detail:?}"
+        );
+    }
+
+    /// An unverified entry omits the three signing keys rather than emitting
+    /// them empty — an empty SAN reads as an identity that failed to render.
+    #[test]
+    fn an_unverified_entry_omits_the_signing_keys() {
+        let json = serde_json::to_value(unverified_entry("sha256:cccc")).expect("serialize");
+        assert_eq!(json["verified"], false);
+        for absent in ["certificate_identity", "certificate_oidc_issuer", "signed_at"] {
+            assert!(json.get(absent).is_none(), "{absent} must be absent, not empty");
+        }
+        // Positive control: the signed shape still carries all three, so this
+        // cannot pass by the keys having been dropped everywhere.
+        let signed = serde_json::to_value(entry("signer@example.com")).expect("serialize");
+        assert_eq!(signed["verified"], true);
+        assert_eq!(signed["certificate_identity"], "signer@example.com");
+        assert_eq!(signed["signed_at"], "2026-08-19T10:00:00Z");
     }
 
     fn refusal(digest: &str, reason: &str) -> RefusedEntry {
@@ -288,7 +432,11 @@ mod tests {
 
     #[test]
     fn a_clean_listing_is_success_and_a_refusal_makes_it_partial() {
-        let clean = SbomListingReport::new(vec![entry("you@example.com")], Vec::new());
+        let clean = SbomListingReport::new(
+            ListingVerification::Verified,
+            vec![entry("you@example.com")],
+            Vec::new(),
+        );
         assert_eq!(clean.summary.status, "success");
         assert_eq!(
             (clean.summary.total, clean.summary.verified, clean.summary.refused),
@@ -296,6 +444,7 @@ mod tests {
         );
 
         let mixed = SbomListingReport::new(
+            ListingVerification::Verified,
             vec![entry("you@example.com")],
             vec![refusal("sha256:cccc", "payload type unsupported")],
         );
@@ -310,6 +459,7 @@ mod tests {
     #[test]
     fn json_envelope_is_the_frozen_shape() {
         let report = SbomListingReport::new(
+            ListingVerification::Verified,
             vec![entry("you@example.com")],
             vec![refusal("sha256:cccc", "payload type unsupported")],
         );
@@ -318,8 +468,8 @@ mod tests {
             json,
             concat!(
                 r#"{"schema_version":1,"command":"package sbom","exit_code":0,"data":{"#,
-                r#""summary":{"status":"partial_failure","exit_code":0,"total":2,"verified":1,"refused":1},"#,
-                r#""entries":[{"predicate_type":"https://cyclonedx.org/bom","subject_digest":"sha256:aaaa","#,
+                r#""summary":{"status":"partial_failure","verification":"verified","exit_code":0,"total":2,"verified":1,"unverified":0,"refused":1},"#,
+                r#""entries":[{"predicate_type":"https://cyclonedx.org/bom","verified":true,"subject_digest":"sha256:aaaa","#,
                 r#""referrer_digest":"sha256:bbbb","certificate_identity":"you@example.com","#,
                 r#""certificate_oidc_issuer":"https://token.actions.githubusercontent.com","#,
                 r#""signed_at":"2026-08-19T10:00:00Z"}],"#,
@@ -335,7 +485,11 @@ mod tests {
     /// silently break the byte-diff guarantee.
     #[test]
     fn json_keeps_the_hostile_bytes_verbatim() {
-        let report = SbomListingReport::new(vec![entry("ev\u{202e}il@example.com")], Vec::new());
+        let report = SbomListingReport::new(
+            ListingVerification::Verified,
+            vec![entry("ev\u{202e}il@example.com")],
+            Vec::new(),
+        );
         let json = crate::error_envelope::render_success_envelope("package sbom", &report).expect("render");
         assert!(
             json.contains('\u{202e}'),
@@ -348,7 +502,11 @@ mod tests {
     /// CSI: a certificate SAN carrying `\x1b[2J` clears the operator's screen.
     #[test]
     fn plain_neutralizes_a_csi_sequence_in_a_certificate_identity() {
-        let report = SbomListingReport::new(vec![entry("\u{1b}[2Jyou@example.com")], Vec::new());
+        let report = SbomListingReport::new(
+            ListingVerification::Verified,
+            vec![entry("\u{1b}[2Jyou@example.com")],
+            Vec::new(),
+        );
         let out = rendered(&report);
         assert!(!out.contains('\u{1b}'), "ESC survived into a rendered cell: {out:?}");
         assert!(
@@ -364,6 +522,7 @@ mod tests {
     #[test]
     fn plain_neutralizes_a_bidi_override_in_a_refusal_reason() {
         let report = SbomListingReport::new(
+            ListingVerification::Verified,
             Vec::new(),
             vec![refusal(
                 "sha256:\u{202e}dead",
@@ -379,6 +538,7 @@ mod tests {
     #[test]
     fn plain_neutralizes_a_forged_row_in_a_refusal_reason() {
         let report = SbomListingReport::new(
+            ListingVerification::Verified,
             Vec::new(),
             vec![refusal(
                 "sha256:dead",
@@ -391,7 +551,11 @@ mod tests {
 
     #[test]
     fn ordinary_values_pass_through_verbatim() {
-        let report = SbomListingReport::new(vec![entry("you@example.com")], Vec::new());
+        let report = SbomListingReport::new(
+            ListingVerification::Verified,
+            vec![entry("you@example.com")],
+            Vec::new(),
+        );
         let out = rendered(&report);
         for expected in [
             "https://cyclonedx.org/bom",
@@ -411,7 +575,7 @@ mod tests {
         let refused: Vec<_> = (0..MAX_PLAIN_REFUSALS + 7)
             .map(|n| refusal(&format!("sha256:{n:04}"), "payload type unsupported"))
             .collect();
-        let report = SbomListingReport::new(Vec::new(), refused);
+        let report = SbomListingReport::new(ListingVerification::Verified, Vec::new(), refused);
 
         let rows = report.plain_rows();
         assert_eq!(
@@ -439,7 +603,7 @@ mod tests {
         let refused: Vec<_> = (0..MAX_PLAIN_REFUSALS)
             .map(|n| refusal(&format!("sha256:{n:04}"), "payload type unsupported"))
             .collect();
-        let report = SbomListingReport::new(Vec::new(), refused);
+        let report = SbomListingReport::new(ListingVerification::Verified, Vec::new(), refused);
         assert_eq!(
             report.plain_rows()[0].len(),
             MAX_PLAIN_REFUSALS,

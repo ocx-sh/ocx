@@ -69,6 +69,10 @@ pub enum AttestationOutcome {
         referrer_digest: String,
         /// The resolved `predicateType` URI written into the Statement.
         predicate_type: String,
+        /// Whether the referrer carries a signature. `false` means the SBOM
+        /// was attached raw because the run had no signing identity available
+        /// — the push still succeeded, and nothing vouches for the document.
+        signed: bool,
     },
     /// The push landed and was NOT rolled back; the attestation did not.
     Failed {
@@ -325,6 +329,7 @@ mod attestation_tests {
         let json = serde_json::to_value(report().with_attestation(AttestationOutcome::Succeeded {
             referrer_digest: format!("sha256:{}", "c".repeat(64)),
             predicate_type: "https://cyclonedx.org/bom".into(),
+            signed: true,
         }))
         .expect("serialize");
 
@@ -334,5 +339,23 @@ mod attestation_tests {
             format!("sha256:{}", "c".repeat(64))
         );
         assert_eq!(json["attestation"]["predicate_type"], "https://cyclonedx.org/bom");
+        assert_eq!(json["attestation"]["signed"], true);
+    }
+
+    /// A push that attached an SBOM with no identity behind it still reports
+    /// `succeeded`, and says so in the one field that distinguishes the two.
+    /// Without it a CI job whose OIDC configuration silently broke would read
+    /// as having published a signed SBOM.
+    #[test]
+    fn an_unsigned_attachment_succeeds_and_says_it_is_unsigned() {
+        let json = serde_json::to_value(report().with_attestation(AttestationOutcome::Succeeded {
+            referrer_digest: format!("sha256:{}", "c".repeat(64)),
+            predicate_type: "https://cyclonedx.org/bom".into(),
+            signed: false,
+        }))
+        .expect("serialize");
+
+        assert_eq!(json["attestation"]["status"], "succeeded");
+        assert_eq!(json["attestation"]["signed"], false);
     }
 }

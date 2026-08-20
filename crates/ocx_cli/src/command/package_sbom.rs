@@ -5,14 +5,23 @@
 //! attestations a published package carries.
 //!
 //! The attestation twin of `ocx package verify`: same identity resolution, same
-//! trust-root ladder, same pipeline — different arity. Verification is
-//! unconditional and there is no `--no-verify`: an unverified listing is
-//! registry-controlled text presented as fact, which is the shape SEC-32 exists
-//! to prevent.
+//! trust-root ladder, same pipeline — different arity.
 //!
-//! Three modes, mutually exclusive by construction (clap `conflicts_with`):
-//! the default listing, `--output PATH` writing one verified predicate
-//! verbatim, and `--summary` parsing each CycloneDX document.
+//! Two verification modes, resolved per invocation. **Demand**
+//! is what an operator who has said who may sign gets: full crypto, and an
+//! unsigned attachment is refused rather than listed. **Permissive** is what
+//! everyone else gets: no cryptography runs at all, and every document — raw
+//! attachment or bundle payload — is listed `verified: false`.
+//!
+//! Permissive is not a hole in SEC-32: every row it emits is labelled
+//! unverified in both output formats, carries no signer identity, and the
+//! effective mode is reported in the summary, so nothing registry-controlled is
+//! ever presented as fact. What it replaces is worse — until this existed, a
+//! consumer with no Sigstore setup could not read a published SBOM at all.
+//!
+//! Three output shapes, mutually exclusive by construction (clap
+//! `conflicts_with`): the default listing, `--output PATH` writing one
+//! predicate verbatim, and `--summary` parsing each CycloneDX document.
 //!
 //! `--output -` refuses a TTY. The predicate is authored by whoever holds an
 //! identity the policy admits, so "verified" does not mean "safe to print":
@@ -32,28 +41,34 @@ use ocx_lib::cli;
 use ocx_lib::cli::ClassifyErrorKind as _;
 use ocx_lib::oci;
 use ocx_lib::oci::attest::predicate::PredicateType;
-use ocx_lib::oci::verify::{AttestationMatch, RefusedCandidate, VerifyError, VerifyErrorKind};
+use ocx_lib::oci::verify::{
+    AttestationMatch, RefusedCandidate, TrustRoot, UnverifiedSbom, VerificationMode, VerifyError, VerifyErrorKind,
+};
 use ocx_lib::package_manager::SbomOptions;
 use ocx_lib::sbom;
+use ocx_lib::trust::CompiledPolicy;
 
-use crate::api::data::sbom::{RefusedEntry, SbomEntry, SbomListingReport, SbomSummaryOut};
+use crate::api::data::sanitize_for_terminal;
+use crate::api::data::sbom::{ListingVerification, RefusedEntry, SbomEntry, SbomListingReport, SbomSummaryOut};
 use crate::app::CommandError;
 use crate::command::package_sign_common;
 use crate::options;
 
-/// List the verified SBOM attestations a published package carries.
+/// List the SBOM attestations a published package carries, verified or not.
 #[derive(Parser, Clone)]
 pub struct PackageSbom {
     /// Target platform (single-platform manifest under an image index).
     #[clap(short = 'p', long = "platform", required = true, value_name = "PLATFORM")]
     platform: oci::Platform,
 
-    /// Write the verified predicate document to PATH ("-" for stdout).
+    /// Write the SBOM document to PATH ("-" for stdout).
     ///
-    /// The bytes are the exact sub-slice the publisher signed, never a
-    /// re-serialization. More than one verified attestation of the requested
-    /// type is a refusal, not a choice: narrow with --type. Writing raw
-    /// predicate bytes to a terminal is refused - redirect to a file or a pipe.
+    /// The bytes are exactly what was attached, never a re-serialization.
+    /// Under --no-verify nothing was checked, so the document is written
+    /// with a warning on stderr saying so. More than one candidate of the
+    /// requested type is a refusal, not a choice: narrow with --type.
+    /// Writing raw predicate bytes to a terminal is refused - redirect to a
+    /// file or a pipe.
     #[clap(long = "output", short = 'o', value_name = "PATH", conflicts_with = "summary")]
     output: Option<PathBuf>,
 
@@ -116,6 +131,9 @@ pub struct PackageSbom {
     #[clap(long = "no-cache")]
     no_cache: bool,
 
+    #[clap(flatten)]
+    verification: options::Verification,
+
     /// Package identifier to read (`registry/repo:tag[@digest]`).
     identifier: options::Identifier,
 }
@@ -166,22 +184,33 @@ impl PackageSbom {
 
         let client = context.verify_client();
         let offline = context.is_offline();
-        let rekor_cache_key = ocx_lib::oci::verify::trust_cache::cache_key_for_rekor(&rekor_url);
-        let trust_root = package_sign_common::resolve_trust_root(
-            &context,
-            &identifier,
-            &rekor_cache_key,
-            offline,
-            self.trusted_root.as_deref(),
-        )
-        .await?;
-        let policies = package_sign_common::resolve_policies(
-            &context,
-            &identifier,
-            self.certificate_identity.as_deref(),
-            self.certificate_oidc_issuer.as_deref(),
-        )
-        .await?;
+        let (verification, policies) = self.mode(&context, &identifier).await?;
+
+        // Neither is resolved under `Permissive`, and that is the gap fix, not
+        // an optimization: `resolve_policies` refuses an invocation with no
+        // identity source (exit 64), so calling it unconditionally locked every
+        // consumer without a trust policy out of reading SBOMs entirely. The
+        // trust root goes with it — a TUF fetch to serve a run that verifies
+        // nothing is latency spent on material nothing will read.
+        //
+        // `TrustRoot::default()` carries no anchors and no CT-log key, so it
+        // fails closed on contact: if this value ever reached the signed pass
+        // through a later refactor, that pass refuses with `NoCtLogKey` rather
+        // than verifying against nothing.
+        let trust_root = match verification {
+            VerificationMode::Permissive => TrustRoot::default(),
+            VerificationMode::Demand => {
+                let rekor_cache_key = ocx_lib::oci::verify::trust_cache::cache_key_for_rekor(&rekor_url);
+                package_sign_common::resolve_trust_root(
+                    &context,
+                    &identifier,
+                    &rekor_cache_key,
+                    offline,
+                    self.trusted_root.as_deref(),
+                )
+                .await?
+            }
+        };
 
         let options = SbomOptions {
             policies: &policies,
@@ -192,6 +221,7 @@ impl PackageSbom {
             state: &context.file_structure().state,
             no_cache: self.no_cache,
             predicate_type: self.predicate_type.clone(),
+            verification,
         };
         // The unwrap is load-bearing, not ceremony: `PackageError` omits
         // `#[source]` on its `kind`, so without re-rooting the chain on the
@@ -205,15 +235,69 @@ impl PackageSbom {
 
         match destination {
             Some(destination) => {
-                let attestation = single_match(&identifier, &report.attestations)?;
-                write_predicate(&destination, attestation.attestation.predicate.get().as_bytes()).await?;
+                let selected = single_document(&identifier, &report.attestations, &report.unverified, report.refused)?;
+                if let Selected::Unverified(sbom) = &selected {
+                    // One line, on stderr, so `--output -` piped to a file is
+                    // still byte-exact. Registry-sourced, so sanitized (CWE-150).
+                    ocx_lib::log::warn!(
+                        "SBOM is unverified: no signature over referrer {} was checked, \
+                         so nothing vouches for what it says",
+                        sanitize_for_terminal(&sbom.referrer_digest.to_string())
+                    );
+                }
+                write_predicate(&destination, selected.document()).await?;
             }
             None => {
-                let listing = self.listing(report.attestations, report.refused);
+                let listing = self.listing(verification, report.attestations, report.unverified, report.refused);
                 context.api().report(&listing)?;
             }
         }
         Ok(ExitCode::SUCCESS)
+    }
+
+    /// Resolve the verification mode, and the policies it will verify against.
+    ///
+    /// Three inputs, one answer:
+    ///
+    /// - `--no-verify` → permissive, and **nothing is resolved**. This is the
+    ///   gap fix: [`package_sign_common::resolve_policies`] refuses an
+    ///   invocation with no identity source (exit 64), so calling it here
+    ///   regardless of mode is what locked every consumer without a trust
+    ///   policy out of reading SBOMs at all.
+    /// - `--verify` → demand, through the strict resolution, so demanding
+    ///   verification with nothing to verify against is still the usage error
+    ///   it has always been.
+    /// - neither → the invocation decides. Identity flags, or a
+    ///   `[trust.policy]` covering the target, mean verification was asked
+    ///   for. Neither means there is nothing to verify against, and refusing
+    ///   would answer a question nobody asked.
+    ///
+    /// The empty policy set therefore has two readings, and the flag is what
+    /// picks between them: under `--verify` it is "you named nothing to verify
+    /// against" (64), and by default it is "no policy governs this package".
+    /// One resolution, two readings — see
+    /// [`package_sign_common::resolve_policies_lenient`].
+    async fn mode(
+        &self,
+        context: &crate::app::Context,
+        identifier: &oci::Identifier,
+    ) -> anyhow::Result<(VerificationMode, Vec<CompiledPolicy>)> {
+        let requested = self.verification.requested();
+        if requested == Some(VerificationMode::Permissive) {
+            return Ok((VerificationMode::Permissive, Vec::new()));
+        }
+        let policies = package_sign_common::resolve_policies_lenient(
+            context,
+            identifier,
+            self.certificate_identity.as_deref(),
+            self.certificate_oidc_issuer.as_deref(),
+        )
+        .await?;
+        match resolve_mode(requested, policies.is_empty()) {
+            Some(VerificationMode::Demand) => Ok((VerificationMode::Demand, policies)),
+            Some(VerificationMode::Permissive) => Ok((VerificationMode::Permissive, Vec::new())),
+            None => Err(VerifyError::new(identifier.clone(), VerifyErrorKind::NoIdentityProvided).into()),
+        }
     }
 
     /// Project a scan into the report DTO, summarizing under `--summary`.
@@ -225,8 +309,14 @@ impl PackageSbom {
     /// a bare `?` in the loop is the shape that reports 1 of N as 0 of N.
     /// The refusal lands in the vocabulary the report already carries, beside
     /// the candidates the verify pipeline itself refused.
-    fn listing(&self, attestations: Vec<AttestationMatch>, refused: Vec<RefusedCandidate>) -> SbomListingReport {
-        let mut entries = Vec::with_capacity(attestations.len());
+    fn listing(
+        &self,
+        verification: VerificationMode,
+        attestations: Vec<AttestationMatch>,
+        unverified: Vec<UnverifiedSbom>,
+        refused: Vec<RefusedCandidate>,
+    ) -> SbomListingReport {
+        let mut entries = Vec::with_capacity(attestations.len() + unverified.len());
         let mut refusals: Vec<RefusedEntry> = refused
             .into_iter()
             .map(|candidate| RefusedEntry {
@@ -237,34 +327,105 @@ impl PackageSbom {
             .collect();
 
         for candidate in attestations {
-            let summary = match self.summary {
-                false => None,
-                true => match summarize(
-                    &candidate.attestation.predicate_type,
-                    candidate.attestation.predicate.get().as_bytes(),
-                ) {
-                    Ok(summary) => Some(summary),
-                    Err(reason) => {
-                        refusals.push(RefusedEntry {
-                            referrer_digest: candidate.verify.referrer_digest.to_string(),
-                            reason,
-                            reason_kind: SUMMARY_FAILED,
-                        });
-                        continue;
-                    }
-                },
+            let referrer_digest = candidate.verify.referrer_digest.to_string();
+            let summary = match self.summary_for(
+                &candidate.attestation.predicate_type,
+                candidate.attestation.predicate.get().as_bytes(),
+                &referrer_digest,
+            ) {
+                Ok(summary) => summary,
+                Err(refusal) => {
+                    refusals.push(refusal);
+                    continue;
+                }
             };
             entries.push(SbomEntry {
                 predicate_type: candidate.attestation.predicate_type,
+                verified: true,
                 subject_digest: candidate.attestation.subject_digest.to_string(),
-                referrer_digest: candidate.verify.referrer_digest.to_string(),
-                certificate_identity: candidate.verify.certificate_identity,
-                certificate_oidc_issuer: candidate.verify.certificate_oidc_issuer,
-                signed_at: package_sign_common::iso8601(candidate.verify.signed_at),
+                referrer_digest,
+                certificate_identity: Some(candidate.verify.certificate_identity),
+                certificate_oidc_issuer: Some(candidate.verify.certificate_oidc_issuer),
+                signed_at: Some(package_sign_common::iso8601(candidate.verify.signed_at)),
                 summary,
             });
         }
-        SbomListingReport::new(entries, refusals)
+
+        // The unsigned half, through the same summarizer and the same refusal
+        // channel: `--summary` reads a document, and whether anyone signed it
+        // says nothing about whether it parses.
+        for candidate in unverified {
+            let referrer_digest = candidate.referrer_digest.to_string();
+            let summary = match self.summary_for(&candidate.predicate_type, &candidate.document, &referrer_digest) {
+                Ok(summary) => summary,
+                Err(refusal) => {
+                    refusals.push(refusal);
+                    continue;
+                }
+            };
+            entries.push(SbomEntry {
+                predicate_type: candidate.predicate_type,
+                verified: false,
+                subject_digest: candidate.subject_digest.to_string(),
+                referrer_digest,
+                certificate_identity: None,
+                certificate_oidc_issuer: None,
+                signed_at: None,
+                summary,
+            });
+        }
+        let verification = match verification {
+            VerificationMode::Demand => ListingVerification::Verified,
+            VerificationMode::Permissive => ListingVerification::Unverified,
+        };
+        SbomListingReport::new(verification, entries, refusals)
+    }
+
+    /// The `--summary` cell for one document, or the refusal that replaces its
+    /// whole listing row.
+    ///
+    /// `Ok(None)` is the no-`--summary` case, not a failure: the listing works
+    /// without the flag, and only a document the flag could not read costs its
+    /// entry (PKG-22).
+    fn summary_for(
+        &self,
+        predicate_type: &str,
+        document: &[u8],
+        referrer_digest: &str,
+    ) -> Result<Option<SbomSummaryOut>, RefusedEntry> {
+        if !self.summary {
+            return Ok(None);
+        }
+        summarize(predicate_type, document)
+            .map(Some)
+            .map_err(|reason| RefusedEntry {
+                referrer_digest: referrer_digest.to_string(),
+                reason,
+                reason_kind: SUMMARY_FAILED,
+            })
+    }
+}
+
+/// The mode decision itself, over values: what the flags asked for, and
+/// whether any identity source resolved. `None` is the usage error.
+///
+/// Split from [`PackageSbom::mode`] because that one reads a project file and
+/// a config tier to answer the second question, and the decision over the
+/// answer needs neither (ARCH-12). Every row of the matrix is then a test
+/// that constructs nothing.
+fn resolve_mode(requested: Option<VerificationMode>, policies_empty: bool) -> Option<VerificationMode> {
+    match (requested, policies_empty) {
+        // `--no-verify` never reaches here; the caller short-circuits it
+        // before resolving anything, which is the point of the flag.
+        (Some(VerificationMode::Permissive), _) => Some(VerificationMode::Permissive),
+        // Verification demanded with nothing to verify against.
+        (Some(VerificationMode::Demand), true) => None,
+        (Some(VerificationMode::Demand), false) => Some(VerificationMode::Demand),
+        // No flag: the invocation decides. An identity source means somebody
+        // asked for verification; its absence means nobody did, and refusing
+        // would answer a question nobody put.
+        (None, true) => Some(VerificationMode::Permissive),
+        (None, false) => Some(VerificationMode::Demand),
     }
 }
 
@@ -298,42 +459,141 @@ fn refuse_tty_output(destination: &OutputDestination, stdout_is_terminal: bool) 
     Ok(())
 }
 
-/// The one attestation `--output` may write, or a refusal naming the rest.
+/// Which document `--output` resolved to, and what backs it.
 ///
-/// Zero matches never reaches here — the library ends that scan as
+/// A two-variant enum rather than a `(&[u8], bool)` pair so the warning cannot
+/// be forgotten at a call site that already has the bytes: reading the document
+/// out of an unverified match is a `match` the compiler makes visible.
+#[derive(Debug)]
+enum Selected<'a> {
+    /// A document with a verified signature over it.
+    Verified(&'a AttestationMatch),
+    /// A document attached with no signature at all.
+    Unverified(&'a UnverifiedSbom),
+}
+
+impl Selected<'_> {
+    /// The bytes to write, verbatim in both cases.
+    fn document(&self) -> &[u8] {
+        match self {
+            Self::Verified(candidate) => candidate.attestation.predicate.get().as_bytes(),
+            Self::Unverified(candidate) => &candidate.document,
+        }
+    }
+}
+
+/// The one document `--output` may write, or a refusal naming the rest.
+///
+/// **A truncated scan is refused before anything is picked.** `--output` needs
+/// exactly one candidate, and truncation is the state in which "exactly one"
+/// cannot be established: a second SBOM the budget never reached is
+/// indistinguishable from no second SBOM, so the ambiguity check below fails
+/// open and the command writes one document silently, exit 0. A demanded scan
+/// already fails closed on this inside the library (`finish_scan`); a
+/// permissive one deliberately does not, because a *listing* survives
+/// truncation and reports it as `partial_failure`. That is right for a listing
+/// and wrong for a pick, and this is where the asymmetry is repaired. The check
+/// lives here rather than at the call site so a pick cannot be made without it.
+///
+/// Zero of either kind never reaches here — the library ends that scan as
 /// `AttestationNotFound` (79). More than one is `MultipleAttestations` (65)
 /// naming every referrer digest, because picking one would let the registry's
 /// listing order decide which document a consumer reads.
 ///
-/// The refusal carries **every** distinct predicate type in the match set, not
-/// the first one: a package can carry a CycloneDX SBOM and an SPDX one, and a
-/// message naming only whichever the registry listed first states something
+/// **A verified document wins outright**, and the unverified set is not even
+/// looked at. That precedence is defensive rather than reachable: the two
+/// lists are mode-exclusive by construction — a demanded scan refuses unsigned
+/// attachments instead of listing them, and a permissive one verifies nothing
+/// — so exactly one of them is ever non-empty. Kept as the fail-safe ordering
+/// anyway, because if that ever stops holding, the answer that must not depend
+/// on listing order is which trust class `--output` writes. Ambiguity is
+/// judged **within** a trust class and never across it.
+///
+/// The refusal carries **every** distinct predicate type in the colliding set,
+/// not the first one: a package can carry a CycloneDX SBOM and an SPDX one, and
+/// a message naming only whichever the registry listed first states something
 /// untrue about the other candidate and hides the `--type` value that would
 /// actually resolve the ambiguity. `BTreeSet` both dedupes and sorts, so the
 /// message is stable across listing order (DATA-DET-01).
-fn single_match<'a>(
+fn single_document<'a>(
     identifier: &oci::Identifier,
     attestations: &'a [AttestationMatch],
-) -> anyhow::Result<&'a AttestationMatch> {
-    match attestations {
-        [only] => Ok(only),
-        many => Err(VerifyError::new(
-            identifier.clone(),
-            VerifyErrorKind::MultipleAttestations {
-                predicate_types: many
-                    .iter()
-                    .map(|candidate| candidate.attestation.predicate_type.clone())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect(),
-                referrer_digests: many
-                    .iter()
-                    .map(|candidate| candidate.verify.referrer_digest.to_string())
-                    .collect(),
-            },
-        )
-        .into()),
+    unverified: &'a [UnverifiedSbom],
+    refused: Vec<RefusedCandidate>,
+) -> anyhow::Result<Selected<'a>> {
+    if let Some(reason) = truncation_refusal(refused) {
+        return Err(VerifyError::new(identifier.clone(), reason).into());
     }
+    match attestations {
+        [only] => return Ok(Selected::Verified(only)),
+        [] => {}
+        many => {
+            return Err(ambiguous(
+                identifier,
+                many.iter()
+                    .map(|candidate| {
+                        (
+                            candidate.attestation.predicate_type.clone(),
+                            candidate.verify.referrer_digest.to_string(),
+                        )
+                    })
+                    .collect(),
+            ));
+        }
+    }
+    match unverified {
+        [only] => Ok(Selected::Unverified(only)),
+        // Unreachable: a scan with nothing of either kind ends as
+        // `AttestationNotFound` inside the library. Returned rather than
+        // asserted — a panic here would be the CLI crashing on a library
+        // contract change instead of reporting one.
+        [] => Err(VerifyError::new(identifier.clone(), VerifyErrorKind::AttestationNotFound).into()),
+        many => Ok(Err(ambiguous(
+            identifier,
+            many.iter()
+                .map(|candidate| (candidate.predicate_type.clone(), candidate.referrer_digest.to_string()))
+                .collect(),
+        ))?),
+    }
+}
+
+/// The truncation refusal among a scan's refused candidates, if it carries one.
+///
+/// The three kinds are the whole of what [`ScanBudget`] can stop on — a
+/// candidate cap, a byte budget, a listing cap — and they are the only refusals
+/// that say something about the candidates that were *not* examined. Every
+/// other refusal is about one candidate that was.
+///
+/// Matched exhaustively rather than by a catch-all: a new budget stop must
+/// either be added here or be a deliberate decision not to refuse a pick.
+///
+/// [`ScanBudget`]: ocx_lib::oci::verify
+fn truncation_refusal(refused: Vec<RefusedCandidate>) -> Option<VerifyErrorKind> {
+    refused.into_iter().map(|candidate| candidate.reason).find(|reason| {
+        matches!(
+            reason,
+            VerifyErrorKind::TooManyAttestations { .. }
+                | VerifyErrorKind::AttestationBudgetExhausted { .. }
+                | VerifyErrorKind::CandidateLimitExhausted { .. }
+        )
+    })
+}
+
+/// The `MultipleAttestations` refusal over one trust class's colliding set.
+fn ambiguous(identifier: &oci::Identifier, candidates: Vec<(String, String)>) -> anyhow::Error {
+    VerifyError::new(
+        identifier.clone(),
+        VerifyErrorKind::MultipleAttestations {
+            predicate_types: candidates
+                .iter()
+                .map(|(predicate_type, _)| predicate_type.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            referrer_digests: candidates.into_iter().map(|(_, digest)| digest).collect(),
+        },
+    )
+    .into()
 }
 
 /// Summarize one verified predicate, or return the refusal prose.
@@ -476,7 +736,7 @@ mod tests {
             },
         ];
 
-        let report = command(&[]).listing(Vec::new(), refused);
+        let report = command(&[]).listing(VerificationMode::Demand, Vec::new(), Vec::new(), refused);
         let slugs: Vec<&str> = report.refused.iter().map(|entry| entry.reason_kind).collect();
 
         assert_eq!(slugs, ["identity_mismatch", "bundle_parse_failed"]);
@@ -485,6 +745,314 @@ mod tests {
             VerifyErrorKind::IdentityMismatch.to_string(),
             "the prose stays beside the slug, not replaced by it",
         );
+    }
+
+    // ── `--output` across the two trust classes ─────────────────────────────
+
+    /// A verified document wins outright, and the unverified set is not even
+    /// consulted. A publisher who signed an SBOM and left an unsigned one
+    /// beside it has said which one they stand behind — and a registry that
+    /// adds an unsigned referrer must not be able to turn a working `--output`
+    /// into an ambiguity refusal.
+    #[test]
+    fn a_verified_document_wins_over_an_unverified_one() {
+        let verified = [attestation_match_carrying("b", "https://cyclonedx.org/bom", CYCLONEDX)];
+        let unverified = [unverified_sbom("c", "https://cyclonedx.org/bom", SPDX)];
+
+        let selected =
+            single_document(&identifier(), &verified, &unverified, Vec::new()).expect("the signed document wins");
+        let Selected::Verified(only) = selected else {
+            panic!("a verified document must outrank an unverified one");
+        };
+        assert_eq!(
+            only.attestation.predicate.get(),
+            CYCLONEDX,
+            "the bytes written must be the signed ones",
+        );
+    }
+
+    /// With nothing verified, the single unverified document is written — and
+    /// the caller learns it is unverified from the variant, which is what makes
+    /// the warning impossible to forget at the call site.
+    #[test]
+    fn a_lone_unverified_document_is_selected_and_marked_as_such() {
+        let unverified = [unverified_sbom("c", "https://cyclonedx.org/bom", CYCLONEDX)];
+
+        let selected =
+            single_document(&identifier(), &[], &unverified, Vec::new()).expect("one document is one document");
+        let Selected::Unverified(only) = selected else {
+            panic!("with nothing verified the unsigned document is the answer");
+        };
+        assert_eq!(only.document, CYCLONEDX.as_bytes());
+        assert_eq!(selected.document(), CYCLONEDX.as_bytes(), "written verbatim");
+    }
+
+    /// Ambiguity is judged **within** a trust class, never across it. Two
+    /// verified documents collide; two unverified ones collide; one of each
+    /// does not — which is the row `a_verified_document_wins_over_an_unverified_one`
+    /// pins, and this is its complement.
+    #[test]
+    fn ambiguity_is_per_trust_class() {
+        let two_unverified = [
+            unverified_sbom("b", "https://cyclonedx.org/bom", CYCLONEDX),
+            unverified_sbom("c", "https://spdx.dev/Document", SPDX),
+        ];
+        let error = single_document(&identifier(), &[], &two_unverified, Vec::new())
+            .expect_err("two unverified documents are not one document");
+        let parsed = envelope(&error);
+
+        assert_eq!(parsed["exit_code"], 65);
+        assert_eq!(parsed["error"]["detail"], "multiple_attestations");
+        let message = parsed["error"]["message"].as_str().expect("message is a string");
+        for named in [
+            "https://cyclonedx.org/bom",
+            "https://spdx.dev/Document",
+            &"b".repeat(64),
+            &"c".repeat(64),
+        ] {
+            assert!(
+                message.contains(named),
+                "the refusal must name every colliding candidate: {message}"
+            );
+        }
+
+        // And the cross-class pair does NOT collide, so the rule is genuinely
+        // per-class rather than "any two documents refuse".
+        let verified = [attestation_match_carrying("b", "https://cyclonedx.org/bom", CYCLONEDX)];
+        let unverified = [unverified_sbom("c", "https://cyclonedx.org/bom", SPDX)];
+        assert!(
+            single_document(&identifier(), &verified, &unverified, Vec::new()).is_ok(),
+            "one verified and one unverified document is not an ambiguity",
+        );
+    }
+
+    /// A truncated scan refuses to pick, even when it happens to hold exactly
+    /// one document.
+    ///
+    /// This is the whole of W1: the one candidate here is real, and picking it
+    /// would look correct. What makes it wrong is that the budget stopped
+    /// before the listing was exhausted, so "exactly one" was never
+    /// established — a second SBOM behind the cap is indistinguishable from no
+    /// second SBOM, and the ambiguity check fails open rather than closed.
+    ///
+    /// Asserted on the exit code and the slug rather than the message, because
+    /// those are the contract a script branches on.
+    #[test]
+    fn a_truncated_scan_refuses_to_pick_a_document() {
+        let unverified = [unverified_sbom("c", "https://cyclonedx.org/bom", CYCLONEDX)];
+        let refused = vec![RefusedCandidate {
+            referrer_digest: "d".repeat(64),
+            reason: VerifyErrorKind::TooManyAttestations { limit: 32 },
+        }];
+
+        let error = single_document(&identifier(), &[], &unverified, refused)
+            .expect_err("a partial candidate set cannot answer which document");
+        let parsed = envelope(&error);
+
+        assert_eq!(parsed["exit_code"], 65);
+        assert_eq!(parsed["error"]["detail"], "too_many_attestations");
+    }
+
+    /// Every budget stop refuses, not just the candidate cap — the three are
+    /// one condition reached three ways, and a guard covering one of them is
+    /// the same bug for the other two.
+    #[test]
+    fn every_budget_stop_refuses_a_pick() {
+        for reason in [
+            VerifyErrorKind::TooManyAttestations { limit: 32 },
+            VerifyErrorKind::AttestationBudgetExhausted { limit: 65_536 },
+            VerifyErrorKind::CandidateLimitExhausted { unexamined: 4 },
+        ] {
+            let unverified = [unverified_sbom("c", "https://cyclonedx.org/bom", CYCLONEDX)];
+            let refused = vec![RefusedCandidate {
+                referrer_digest: "d".repeat(64),
+                reason,
+            }];
+            assert!(
+                single_document(&identifier(), &[], &unverified, refused).is_err(),
+                "a budget stop is a budget stop however it was reached",
+            );
+        }
+    }
+
+    /// An untruncated scan still serves, and a per-candidate refusal is not a
+    /// truncation.
+    ///
+    /// The complement that keeps the guard from being "refuse whenever anything
+    /// was refused": one malformed referrer beside one good document is exactly
+    /// the case the per-candidate independence exists to keep working, and
+    /// refusing it would hand a registry a denial of service for the price of
+    /// one junk attachment.
+    #[test]
+    fn a_refusal_that_is_not_a_truncation_still_serves_the_document() {
+        let unverified = [unverified_sbom("c", "https://cyclonedx.org/bom", CYCLONEDX)];
+        let refused = vec![RefusedCandidate {
+            referrer_digest: "d".repeat(64),
+            reason: VerifyErrorKind::BundleParseFailed,
+        }];
+
+        let selected = single_document(&identifier(), &[], &unverified, refused)
+            .expect("one unreadable sibling does not make the readable document ambiguous");
+        assert_eq!(selected.document(), CYCLONEDX.as_bytes());
+    }
+
+    // ── the listing across the two trust classes ────────────────────────────
+
+    /// Both classes reach the listing, each labelled, and `--summary` reads an
+    /// unsigned document exactly as it reads a signed one: whether anyone
+    /// signed it says nothing about whether it parses.
+    ///
+    /// Two listings, not one mixed listing: a scan returns verified matches or
+    /// unverified documents and never both, because the mode decides which
+    /// pass runs. What is shared is the projection under test — the same
+    /// summarizer and the same refusal channel serve both.
+    #[test]
+    fn the_listing_carries_both_trust_classes_and_summarizes_either() {
+        let demanded = command(&["--summary"]).listing(
+            VerificationMode::Demand,
+            vec![attestation_match_carrying("b", "https://cyclonedx.org/bom", CYCLONEDX)],
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(demanded.summary.verified, 1);
+        assert_eq!(demanded.summary.unverified, 0);
+        assert_eq!(
+            demanded.summary.verification,
+            ListingVerification::Verified,
+            "a demanded listing must say so, so a script can read the rows correctly",
+        );
+        let signed = &demanded.entries[0];
+        assert!(signed.verified);
+        assert_eq!(signed.certificate_identity.as_deref(), Some("you@example.com"));
+        assert!(signed.summary.is_some());
+
+        let permissive = command(&["--summary"]).listing(
+            VerificationMode::Permissive,
+            Vec::new(),
+            vec![unverified_sbom("c", "https://cyclonedx.org/bom", CYCLONEDX)],
+            Vec::new(),
+        );
+        assert_eq!(permissive.summary.verified, 0);
+        assert_eq!(permissive.summary.unverified, 1);
+        assert_eq!(
+            permissive.summary.verification,
+            ListingVerification::Unverified,
+            "an unverified listing must say so: the rows look the same either way",
+        );
+        let unverified = &permissive.entries[0];
+        assert!(!unverified.verified, "an unverified entry must be labelled as such");
+        assert_eq!(
+            unverified.certificate_identity, None,
+            "an unverified entry has no checked certificate to name",
+        );
+        assert_eq!(unverified.signed_at, None);
+        assert!(
+            unverified.summary.is_some(),
+            "--summary reads an unverified CycloneDX document like any other",
+        );
+    }
+
+    /// The whole mode matrix, in one place, over the two inputs that decide
+    /// it: what the flags asked for, and whether any identity source resolved.
+    ///
+    /// The `--verify`-with-nothing-to-verify-against row is the one that must
+    /// stay an error. Every other row that resolves to permissive would be
+    /// indistinguishable from it if that one silently degraded, and an
+    /// operator who typed `--verify` would get an unverified listing.
+    #[test]
+    fn the_mode_matrix_resolves_every_combination() {
+        use VerificationMode::{Demand, Permissive};
+
+        // No flag: the identity sources decide.
+        assert_eq!(resolve_mode(None, true), Some(Permissive));
+        assert_eq!(resolve_mode(None, false), Some(Demand));
+        // --verify: demanded, and an empty policy set is the usage error.
+        assert_eq!(resolve_mode(Some(Demand), false), Some(Demand));
+        assert_eq!(
+            resolve_mode(Some(Demand), true),
+            None,
+            "--verify with no identity source must not degrade to permissive",
+        );
+        // --no-verify never reaches this function, but if it ever did it must
+        // not be turned into a demand by a policy the operator refused.
+        assert_eq!(resolve_mode(Some(Permissive), false), Some(Permissive));
+        assert_eq!(resolve_mode(Some(Permissive), true), Some(Permissive));
+    }
+
+    /// The two flags name their modes, and neither names one.
+    ///
+    /// Asserted through the real command's argv so the flatten is covered:
+    /// a `#[clap(flatten)]` that silently stopped wiring the pair would leave
+    /// [`resolve_mode`] correct and the command permanently on its default.
+    #[test]
+    fn the_flags_reach_the_command_through_the_flatten() {
+        assert_eq!(command(&[]).verification.requested(), None);
+        assert_eq!(
+            command(&["--verify"]).verification.requested(),
+            Some(VerificationMode::Demand),
+        );
+        assert_eq!(
+            command(&["--no-verify"]).verification.requested(),
+            Some(VerificationMode::Permissive),
+        );
+    }
+
+    /// `--no-verify` with an identity is contradictory, and clap refuses it
+    /// (exit 64) rather than silently ignoring one of the two.
+    #[test]
+    fn no_verify_with_a_certificate_identity_is_a_usage_error() {
+        let parsed = PackageSbom::try_parse_from([
+            "sbom",
+            "-p",
+            "linux/amd64",
+            "--no-verify",
+            "--certificate-identity",
+            "you@example.com",
+            "--certificate-oidc-issuer",
+            "https://example.com",
+            "ocx.sh/acme/tool:1.0",
+        ]);
+        assert!(parsed.is_err(), "an identity flag with --no-verify must not parse");
+    }
+
+    /// The two verification flags last-win through the real command, both
+    /// orders — the flatten must carry the `overrides_with` pair, not just the
+    /// flags.
+    #[test]
+    fn verify_and_no_verify_last_win() {
+        let permissive = command(&["--verify", "--no-verify"]);
+        assert_eq!(
+            permissive.verification.requested(),
+            Some(VerificationMode::Permissive),
+            "--no-verify wins when last",
+        );
+        let demand = command(&["--no-verify", "--verify"]);
+        assert_eq!(
+            demand.verification.requested(),
+            Some(VerificationMode::Demand),
+            "--verify wins when last",
+        );
+    }
+
+    /// The refusal channel is shared too: an unsigned document `--summary`
+    /// cannot read costs its own entry and not the listing (PKG-22).
+    #[test]
+    fn an_unsummarizable_unsigned_document_refuses_only_its_own_entry() {
+        let listing = command(&["--summary"]).listing(
+            VerificationMode::Permissive,
+            Vec::new(),
+            vec![
+                unverified_sbom("b", "https://cyclonedx.org/bom", CYCLONEDX),
+                unverified_sbom("c", "https://spdx.dev/Document", SPDX),
+            ],
+            Vec::new(),
+        );
+
+        assert_eq!(listing.entries.len(), 1, "the readable document is still listed");
+        assert_eq!(listing.entries[0].referrer_digest, format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(listing.refused.len(), 1);
+        assert_eq!(listing.refused[0].reason_kind, "sbom_summary_failed");
+        assert_eq!(listing.summary.unverified, 1);
     }
 
     #[test]
@@ -575,6 +1143,20 @@ mod tests {
         }
     }
 
+    /// An SBOM attached with nothing behind it.
+    fn unverified_sbom(referrer_hex: &str, predicate_type: &str, document: &str) -> UnverifiedSbom {
+        let digest = |hex: &str| {
+            ocx_lib::oci::Digest::try_from(format!("sha256:{}", hex.repeat(64 / hex.len())).as_str())
+                .expect("build test digest")
+        };
+        UnverifiedSbom {
+            referrer_digest: digest(referrer_hex),
+            subject_digest: digest("a"),
+            predicate_type: predicate_type.into(),
+            document: document.as_bytes().to_vec(),
+        }
+    }
+
     /// A parsed command, so the `--summary` gate under test is the one clap
     /// actually wires rather than a hand-set field.
     fn command(extra: &[&str]) -> PackageSbom {
@@ -598,7 +1180,8 @@ mod tests {
             attestation_match("b", "https://cyclonedx.org/bom"),
             attestation_match("c", "https://cyclonedx.org/bom"),
         ];
-        let error = single_match(&identifier(), &matches).expect_err("two matches are not one match");
+        let error =
+            single_document(&identifier(), &matches, &[], Vec::new()).expect_err("two matches are not one match");
         let parsed = envelope(&error);
 
         assert_eq!(parsed["exit_code"], 65);
@@ -632,7 +1215,8 @@ mod tests {
             attestation_match("b", "https://spdx.dev/Document"),
             attestation_match("c", "https://cyclonedx.org/bom"),
         ];
-        let error = single_match(&identifier(), &matches).expect_err("two matches are not one match");
+        let error =
+            single_document(&identifier(), &matches, &[], Vec::new()).expect_err("two matches are not one match");
         let parsed = envelope(&error);
 
         assert_eq!(parsed["exit_code"], 65);
@@ -660,7 +1244,8 @@ mod tests {
             attestation_match("b", "https://cyclonedx.org/bom"),
             attestation_match("c", "https://spdx.dev/Document"),
         ];
-        let error = single_match(&identifier(), &matches).expect_err("three matches are not one match");
+        let error =
+            single_document(&identifier(), &matches, &[], Vec::new()).expect_err("three matches are not one match");
         let message = envelope(&error)["error"]["message"]
             .as_str()
             .expect("message is a string")
@@ -684,7 +1269,10 @@ mod tests {
     #[test]
     fn exactly_one_match_is_returned() {
         let matches = [attestation_match("b", "https://cyclonedx.org/bom")];
-        let only = single_match(&identifier(), &matches).expect("one match is the whole point");
+        let selected = single_document(&identifier(), &matches, &[], Vec::new()).expect("one match is the whole point");
+        let Selected::Verified(only) = selected else {
+            panic!("a verified match must select as verified");
+        };
         assert_eq!(
             only.verify.referrer_digest.to_string(),
             format!("sha256:{}", "b".repeat(64))
@@ -704,10 +1292,12 @@ mod tests {
     #[test]
     fn one_unsummarizable_document_refuses_that_entry_and_keeps_the_listing() {
         let listing = command(&["--summary"]).listing(
+            VerificationMode::Demand,
             vec![
                 attestation_match_carrying("b", "https://cyclonedx.org/bom", CYCLONEDX),
                 attestation_match_carrying("c", "https://spdx.dev/Document", SPDX),
             ],
+            Vec::new(),
             Vec::new(),
         );
 
@@ -750,7 +1340,9 @@ mod tests {
     #[test]
     fn without_summary_an_unreadable_document_is_listed_like_any_other() {
         let listing = command(&[]).listing(
+            VerificationMode::Demand,
             vec![attestation_match_carrying("c", "https://spdx.dev/Document", SPDX)],
+            Vec::new(),
             Vec::new(),
         );
 
@@ -768,7 +1360,9 @@ mod tests {
     #[test]
     fn summary_refusals_travel_beside_the_pipelines_own() {
         let listing = command(&["--summary"]).listing(
+            VerificationMode::Demand,
             vec![attestation_match_carrying("c", "https://spdx.dev/Document", SPDX)],
+            Vec::new(),
             vec![RefusedCandidate {
                 referrer_digest: format!("sha256:{}", "d".repeat(64)),
                 reason: VerifyErrorKind::MultipleSignatures { count: 2 },

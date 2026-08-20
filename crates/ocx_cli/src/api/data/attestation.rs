@@ -40,14 +40,22 @@ pub struct AttestationReport {
     pub subject_digest: oci::Digest,
     /// The resolved `predicateType` URI written into the Statement.
     pub predicate_type: String,
-    /// Digest of the Sigstore bundle blob (the referrer's layer content).
+    /// Digest of the referrer's layer content: the Sigstore bundle blob on a
+    /// signed attach, the SBOM document itself on an unsigned one. The JSON key
+    /// keeps its shipped name.
     pub bundle_digest: oci::Digest,
-    /// Digest of the published OCI referrer manifest wrapping the bundle.
+    /// Digest of the published OCI referrer manifest wrapping the payload.
     pub referrer_digest: oci::Digest,
+    /// Whether the referrer carries a signature. `false` means the document was
+    /// attached as-is, with no identity behind it — the two certificate fields
+    /// below are then absent rather than empty.
+    pub signed: bool,
     /// Certificate SAN (identity) embedded in the Fulcio cert.
-    pub certificate_identity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate_identity: Option<String>,
     /// Certificate OIDC issuer URL embedded in the Fulcio cert.
-    pub certificate_oidc_issuer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate_oidc_issuer: Option<String>,
 }
 
 impl AttestationReport {
@@ -68,6 +76,7 @@ impl AttestationReport {
             predicate_type: result.predicate_type,
             bundle_digest: result.bundle_digest,
             referrer_digest: result.referrer_digest,
+            signed: result.signed,
             certificate_identity: result.certificate_identity,
             certificate_oidc_issuer: result.certificate_oidc_issuer,
         }
@@ -86,8 +95,8 @@ impl AttestationReport {
     /// printable. The digests and the platform are typed values that cannot
     /// carry a control character and are routed anyway, because a filter
     /// applied per field has to be re-argued for every field added later.
-    fn plain_fields(&self) -> [(&'static str, String); 8] {
-        [
+    fn plain_fields(&self) -> Vec<(&'static str, String)> {
+        let mut fields = vec![
             ("Identifier", sanitize_for_terminal(&self.identifier)),
             ("Platform", sanitize_for_terminal(&self.platform)),
             (
@@ -95,23 +104,33 @@ impl AttestationReport {
                 sanitize_for_terminal(&self.subject_digest.to_string()),
             ),
             ("Predicate type", sanitize_for_terminal(&self.predicate_type)),
+            // Stated outright rather than left to be inferred from the absence
+            // of the two certificate rows below: an operator scanning a table
+            // notices a row that says "unsigned", and does not notice two rows
+            // that are not there.
             (
-                "Bundle digest",
+                "Signature",
+                match self.signed {
+                    true => "signed".to_string(),
+                    false => "unsigned (attached without an identity)".to_string(),
+                },
+            ),
+            (
+                "Payload digest",
                 sanitize_for_terminal(&self.bundle_digest.to_short_string()),
             ),
             (
                 "Referrer digest",
                 sanitize_for_terminal(&self.referrer_digest.to_short_string()),
             ),
-            (
-                "Certificate identity",
-                sanitize_for_terminal(&self.certificate_identity),
-            ),
-            (
-                "Certificate OIDC issuer",
-                sanitize_for_terminal(&self.certificate_oidc_issuer),
-            ),
-        ]
+        ];
+        if let Some(identity) = &self.certificate_identity {
+            fields.push(("Certificate identity", sanitize_for_terminal(identity)));
+        }
+        if let Some(issuer) = &self.certificate_oidc_issuer {
+            fields.push(("Certificate OIDC issuer", sanitize_for_terminal(issuer)));
+        }
+        fields
     }
 }
 
@@ -156,10 +175,70 @@ mod tests {
                 bundle_digest: digest('b'),
                 referrer_digest: digest('c'),
                 referrer_descriptor: Default::default(),
-                certificate_identity: "signer@example.com".into(),
-                certificate_oidc_issuer: "https://accounts.google.com".into(),
+                signed: true,
+                certificate_identity: Some("signer@example.com".into()),
+                certificate_oidc_issuer: Some("https://accounts.google.com".into()),
             },
         )
+    }
+
+    /// The unsigned twin: same attach, no identity behind it.
+    fn unsigned_sample() -> AttestationReport {
+        AttestationReport::new(
+            "registry.example/pkg:1.0".into(),
+            &"linux/amd64".parse().expect("platform"),
+            AttestResult {
+                subject_digest: digest('a'),
+                predicate_type: "https://cyclonedx.org/bom".into(),
+                bundle_digest: digest('b'),
+                referrer_digest: digest('c'),
+                referrer_descriptor: Default::default(),
+                signed: false,
+                certificate_identity: None,
+                certificate_oidc_issuer: None,
+            },
+        )
+    }
+
+    /// An unsigned attach reports `signed: false` and omits both certificate
+    /// keys rather than emitting them empty — an empty SAN reads as an identity
+    /// that failed to render, which is the opposite of what happened.
+    #[test]
+    fn an_unsigned_attach_omits_the_certificate_keys_and_says_so() {
+        let json =
+            crate::error_envelope::render_success_envelope("package attest", &unsigned_sample()).expect("render");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        let data = &parsed["data"];
+
+        assert_eq!(data["signed"], false);
+        assert!(data.get("certificate_identity").is_none(), "empty SAN would mislead");
+        assert!(data.get("certificate_oidc_issuer").is_none());
+        // The positive control: the signed shape still carries both, so this
+        // pair cannot pass by the keys having been dropped everywhere.
+        let signed = crate::error_envelope::render_success_envelope("package attest", &sample()).expect("render");
+        let signed: serde_json::Value = serde_json::from_str(&signed).expect("valid json");
+        assert_eq!(signed["data"]["signed"], true);
+        assert_eq!(signed["data"]["certificate_identity"], "signer@example.com");
+    }
+
+    /// Plain output names the trust class outright. Inferring it from two
+    /// missing rows is exactly the reading an operator does not do.
+    #[test]
+    fn plain_output_states_whether_the_attach_was_signed() {
+        let signed: std::collections::BTreeMap<_, _> = sample().plain_fields().into_iter().collect();
+        assert_eq!(signed["Signature"], "signed");
+        assert!(signed.contains_key("Certificate identity"));
+
+        let unsigned: std::collections::BTreeMap<_, _> = unsigned_sample().plain_fields().into_iter().collect();
+        assert!(
+            unsigned["Signature"].contains("unsigned"),
+            "got {:?}",
+            unsigned["Signature"]
+        );
+        assert!(
+            !unsigned.contains_key("Certificate identity"),
+            "an unsigned attach has no certificate to name"
+        );
     }
 
     #[test]
@@ -194,9 +273,9 @@ mod tests {
         let report = sample();
         let fields: std::collections::BTreeMap<_, _> = report.plain_fields().into_iter().collect();
         assert_eq!(fields["Subject digest"], format!("sha256:{}", "a".repeat(64)));
-        assert_ne!(fields["Bundle digest"], format!("sha256:{}", "b".repeat(64)));
+        assert_ne!(fields["Payload digest"], format!("sha256:{}", "b".repeat(64)));
         assert_ne!(fields["Referrer digest"], format!("sha256:{}", "c".repeat(64)));
-        assert!(fields["Bundle digest"].len() < 30, "bundle digest was not shortened");
+        assert!(fields["Payload digest"].len() < 30, "payload digest was not shortened");
     }
 
     /// A predicateType is attacker-controlled inside a signed payload: being
@@ -209,8 +288,9 @@ mod tests {
             bundle_digest: digest('b'),
             referrer_digest: digest('c'),
             referrer_descriptor: Default::default(),
-            certificate_identity: "signer\u{202e}moc.elpmaxe@".into(),
-            certificate_oidc_issuer: "https://accounts.google.com".into(),
+            signed: true,
+            certificate_identity: Some("signer\u{202e}moc.elpmaxe@".into()),
+            certificate_oidc_issuer: Some("https://accounts.google.com".into()),
         };
         result.predicate_type.push('\r');
 
@@ -246,7 +326,7 @@ mod tests {
     fn plain_output_carries_the_certificate_issuer_beside_the_identity() {
         let report = sample();
         let rendered = report.plain_fields();
-        assert_eq!(rendered.len(), 8, "a plain row went missing");
+        assert_eq!(rendered.len(), 9, "a plain row went missing");
         let fields: std::collections::BTreeMap<_, _> = rendered.into_iter().collect();
         assert_eq!(fields["Certificate OIDC issuer"], "https://accounts.google.com");
     }

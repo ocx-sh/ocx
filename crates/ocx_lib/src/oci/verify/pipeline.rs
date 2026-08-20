@@ -42,7 +42,7 @@ use super::tlog;
 use super::trust_cache::TrustRootCache;
 use super::trust_root::TrustRoot;
 use crate::file_structure::StateStore;
-use crate::oci::attest::predicate::PredicateType;
+use crate::oci::attest::predicate::{PredicateType, sbom_predicate_type_uri};
 use crate::oci::attest::{MAX_ATTESTATION_CANDIDATES, MAX_ATTESTATION_ENVELOPE_BYTES, MAX_TOTAL_ATTESTATION_BYTES};
 use crate::oci::client::error::ClientError;
 use crate::oci::client::{Client, OciTransport};
@@ -129,6 +129,26 @@ pub enum VerifyContentMode {
     },
 }
 
+/// Whether a run demands cryptographic verification, or merely reads.
+///
+/// Resolved once per invocation from the flags and the trust policies, and
+/// carried into the pipeline rather than re-derived: "is there a policy" is a
+/// question about configuration, and the pipeline must not be able to answer it
+/// differently from the CLI that reported the mode to the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationMode {
+    /// Every document must carry a signature this run can verify against the
+    /// resolved policies. An unsigned attachment is refused, never listed.
+    Demand,
+    /// Nothing is verified and no cryptography runs. Every document — raw
+    /// attachment or bundle payload — is read and reported as unverified.
+    ///
+    /// This is what makes `ocx package sbom` usable with no Sigstore setup at
+    /// all. It is not a relaxation of `Demand`: no key, certificate or log
+    /// entry is consulted, so nothing here may ever be presented as verified.
+    Permissive,
+}
+
 /// The untrusted-byte bounds one verify run enforces, chosen by content mode.
 ///
 /// Three integers, fixed per mode: nothing here will grow a heap field.
@@ -194,6 +214,10 @@ pub struct VerifyContext<'a> {
     pub offline: bool,
     /// Which content kind to look for. `Signature` is today's behaviour.
     pub content: VerifyContentMode,
+    /// Whether this run demands verification. Inert for
+    /// [`VerifyContentMode::Signature`], whose entire purpose is to verify:
+    /// [`VerifyPipeline::run`] never reads it.
+    pub verification: VerificationMode,
 }
 
 /// Result emitted by a successful verify pipeline run.
@@ -251,8 +275,41 @@ pub struct RefusedCandidate {
 pub struct AttestationScan {
     /// Every candidate that verified, in listing order.
     pub matches: Vec<AttestationMatch>,
+    /// Every **unsigned** SBOM referrer found, in digest order.
+    ///
+    /// A separate list rather than an `Option` on [`AttestationMatch`], because
+    /// the two are not the same claim wearing different clothes: a verified
+    /// match carries a predicateType read out of a signed payload and a subject
+    /// digest a signature *proved*, and an unverified one carries a media type
+    /// the registry asserted and a subject it merely claims. Keeping them apart
+    /// makes a caller that ignores this field under-report rather than
+    /// mis-report, and leaves the verified path's shape untouched.
+    pub unverified: Vec<UnverifiedSbom>,
     /// Every candidate that was examined and refused, in listing order.
     pub refused: Vec<RefusedCandidate>,
+}
+
+/// An SBOM attached without a signature: the document itself as the referrer
+/// payload, typed by its own media type.
+///
+/// Nothing here is proven — the registry served the bytes and said what they
+/// are, and there is no certificate, envelope or log entry to check any of it
+/// against. That is the whole content of the type, and why every consumer must
+/// label it as unverified rather than fold it into a listing beside signed
+/// documents.
+#[derive(Debug)]
+pub struct UnverifiedSbom {
+    /// Digest of the OCI referrer manifest carrying the document.
+    pub referrer_digest: Digest,
+    /// The subject the referrer is attached to — the digest this scan
+    /// resolved, which the referrer claims rather than proves.
+    pub subject_digest: Digest,
+    /// The predicateType URI the referrer's `artifactType` stands for, so a
+    /// consumer compares one vocabulary across both trust classes.
+    pub predicate_type: String,
+    /// The document, verbatim as the registry served it. Not a `RawValue`:
+    /// `text/spdx` is tag-value text, so an SBOM payload is not always JSON.
+    pub document: Vec<u8>,
 }
 
 /// Verify pipeline entry point.
@@ -303,8 +360,49 @@ impl VerifyPipeline {
         client: &Client,
         ctx: VerifyContext<'_>,
     ) -> Result<AttestationScan, VerifyErrorKind> {
-        let found = Self::scan(client, &ctx, ScanArity::All).await?;
-        let matches = found
+        let target = Self::resolve_target(client, &ctx).await?;
+        let mut budget = ScanBudget::new(ctx.content.caps());
+
+        if ctx.verification == VerificationMode::Permissive {
+            // One pass, one budget, and no signed pass at all: with nothing
+            // being verified, a bundle referrer is read for its payload exactly
+            // as a raw attachment is read for its bytes, and both list as
+            // unverified. Reading them in one digest-ordered pass is what makes
+            // the two kinds unable to starve each other — there is no second
+            // allowance for volume of one kind to spend on behalf of the other.
+            let (unverified, refused) = Self::scan_unverified(client, &ctx, &target, &mut budget).await?;
+            if unverified.is_empty() {
+                // Same ladder the signed pass ends on: a refusal that was
+                // recorded is more actionable than "none found", which would
+                // send a publisher looking for an attach that did happen.
+                return Err(best_failure(refused).unwrap_or(VerifyErrorKind::AttestationNotFound));
+            }
+            return Ok(AttestationScan {
+                matches: Vec::new(),
+                unverified,
+                refused,
+            });
+        }
+
+        // Demand. Raw attachments are refused wholesale and *without a fetch*,
+        // so untrusted volume cannot spend one byte or one candidate slot of
+        // the budget the signed pass needs — the starvation question is closed
+        // structurally here rather than by rationing a shared allowance.
+        let unsigned_refused = Self::refuse_unsigned(client, &ctx, &target).await?;
+        let signed = match Self::scan(client, &ctx, &target, ScanArity::All, &mut budget).await {
+            Ok(outcome) => outcome,
+            // The scan found nothing signed. If unsigned attachments were
+            // refused on the way, that refusal is the actionable answer — "this
+            // SBOM is attached without a signature and you demanded one" tells
+            // an operator what to do, where "none found" states something
+            // false about the subject.
+            Err(kind @ (VerifyErrorKind::AttestationNotFound | VerifyErrorKind::NoSignaturesFound)) => {
+                return Err(best_failure(unsigned_refused).unwrap_or(kind));
+            }
+            Err(kind) => return Err(kind),
+        };
+
+        let matches = signed
             .matches
             .into_iter()
             .map(|(verify, attestation)| {
@@ -317,14 +415,359 @@ impl VerifyPipeline {
                     .ok_or(VerifyErrorKind::AttestationNotFound)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let mut refused = signed.refused;
+        refused.extend(unsigned_refused);
         Ok(AttestationScan {
             matches,
-            refused: found.refused,
+            // Nothing unverified is ever listed under `Demand`: an unsigned
+            // attachment was refused above, and every signed match is in
+            // `matches`.
+            unverified: Vec::new(),
+            refused,
         })
     }
 
+    /// Read every SBOM the target carries **without verifying any of it**:
+    /// raw attachments (`cosign attach sbom` / `oras attach`) and the payloads
+    /// of Sigstore bundles alike.
+    ///
+    /// Reached only under [`VerificationMode::Permissive`]. No cryptography
+    /// runs, by construction rather than by omission: no certificate, no
+    /// transparency-log entry and no trust root is consulted on this path, so
+    /// nothing it returns may ever be presented as verified. What it does
+    /// enforce is structure — the caller's [`ScanBudget`], and each payload's
+    /// own claims about itself, which is all that is checkable without a key.
+    ///
+    /// Both referrer kinds are read in one digest-ordered pass over one
+    /// budget. That is what stops a registry starving one kind with volume of
+    /// the other: there is no second allowance to spend.
+    ///
+    /// Reachable only from [`Self::run_attestations`]. `ocx package verify
+    /// --attestation` goes through [`Self::run`], which never calls this, so a
+    /// document read here can never become a *verification* candidate — the
+    /// separation is structural, not a filter someone has to remember.
+    async fn scan_unverified(
+        client: &Client,
+        ctx: &VerifyContext<'_>,
+        target: &ScanTarget,
+        budget: &mut ScanBudget,
+    ) -> Result<(Vec<UnverifiedSbom>, Vec<RefusedCandidate>), VerifyErrorKind> {
+        let VerifyContentMode::Attestation { .. } = &ctx.content else {
+            // Unreachable through the public API; a signature run always
+            // verifies and never reaches this pass.
+            return Ok((Vec::new(), Vec::new()));
+        };
+        let transport = client.transport();
+        let ScanTarget { image, subject_digest } = target;
+        Self::ensure_referrers_supported(transport, ctx, image, subject_digest).await?;
+
+        // One unfiltered listing rather than one request per artifact type. The
+        // client-side filter below is the real one either way: the OCI spec
+        // permits a registry to ignore the server-side `artifactType`
+        // parameter, so a filtered listing would still have to be re-filtered
+        // here — at several times the requests.
+        let listed = transport
+            .list_referrers(image, subject_digest, None)
+            .await
+            .map_err(map_client_error)?;
+        // An absent `artifactType` is dropped, unlike in the signed scan where
+        // it is kept. The asymmetry is the point: there the bundle parse
+        // downstream fail-closes on a non-bundle, so keeping an untyped
+        // candidate costs a fetch and admits nothing. Here the artifactType is
+        // the only statement of what a raw payload is, so an untyped referrer
+        // is not an SBOM referrer — treating it as one would list an arbitrary
+        // blob under a predicate type nothing ever claimed.
+        // A prefilter, and only that: it decides which candidates are worth a
+        // request and which decode each one needs. `--type` is deliberately
+        // *not* applied here even though the listing appears to carry the
+        // answer, because the listing's `artifactType` is unchecked against the
+        // manifest it points at — narrowing on it would drop a referrer whose
+        // layer is the requested type, and admit one whose layer is not.
+        // Neither shape is narrowed before its payload's own claim is read.
+        let mut candidates: Vec<(crate::oci::Descriptor, UnverifiedPayload)> = listed
+            .into_iter()
+            .filter_map(|descriptor| {
+                let artifact_type = descriptor.artifact_type.as_deref()?;
+                if sbom_predicate_type_uri(artifact_type).is_some() {
+                    return Some((descriptor, UnverifiedPayload::Raw));
+                }
+                (artifact_type == SIGSTORE_BUNDLE_V03).then_some((descriptor, UnverifiedPayload::Bundle))
+            })
+            .collect();
+        // Digest order, for the reason `order_candidates` sorts: a total order
+        // the registry does not choose, so the listing is reproducible.
+        candidates.sort_by(|(left, _), (right, _)| left.digest.cmp(&right.digest));
+
+        let total_candidates = candidates.len();
+        let mut found = Vec::new();
+        let mut refused = Vec::new();
+        let mut processed = 0usize;
+        let mut first_unexamined = None;
+        for (descriptor, payload) in candidates {
+            if !budget.may_examine() {
+                first_unexamined = Some(descriptor.digest.clone());
+                break;
+            }
+            budget.examined();
+            processed = processed.saturating_add(1);
+            match Self::read_unverified_referrer(transport, ctx, budget, target, &descriptor, payload).await {
+                Ok(Some(sbom)) => found.push(sbom),
+                // A `--type` narrowing miss: this candidate is fine, it simply
+                // is not the document that was asked for. It spent a slot and
+                // records no failure, exactly as the signed scan's
+                // `TypeNarrowed` does (S-017).
+                Ok(None) => {}
+                Err(reason) => refused.push(RefusedCandidate {
+                    referrer_digest: descriptor.digest.clone(),
+                    reason,
+                }),
+            }
+        }
+
+        // A truncated permissive pass is reported as a refusal, not raised as
+        // an error — the one place this pass's posture differs from the signed
+        // one's, and deliberately so. The signed pass fails closed because a
+        // partial answer about *signed* documents understates what a publisher
+        // vouched for. Here nothing is vouched for by anyone, and raising would
+        // let a registry turn a working listing into a hard failure by the
+        // cheapest means available: attach enough junk. The refusal travels out
+        // beside the results, turns the CLI summary to `partial_failure`, and
+        // names the first referrer that was not looked at.
+        if let Some(stop) = budget.stop {
+            refused.push(RefusedCandidate {
+                referrer_digest: first_unexamined.unwrap_or_default(),
+                reason: truncation_failure(budget.caps, stop, total_candidates.saturating_sub(processed)),
+            });
+        }
+        Ok((found, refused))
+    }
+
+    /// Fetch one referrer and turn it into an unverified document: its
+    /// manifest, then its payload blob, then whatever decode its shape calls
+    /// for.
+    ///
+    /// The caps are the signed path's, reached through the same two helpers, so
+    /// a document read here is bounded by exactly the numbers an attestation
+    /// envelope is. Bytes are charged on the failure paths too — a rejected
+    /// read still cost up to the cap, because the bounded read stops at cap + 1
+    /// rather than at zero. That charge is deliberately pessimistic and cannot
+    /// be tightened: `pull_bundle_blob_capped` drops the buffer on the error
+    /// path, and a registry declaring one byte while streaming the cap would
+    /// otherwise be charged one byte.
+    ///
+    /// `Ok(None)` is a `--type` narrowing miss, not a failure — see the caller.
+    async fn read_unverified_referrer(
+        transport: &dyn OciTransport,
+        ctx: &VerifyContext<'_>,
+        budget: &mut ScanBudget,
+        target: &ScanTarget,
+        descriptor: &crate::oci::Descriptor,
+        payload: UnverifiedPayload,
+    ) -> Result<Option<UnverifiedSbom>, VerifyErrorKind> {
+        let caps = budget.caps;
+        let referrer_digest =
+            Digest::try_from(descriptor.digest.as_str()).map_err(|e| VerifyErrorKind::Internal(Box::new(e)))?;
+
+        // Cheap reject of a self-declared over-cap descriptor before any fetch;
+        // the actual body length is re-checked after the read, since a registry
+        // can lie about the declared size.
+        if descriptor.size < 0 || descriptor.size as u64 > MAX_REFERRER_MANIFEST_BYTES {
+            return Err(VerifyErrorKind::BundleParseFailed);
+        }
+        // `clone_with_digest` drops the tag, so this stays digest-only — a
+        // `repo:tag@digest` reference keys a different registry path and 404s.
+        let referrer_ref = target.image.clone_with_digest(descriptor.digest.clone());
+        let referrer_bytes = match pull_referrer_manifest_capped(transport, &referrer_ref).await {
+            Ok(bytes) => bytes,
+            Err(kind) => {
+                budget.charge(MAX_REFERRER_MANIFEST_BYTES);
+                return Err(kind);
+            }
+        };
+        budget.charge(referrer_bytes.len() as u64);
+
+        let manifest: crate::oci::referrer::ReferrerManifest =
+            serde_json::from_slice(&referrer_bytes).map_err(|_| VerifyErrorKind::BundleParseFailed)?;
+        let layer = manifest.layers.first().ok_or(VerifyErrorKind::NoUsableBundle)?;
+        // For a raw attachment the layer's media type is *the* claim about what
+        // the document is, and the only one checkable without a key. It is
+        // therefore both the gate and the label: outside the SBOM set the
+        // referrer is refused, since otherwise it could declare
+        // `application/vnd.cyclonedx+json` in the listing, carry an executable,
+        // and be presented as an SBOM. Inside the set it names the
+        // predicateType reported for the bytes that were actually served —
+        // never the listing's echo, which nothing checks against this manifest,
+        // and which a registry can therefore use to label SPDX bytes CycloneDX.
+        // A bundle needs no such gate: its predicateType is inside the payload
+        // and the parse below fail-closes on anything that is not a bundle.
+        let raw_predicate_type = match payload {
+            UnverifiedPayload::Raw => match sbom_predicate_type_uri(&layer.media_type) {
+                Some(uri) => Some(uri),
+                None => {
+                    return Err(VerifyErrorKind::SbomMediaTypeUnsupported {
+                        media_type: layer.media_type.clone(),
+                    });
+                }
+            },
+            UnverifiedPayload::Bundle => None,
+        };
+        // `--type` narrows on the value that will be *reported*, which is the
+        // layer's. Applied here rather than after the blob pull only because
+        // the answer is already known: a narrowed-out raw referrer costs one
+        // manifest request and no payload bytes. A bundle is narrowed after its
+        // parse, in `extract_bundle_payload`, for the same reason in reverse —
+        // its predicateType is not knowable until then.
+        if let Some(uri) = raw_predicate_type
+            && let VerifyContentMode::Attestation {
+                predicate_type: Some(requested),
+            } = &ctx.content
+            && requested.uri() != uri
+        {
+            return Ok(None);
+        }
+        if layer.size < 0 || layer.size as u64 > caps.bundle_bytes as u64 {
+            return Err(VerifyErrorKind::AttestationTooLarge {
+                limit: caps.bundle_bytes as u64,
+                actual: layer.size.max(0) as u64,
+            });
+        }
+        let blob_digest = Digest::try_from(layer.digest.as_str()).map_err(|_| VerifyErrorKind::BundleParseFailed)?;
+        let bytes = match pull_bundle_blob_capped(transport, &target.image, &blob_digest, caps.bundle_bytes).await {
+            Ok(bytes) => {
+                budget.charge(bytes.len() as u64);
+                bytes
+            }
+            Err(kind) => {
+                budget.charge(caps.bundle_bytes as u64);
+                return Err(kind);
+            }
+        };
+
+        let (predicate_type, document) = match raw_predicate_type {
+            // The registry served these bytes under this media type. That is
+            // the whole of it, which is why the caller labels the result
+            // unverified.
+            Some(uri) => (uri.to_owned(), bytes),
+            None => match Self::extract_bundle_payload(ctx, bytes, target).await? {
+                Some(extracted) => extracted,
+                None => return Ok(None),
+            },
+        };
+
+        Ok(Some(UnverifiedSbom {
+            referrer_digest,
+            subject_digest: target.subject_digest.clone(),
+            predicate_type,
+            document,
+        }))
+    }
+
+    /// Read a Sigstore bundle's DSSE payload with **nothing verified**: the
+    /// predicateType and the predicate document, as the envelope states them.
+    ///
+    /// Deliberately the existing structural parse chain and not a second one:
+    /// `parse_bundle` then [`dsse::verify_envelope`], the same two calls the
+    /// signed path makes before it verifies anything. `verify_envelope`'s name
+    /// says verify, but its own doc calls it "the structural half: everything
+    /// provable without a verifying key" — it consults no certificate, no key
+    /// and no log. Reusing it is what keeps the caps custody, the `_type`
+    /// allowlist and the subject binding identical across the two modes; a
+    /// separate reader would be a second parser to keep in step.
+    ///
+    /// What this must never do is carry signer identity out. The bundle has a
+    /// certificate in it and it would be one line to read a SAN off it, and
+    /// that line would put an unverified string in the column an operator reads
+    /// as provenance. [`UnverifiedSbom`] has nowhere to put it, which is the
+    /// enforcement.
+    ///
+    /// `Ok(None)` is a `--type` narrowing miss.
+    async fn extract_bundle_payload(
+        ctx: &VerifyContext<'_>,
+        bundle_bytes: Vec<u8>,
+        target: &ScanTarget,
+    ) -> Result<Option<(String, Vec<u8>)>, VerifyErrorKind> {
+        let VerifyContentMode::Attestation { predicate_type } = &ctx.content else {
+            return Ok(None);
+        };
+        // Off the runtime worker for the same reason the signed path's parse
+        // is: serde passes over up to `MAX_ATTESTATION_ENVELOPE_BYTES` (32 MiB)
+        // of registry-supplied JSON with no await between them (ASYNC-01).
+        let cap = ctx.content.caps().bundle_bytes;
+        let subject_digest = target.subject_digest.clone();
+        let requested = predicate_type.clone();
+        tokio::task::spawn_blocking(move || {
+            let bundle = parse_bundle(&bundle_bytes, cap).ok_or(VerifyErrorKind::BundleParseFailed)?;
+            match dsse::verify_envelope(&bundle, &subject_digest, requested.as_ref()) {
+                Ok(verified) => Ok(Some((
+                    verified.attestation.predicate_type,
+                    verified.attestation.predicate.get().as_bytes().to_vec(),
+                ))),
+                // Only reachable when a type was requested; the candidate is
+                // sound, it is simply not the document that was asked for.
+                Err(VerifyErrorKind::PredicateTypeMismatch { .. }) if requested.is_some() => Ok(None),
+                Err(kind) => Err(kind),
+            }
+        })
+        .await
+        .map_err(|error| {
+            tracing::warn!("unverified bundle read task panicked: {error}");
+            VerifyErrorKind::Internal(Box::new(error))
+        })?
+    }
+
+    /// List the raw SBOM attachments on the target and refuse every one,
+    /// **without fetching any of them**.
+    ///
+    /// Under [`VerificationMode::Demand`] a raw attachment can never be an
+    /// answer, so there is nothing to learn from its bytes — and not fetching
+    /// is what makes untrusted volume unable to spend the budget the signed
+    /// pass needs. The rows are capped at the mode's candidate count for the
+    /// same reason: a registry listing ten thousand attachments must not be
+    /// able to turn a refusal into ten thousand report rows.
+    async fn refuse_unsigned(
+        client: &Client,
+        ctx: &VerifyContext<'_>,
+        target: &ScanTarget,
+    ) -> Result<Vec<RefusedCandidate>, VerifyErrorKind> {
+        let VerifyContentMode::Attestation { .. } = &ctx.content else {
+            return Ok(Vec::new());
+        };
+        let transport = client.transport();
+        let ScanTarget { image, subject_digest } = target;
+        Self::ensure_referrers_supported(transport, ctx, image, subject_digest).await?;
+        let listed = transport
+            .list_referrers(image, subject_digest, None)
+            .await
+            .map_err(map_client_error)?;
+
+        let mut digests: Vec<String> = listed
+            .into_iter()
+            .filter(|descriptor| {
+                descriptor
+                    .artifact_type
+                    .as_deref()
+                    .and_then(sbom_predicate_type_uri)
+                    .is_some()
+            })
+            .map(|descriptor| descriptor.digest)
+            .collect();
+        // Digest order, for the reason `order_candidates` sorts: a total order
+        // the registry does not choose, so the report is reproducible.
+        digests.sort();
+        Ok(digests
+            .into_iter()
+            .take(ctx.content.caps().candidates)
+            .map(|referrer_digest| RefusedCandidate {
+                referrer_digest,
+                reason: VerifyErrorKind::UnsignedRejectedByPolicy,
+            })
+            .collect())
+    }
+
     async fn run_inner(client: &Client, ctx: VerifyContext<'_>) -> Result<VerifyResult, VerifyErrorKind> {
-        let found = Self::scan(client, &ctx, ScanArity::FirstMatch).await?;
+        let target = Self::resolve_target(client, &ctx).await?;
+        let mut budget = ScanBudget::new(ctx.content.caps());
+        let found = Self::scan(client, &ctx, &target, ScanArity::FirstMatch, &mut budget).await?;
         // `ScanArity::FirstMatch` returns the moment a candidate passes, so a
         // non-empty result holds exactly that candidate.
         found
@@ -335,13 +778,15 @@ impl VerifyPipeline {
             .ok_or(VerifyErrorKind::NoSignaturesFound)
     }
 
-    /// The scan both entry points share: resolve the target, list its referrer
-    /// candidates, and verify them under the requested content mode.
+    /// Resolve the target once: the SSRF floor on the trust services, the
+    /// per-platform subject digest, and the registry reference every
+    /// referrer-facing call is addressed with.
     ///
-    /// `arity` is passed rather than derived from `ctx.content` so the two facts
-    /// stay separable — "which content kind" and "how many answers" are
-    /// different questions, and a test can vary either alone.
-    async fn scan(client: &Client, ctx: &VerifyContext<'_>, arity: ScanArity) -> Result<ScanOutcome, VerifyErrorKind> {
+    /// Extracted from [`Self::scan`] because an attestation run makes two
+    /// passes over the same subject — signed referrers, then unsigned ones —
+    /// and resolving twice would repeat an index select, a physical rewrite and
+    /// a dial-time DNS lookup to re-derive an answer that cannot have changed.
+    async fn resolve_target(client: &Client, ctx: &VerifyContext<'_>) -> Result<ScanTarget, VerifyErrorKind> {
         // 0. SSRF floor for the trust services (CWE-918). The CLI boundary
         //    validated the URL as a *string*; this is where we find out where it
         //    actually resolves, before anything dials it. Skipped under
@@ -357,7 +802,6 @@ impl VerifyPipeline {
                 })?;
         }
 
-        let transport = client.transport();
         // 1. Resolve the per-platform target manifest.
         let resolved = match ctx
             .index
@@ -407,6 +851,27 @@ impl VerifyPipeline {
         // every registry-facing reference must come from (T-arch-G1), so a
         // `[mirrors]` entry for the physical host redirects this traffic too.
         let image = client.transport_reference(&physical);
+        Ok(ScanTarget { image, subject_digest })
+    }
+
+    /// The scan both entry points share: list the target's signature-bundle
+    /// referrer candidates and verify them under the requested content mode.
+    ///
+    /// `arity` is passed rather than derived from `ctx.content` so the two facts
+    /// stay separable — "which content kind" and "how many answers" are
+    /// different questions, and a test can vary either alone. `budget` is the
+    /// caller's so an attestation run's two passes spend one set of bounds
+    /// between them rather than one set each.
+    ///
+    async fn scan(
+        client: &Client,
+        ctx: &VerifyContext<'_>,
+        target: &ScanTarget,
+        arity: ScanArity,
+        budget: &mut ScanBudget,
+    ) -> Result<ScanOutcome, VerifyErrorKind> {
+        let transport = client.transport();
+        let ScanTarget { image, subject_digest } = target;
 
         // 2. List signature referrers (capability cache short-circuits a known
         //    Unsupported registry without re-listing), then re-filter client-side
@@ -421,7 +886,7 @@ impl VerifyPipeline {
         //    it would drop a genuine server-matched referrer (regression class:
         //    a registry that matched server-side but omits the per-descriptor
         //    artifactType echo).
-        let referrers = Self::list_signature_referrers(transport, ctx, &image, &subject_digest).await?;
+        let referrers = Self::list_signature_referrers(transport, ctx, image, subject_digest).await?;
         let mut candidates: Vec<crate::oci::Descriptor> = referrers
             .into_iter()
             .filter(|descriptor| match descriptor.artifact_type.as_deref() {
@@ -430,6 +895,10 @@ impl VerifyPipeline {
             })
             .collect();
         if candidates.is_empty() {
+            // Before the trust-root gate below: a subject with no bundle
+            // referrer at all is "not signed", and a missing trust root is not
+            // the thing to report about it. The caller promotes any refusal it
+            // recorded over this kind.
             return Err(VerifyErrorKind::NoSignaturesFound);
         }
         order_candidates(&mut candidates, &ctx.content);
@@ -454,7 +923,7 @@ impl VerifyPipeline {
         // The signed artifact's bytes, not just its digest: `Verifier` hashes a
         // preimage. Fetched once per run, after the referrer listing so an
         // unsigned artifact costs no extra request.
-        let subject_bytes = pull_subject_manifest_verified(transport, &image, &subject_digest).await?;
+        let subject_bytes = pull_subject_manifest_verified(transport, image, subject_digest).await?;
 
         // 3. Verify each candidate independently. `FirstMatch` is the ANY-of
         //    signature scan — the first candidate that fully passes crypto +
@@ -474,8 +943,7 @@ impl VerifyPipeline {
         let mut refused: Vec<RefusedCandidate> = Vec::new();
         let mut matches: Vec<(VerifyResult, Option<VerifiedAttestation>)> = Vec::new();
         // Resolved from the requested mode, before the first fetch (D-d).
-        let caps = ctx.content.caps();
-        let mut budget = ScanBudget::new(caps);
+        let caps = budget.caps;
         for descriptor in candidates {
             if !budget.may_examine() {
                 break;
@@ -514,10 +982,10 @@ impl VerifyPipeline {
                 &verifier,
                 &descriptor,
                 referrer_bytes,
-                &subject_digest,
+                subject_digest,
                 &subject_bytes,
-                &image,
-                &mut budget,
+                image,
+                budget,
             )
             .await
             {
@@ -553,7 +1021,7 @@ impl VerifyPipeline {
         ctx: &VerifyContext<'_>,
         caps: ContentCaps,
         total_candidates: usize,
-        budget: ScanBudget,
+        budget: &ScanBudget,
         matches: Vec<(VerifyResult, Option<VerifiedAttestation>)>,
         refused: Vec<RefusedCandidate>,
     ) -> Result<ScanOutcome, VerifyErrorKind> {
@@ -574,23 +1042,21 @@ impl VerifyPipeline {
             // scan cannot answer a question about *every* attestation, so
             // returning the partial list would understate what the subject
             // carries. Which bound stopped it is the actionable part.
-            VerifyContentMode::Attestation { .. } => match budget.stop {
-                Some(ScanStop::CandidateCap) => Err(VerifyErrorKind::TooManyAttestations { limit: caps.candidates }),
-                Some(ScanStop::ByteBudget) => Err(VerifyErrorKind::AttestationBudgetExhausted {
-                    limit: caps.total_bytes,
-                }),
-                Some(ScanStop::ListingCap) => Err(VerifyErrorKind::CandidateLimitExhausted { unexamined }),
-                // Every refusal recorded here is a real defect in a candidate of
-                // the requested type — a narrowing miss records none — so an
-                // empty result with nothing recorded is genuinely "not found".
-                None if matches.is_empty() => {
-                    Err(best_failure(refused).unwrap_or(VerifyErrorKind::AttestationNotFound))
+            VerifyContentMode::Attestation { .. } => {
+                match budget.stop.map(|stop| truncation_failure(caps, stop, unexamined)) {
+                    Some(kind) => Err(kind),
+                    // Every refusal recorded here is a real defect in a candidate of
+                    // the requested type — a narrowing miss records none — so an
+                    // empty result with nothing recorded is genuinely "not found".
+                    None if matches.is_empty() => {
+                        Err(best_failure(refused).unwrap_or(VerifyErrorKind::AttestationNotFound))
+                    }
+                    // Matches *and* refusals travel out together. Failing here on a
+                    // recorded refusal would let one malformed referrer hide every
+                    // valid attestation beside it.
+                    None => Ok(ScanOutcome { matches, refused }),
                 }
-                // Matches *and* refusals travel out together. Failing here on a
-                // recorded refusal would let one malformed referrer hide every
-                // valid attestation beside it.
-                None => Ok(ScanOutcome { matches, refused }),
-            },
+            }
         }
     }
 
@@ -873,6 +1339,32 @@ impl VerifyPipeline {
         image: &native::Reference,
         subject_digest: &Digest,
     ) -> Result<Vec<crate::oci::Descriptor>, VerifyErrorKind> {
+        Self::ensure_referrers_supported(transport, ctx, image, subject_digest).await?;
+
+        // Fetch the signature referrers (server-side artifactType filter).
+        transport
+            .list_referrers(image, subject_digest, Some(SIGSTORE_BUNDLE_V03))
+            .await
+            .map_err(map_client_error)
+    }
+
+    /// Confirm the registry serves the OCI Referrers API before any listing.
+    ///
+    /// Shared by both passes rather than folded into the signed one: a registry
+    /// that does not serve referrers has no unsigned SBOMs either, and the
+    /// answer is the same 84. Skipping it in the unsigned pass would turn a
+    /// cached `Unsupported` into a live request the cache exists to avoid, and
+    /// would report the miss as whatever the registry answered instead.
+    ///
+    /// The probe result is cached, so the second caller in a run normally reads
+    /// the entry the first one wrote; `--no-cache` deliberately buys a second
+    /// probe rather than a stale answer.
+    async fn ensure_referrers_supported(
+        transport: &dyn OciTransport,
+        ctx: &VerifyContext<'_>,
+        image: &native::Reference,
+        subject_digest: &Digest,
+    ) -> Result<(), VerifyErrorKind> {
         // Capability: a fresh cache entry avoids a re-probe; otherwise probe
         // and persist. `Unsupported` fails hard (no fallback-tag reads, S1-F).
         // Cache key = the host actually probed (`probe` records the same one),
@@ -905,12 +1397,7 @@ impl VerifyPipeline {
         if capability.supported == ReferrersSupport::Unsupported {
             return Err(VerifyErrorKind::ReferrersUnsupported);
         }
-
-        // Fetch the signature referrers (server-side artifactType filter).
-        transport
-            .list_referrers(image, subject_digest, Some(SIGSTORE_BUNDLE_V03))
-            .await
-            .map_err(map_client_error)
+        Ok(())
     }
 }
 
@@ -1188,10 +1675,41 @@ struct ParsedBundle {
 /// The `Option<VerifiedAttestation>` is populated only in attestation mode; the
 /// signature path ignores it. Both entry points reshape this into their own
 /// public return before it leaves the module.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct ScanOutcome {
     matches: Vec<(VerifyResult, Option<VerifiedAttestation>)>,
     refused: Vec<RefusedCandidate>,
+}
+
+/// The subject one scan runs against, resolved once.
+///
+/// The pair travels together because they are two halves of one answer: the
+/// digest names *what* is being read and the reference names *where from*,
+/// after index indirection and the mirror map have both had their say. Split
+/// across two arguments they would be one transposition away from addressing
+/// the right host for the wrong subject.
+/// Which of the two referrer *shapes* a candidate is, decided from its
+/// `artifactType` before any fetch.
+///
+/// Shape only — deliberately not the predicate type. The listing's
+/// `artifactType` is a registry-served echo of what the referrer claims, and
+/// nothing checks it against the manifest it points at, so it may say which
+/// decode to run but must never decide the label the decode's result is
+/// reported under. That comes from the layer, in
+/// [`Self::read_unverified_referrer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnverifiedPayload {
+    /// The document itself, typed by the layer's own media type.
+    Raw,
+    /// A Sigstore bundle, read for its DSSE payload with nothing verified.
+    Bundle,
+}
+
+struct ScanTarget {
+    /// Registry reference every referrer-facing call is addressed with.
+    image: native::Reference,
+    /// The per-platform subject manifest digest.
+    subject_digest: Digest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1240,6 +1758,11 @@ impl ScanBudget {
     ///
     /// The byte budget is charged from bytes actually read, never a declared
     /// size, so a registry cannot buy extra fetches by advertising size 0.
+    ///
+    /// One allowance, spent by one pass: an attestation run either verifies
+    /// (and then never fetches an unsigned attachment at all) or verifies
+    /// nothing (and then reads both referrer kinds in a single pass). Nothing
+    /// is rationed between passes, because there is only ever one that fetches.
     fn may_examine(&mut self) -> bool {
         let stop = if self.examined >= self.caps.candidates {
             ScanStop::CandidateCap
@@ -1327,6 +1850,22 @@ fn annotation_disagrees_with_mode(descriptor: &crate::oci::Descriptor, mode: &Ve
     hint != match mode {
         VerifyContentMode::Signature => BUNDLE_CONTENT_MESSAGE_SIGNATURE,
         VerifyContentMode::Attestation { .. } => BUNDLE_CONTENT_DSSE,
+    }
+}
+
+/// Name the bound that stopped a scan, for a caller reporting the truncation.
+///
+/// A truncated scan cannot answer a question about *every* SBOM a subject
+/// carries, so which bound ran out is the actionable part. Shared by both
+/// passes; how each one reports it differs — see
+/// [`VerifyPipeline::scan_unverified`].
+fn truncation_failure(caps: ContentCaps, stop: ScanStop, unexamined: usize) -> VerifyErrorKind {
+    match stop {
+        ScanStop::CandidateCap => VerifyErrorKind::TooManyAttestations { limit: caps.candidates },
+        ScanStop::ByteBudget => VerifyErrorKind::AttestationBudgetExhausted {
+            limit: caps.total_bytes,
+        },
+        ScanStop::ListingCap => VerifyErrorKind::CandidateLimitExhausted { unexamined },
     }
 }
 
@@ -1869,6 +2408,7 @@ mod tests {
             state: &state,
             offline: true,
             content: VerifyContentMode::Signature,
+            verification: VerificationMode::Demand,
         };
 
         // A well-formed referrer manifest whose one layer names the blob. The
@@ -2485,6 +3025,7 @@ mod tests {
                 state: &state,
                 offline: true,
                 content: VerifyContentMode::Signature,
+                verification: VerificationMode::Demand,
             },
         )
         .await;
@@ -2722,6 +3263,7 @@ mod tests {
             state,
             offline: true,
             content: VerifyContentMode::Attestation { predicate_type: None },
+            verification: VerificationMode::Demand,
         }
     }
 
@@ -2765,7 +3307,7 @@ mod tests {
             let mut budget = ScanBudget::new(caps);
             budget.stop = Some(stop);
             budget.considered = 3;
-            let outcome = VerifyPipeline::finish_scan(&ctx, caps, 9, budget, vec![verified()], Vec::new());
+            let outcome = VerifyPipeline::finish_scan(&ctx, caps, 9, &budget, vec![verified()], Vec::new());
             let error = outcome.expect_err("a truncated scan never returns a partial list");
             assert_eq!(
                 error.kind_detail(),
@@ -2793,7 +3335,7 @@ mod tests {
         let ctx = attestation_ctx(&identifier, &platform, &index, &trust_root, &rekor_url, &state);
         let caps = ctx.content.caps();
 
-        let outcome = VerifyPipeline::finish_scan(&ctx, caps, 2, ScanBudget::new(caps), Vec::new(), Vec::new());
+        let outcome = VerifyPipeline::finish_scan(&ctx, caps, 2, &ScanBudget::new(caps), Vec::new(), Vec::new());
         assert!(matches!(outcome, Err(VerifyErrorKind::AttestationNotFound)));
         assert_eq!(
             VerifyErrorKind::AttestationNotFound.exit_code(),
@@ -2807,7 +3349,7 @@ mod tests {
             &ctx,
             caps,
             2,
-            ScanBudget::new(caps),
+            &ScanBudget::new(caps),
             Vec::new(),
             vec![refusal(VerifyErrorKind::TlogBindingMismatch)],
         );
@@ -2850,7 +3392,7 @@ mod tests {
             })
             .collect();
 
-        let returned = VerifyPipeline::finish_scan(&ctx, caps, 3, ScanBudget::new(caps), matches, Vec::new())
+        let returned = VerifyPipeline::finish_scan(&ctx, caps, 3, &ScanBudget::new(caps), matches, Vec::new())
             .expect("three verified candidates are three results");
         assert_eq!(
             returned.matches.len(),
@@ -2895,7 +3437,7 @@ mod tests {
             &ctx,
             caps,
             2,
-            ScanBudget::new(caps),
+            &ScanBudget::new(caps),
             vec![passing],
             vec![refusal(VerifyErrorKind::TlogBindingMismatch)],
         )
@@ -2962,6 +3504,7 @@ mod tests {
             state: &state,
             offline: true,
             content: VerifyContentMode::Signature,
+            verification: VerificationMode::Demand,
         };
         let caps = ctx.content.caps();
         let mut budget = ScanBudget::new(caps);
@@ -2971,7 +3514,7 @@ mod tests {
             &ctx,
             caps,
             1,
-            budget,
+            &budget,
             Vec::new(),
             vec![refusal(VerifyErrorKind::SignatureInvalid)],
         );
@@ -3172,11 +3715,11 @@ mod tests {
 
     /// A bundle carrying a DSSE envelope over an in-toto Statement that binds
     /// `subject_digest` and declares `predicate_type` in its **signed** payload.
-    fn dsse_bundle_binding(subject_digest: &Digest, predicate_type: &str) -> Bundle {
+    fn dsse_bundle_binding(subject_digest: &Digest, predicate_type: &str, predicate: &str) -> Bundle {
         use sigstore_protobuf_specs::dev::sigstore::bundle::v1::bundle;
         use sigstore_protobuf_specs::io::intoto::{Envelope, Signature};
         let statement = format!(
-            r#"{{"_type":"https://in-toto.io/Statement/v1","subject":[{{"name":"pkg","digest":{{"sha256":"{}"}}}}],"predicateType":"{predicate_type}","predicate":{{"bomFormat":"CycloneDX"}}}}"#,
+            r#"{{"_type":"https://in-toto.io/Statement/v1","subject":[{{"name":"pkg","digest":{{"sha256":"{}"}}}}],"predicateType":"{predicate_type}","predicate":{predicate}}}"#,
             subject_digest.hex(),
         );
         let mut bundle = message_bundle(true, true);
@@ -3206,11 +3749,13 @@ mod tests {
         use crate::oci::client::test_transport::{StubTransport, StubTransportData};
 
         const SIGNED: &str = "https://cyclonedx.org/bom";
+        const CYCLONEDX_PREDICATE: &str = r#"{"bomFormat":"CycloneDX"}"#;
         const REWRITTEN: &str = "https://slsa.dev/provenance/v1";
 
         let subject_bytes = b"the artifact under attestation";
         let subject_digest = crate::oci::Algorithm::Sha256.hash(subject_bytes);
-        let blob = serde_json::to_vec(&dsse_bundle_binding(&subject_digest, SIGNED)).expect("bundle serializes");
+        let blob = serde_json::to_vec(&dsse_bundle_binding(&subject_digest, SIGNED, CYCLONEDX_PREDICATE))
+            .expect("bundle serializes");
         let blob_digest = crate::oci::Algorithm::Sha256.hash(&blob);
 
         let data = StubTransportData::new();
@@ -3329,6 +3874,7 @@ mod tests {
                 state: &state,
                 offline: true,
                 content: content.clone(),
+                verification: VerificationMode::Demand,
             };
             let mut budget = ScanBudget::new(ctx.content.caps());
             let verdict = VerifyPipeline::verify_one_referrer(
@@ -3377,7 +3923,7 @@ mod tests {
             let mut budget = ScanBudget::new(caps);
             budget.stop = Some(stop);
             budget.considered = 2;
-            VerifyPipeline::finish_scan(&ctx, caps, 5, budget, Vec::new(), Vec::new())
+            VerifyPipeline::finish_scan(&ctx, caps, 5, &budget, Vec::new(), Vec::new())
                 .expect_err("a truncated scan never returns a partial list")
         };
 
@@ -3401,6 +3947,872 @@ mod tests {
                 VerifyErrorKind::CandidateLimitExhausted { unexamined } if unexamined == 3,
             ),
             "the listing backstop reports how many candidates were left unlooked-at",
+        );
+    }
+
+    // ── Unsigned SBOM referrers (`cosign attach sbom` shape) ────────────────
+
+    /// One referrer the SBOM transport serves, described by what a publisher
+    /// would have chosen: its artifact type, its layer's media type, and the
+    /// document bytes.
+    #[derive(Clone)]
+    struct StubReferrer {
+        artifact_type: String,
+        layer_media_type: String,
+        document: Vec<u8>,
+        /// Overrides the layer's declared size, so a cap test can lie about it
+        /// the way a hostile registry would.
+        declared_layer_size: Option<i64>,
+    }
+
+    impl StubReferrer {
+        /// An unsigned SBOM referrer: the document is the payload, and the
+        /// artifact type and the layer media type agree.
+        fn sbom(media_type: &str, document: &str) -> Self {
+            Self {
+                artifact_type: media_type.to_string(),
+                layer_media_type: media_type.to_string(),
+                document: document.as_bytes().to_vec(),
+                declared_layer_size: None,
+            }
+        }
+
+        /// An unsigned SBOM referrer whose listing entry and payload layer
+        /// disagree about what the document is.
+        ///
+        /// Nothing prevents a registry from serving this: the `artifactType` on
+        /// a referrers listing is never checked against the manifest it points
+        /// at, so the two are independent claims and only the layer's is about
+        /// the bytes.
+        fn mislabelled_sbom(artifact_type: &str, layer_media_type: &str, document: &str) -> Self {
+            Self {
+                artifact_type: artifact_type.to_string(),
+                layer_media_type: layer_media_type.to_string(),
+                document: document.as_bytes().to_vec(),
+                declared_layer_size: None,
+            }
+        }
+
+        /// A Sigstore-bundle referrer carrying a real DSSE envelope over an
+        /// in-toto statement binding this transport's subject.
+        ///
+        /// Structurally sound and cryptographically worthless - the signature
+        /// is four bytes of 0xDEADBEEF. That is exactly the fixture the
+        /// permissive mode needs: it must extract this payload, and it must
+        /// never be able to call it verified.
+        fn attestation_bundle(predicate_type: &str, predicate: &str) -> Self {
+            let bundle = dsse_bundle_binding(&indirection_subject_digest(), predicate_type, predicate);
+            Self {
+                artifact_type: SIGSTORE_BUNDLE_V03.to_string(),
+                layer_media_type: crate::oci::sign::bundle::BUNDLE_V03_MEDIA_TYPE.to_string(),
+                document: serde_json::to_vec(&bundle).expect("bundle serializes"),
+                declared_layer_size: None,
+            }
+        }
+
+        /// A Sigstore-bundle referrer whose blob is junk, which is how far a
+        /// unit test can drive the signed pass: it reaches `parse_bundle` and
+        /// fail-closes into `BundleParseFailed`.
+        fn junk_bundle() -> Self {
+            Self {
+                artifact_type: SIGSTORE_BUNDLE_V03.to_string(),
+                layer_media_type: crate::oci::sign::bundle::BUNDLE_V03_MEDIA_TYPE.to_string(),
+                document: STUB_BUNDLE_BLOB.to_vec(),
+                declared_layer_size: None,
+            }
+        }
+
+        fn document_digest(&self) -> Digest {
+            crate::oci::Algorithm::Sha256.hash(&self.document)
+        }
+
+        /// Built through the production builder, so the fixture cannot drift
+        /// from the shape the read path parses.
+        fn manifest_bytes(&self) -> Vec<u8> {
+            let payload = crate::oci::Descriptor {
+                media_type: self.layer_media_type.clone(),
+                digest: self.document_digest().to_string(),
+                size: self.declared_layer_size.unwrap_or(self.document.len() as i64),
+                ..crate::oci::Descriptor::default()
+            };
+            let subject = crate::oci::Descriptor {
+                media_type: crate::oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                digest: indirection_subject_digest().to_string(),
+                size: INDIRECTION_SUBJECT_MANIFEST.len() as i64,
+                ..crate::oci::Descriptor::default()
+            };
+            crate::oci::referrer::ReferrerManifest::build(subject, &self.artifact_type, payload, None)
+                .to_canonical_json()
+                .expect("referrer manifest json")
+        }
+
+        fn descriptor(&self) -> crate::oci::Descriptor {
+            let bytes = self.manifest_bytes();
+            crate::oci::Descriptor {
+                media_type: crate::oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                digest: crate::oci::Algorithm::Sha256.hash(&bytes).to_string(),
+                size: bytes.len() as i64,
+                artifact_type: Some(self.artifact_type.clone()),
+                ..crate::oci::Descriptor::default()
+            }
+        }
+    }
+
+    /// Serves a caller-chosen referrer set and records what was asked for.
+    ///
+    /// Honours the server-side `artifactType` filter, unlike the
+    /// spec-permitted registry that ignores it — which is the point: the signed
+    /// pass must ask for bundles and get only bundles, so an unsigned referrer
+    /// reaching a verification candidate would be this double's fault to expose
+    /// and not to hide.
+    #[derive(Clone)]
+    struct SbomTransport {
+        referrers: Vec<StubReferrer>,
+        listing_filters: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        pulled_blobs: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl SbomTransport {
+        fn new(referrers: Vec<StubReferrer>) -> Self {
+            Self {
+                referrers,
+                listing_filters: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                pulled_blobs: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn pulled_blobs(&self) -> Vec<String> {
+            self.pulled_blobs.lock().expect("recorder lock").clone()
+        }
+
+        fn listing_filters(&self) -> Vec<Option<String>> {
+            self.listing_filters.lock().expect("recorder lock").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OciTransport for SbomTransport {
+        async fn ensure_auth(
+            &self,
+            _: &native::Reference,
+            _: crate::oci::RegistryOperation,
+        ) -> std::result::Result<(), ClientError> {
+            Ok(())
+        }
+
+        async fn list_tags(
+            &self,
+            _: &native::Reference,
+            _: usize,
+            _: Option<String>,
+        ) -> std::result::Result<Vec<String>, ClientError> {
+            unimplemented!("the sbom scan never lists tags")
+        }
+
+        async fn catalog(
+            &self,
+            _: &native::Reference,
+            _: usize,
+            _: Option<String>,
+        ) -> std::result::Result<Vec<String>, ClientError> {
+            unimplemented!("the sbom scan never reads the catalog")
+        }
+
+        async fn fetch_manifest_digest(&self, _: &native::Reference) -> std::result::Result<String, ClientError> {
+            unimplemented!("the sbom scan resolves digests through the index")
+        }
+
+        async fn pull_manifest_raw(
+            &self,
+            image: &native::Reference,
+            _: &[&str],
+        ) -> std::result::Result<(Vec<u8>, String), ClientError> {
+            let subject = indirection_subject_digest();
+            if image.digest() == Some(subject.to_string().as_str()) {
+                return Ok((INDIRECTION_SUBJECT_MANIFEST.to_vec(), subject.to_string()));
+            }
+            let wanted = image.digest().unwrap_or_default().to_string();
+            let referrer = self
+                .referrers
+                .iter()
+                .find(|stub| stub.descriptor().digest == wanted)
+                .expect("the scan only asks for referrers this transport listed");
+            Ok((referrer.manifest_bytes(), wanted))
+        }
+
+        async fn pull_blob(&self, _: &native::Reference, _: &Digest) -> std::result::Result<Vec<u8>, ClientError> {
+            unimplemented!("the sbom scan streams blobs")
+        }
+
+        async fn pull_blob_streaming(
+            &self,
+            _: &native::Reference,
+            digest: &Digest,
+        ) -> std::result::Result<Box<dyn tokio::io::AsyncRead + Send + Unpin + 'static>, ClientError> {
+            self.pulled_blobs
+                .lock()
+                .expect("recorder lock")
+                .push(digest.to_string());
+            let referrer = self
+                .referrers
+                .iter()
+                .find(|stub| &stub.document_digest() == digest)
+                .expect("the scan only asks for blobs a listed referrer named");
+            Ok(Box::new(std::io::Cursor::new(referrer.document.clone())))
+        }
+
+        async fn pull_blob_to_file(
+            &self,
+            _: &native::Reference,
+            _: &Digest,
+            _: &std::path::Path,
+        ) -> std::result::Result<(), ClientError> {
+            unimplemented!("the sbom scan never writes blobs to disk")
+        }
+
+        async fn head_blob(&self, _: &native::Reference, _: &Digest) -> std::result::Result<u64, ClientError> {
+            unimplemented!("the sbom scan never HEADs blobs")
+        }
+
+        async fn push_manifest(
+            &self,
+            _: &native::Reference,
+            _: &crate::oci::Manifest,
+        ) -> std::result::Result<String, ClientError> {
+            unimplemented!("reading an SBOM never pushes")
+        }
+
+        async fn push_manifest_raw(
+            &self,
+            _: &native::Reference,
+            _: Vec<u8>,
+            _: &str,
+        ) -> std::result::Result<String, ClientError> {
+            unimplemented!("reading an SBOM never pushes")
+        }
+
+        async fn push_blob(
+            &self,
+            _: &native::Reference,
+            _: Vec<u8>,
+            _: &Digest,
+            _: std::sync::Arc<dyn Fn(u64) + Send + Sync>,
+        ) -> std::result::Result<String, ClientError> {
+            unimplemented!("reading an SBOM never pushes")
+        }
+
+        async fn push_referrer_manifest(
+            &self,
+            _: &native::Reference,
+            _: &Digest,
+            _: &[u8],
+            _: &str,
+        ) -> std::result::Result<crate::oci::Descriptor, ClientError> {
+            unimplemented!("reading an SBOM never pushes")
+        }
+
+        async fn list_referrers(
+            &self,
+            _: &native::Reference,
+            _: &Digest,
+            artifact_type: Option<&str>,
+        ) -> std::result::Result<Vec<crate::oci::Descriptor>, ClientError> {
+            self.listing_filters
+                .lock()
+                .expect("recorder lock")
+                .push(artifact_type.map(str::to_string));
+            Ok(self
+                .referrers
+                .iter()
+                .filter(|stub| artifact_type.is_none_or(|wanted| stub.artifact_type == wanted))
+                .map(StubReferrer::descriptor)
+                .collect())
+        }
+
+        fn box_clone(&self) -> Box<dyn OciTransport> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// A CycloneDX document, spelled non-canonically so a re-serialization on
+    /// the read path would be observable in the bytes.
+    const RAW_CYCLONEDX: &str = r#"{"bomFormat":"CycloneDX","specVersion":"1.6","components":[ ]}"#;
+    const RAW_SPDX: &str = r#"{"spdxVersion":"SPDX-2.3"}"#;
+    /// The predicateType a CycloneDX document is stated under, spelled out
+    /// rather than imported: `predicate::URI_CYCLONEDX` is private to its
+    /// module, and a test that asserts the wire value should name it.
+    const CYCLONEDX_URI: &str = "https://cyclonedx.org/bom";
+    /// The SPDX counterpart, spelled out for the same reason.
+    const SPDX_URI: &str = "https://spdx.dev/Document";
+
+    /// Drive an `ocx package sbom` scan against a caller-chosen referrer set.
+    ///
+    /// The mode is explicit at every call site rather than defaulted: it is
+    /// the whole subject of these tests, and a default would make half of them
+    /// assert against a mode nobody chose.
+    async fn drive_sbom_scan(
+        referrers: Vec<StubReferrer>,
+        predicate_type: Option<PredicateType>,
+        verification: VerificationMode,
+    ) -> (Result<AttestationScan, VerifyError>, SbomTransport, tempfile::TempDir) {
+        let (_key, cert) = self_signed_cert();
+        drive_sbom_scan_with_trust_root(referrers, predicate_type, verification, trust_root_of(&[&cert])).await
+    }
+
+    /// [`drive_sbom_scan`] with the trust root chosen by the caller, so a test
+    /// can hand the pipeline material no signature could verify against.
+    async fn drive_sbom_scan_with_trust_root(
+        referrers: Vec<StubReferrer>,
+        predicate_type: Option<PredicateType>,
+        verification: VerificationMode,
+        trust_root: TrustRoot,
+    ) -> (Result<AttestationScan, VerifyError>, SbomTransport, tempfile::TempDir) {
+        let logical = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
+        // A public IP literal, not a name: the dial-site SSRF guard resolves the
+        // physical host, and a DNS name here would make this unit test open a
+        // socket.
+        let physical = Identifier::parse("8.8.8.8/acme/tool:1.0").expect("physical identifier");
+
+        let transport = SbomTransport::new(referrers);
+        let client = Client::with_transport(Box::new(transport.clone()));
+        let index = Index::from_impl(IndirectingIndex { physical });
+        let temp = tempfile::TempDir::new().expect("state dir");
+        let state = StateStore::new(temp.path());
+        let rekor_url = Url::parse("http://127.0.0.1:3000").expect("rekor url");
+        let platform = crate::oci::Platform::any();
+
+        let outcome = VerifyPipeline::run_attestations(
+            &client,
+            VerifyContext {
+                identifier: &logical,
+                platform: &platform,
+                policies: &[],
+                no_cache: true,
+                index: &index,
+                trust_root: &trust_root,
+                rekor_url: &rekor_url,
+                state: &state,
+                offline: true,
+                content: VerifyContentMode::Attestation { predicate_type },
+                verification,
+            },
+        )
+        .await;
+        (outcome, transport, temp)
+    }
+
+    /// The headline case: a subject carrying a bundle referrer the signed pass
+    /// cannot use *and* an unsigned SBOM. The SBOM is reported, the bundle's
+    /// refusal travels beside it, and neither hides the other.
+    ///
+    /// Without the two-pass ordering this reds as `BundleParseFailed`: one
+    /// refused signed candidate would end a listing that had a perfectly
+    /// readable document in it — the same DoS `AttestationScan::refused` exists
+    /// to prevent, one layer up.
+    #[tokio::test]
+    async fn an_unsigned_sbom_is_listed_beside_a_refused_bundle_referrer() {
+        let (outcome, _transport, _state) = drive_sbom_scan(
+            vec![
+                StubReferrer::junk_bundle(),
+                StubReferrer::sbom("application/vnd.cyclonedx+json", RAW_CYCLONEDX),
+            ],
+            None,
+            VerificationMode::Permissive,
+        )
+        .await;
+
+        let scan = outcome.expect("a readable unsigned SBOM is an answer");
+        assert!(scan.matches.is_empty(), "the junk bundle cannot verify");
+        assert_eq!(scan.unverified.len(), 1, "the unsigned SBOM must be reported");
+        let sbom = &scan.unverified[0];
+        assert_eq!(
+            sbom.predicate_type, "https://cyclonedx.org/bom",
+            "an unsigned entry is labelled with the predicateType its artifactType stands for",
+        );
+        assert_eq!(
+            sbom.document,
+            RAW_CYCLONEDX.as_bytes(),
+            "the document is returned verbatim, not re-serialized",
+        );
+        assert_eq!(sbom.subject_digest, indirection_subject_digest());
+        assert_eq!(scan.refused.len(), 1, "the bundle's refusal travels beside the answer");
+        assert!(matches!(scan.refused[0].reason, VerifyErrorKind::BundleParseFailed));
+    }
+
+    /// `ocx package verify --attestation` goes through the ANY-of entry point,
+    /// which never runs the unsigned pass — so an unsigned referrer can never
+    /// become a *verification* candidate. Structural, not a filter someone has
+    /// to remember.
+    ///
+    /// Asserted twice over: the run reports "nothing to verify", and the
+    /// document's blob was never fetched at all.
+    #[tokio::test]
+    async fn verify_attestation_never_treats_an_unsigned_sbom_as_a_candidate() {
+        let sbom = StubReferrer::sbom("application/vnd.cyclonedx+json", RAW_CYCLONEDX);
+        let document_digest = sbom.document_digest().to_string();
+
+        let logical = Identifier::parse("ocx.sh/acme/tool:1.0").expect("logical identifier");
+        let physical = Identifier::parse("8.8.8.8/acme/tool:1.0").expect("physical identifier");
+        let transport = SbomTransport::new(vec![sbom]);
+        let client = Client::with_transport(Box::new(transport.clone()));
+        let index = Index::from_impl(IndirectingIndex { physical });
+        let temp = tempfile::TempDir::new().expect("state dir");
+        let state = StateStore::new(temp.path());
+        let rekor_url = Url::parse("http://127.0.0.1:3000").expect("rekor url");
+        let platform = crate::oci::Platform::any();
+        let (_key, cert) = self_signed_cert();
+        let trust_root = trust_root_of(&[&cert]);
+
+        let outcome = VerifyPipeline::run(
+            &client,
+            VerifyContext {
+                identifier: &logical,
+                platform: &platform,
+                policies: &[],
+                no_cache: true,
+                index: &index,
+                trust_root: &trust_root,
+                rekor_url: &rekor_url,
+                state: &state,
+                offline: true,
+                content: VerifyContentMode::Attestation { predicate_type: None },
+                verification: VerificationMode::Demand,
+            },
+        )
+        .await;
+
+        let Err(error) = outcome else {
+            panic!("an unsigned referrer must never satisfy a verification");
+        };
+        assert!(
+            matches!(error.kind, VerifyErrorKind::NoSignaturesFound),
+            "expected nothing-to-verify, got: {error}",
+        );
+        assert!(
+            !transport.pulled_blobs().contains(&document_digest),
+            "the verify path must not even fetch an unsigned document, got: {:?}",
+            transport.pulled_blobs(),
+        );
+        // The signed listing kept its server-side filter, which is the other
+        // half of why an unsigned referrer never reaches this scan.
+        assert!(
+            transport
+                .listing_filters()
+                .contains(&Some(SIGSTORE_BUNDLE_V03.to_string())),
+            "the signature listing must still ask the registry for bundles only, got: {:?}",
+            transport.listing_filters(),
+        );
+    }
+
+    /// `--type` narrows unsigned referrers by the same predicateType vocabulary
+    /// a signed entry carries, so one flag means one thing across both trust
+    /// classes. The unnarrowed row is the control: without it a narrowing that
+    /// dropped everything would pass every other row.
+    #[tokio::test]
+    async fn the_type_flag_narrows_unsigned_referrers_by_predicate_type() {
+        let referrers = vec![
+            StubReferrer::sbom("application/vnd.cyclonedx+json", RAW_CYCLONEDX),
+            StubReferrer::sbom("application/spdx+json", RAW_SPDX),
+        ];
+        let cases: [(Option<PredicateType>, &[&str]); 4] = [
+            (None, &["https://cyclonedx.org/bom", "https://spdx.dev/Document"]),
+            (Some(PredicateType::CycloneDx), &["https://cyclonedx.org/bom"]),
+            (Some(PredicateType::SpdxJson), &["https://spdx.dev/Document"]),
+            // The two SPDX spellings share one predicateType URI, so narrowing
+            // is by URI and `spdx` reaches the JSON serialization too.
+            (Some(PredicateType::Spdx), &["https://spdx.dev/Document"]),
+        ];
+        for (predicate_type, expected) in cases {
+            let (outcome, _transport, _state) =
+                drive_sbom_scan(referrers.clone(), predicate_type.clone(), VerificationMode::Permissive).await;
+            let scan = outcome.unwrap_or_else(|error| panic!("{predicate_type:?} must list: {error}"));
+            let mut found: Vec<String> = scan.unverified.iter().map(|sbom| sbom.predicate_type.clone()).collect();
+            found.sort();
+            assert_eq!(found, expected, "for --type {predicate_type:?}");
+        }
+    }
+
+    /// The one structural claim an unsigned referrer makes that can be checked
+    /// without a key. Nothing signs the artifactType, so without this a referrer
+    /// could advertise `application/vnd.cyclonedx+json` and carry anything at
+    /// all, and the listing would present it as an SBOM.
+    ///
+    /// With nothing else on the subject the refusal is also what the scan
+    /// *reports*: "not found" would send a publisher looking for an attach that
+    /// did happen.
+    #[tokio::test]
+    async fn an_unsigned_referrer_whose_layer_is_not_an_sbom_is_refused_by_name() {
+        let mut stub = StubReferrer::sbom("application/vnd.cyclonedx+json", RAW_CYCLONEDX);
+        stub.layer_media_type = "application/octet-stream".to_string();
+
+        let (outcome, _transport, _state) = drive_sbom_scan(vec![stub], None, VerificationMode::Permissive).await;
+
+        let Err(error) = outcome else {
+            panic!("a layer typed outside the SBOM set must not be listed as an SBOM");
+        };
+        let VerifyErrorKind::SbomMediaTypeUnsupported { media_type } = &error.kind else {
+            panic!("expected the media-type refusal, got: {error}");
+        };
+        assert_eq!(media_type, "application/octet-stream");
+        assert_eq!(classify_error(&error), ExitCode::DataError);
+    }
+
+    /// The size cap, on the declared size, before the body is fetched. The
+    /// declared value is untrusted, so this is the cheap half — the read itself
+    /// is separately bounded — but it is the half that keeps a hostile registry
+    /// from making the client open the connection at all.
+    #[tokio::test]
+    async fn an_oversized_unsigned_document_is_refused_before_it_is_fetched() {
+        let mut stub = StubReferrer::sbom("application/vnd.cyclonedx+json", RAW_CYCLONEDX);
+        stub.declared_layer_size = Some(MAX_ATTESTATION_ENVELOPE_BYTES as i64 + 1);
+
+        let (outcome, transport, _state) =
+            drive_sbom_scan(vec![stub.clone()], None, VerificationMode::Permissive).await;
+
+        let Err(error) = outcome else {
+            panic!("an over-cap document must be refused");
+        };
+        let VerifyErrorKind::AttestationTooLarge { limit, actual } = &error.kind else {
+            panic!("expected the size refusal naming the bound, got: {error}");
+        };
+        assert_eq!(*limit, MAX_ATTESTATION_ENVELOPE_BYTES as u64);
+        assert_eq!(*actual, MAX_ATTESTATION_ENVELOPE_BYTES as u64 + 1);
+        assert_eq!(classify_error(&error), ExitCode::DataError);
+        assert!(
+            !transport.pulled_blobs().contains(&stub.document_digest().to_string()),
+            "the refusal must land before the fetch, got: {:?}",
+            transport.pulled_blobs(),
+        );
+    }
+
+    /// A subject with no referrers of either kind still ends where it always
+    /// did — the 79 `ocx package sbom` and its callers branch on. The unsigned
+    /// pass must not turn an empty subject into a success with an empty list.
+    #[tokio::test]
+    async fn a_subject_with_nothing_attached_is_still_not_found() {
+        let (outcome, _transport, _state) = drive_sbom_scan(Vec::new(), None, VerificationMode::Permissive).await;
+
+        let Err(error) = outcome else {
+            panic!("an empty subject carries no SBOMs");
+        };
+        assert!(
+            matches!(
+                error.kind,
+                VerifyErrorKind::AttestationNotFound | VerifyErrorKind::NoSignaturesFound
+            ),
+            "expected a not-found verdict, got: {error}",
+        );
+        assert_eq!(classify_error(&error), ExitCode::NotFound);
+    }
+
+    /// Volume of unsigned referrers cannot starve the signed pass.
+    ///
+    /// A registry attaching more SBOM-typed referrers than the candidate cap
+    /// allows must not be able to spend the budget the signed pass needs: on
+    /// one shared allowance it would take every slot before the signed pass
+    /// looked at anything, the run would report `TooManyAttestations`, and the
+    /// bundle sitting behind them would never be fetched at all.
+    ///
+    /// Under `Demand` that is closed structurally rather than by rationing —
+    /// an unsigned attachment can never be an answer here, so it is refused
+    /// from the listing and its blob is never fetched. Both halves are
+    /// asserted: the bundle was reached, and not one unsigned document was
+    /// read. The second is what fails the moment the refusal starts costing a
+    /// fetch, whatever budget arithmetic surrounds it.
+    #[tokio::test]
+    async fn unsigned_referrer_volume_cannot_starve_the_signed_pass() {
+        let bundle = StubReferrer::junk_bundle();
+        let unsigned: Vec<StubReferrer> = (0..=MAX_ATTESTATION_CANDIDATES)
+            .map(|index| {
+                // Distinct bytes per referrer: identical documents would share
+                // one digest and the transport could not tell them apart.
+                let document = format!(r#"{{"bomFormat":"CycloneDX","specVersion":"1.6","serialNumber":"{index}"}}"#);
+                StubReferrer::sbom("application/vnd.cyclonedx+json", &document)
+            })
+            .collect();
+        // Listed last, so being reached at all is the property under test.
+        let mut referrers = unsigned.clone();
+        referrers.push(bundle.clone());
+
+        let (outcome, transport, _state) = drive_sbom_scan(referrers, None, VerificationMode::Demand).await;
+
+        // Nothing verifies in a unit test, so the whole scan ends as the
+        // bundle's own refusal — promoted over the unsigned ones because a
+        // real signature failure outranks them (`failure_rank`).
+        let Err(error) = outcome else {
+            panic!("a junk bundle cannot verify, and no unsigned document may stand in for it");
+        };
+        assert!(
+            matches!(error.kind, VerifyErrorKind::BundleParseFailed),
+            "the signed pass must have reached the bundle, got: {error}",
+        );
+        let pulled = transport.pulled_blobs();
+        assert!(
+            pulled.contains(&bundle.document_digest().to_string()),
+            "the signed pass must still reach the bundle's blob, got: {pulled:?}",
+        );
+        for candidate in &unsigned {
+            assert!(
+                !pulled.contains(&candidate.document_digest().to_string()),
+                "a demanded scan must refuse an unsigned attachment without fetching it, got: {pulled:?}",
+            );
+        }
+    }
+
+    /// The refusal a demanded scan records for an unsigned attachment, and the
+    /// code it exits with when that is all the subject carries.
+    ///
+    /// 77, not 79: the SBOM is there and the operator can see it listed by
+    /// `--no-verify`. What happened is that a policy demanded a signer and this
+    /// document has none — the same class of answer as the wrong signer, and
+    /// the code a script already branches on for it.
+    #[tokio::test]
+    async fn a_demanded_scan_refuses_an_unsigned_sbom_with_permission_denied() {
+        let sbom = StubReferrer::sbom("application/vnd.cyclonedx+json", RAW_CYCLONEDX);
+        let (outcome, transport, _state) = drive_sbom_scan(vec![sbom.clone()], None, VerificationMode::Demand).await;
+
+        let Err(error) = outcome else {
+            panic!("an unsigned attachment is not an answer to a demanded scan");
+        };
+        assert!(
+            matches!(error.kind, VerifyErrorKind::UnsignedRejectedByPolicy),
+            "expected the unsigned refusal, got: {error}",
+        );
+        assert_eq!(classify_error(&error), ExitCode::PermissionDenied);
+        assert!(
+            transport.pulled_blobs().is_empty(),
+            "the refusal lands before the fetch, got: {:?}",
+            transport.pulled_blobs(),
+        );
+    }
+
+    /// The same subject under `--no-verify`: the document a demanded scan
+    /// refuses is exactly the one a permissive scan lists.
+    ///
+    /// The pair is the contract. Read separately, either half looks like a
+    /// bug — a refused SBOM that is plainly there, or an unverified row nobody
+    /// checked — and it is the flag that decides which is correct.
+    #[tokio::test]
+    async fn a_permissive_scan_lists_the_sbom_a_demanded_scan_refuses() {
+        let sbom = StubReferrer::sbom("application/vnd.cyclonedx+json", RAW_CYCLONEDX);
+        let (outcome, _transport, _state) = drive_sbom_scan(vec![sbom], None, VerificationMode::Permissive).await;
+
+        let scan = outcome.expect("a permissive scan reads what is attached");
+        assert!(scan.matches.is_empty(), "nothing is verified in this mode");
+        assert_eq!(scan.unverified.len(), 1);
+        assert_eq!(scan.unverified[0].document, RAW_CYCLONEDX.as_bytes());
+    }
+
+    /// A signed publisher's SBOM is readable with no Sigstore setup at all:
+    /// `--no-verify` extracts the bundle's DSSE payload and lists it, with the
+    /// trust class it actually has.
+    ///
+    /// This is the case the mode exists for, so it asserts both halves. The
+    /// document must come out — the predicate verbatim, not the envelope — and
+    /// it must be labelled `unverified` and carry no signer, because nothing
+    /// here checked a certificate. An extraction that reported a signer would
+    /// be presenting registry-controlled bytes as provenance.
+    #[tokio::test]
+    async fn a_permissive_scan_extracts_a_bundle_payload_without_verifying_it() {
+        let bundle = StubReferrer::attestation_bundle(CYCLONEDX_URI, RAW_CYCLONEDX);
+        let (outcome, _transport, _state) = drive_sbom_scan(vec![bundle], None, VerificationMode::Permissive).await;
+
+        let scan = outcome.expect("the payload is readable without a key");
+        assert!(scan.matches.is_empty(), "nothing is verified in this mode");
+        assert_eq!(scan.unverified.len(), 1, "the bundle's payload is the answer");
+        let extracted = &scan.unverified[0];
+        assert_eq!(
+            extracted.predicate_type, CYCLONEDX_URI,
+            "the predicateType comes from the payload, which is the only place it is stated",
+        );
+        assert_eq!(
+            extracted.document,
+            RAW_CYCLONEDX.as_bytes(),
+            "the predicate is the verbatim sub-slice, never a re-serialization",
+        );
+    }
+
+    /// The mode runs no cryptography, proven by handing it a trust root
+    /// nothing could ever verify against.
+    ///
+    /// An empty [`TrustRoot`] has no CT-log key, which the signed scan refuses
+    /// outright (`NoCtLogKey`) before it looks at a single candidate. So the
+    /// same subject, the same bundle and the same fixture split cleanly on the
+    /// mode: demanded it fails on trust material, permissive it returns the
+    /// document. A permissive path that quietly grew a verification step would
+    /// red here, whatever it did with the result.
+    #[tokio::test]
+    async fn a_permissive_scan_needs_no_trust_material_at_all() {
+        let bundle = StubReferrer::attestation_bundle(CYCLONEDX_URI, RAW_CYCLONEDX);
+
+        let (permissive, _transport, _state) = drive_sbom_scan_with_trust_root(
+            vec![bundle.clone()],
+            None,
+            VerificationMode::Permissive,
+            TrustRoot::default(),
+        )
+        .await;
+        let scan = permissive.expect("reading a payload needs no trust root");
+        assert_eq!(scan.unverified.len(), 1);
+
+        let (demanded, _transport, _state) =
+            drive_sbom_scan_with_trust_root(vec![bundle], None, VerificationMode::Demand, TrustRoot::default()).await;
+        let Err(error) = demanded else {
+            panic!("a demanded scan cannot verify against an empty trust root");
+        };
+        assert!(
+            matches!(
+                error.kind,
+                VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::NoCtLogKey)
+            ),
+            "the demanded half must fail on trust material, got: {error}",
+        );
+    }
+
+    /// `--type` narrows a bundle payload too, and after the parse rather than
+    /// before it: a bundle states its predicateType inside the envelope, so
+    /// there is nothing to narrow on until it has been read.
+    #[tokio::test]
+    async fn the_type_flag_narrows_a_bundle_payload_after_the_parse() {
+        let bundle = StubReferrer::attestation_bundle(CYCLONEDX_URI, RAW_CYCLONEDX);
+        let (outcome, _transport, _state) = drive_sbom_scan(
+            vec![bundle],
+            Some(PredicateType::SpdxJson),
+            VerificationMode::Permissive,
+        )
+        .await;
+
+        let Err(error) = outcome else {
+            panic!("a narrowing miss leaves nothing to list");
+        };
+        assert!(
+            matches!(
+                error.kind,
+                VerifyErrorKind::AttestationNotFound | VerifyErrorKind::NoSignaturesFound
+            ),
+            "a narrowing miss is not-found, never a refusal: the candidate was sound, got: {error}",
+        );
+    }
+
+    /// A referrer whose listing entry and payload layer disagree is reported
+    /// under the *layer's* type, because that is the one claim attached to the
+    /// bytes that were served.
+    ///
+    /// The attack this closes: a registry lists `artifactType:
+    /// application/vnd.cyclonedx+json` over a `text/spdx` layer, and a consumer
+    /// that trusted the listing hands SPDX bytes to a CycloneDX parser — or,
+    /// worse, records them in an inventory under a format they are not in.
+    /// Nothing checks a listing's `artifactType` against the manifest it points
+    /// at, so it may choose which decode to run and nothing more.
+    #[tokio::test]
+    async fn an_unverified_row_is_typed_by_its_layer_not_by_the_listing() {
+        let mislabelled = StubReferrer::mislabelled_sbom(
+            "application/vnd.cyclonedx+json",
+            crate::oci::referrer::media_types::SBOM_SPDX_TEXT,
+            RAW_SPDX,
+        );
+        let (outcome, _transport, _state) =
+            drive_sbom_scan(vec![mislabelled], None, VerificationMode::Permissive).await;
+
+        let scan = outcome.expect("a cross-family disagreement is labelled, not refused");
+        assert_eq!(scan.unverified.len(), 1);
+        assert_eq!(
+            scan.unverified[0].predicate_type, SPDX_URI,
+            "the layer served SPDX bytes, so SPDX is what the row may claim",
+        );
+        assert_eq!(scan.unverified[0].document, RAW_SPDX.as_bytes());
+    }
+
+    /// `--type` narrows a raw attachment on the layer-derived type: the
+    /// requested type matches the layer, and the row comes out.
+    ///
+    /// Paired with its miss below. Either assertion alone passes against the
+    /// listing-derived label too — it is the *pair*, on one fixture whose two
+    /// claims disagree, that pins which of the two the filter reads.
+    #[tokio::test]
+    async fn the_type_flag_narrows_a_raw_attachment_on_the_layer_type() {
+        let mislabelled = StubReferrer::mislabelled_sbom(
+            "application/vnd.cyclonedx+json",
+            crate::oci::referrer::media_types::SBOM_SPDX_TEXT,
+            RAW_SPDX,
+        );
+        let (outcome, _transport, _state) = drive_sbom_scan(
+            vec![mislabelled],
+            Some(PredicateType::SpdxJson),
+            VerificationMode::Permissive,
+        )
+        .await;
+
+        let scan = outcome.expect("--type spdx matches the SPDX layer");
+        assert_eq!(scan.unverified.len(), 1);
+        assert_eq!(scan.unverified[0].predicate_type, SPDX_URI);
+    }
+
+    /// The miss half: `--type cyclonedx` against the same fixture drops it,
+    /// even though the *listing* said CycloneDX.
+    #[tokio::test]
+    async fn the_type_flag_ignores_the_listings_claim_when_narrowing() {
+        let mislabelled = StubReferrer::mislabelled_sbom(
+            "application/vnd.cyclonedx+json",
+            crate::oci::referrer::media_types::SBOM_SPDX_TEXT,
+            RAW_SPDX,
+        );
+        let (outcome, _transport, _state) = drive_sbom_scan(
+            vec![mislabelled],
+            Some(PredicateType::CycloneDx),
+            VerificationMode::Permissive,
+        )
+        .await;
+
+        let Err(error) = outcome else {
+            panic!("the only candidate's layer is SPDX, so nothing answers --type cyclonedx");
+        };
+        assert!(
+            matches!(
+                error.kind,
+                VerifyErrorKind::AttestationNotFound | VerifyErrorKind::NoSignaturesFound
+            ),
+            "a narrowing miss is not-found, never a refusal: the candidate was sound, got: {error}",
+        );
+    }
+
+    /// A layer typed outside the SBOM set is still refused - the gate the
+    /// layer-derived label replaced is the same gate, not a dropped one.
+    #[tokio::test]
+    async fn a_raw_attachment_with_a_non_sbom_layer_is_refused() {
+        let mislabelled = StubReferrer::mislabelled_sbom(
+            "application/vnd.cyclonedx+json",
+            "application/vnd.oci.image.layer.v1.tar+gzip",
+            RAW_CYCLONEDX,
+        );
+        let (outcome, _transport, _state) =
+            drive_sbom_scan(vec![mislabelled], None, VerificationMode::Permissive).await;
+
+        let Err(error) = outcome else {
+            panic!("an arbitrary blob is not an SBOM however the listing types it");
+        };
+        assert!(
+            matches!(error.kind, VerifyErrorKind::SbomMediaTypeUnsupported { .. }),
+            "the layer's media type decides, got: {error}",
+        );
+    }
+
+    /// A bundle whose blob is not a bundle is refused, not served.
+    ///
+    /// The permissive mode reads a payload without checking a signature; it
+    /// does not read *anything* and call it a payload. The structural parse is
+    /// what separates the two, and it is the same one the signed path runs.
+    #[tokio::test]
+    async fn a_permissive_scan_refuses_an_unparseable_bundle() {
+        let (outcome, _transport, _state) =
+            drive_sbom_scan(vec![StubReferrer::junk_bundle()], None, VerificationMode::Permissive).await;
+
+        let Err(error) = outcome else {
+            panic!("junk is not a document");
+        };
+        assert!(
+            matches!(error.kind, VerifyErrorKind::BundleParseFailed),
+            "expected the parse refusal, got: {error}",
         );
     }
 }

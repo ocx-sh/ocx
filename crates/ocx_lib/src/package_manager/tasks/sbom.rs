@@ -22,7 +22,8 @@ use url::Url;
 use crate::file_structure::StateStore;
 use crate::oci::attest::predicate::PredicateType;
 use crate::oci::verify::{
-    AttestationMatch, AttestationScan, RefusedCandidate, TrustRoot, VerifyContentMode, VerifyContext, VerifyPipeline,
+    AttestationMatch, AttestationScan, RefusedCandidate, TrustRoot, UnverifiedSbom, VerificationMode,
+    VerifyContentMode, VerifyContext, VerifyPipeline,
 };
 use crate::oci::{self};
 use crate::package_manager::error::PackageError;
@@ -38,8 +39,12 @@ use super::verify::map_verify_error;
 /// verifies attestations by definition, so a `Signature` mode here would be an
 /// unrepresentable request rather than a configurable one.
 pub struct SbomOptions<'a> {
-    /// Resolved ANY-of policies the signing certificate must satisfy.
+    /// Resolved ANY-of policies the signing certificate must satisfy. Empty
+    /// under [`VerificationMode::Permissive`], where nothing is verified.
     pub policies: &'a [CompiledPolicy],
+    /// Whether this run demands verification, resolved at the CLI boundary
+    /// from the flags and the trust policies.
+    pub verification: VerificationMode,
     /// Registry client (always available, unlike the manager's offline client).
     pub client: &'a oci::Client,
     /// Trust root (Fulcio CA + optional pinned Rekor key); #196 seam.
@@ -68,6 +73,9 @@ pub struct SbomOptions<'a> {
 pub struct SbomReport {
     /// Every attestation that verified, in listing order.
     pub attestations: Vec<AttestationMatch>,
+    /// Every SBOM attached **without** a signature, in digest order. Carried
+    /// separately so a caller cannot present one as the other.
+    pub unverified: Vec<UnverifiedSbom>,
     /// Every candidate that was examined and refused, in listing order.
     pub refused: Vec<RefusedCandidate>,
 }
@@ -109,6 +117,7 @@ impl PackageManager {
             content: VerifyContentMode::Attestation {
                 predicate_type: opts.predicate_type,
             },
+            verification: opts.verification,
         };
         let scan = VerifyPipeline::run_attestations(opts.client, context)
             .await
@@ -125,9 +134,14 @@ impl PackageManager {
 fn report_from(scan: AttestationScan) -> SbomReport {
     // Destructured, not field-read: a third field on `AttestationScan` must
     // break this build rather than be dropped on the floor here.
-    let AttestationScan { matches, refused } = scan;
+    let AttestationScan {
+        matches,
+        unverified,
+        refused,
+    } = scan;
     SbomReport {
         attestations: matches,
+        unverified,
         refused,
     }
 }
@@ -209,6 +223,7 @@ mod tests {
                 a_match("first", CYCLONEDX_1_6, "https://cyclonedx.org/bom"),
                 a_match("second", r#"{"specVersion":"1.5"}"#, "https://cyclonedx.org/bom"),
             ],
+            unverified: Vec::new(),
             refused: vec![
                 a_refusal("sha256:aa", VerifyErrorKind::BundleParseFailed),
                 a_refusal("sha256:bb", VerifyErrorKind::MultipleSignatures { count: 2 }),
@@ -254,6 +269,7 @@ mod tests {
     fn report_with_no_refusals_is_empty_not_fabricated() {
         let scan = AttestationScan {
             matches: vec![a_match("only", CYCLONEDX_1_6, "https://cyclonedx.org/bom")],
+            unverified: Vec::new(),
             refused: Vec::new(),
         };
         let report = report_from(scan);
@@ -271,6 +287,7 @@ mod tests {
     fn match_predicate_bytes_are_verbatim_and_summarize() {
         let report = report_from(AttestationScan {
             matches: vec![a_match("only", CYCLONEDX_1_6, "https://cyclonedx.org/bom")],
+            unverified: Vec::new(),
             refused: Vec::new(),
         });
         let predicate = report.attestations[0].attestation.predicate.get();
@@ -368,6 +385,7 @@ mod tests {
             state: &state,
             no_cache: false,
             predicate_type: None,
+            verification: VerificationMode::Demand,
         };
 
         match manager.sbom_one(&tagged_id(), &platform, opts).await {
