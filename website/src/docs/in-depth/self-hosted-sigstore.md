@@ -18,7 +18,7 @@ Four components. Only the first two are OCX's concern; the other two are what th
 | Component | What it does | Do you have a choice? |
 |---|---|---|
 | [Fulcio][fulcio] | Exchanges an OIDC token for a short-lived X.509 certificate whose SAN *is* the caller's identity. This is the CA. | No — OCX speaks Fulcio |
-| [Rekor][rekor] | Append-only transparency log. Records the signature and returns a Signed Entry Timestamp that proves *when* it was logged. | No — v1 `hashedrekord`, see [Current limitations][signing-limitations] |
+| [Rekor][rekor] | Append-only transparency log. Records a signature or an attestation and returns a Signed Entry Timestamp that proves *when* it was logged — `hashedrekord` entries for signatures, `dsse` entries for attestations. | No — v1 only, see [Current limitations][signing-limitations] |
 | A certificate-transparency log | Fulcio embeds a Signed Certificate Timestamp in every certificate it issues, and the verifier checks it. No CT log means no verifiable certificates. | [TesseraCT][tesseract] or a Trillian-backed CTFE |
 | An OIDC issuer | Mints the token Fulcio trusts. **This is the decision that determines whether the stack can run air-gapped** — see [the issuer matrix](#issuers). | Yes, and it matters |
 
@@ -102,7 +102,7 @@ install -Dm644 trusted_root.json "$OCX_HOME/sigstore/trusted-root.json"
 
 Absent, it falls through to the next rung. Present but unreadable, it fails — that is deliberate: a trust root you meant to install and cannot read is not the same thing as one you never installed.
 
-### 4. `--trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT` {#distribution-flag}
+### 4. `--sigstore-trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT` {#distribution-flag}
 
 The flag and its environment variable are for one-off overrides — a debugging session, a CI job pinning a specific root, a machine that is not part of the fleet. Reaching for them as the *deployment* mechanism is how you end up setting an environment variable in every shell profile on every host.
 
@@ -174,7 +174,9 @@ ocx package sign -p linux/amd64 \
 # $OCX_HOME/config.toml — or the config.toml you publish to the fleet
 [[trust.policy]]
 scope = "registry.corp.example/acme"
-identity = "https://github.com/acme/mytool/.github/workflows/release.yml@refs/tags/v1.0.0"
+
+[trust.policy.keyless]
+identity    = "https://github.com/acme/mytool/.github/workflows/release.yml@refs/tags/v1.0.0"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
 
@@ -183,8 +185,10 @@ Pinning an exact tag ref means every release needs a policy edit. The usual shap
 ```toml
 [[trust.policy]]
 scope = "registry.corp.example/acme"
+
+[trust.policy.keyless]
 identity_regexp = "https://github\\.com/acme/mytool/\\.github/workflows/release\\.yml@refs/tags/v.*"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+oidc_issuer     = "https://token.actions.githubusercontent.com"
 ```
 
 **GitLab self-managed.** The identity is the CI config file at a ref; note GitLab's doubled slash between project path and config path:
@@ -192,8 +196,10 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
 ```toml
 [[trust.policy]]
 scope = "registry.corp.example/acme"
+
+[trust.policy.keyless]
 identity_regexp = "https://gitlab\\.corp\\.example/acme/mytool//\\.gitlab-ci\\.yml@refs/tags/v.*"
-oidc_issuer = "https://gitlab.corp.example"
+oidc_issuer     = "https://gitlab.corp.example"
 ```
 
 **Generic OIDC.** A human or a service account, identified by email:
@@ -201,7 +207,9 @@ oidc_issuer = "https://gitlab.corp.example"
 ```toml
 [[trust.policy]]
 scope = "registry.corp.example/acme"
-identity = "release-bot@corp.example"
+
+[trust.policy.keyless]
+identity    = "release-bot@corp.example"
 oidc_issuer = "https://sso.corp.example"
 ```
 
@@ -245,7 +253,7 @@ ocx package sign -p linux/amd64 \
 ocx package verify -p linux/amd64 registry.corp.example/acme/mytool:1.0.0
 ```
 
-Exit `0` with no `--trusted-root` and no `--certificate-identity` proves both halves at once: the trust root arrived through configuration, and a `[[trust.policy]]` matched.
+Exit `0` with no `--sigstore-trusted-root` and no `--certificate-identity` proves both halves at once: the trust root arrived through configuration, and a `[[trust.policy]]` matched.
 
 **3. Verify offline**, to prove the pinned Rekor key is really in the trust material:
 

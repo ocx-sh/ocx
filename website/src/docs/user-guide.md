@@ -1001,7 +1001,7 @@ ocx package sign -p linux/amd64 registry.example/pkg:1.0
 
 ### Verify what you install {#supply-chain-verification}
 
-[`ocx package verify`][cmd-package-verify] checks a previously published signature against an expected certificate identity and OIDC issuer. Supply them as flags for a one-off check — there is no default, because verification is meaningless without specifying whose signature you trust. Against public Sigstore that is all you need: the trust root is fetched and verified over TUF. For a private or self-hosted Sigstore deployment you also have to say where the trust root comes from — pass [`--trusted-root`][env-sigstore-trusted-root], or configure it once and never pass it again ([Self-hosted Sigstore][in-depth-self-hosted-sigstore]).
+[`ocx package verify`][cmd-package-verify] checks a previously published signature against an expected certificate identity and OIDC issuer. Supply them as flags for a one-off check — there is no default, because verification is meaningless without specifying whose signature you trust. Against public Sigstore that is all you need: the trust root is fetched and verified over TUF. For a private or self-hosted Sigstore deployment you also have to say where the trust root comes from — pass [`--sigstore-trusted-root`][env-sigstore-trusted-root], or configure it once and never pass it again ([Self-hosted Sigstore][in-depth-self-hosted-sigstore]).
 
 ```shell
 ocx package verify \
@@ -1026,13 +1026,13 @@ So you supply the trust material locally. A [Sigstore trusted-root JSON][env-sig
 ```shell
 ocx --offline package verify \
   -p linux/amd64 \
-  --trusted-root /etc/ocx/trusted_root.json \
+  --sigstore-trusted-root /etc/ocx/trusted_root.json \
   --certificate-identity ci@example.com \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   registry.internal/pkg:1.0
 ```
 
-Alternatively, a successful online verify caches the trust material it used, so a later [`--offline`][arg-offline] verify against the same Rekor instance reuses it — no `--trusted-root` needed. And on a fleet, nobody passes the flag at all: the trust root is distributed once through configuration. See [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
+Alternatively, a successful online verify caches the trust material it used, so a later [`--offline`][arg-offline] verify against the same Rekor instance reuses it — no `--sigstore-trusted-root` needed. And on a fleet, nobody passes the flag at all: the trust root is distributed once through configuration. See [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
 
 :::warning Offline verify never skips
 If you go offline with no trusted-root file and no cached material, verify fails with exit 78 and names the remedy. It never silently treats "cannot reach the trust service" as "verified" — an unverifiable package is an error, not a pass.
@@ -1046,7 +1046,9 @@ A [`[[trust.policy]]`][config-trust] entry declares the accepted signer once, fo
 
 ```toml
 [[trust.policy]]
-scope       = "ghcr.io/acme/*"
+scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
 identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
@@ -1054,7 +1056,7 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
 Declare it in a `config.toml` tier (system, user, or `$OCX_HOME`) or in the project's `ocx.toml`, and `ocx package verify` resolves the identity automatically — no identity flags needed for any package under `ghcr.io/acme/` (the trust-root requirement from [above](#supply-chain-verification) still applies):
 
 ```shell
-ocx package verify -p linux/amd64 --trusted-root /etc/ocx/trusted_root.json ghcr.io/acme/tool:1.0
+ocx package verify -p linux/amd64 --sigstore-trusted-root /etc/ocx/trusted_root.json ghcr.io/acme/tool:1.0
 ```
 
 The two locations are not interchangeable: an operator's `config.toml` policy always wins over a project's `ocx.toml` policy for a package it covers, even if the project's scope is narrower. A project `ocx.toml` only adds trust for packages the operator hasn't already pinned — it can never override or narrow an operator's pin. See [Tier precedence][config-trust] in the configuration reference for the full rule.
@@ -1063,12 +1065,16 @@ When the signing workflow moves (a renamed workflow file, a new repository, a ro
 
 ```toml
 [[trust.policy]]
-scope       = "ghcr.io/acme/*"
+scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
 identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 
 [[trust.policy]]
-scope       = "ghcr.io/acme/*"
+scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
 identity    = "https://github.com/acme/tool/.github/workflows/release-v2.yml@refs/heads/main"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 ```

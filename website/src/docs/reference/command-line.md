@@ -319,7 +319,7 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 | 80 | AuthError | OCX | Authentication failure: registry 401 or 403, missing credentials, Fulcio OIDC token rejected | Refresh or set registry credentials |
 | 81 | PolicyBlocked | OCX | A deliberate local policy (`--offline` or `--frozen`) refused a network or resolution operation — not a fault. Includes an unpinned-tag resolve that the policy forbade | Loosen the flag, or populate the local index first with `ocx index update` — itself run without the flag |
 | 82 | DirtyRcBlock | OCX | A managed shell-integration block carried user edits and `ocx self setup` ran without `--force`; the block was left untouched. Distinct from ConfigError (78): the content is valid but intentionally user-modified | Re-run with `--force`, or edit the block manually and re-run |
-| 83 | RekorUnavailable | OCX | Rekor transparency log unreachable during sign or verify (5xx/timeout, or SET absent with only TSA present) | Retry later; check Rekor endpoint |
+| 83 | TransparencyLogUnavailable | OCX | Rekor transparency log unreachable during sign or verify (5xx/timeout, or SET absent with only TSA present) | Retry later; check Rekor endpoint |
 | 84 | ReferrersUnsupported | OCX | Registry does not implement the OCI Referrers API — sign and verify require OCI 1.1 referrers support | Use a registry with OCI 1.1 referrers support |
 
 **75 means the same command may succeed if run again; 69 does not.** That distinction is what makes automated retry safe: a wrapper loops on 75 and stops on 69, without parsing a single line of stderr. The per-command tables below still name 69 as "registry unreachable" — those rows exit 75 instead whenever the failure is transient (the connect never completed, the request timed out, or the registry answered 429/502/503/504).
@@ -3110,6 +3110,7 @@ ocx package push [OPTIONS] <LAYERS>...
 - `--canonical-tag` / `--no-canonical-tag`: `--canonical-tag` (default) also pushes a digest-named `sha256.<hex>` tag for each platform manifest pushed in this invocation; `--no-canonical-tag` skips it. This is a pure registry-side deletion safety net — a stray tag delete cannot orphan a digest still referenced by a lock, since the canonical tag itself keeps the manifest reachable. It has no effect on [`index.ocx.sh`][in-depth-indices-public] resolution, which ignores canonical tags entirely.
 - `--announce-file <PATH>`: After a successful push, append the pushed tag and any cascade tags to this file (creating it if absent), so [`ocx package announce --tags-from-file`][cmd-package-announce] can pick them up. This is a scratch file for one pipeline run, not a persistent list — a stale file left over from an earlier run could re-add a tag that was deliberately dropped from a later announce.
 - `--annotation <KEY=VALUE>`: Record an [OCI annotation][oci-annotations] on the published [image index][oci-image-index]. Repeatable; see [Annotations](#package-push-annotations) below.
+- `--sbom <PATH>`: Attach the file at `PATH` as a CycloneDX SBOM attestation on the manifest this push just wrote — sugar for running [`ocx package attest --type cyclonedx`][cmd-package-attest] against the pushed digest immediately afterward. The predicate is read and every offline/policy check runs *before* the push itself; a refusal there means nothing is uploaded. A failure *after* the push (Fulcio, Rekor, or the referrer write) does not roll the push back — the push report is printed first, and only then does the attest failure become the process's exit code. See [`attest`][cmd-package-attest] for the predicate-type vocabulary, the identity-token precedence, and the size limit.
 - `-h`, `--help`: Print help information.
 
 ::: tip Layer reuse
@@ -3673,8 +3674,8 @@ ocx package sign [OPTIONS] --platform <PLATFORM> <IDENTIFIER>
 | Name | Short | Default | Purpose |
 |------|-------|---------|---------|
 | `--platform` | `-p` | *(required)* | Target platform — selects the single-platform manifest under the image index to sign |
-| `--fulcio-url` | — | `https://fulcio.sigstore.dev` | [Fulcio][fulcio] CA endpoint (override for private deployments) |
-| `--rekor-url` | — | `https://rekor.sigstore.dev` | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
+| `--fulcio-url` | — | (`[trust.sigstore].fulcio_url`, else `https://fulcio.sigstore.dev`) | [Fulcio][fulcio] CA endpoint (override for private deployments) |
+| `--rekor-url` | — | (`[trust.sigstore].rekor_url`, else `https://rekor.sigstore.dev`) | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
 | `--identity-token-file` | — | — | Read the OIDC identity token from this file (highest precedence). File must be owner-readable only (`chmod 600`); world- or group-readable files are rejected with exit 77 (`IdentityTokenFilePermissive`). File must be **owned by the effective user** (uid match required); a foreign-owned file with mode `0600` is still rejected with exit 77 (CWE-732). Symlinks are not followed; a symlink at the supplied path is rejected with exit 77 (CWE-367 mitigation). **Windows:** permission validation is not implemented; use `--identity-token-stdin` or [`OCX_IDENTITY_TOKEN`][env-identity-token] instead (the command exits 77 if `--identity-token-file` is used on Windows). |
 | `--identity-token-stdin` | — | — | Read the OIDC identity token from stdin (second precedence). Mutually exclusive with `--identity-token-file` |
 | `--no-tty` | — | `false` | Suppress the interactive browser OAuth fallback; ambient token detection must succeed or an override flag must supply a token |
@@ -3767,7 +3768,7 @@ On error, `ocx package sign` emits a C-S1-1 error envelope. The `error.detail` f
 }
 ```
 
-`detail` is omitted when no fine-grained discriminant is available. `context` is always present (may be `{}`). A `remediation` key is reserved in the v1 shape but not currently emitted. The `kind` values are the snake_case `ErrorCategory` variants: `usage_error`, `auth_error`, `permission_denied`, `config_error`, `data_error`, `not_found`, `unavailable`, `temp_fail`, `rekor_unavailable`, `referrers_unsupported`, `io_error`, `internal`.
+`detail` is omitted when no fine-grained discriminant is available. `context` is always present (may be `{}`). A `remediation` key is reserved in the envelope shape but not currently emitted. The `kind` values are the snake_case `ErrorCategory` variants: `usage_error`, `auth_error`, `permission_denied`, `config_error`, `data_error`, `not_found`, `unavailable`, `temp_fail`, `transparency_log_unavailable`, `referrers_unsupported`, `io_error`, `internal`.
 
 **`detail` discriminants for `package sign`** (frozen contract C-S1-1):
 
@@ -3775,7 +3776,8 @@ On error, `ocx package sign` emits a C-S1-1 error envelope. The `error.detail` f
 |----------------|------|---------|
 | `fulcio_bad_request` | 78 | Fulcio rejected the CSR as malformed |
 | `oidc_token_rejected` | 80 | Fulcio rejected the OIDC token (issuer mismatch, expired, wrong audience) |
-| `rekor_unavailable` | 83 | Rekor transparency log unavailable at time of signing, or it returned a log entry with no usable Merkle inclusion proof — publishing that bundle would produce a signature OCX itself refuses to verify |
+| `fulcio_unavailable` | 75 | Fulcio could not be reached, or answered 429 or 5xx — a transient outage, safe to retry |
+| `transparency_log_unavailable` | 83 | Rekor transparency log unavailable at time of signing, or it returned a log entry with no usable Merkle inclusion proof — publishing that bundle would produce a signature OCX itself refuses to verify |
 | `rekor_set_malformed` | 65 | Rekor returned the entry but the SET could not be extracted or parsed |
 | `referrers_unsupported` | 84 | Registry does not implement the OCI Referrers API |
 | `target_not_found` | 79 | No manifest for the requested `--platform` under the target image index |
@@ -3800,9 +3802,9 @@ In GitHub Actions, the `ACTIONS_ID_TOKEN_REQUEST_TOKEN` variable is present auto
 
 #### `verify` {#package-verify}
 
-Verifies a [Sigstore][sigstore] keyless signature attached to a package manifest via [OCI Referrers][oci-referrers-spec]. The command fetches the [Sigstore bundle v0.3][sigstore-bundle] referrer for the target, verifies the [Fulcio][fulcio] certificate chain against a supplied trust root (see `--trusted-root` below), verifies the [Rekor][rekor] Signed Entry Timestamp (SET), verifies the signature over the subject manifest digest, and checks the certificate identity and OIDC issuer against the identity you either supply as flags or have pinned in a [`[[trust.policy]]`][config-trust] entry. All five checks must pass for the command to exit 0.
+Verifies a [Sigstore][sigstore] keyless signature attached to a package manifest via [OCI Referrers][oci-referrers-spec]. The command fetches the [Sigstore bundle v0.3][sigstore-bundle] referrer for the target, verifies the [Fulcio][fulcio] certificate chain against a supplied trust root (see `--sigstore-trusted-root` below), verifies the [Rekor][rekor] Signed Entry Timestamp (SET), verifies the signature over the subject manifest digest, and checks the certificate identity and OIDC issuer against the identity you either supply as flags or have pinned in a [`[[trust.policy]]`][config-trust] entry. All five checks must pass for the command to exit 0.
 
-`--offline` (or [`OCX_OFFLINE`][env-offline]) scopes to the Sigstore trust services — the Rekor-key fetch and TUF — not the registry: verify still fetches the target and its signature referrer from the registry in every mode. Offline verify requires a pinned Rekor key from `--trusted-root` (or one of the other trust-root rungs) or a fresh trust-root cache entry; see [Offline and Air-Gapped Verification][signing-offline] for the full model.
+`--offline` (or [`OCX_OFFLINE`][env-offline]) scopes to the Sigstore trust services — the Rekor-key fetch and TUF — not the registry: verify still fetches the target and its signature referrer from the registry in every mode. Offline verify requires a pinned Rekor key from `--sigstore-trusted-root` (or one of the other trust-root rungs) or a fresh trust-root cache entry; see [Offline and Air-Gapped Verification][signing-offline] for the full model.
 
 `--certificate-identity` and `--certificate-oidc-issuer` are optional — but only when a [`[[trust.policy]]`][config-trust] scope covers the target (see [Identity resolution](#package-verify-identity) below). Keyless verification is meaningless without an identity from one source or the other.
 
@@ -3825,9 +3827,11 @@ ocx package verify [OPTIONS] --platform <PLATFORM> \
 | `--platform` | `-p` | *(required)* | Target platform — selects the single-platform manifest under the image index |
 | `--certificate-identity` | — | *(policy-resolved)* | Expected certificate SAN (Subject Alternative Name), exact match. Optional when a [`[[trust.policy]]`][config-trust] scope covers the target; when given, overrides any policy and requires `--certificate-oidc-issuer` too. Examples: `you@example.com`, `https://github.com/org/repo/.github/workflows/build.yml@refs/heads/main` |
 | `--certificate-oidc-issuer` | — | *(policy-resolved)* | Expected OIDC issuer URL, exact match. Used together with `--certificate-identity` — passing one without the other is a usage error. Examples: `https://github.com/login/oauth`, `https://token.actions.githubusercontent.com` |
-| `--rekor-url` | — | `https://rekor.sigstore.dev` | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
-| `--trusted-root` | — | *(public-good root over TUF)* | Path to a Sigstore [trusted-root][sigstore-tuf] JSON (or a directory holding `trusted_root.json`) — supplies the [Fulcio][fulcio] CA, the certificate-transparency log keys and the pinned [Rekor][rekor] public key together, so no Rekor-key fetch is needed. Equivalent env var: [`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root]; the flag wins. Highest rung of the trust-root ladder — see [Self-hosted Sigstore][in-depth-self-hosted-sigstore] for the config-driven alternatives. Required for [`--offline`](#arg-offline) verify unless another rung already supplies a pinned Rekor key |
+| `--rekor-url` | — | (`[trust.sigstore].rekor_url`, else `https://rekor.sigstore.dev`) | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
+| `--sigstore-trusted-root` | — | *(public-good root over TUF)* | Path to a Sigstore [trusted-root][sigstore-tuf] JSON (or a directory holding `trusted_root.json`) — supplies the [Fulcio][fulcio] CA, the certificate-transparency log keys and the pinned [Rekor][rekor] public key together, so no Rekor-key fetch is needed. Equivalent env var: [`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root]; the flag wins. Highest rung of the trust-root ladder — see [Self-hosted Sigstore][in-depth-self-hosted-sigstore] for the config-driven alternatives. Required for [`--offline`](#arg-offline) verify unless another rung already supplies a pinned Rekor key |
 | `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
+| `--attestation` | — | `false` | Verify an in-toto attestation instead of a signature — same referrer discovery, trust-root and identity pipeline, a different referrer content type. See [Verifying attestations][cmd-package-verify-attestations] below |
+| `--type` | — | *(any type)* | Restrict attestation verification to one [predicate type][cmd-package-attest]. Requires `--attestation` — used alone it is a usage error (exit 64) |
 
 #### Identity resolution {#package-verify-identity}
 
@@ -3841,7 +3845,7 @@ Supplying exactly one of the two flags is a usage error (exit 64) rejected by th
 :::warning A bare Fulcio CA is not a trust root
 `ocx package verify` runs the full pipeline end-to-end — referrer discovery, [Fulcio][fulcio] chain, SCT, [Rekor][rekor] SET and inclusion proof, subject-digest signature, identity and issuer match. With no trust root supplied by any rung of the ladder and no cached trust material, it fetches the public-good trust root over [TUF][sigstore-tuf].
 
-A Fulcio certificate embeds a Signed Certificate Timestamp that the verifier checks against the CT log's key, so trust material carrying CA anchors alone cannot verify anything — verify refuses it with exit 78 and the message `trust root carries no CT log key`. A Sigstore trusted-root JSON carries the anchors, the CT log keys and the pinned Rekor key together; that is the only shape `--trusted-root` accepts. See [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
+A Fulcio certificate embeds a Signed Certificate Timestamp that the verifier checks against the CT log's key, so trust material carrying CA anchors alone cannot verify anything — verify refuses it with exit 78 and the message `trust root carries no CT log key`. A Sigstore trusted-root JSON carries the anchors, the CT log keys and the pinned Rekor key together; that is the only shape `--sigstore-trusted-root` accepts. See [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
 :::
 
 **Exit codes**
@@ -3851,12 +3855,12 @@ A Fulcio certificate embeds a Signed Certificate Timestamp that the verifier che
 | 0 | Signature verified — identity and issuer match, bundle cryptographically valid |
 | 64 | `UsageError` — malformed `--rekor-url` (must be `https://`, or `http://` on loopback only; no credentials, no userinfo) |
 | 64 | `NoIdentityProvided` — neither `--certificate-identity` nor `--certificate-oidc-issuer` was given and no [`[[trust.policy]]`][config-trust] scope covers the target (a lone flag is instead rejected at parse time as a bare usage error, with no envelope) |
-| 65 | Data integrity failure: signature invalid, subject digest mismatch, certificate chain invalid, Rekor SET invalid (bundle tampered), Rekor transparency-log body does not bind to the bundle (spliced SET), the signature candidate examination cap was reached before a valid signature was found, or bundle parse failed |
+| 65 | Data integrity failure: signature invalid, subject digest mismatch, certificate chain invalid, Rekor SET invalid (bundle tampered), Rekor transparency-log body does not bind to the bundle (spliced SET), the signature candidate examination cap was reached before a valid signature was found, or bundle parse failed. In `--attestation` mode, also: predicate type mismatch, a missing or weak-digest subject, an unrecognized in-toto statement or DSSE payload type, a SLSA provenance builder mismatch, more than one matching attestation with no `--type` to disambiguate, or the attestation exceeded its size or byte-budget limit |
 | 77 | Certificate identity or OIDC issuer mismatch |
-| 78 | Trust root unavailable or failed to load — includes [`--offline`](#arg-offline) verify with no pinned Rekor key available (no `--trusted-root`, no configured trust root, and no fresh trust-root cache entry); the message names the remedy |
+| 78 | Trust root unavailable or failed to load — includes [`--offline`](#arg-offline) verify with no pinned Rekor key available (no `--sigstore-trusted-root`, no configured trust root, and no fresh trust-root cache entry); the message names the remedy |
 | 78 | `TrustPolicyInvalid` — the [`[[trust.policy]]`][config-trust] entry matched for this target sets both `identity` and `identity_regexp`, sets neither, or its `identity_regexp` fails to compile |
 | 78 | `ForbiddenRegistryTarget` — the target registry is refused by policy before any verification is attempted |
-| 79 | No signatures found for target, no usable Sigstore bundle among referrers, or no manifest for the requested `--platform` under the target image index |
+| 79 | No signatures found for target, no usable Sigstore bundle among referrers, or no manifest for the requested `--platform` under the target image index. In `--attestation` mode: no attestation found for the target (`attestation_not_found`) |
 | 80 | Registry authentication failed while fetching referrers |
 | 83 | Rekor unavailable, or SET absent with only TSA timestamp present (Rekor v2 transition) |
 | 84 | Registry does not support the OCI Referrers API |
@@ -3931,44 +3935,290 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 | `rekor_inclusion_proof_absent` | 65 | Bundle carries a Rekor inclusion promise but no Merkle inclusion proof. The promise alone is not evidence the entry was published in a signed tree, so verification refuses it. Re-sign against a transparency log that returns an inclusion proof |
 | `rekor_set_absent_tsa_present` | 83 | Rekor SET absent but RFC 3161 TSA timestamp present (Rekor v2 transition) |
 | `referrers_unsupported` | 84 | Registry does not implement the OCI Referrers API |
-| `rekor_unavailable` | 83 | Rekor transparency log unavailable during verify |
+| `transparency_log_unavailable` | 83 | Rekor transparency log unavailable during verify |
 | `bundle_parse_failed` | 65 | Bundle is not valid Sigstore bundle v0.3 or is corrupted JSON |
 | `trust_root_unavailable` | 78 | Embedded TUF trust root asset not present in this build (Slice 1) |
-| `trust_root_load` | 78 | Trust root failed to load — malformed trusted-root JSON, no CT log key, TUF fetch failed, or [`--offline`](#arg-offline) verify with no pinned Rekor key available (supply `--trusted-root`, or run an online verify first to populate the cache) |
+| `trust_root_load` | 78 | Trust root failed to load — malformed trusted-root JSON, no CT log key, TUF fetch failed, or [`--offline`](#arg-offline) verify with no pinned Rekor key available (supply `--sigstore-trusted-root`, or run an online verify first to populate the cache) |
 | `forbidden_registry_target` | 78 | The target registry is refused by policy before any verification is attempted |
 | `no_identity_provided` | 64 | No identity to verify against: both certificate flags omitted and no [`[[trust.policy]]`][config-trust] scope matched the target. (A lone flag is a clap parse error — still exit 64, but with no envelope and no `detail`.) |
 | `trust_policy_invalid` | 78 | A matched [`[[trust.policy]]`][config-trust] entry is malformed — identity XOR violation, or an `identity_regexp` that does not compile |
 | `invalid_endpoint_url` | 64 | Malformed `--rekor-url` |
+| `attestation_not_found` | 79 | No attestation referrer found for the target (`--attestation` mode) |
+| `predicate_type_mismatch` | 65 | The `--type` given does not match any verified attestation's `predicateType` |
+| `statement_subject_mismatch` | 65 | The in-toto Statement's `subject` does not name the target manifest digest |
+| `statement_subject_absent` | 65 | The in-toto Statement carries no `subject` entry at all |
+| `statement_subject_weak_algorithm` | 65 | The Statement's subject digest uses an algorithm weaker than SHA-256 |
+| `builder_mismatch` | 65 | The attestation's SLSA provenance `builder.id` does not match the pinned `builder` in a [`[[trust.policy]]`][config-trust] entry |
+| `statement_type_unsupported` | 65 | The DSSE payload's `_type` is not a recognized [in-toto][in-toto] Statement type |
+| `payload_type_unsupported` | 65 | The [DSSE][dsse] envelope's `payloadType` is not `application/vnd.in-toto+json` |
+| `multiple_attestations` | 65 | More than one verified attestation candidate for the target and no `--type` narrowed it to one; the message names every candidate's referrer digest and every distinct predicate type in the set, so `--type` has a value to take — and says outright when a single shared type means `--type` cannot narrow further |
+| `unsupported_tlog_entry_kind` | 65 | The Rekor transparency-log entry kind is neither `hashedrekord` nor `dsse` |
+| `tlog_binding_mismatch` | 65 | The transparency-log entry does not bind to the DSSE envelope actually being verified |
+| `attestation_too_large` | 65 | The attestation referrer exceeds its per-entry size limit |
+| `attestation_payload_too_large` | 65 | The DSSE payload inside a verified attestation exceeds its size limit |
+| `too_many_attestations` | 65 | More attestation candidates exist for the target than the examination cap allows |
+| `attestation_budget_exhausted` | 65 | The cumulative byte budget across all examined attestation candidates was exhausted before a match was found |
 | `internal` | 1 | Unexpected internal error |
+
+#### Verifying attestations {#package-verify-attestations}
+
+`--attestation` swaps the referrer content type verify looks for: instead of a Sigstore-bundle signature over the manifest digest, it fetches a [DSSE][dsse]-enveloped [in-toto][in-toto] Statement, verifies the identical five-step pipeline against it (referrer discovery, Fulcio chain, Rekor SET and inclusion proof, then the Statement's signature and subject digest), and additionally checks that the Statement's `subject` names the target digest with a strong algorithm. `--type` narrows which `predicateType` counts as a match — omit it to accept any predicate type carried by a verified attestation.
+
+The success and error JSON envelopes are byte-identical in shape to signature-mode verify (see [JSON output](#package-verify) above) — `data` carries the same five fields regardless of mode, since a verified attestation and a verified signature both reduce to "this subject digest, this certificate, this timestamp." Use [`ocx package sbom`][cmd-package-sbom] when the predicate type or its content is the thing you need back.
 
 **Example — verify a package signed in CI, with flags**
 
 ```shell
 ocx package verify \
   -p linux/amd64 \
-  --trusted-root /etc/ocx/trusted_root.json \
+  --sigstore-trusted-root /etc/ocx/trusted_root.json \
   --certificate-identity https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   registry.example/pkg:1.0
 ```
 
-With no trust root from any rung of the ladder and no fresh trust-root cache entry, verify fetches the public-good trust root over [TUF][sigstore-tuf] — `--trusted-root` here pins a self-hosted or private deployment's own trust material instead. Passing it on every invocation is the most expensive rung; [Self-hosted Sigstore][in-depth-self-hosted-sigstore] covers the config-driven alternatives. See also [Current limitations][signing-limitations].
+With no trust root from any rung of the ladder and no fresh trust-root cache entry, verify fetches the public-good trust root over [TUF][sigstore-tuf] — `--sigstore-trusted-root` here pins a self-hosted or private deployment's own trust material instead. Passing it on every invocation is the most expensive rung; [Self-hosted Sigstore][in-depth-self-hosted-sigstore] covers the config-driven alternatives. See also [Current limitations][signing-limitations].
 
 **Example — verify with a `[[trust.policy]]` covering the target, no flags**
 
 ```toml
 # ocx.toml or config.toml
 [[trust.policy]]
-scope       = "registry.example/pkg"
+scope = "registry.example/pkg"
+
+[trust.policy.keyless]
 identity    = "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
 
 ```shell
-ocx package verify -p linux/amd64 --trusted-root /etc/ocx/trusted_root.json registry.example/pkg:1.0
+ocx package verify -p linux/amd64 --sigstore-trusted-root /etc/ocx/trusted_root.json registry.example/pkg:1.0
 ```
 
 See the [configuration reference][config-trust] for the full schema, scope matching, and rotation semantics.
+
+#### `attest` {#package-attest}
+
+Attaches a signed [in-toto][in-toto] attestation — an SBOM, a provenance statement, or any other structured predicate — to a package manifest as an [OCI Referrers][oci-referrers-spec] artifact. The predicate you supply is wrapped in a [DSSE][dsse]-enveloped in-toto Statement naming the target manifest digest as its `subject`, signed through the identical keyless pipeline [`sign`][cmd-package-sign] uses — an ephemeral ECDSA P-256 keypair, a [Fulcio][fulcio] certificate bound to your OIDC identity, a [Rekor][rekor] transparency-log entry — and the resulting bundle is pushed as a referrer, discoverable and verifiable by [`ocx package verify --attestation`][cmd-package-verify-attestations] and [`ocx package sbom`][cmd-package-sbom].
+
+`ocx package push --sbom <PATH>` is sugar for `ocx package attest --type cyclonedx` against the digest a push just wrote — see [`push`][cmd-package-push]. Use `attest` directly to attach a predicate standalone, attach more than one predicate type to the same manifest, or attach an attestation to something other than a package this invocation just published.
+
+Attesting requires network access — `--offline` is rejected with exit 77, checked before the predicate file is even read.
+
+**Usage**
+
+```shell
+ocx package attest [OPTIONS] --predicate <PATH> --type <TYPE> --platform <PLATFORM> <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>`: Package identifier to attest (`registry/repo:tag[@digest]`).
+
+**Options**
+
+| Name | Short | Default | Purpose |
+|------|-------|---------|---------|
+| `--predicate <PATH>` | — | *(required)* | Path to the predicate file — the document the Statement wraps verbatim. Bounded to 15 MiB; a larger file is refused (exit 65, `predicate_too_large`) rather than truncated. The path must not be a symlink — it is opened with `O_NOFOLLOW` on Unix, and a symlink is refused, along with any other I/O error reading the file (exit 74 — see the exit-codes table below) |
+| `--type <TYPE>` | — | *(required)* | The predicate's type. One of the cosign-compatible aliases — `cyclonedx`, `spdx`, `spdxjson`, `slsaprovenance1`, `link`, `vuln`, `openvex`, `custom` — or any absolute predicate-type URI, stored byte-exact. `slsaprovenance` and `slsaprovenance02` are recognized aliases but both resolve to SLSA provenance v0.2, which `attest` refuses before any network call (exit 64, `provenance_version_unsupported`) — pass `slsaprovenance1` instead. `custom` wraps the predicate bytes in cosign's `{Data, Timestamp}` envelope before signing; every other alias resolves to its canonical `predicateType` URI and signs the predicate bytes as given |
+| `--platform` | `-p` | *(required)* | Target platform — selects the single-platform manifest under the image index to attest |
+| `--fulcio-url` | — | (`[trust.sigstore].fulcio_url`, else `https://fulcio.sigstore.dev`) | [Fulcio][fulcio] CA endpoint (override for private deployments) |
+| `--rekor-url` | — | (`[trust.sigstore].rekor_url`, else `https://rekor.sigstore.dev`) | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
+| `--identity-token-file <PATH>` | — | — | Read the OIDC identity token from this file. Same permission, ownership and symlink checks as [`sign`][cmd-package-sign] |
+| `--identity-token-stdin` | — | — | Read the OIDC identity token from stdin. Mutually exclusive with `--identity-token-file` |
+| `--no-tty` | — | `false` | Suppress the interactive browser OAuth fallback |
+| `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
+
+Token precedence and the ambient-CI detection order are identical to [`sign`][cmd-package-sign] — neither command has a `--identity-token` value flag; only file, stdin, an environment variable, and ambient CI detection.
+
+::: tip Offline refusal runs before the predicate is even read
+`--offline` fails the command before `--predicate` is opened and before any token is resolved — a local policy refusal never depends on what the predicate file contains or whether it exists.
+:::
+
+**Exit codes**
+
+| Code | Condition |
+|------|-----------|
+| 0 | Attestation published successfully |
+| 64 | `InvalidEndpointUrl` — malformed `--fulcio-url` or `--rekor-url` |
+| 64 | `ProvenanceVersionUnsupported` — `--type` resolved to a SLSA provenance predicate below v1.0 (`slsaprovenance` or `slsaprovenance02`); pass `--type slsaprovenance1` |
+| 65 | `PredicateTooLarge` — the `--predicate` file exceeds 15 MiB |
+| 65 | `RekorSetMalformed` — Rekor returned the log entry but its Signed Entry Timestamp could not be extracted or parsed |
+| 65 | `PredicateNotJson` — the `--predicate` file did not parse as JSON |
+| 74 | An I/O error reading `--predicate` — missing file, permission denied, or the symlink refusal. `error.kind` is `io_error` with **no** `error.detail`; a script must branch on `error.kind` for this one |
+| 75 | `FulcioUnavailable` — Fulcio could not be reached, or answered 429 or 5xx; a transient outage, safe to retry |
+| 77 | `OidcPreCheckFailed`, `OfflineAttestRefused` (`--offline` is incompatible with `attest`; checked first), or `IdentityTokenFilePermissive` |
+| 78 | Fulcio rejected the certificate signing request as malformed |
+| 79 | `TargetNotFound` — no manifest for the requested `--platform` under the target image index |
+| 80 | Fulcio rejected the OIDC token |
+| 83 | Rekor transparency log unavailable, or it returned a log entry with no usable Merkle inclusion proof |
+| 84 | Registry does not support the OCI Referrers API |
+
+**JSON output** (`--format json`)
+
+On success, `ocx package attest` emits a success envelope:
+
+```json
+{
+  "schema_version": 1,
+  "command": "package attest",
+  "exit_code": 0,
+  "data": {
+    "identifier": "registry.example/pkg:1.0",
+    "platform": "linux/amd64",
+    "subject_digest": "sha256:<64-hex>",
+    "predicate_type": "https://cyclonedx.org/bom",
+    "bundle_digest": "sha256:<64-hex>",
+    "referrer_digest": "sha256:<64-hex>",
+    "certificate_identity": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
+    "certificate_oidc_issuer": "https://token.actions.githubusercontent.com"
+  }
+}
+```
+
+`predicate_type` echoes the **resolved** `predicateType` URI actually written into the Statement — for the cosign-alias spellings this differs from the `--type` value you passed (e.g. `--type cyclonedx` resolves to `https://cyclonedx.org/bom`); a literal URI passed to `--type` is echoed unchanged.
+
+On error, `ocx package attest` emits the same envelope shape as [`sign`][cmd-package-sign]. The `error.detail` field is a snake_case discriminant for programmatic matching:
+
+**`detail` discriminants for `package attest`** (frozen contract C-S1-1):
+
+| `detail` value | Exit | Meaning |
+|----------------|------|---------|
+| `predicate_too_large` | 65 | The `--predicate` file exceeds 15 MiB |
+| `rekor_set_malformed` | 65 | Rekor returned the entry but the SET could not be extracted or parsed |
+| `predicate_not_json` | 65 | The `--predicate` file did not parse as JSON |
+| `fulcio_bad_request` | 78 | Fulcio rejected the CSR as malformed |
+| `fulcio_unavailable` | 75 | Fulcio could not be reached, or answered 429 or 5xx — a transient outage, safe to retry |
+| `oidc_token_rejected` | 80 | Fulcio rejected the OIDC token |
+| `transparency_log_unavailable` | 83 | Rekor transparency log unavailable, or returned an entry with no usable Merkle inclusion proof |
+| `referrers_unsupported` | 84 | Registry does not implement the OCI Referrers API |
+| `target_not_found` | 79 | No manifest for the requested `--platform` under the target image index |
+| `oidc_pre_check_failed` | 77 | OIDC pre-check failed client-side before the token was sent to Fulcio |
+| `offline_attest_refused` | 77 | `--offline` is incompatible with `package attest` |
+| `identity_token_file_permissive` | 77 | Token file has permissive permissions, wrong owner, or is a symlink |
+| `forbidden_registry_target` | 78 | The target registry is refused by policy |
+| `invalid_endpoint_url` | 64 | Malformed `--fulcio-url` or `--rekor-url` |
+| `provenance_version_unsupported` | 64 | `--type` resolved to a SLSA provenance predicate below v1.0; pass `--type slsaprovenance1` |
+| `internal` | 1 | Unexpected internal error |
+
+**Example — attach a CycloneDX SBOM in CI**
+
+```yaml
+- name: Attest SBOM
+  run: |
+    cyclonedx-cli ... > sbom.json
+    ocx package attest \
+      -p linux/amd64 \
+      --predicate sbom.json --type cyclonedx \
+      registry.example/pkg:1.0
+```
+
+The same ambient GitHub Actions OIDC token [`sign`][cmd-package-sign] picks up automatically applies here — no `--identity-token-*` flag is needed.
+
+#### `sbom` {#package-sbom}
+
+Lists, or extracts, the verified SBOM attestations a package manifest carries — the read-side counterpart to [`attest`][cmd-package-attest]. Every check [`verify --attestation`][cmd-package-verify-attestations] runs, `sbom` also runs: referrer discovery, the Fulcio/Rekor/identity pipeline, and the Statement's subject-digest binding. There is no `--no-verify` escape — an attestation `sbom` returns has always been cryptographically verified (see [Automatic verification on install and pull][guide-auto-verify] for why signature checks are never optional in this tool).
+
+**Usage**
+
+```shell
+ocx package sbom [OPTIONS] --platform <PLATFORM> <IDENTIFIER>
+```
+
+**Arguments**
+
+- `<IDENTIFIER>`: Package identifier to list SBOM attestations for (`registry/repo:tag[@digest]`).
+
+**Options**
+
+| Name | Short | Default | Purpose |
+|------|-------|---------|---------|
+| `--platform` | `-p` | *(required)* | Target platform — selects the single-platform manifest under the image index |
+| `--type <TYPE>` | — | *(any type)* | Restrict to one [predicate type][cmd-package-attest] |
+| `--output <PATH\|->` | `-o` | — | Write the matched predicate's bytes, byte-exact as the publisher signed them, to `PATH`, or to stdout with `-`. Refuses more than one matching attestation (exit 65, `multiple_attestations`) — naming every candidate's referrer digest and every distinct predicate type in the set, since there is no correct one to pick silently. `-` refuses a TTY destination (exit 64) — piped bytes are not something a terminal should render raw |
+| `--summary` | — | `false` | Augments the listing rather than replacing it: each plain-text row's Detail column gains component-count context (spec version, component count, top-level component name); each JSON entry gains a `summary` object, which also carries `serial_number` — a JSON-only field, never shown in the plain-text form. Restricted to `specVersion` 1.5-1.7; any other predicate type or an out-of-range CycloneDX version refuses **that entry** — it moves to `refused` with `reason_kind` `sbom_summary_failed`, naming the version it read and the `--type cyclonedx` remedy — never a silently empty summary and never the whole listing, so one unreadable document among five costs you that one |
+| `--certificate-identity` / `--certificate-oidc-issuer` | — | *(policy-resolved)* | Same identity-resolution rule as [`verify`][cmd-package-verify] |
+| `--sigstore-trusted-root` | — | *(public-good root over TUF)* | Same as [`verify`][cmd-package-verify] |
+| `--rekor-url` | — | (`[trust.sigstore].rekor_url`, else `https://rekor.sigstore.dev`) | [Rekor][rekor] transparency-log endpoint |
+| `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
+
+`--output` and `--summary` are mutually exclusive with each other and with the default listing mode.
+
+**Exit codes**
+
+Shares [`verify`][cmd-package-verify]'s exit-code taxonomy — 79 when nothing verifies, 65 for any data-integrity failure, 78 for a trust-root or policy problem, 83/84 for Rekor/Referrers unavailability. Two `sbom`-specific additions:
+
+| Code | Condition |
+|------|-----------|
+| 65 | `MultipleAttestations` under `--output` — more than one attestation matches and none was named by `--type` |
+| 64 | `--output -` requested on a TTY, or `--summary` combined with `--output` |
+
+A scan that verifies nothing at all is `AttestationNotFound` (79), the same as an unqualified [`verify --attestation`][cmd-package-verify-attestations] with no matching referrer. Under `--summary` an empty `entries` array is reachable at exit 0 — every verified document refused the summariser, so each one is reported in `refused` with `summary.status` `partial_failure`. The distinction is what was verified, not what was listed: 79 means nothing verified, exit 0 with empty `entries` means everything verified and nothing could be read.
+
+**JSON output** (`--format json`) — default listing mode
+
+`--output` bypasses this envelope entirely, regardless of `--format`: the destination (a file, or stdout via `-`) receives the matched predicate's raw bytes and nothing else. Combining `--output <file>` with `--format json` leaves stdout empty — the bytes went to the file, and there is no listing to wrap in an envelope.
+
+```json
+{
+  "schema_version": 1,
+  "command": "package sbom",
+  "exit_code": 0,
+  "data": {
+    "summary": {
+      "status": "success",
+      "exit_code": 0,
+      "total": 1,
+      "verified": 1,
+      "refused": 0
+    },
+    "entries": [
+      {
+        "predicate_type": "https://cyclonedx.org/bom",
+        "subject_digest": "sha256:<64-hex>",
+        "referrer_digest": "sha256:<64-hex>",
+        "certificate_identity": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
+        "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
+        "signed_at": "2026-04-19T12:00:00Z"
+      }
+    ],
+    "refused": []
+  }
+}
+```
+
+A scan that examined and rejected candidates reports them in `refused`, never silently — `summary.status` is `partial_failure` whenever `refused` is non-empty, `success` otherwise. Plain-format listings truncate `refused` to the first 20 with a `... and N more (see --json)` trailer; `--json` is never truncated. Each `refused` entry carries `reason` (prose) and `reason_kind` (a frozen slug, e.g. `multiple_attestations`, `bundle_parse_failed`) — scripts branch on `reason_kind`, never on `reason`. The verify pipeline's own refusals come first; a `--summary` document that could not be read follows them with `reason_kind` `sbom_summary_failed`, which is deliberately outside the verify slug set: that bundle verified, and only the reading of its payload failed.
+
+Under `--summary`, each entry gains a `summary` object:
+
+```json
+"summary": {
+  "spec_version": "1.6",
+  "serial_number": "urn:uuid:...",
+  "component_count": 42,
+  "top_level_component": "acme/widget"
+}
+```
+
+`serial_number` and `top_level_component` are omitted, not `null`, when the document does not carry one.
+
+**Example — list every SBOM a package carries**
+
+```shell
+ocx package sbom -p linux/amd64 registry.example/pkg:1.0
+```
+
+**Example — extract the CycloneDX SBOM to a file**
+
+```shell
+ocx package sbom -p linux/amd64 --type cyclonedx --output sbom.json registry.example/pkg:1.0
+```
+
+**Example — pipe a CycloneDX SBOM straight into another tool**
+
+```shell
+ocx package sbom -p linux/amd64 --type cyclonedx --output - registry.example/pkg:1.0 | jq .
+```
 
 #### `info` {#package-info}
 
@@ -4794,6 +5044,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 [sigstore]: https://www.sigstore.dev/
 [fulcio]: https://github.com/sigstore/fulcio
 [rekor]: https://github.com/sigstore/rekor
+[in-toto]: https://github.com/in-toto/attestation
+[dsse]: https://github.com/secure-systems-lab/dsse
 [cosign]: https://github.com/sigstore/cosign
 [sigstore-bundle]: https://github.com/sigstore/protobuf-specs/blob/main/protos/sigstore_bundle.proto
 [sigstore-tuf]: https://docs.sigstore.dev/certificate_authority/overview/
@@ -4907,7 +5159,11 @@ or a registry error) — the report then degrades to a local-state-only summary
 <!-- commands (package group) -->
 [cmd-package-install]: #package-install
 [cmd-package-pull]: #package-pull
+[cmd-package-sign]: #package-sign
 [cmd-package-verify]: #package-verify
+[cmd-package-verify-attestations]: #package-verify-attestations
+[cmd-package-attest]: #package-attest
+[cmd-package-sbom]: #package-sbom
 [cmd-package-uninstall]: #package-uninstall
 [cmd-package-select]: #package-select
 [cmd-package-deselect]: #package-deselect
