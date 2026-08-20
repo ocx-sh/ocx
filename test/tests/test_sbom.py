@@ -8,9 +8,17 @@ S-008, S-017, S-019, plus the signature/attestation scan-isolation half of
 S-012. The writing side (``package attest``, ``push --sbom``) is
 ``test_attest.py``.
 
-Verification is unconditional here — there is no ``--no-verify`` — so every
-listing assertion is also an assertion that the whole keyless pipeline agreed
-with itself: Fulcio chain, Rekor inclusion, DSSE envelope, subject binding.
+Two verification modes are resolved per invocation, mirroring
+``crates/ocx_cli/src/command/package_sbom.rs``: **demand** (``--verify``, or by
+default when identity flags or a matching ``[trust.policy]`` are present) runs
+the full keyless pipeline and refuses an unsigned attachment outright;
+**permissive** (``--no-verify``, or by default when neither of those is
+present) runs no cryptography at all and labels every document -- signed or
+not -- unverified. Most tests below drive demand mode via identity flags
+(``sbom_args``); the permissive-mode and mode-selection tests use
+``no_identity_args`` or the ``--verify``/``--no-verify`` flags directly. The
+edge-case matrix at the end of this file exercises every corner of the mode
+resolution itself.
 """
 from __future__ import annotations
 
@@ -75,6 +83,22 @@ def sbom_args(stack: SigstoreStack, *, identity: str | None = None) -> list[str]
     return args
 
 
+def no_identity_args(stack: SigstoreStack) -> list[str]:
+    """Platform/Rekor/trust-root flags with no certificate identity at all.
+
+    Omitting ``--certificate-identity``/``--certificate-oidc-issuer`` (and never
+    passing ``--verify``) is what resolves ``VerificationMode::Permissive`` by
+    the invocation's own default: no identity flags and no matching
+    ``[trust.policy]`` mean nothing was asked to be verified
+    (``package_sbom.rs::mode``).
+    """
+    return [
+        "--platform", current_platform(),
+        "--rekor-url", stack.rekor_url,
+        "--sigstore-trusted-root", str(stack.trust_root),
+    ]
+
+
 def write_json(target: Path, document: dict) -> Path:
     target.write_text(json.dumps(document))
     return target
@@ -89,6 +113,66 @@ def predicate_value_bytes() -> bytes:
     terminates the *file* is framing outside that value and does not.
     """
     return attestations.PRETTY_CYCLONEDX_PATH.read_bytes().strip()
+
+
+def push_sbom_referrer(
+    registry: str,
+    repo: str,
+    subject_digest: str,
+    subject_size: int,
+    *,
+    media_type: str,
+    payload: bytes,
+    layer_media_type: str | None = None,
+) -> str:
+    """Push a raw, unsigned SBOM referrer with `media_type` as its artifactType.
+
+    ``registry.push_referrer`` (``test/src/registry.py``) hardcodes its layer
+    to ``application/octet-stream`` regardless of ``artifact_type`` -- correct
+    for its own signature-bundle callers, where the bundle's wrapped content
+    is what matters, but not what a real SBOM attach produces. A genuine
+    unsigned attach (``cosign attach sbom``, ``oras attach``, ``syft attest
+    --output``) types its *layer* by the SBOM's own media type, and that is
+    what OCX's own read path both gates and LABELS on
+    (``VerifyErrorKind::SbomMediaTypeUnsupported`` and every unverified row's
+    ``predicate_type`` read ``layer.media_type``, never the manifest's
+    ``artifactType`` -- see ``oci/verify/pipeline.rs``). This helper
+    reproduces that exact shape so the interop tests below simulate a real
+    foreign tool rather than ``push_referrer``'s signature-bundle-shaped
+    default.
+
+    ``layer_media_type`` defaults to `media_type` (the ordinary, self-consistent
+    case); pass a different value to simulate a registry listing whose
+    artifactType and served layer disagree (the cross-family mislabel the read
+    path is checked against).
+    """
+    config_digest = reg.push_blob(registry, repo, b"{}", insecure=True)
+    layer_digest = reg.push_blob(registry, repo, payload, insecure=True)
+    manifest = {
+        "schemaVersion": 2,
+        "mediaType": reg.IMAGE_MANIFEST_MEDIA_TYPE,
+        "artifactType": media_type,
+        "config": {
+            "mediaType": "application/vnd.oci.empty.v1+json",
+            "digest": config_digest,
+            "size": 2,
+        },
+        "layers": [
+            {"mediaType": layer_media_type or media_type, "digest": layer_digest, "size": len(payload)},
+        ],
+        "subject": {"mediaType": reg.IMAGE_MANIFEST_MEDIA_TYPE, "digest": subject_digest, "size": subject_size},
+    }
+    digest, _ = reg.push_manifest(registry, repo, manifest, insecure=True)
+    return digest
+
+
+#: Mirrors `oci::referrer::media_types::SBOM_CYCLONEDX`.
+SBOM_CYCLONEDX_MEDIA_TYPE = "application/vnd.cyclonedx+json"
+
+CYCLONEDX_MINIMAL = b'{"bomFormat":"CycloneDX","specVersion":"1.6","components":[]}'
+
+#: Mirrors `oci::referrer::media_types::SBOM_SPDX_TEXT`.
+SBOM_SPDX_TEXT_MEDIA_TYPE = "text/spdx"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -121,7 +205,7 @@ def test_sbom_lists_the_verified_attestation_with_its_signer_and_time(
 
     data = json.loads(result.stdout)["data"]
     assert data["summary"] == {
-        "status": "success", "exit_code": 0, "total": 1, "verified": 1, "refused": 0,
+        "status": "success", "verification": "verified", "exit_code": 0, "total": 1, "verified": 1, "unverified": 0, "refused": 0,
     }
     assert data["refused"] == []
 
@@ -137,33 +221,37 @@ def test_sbom_lists_the_verified_attestation_with_its_signer_and_time(
     assert "summary" not in entry, "the per-document summary appears only under --summary"
 
 
-def test_sbom_without_an_identity_refuses_rather_than_listing_unverified(
+def test_sbom_without_identity_flags_defaults_to_permissive_listing(
     ocx: OcxRunner,
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
 ) -> None:
-    """S-006 error case: no identity flags and no policy is 64, never a listing.
+    """No identity flags and no policy now default to PERMISSIVE, not a refusal.
 
-    An unverified listing is registry-controlled text presented as fact. The
-    refusal must also say what to do about it — an operator who is told only
-    "no trusted identity" cannot tell a missing flag from a missing policy.
+    Superseded by the owner's mode-matrix ruling: absence of an identity source
+    used to mean "refuse at 64"; it now means "nothing to verify against, so
+    read permissively". ``--verify`` is what still demands an identity -- see
+    ``test_edge_6_verify_flag_with_no_identity_source_is_a_usage_error`` below.
     """
-    result = ocx.run(
-        "package", "sbom",
-        "--platform", current_platform(),
-        "--rekor-url", sigstore_stack.rekor_url,
-        "--sigstore-trusted-root", str(sigstore_stack.trust_root),
-        published_package.short,
-        check=False,
+    subject, size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_MINIMAL,
     )
 
-    assert result.returncode == 64, f"expected a usage error, got {result.returncode}"
-    envelope = json.loads(result.stdout)
-    assert envelope["error"]["detail"] == "no_identity_provided"
-    message = envelope["error"]["message"]
-    assert "--certificate-identity" in message and "trust.policy" in message, (
-        f"the refusal must name both remedies, got: {message!r}"
+    result = ocx.run(
+        "package", "sbom", *no_identity_args(sigstore_stack), published_package.short, check=False,
     )
+    assert result.returncode == 0, (
+        f"no identity source must default to a permissive listing, not a refusal\\n"
+        f"stdout: {result.stdout}\\nstderr: {result.stderr}"
+    )
+    data = json.loads(result.stdout)["data"]
+    assert data["summary"]["verification"] == "unverified"
+    [entry] = data["entries"]
+    assert entry["verified"] is False
 
 
 def test_sbom_on_a_package_carrying_nothing_is_not_found(
@@ -502,7 +590,7 @@ def test_sbom_summary_refuses_a_non_cyclonedx_predicate_but_listing_still_works(
     )
     data = json.loads(summarized.stdout)["data"]
     assert data["summary"] == {
-        "status": "partial_failure", "exit_code": 0, "total": 1, "verified": 0, "refused": 1,
+        "status": "partial_failure", "verification": "verified", "exit_code": 0, "total": 1, "verified": 0, "unverified": 0, "refused": 1,
     }
     assert data["entries"] == [], "nothing summarized, so nothing is listed as summarized"
 
@@ -567,7 +655,7 @@ def test_sbom_summary_partial_failure_still_summarizes_the_readable_entry(
     )
     data = json.loads(result.stdout)["data"]
     assert data["summary"] == {
-        "status": "partial_failure", "exit_code": 0, "total": 2, "verified": 1, "refused": 1,
+        "status": "partial_failure", "verification": "verified", "exit_code": 0, "total": 2, "verified": 1, "unverified": 0, "refused": 1,
     }
 
     [entry] = data["entries"]
@@ -739,3 +827,681 @@ def test_sbom_refuses_an_attestation_whose_predicate_bytes_were_edited(
         f"expected the signature check to catch the edit, got "
         f"{envelope['error']['detail']!r}: {envelope['error']['message']!r}"
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Unsigned SBOM referrers: foreign-tool interop, cross-and-within-trust-class
+# ambiguity, and the structural media-type check
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_sbom_lists_a_foreign_tools_raw_referrer_as_unverified(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+) -> None:
+    """A raw SBOM referrer pushed exactly like `cosign attach sbom`/syft would.
+
+    Nothing here goes through `ocx package attest` -- `push_sbom_referrer`
+    types the layer by the SBOM's own media type, which is the shape a real
+    foreign tool produces and the shape OCX's own read path recognizes. Read
+    without identity flags (the permissive default): under demand mode a raw
+    attachment is refused outright rather than listed (see the edge-case
+    matrix below), so interop specifically needs the permissive path. The
+    listing must surface it as an ordinary, unverified entry, and `--summary`
+    must read it exactly as it reads a signed CycloneDX document.
+    """
+    subject, size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_MINIMAL,
+    )
+
+    listed = ocx.run("package", "sbom", *no_identity_args(sigstore_stack), published_package.short, check=False)
+    assert listed.returncode == 0, f"sbom failed\\nstdout: {listed.stdout}\\nstderr: {listed.stderr}"
+    data = json.loads(listed.stdout)["data"]
+    assert data["summary"] == {
+        "status": "success", "verification": "unverified", "exit_code": 0,
+        "total": 1, "verified": 0, "unverified": 1, "refused": 0,
+    }
+    [entry] = data["entries"]
+    assert entry["verified"] is False
+    assert entry["predicate_type"] == CYCLONEDX_URI
+    assert "certificate_identity" not in entry
+
+    summarized = ocx.run(
+        "package", "sbom", *no_identity_args(sigstore_stack), "--summary", published_package.short, check=False,
+    )
+    assert summarized.returncode == 0, f"stdout: {summarized.stdout}"
+    [summary_entry] = json.loads(summarized.stdout)["data"]["entries"]
+    assert summary_entry["summary"]["component_count"] == 0
+
+
+def test_sbom_demand_mode_lists_the_verified_document_and_refuses_the_unsigned_sibling(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """Demand mode: a verified document is listed, an unsigned sibling is refused.
+
+    Supersedes the old
+    `test_sbom_output_prefers_a_verified_document_over_an_unverified_one_silently`:
+    under the mode matrix a demanded scan never lists an unsigned attachment at
+    all (`refuse_unsigned` in `verify/pipeline.rs` refuses it before any
+    fetch), so "prefers the verified one" is no longer a choice between two
+    listed candidates -- the unsigned one never reaches the listing at all.
+    `--output` still writes the verified document's exact bytes, and still
+    warns nothing, because there is nothing unverified left to warn about.
+    """
+    predicate = tmp_path / "sbom.cdx.json"
+    predicate.write_bytes(attestations.PRETTY_CYCLONEDX_PATH.read_bytes())
+    attest(ocx, sigstore_stack, identity_token, published_package, predicate)
+
+    subject, size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_MINIMAL,
+    )
+
+    listed = ocx.run("package", "sbom", *sbom_args(sigstore_stack), published_package.short, check=False)
+    assert listed.returncode == 0, listed.stdout
+    data = json.loads(listed.stdout)["data"]
+    assert data["summary"]["verification"] == "verified"
+    assert (data["summary"]["verified"], data["summary"]["unverified"], data["summary"]["refused"]) == (1, 0, 1)
+    [refusal] = data["refused"]
+    assert refusal["reason_kind"] == "unsigned_rejected_by_policy"
+
+    extracted = tmp_path / "extracted.json"
+    result = ocx.run(
+        "package", "sbom", *sbom_args(sigstore_stack), "--type", "cyclonedx",
+        "--output", str(extracted), published_package.short, check=False,
+    )
+    assert result.returncode == 0, f"stdout: {result.stdout}\\nstderr: {result.stderr}"
+    assert extracted.read_bytes() == predicate_value_bytes(), "the verified document must win, byte for byte"
+    assert "unverified" not in result.stderr, (
+        f"a verified winner must not warn about the refused unsigned sibling: {result.stderr!r}"
+    )
+
+
+def test_sbom_output_of_a_lone_unverified_document_warns_exactly_once(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    tmp_path: Path,
+) -> None:
+    """`--output` on a lone unsigned SBOM, read permissively, warns once.
+
+    Under demand mode a raw attachment is refused outright (see the edge-case
+    matrix), so reaching `--output`'s unverified branch needs the permissive
+    default -- no identity flags. The bytes still have to be exact (S-007's
+    contract applies to either trust class); the caller must additionally be
+    told, once, that nothing vouches for what they are about to read.
+    """
+    subject, size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_MINIMAL,
+    )
+
+    extracted = tmp_path / "extracted.json"
+    result = ocx.run(
+        "package", "sbom", *no_identity_args(sigstore_stack), "--type", "cyclonedx",
+        "--output", str(extracted), published_package.short, check=False,
+    )
+    assert result.returncode == 0, f"stdout: {result.stdout}\\nstderr: {result.stderr}"
+    assert extracted.read_bytes() == CYCLONEDX_MINIMAL
+    assert result.stderr.count("unverified") == 1, (
+        f"expected exactly one unverified warning, got: {result.stderr!r}"
+    )
+    assert "nothing vouches for what it says" in result.stderr, (
+        f"the warning wording changed; update this assertion to match, got: {result.stderr!r}"
+    )
+
+
+def test_sbom_output_refuses_two_unverified_cyclonedx_candidates(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    tmp_path: Path,
+) -> None:
+    """Ambiguity is judged within a trust class too: two raw SBOMs collide.
+
+    Read permissively (no identity flags): under demand mode two raw
+    attachments are both refused outright with `unsigned_rejected_by_policy`
+    and never reach `single_document` at all (see the edge-case matrix), so
+    this within-trust-class ambiguity is only reachable permissively.
+    """
+    subject, size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    first = b'{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"components":[]}'
+    second = b'{"bomFormat":"CycloneDX","specVersion":"1.6","version":2,"components":[]}'
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=first,
+    )
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=second,
+    )
+
+    result = ocx.run(
+        "package", "sbom", *no_identity_args(sigstore_stack), "--type", "cyclonedx",
+        "--output", str(tmp_path / "never-written.json"), published_package.short, check=False,
+    )
+    assert result.returncode == 65, f"expected a data error, got {result.returncode}\\nstdout: {result.stdout}"
+    envelope = json.loads(result.stdout)
+    assert envelope["error"]["detail"] == "multiple_attestations"
+    assert not (tmp_path / "never-written.json").exists(), "a refused extraction must not leave a partial file"
+
+
+def test_verify_attestation_never_treats_an_unsigned_sbom_as_a_candidate(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+) -> None:
+    """A subject carrying ONLY an unsigned SBOM has nothing `verify --attestation` can see.
+
+    The signed listing keeps its server-side referrers filter
+    (`artifactType == SIGSTORE_BUNDLE_V03`), so a raw SBOM referrer is never
+    even returned by the registry query the attestation scan issues --
+    structurally, not by a post-fetch check.
+    """
+    subject, size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_MINIMAL,
+    )
+
+    result = ocx.run(
+        "package", "verify", "--attestation", "--type", "cyclonedx",
+        *sigstore_stack.verify_args(), published_package.short, check=False,
+    )
+    assert result.returncode == 79, (
+        f"an unsigned-only subject must never satisfy an attestation verify, got {result.returncode}\n"
+        f"stdout: {result.stdout}"
+    )
+
+
+def test_sbom_refuses_a_raw_referrer_whose_layer_media_type_disagrees_with_its_artifact_type(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+) -> None:
+    """An unsigned referrer's structural claim is its LAYER media type, not its artifactType.
+
+    `registry.push_referrer` always types its layer `application/octet-stream`
+    regardless of the `artifact_type` argument -- a shape no real tool
+    produces, but exactly what this test needs: an `artifactType` claiming
+    CycloneDX with a layer that is not an SBOM at all.
+
+    Read permissively (no identity flags): under demand mode a raw referrer is
+    refused by `artifactType` alone, WITHOUT ever fetching its manifest
+    (`refuse_unsigned` in `verify/pipeline.rs`), so the layer-media-type check
+    this test exists to prove can never fire there -- it lives entirely in the
+    permissive path's `read_unverified_referrer`, which does fetch. As the ONLY
+    referrer on the subject, the refusal surfaces as the scan's own top-level
+    error, not as a `refused` row beside other entries (there is nothing else
+    to be beside).
+    """
+    subject, size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    reg.push_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        artifact_type=SBOM_CYCLONEDX_MEDIA_TYPE,
+    )
+
+    result = ocx.run("package", "sbom", *no_identity_args(sigstore_stack), published_package.short, check=False)
+    assert result.returncode == 65, f"expected a data error, got {result.returncode}\\nstdout: {result.stdout}"
+    envelope = json.loads(result.stdout)
+    assert envelope["error"]["detail"] == "sbom_media_type_unsupported"
+    assert "application/octet-stream" in envelope["error"]["message"], (
+        f"the refusal must name the offending layer media type: {envelope['error']['message']!r}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Owner's edge-case matrix: demand vs permissive, exhaustively
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_edge_1_demand_mode_refuses_a_lone_unsigned_sbom_before_listing(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+) -> None:
+    """Edge case 1: policy demands + ONLY an unsigned SBOM -> 77, before any listing.
+
+    `refuse_unsigned` (`verify/pipeline.rs`) refuses a raw attachment WITHOUT
+    fetching it under demand mode, and with nothing else on the subject the
+    lone refusal is promoted to the scan's own top-level error -- a top-level
+    envelope, not a `refused` row inside a listing. Identity flags are used as
+    the demand trigger (flags are equivalent to a matching policy for mode
+    resolution).
+
+    Red proof: the identical invocation with the identity flags dropped
+    (permissive default) succeeds with a listing instead -- the mode flag
+    alone is what changed between red and green.
+    """
+    subject, size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_MINIMAL,
+    )
+
+    demanded = ocx.run("package", "sbom", *sbom_args(sigstore_stack), published_package.short, check=False)
+    assert demanded.returncode == 77, (
+        f"a lone unsigned SBOM under demand mode must refuse at 77, got {demanded.returncode}\n"
+        f"stdout: {demanded.stdout}"
+    )
+    assert json.loads(demanded.stdout)["error"]["detail"] == "unsigned_rejected_by_policy"
+
+    # Red proof: same referrer, permissive mode -- succeeds instead of refusing.
+    permitted = ocx.run("package", "sbom", *no_identity_args(sigstore_stack), published_package.short, check=False)
+    assert permitted.returncode == 0, (
+        f"the identical referrer must list under permissive mode: {permitted.stdout}"
+    )
+
+
+def test_edge_2_demand_mode_with_an_invalid_bundle_and_an_unsigned_sbom_fails_as_a_signature_error(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """Edge case 2: demand + unsigned + an INVALID-signature bundle -> 65, no downgrade.
+
+    A tampered signed bundle beside a refused unsigned referrer must fail as
+    the signature class -- `scan()`'s own `best_failure` picks the tampered
+    bundle's `signature_invalid` (rank 4) and `run_attestations_inner`
+    propagates it directly, because the unsigned-refusal promotion only fires
+    when the signed pass finds NOTHING at all (`NoSignaturesFound` /
+    `AttestationNotFound`), which is not the case here -- one signed candidate
+    was examined and failed for a specific reason. Neither document is
+    obtainable via `--output`.
+    """
+    predicate = write_json(tmp_path / "sbom.cdx.json", {
+        "bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
+        "components": [{"type": "library", "name": "honest-lib", "version": "1.0.0"}],
+    })
+    attest(ocx, sigstore_stack, identity_token, published_package, predicate)
+
+    subject, size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    attestations.tamper_attestation_payload(
+        ocx.registry, published_package.repo, subject, size,
+        replace=(b"honest-lib", b"evil-lib24"),
+    )
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_MINIMAL,
+    )
+
+    extracted = tmp_path / "never-written.json"
+    result = ocx.run(
+        "package", "sbom", *sbom_args(sigstore_stack),
+        "--output", str(extracted), published_package.short, check=False,
+    )
+    assert result.returncode == 65, (
+        f"a tampered bundle beside an unsigned referrer must fail as the signature "
+        f"class (65), not be silently downgraded to the unsigned refusal (77), "
+        f"got {result.returncode}\nstdout: {result.stdout}"
+    )
+    envelope = json.loads(result.stdout)
+    assert envelope["error"]["detail"] == "signature_invalid", (
+        f"expected the tampered signature to be the reported failure, got "
+        f"{envelope['error']['detail']!r}: {envelope['error']['message']!r}"
+    )
+    assert not extracted.exists(), "a refused extraction must not leave a partial file behind"
+
+
+def test_edge_3_demand_mode_lists_the_valid_signed_document_beside_two_refusals(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """Edge case 3: demand + THREE candidates -- valid signed, tampered signed, unsigned.
+
+    Exactly one verified entry; the tampered bundle and the unsigned referrer
+    both land in `refused` with their own slugs; `--output` writes the VALID
+    document's exact bytes. The tamper happens first, while it is the only
+    attestation on the subject (`_attestation_referrer` requires exactly one
+    candidate) -- the valid attestation and the raw referrer are added
+    afterward.
+    """
+    tampered_predicate = write_json(tmp_path / "tampered.cdx.json", {
+        "bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
+        "components": [{"type": "library", "name": "honest-lib", "version": "1.0.0"}],
+    })
+    attest(ocx, sigstore_stack, identity_token, published_package, tampered_predicate)
+    subject, size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    attestations.tamper_attestation_payload(
+        ocx.registry, published_package.repo, subject, size,
+        replace=(b"honest-lib", b"evil-lib24"),
+    )
+
+    valid_predicate = tmp_path / "valid.cdx.json"
+    valid_predicate.write_bytes(attestations.PRETTY_CYCLONEDX_PATH.read_bytes())
+    attest(ocx, sigstore_stack, identity_token, published_package, valid_predicate)
+
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_MINIMAL,
+    )
+
+    listed = ocx.run("package", "sbom", *sbom_args(sigstore_stack), published_package.short, check=False)
+    assert listed.returncode == 0, f"stdout: {listed.stdout}\nstderr: {listed.stderr}"
+    data = json.loads(listed.stdout)["data"]
+    assert (data["summary"]["verified"], data["summary"]["unverified"], data["summary"]["refused"]) == (1, 0, 2), (
+        f"expected 1 verified, 0 unverified, 2 refused; got {data['summary']!r}"
+    )
+    assert data["summary"]["verification"] == "verified"
+    reasons = {row["reason_kind"] for row in data["refused"]}
+    assert reasons == {"signature_invalid", "unsigned_rejected_by_policy"}, (
+        f"expected the tampered bundle and the unsigned referrer both refused, got {reasons!r}"
+    )
+
+    extracted = tmp_path / "extracted.json"
+    result = ocx.run(
+        "package", "sbom", *sbom_args(sigstore_stack), "--type", "cyclonedx",
+        "--output", str(extracted), published_package.short, check=False,
+    )
+    assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    assert extracted.read_bytes() == predicate_value_bytes(), "the valid document must win, byte for byte"
+
+
+def test_edge_4_permissive_mode_extracts_a_signed_bundles_payload_unverified(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """Edge case 4: permissive + a signed bundle only -- extracted, unverified, `--summary` parses.
+
+    A genuinely signed attestation, read with no identity flags, gets its DSSE
+    payload extracted with no cryptography run over it at all -- listed
+    `verified: false`, no certificate fields, and `--summary` still parses the
+    document's own CycloneDX fields.
+
+    Red proof: the identical package, read WITH identity flags (demand),
+    reports the very same document `verified: true` with certificate fields
+    present -- the mode flag alone flips the classification of unchanged
+    bytes.
+    """
+    predicate = write_json(tmp_path / "sbom.cdx.json", {
+        "bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
+        "components": [{"type": "library", "name": "left-pad", "version": "1.0.0"}],
+    })
+    attest(ocx, sigstore_stack, identity_token, published_package, predicate)
+
+    result = ocx.run(
+        "package", "sbom", *no_identity_args(sigstore_stack), "--summary",
+        published_package.short, check=False,
+    )
+    assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    data = json.loads(result.stdout)["data"]
+    assert data["summary"]["verification"] == "unverified"
+    assert (data["summary"]["verified"], data["summary"]["unverified"]) == (0, 1)
+    [entry] = data["entries"]
+    assert entry["verified"] is False
+    assert "certificate_identity" not in entry
+    assert "certificate_oidc_issuer" not in entry
+    assert "signed_at" not in entry
+    assert entry["summary"]["component_count"] == 1
+
+    # Red proof: the same bytes, read with identity flags, verify instead.
+    demanded = ocx.run(
+        "package", "sbom", *sbom_args(sigstore_stack), published_package.short, check=False,
+    )
+    assert demanded.returncode == 0, demanded.stdout
+    demanded_data = json.loads(demanded.stdout)["data"]
+    assert demanded_data["summary"]["verification"] == "verified"
+    [demanded_entry] = demanded_data["entries"]
+    assert demanded_entry["verified"] is True
+    assert demanded_entry["certificate_identity"] == sigstore_stack.identity
+
+
+def test_edge_5_permissive_mode_lists_a_signed_and_an_unsigned_document_both_unverified(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """Edge case 5: permissive mixed -- a signed bundle beside a raw unsigned referrer.
+
+    No cryptography runs over either kind under permissive mode: both are
+    listed `verified: false`, and the summary's own trust class is
+    `unverified` for the whole run.
+    """
+    predicate = tmp_path / "sbom.cdx.json"
+    predicate.write_bytes(attestations.PRETTY_CYCLONEDX_PATH.read_bytes())
+    attest(ocx, sigstore_stack, identity_token, published_package, predicate)
+
+    subject, size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_MINIMAL,
+    )
+
+    result = ocx.run("package", "sbom", *no_identity_args(sigstore_stack), published_package.short, check=False)
+    assert result.returncode == 0, f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    data = json.loads(result.stdout)["data"]
+    assert data["summary"]["verification"] == "unverified"
+    assert (data["summary"]["verified"], data["summary"]["unverified"]) == (0, 2), (
+        f"both documents must list unverified under permissive mode, got {data['summary']!r}"
+    )
+    assert all(not entry["verified"] for entry in data["entries"])
+
+
+def test_edge_6_verify_flag_with_no_identity_source_is_a_usage_error(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+) -> None:
+    """Edge case 6: `--verify` with no identity flags and no policy -> 64.
+
+    `--verify` demands verification; `resolve_mode` refuses `(Demand, policies
+    empty)` with `NoIdentityProvided` rather than silently falling back to
+    permissive -- an operator who typed `--verify` must not have it silently
+    ignored. Each test runs against a fresh, per-test `OCX_HOME` (`OcxRunner`
+    isolates `OCX_HOME`/`XDG_CONFIG_HOME` per instance), so there is no stray
+    `[trust.policy]` to accidentally satisfy this.
+    """
+    result = ocx.run(
+        "package", "sbom", "--verify",
+        "--platform", current_platform(),
+        "--rekor-url", sigstore_stack.rekor_url,
+        "--sigstore-trusted-root", str(sigstore_stack.trust_root),
+        published_package.short,
+        check=False,
+    )
+    assert result.returncode == 64, f"expected a usage error, got {result.returncode}\nstdout: {result.stdout}"
+    assert json.loads(result.stdout)["error"]["detail"] == "no_identity_provided"
+
+
+def test_edge_7_no_verify_conflicts_with_certificate_identity_flags(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+) -> None:
+    """Edge case 7: `--no-verify` + `--certificate-identity`/`--certificate-oidc-issuer` -> 64.
+
+    Supplying an identity while refusing to check it is contradictory, not the
+    other half of a paired toggle -- clap `conflicts_with_all` on
+    `Verification` (`options/verification.rs`) refuses to parse the
+    combination at all, before any network round-trip.
+    """
+    result = ocx.run(
+        "package", "sbom", "--no-verify",
+        "--certificate-identity", "me@example.com",
+        "--certificate-oidc-issuer", "https://example.com",
+        published_package.short,
+        check=False,
+    )
+    assert result.returncode == 64, (
+        f"--no-verify with an identity must be a usage error, got {result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_edge_8_verify_and_no_verify_flags_last_win(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+) -> None:
+    """Edge case 8: `--verify --no-verify` and `--no-verify --verify` diverge by order.
+
+    POSIX last-wins (`overrides_with`, `options/verification.rs`): with the
+    identity flags absent either way, `--no-verify` last resolves permissive
+    and succeeds; `--verify` last resolves demand and refuses at 64 for lack
+    of an identity source. The two invocations differ only in flag order, so
+    this is its own red/green proof.
+    """
+    subject, size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_MINIMAL,
+    )
+
+    permissive_last = ocx.run(
+        "package", "sbom", "--verify", "--no-verify",
+        *no_identity_args(sigstore_stack), published_package.short, check=False,
+    )
+    assert permissive_last.returncode == 0, (
+        f"--no-verify last must win and list permissively, got {permissive_last.returncode}\n"
+        f"stdout: {permissive_last.stdout}"
+    )
+    assert json.loads(permissive_last.stdout)["data"]["summary"]["verification"] == "unverified"
+
+    demand_last = ocx.run(
+        "package", "sbom", "--no-verify", "--verify",
+        *no_identity_args(sigstore_stack), published_package.short, check=False,
+    )
+    assert demand_last.returncode == 64, (
+        f"--verify last must win and demand an identity, got {demand_last.returncode}\n"
+        f"stdout: {demand_last.stdout}"
+    )
+    assert json.loads(demand_last.stdout)["error"]["detail"] == "no_identity_provided"
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# W2: an unverified row is labelled by its LAYER media type, never the listing's
+# artifactType -- the listing is a prefilter only.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_w2_a_cross_family_mislabelled_referrer_is_listed_under_its_layer_type(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+) -> None:
+    """Edge case W2-1: artifactType claims CycloneDX, the LAYER is `text/spdx`.
+
+    Read permissively (no identity flags -- the artifactType/layer mismatch is
+    checked at fetch time, in `read_unverified_referrer`, same as before). The
+    row must be listed labelled SPDX -- the layer's own claim -- not refused,
+    and not labelled CycloneDX by the listing's artifactType. `--type cyclonedx`
+    must miss it (79, nothing else on the subject); `--type spdx` must hit it.
+
+    Red proof, stated explicitly: under the prior (listing-artifactType-based)
+    labelling this row would have reported `predicate_type == CYCLONEDX_URI` --
+    the exact value the assertion below checks is ABSENT. That is the
+    assertion that would have read differently before this fix.
+    """
+    subject, size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE,
+        layer_media_type=SBOM_SPDX_TEXT_MEDIA_TYPE,
+        payload=b"SPDXVersion: SPDX-2.3\nDataLicense: CC0-1.0\n",
+    )
+
+    listed = ocx.run("package", "sbom", *no_identity_args(sigstore_stack), published_package.short, check=False)
+    assert listed.returncode == 0, f"a cross-family disagreement must be labelled, not refused\nstdout: {listed.stdout}"
+    [entry] = json.loads(listed.stdout)["data"]["entries"]
+    assert entry["predicate_type"] == SPDX_URI, (
+        f"the layer served SPDX bytes, so SPDX is what the row must claim, got: {entry!r}"
+    )
+    # Red proof: the prior labelling read the listing's artifactType, which
+    # here claims CycloneDX -- this value must NOT appear.
+    assert entry["predicate_type"] != CYCLONEDX_URI
+
+    missed = ocx.run(
+        "package", "sbom", *no_identity_args(sigstore_stack), "--type", "cyclonedx",
+        published_package.short, check=False,
+    )
+    assert missed.returncode == 79, (
+        f"--type cyclonedx must ignore the listing's claim and miss the SPDX layer, "
+        f"got {missed.returncode}\nstdout: {missed.stdout}"
+    )
+    assert json.loads(missed.stdout)["error"]["detail"] == "attestation_not_found"
+
+    hit = ocx.run(
+        "package", "sbom", *no_identity_args(sigstore_stack), "--type", "spdx",
+        published_package.short, check=False,
+    )
+    assert hit.returncode == 0, f"--type spdx must match the layer's real type\nstdout: {hit.stdout}"
+    [hit_entry] = json.loads(hit.stdout)["data"]["entries"]
+    assert hit_entry["predicate_type"] == SPDX_URI
+
+
+def test_w2_type_flag_narrows_a_correctly_typed_raw_attachment(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+) -> None:
+    """Edge case W2-2: an ordinary (non-mislabelled) raw attachment still narrows correctly.
+
+    `--type cyclonedx` hits a genuine CycloneDX attachment; `--type spdx` misses
+    it (79) -- the layer-derived narrowing introduced for the mislabelled case
+    must not regress the ordinary, self-consistent one.
+    """
+    subject, size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, subject, size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_MINIMAL,
+    )
+
+    hit = ocx.run(
+        "package", "sbom", *no_identity_args(sigstore_stack), "--type", "cyclonedx",
+        published_package.short, check=False,
+    )
+    assert hit.returncode == 0, f"stdout: {hit.stdout}"
+    [entry] = json.loads(hit.stdout)["data"]["entries"]
+    assert entry["predicate_type"] == CYCLONEDX_URI
+
+    missed = ocx.run(
+        "package", "sbom", *no_identity_args(sigstore_stack), "--type", "spdx",
+        published_package.short, check=False,
+    )
+    assert missed.returncode == 79, f"stdout: {missed.stdout}"
+    assert json.loads(missed.stdout)["error"]["detail"] == "attestation_not_found"

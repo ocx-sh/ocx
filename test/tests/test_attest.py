@@ -42,6 +42,23 @@ FULL_SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 CYCLONEDX_URI = "https://cyclonedx.org/bom"
 
 
+def no_identity_args(stack: SigstoreStack) -> list[str]:
+    """Platform/Rekor/trust-root flags with no certificate identity at all.
+
+    Reading back an unsigned attach with ``package sbom`` needs the permissive
+    default (no identity flags, no policy): under demand mode a lone unsigned
+    referrer is refused outright (``unsigned_rejected_by_policy``, exit 77)
+    rather than listed -- see ``test_sbom.py``'s edge-case matrix. Mirrors
+    ``test_sbom.py::no_identity_args``; kept local rather than imported so this
+    module's own fixture surface stays self-contained.
+    """
+    return [
+        "--platform", current_platform(),
+        "--rekor-url", stack.rekor_url,
+        "--sigstore-trusted-root", str(stack.trust_root),
+    ]
+
+
 def attest(
     ocx: OcxRunner,
     stack: SigstoreStack,
@@ -56,6 +73,36 @@ def attest(
     return ocx.run(
         "package", "attest",
         *stack.sign_args(token),
+        "--predicate", str(predicate),
+        "--type", predicate_type,
+        pkg.short,
+        check=False,
+        **kwargs,
+    )
+
+
+def attest_unsigned(
+    ocx: OcxRunner,
+    pkg: PackageInfo,
+    predicate: Path,
+    *,
+    predicate_type: str = "cyclonedx",
+    **kwargs,
+):
+    """Run ``ocx package attest`` with no signing material at all.
+
+    No ``--identity-token-*`` flag and no ``OCX_IDENTITY_TOKEN`` in the child
+    env. ``OcxRunner`` already strips ambient env down to PATH/HOME/OCX_* (see
+    ``subsystem-tests.md``), so no ambient-CI provider can fire either --
+    ``DispatchingTokenProvider::has_signing_material`` sees neither an override
+    token nor a detected identity, and the pipeline takes the unsigned attach
+    path (``AttestMode::Unsigned``). Also omits ``--fulcio-url``/``--rekor-url``:
+    unsigned mode dials neither service, so the command needs no endpoint flags.
+    """
+    return ocx.run(
+        "package", "attest",
+        "--platform", current_platform(),
+        "--no-tty",
         "--predicate", str(predicate),
         "--type", predicate_type,
         pkg.short,
@@ -124,6 +171,9 @@ def test_attest_publishes_a_bundle_referrer_carrying_three_annotations(
     data = envelope["data"]
     assert data["predicate_type"] == CYCLONEDX_URI, (
         "the report must echo the RESOLVED predicateType URI, not the --type alias"
+    )
+    assert data["signed"] is True, (
+        "signing material was supplied via --identity-token-file, so the attach must be signed"
     )
     assert data["certificate_identity"] == sigstore_stack.identity
     assert data["certificate_oidc_issuer"] == sigstore_stack.issuer
@@ -376,6 +426,125 @@ def test_attest_refuses_a_predicate_reached_through_a_symlink(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Unsigned polarity: no signing material at all -> raw, unsigned SBOM referrer
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_attest_with_no_signing_material_attaches_unsigned_and_lists_as_unverified(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    tmp_path: Path,
+) -> None:
+    """No override token, no ambient CI identity -> the raw-attach polarity.
+
+    ``DispatchingTokenProvider::has_signing_material`` sees nothing, so the
+    pipeline takes ``AttestMode::Unsigned``: the SBOM document itself becomes
+    the referrer payload, typed by the resolved predicate's own SBOM media
+    type, with no DSSE envelope and no Fulcio/Rekor round trip at all. The
+    command still succeeds (0), still names the resolved predicate type, and
+    the report says outright that nothing vouches for it.
+    """
+    result = attest_unsigned(ocx, published_package, cyclonedx_predicate(tmp_path))
+    assert result.returncode == 0, f"unsigned attach failed\nstdout: {result.stdout}\nstderr: {result.stderr}"
+
+    envelope = json.loads(result.stdout)
+    data = envelope["data"]
+    assert data["predicate_type"] == CYCLONEDX_URI
+    assert data["signed"] is False
+    assert "certificate_identity" not in data, "an unsigned attach has no certificate to name"
+    assert "certificate_oidc_issuer" not in data
+    assert FULL_SHA256_DIGEST_RE.match(data["referrer_digest"])
+
+    listed = ocx.run("package", "sbom", *no_identity_args(sigstore_stack), published_package.short, check=False)
+    assert listed.returncode == 0, f"sbom failed\nstdout: {listed.stdout}\nstderr: {listed.stderr}"
+    listing = json.loads(listed.stdout)["data"]
+    assert listing["summary"]["unverified"] == 1
+    assert listing["summary"]["verified"] == 0
+    [entry] = listing["entries"]
+    assert entry["verified"] is False
+    assert entry["predicate_type"] == CYCLONEDX_URI
+    assert "certificate_identity" not in entry
+    assert "certificate_oidc_issuer" not in entry
+    assert "signed_at" not in entry
+
+    summarized = ocx.run(
+        "package", "sbom", *no_identity_args(sigstore_stack), "--summary",
+        published_package.short, check=False,
+    )
+    assert summarized.returncode == 0, (
+        f"--summary must parse an unverified CycloneDX document like any other\n"
+        f"stdout: {summarized.stdout}"
+    )
+    [summary_entry] = json.loads(summarized.stdout)["data"]["entries"]
+    assert summary_entry["summary"]["component_count"] == 2
+
+
+def test_push_with_sbom_and_no_signing_material_reports_unsigned_and_reads_back_unverified(
+    ocx: OcxRunner,
+    unique_repo: str,
+    sigstore_stack: SigstoreStack,
+    tmp_path: Path,
+) -> None:
+    """``push --sbom`` with no OIDC identity available still succeeds, unsigned.
+
+    Mirrors the standalone ``attest`` case above through the ``--sbom`` sugar:
+    no ``OCX_IDENTITY_TOKEN`` and no ambient CI env, so the push's own attest
+    step resolves the same ``AttestMode::Unsigned`` polarity ``package
+    attest`` would.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    sbom = cyclonedx_predicate(tmp_path)
+
+    result = ocx.run(*push_argv(pkg, tmp_path, sbom), check=False)
+    assert result.returncode == 0, f"push failed\nstdout: {result.stdout}\nstderr: {result.stderr}"
+
+    report = json.loads(result.stdout)
+    assert report["status"] == "pushed"
+    attestation = report["attestation"]
+    assert attestation["status"] == "succeeded"
+    assert attestation["signed"] is False
+
+    listed = ocx.run("package", "sbom", *no_identity_args(sigstore_stack), pkg.short, check=False)
+    assert listed.returncode == 0, f"sbom failed\nstdout: {listed.stdout}\nstderr: {listed.stderr}"
+    listing = json.loads(listed.stdout)["data"]
+    assert listing["summary"]["unverified"] == 1
+    [entry] = listing["entries"]
+    assert entry["verified"] is False
+    assert entry["referrer_digest"] == attestation["referrer_digest"]
+
+
+def test_attest_slsa_provenance_with_no_signing_material_refuses_naming_the_remedy(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    tmp_path: Path,
+) -> None:
+    """A non-SBOM ``--type`` has no unsigned home: exit 64, ``unsigned_type_unsupported``.
+
+    An unsigned referrer records what it is in its own ``artifactType`` and
+    nowhere else, so a provenance predicate -- which has no SBOM media type to
+    declare -- cannot be attached without a signing identity, at any provenance
+    version. The refusal must name the remedy (supply an identity), not just
+    the failure, since the document itself is fine.
+    """
+    predicate = tmp_path / "provenance.json"
+    predicate.write_text('{"predicateType":"https://slsa.dev/provenance/v1"}')
+
+    result = attest_unsigned(
+        ocx, published_package, predicate, predicate_type="slsaprovenance",
+    )
+
+    assert result.returncode == 64, (
+        f"expected a usage error, got {result.returncode}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    envelope = json.loads(result.stdout)
+    assert envelope["error"]["detail"] == "unsigned_type_unsupported"
+    assert "OIDC identity" in envelope["error"]["message"], (
+        f"the refusal must name the remedy, got: {envelope['error']['message']!r}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # S-018 — offline `push --sbom` refuses with the ATTEST code, not the offline one
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -531,6 +700,10 @@ def test_push_with_sbom_reaches_the_stack_through_trust_sigstore_config(
     attestation = report["attestation"]
     assert attestation["status"] == "succeeded", attestation
     assert attestation["predicate_type"] == CYCLONEDX_URI
+    assert attestation["signed"] is True, (
+        "OCX_IDENTITY_TOKEN is signing material -- an env-token push must still sign, "
+        "never silently downgrade to an unsigned attach"
+    )
     assert FULL_SHA256_DIGEST_RE.match(attestation["referrer_digest"]), (
         "the report must name the published referrer by full digest"
     )

@@ -1081,7 +1081,7 @@ def test_sbom_summary_on_a_non_cyclonedx_predicate_is_partial_failure_not_a_hard
     )
     data = envelope["data"]
     assert data["summary"] == {
-        "status": "partial_failure", "exit_code": 0, "total": 1, "verified": 0, "refused": 1,
+        "status": "partial_failure", "verification": "verified", "exit_code": 0, "total": 1, "verified": 0, "unverified": 0, "refused": 1,
     }
     assert data["entries"] == [], "nothing summarized, so nothing is listed as summarized"
 
