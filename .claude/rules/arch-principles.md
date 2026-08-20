@@ -96,6 +96,7 @@ CLI command (clap parse)
 | `adr_trust_policy.md` | Identity-pinned verify via `[[trust.policy]]` in `config.toml` + `ocx.toml`; operator `config.toml` array-appends + is authoritative over project `ocx.toml` (`resolve_tiered`), most-specific-scope + ANY-of within a tier, `--certificate-identity`/`-oidc-issuer` optional-when-policy-matches (#98) |
 | `adr_ocx_mirror.md` | Standalone binary mirroring tool design |
 | `adr_release_install_strategy.md` | Release + install phased strategy |
+| `adr_sbom_attestations.md` | DSSE in-toto attestations as cosign v3 bundles over OCI referrers; `attest`/`sbom` commands, `verify --attestation` mode; CycloneDX SBOM read + `--summary` |
 | `adr_sbom_strategy.md` | SBOM gen approach |
 | `adr_version_build_separator.md` | Underscore as build separator in version tags |
 | `adr_three_tier_cas_storage.md` | Three-tier content-addressed storage (blobs + layers + packages) |

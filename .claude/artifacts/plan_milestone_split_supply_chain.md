@@ -133,3 +133,66 @@ Milestone A = milestone 2 "Signing & Trust v1" (renamed); B = milestone 4 "SBOM,
 | N7 SBOM dogfood | #200 |
 
 Rewritten: #24 (A tracker), #98, #99, #100, #101, #102, #103, #104, #106, #107, #108, #109. Closed: #110 (not planned, tests redistributed). PR #87 test plan fixed + milestone A. Rosters verified, no placeholder leaks.
+
+## Amendment (2026-08-20) — design revision before implementation start
+
+Decided in-session with the owner, superseding the B-milestone mechanics above
+where they conflict. Ground-truth deltas since 2026-07-09: milestone A closed
+in full; milestone 5 "production fidelity" shipped real X.509 / chain walk /
+SCT / standard Rekor SET + Merkle proof / TUF root / cosign v3 interop;
+`fake_sigstore.py` was deleted in favour of the real compose stack (Fulcio
+1.8.8, Rekor 1.4.2 + Trillian, dex, zot 2.1.18); exit codes 83/84 now exist
+(unreleased); `guides/` docs dir does not exist.
+
+Decisions:
+
+1. **Storage shape = cosign v3 bundle over OCI referrers.** DSSE-enveloped
+   in-toto Statement in a Sigstore bundle v0.3, pushed as a referrer with
+   `artifactType: application/vnd.dev.sigstore.bundle.v0.3+json` and cosign's
+   `dev.sigstore.bundle.content` / `dev.sigstore.bundle.predicateType`
+   annotations. Compatibility target: `cosign verify-attestation` reads what
+   `ocx package attest` writes. Considered and rejected: SBOM as package
+   layer (breaks every deployed client — pull extracts all layers untyped;
+   pays bytes on every install), BuildKit-style in-index attestation manifest
+   (cosign#2688 closed not-planned: unsigned, digest-mutating, no ecosystem
+   convergence), config-blob embedding (taxes every metadata-first resolve).
+2. **CLI = one general verb.** `ocx package attest --predicate FILE --type
+   TYPE` with cosign's type vocabulary; `--type` ∈ {cyclonedx, spdx,
+   spdxjson, slsaprovenance, ...}. `ocx package push --sbom FILE` stays as
+   sugar over the cyclonedx path. Attach parity across cyclonedx / spdx /
+   spdxjson; **parse/summarize CycloneDX 1.5–1.7 only** in v1 (`ocx package
+   sbom`), stated in docs. No `SbomFormat` abstraction for a second parser
+   that does not exist.
+3. **Pre-release renames land first** (nothing shipped: v0.5.8 predates the
+   signing surface entirely — plain edits, no compat, no `!`):
+   `--trusted-root` → `--sigstore-trusted-root` (matches
+   `OCX_SIGSTORE_TRUSTED_ROOT` / `[trust.sigstore]`); `[[trust.policy]]`
+   keyless matchers move under a `keyless` sub-table (`[trust.policy.keyless]`
+   with identity / identity_regexp / oidc_issuer; exactly-one-backend
+   validation; future `[trust.policy.key]` slot) — #103's `builder` stays a
+   top-level sibling of `scope` (backend-independent); JSON envelope slug
+   `rekor_unavailable` → `transparency_log_unavailable` (exit 83 number
+   unchanged).
+4. **Keyless-only stays.** Browser PKCE remains deferred; publisher flow is
+   CI ambient or token-file/stdin/env. Corporate laptop path = self-hosted
+   Fulcio (`[trust.sigstore]`, shipped). KMS/key signers stay a v2 `Signer`
+   seam.
+5. **#104 OSV scan**: dedicated exit code is **85** (83/84 now taken).
+   Acceptance tests use a local OSV querybatch stub, not osv.dev.
+6. **#200 dogfood is blocked**, not dropped: OCX's own physical registry is
+   GHCR (no Referrers API, no roadmap item). Revisit when the self-publish
+   target moves to a referrers-capable registry.
+7. **#198 shrinks.** Verify-side machinery (X.509, SCT, SET, Merkle,
+   identity matching) shipped with milestone 5; the genuine delta is DSSE PAE
+   encode/verify, the `dsse` Rekor entry type, a Statement payload path
+   through `Signer`/bundle assembly, and referrer discovery by predicate
+   annotation. Spike required: Rekor v1.4.2 acceptance of `dsse`/`intoto`
+   entry kinds against the compose stack.
+8. **Docs placement**: publisher CI guides + threat model land under the
+   existing `website/src/docs/` structure (`in-depth/` precedent;
+   `guides/` does not exist). SBOM signing/verification acceptance tests run
+   against the real docker-compose Sigstore stack including negative paths.
+
+Supersessions applied: `adr_oci_referrers_discovery_v2.md` → SUPERSEDED;
+`adr_sbom_strategy.md` Phase 3 → superseded by `adr_sbom_attestations.md`
+(authored by the milestone-4 architecture pass).

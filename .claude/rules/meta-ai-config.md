@@ -140,6 +140,7 @@ Allowed `Step` values:
 - `awaiting /swarm-execute (review-fix loop)`
 - `awaiting /finalize`
 - `finalized` (terminal — `/finalize` writes this then deletes `current_plan.md`)
+- `/hex-execute → <stage>`, `/hex-review → round N`, `awaiting /hex-execute` — the hex-family skills reuse this protocol with their own spellings
 
 ### Global pointer
 

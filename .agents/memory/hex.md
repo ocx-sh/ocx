@@ -201,3 +201,17 @@ research-axes:
   - Note for next `/hex-init`: `worker-researcher` has no Write tool, so
     "persist a research artifact" instructions cannot be followed by that role —
     the orchestrator must persist, or the role needs Write.
+- **Active plan (hex-execute, 2026-08-20):**
+  `.claude/state/plans/plan_sbom_attestations.md` — SBOM/DSSE attestations over OCI
+  referrers, [ocx-sh/ocx#199](https://github.com/ocx-sh/ocx/issues/199) (milestone 4),
+  tier high, State `review`. Branch `feat/sbom-attestations`, worktree
+  `.agents/worktrees/sbom-milestone` (this worktree's `current_plan.md` points here —
+  the soraka root pointer is untouched). All 19 WPs merged via per-WP opus panels +
+  serialized `--no-ff` merges; wave-close gates green at the tip (acceptance 2177,
+  rust:verify 5299, website, claude:tests, shellcheck, links); codex terra gate ran —
+  F3 (URL scrub) + F5 (false-arm bundle test) fixed as
+  [0b94350b](https://github.com/ocx-sh/ocx/commit/0b94350b) /
+  [345cfdea](https://github.com/ocx-sh/ocx/commit/345cfdea), F1/F2/F4 refuted with
+  in-code rationale. Next: `/hex-review .claude/state/plans/plan_sbom_attestations.md`
+  (max-5-turn review/execute loop; turn 1 = branch-level integration review over
+  cross-WP seams), then Deep Verify on the pushed feature branch, one PR, `/finalize`.

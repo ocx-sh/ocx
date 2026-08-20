@@ -2,8 +2,16 @@
 
 ## Metadata
 
-**Status:** Proposed
+**Status:** Partially implemented; Phase 3 superseded (2026-08-20)
 **Date:** 2026-03-13
+**Update 2026-08-20:** Phase 1 (cargo-auditable + cargo-cyclonedx in
+`dist-workspace.toml`) shipped in v0.2.1 and is live. Phase 3 (embed CycloneDX
+SBOM as OCI referrer when pushing) is superseded by
+`adr_sbom_attestations.md` (milestone 4 design record): SBOMs attach as
+DSSE-enveloped in-toto attestations in the cosign v3 bundle shape, via
+`ocx package attest` — not as raw CycloneDX referrer blobs. Phase 2
+(actions/attest-sbom) and Phase 4 (native Cargo SBOM, still unstable as of
+2026-08) remain future options.
 **Deciders:** mherwig
 **Beads Issue:** N/A
 **Related PRD:** N/A
@@ -11,7 +19,7 @@
 - [x] Decision follows Golden Path in `.claude/rules/tech-strategy.md`
 **Domain Tags:** security | devops
 **Supersedes:** N/A
-**Superseded By:** N/A
+**Superseded By:** `adr_sbom_attestations.md` (Phase 3 only)
 
 ## Context
 
