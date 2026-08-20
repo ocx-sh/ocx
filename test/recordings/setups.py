@@ -741,6 +741,26 @@ def signing(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[
         indent=2,
     ))
 
+    # user-guide/attestations-unsigned reuses this same state for its second
+    # (unsigned) predicate: an SPDX-JSON document attached after the cast
+    # `unset`s OCX_IDENTITY_TOKEN, so no signing identity is visible and the
+    # attach follows the raw-referrer path.
+    (tmp_path / "spdx.json").write_text(json.dumps(
+        {
+            "spdxVersion": "SPDX-2.3",
+            "SPDXID": "SPDXRef-DOCUMENT",
+            "name": "mytool-1.0.0",
+            "dataLicense": "CC0-1.0",
+            "documentNamespace": "https://example.com/mytool-1.0.0",
+            "creationInfo": {"created": "2026-08-20T00:00:00Z", "creators": ["Tool: mytool-build"]},
+            "packages": [
+                {"SPDXID": "SPDXRef-Package-mytool", "name": "mytool", "versionInfo": "1.0.0",
+                 "downloadLocation": "NOASSERTION"},
+            ],
+        },
+        indent=2,
+    ))
+
     ocx.env.update(
         {
             "FULCIO": f"http://localhost:{os.environ.get('OCX_TEST_FULCIO_PORT', '5555')}",

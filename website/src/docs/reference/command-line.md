@@ -3110,7 +3110,7 @@ ocx package push [OPTIONS] <LAYERS>...
 - `--canonical-tag` / `--no-canonical-tag`: `--canonical-tag` (default) also pushes a digest-named `sha256.<hex>` tag for each platform manifest pushed in this invocation; `--no-canonical-tag` skips it. This is a pure registry-side deletion safety net — a stray tag delete cannot orphan a digest still referenced by a lock, since the canonical tag itself keeps the manifest reachable. It has no effect on [`index.ocx.sh`][in-depth-indices-public] resolution, which ignores canonical tags entirely.
 - `--announce-file <PATH>`: After a successful push, append the pushed tag and any cascade tags to this file (creating it if absent), so [`ocx package announce --tags-from-file`][cmd-package-announce] can pick them up. This is a scratch file for one pipeline run, not a persistent list — a stale file left over from an earlier run could re-add a tag that was deliberately dropped from a later announce.
 - `--annotation <KEY=VALUE>`: Record an [OCI annotation][oci-annotations] on the published [image index][oci-image-index]. Repeatable; see [Annotations](#package-push-annotations) below.
-- `--sbom <PATH>`: Attach the file at `PATH` as a CycloneDX SBOM attestation on the manifest this push just wrote — sugar for running [`ocx package attest --type cyclonedx`][cmd-package-attest] against the pushed digest immediately afterward. The predicate is read and every offline/policy check runs *before* the push itself; a refusal there means nothing is uploaded. A failure *after* the push (Fulcio, Rekor, or the referrer write) does not roll the push back — the push report is printed first, and only then does the attest failure become the process's exit code. See [`attest`][cmd-package-attest] for the predicate-type vocabulary, the identity-token precedence, and the size limit.
+- `--sbom <PATH>`: Attach the file at `PATH` as a CycloneDX SBOM on the manifest this push just wrote — sugar for running [`ocx package attest --type cyclonedx`][cmd-package-attest] against the pushed digest immediately afterward, including its polarity: a signing identity visible in the environment (an identity-token override, or an ambient CI platform) means a signed [DSSE][dsse] attestation; nothing visible means the SBOM is attached raw, typed by its own media type, with no signature at all. See [Attestations][ug-attestations-attach] for when each shape applies. The predicate is read and every offline/policy check runs *before* the push itself; a refusal there means nothing is uploaded. A failure *after* the push (Fulcio, Rekor, or the referrer write) does not roll the push back — the push report is printed first, and only then does the attest failure become the process's exit code. See [`attest`][cmd-package-attest] for the predicate-type vocabulary, the identity-token precedence, and the size limit.
 - `-h`, `--help`: Print help information.
 
 ::: tip Layer reuse
@@ -3999,11 +3999,15 @@ See the [configuration reference][config-trust] for the full schema, scope match
 
 #### `attest` {#package-attest}
 
-Attaches a signed [in-toto][in-toto] attestation — an SBOM, a provenance statement, or any other structured predicate — to a package manifest as an [OCI Referrers][oci-referrers-spec] artifact. The predicate you supply is wrapped in a [DSSE][dsse]-enveloped in-toto Statement naming the target manifest digest as its `subject`, signed through the identical keyless pipeline [`sign`][cmd-package-sign] uses — an ephemeral ECDSA P-256 keypair, a [Fulcio][fulcio] certificate bound to your OIDC identity, a [Rekor][rekor] transparency-log entry — and the resulting bundle is pushed as a referrer, discoverable and verifiable by [`ocx package verify --attestation`][cmd-package-verify-attestations] and [`ocx package sbom`][cmd-package-sbom].
+Attaches an attestation — an SBOM, a provenance statement, or any other structured predicate — to a package manifest as an [OCI Referrers][oci-referrers-spec] artifact.
 
-`ocx package push --sbom <PATH>` is sugar for `ocx package attest --type cyclonedx` against the digest a push just wrote — see [`push`][cmd-package-push]. Use `attest` directly to attach a predicate standalone, attach more than one predicate type to the same manifest, or attach an attestation to something other than a package this invocation just published.
+The shape depends on whether a signing identity is visible in the environment (see [`sign`][cmd-package-sign] for the same override-token/ambient-CI check). **With one present**, the predicate you supply is wrapped in a [DSSE][dsse]-enveloped in-toto Statement naming the target manifest digest as its `subject`, signed through the identical keyless pipeline `sign` uses — an ephemeral ECDSA P-256 keypair, a [Fulcio][fulcio] certificate bound to your OIDC identity, a [Rekor][rekor] transparency-log entry — and the resulting bundle is pushed as a referrer, discoverable and verifiable by [`ocx package verify --attestation`][cmd-package-verify-attestations] and [`ocx package sbom`][cmd-package-sbom]. **With none visible**, `--type` must resolve to one of the three SBOM media types (`cyclonedx`, `spdx`, `spdxjson`, or a full URI resolving to one of them) — the predicate document is pushed as the referrer payload verbatim, typed by its own media type, with no DSSE envelope, no Fulcio certificate, and no Rekor entry. Any other `--type` with no signing identity present is refused before any network call (exit 64, `unsigned_type_unsupported`) — an unsigned provenance or vulnerability statement carries no attribution worth publishing. See [Attestations][ug-attestations-attach] for the full polarity rule and when each shape applies.
 
-Attesting requires network access — `--offline` is rejected with exit 77, checked before the predicate file is even read.
+If a signing identity is detected but acquiring a usable token then fails (Fulcio unreachable, an ambient CI token rejected), that is a hard error — the command never falls back to publishing unsigned.
+
+`ocx package push --sbom <PATH>` is sugar for `ocx package attest --type cyclonedx` against the digest a push just wrote, including this same polarity — see [`push`][cmd-package-push]. Use `attest` directly to attach a predicate standalone, attach an SPDX predicate, attach more than one predicate type to the same manifest, or attach an attestation to something other than a package this invocation just published.
+
+Attesting requires registry access regardless of shape — `--offline` is rejected with exit 77, checked before the predicate file is even read.
 
 **Usage**
 
@@ -4042,6 +4046,7 @@ Token precedence and the ambient-CI detection order are identical to [`sign`][cm
 | 0 | Attestation published successfully |
 | 64 | `InvalidEndpointUrl` — malformed `--fulcio-url` or `--rekor-url` |
 | 64 | `ProvenanceVersionUnsupported` — `--type` resolved to a SLSA provenance predicate below v1.0 (`slsaprovenance` or `slsaprovenance02`); pass `--type slsaprovenance1` |
+| 64 | `UnsignedTypeUnsupported` — no signing identity is visible and `--type` did not resolve to one of the three SBOM media types; supply an identity to attach it signed, or use a `cyclonedx`/`spdx`/`spdxjson` type |
 | 65 | `PredicateTooLarge` — the `--predicate` file exceeds 15 MiB |
 | 65 | `RekorSetMalformed` — Rekor returned the log entry but its Signed Entry Timestamp could not be extracted or parsed |
 | 65 | `PredicateNotJson` — the `--predicate` file did not parse as JSON |
@@ -4056,7 +4061,7 @@ Token precedence and the ambient-CI detection order are identical to [`sign`][cm
 
 **JSON output** (`--format json`)
 
-On success, `ocx package attest` emits a success envelope:
+On success, `ocx package attest` emits a success envelope. Signed:
 
 ```json
 {
@@ -4070,13 +4075,33 @@ On success, `ocx package attest` emits a success envelope:
     "predicate_type": "https://cyclonedx.org/bom",
     "bundle_digest": "sha256:<64-hex>",
     "referrer_digest": "sha256:<64-hex>",
+    "signed": true,
     "certificate_identity": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
     "certificate_oidc_issuer": "https://token.actions.githubusercontent.com"
   }
 }
 ```
 
-`predicate_type` echoes the **resolved** `predicateType` URI actually written into the Statement — for the cosign-alias spellings this differs from the `--type` value you passed (e.g. `--type cyclonedx` resolves to `https://cyclonedx.org/bom`); a literal URI passed to `--type` is echoed unchanged.
+Unsigned — no signing identity was visible, so the three certificate fields are omitted (never emitted empty) and `bundle_digest` is the SBOM document's own digest rather than a Sigstore bundle's:
+
+```json
+{
+  "schema_version": 1,
+  "command": "package attest",
+  "exit_code": 0,
+  "data": {
+    "identifier": "registry.example/pkg:1.0",
+    "platform": "linux/amd64",
+    "subject_digest": "sha256:<64-hex>",
+    "predicate_type": "https://spdx.dev/Document",
+    "bundle_digest": "sha256:<64-hex>",
+    "referrer_digest": "sha256:<64-hex>",
+    "signed": false
+  }
+}
+```
+
+`predicate_type` echoes the **resolved** `predicateType` URI actually written into the Statement (signed) or declared as the referrer's `artifactType` (unsigned) — for the cosign-alias spellings this differs from the `--type` value you passed (e.g. `--type cyclonedx` resolves to `https://cyclonedx.org/bom`); a literal URI passed to `--type` is echoed unchanged.
 
 On error, `ocx package attest` emits the same envelope shape as [`sign`][cmd-package-sign]. The `error.detail` field is a snake_case discriminant for programmatic matching:
 
@@ -4099,7 +4124,10 @@ On error, `ocx package attest` emits the same envelope shape as [`sign`][cmd-pac
 | `forbidden_registry_target` | 78 | The target registry is refused by policy |
 | `invalid_endpoint_url` | 64 | Malformed `--fulcio-url` or `--rekor-url` |
 | `provenance_version_unsupported` | 64 | `--type` resolved to a SLSA provenance predicate below v1.0; pass `--type slsaprovenance1` |
+| `unsigned_type_unsupported` | 64 | No signing identity is visible and `--type` did not resolve to a CycloneDX or SPDX predicate |
 | `internal` | 1 | Unexpected internal error |
+
+**Human-readable output** (default format) states the trust class outright rather than leaving it to be inferred from missing rows — a `Signature` field reads `signed` or `unsigned (attached without an identity)`, and the three certificate rows are present only when signed.
 
 **Example — attach a CycloneDX SBOM in CI**
 
@@ -4117,7 +4145,16 @@ The same ambient GitHub Actions OIDC token [`sign`][cmd-package-sign] picks up a
 
 #### `sbom` {#package-sbom}
 
-Lists, or extracts, the verified SBOM attestations a package manifest carries — the read-side counterpart to [`attest`][cmd-package-attest]. Every check [`verify --attestation`][cmd-package-verify-attestations] runs, `sbom` also runs: referrer discovery, the Fulcio/Rekor/identity pipeline, and the Statement's subject-digest binding. There is no `--no-verify` escape — an attestation `sbom` returns has always been cryptographically verified (see [Automatic verification on install and pull][guide-auto-verify] for why signature checks are never optional in this tool).
+Lists, or extracts, the SBOM attestations a package manifest carries — the read-side counterpart to [`attest`][cmd-package-attest]. A manifest can carry two kinds: a **signed** attestation, a [DSSE][dsse] bundle with a Fulcio certificate and a Rekor entry behind it, and an **unsigned** attach, a raw referrer with no signature over it at all.
+
+Which of the two you get back, and whether anything is checked, is decided per invocation by one of two modes:
+
+- **`--verify`** — every listed document carries a signature that passed every check [`verify --attestation`][cmd-package-verify-attestations] runs (referrer discovery, the Fulcio/Rekor/identity pipeline, the Statement's subject-digest binding). An unsigned attach is **refused**, never listed: the policy names who must have signed, and this document has no signer (exit 77 when it is all the package carries). This is the default whenever `--certificate-identity`/`--certificate-oidc-issuer` are given, or a [`[[trust.policy]]`][config-trust] covers the package.
+- **`--no-verify`** — nothing is checked and no cryptography runs at all. Signed bundles and raw attachments alike are read for their document and reported `verified: false`, with no signer identity, because none was checked. This is the default when no identity source resolves, and it is what makes `ocx package sbom` work with no Sigstore setup: a consumer who has configured no trust policy can still read a published SBOM.
+
+Naming both flags is not an error — the later one wins, as with every `--x`/`--no-x` pair in ocx — but `--no-verify` cannot be combined with `--certificate-identity`/`--certificate-oidc-issuer` (exit 64): supplying an identity while refusing to check it is contradictory rather than overridden. `--verify` with no identity source at all is also exit 64 — verification was demanded and nothing was named to verify against.
+
+An unverified entry is never dressed up as a verified one. It carries `verified: false` in both the plain-text and JSON forms, no certificate fields, and the listing itself reports which mode produced it in `summary.verification` — so a script never has to infer why a row is unverified. See [Attestations][ug-attestations-attach] for when a package carries which kind.
 
 **Usage**
 
@@ -4135,29 +4172,35 @@ ocx package sbom [OPTIONS] --platform <PLATFORM> <IDENTIFIER>
 |------|-------|---------|---------|
 | `--platform` | `-p` | *(required)* | Target platform — selects the single-platform manifest under the image index |
 | `--type <TYPE>` | — | *(any type)* | Restrict to one [predicate type][cmd-package-attest] |
-| `--output <PATH\|->` | `-o` | — | Write the matched predicate's bytes, byte-exact as the publisher signed them, to `PATH`, or to stdout with `-`. Refuses more than one matching attestation (exit 65, `multiple_attestations`) — naming every candidate's referrer digest and every distinct predicate type in the set, since there is no correct one to pick silently. `-` refuses a TTY destination (exit 64) — piped bytes are not something a terminal should render raw |
+| `--output <PATH\|->` | `-o` | — | Write the matched predicate's bytes, byte-exact as the publisher wrote them, to `PATH`, or to stdout with `-`. Refuses more than one matching attestation (exit 65, `multiple_attestations`) — naming every candidate's referrer digest and every distinct predicate type in the set, since there is no correct one to pick silently. Under `--no-verify` the document was not checked, so one warning line naming the referrer digest goes to stderr; the written bytes are unaffected. `-` refuses a TTY destination (exit 64) — piped bytes are not something a terminal should render raw |
 | `--summary` | — | `false` | Augments the listing rather than replacing it: each plain-text row's Detail column gains component-count context (spec version, component count, top-level component name); each JSON entry gains a `summary` object, which also carries `serial_number` — a JSON-only field, never shown in the plain-text form. Restricted to `specVersion` 1.5-1.7; any other predicate type or an out-of-range CycloneDX version refuses **that entry** — it moves to `refused` with `reason_kind` `sbom_summary_failed`, naming the version it read and the `--type cyclonedx` remedy — never a silently empty summary and never the whole listing, so one unreadable document among five costs you that one |
 | `--certificate-identity` / `--certificate-oidc-issuer` | — | *(policy-resolved)* | Same identity-resolution rule as [`verify`][cmd-package-verify] |
 | `--sigstore-trusted-root` | — | *(public-good root over TUF)* | Same as [`verify`][cmd-package-verify] |
 | `--rekor-url` | — | (`[trust.sigstore].rekor_url`, else `https://rekor.sigstore.dev`) | [Rekor][rekor] transparency-log endpoint |
 | `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
+| `--verify` | — | *(when an identity source resolves)* | Require a verified signature; refuse unsigned attachments. Exit 64 when no identity source resolves — nothing was named to verify against |
+| `--no-verify` | — | *(when no identity source resolves)* | List every document without verifying anything. Conflicts with `--verify` and with the certificate flags (exit 64) |
 
-`--output` and `--summary` are mutually exclusive with each other and with the default listing mode.
+`--output` and `--summary` are mutually exclusive with each other and with the default listing mode. `--summary` works in both verification modes, on whatever the mode listed.
 
 **Exit codes**
 
-Shares [`verify`][cmd-package-verify]'s exit-code taxonomy — 79 when nothing verifies, 65 for any data-integrity failure, 78 for a trust-root or policy problem, 83/84 for Rekor/Referrers unavailability. Two `sbom`-specific additions:
+Shares [`verify`][cmd-package-verify]'s exit-code taxonomy under `--verify` — 79 when nothing verifies, 65 for any data-integrity failure, 78 for a trust-root or policy problem, 83/84 for Rekor/Referrers unavailability. Under `--no-verify` the trust-material codes — 78 (trust root or policy), 77 (identity), 83 (Rekor), and the 65 signature classes — are unreachable, because no trust material is consulted; 84 remains reachable (the referrers capability is still probed), and so does 64 for an invalid `--rekor-url`, which is validated before the mode is resolved. Four `sbom`-specific additions:
 
 | Code | Condition |
 |------|-----------|
+| 77 | `unsigned_rejected_by_policy` — an unsigned attach was found and this run demands a signature. Listed in `refused` when a signed attestation was also found; when unsigned attachments are all the subject carries, the refusal is promoted to the command's own error. `--no-verify` lists the same document instead |
 | 65 | `MultipleAttestations` under `--output` — more than one attestation matches and none was named by `--type` |
-| 64 | `--output -` requested on a TTY, or `--summary` combined with `--output` |
+| 65 | `sbom_media_type_unsupported` — a raw referrer's payload layer declares a media type outside the SBOM set. Reachable under `--no-verify` only, since `--verify` refuses raw referrers before reading them. Listed in `refused` when the scan found anything else on the subject; when it is the only candidate, the refusal is promoted to the command's own error |
+| 64 | `--output -` requested on a TTY, or `--summary` combined with `--output`. `--no-verify` combined with a certificate flag is a clap parse error, no envelope. `no_identity_provided` — `--verify` demanded with no identity source to verify against: no certificate flags and no matching [`[[trust.policy]]`][config-trust] |
 
-A scan that verifies nothing at all is `AttestationNotFound` (79), the same as an unqualified [`verify --attestation`][cmd-package-verify-attestations] with no matching referrer. Under `--summary` an empty `entries` array is reachable at exit 0 — every verified document refused the summariser, so each one is reported in `refused` with `summary.status` `partial_failure`. The distinction is what was verified, not what was listed: 79 means nothing verified, exit 0 with empty `entries` means everything verified and nothing could be read.
+A scan that finds nothing at all — no signed attestation and no unsigned attach — is `AttestationNotFound` (79), the same as an unqualified [`verify --attestation`][cmd-package-verify-attestations] with no matching referrer. Under `--summary` an empty `entries` array is reachable at exit 0 — every document refused the summariser, so each one is reported in `refused` with `summary.status` `partial_failure`. The distinction is what was found, not what was listed: 79 means nothing at all was found, exit 0 with empty `entries` means every candidate was found but none could be read.
 
 **JSON output** (`--format json`) — default listing mode
 
 `--output` bypasses this envelope entirely, regardless of `--format`: the destination (a file, or stdout via `-`) receives the matched predicate's raw bytes and nothing else. Combining `--output <file>` with `--format json` leaves stdout empty — the bytes went to the file, and there is no listing to wrap in an envelope.
+
+A verifying run (`--verify`, or an identity source resolving) over a manifest carrying one signed attestation:
 
 ```json
 {
@@ -4167,14 +4210,17 @@ A scan that verifies nothing at all is `AttestationNotFound` (79), the same as a
   "data": {
     "summary": {
       "status": "success",
+      "verification": "verified",
       "exit_code": 0,
       "total": 1,
       "verified": 1,
+      "unverified": 0,
       "refused": 0
     },
     "entries": [
       {
         "predicate_type": "https://cyclonedx.org/bom",
+        "verified": true,
         "subject_digest": "sha256:<64-hex>",
         "referrer_digest": "sha256:<64-hex>",
         "certificate_identity": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
@@ -4187,7 +4233,72 @@ A scan that verifies nothing at all is `AttestationNotFound` (79), the same as a
 }
 ```
 
-A scan that examined and rejected candidates reports them in `refused`, never silently — `summary.status` is `partial_failure` whenever `refused` is non-empty, `success` otherwise. Plain-format listings truncate `refused` to the first 20 with a `... and N more (see --json)` trailer; `--json` is never truncated. Each `refused` entry carries `reason` (prose) and `reason_kind` (a frozen slug, e.g. `multiple_attestations`, `bundle_parse_failed`) — scripts branch on `reason_kind`, never on `reason`. The verify pipeline's own refusals come first; a `--summary` document that could not be read follows them with `reason_kind` `sbom_summary_failed`, which is deliberately outside the verify slug set: that bundle verified, and only the reading of its payload failed.
+The same manifest under `--no-verify`, which checks nothing and reads the bundle's payload anyway:
+
+```json
+{
+  "summary": {
+    "status": "success",
+    "verification": "unverified",
+    "exit_code": 0,
+    "total": 1,
+    "verified": 0,
+    "unverified": 1,
+    "refused": 0
+  },
+  "entries": [
+    {
+      "predicate_type": "https://cyclonedx.org/bom",
+      "verified": false,
+      "subject_digest": "sha256:<64-hex>",
+      "referrer_digest": "sha256:<64-hex>"
+    }
+  ],
+  "refused": []
+}
+```
+
+`summary.verification` is `verified` or `unverified` and names the mode the whole listing was produced under. Branch on it, not on the rows: an `unverified` row means "nothing was checked" under `verification: "unverified"`, and cannot occur at all under `verification: "verified"`, where an unsigned attach is refused rather than listed.
+
+A manifest carrying a signed attestation *and* a raw unsigned attach, read under `--verify` (or a matching policy): the signed document lists, the unsigned one moves to `refused`, and the whole command still exits 0 — a refusal beside a match is reported, not raised:
+
+```json
+{
+  "summary": {
+    "status": "partial_failure",
+    "verification": "verified",
+    "exit_code": 0,
+    "total": 2,
+    "verified": 1,
+    "unverified": 0,
+    "refused": 1
+  },
+  "entries": [
+    {
+      "predicate_type": "https://cyclonedx.org/bom",
+      "verified": true,
+      "subject_digest": "sha256:<64-hex>",
+      "referrer_digest": "sha256:<64-hex>",
+      "certificate_identity": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
+      "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
+      "signed_at": "2026-04-19T12:00:00Z"
+    }
+  ],
+  "refused": [
+    {
+      "referrer_digest": "sha256:<64-hex>",
+      "reason": "SBOM referrer is attached without a signature, and verification is required; pass --no-verify to list it unverified",
+      "reason_kind": "unsigned_rejected_by_policy"
+    }
+  ]
+}
+```
+
+When the unsigned attach is the *only* candidate on the subject, there is nothing for the refusal to sit beside — it is promoted to the command's own top-level error instead of a `refused` row, exit 77.
+
+Every entry carries `predicate_type`, `verified`, `subject_digest` and `referrer_digest`. `certificate_identity`, `certificate_oidc_issuer` and `signed_at` are present only when `verified: true` — omitted, not `null`, on an unverified entry, so an empty identity is never mistaken for a rendering failure. `summary.verified` and `summary.unverified` partition `entries`; `summary.total` is `verified + unverified + refused`.
+
+A scan that examined and rejected candidates reports them in `refused`, never silently — `summary.status` is `partial_failure` whenever `refused` is non-empty, `success` otherwise. Plain-format listings truncate `refused` to the first 20 with a `... and N more (see --json)` trailer; `--json` is never truncated. Each `refused` entry carries `reason` (prose) and `reason_kind` (a frozen slug, e.g. `unsigned_rejected_by_policy`, `multiple_attestations`, `bundle_parse_failed`, `sbom_media_type_unsupported`) — scripts branch on `reason_kind`, never on `reason`. The verify pipeline's own refusals come first; a `--summary` document that could not be read follows them with `reason_kind` `sbom_summary_failed`, which is deliberately outside that slug set: the document was found (verified or not), and only the reading of its payload failed.
 
 Under `--summary`, each entry gains a `summary` object:
 
@@ -5142,6 +5253,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [ug-deps-env]: ../user-guide.md#dependencies-environment
 [patches-user-guide]: ../user-guide/patches.md
 [guide-auto-verify]: ../user-guide.md#supply-chain-auto-verify
+[ug-attestations-attach]: ../user-guide/attestations.md#attestations-attach
 
 <!-- commands (package-test options) -->
 [cmd-package-describe]: #package-describe
