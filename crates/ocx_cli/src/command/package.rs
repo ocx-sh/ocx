@@ -18,6 +18,12 @@ pub enum Package {
     /// Observe an owner-curated set of registry tags and publish the rebuilt
     /// package entry into the index.
     Announce(super::package_announce::PackageAnnounce),
+    /// Attach an in-toto attestation to a published package manifest.
+    ///
+    /// Signs a caller-supplied predicate document (an SBOM, provenance,
+    /// VEX) with the same keyless Sigstore machinery `sign` uses, and
+    /// publishes it as an OCI referrer on the target manifest.
+    Attest(super::package_attest::PackageAttest),
     /// Audit and repair the rolling tags a published package cascades into.
     ///
     /// Pushing `3.28.1` is supposed to leave `3.28`, `3` and `latest` pointing
@@ -44,6 +50,8 @@ pub enum Package {
     Pull(super::package_pull::PackagePull),
     /// Publish a package's layers and metadata to a registry.
     Push(super::package_push::PackagePush),
+    /// List or extract the SBOM attestations a published package carries.
+    Sbom(super::package_sbom::PackageSbom),
     /// Set the current version of one or more packages.
     Select(super::select::Select),
     /// Remove the current-version symlink for one or more packages.
@@ -67,6 +75,7 @@ impl Package {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         match self {
             Package::Announce(announce) => announce.execute(context).await,
+            Package::Attest(attest) => attest.execute(context).await,
             Package::Cascade(cascade) => cascade.execute(context).await,
             Package::Create(create) => create.execute(context).await,
             Package::Describe(describe) => describe.execute(context).await,
@@ -77,6 +86,7 @@ impl Package {
             Package::Install(install) => install.execute(context).await,
             Package::Pull(pull) => pull.execute(context).await,
             Package::Push(deploy) => deploy.execute(context).await,
+            Package::Sbom(sbom) => sbom.execute(context).await,
             Package::Select(select) => select.execute(context).await,
             Package::Deselect(deselect) => deselect.execute(context).await,
             Package::Sign(sign) => sign.execute(context).await,

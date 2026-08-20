@@ -1,0 +1,245 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+//! `attest_one` — package-manager task that attaches one in-toto attestation
+//! to a single target manifest.
+//!
+//! Mirrors [`sign_one`](super::sign) exactly: the client and index come from
+//! the [`PackageManager`] facade, the pipeline's [`AttestResult`] becomes an
+//! [`AttestReport`], and any failure is wrapped in a [`PackageError`] tagged
+//! with the target identifier.
+//!
+//! Per [`subsystem-package-manager.md`](../../../../../.claude/rules/subsystem-package-manager.md)
+//! and Spec A10 — tasks live in `package_manager/tasks/`; the aggregator is
+//! `package_manager/tasks.rs` (not `tasks/mod.rs`).
+
+use url::Url;
+use zeroize::Zeroizing;
+
+use crate::oci;
+use crate::oci::attest::pipeline::{AttestContext, AttestPipeline, AttestResult};
+use crate::oci::attest::predicate::PredicateType;
+use crate::oci::sign::{DispatchingTokenProvider, KeylessSigner, SignError, SignErrorKind};
+use crate::package_manager::error::{PackageError, PackageErrorKind};
+
+use super::super::PackageManager;
+
+/// Options forwarded from the CLI to [`PackageManager::attest_one`].
+///
+/// Mirrors [`SignOptions`](super::sign::SignOptions), plus the two fields
+/// attesting adds and the `offline` policy flag signing keeps at its own CLI
+/// boundary.
+pub struct AttestOptions {
+    /// Fulcio CA endpoint (validated by the CLI). Default: `https://fulcio.sigstore.dev`.
+    pub fulcio_url: Url,
+    /// Rekor transparency log endpoint (validated by the CLI). Default: `https://rekor.sigstore.dev`.
+    pub rekor_url: Url,
+    /// OIDC override token (file / stdin / env, resolved by the CLI layer).
+    pub identity_token: Option<Zeroizing<String>>,
+    /// The requested `--type`; its resolved URI is what gets written (D-c).
+    pub predicate_type: PredicateType,
+    /// RAW FILE BYTES, not a parsed `Value`. Validated by a parse whose result
+    /// is discarded, then spliced verbatim (D-b). A `Value` here would
+    /// normalize whitespace and number spelling before anything downstream
+    /// could preserve them.
+    pub predicate: Vec<u8>,
+    /// Bypass the referrers-capability cache for this invocation.
+    pub no_cache: bool,
+    /// When true, suppress the browser OAuth fallback (CI / headless).
+    pub no_tty: bool,
+    /// Mirrors the S1-E policy: the refusal runs before token resolution.
+    pub offline: bool,
+}
+
+/// Success payload returned by [`PackageManager::attest_one`].
+#[derive(Debug)]
+pub struct AttestReport {
+    /// Raw pipeline result (subject digest, resolved predicate type, referrer descriptor).
+    pub result: AttestResult,
+}
+
+impl PackageManager {
+    /// Attach an in-toto attestation to `package` for `platform` by publishing
+    /// a DSSE-enveloped Sigstore bundle v0.3 referrer manifest.
+    ///
+    /// # Errors
+    ///
+    /// [`PackageError`] tagged with `package` on any failure — exit-code
+    /// classification routes via [`crate::oci::sign::SignErrorKind`].
+    pub async fn attest_one(
+        &self,
+        package: &oci::Identifier,
+        platform: &oci::Platform,
+        opts: AttestOptions,
+    ) -> Result<AttestReport, PackageError> {
+        // The S1-E refusal has to answer here as well as in the pipeline:
+        // `require_client` below reports `OfflineMode` (81) for an offline
+        // manager, which would shadow the 77 policy code a script branches on
+        // to tell a deliberate refusal from an outage. The pipeline keeps its
+        // own check for every other caller; this one keeps 81 from winning.
+        if opts.offline {
+            return Err(map_attest_error(
+                package.clone(),
+                SignError::new(package.clone(), SignErrorKind::OfflineAttestRefused),
+            ));
+        }
+
+        // The CLI hands over raw file bytes on purpose (D-b): parsing to a
+        // `Value` here would normalize whitespace and number spelling before
+        // anything downstream could preserve them. `RawValue` validates the
+        // bytes as JSON and keeps the original slice, which is what gets
+        // signed.
+        let predicate: Box<serde_json::value::RawValue> = serde_json::from_slice(&opts.predicate).map_err(|_| {
+            // The parse error itself is discarded: it quotes the offending
+            // bytes, which came from a file the user named and would reach
+            // the terminal unsanitized.
+            map_attest_error(
+                package.clone(),
+                SignError::new(package.clone(), SignErrorKind::PredicateNotJson),
+            )
+        })?;
+
+        let client = self
+            .require_client()
+            .map_err(|e| PackageError::new(package.clone(), PackageErrorKind::Internal(e)))?;
+
+        let signer = KeylessSigner::new();
+        let trusted_hosts = self.index().trusted_hosts_for(package.registry()).to_vec();
+        let token_provider = DispatchingTokenProvider::new(opts.identity_token, opts.no_tty, trusted_hosts);
+        let context = AttestContext {
+            identifier: package,
+            platform,
+            signer: &signer,
+            token_provider: &token_provider,
+            predicate_type: &opts.predicate_type,
+            predicate: &predicate,
+            no_cache: opts.no_cache,
+            offline: opts.offline,
+            index: self.index(),
+            fulcio_url: &opts.fulcio_url,
+            rekor_url: &opts.rekor_url,
+            state: &self.file_structure().state,
+        };
+        let result = AttestPipeline::run(client, context)
+            .await
+            .map_err(|err| map_attest_error(package.clone(), err))?;
+        Ok(AttestReport { result })
+    }
+}
+
+/// Wrap a [`SignError`] in a [`PackageError`] tagged with `identifier`,
+/// preserving the attest exit code through `PackageErrorKind::Internal`.
+fn map_attest_error(identifier: oci::Identifier, err: SignError) -> PackageError {
+    PackageError::new(
+        identifier,
+        PackageErrorKind::Internal(crate::Error::Sign(Box::new(err))),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{ExitCode, classify_error};
+    use crate::file_structure::{FileStructure, IndexStore};
+    use crate::oci::index::{ChainMode, Index, LocalConfig, LocalIndex};
+    use crate::oci::sign::SignErrorKind;
+    use crate::package_manager::error::PackageErrorKind;
+
+    /// A minimal offline manager — no OCI client, which is what `is_offline`
+    /// reads.
+    fn offline_manager(ocx_home: &std::path::Path) -> PackageManager {
+        let fs = FileStructure::with_root(ocx_home.to_path_buf());
+        let local_index = LocalIndex::new(LocalConfig {
+            index_store: IndexStore::new(ocx_home.join("index")),
+        });
+        let index = Index::from_chained(local_index, vec![], ChainMode::Offline);
+        PackageManager::new(fs, index, None, "localhost:5000")
+    }
+
+    fn options(predicate: &[u8]) -> AttestOptions {
+        AttestOptions {
+            fulcio_url: Url::parse("http://127.0.0.1:5555").expect("fulcio url"),
+            rekor_url: Url::parse("http://127.0.0.1:3000").expect("rekor url"),
+            identity_token: None,
+            predicate_type: PredicateType::CycloneDx,
+            predicate: predicate.to_vec(),
+            no_cache: true,
+            no_tty: true,
+            offline: false,
+        }
+    }
+
+    /// Reach the wrapped [`SignError`] by structure rather than by walking
+    /// `source()`. `PackageError.kind` deliberately omits `#[source]`
+    /// (`package_manager/error.rs`), so a `PackageError` has an empty source
+    /// chain and a downcast walk finds nothing.
+    ///
+    /// Structure is also what the CLI reads: `package_sign.rs` unwraps exactly
+    /// this shape before handing the error to anyhow, which is what makes the
+    /// sign-side exit code survive. Asserting `classify_error` on the
+    /// `PackageError` itself would assert a contract this layer does not hold
+    /// — it answers `Failure` for every kind.
+    fn sign_error(error: &PackageError) -> &SignError {
+        let PackageErrorKind::Internal(crate::Error::Sign(sign)) = &error.kind else {
+            panic!("expected an Internal(Sign(..)) kind, got: {:?}", error.kind);
+        };
+        sign
+    }
+
+    /// S-002 at the task layer. `require_client` answers `OfflineMode` (81) for
+    /// an offline manager, so a task that reached for the client first would
+    /// report a passive network failure where the contract says 77 policy
+    /// refusal — and `ocx package push --sbom`, which never passes through
+    /// `ocx package attest`'s own CLI gate, would get 81 with nothing else
+    /// catching it.
+    #[tokio::test]
+    async fn attest_one_refuses_offline_as_a_policy_rejection_not_a_missing_client() {
+        let temp = tempfile::TempDir::new().expect("ocx home");
+        let manager = offline_manager(temp.path());
+        let package = crate::oci::Identifier::parse("registry.example/pkg:1.0").expect("identifier");
+
+        let error = manager
+            .attest_one(
+                &package,
+                &crate::oci::Platform::any(),
+                AttestOptions {
+                    offline: true,
+                    ..options(br#"{"bomFormat":"CycloneDX"}"#)
+                },
+            )
+            .await
+            .expect_err("an offline attest must be refused");
+
+        let sign = sign_error(&error);
+        assert!(
+            matches!(sign.kind, SignErrorKind::OfflineAttestRefused),
+            "expected the offline policy refusal, got: {error}",
+        );
+        assert_eq!(classify_error(sign), ExitCode::PermissionDenied);
+        assert_eq!(&error.identifier, &package, "the refusal is tagged with the target");
+    }
+
+    /// S-005 read half: the CLI hands over raw bytes, and the task layer is
+    /// where they become the `RawValue` the pipeline splices. Non-JSON bytes
+    /// are a malformed *file* (65), not a bad invocation.
+    #[tokio::test]
+    async fn attest_one_refuses_a_predicate_that_is_not_json() {
+        let temp = tempfile::TempDir::new().expect("ocx home");
+        let manager = offline_manager(temp.path());
+        let package = crate::oci::Identifier::parse("registry.example/pkg:1.0").expect("identifier");
+
+        for bytes in [b"not json at all".to_vec(), vec![0xff, 0xfe, 0xfd]] {
+            let error = manager
+                .attest_one(&package, &crate::oci::Platform::any(), options(&bytes))
+                .await
+                .expect_err("a non-JSON predicate must be refused");
+
+            let sign = sign_error(&error);
+            assert!(
+                matches!(sign.kind, SignErrorKind::PredicateNotJson),
+                "expected the predicate refusal, got: {error}",
+            );
+            assert_eq!(classify_error(sign), ExitCode::DataError);
+        }
+    }
+}

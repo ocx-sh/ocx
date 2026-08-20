@@ -70,6 +70,14 @@ pub mod referrer;
 // primitive both use (ADR `adr_oci_referrers_signing_v1.md` Amendment 2).
 pub mod endpoint;
 
+// `attest` owns the in-toto/DSSE wire formats. The module graph is NOT
+// acyclic here, and that is accepted (D-h: no new error family) rather than a
+// design lapse: attest/dsse.rs + attest/statement.rs return VerifyErrorKind
+// (attest <-> verify), and attest/pipeline.rs + attest/statement.rs return
+// SignErrorKind while sign/{bundle,rekor,signer}.rs import attest's DSSE and
+// Statement types back (attest <-> sign). See adr_sbom_attestations.md D-i.
+pub mod attest;
+
 pub mod sign;
 
 pub mod verify;

@@ -131,7 +131,7 @@ pub enum VerifyErrorKind {
     ///
     /// Exit 65 (`DataError`). A cryptographically invalid SET is a data integrity
     /// failure — the bundle has been tampered with. This is distinct from
-    /// [`Self::RekorUnavailable`] (service down, retry may help): no amount of
+    /// [`Self::TransparencyLogUnavailable`] (service down, retry may help): no amount of
     /// retrying will fix a tampered SET, and callers must not treat this as a
     /// transient failure.
     #[error("Rekor SET does not verify")]
@@ -185,7 +185,7 @@ pub enum VerifyErrorKind {
     ///
     /// Exit 83. Distinct from [`Self::RekorSetInvalid`] — retry is appropriate.
     #[error("Rekor transparency log unavailable")]
-    RekorUnavailable,
+    TransparencyLogUnavailable,
 
     /// Bundle parse failed (not v0.3, corrupted JSON).
     ///
@@ -249,12 +249,229 @@ pub enum VerifyErrorKind {
     )]
     NoIdentityProvided,
 
-    /// A `[[trust.policy]]` entry is malformed (both or neither identity form
-    /// set, or an `identity_regexp` that does not compile).
+    /// A `[[trust.policy]]` entry is malformed: no `[trust.policy.keyless]`
+    /// backend declared, an incomplete matcher (identity or issuer unset,
+    /// both or neither identity form set), or an `identity_regexp` that does
+    /// not compile.
     ///
     /// Exit 78 (`ConfigError`).
     #[error(transparent)]
     TrustPolicyInvalid(#[from] crate::trust::TrustPolicyError),
+
+    /// The attestation scan ended with zero verified matches.
+    ///
+    /// Exit 79 (`NotFound`). Either no referrer is an attestation, or none
+    /// whose *signed* predicateType matches the requested `--type`. Narrowing
+    /// happens on the verified payload after fetch-and-parse: a referrer
+    /// annotation never excludes a candidate, because an annotation is
+    /// unsigned and a hostile publisher controls it.
+    #[error("no attestation found for target")]
+    AttestationNotFound,
+
+    /// The signed predicateType is not the one requested, or disagrees with
+    /// the referrer's annotation.
+    ///
+    /// Exit 65 (`DataError`).
+    #[error("predicate type mismatch: expected {expected}, found {actual}")]
+    PredicateTypeMismatch {
+        /// predicateType the caller requested, or the referrer annotation claimed.
+        expected: String,
+        /// predicateType the signed Statement actually carries.
+        actual: String,
+    },
+
+    /// No subject in the signed Statement binds the target digest.
+    ///
+    /// Exit 65 (`DataError`). The attestation verifies cryptographically but
+    /// attests to a *different* artifact — the splice this check exists for.
+    #[error("statement subject does not bind the target digest: expected {expected}, found {actual}")]
+    StatementSubjectMismatch {
+        /// Digest of the artifact being verified.
+        expected: String,
+        /// Subject digests the Statement actually carries, capped at
+        /// `attest::statement::MAX_REPORTED_SUBJECTS` with an `and N more`
+        /// tail — the Statement's subject count is attacker-chosen.
+        actual: String,
+    },
+
+    /// The signed Statement carries zero subjects.
+    ///
+    /// Exit 65 (`DataError`). A subject-less Statement binds nothing, so it
+    /// can never be evidence about this artifact. Distinct from
+    /// [`Self::StatementSubjectMismatch`]: there is nothing to compare.
+    #[error("statement carries no subject")]
+    StatementSubjectAbsent,
+
+    /// A subject's DigestSet carries no `sha256` entry.
+    ///
+    /// Exit 65 (`DataError`). Matching on a weaker algorithm would let a
+    /// collision stand in for the binding, so an unusable DigestSet is
+    /// refused rather than matched on what it does carry.
+    // The {:?} interpolation is deliberate: Debug-escaping the registry-sourced
+    // strings IS the CWE-150 terminal-injection protection. Do not "clean up" to {}.
+    #[error("statement subject carries no sha256 digest (found: {algorithms:?})")]
+    StatementSubjectWeakAlgorithm {
+        /// Digest algorithms present on the subject, capped at
+        /// `attest::statement::MAX_REPORTED_SUBJECTS` — a hostile Statement
+        /// carries hundreds of thousands of them, and this field crosses into
+        /// `--json` unrendered.
+        algorithms: Vec<String>,
+    },
+
+    /// A policy `builder` pin did not match the provenance predicate.
+    ///
+    /// Exit 65 (`DataError`). Covers all three shapes of failure — the
+    /// builder identity is absent, unparseable, or simply different. A pin
+    /// that cannot be evaluated is a refusal, never a skip: silently passing
+    /// an unpinnable predicate is how a policy stops being a policy.
+    #[error(
+        "builder identity mismatch: policy pins {expected}, provenance names {}",
+        found.as_deref().unwrap_or("none")
+    )]
+    BuilderMismatch {
+        /// Builder identity the trust policy pins.
+        expected: String,
+        /// Builder identity found in the predicate, if one could be read.
+        found: Option<String>,
+    },
+
+    /// The Statement's `_type` is outside `ACCEPTED_STATEMENT_TYPES`.
+    ///
+    /// Exit 65 (`DataError`).
+    #[error("unsupported in-toto statement type: {statement_type}")]
+    StatementTypeUnsupported {
+        /// The `_type` value the Statement declared.
+        statement_type: String,
+    },
+
+    /// The DSSE envelope's `payloadType` is not `application/vnd.in-toto+json`.
+    ///
+    /// Exit 65 (`DataError`). Checked before the payload is parsed: the
+    /// declared type is what says how to read the bytes.
+    #[error("unsupported DSSE payload type: {payload_type}")]
+    PayloadTypeUnsupported {
+        /// The `payloadType` value the envelope declared.
+        payload_type: String,
+    },
+
+    /// The bundle's DSSE envelope carries other than exactly one signature.
+    ///
+    /// Exit 65 (`DataError`). Verifying one signature out of several would
+    /// report "verified" for an envelope whose other signatures nobody checked.
+    #[error("DSSE envelope carries {count} signatures, expected exactly 1")]
+    MultipleSignatures {
+        /// Number of signatures on the envelope.
+        count: usize,
+    },
+
+    /// More than one verified attestation matched.
+    ///
+    /// Exit 65 (`DataError`). `ocx package sbom --output` writes one document;
+    /// picking one of several verified candidates would make which SBOM a
+    /// consumer receives depend on referrer ordering.
+    // The {:?} interpolation is deliberate: Debug-escaping the registry-sourced
+    // strings IS the CWE-150 terminal-injection protection. Do not "clean up" to {}.
+    #[error(
+        "multiple attestations match the target: {referrer_digests:?}; {}",
+        narrow_by_type_hint(.predicate_types)
+    )]
+    MultipleAttestations {
+        /// Every distinct predicateType across the matches, sorted and
+        /// deduplicated. All of them, not the first: a mixed-type match set
+        /// named by one type tells the operator something untrue about the
+        /// other candidates, and `--type` is unusable advice without the list
+        /// of values it accepts here.
+        predicate_types: Vec<String>,
+        /// Digests of the referrers that matched.
+        referrer_digests: Vec<String>,
+    },
+
+    /// The transparency-log entry's `kindVersion` is outside `ACCEPTED_TLOG_KINDS`.
+    ///
+    /// Exit 65 (`DataError`). Each kind has its own canonicalization, so an
+    /// unrecognized one cannot be re-derived and compared at all.
+    #[error("unsupported transparency-log entry kind: {kind} v{version}")]
+    UnsupportedTlogEntryKind {
+        /// The entry `kind` (e.g. `hashedrekord`).
+        kind: String,
+        /// The entry `version` within that kind.
+        version: String,
+    },
+
+    /// The canonicalized log-entry body does not match the received envelope.
+    ///
+    /// Exit 65 (`DataError`). Deliberately *not* named `EnvelopeHashMismatch`:
+    /// verify never recomputes an envelope hash, so a name promising that
+    /// comparison would describe a check that does not exist. What is compared
+    /// is the body's `payloadHash` and `signatures[]` against the envelope
+    /// actually received.
+    #[error("transparency-log entry does not bind to the received envelope")]
+    TlogBindingMismatch,
+
+    /// The log entry's `integratedTime` falls outside the leaf certificate's
+    /// validity window.
+    ///
+    /// Exit 65 (`DataError`). CVE-2024-55655: without this check an expired
+    /// certificate's signature stays acceptable forever, because the log entry
+    /// alone does not prove the signature was made while the cert was valid.
+    /// All three fields are RFC 3339 with an explicit `Z`.
+    #[error(
+        "transparency-log integrated time {integrated_time} is outside the certificate validity window {not_before} to {not_after}"
+    )]
+    CertificateValidityWindow {
+        /// `integratedTime` from the transparency-log entry.
+        integrated_time: String,
+        /// Leaf certificate `notBefore`.
+        not_before: String,
+        /// Leaf certificate `notAfter`.
+        not_after: String,
+    },
+
+    /// The attestation envelope exceeded `MAX_ATTESTATION_ENVELOPE_BYTES`.
+    ///
+    /// Exit 65 (`DataError`).
+    #[error("attestation envelope is {actual} bytes, over the {limit}-byte limit")]
+    AttestationTooLarge {
+        /// The configured ceiling, in bytes.
+        limit: u64,
+        /// Estimated from the encoded length (conservative ceiling), not counted bytes.
+        actual: u64,
+    },
+
+    /// The Statement payload (estimated pre-decode from the base64 length) exceeded `MAX_STATEMENT_PAYLOAD_BYTES`.
+    ///
+    /// Exit 65 (`DataError`). Separate from [`Self::AttestationTooLarge`]
+    /// because base64 in the envelope and the decoded payload are two
+    /// different sizes, and the decode is where the expansion happens.
+    #[error("attestation payload is {actual} bytes, over the {limit}-byte limit")]
+    AttestationPayloadTooLarge {
+        /// The configured ceiling, in bytes.
+        limit: u64,
+        /// Bytes actually counted before the limit tripped.
+        actual: u64,
+    },
+
+    /// The referrer list held more than `MAX_ATTESTATION_CANDIDATES` entries.
+    ///
+    /// Exit 65 (`DataError`). Fail-closed, like
+    /// [`Self::CandidateLimitExhausted`] on the signature path: candidates
+    /// exist, so reporting "not found" would misreport a possibly-attested
+    /// artifact.
+    #[error("more than {limit} attestation candidates for target")]
+    TooManyAttestations {
+        /// The configured candidate ceiling.
+        limit: usize,
+    },
+
+    /// Cumulative attestation bytes exceeded `MAX_TOTAL_ATTESTATION_BYTES`.
+    ///
+    /// Exit 65 (`DataError`). Per-envelope caps bound one candidate; this
+    /// bounds the scan, which is what a thousand small envelopes attack.
+    #[error("attestation fetch exceeded the {limit}-byte total budget")]
+    AttestationBudgetExhausted {
+        /// The configured total-bytes ceiling.
+        limit: u64,
+    },
 
     /// Catch-all for verify-side failures outside the codes above (index
     /// resolution, digest parse, malformed URL join).
@@ -264,6 +481,24 @@ pub enum VerifyErrorKind {
     /// cause — never erase it with `.to_string()`.
     #[error("internal verification error")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+/// The disambiguation advice carried by [`VerifyErrorKind::MultipleAttestations`].
+///
+/// `--type` narrows a scan by predicate type, so it is a remedy only when the
+/// matches disagree about type. Two CycloneDX SBOMs attested by two CI runs
+/// are the other case, and sending that operator round `--type cyclonedx`
+/// returns them exactly where they started — so the single-type set says so
+/// instead of naming a flag that cannot help.
+///
+/// `{:?}` on every interpolated value is deliberate and load-bearing: these
+/// strings are read out of a registry-served payload and rendered to a
+/// terminal, and Debug-escaping them IS the CWE-150 protection.
+fn narrow_by_type_hint(predicate_types: &[String]) -> String {
+    match predicate_types {
+        [single] => format!("every match carries {single:?}, so --type cannot narrow further"),
+        many => format!("narrow with --type to one of {many:?}"),
+    }
 }
 
 /// Typed discriminant for [`VerifyErrorKind::TrustRootLoad`].
@@ -315,7 +550,7 @@ pub enum TrustRootLoadReason {
     /// trusted-root document that declares only a certificate authority hits
     /// this; the remedy is one that carries the log keys alongside the anchors.
     #[error(
-        "trust root carries no CT log key: supply a trusted-root JSON via --trusted-root \
+        "trust root carries no CT log key: supply a trusted-root JSON via --sigstore-trusted-root \
          (see `cosign trusted-root create`, or test/sigstore/generate-trusted-root.py for a self-hosted stack)"
     )]
     NoCtLogKey,
@@ -335,11 +570,11 @@ pub enum TrustRootLoadReason {
     )]
     AmbiguousTrustRootConfig,
 
-    /// Offline verify found no usable trust material: no `--trusted-root` /
+    /// Offline verify found no usable trust material: no `--sigstore-trusted-root` /
     /// cached trust root supplying a pinned Rekor key, and the online
     /// fetch/embedded fallback is forbidden offline. The message names the remedy.
     #[error(
-        "offline verify has no pinned Rekor key: supply --trusted-root, or run an online verify first to populate the trust-root cache"
+        "offline verify has no pinned Rekor key: supply --sigstore-trusted-root, or run an online verify first to populate the trust-root cache"
     )]
     OfflineTrustMaterialUnavailable,
 }
@@ -347,7 +582,13 @@ pub enum TrustRootLoadReason {
 impl ClassifyErrorKind for VerifyErrorKind {
     fn exit_code(&self) -> ExitCode {
         match self {
-            Self::NoSignaturesFound | Self::NoUsableBundle | Self::TargetNotFound { .. } => ExitCode::NotFound,
+            // AttestationNotFound joins the family for the same reason
+            // NoSignaturesFound is here: the scan completed and found nothing
+            // to check, which is an absence, not a verification failure.
+            Self::NoSignaturesFound
+            | Self::NoUsableBundle
+            | Self::TargetNotFound { .. }
+            | Self::AttestationNotFound => ExitCode::NotFound,
             Self::IdentityMismatch | Self::IssuerMismatch => ExitCode::PermissionDenied,
             Self::CertChainInvalid
             | Self::SignatureInvalid
@@ -362,8 +603,27 @@ impl ClassifyErrorKind for VerifyErrorKind {
             // CandidateLimitExhausted is a fail-closed "could not examine all
             // candidates" outcome, not "unsigned" (79) — keep it in the
             // verification-failed bucket.
-            | Self::CandidateLimitExhausted { .. } => ExitCode::DataError,
-            Self::RekorSetAbsentTsaPresent | Self::RekorUnavailable => ExitCode::RekorUnavailable,
+            | Self::CandidateLimitExhausted { .. }
+            // Every attestation shape, binding and bound failure is 65: the
+            // bytes arrived and did not hold up. A retry re-fetches the same
+            // bytes, so none of these is transient.
+            | Self::PredicateTypeMismatch { .. }
+            | Self::StatementSubjectMismatch { .. }
+            | Self::StatementSubjectAbsent
+            | Self::StatementSubjectWeakAlgorithm { .. }
+            | Self::BuilderMismatch { .. }
+            | Self::StatementTypeUnsupported { .. }
+            | Self::PayloadTypeUnsupported { .. }
+            | Self::MultipleSignatures { .. }
+            | Self::MultipleAttestations { .. }
+            | Self::UnsupportedTlogEntryKind { .. }
+            | Self::TlogBindingMismatch
+            | Self::CertificateValidityWindow { .. }
+            | Self::AttestationTooLarge { .. }
+            | Self::AttestationPayloadTooLarge { .. }
+            | Self::TooManyAttestations { .. }
+            | Self::AttestationBudgetExhausted { .. } => ExitCode::DataError,
+            Self::RekorSetAbsentTsaPresent | Self::TransparencyLogUnavailable => ExitCode::TransparencyLogUnavailable,
             Self::ReferrersUnsupported => ExitCode::ReferrersUnsupported,
             Self::TrustRootUnavailable
             | Self::TrustRootLoad(_)
@@ -392,7 +652,7 @@ impl ClassifyErrorKind for VerifyErrorKind {
             Self::RekorInclusionProofAbsent => "rekor_inclusion_proof_absent",
             Self::RekorSetAbsentTsaPresent => "rekor_set_absent_tsa_present",
             Self::ReferrersUnsupported => "referrers_unsupported",
-            Self::RekorUnavailable => "rekor_unavailable",
+            Self::TransparencyLogUnavailable => "transparency_log_unavailable",
             Self::BundleParseFailed => "bundle_parse_failed",
             Self::ForbiddenRegistryTarget { .. } => "forbidden_registry_target",
             Self::TrustRootUnavailable => "trust_root_unavailable",
@@ -400,6 +660,23 @@ impl ClassifyErrorKind for VerifyErrorKind {
             Self::NoIdentityProvided => "no_identity_provided",
             Self::TrustPolicyInvalid(_) => "trust_policy_invalid",
             Self::InvalidEndpointUrl { .. } => "invalid_endpoint_url",
+            Self::AttestationNotFound => "attestation_not_found",
+            Self::PredicateTypeMismatch { .. } => "predicate_type_mismatch",
+            Self::StatementSubjectMismatch { .. } => "statement_subject_mismatch",
+            Self::StatementSubjectAbsent => "statement_subject_absent",
+            Self::StatementSubjectWeakAlgorithm { .. } => "statement_subject_weak_algorithm",
+            Self::BuilderMismatch { .. } => "builder_mismatch",
+            Self::StatementTypeUnsupported { .. } => "statement_type_unsupported",
+            Self::PayloadTypeUnsupported { .. } => "payload_type_unsupported",
+            Self::MultipleSignatures { .. } => "multiple_signatures",
+            Self::MultipleAttestations { .. } => "multiple_attestations",
+            Self::UnsupportedTlogEntryKind { .. } => "unsupported_tlog_entry_kind",
+            Self::TlogBindingMismatch => "tlog_binding_mismatch",
+            Self::CertificateValidityWindow { .. } => "certificate_validity_window",
+            Self::AttestationTooLarge { .. } => "attestation_too_large",
+            Self::AttestationPayloadTooLarge { .. } => "attestation_payload_too_large",
+            Self::TooManyAttestations { .. } => "too_many_attestations",
+            Self::AttestationBudgetExhausted { .. } => "attestation_budget_exhausted",
             Self::Internal(_) => "internal",
         }
     }
@@ -475,7 +752,7 @@ mod tests {
     #[test]
     fn rekor_set_invalid_maps_to_data_error() {
         // RekorSetInvalid is a tampered-bundle / crypto failure — exit 65 (DataError),
-        // NOT exit 83 (RekorUnavailable). A `case $? in 83) retry` handler must not
+        // NOT exit 83 (TransparencyLogUnavailable). A `case $? in 83) retry` handler must not
         // retry a tampered SET.
         assert_eq!(VerifyErrorKind::RekorSetInvalid.exit_code(), ExitCode::DataError);
     }
@@ -491,13 +768,17 @@ mod tests {
     }
 
     #[test]
-    fn rekor_unavailable_family_maps_to_rekor_unavailable() {
+    fn transparency_log_unavailable_family_maps_to_transparency_log_unavailable() {
         // 83 = "Rekor service unreachable or TSA transition" — retry may help.
         for kind in [
             VerifyErrorKind::RekorSetAbsentTsaPresent,
-            VerifyErrorKind::RekorUnavailable,
+            VerifyErrorKind::TransparencyLogUnavailable,
         ] {
-            assert_eq!(kind.exit_code(), ExitCode::RekorUnavailable, "variant: {kind:?}");
+            assert_eq!(
+                kind.exit_code(),
+                ExitCode::TransparencyLogUnavailable,
+                "variant: {kind:?}"
+            );
         }
     }
 
@@ -557,7 +838,7 @@ mod tests {
             "certificate identity mismatch"
         );
         assert_eq!(
-            format!("{}", VerifyErrorKind::RekorUnavailable),
+            format!("{}", VerifyErrorKind::TransparencyLogUnavailable),
             "Rekor transparency log unavailable"
         );
         for kind in [
@@ -631,6 +912,129 @@ mod tests {
         }
     }
 
+    /// Every attestation variant, so the family below is a full enumeration
+    /// rather than whichever ones came to mind. `BuilderMismatch` appears with
+    /// `found: Some(..)` here and with `found: None` in the slug table, so both
+    /// arms of its format expression are constructed somewhere.
+    fn attestation_data_error_kinds() -> Vec<VerifyErrorKind> {
+        vec![
+            VerifyErrorKind::PredicateTypeMismatch {
+                expected: "https://slsa.dev/provenance/v1".into(),
+                actual: "https://spdx.dev/Document".into(),
+            },
+            VerifyErrorKind::StatementSubjectMismatch {
+                expected: "sha256:aaaa".into(),
+                actual: "sha256:bbbb".into(),
+            },
+            VerifyErrorKind::StatementSubjectAbsent,
+            VerifyErrorKind::StatementSubjectWeakAlgorithm {
+                algorithms: vec!["sha1".into()],
+            },
+            VerifyErrorKind::BuilderMismatch {
+                expected: "https://github.com/acme/.github/workflows/release.yml".into(),
+                found: Some("https://github.com/evil/.github/workflows/release.yml".into()),
+            },
+            VerifyErrorKind::StatementTypeUnsupported {
+                statement_type: "https://in-toto.io/Statement/v0.1".into(),
+            },
+            VerifyErrorKind::PayloadTypeUnsupported {
+                payload_type: "application/json".into(),
+            },
+            VerifyErrorKind::MultipleSignatures { count: 2 },
+            VerifyErrorKind::MultipleAttestations {
+                predicate_types: vec!["https://spdx.dev/Document".into()],
+                referrer_digests: vec!["sha256:aaaa".into(), "sha256:bbbb".into()],
+            },
+            VerifyErrorKind::UnsupportedTlogEntryKind {
+                kind: "dsse".into(),
+                version: "0.0.1".into(),
+            },
+            VerifyErrorKind::TlogBindingMismatch,
+            VerifyErrorKind::CertificateValidityWindow {
+                integrated_time: "2026-01-01T00:00:00Z".into(),
+                not_before: "2026-02-01T00:00:00Z".into(),
+                not_after: "2026-02-01T00:10:00Z".into(),
+            },
+            VerifyErrorKind::AttestationTooLarge {
+                limit: 1024,
+                actual: 2048,
+            },
+            VerifyErrorKind::AttestationPayloadTooLarge {
+                limit: 1024,
+                actual: 4096,
+            },
+            VerifyErrorKind::TooManyAttestations { limit: 32 },
+            VerifyErrorKind::AttestationBudgetExhausted { limit: 65_536 },
+        ]
+    }
+
+    #[test]
+    fn attestation_not_found_maps_to_not_found() {
+        // 79, the same code `NoSignaturesFound` uses and for the same reason:
+        // the scan completed and found nothing to check. Never 65 — "we looked
+        // and there is no attestation" is not "an attestation failed to verify",
+        // and a gate script that treats the two alike either blocks every
+        // unattested artifact or accepts every broken one.
+        assert_eq!(VerifyErrorKind::AttestationNotFound.exit_code(), ExitCode::NotFound);
+    }
+
+    #[test]
+    fn attestation_failures_map_to_data_error() {
+        // 65 across the whole family: shape failures, binding failures and
+        // resource-limit trips alike. The bytes arrived and did not hold up, so
+        // a retry re-fetches the same bytes — none of these is transient, and
+        // none may reach a code a caller retries on.
+        for kind in attestation_data_error_kinds() {
+            assert_eq!(kind.exit_code(), ExitCode::DataError, "variant: {kind:?}");
+        }
+    }
+
+    #[test]
+    fn attestation_kind_display_rules() {
+        // C-GOOD-ERR on the new family: lowercase leading English word, no
+        // trailing period. `DSSE` is an acronym and keeps its case.
+        for kind in attestation_data_error_kinds()
+            .into_iter()
+            .chain([VerifyErrorKind::AttestationNotFound])
+        {
+            let msg = format!("{kind}");
+            assert!(!msg.ends_with('.'), "trailing period on: {msg}");
+            let first = msg.split(' ').next().unwrap_or_default();
+            assert!(
+                first.chars().next().is_some_and(|c| !c.is_uppercase()) || first.chars().all(|c| c.is_uppercase()),
+                "leading word must be lowercase or an all-caps acronym, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn builder_mismatch_renders_absent_builder_as_none() {
+        // The `found` field is an `Option` rendered through a hand-written
+        // format expression, which is the one place in this enum where a
+        // regression would silently print `None` (the Debug form) instead of
+        // reading as a sentence. Both arms are pinned.
+        assert_eq!(
+            format!(
+                "{}",
+                VerifyErrorKind::BuilderMismatch {
+                    expected: "acme-builder".into(),
+                    found: None,
+                }
+            ),
+            "builder identity mismatch: policy pins acme-builder, provenance names none"
+        );
+        assert_eq!(
+            format!(
+                "{}",
+                VerifyErrorKind::BuilderMismatch {
+                    expected: "acme-builder".into(),
+                    found: Some("evil-builder".into()),
+                }
+            ),
+            "builder identity mismatch: policy pins acme-builder, provenance names evil-builder"
+        );
+    }
+
     #[test]
     fn kind_detail_values_are_stable() {
         // C-S1-1 frozen contract: these strings ship in JSON envelopes and consumer
@@ -663,7 +1067,7 @@ mod tests {
             ("rekor_inclusion_proof_absent", RekorInclusionProofAbsent),
             ("rekor_set_absent_tsa_present", RekorSetAbsentTsaPresent),
             ("referrers_unsupported", ReferrersUnsupported),
-            ("rekor_unavailable", RekorUnavailable),
+            ("transparency_log_unavailable", TransparencyLogUnavailable),
             ("bundle_parse_failed", BundleParseFailed),
             (
                 "forbidden_registry_target",
@@ -692,6 +1096,90 @@ mod tests {
                     },
                 },
             ),
+            ("attestation_not_found", AttestationNotFound),
+            (
+                "predicate_type_mismatch",
+                PredicateTypeMismatch {
+                    expected: "https://slsa.dev/provenance/v1".into(),
+                    actual: "https://spdx.dev/Document".into(),
+                },
+            ),
+            (
+                "statement_subject_mismatch",
+                StatementSubjectMismatch {
+                    expected: "sha256:aaaa".into(),
+                    actual: "sha256:bbbb".into(),
+                },
+            ),
+            ("statement_subject_absent", StatementSubjectAbsent),
+            (
+                "statement_subject_weak_algorithm",
+                StatementSubjectWeakAlgorithm {
+                    algorithms: vec!["sha1".into()],
+                },
+            ),
+            (
+                "builder_mismatch",
+                BuilderMismatch {
+                    expected: "https://github.com/acme/.github/workflows/release.yml".into(),
+                    found: None,
+                },
+            ),
+            (
+                "statement_type_unsupported",
+                StatementTypeUnsupported {
+                    statement_type: "https://in-toto.io/Statement/v0.1".into(),
+                },
+            ),
+            (
+                "payload_type_unsupported",
+                PayloadTypeUnsupported {
+                    payload_type: "application/json".into(),
+                },
+            ),
+            ("multiple_signatures", MultipleSignatures { count: 2 }),
+            (
+                "multiple_attestations",
+                MultipleAttestations {
+                    predicate_types: vec!["https://spdx.dev/Document".into()],
+                    referrer_digests: vec!["sha256:aaaa".into(), "sha256:bbbb".into()],
+                },
+            ),
+            (
+                "unsupported_tlog_entry_kind",
+                UnsupportedTlogEntryKind {
+                    kind: "dsse".into(),
+                    version: "0.0.1".into(),
+                },
+            ),
+            ("tlog_binding_mismatch", TlogBindingMismatch),
+            (
+                "certificate_validity_window",
+                CertificateValidityWindow {
+                    integrated_time: "2026-01-01T00:00:00Z".into(),
+                    not_before: "2026-02-01T00:00:00Z".into(),
+                    not_after: "2026-02-01T00:10:00Z".into(),
+                },
+            ),
+            (
+                "attestation_too_large",
+                AttestationTooLarge {
+                    limit: 1024,
+                    actual: 2048,
+                },
+            ),
+            (
+                "attestation_payload_too_large",
+                AttestationPayloadTooLarge {
+                    limit: 1024,
+                    actual: 4096,
+                },
+            ),
+            ("too_many_attestations", TooManyAttestations { limit: 32 }),
+            (
+                "attestation_budget_exhausted",
+                AttestationBudgetExhausted { limit: 65_536 },
+            ),
             ("internal", Internal(Box::new(std::io::Error::other("test")))),
         ];
 
@@ -705,7 +1193,7 @@ mod tests {
         // all. Closing that gap needs variant enumeration.
         assert_eq!(
             pairs.len(),
-            23,
+            40,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
 

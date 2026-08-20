@@ -9,6 +9,11 @@
 //! identity pinning, an attacker who publishes to the same registry with their
 //! own valid GitHub Actions OIDC token passes signature verification.
 //!
+//! A policy's signer matchers are nested per backend: keyless (Sigstore)
+//! matchers live under `[trust.policy.keyless]`, while `scope` and the SLSA
+//! `builder` pin stay top-level because neither depends on which backend
+//! signed. See [`TrustPolicy`].
+//!
 //! Policies are declared as an array-of-tables (`[[trust.policy]]`) in the
 //! operator `config.toml` (system / user / `$OCX_HOME`, which array-append into
 //! one operator set) and in the project `ocx.toml`. Resolution is
@@ -208,9 +213,29 @@ impl SigstoreTrust {
 
 /// A single `[[trust.policy]]` entry.
 ///
-/// Exactly one of `identity` / `identity_regexp` must be set — both or neither
-/// is a configuration error surfaced by [`TrustPolicy::compile`] (cosign's
-/// `--certificate-identity` / `--certificate-identity-regexp` precedent).
+/// The matchers naming an acceptable signer are **nested per backend**: keyless
+/// (Sigstore/Fulcio) matchers live under `[trust.policy.keyless]`, and a future
+/// key-based backend gets its own `[trust.policy.key]` sub-table beside it.
+/// [`Self::scope`] and [`Self::builder`] stay top-level because neither depends
+/// on which backend produced the signature.
+///
+/// ```toml
+/// [[trust.policy]]
+/// scope = "ghcr.io/acme/*"
+///
+/// [trust.policy.keyless]
+/// identity = "https://github.com/acme/tool/.github/workflows/release.yml@refs/tags/v1.2.3"
+/// oidc_issuer = "https://token.actions.githubusercontent.com"
+/// ```
+///
+/// Every field is optional at the serde layer, for the same fleet
+/// forward-compat reason unknown keys are tolerated (see [`TrustConfig`]): an
+/// entry written by a newer ocx degrades to its known parts instead of failing
+/// the whole file. What a *resolved* policy is allowed to mean is narrowed at
+/// [`TrustPolicy::compile`] instead, which refuses an entry declaring no
+/// backend. That is also what makes a flat-form typo loud: the pre-nesting
+/// spelling parses as unknown keys, leaves no backend behind, and fails closed
+/// with [`TrustPolicyError::NoBackend`] naming the sub-table it expected.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct TrustPolicy {
     /// Package prefix this policy applies to, e.g. `ghcr.io/acme/*`.
@@ -222,21 +247,28 @@ pub struct TrustPolicy {
     /// prefix text — `ghcr.io/acme/tool` does **not** cover
     /// `ghcr.io/acme/tool-cli`. A trailing `/*` covers the subtree; a mid-string
     /// `*` is a literal-prefix substring glob (see [`Self::matches_scope`]).
-    pub scope: String,
-
-    /// Exact expected certificate SAN (byte-equal). Mutually exclusive with
-    /// [`Self::identity_regexp`].
+    /// Absent reads exactly like `""`: a catch-all.
     #[serde(default)]
-    pub identity: Option<String>,
+    pub scope: Option<String>,
 
-    /// Regex the certificate SAN must match in full (anchored `\A…\z`).
-    /// Mutually exclusive with [`Self::identity`].
+    /// Expected SLSA provenance builder identity, matched against the
+    /// provenance predicate during attestation verify.
+    ///
+    /// Backend-independent — it names who *built* the artifact, not how the
+    /// signature was made — so it is a sibling of [`Self::scope`] rather than a
+    /// member of a backend sub-table. Inert in signature mode: a pin on a
+    /// policy that never verifies provenance is forward configuration, not an
+    /// error.
     #[serde(default)]
-    pub identity_regexp: Option<String>,
+    pub builder: Option<String>,
 
-    /// Exact expected OIDC issuer URL (byte-equal).
-    pub oidc_issuer: String,
+    /// The keyless (Sigstore) matcher sub-table, `[trust.policy.keyless]`.
+    #[serde(default)]
+    pub keyless: Option<KeylessMatcher>,
 
+    // A key-based backend lands here as `pub key: Option<KeyMatcher>` beside a
+    // `PolicyBackend::Key` variant. It is deliberately not parsed yet: a config
+    // surface with no verifier behind it is a promise that reads as a feature.
     /// Runtime provenance marker: this policy was declared at the SYSTEM config
     /// scope (`/etc/ocx/config.toml`), so it pins the specificity level for the
     /// scopes it matches — a lower tier can join its ANY-of set only at equal
@@ -254,14 +286,44 @@ pub struct TrustPolicy {
     pub system_locked: bool,
 }
 
+/// The `[trust.policy.keyless]` sub-table: which Sigstore identity may sign.
+///
+/// Exactly one of `identity` / `identity_regexp` must be set — both or neither
+/// is a configuration error surfaced by [`TrustPolicy::compile`] (cosign's
+/// `--certificate-identity` / `--certificate-identity-regexp` precedent) — and
+/// `oidc_issuer` must be present. All three are `Option` at the serde layer and
+/// mandatory at compile, for the tolerance reason [`TrustPolicy`] states.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct KeylessMatcher {
+    /// Exact expected certificate SAN (byte-equal). Mutually exclusive with
+    /// [`Self::identity_regexp`].
+    #[serde(default)]
+    pub identity: Option<String>,
+
+    /// Regex the certificate SAN must match in full (anchored `\A…\z`).
+    /// Mutually exclusive with [`Self::identity`].
+    #[serde(default)]
+    pub identity_regexp: Option<String>,
+
+    /// Exact expected OIDC issuer URL (byte-equal).
+    #[serde(default)]
+    pub oidc_issuer: Option<String>,
+}
+
 impl TrustPolicy {
+    /// The declared scope, with an absent one read as the empty catch-all.
+    fn scope_str(&self) -> &str {
+        self.scope.as_deref().unwrap_or_default()
+    }
+
     /// The literal scope prefix: everything before the first `*` (the whole
     /// scope when there is no wildcard).
     #[must_use]
     pub fn literal_prefix(&self) -> &str {
-        match self.scope.find('*') {
-            Some(index) => &self.scope[..index],
-            None => &self.scope,
+        let scope = self.scope_str();
+        match scope.find('*') {
+            Some(index) => &scope[..index],
+            None => scope,
         }
     }
 
@@ -272,56 +334,108 @@ impl TrustPolicy {
     /// matches `ghcr.io/acme` and `ghcr.io/acme/tool`, but never
     /// `ghcr.io/acmecorp`. A `*` makes it a glob on the literal prefix before
     /// the wildcard (`ghcr.io/acme/*` covers the subtree; a bare `ghcr.io/acme*`
-    /// is an intentional substring glob). An empty scope is a catch-all.
+    /// is an intentional substring glob). An empty — or absent — scope is a
+    /// catch-all.
     #[must_use]
     pub fn matches_scope(&self, target: &str) -> bool {
-        if self.scope.is_empty() {
+        let scope = self.scope_str();
+        if scope.is_empty() {
             return true;
         }
-        match self.scope.find('*') {
-            Some(index) => target.starts_with(&self.scope[..index]),
-            None => target == self.scope || target.starts_with(&format!("{}/", self.scope)),
+        match scope.find('*') {
+            Some(index) => target.starts_with(&scope[..index]),
+            None => target == scope || target.starts_with(&format!("{scope}/")),
         }
     }
 
-    /// Compile the identity constraint, enforcing the identity XOR
-    /// identity_regexp invariant and the issuer being present.
+    /// Resolve this entry into the ready-to-match [`CompiledPolicy`]: pick the
+    /// declared backend and enforce that backend's invariants.
     ///
     /// # Errors
-    /// [`TrustPolicyError::IdentityConflict`] when both identity fields are
-    /// set, [`TrustPolicyError::IdentityUnset`] when neither is, and
+    /// [`TrustPolicyError::NoBackend`] when the entry declares no backend
+    /// sub-table; from a `[trust.policy.keyless]` table,
+    /// [`TrustPolicyError::IdentityConflict`] when both identity forms are set,
+    /// [`TrustPolicyError::IdentityUnset`] when neither is,
+    /// [`TrustPolicyError::IssuerUnset`] when `oidc_issuer` is absent, and
     /// [`TrustPolicyError::InvalidRegex`] when `identity_regexp` does not
     /// compile.
     pub fn compile(&self) -> Result<CompiledPolicy, TrustPolicyError> {
-        let identity = match (&self.identity, &self.identity_regexp) {
+        // Exactly one backend is a property of the type, not of a runtime
+        // count: one `Option` field can only declare one, and a second backend
+        // arrives as another field here plus a `PolicyBackend` variant, whose
+        // exhaustive matches then force every consumer to be revisited. A
+        // "more than one declared" refusal is written with that field, against
+        // a config that can express the conflict — written now it could never
+        // fail, which is not a check.
+        let keyless = self.keyless.as_ref().ok_or_else(|| TrustPolicyError::NoBackend {
+            scope: self.scope_str().to_string(),
+        })?;
+        Ok(CompiledPolicy {
+            builder: self.builder.clone(),
+            backend: PolicyBackend::Keyless(self.compile_keyless(keyless)?),
+        })
+    }
+
+    /// Enforce the keyless invariants: identity XOR identity_regexp, and an
+    /// issuer present.
+    fn compile_keyless(&self, keyless: &KeylessMatcher) -> Result<CompiledKeyless, TrustPolicyError> {
+        let scope = self.scope_str();
+        let identity = match (&keyless.identity, &keyless.identity_regexp) {
             (Some(_), Some(_)) => {
                 return Err(TrustPolicyError::IdentityConflict {
-                    scope: self.scope.clone(),
+                    scope: scope.to_string(),
                 });
             }
             (None, None) => {
                 return Err(TrustPolicyError::IdentityUnset {
-                    scope: self.scope.clone(),
+                    scope: scope.to_string(),
                 });
             }
             (Some(exact), None) => IdentityRule::Exact(exact.clone()),
             (None, Some(pattern)) => {
                 IdentityRule::compile_regex(pattern).map_err(|source| TrustPolicyError::InvalidRegex {
-                    scope: self.scope.clone(),
+                    scope: scope.to_string(),
                     source,
                 })?
             }
         };
-        Ok(CompiledPolicy {
-            identity,
-            issuer: self.oidc_issuer.clone(),
-        })
+        let issuer = keyless
+            .oidc_issuer
+            .clone()
+            .ok_or_else(|| TrustPolicyError::IssuerUnset {
+                scope: scope.to_string(),
+            })?;
+        Ok(CompiledKeyless { identity, issuer })
     }
 }
 
-/// A compiled, ready-to-match acceptable `(identity, issuer)` constraint.
+/// A compiled, ready-to-match policy: the acceptable signer, plus the pins that
+/// hold whichever backend signed.
 #[derive(Debug, Clone)]
 pub struct CompiledPolicy {
+    /// The SLSA provenance builder identity this policy pins, if any. Enforced
+    /// by attestation verify; inert in signature mode.
+    pub builder: Option<String>,
+    /// The verification backend this policy resolved to.
+    pub backend: PolicyBackend,
+}
+
+/// The verification backend a compiled policy resolved to.
+///
+/// One variant today. It is an enum rather than a set of optional fields so
+/// that adding a key-based backend is a compile error at every site that
+/// consumes a policy, instead of a silent `None` nobody handles. Deliberately
+/// not `#[non_exhaustive]`: the binary is the only consumer, and in-crate
+/// matches staying total is the whole point.
+#[derive(Debug, Clone)]
+pub enum PolicyBackend {
+    /// Keyless Sigstore: a Fulcio certificate SAN plus its OIDC issuer.
+    Keyless(CompiledKeyless),
+}
+
+/// A compiled `[trust.policy.keyless]` matcher.
+#[derive(Debug, Clone)]
+pub struct CompiledKeyless {
     /// The identity constraint (exact or anchored regex).
     pub identity: IdentityRule,
     /// The exact expected OIDC issuer URL.
@@ -329,13 +443,18 @@ pub struct CompiledPolicy {
 }
 
 impl CompiledPolicy {
-    /// Build a single exact `(identity, issuer)` policy — the flag-override
-    /// path (`--certificate-identity` + `--certificate-oidc-issuer`).
+    /// Build a single exact keyless `(identity, issuer)` policy — the
+    /// flag-override path (`--certificate-identity` +
+    /// `--certificate-oidc-issuer`). It carries no builder pin: the flags name
+    /// a signer, not a build.
     #[must_use]
     pub fn exact(identity: String, issuer: String) -> Self {
         Self {
-            identity: IdentityRule::Exact(identity),
-            issuer,
+            builder: None,
+            backend: PolicyBackend::Keyless(CompiledKeyless {
+                identity: IdentityRule::Exact(identity),
+                issuer,
+            }),
         }
     }
 }
@@ -413,13 +532,13 @@ pub fn resolve<'a>(policies: impl IntoIterator<Item = &'a TrustPolicy>, target: 
         let refused: Vec<&str> = matching
             .iter()
             .filter(|policy| !policy.system_locked)
-            .map(|policy| policy.scope.as_str())
+            .map(|policy| policy.scope_str())
             .collect();
         if !refused.is_empty() {
             log::debug!(
                 "system-locked trust scope '{}' governs '{target}' alone; lower-tier scopes {refused:?} are \
                  refused — rotate the identity in the system config that declares the pin",
-                pin.scope
+                pin.scope_str()
             );
         }
         return matching
@@ -494,6 +613,22 @@ pub fn policies_from_ocx_toml(toml_str: &str) -> Result<Vec<TrustPolicy>, toml::
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum TrustPolicyError {
+    /// The entry declares no backend sub-table, so it names no acceptable
+    /// signer. Also what the pre-nesting flat spelling degrades to: its keys
+    /// are tolerated as unknown, and this is where the entry fails closed.
+    #[error(
+        "trust policy for scope {scope:?} declares no verification backend (expected a [trust.policy.keyless] sub-table)"
+    )]
+    NoBackend {
+        /// The offending policy's scope.
+        scope: String,
+    },
+    /// A `[trust.policy.keyless]` table omits `oidc_issuer`.
+    #[error("trust policy for scope {scope:?} sets no oidc_issuer under [trust.policy.keyless]")]
+    IssuerUnset {
+        /// The offending policy's scope.
+        scope: String,
+    },
     /// Both `identity` and `identity_regexp` are set on one entry.
     #[error("trust policy for scope {scope:?} sets both identity and identity_regexp (choose one)")]
     IdentityConflict {
@@ -525,12 +660,29 @@ mod tests {
 
     fn policy(scope: &str, identity: Option<&str>, regexp: Option<&str>, issuer: &str) -> TrustPolicy {
         TrustPolicy {
-            scope: scope.to_string(),
-            identity: identity.map(str::to_string),
-            identity_regexp: regexp.map(str::to_string),
-            oidc_issuer: issuer.to_string(),
+            scope: Some(scope.to_string()),
+            builder: None,
+            keyless: Some(KeylessMatcher {
+                identity: identity.map(str::to_string),
+                identity_regexp: regexp.map(str::to_string),
+                oidc_issuer: Some(issuer.to_string()),
+            }),
             system_locked: false,
         }
+    }
+
+    /// The exact identity a parsed policy pins — for assertions that only care
+    /// which entry won resolution.
+    fn pinned_identity(policy: &TrustPolicy) -> Option<&str> {
+        policy.keyless.as_ref()?.identity.as_deref()
+    }
+
+    /// The identity rule a compiled policy resolved to. The irrefutable
+    /// destructure is deliberate: a second [`PolicyBackend`] variant must break
+    /// this line rather than silently skip it.
+    fn compiled_identity(policy: &CompiledPolicy) -> &IdentityRule {
+        let PolicyBackend::Keyless(keyless) = &policy.backend;
+        &keyless.identity
     }
 
     /// The same entry as [`policy`], but marked as declared at the system config
@@ -585,6 +737,8 @@ cmake = 12345
 
 [[trust.policy]]
 scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
 identity = "id"
 oidc_issuer = "iss"
 "#;
@@ -599,7 +753,7 @@ oidc_issuer = "iss"
         let policies = [broad, narrow];
         let resolved = resolve(&policies, "ghcr.io/acme/tool");
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].identity.as_deref(), Some("narrow"));
+        assert_eq!(pinned_identity(resolved[0]), Some("narrow"));
     }
 
     #[test]
@@ -631,7 +785,7 @@ oidc_issuer = "iss"
         let policies = [system, managed];
         let resolved = resolve(&policies, "ghcr.io/acme/tool");
         assert_eq!(resolved.len(), 1, "only the locked pin may govern the scope it matches");
-        assert_eq!(resolved[0].identity.as_deref(), Some("system-X"));
+        assert_eq!(pinned_identity(resolved[0]), Some("system-X"));
     }
 
     #[test]
@@ -647,7 +801,7 @@ oidc_issuer = "iss"
         let policies = [system, managed];
         let resolved = resolve(&policies, "ghcr.io/acme/tool");
         assert_eq!(resolved.len(), 1, "only system-scope entries govern a locked scope");
-        assert_eq!(resolved[0].identity.as_deref(), Some("old-ci"));
+        assert_eq!(pinned_identity(resolved[0]), Some("old-ci"));
     }
 
     #[test]
@@ -660,7 +814,7 @@ oidc_issuer = "iss"
         let policies = [old, new];
         let resolved = resolve(&policies, "ghcr.io/acme/tool");
         assert_eq!(resolved.len(), 2, "equal-specificity locked entries combine as ANY-of");
-        assert!(resolved.iter().any(|p| p.identity.as_deref() == Some("new-ci")));
+        assert!(resolved.iter().any(|p| pinned_identity(p) == Some("new-ci")));
     }
 
     #[test]
@@ -676,7 +830,7 @@ oidc_issuer = "iss"
         let resolved = resolve(&policies, "ghcr.io/acme/tool");
         assert_eq!(resolved.len(), 1);
         assert_eq!(
-            resolved[0].identity.as_deref(),
+            pinned_identity(resolved[0]),
             Some("narrow"),
             "with no locked policy in the matching set, global most-specific-wins is unchanged"
         );
@@ -692,9 +846,11 @@ oidc_issuer = "iss"
         let toml = r#"
 [[trust.policy]]
 scope = "ghcr.io/acme/*"
+system_locked = true
+
+[trust.policy.keyless]
 identity = "attacker@example.test"
 oidc_issuer = "https://example.test"
-system_locked = true
 "#;
         #[derive(Deserialize)]
         struct Root {
@@ -719,6 +875,173 @@ system_locked = true
         };
         config.lock_as_system();
         assert!(config.policy.iter().all(|policy| policy.system_locked));
+    }
+
+    #[test]
+    fn nested_keyless_matcher_compiles_to_a_keyless_backend() {
+        // The shape a user writes: matchers under `[trust.policy.keyless]`,
+        // scope beside it. Everything below depends on this parsing at all.
+        let toml = r#"
+[[trust.policy]]
+scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
+identity = "release@acme.example"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+"#;
+        #[derive(Deserialize)]
+        struct Root {
+            trust: TrustConfig,
+        }
+        let root: Root = toml::from_str(toml).expect("the nested form parses");
+        let compiled = root.trust.policy[0]
+            .compile()
+            .expect("a complete keyless matcher compiles");
+        let PolicyBackend::Keyless(keyless) = &compiled.backend;
+        assert!(matches!(&keyless.identity, IdentityRule::Exact(id) if id == "release@acme.example"));
+        assert_eq!(keyless.issuer, "https://token.actions.githubusercontent.com");
+    }
+
+    #[test]
+    fn the_flat_spelling_declares_no_backend_and_says_so() {
+        // Typo-loudness for the pre-nesting spelling. Unknown keys stay
+        // tolerated fleet-wide, so this parses — and that is precisely why the
+        // refusal has to come from compilation instead. Silently treating a
+        // scope-only entry as "no policy" would leave a user who believes they
+        // pinned an identity with no pin and no signal.
+        let toml = r#"
+[[trust.policy]]
+scope = "ghcr.io/acme/*"
+identity = "release@acme.example"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+"#;
+        #[derive(Deserialize)]
+        struct Root {
+            trust: TrustConfig,
+        }
+        let root: Root = toml::from_str(toml).expect("the flat keys are tolerated as unknown, not rejected");
+        let policy = &root.trust.policy[0];
+        assert!(policy.keyless.is_none(), "flat keys must not populate the sub-table");
+
+        let error = policy
+            .compile()
+            .expect_err("an entry with no backend cannot govern a scope");
+        assert!(matches!(error, TrustPolicyError::NoBackend { .. }));
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("[trust.policy.keyless]"),
+            "the refusal must name the sub-table the matchers belong in; got: {rendered}"
+        );
+        assert!(
+            rendered.contains("ghcr.io/acme/*"),
+            "the refusal must name which entry is at fault; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn compile_rejects_an_entry_declaring_no_backend() {
+        // Zero backends is the only arity a one-backend schema can get wrong.
+        // "More than one" is unwritable until a second backend field exists,
+        // and a check that cannot fail is not a check — see `compile`.
+        let bare = TrustPolicy {
+            scope: Some("ghcr.io/acme/*".to_string()),
+            builder: None,
+            keyless: None,
+            system_locked: false,
+        };
+        assert!(matches!(bare.compile(), Err(TrustPolicyError::NoBackend { .. })));
+    }
+
+    #[test]
+    fn compile_rejects_a_keyless_matcher_without_an_issuer() {
+        // `oidc_issuer` is Option at the serde layer for fleet forward-compat
+        // and mandatory here: an identity with no issuer would accept the same
+        // SAN minted by any OIDC provider.
+        let no_issuer = TrustPolicy {
+            scope: Some("ghcr.io/acme/*".to_string()),
+            builder: None,
+            keyless: Some(KeylessMatcher {
+                identity: Some("release@acme.example".to_string()),
+                identity_regexp: None,
+                oidc_issuer: None,
+            }),
+            system_locked: false,
+        };
+        assert!(matches!(no_issuer.compile(), Err(TrustPolicyError::IssuerUnset { .. })));
+    }
+
+    #[test]
+    fn builder_is_a_backend_independent_sibling_of_scope() {
+        // #103: the SLSA builder pin sits beside `scope`, not inside a backend
+        // sub-table, and rides through compilation for attestation verify.
+        let toml = r#"
+[[trust.policy]]
+scope = "ghcr.io/acme/*"
+builder = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main"
+
+[trust.policy.keyless]
+identity = "release@acme.example"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+"#;
+        #[derive(Deserialize)]
+        struct Root {
+            trust: TrustConfig,
+        }
+        let root: Root = toml::from_str(toml).expect("a top-level builder parses");
+        let compiled = root.trust.policy[0]
+            .compile()
+            .expect("a builder pin does not block compilation");
+        assert_eq!(
+            compiled.builder.as_deref(),
+            Some("https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main")
+        );
+    }
+
+    #[test]
+    fn a_builder_pin_is_not_a_backend() {
+        // A builder pin says who built the artifact, never who may sign it, so
+        // it cannot stand in for the missing matcher.
+        let builder_only = TrustPolicy {
+            scope: Some("ghcr.io/acme/*".to_string()),
+            builder: Some("https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main".to_string()),
+            keyless: None,
+            system_locked: false,
+        };
+        assert!(matches!(
+            builder_only.compile(),
+            Err(TrustPolicyError::NoBackend { .. })
+        ));
+    }
+
+    #[test]
+    fn an_absent_scope_is_the_same_catch_all_as_an_empty_one() {
+        // `scope` is optional so an entry from a newer ocx still parses. Absent
+        // must mean what `""` already means, or the two spellings of one
+        // intent would govern different package sets.
+        let catch_all = TrustPolicy {
+            scope: None,
+            builder: None,
+            keyless: Some(KeylessMatcher {
+                identity: Some("release@acme.example".to_string()),
+                identity_regexp: None,
+                oidc_issuer: Some("https://token.actions.githubusercontent.com".to_string()),
+            }),
+            system_locked: false,
+        };
+        assert!(catch_all.matches_scope("anything/at/all"));
+        assert_eq!(catch_all.literal_prefix(), "");
+        assert!(catch_all.compile().is_ok(), "an unscoped policy still names a signer");
+    }
+
+    #[test]
+    fn the_flag_override_policy_carries_no_builder_pin() {
+        // `--certificate-identity` + `--certificate-oidc-issuer` name a signer,
+        // not a build; inventing a builder pin from them would refuse every
+        // provenance the flags never spoke about.
+        let flags = CompiledPolicy::exact("you@example.com".to_string(), "https://issuer.example".to_string());
+        assert!(flags.builder.is_none());
+        let PolicyBackend::Keyless(keyless) = &flags.backend;
+        assert_eq!(keyless.issuer, "https://issuer.example");
     }
 
     #[test]
@@ -770,7 +1093,7 @@ system_locked = true
         let project = [policy("ghcr.io/acme/tool", Some("project-Y"), None, "iss")];
         let compiled = resolve_tiered(&operator, &project, "ghcr.io/acme/tool").expect("operator policy compiles");
         assert_eq!(compiled.len(), 1);
-        assert!(matches!(&compiled[0].identity, IdentityRule::Exact(id) if id == "operator-X"));
+        assert!(matches!(compiled_identity(&compiled[0]), IdentityRule::Exact(id) if id == "operator-X"));
     }
 
     #[test]
@@ -781,7 +1104,7 @@ system_locked = true
         let project = [policy("ghcr.io/other/tool", Some("project-Z"), None, "iss")];
         let compiled = resolve_tiered(&operator, &project, "ghcr.io/other/tool").expect("project policy compiles");
         assert_eq!(compiled.len(), 1);
-        assert!(matches!(&compiled[0].identity, IdentityRule::Exact(id) if id == "project-Z"));
+        assert!(matches!(compiled_identity(&compiled[0]), IdentityRule::Exact(id) if id == "project-Z"));
     }
 
     #[test]
@@ -812,11 +1135,15 @@ system_locked = true
         let toml = r#"
 [[trust.policy]]
 scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
 identity = "https://github.com/acme/tool/.github/workflows/release.yml@refs/tags/v1.2.3"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 
 [[trust.policy]]
 scope = "ghcr.io/other/*"
+
+[trust.policy.keyless]
 identity_regexp = "^https://example\\.com/.*$"
 oidc_issuer = "https://example.com"
 "#;
@@ -826,8 +1153,20 @@ oidc_issuer = "https://example.com"
         }
         let root: Root = toml::from_str(toml).expect("parse");
         assert_eq!(root.trust.policy.len(), 2);
-        assert_eq!(root.trust.policy[0].scope, "ghcr.io/acme/*");
-        assert!(root.trust.policy[1].identity_regexp.is_some());
+        assert_eq!(root.trust.policy[0].scope.as_deref(), Some("ghcr.io/acme/*"));
+        assert_eq!(
+            root.trust.policy[0]
+                .keyless
+                .as_ref()
+                .and_then(|keyless| keyless.identity.as_deref()),
+            Some("https://github.com/acme/tool/.github/workflows/release.yml@refs/tags/v1.2.3")
+        );
+        assert!(
+            root.trust.policy[1]
+                .keyless
+                .as_ref()
+                .is_some_and(|keyless| keyless.identity_regexp.is_some())
+        );
     }
 
     #[test]
@@ -842,9 +1181,12 @@ oidc_issuer = "https://example.com"
         let toml = r#"
 [[trust.policy]]
 scope = "ghcr.io/acme/*"
+future_field = "added by a newer ocx"
+
+[trust.policy.keyless]
 identity = "https://github.com/acme/tool/.github/workflows/release.yml@refs/tags/v1.2.3"
 oidc_issuer = "https://token.actions.githubusercontent.com"
-future_field = "added by a newer ocx"
+nested_future_field = "added by a newer ocx, inside the backend sub-table"
 "#;
         #[derive(Deserialize)]
         struct Root {
@@ -853,12 +1195,16 @@ future_field = "added by a newer ocx"
         let root: Root = toml::from_str(toml).expect("unknown field is tolerated, not rejected");
         assert_eq!(root.trust.policy.len(), 1);
         let policy = &root.trust.policy[0];
-        assert_eq!(policy.scope, "ghcr.io/acme/*");
+        assert_eq!(policy.scope.as_deref(), Some("ghcr.io/acme/*"));
+        let keyless = policy.keyless.as_ref().expect("the backend sub-table survives");
         assert_eq!(
-            policy.identity.as_deref(),
+            keyless.identity.as_deref(),
             Some("https://github.com/acme/tool/.github/workflows/release.yml@refs/tags/v1.2.3")
         );
-        assert_eq!(policy.oidc_issuer, "https://token.actions.githubusercontent.com");
+        assert_eq!(
+            keyless.oidc_issuer.as_deref(),
+            Some("https://token.actions.githubusercontent.com")
+        );
     }
 
     #[test]
@@ -877,6 +1223,8 @@ future_field = "added by a newer ocx"
 
 [[trust.policy]]
 scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
 identity = "https://github.com/acme/tool/.github/workflows/release.yml@refs/tags/v1.2.3"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 "#;
@@ -886,7 +1234,7 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
         }
         let root: Root = toml::from_str(toml).expect("unknown top-level field is tolerated, not rejected");
         assert_eq!(root.trust.policy.len(), 1);
-        assert_eq!(root.trust.policy[0].scope, "ghcr.io/acme/*");
+        assert_eq!(root.trust.policy[0].scope.as_deref(), Some("ghcr.io/acme/*"));
     }
 
     #[test]

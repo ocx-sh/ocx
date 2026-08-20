@@ -12,6 +12,7 @@ use ocx_lib::{
     publisher::{self, LayerRef, Publisher},
 };
 
+use crate::command::package_sign_common;
 use crate::{conventions, options};
 
 #[derive(Parser)]
@@ -92,6 +93,20 @@ pub struct PackagePush {
     /// was deliberately dropped from a later announce.
     #[clap(long = "announce-file", value_name = "PATH")]
     announce_file: Option<std::path::PathBuf>,
+
+    /// After the push, attest this CycloneDX SBOM against the pushed manifest.
+    ///
+    /// Sugar for `ocx package attest --type cyclonedx` on the digest this push
+    /// just wrote. The file is read before the push, so a bad path costs no
+    /// upload; the OIDC token comes from OCX_IDENTITY_TOKEN or from ambient
+    /// CI detection, as `ocx package attest` resolves it.
+    ///
+    /// A push that lands followed by an attestation that fails is not rolled
+    /// back: a pushed manifest is immutable and OCI offers no un-push. The
+    /// push report is still emitted, with the attestation outcome recorded,
+    /// and the attestation failure decides the exit code.
+    #[clap(long = "sbom", value_name = "PATH")]
+    sbom: Option<std::path::PathBuf>,
 
     /// Target platform (e.g. `linux/amd64`, or `any` for platform-agnostic content)
     ///
@@ -179,6 +194,28 @@ impl PackagePush {
         // receipt is the fallback rather than the host platform.
         let platform = crate::build_receipt::resolve_target_platform(self.platform.clone(), receipt.as_ref())?;
 
+        // `--sbom` work that must happen BEFORE the push, because a push is
+        // not undoable. The offline refusal is first so it beats the generic
+        // `OfflineMode` (81) `remote_client()` would raise: an offline attest
+        // is a deliberate policy refusal (77) whichever verb reached it, and a
+        // script branching on 77 must not see a different code here than it
+        // sees from `ocx package attest`.
+        //
+        // WATCH: 77-before-81 is S-018's contract, pinned end to end in WP10a.
+        // Moving this block below `Publisher::new` silently returns 81 instead
+        // — no unit test here reaches `remote_client()`, so nothing local reds.
+        let sbom_predicate = match &self.sbom {
+            None => None,
+            Some(path) => {
+                package_sign_common::refuse_when_offline(
+                    &context,
+                    &identifier,
+                    ocx_lib::oci::sign::SignErrorKind::OfflineAttestRefused,
+                )?;
+                Some(package_sign_common::read_predicate(path, &identifier).await?)
+            }
+        };
+
         let metadata_path = conventions::resolve_metadata_path(&self.layers, self.metadata.as_deref())?;
 
         log::info!(
@@ -207,7 +244,7 @@ impl PackagePush {
         let infos = vec![package::info::Info {
             identifier: identifier.clone(),
             metadata: valid.into(),
-            platform,
+            platform: platform.clone(),
         }];
 
         let build_meta: Option<String> = self.build_timestamp.as_ref().and_then(build_timestamp);
@@ -263,10 +300,23 @@ impl PackagePush {
         // one-row table (identifier, digest, cascade + canonical tags, layer
         // counts); `--format json`
         // serializes the report consumed by `ocx-mirror pipeline push`.
-        context.api().report(&crate::api::data::push::PushReport::from_outcome(
-            identifier.to_string(),
-            outcome,
-        ))?;
+        let mut report = crate::api::data::push::PushReport::from_outcome(identifier.to_string(), outcome);
+
+        // The push already landed. Whatever the attestation does, the report is
+        // owed to the caller — so the outcome is folded into the report rather
+        // than replacing it with an error envelope, and the error is returned
+        // only after the report is on stdout.
+        let mut attest_failure = None;
+        if let Some(predicate) = sbom_predicate {
+            match self.attest_sbom(&context, &identifier, &platform, predicate).await {
+                Ok(outcome) => report = report.with_attestation(outcome),
+                Err(err) => {
+                    report = report.with_attestation(package_sign_common::failed_outcome(&err));
+                    attest_failure = Some(err);
+                }
+            }
+        }
+        context.api().report(&report)?;
 
         // The append still decides the exit code: the caller asked for the file,
         // so a failure is a failure — it just no longer costs them the report.
@@ -280,7 +330,66 @@ impl PackagePush {
             return Err(error);
         }
 
+        // The push succeeded, so the attestation failure is the worst outcome
+        // in the run and owns the exit code. `main` classifies it through the
+        // same chain `ocx package attest` uses, and the envelope is suppressed
+        // because the push report already claimed stdout.
+        if let Some(error) = attest_failure {
+            return Err(error);
+        }
+
         Ok(ExitCode::SUCCESS)
+    }
+
+    /// Attest `predicate` as a CycloneDX SBOM against the manifest this push
+    /// wrote for `platform`.
+    ///
+    /// The subject digest is resolved by the attest pipeline from the
+    /// identifier and platform, never derived from a canonical tag —
+    /// `--no-canonical-tag` may have suppressed those.
+    ///
+    /// # Errors
+    ///
+    /// Any attest-pipeline failure, already re-rooted so the JSON envelope
+    /// keeps its `context.identifier`.
+    async fn attest_sbom(
+        &self,
+        context: &crate::app::Context,
+        identifier: &oci::Identifier,
+        platform: &oci::Platform,
+        predicate: Vec<u8>,
+    ) -> anyhow::Result<crate::api::data::push::AttestationOutcome> {
+        use ocx_lib::oci::attest::predicate::PredicateType;
+
+        // `push` exposes no endpoint flags, so `None` for both puts it on the
+        // tail of the same ladder `attest` walks: `[trust.sigstore]` > builtin
+        // default, then the same SSRF guard and the same refusal kind.
+        let (fulcio_url, rekor_url) =
+            package_sign_common::resolve_sigstore_pair(context.config_trust_sigstore(), identifier, None, None)?;
+        let identity_token = package_sign_common::resolve_override_token(None, false, identifier).await?;
+        let result = context
+            .manager()
+            .attest_one(
+                identifier,
+                platform,
+                ocx_lib::package_manager::AttestOptions {
+                    fulcio_url,
+                    rekor_url,
+                    identity_token,
+                    predicate_type: PredicateType::CycloneDx,
+                    predicate,
+                    no_cache: false,
+                    no_tty: false,
+                    offline: context.is_offline(),
+                },
+            )
+            .await
+            .map_err(package_sign_common::attest_error_into_anyhow)?
+            .result;
+        Ok(crate::api::data::push::AttestationOutcome::Succeeded {
+            referrer_digest: result.referrer_digest.to_string(),
+            predicate_type: result.predicate_type,
+        })
     }
 }
 

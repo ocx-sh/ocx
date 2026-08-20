@@ -16,9 +16,11 @@
 //!
 //! HTTP failures map to typed [`SignErrorKind`]s: 401/403 →
 //! [`SignErrorKind::OidcTokenRejected`], other 4xx →
-//! [`SignErrorKind::FulcioBadRequest`], 5xx / transport →
-//! [`SignErrorKind::Internal`]. Fulcio states the actual cause only in the
-//! response body, which the typed kinds cannot carry, so it is logged.
+//! [`SignErrorKind::FulcioBadRequest`], and the retryable set (429, any 5xx,
+//! and a transport-level connect or timeout failure) →
+//! [`SignErrorKind::FulcioUnavailable`], which is exit 75 so a caller reading
+//! `$?` can retry it. Fulcio states the actual cause only in the response
+//! body, which the typed kinds cannot carry, so it is logged.
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -133,7 +135,11 @@ impl FulcioClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+            // Connect refused, DNS failure, TLS handshake, read timeout: every
+            // one of these is a transient outage of a remote service, not a
+            // defect in this request. `Internal` (exit 1) reported them as a
+            // bug in ocx and made them unretryable.
+            .map_err(|_| SignErrorKind::FulcioUnavailable)?;
 
         let status = response.status();
         if !status.is_success() {
@@ -219,8 +225,12 @@ const FULCIO_IDENTITY_TOKEN_ERROR: &str = "error processing the identity token";
 fn classify_rejection(status: u16, body: &str) -> SignErrorKind {
     match status {
         401 | 403 => SignErrorKind::OidcTokenRejected,
+        // 429 is a 4xx by number and a transient fault by meaning; it leads the
+        // 4xx arms deliberately (PKG-16's retryable set is {429, 5xx}).
+        429 => SignErrorKind::FulcioUnavailable,
         400..=499 if body.contains(FULCIO_IDENTITY_TOKEN_ERROR) => SignErrorKind::OidcTokenRejected,
         400..=499 => SignErrorKind::FulcioBadRequest,
+        500..=599 => SignErrorKind::FulcioUnavailable,
         other => SignErrorKind::Internal(format!("Fulcio returned HTTP {other}").into()),
     }
 }
@@ -294,10 +304,65 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_auth_status_needs_no_body_and_a_server_fault_is_internal() {
+    fn an_explicit_auth_status_needs_no_body() {
         assert!(matches!(classify_rejection(401, ""), SignErrorKind::OidcTokenRejected));
         assert!(matches!(classify_rejection(403, ""), SignErrorKind::OidcTokenRejected));
-        assert!(matches!(classify_rejection(503, ""), SignErrorKind::Internal(_)));
+    }
+
+    /// PKG-16's retryable set — 429 plus every 5xx — is a transient Fulcio
+    /// outage, not a defect in the request. It has to reach exit 75 so a CI
+    /// runner can retry it, and it has to stay a *different* integer from the
+    /// hard 4xx refusals so the two are told apart (PKG-28).
+    #[test]
+    fn a_transient_fulcio_fault_is_retryable_and_a_hard_refusal_is_not() {
+        use crate::cli::{ClassifyErrorKind, ExitCode};
+
+        for status in [429, 500, 502, 503, 504] {
+            assert!(
+                matches!(classify_rejection(status, ""), SignErrorKind::FulcioUnavailable),
+                "HTTP {status} from Fulcio must be retryable"
+            );
+            assert_eq!(classify_rejection(status, "").exit_code(), ExitCode::TempFail);
+        }
+
+        // The hard refusals keep their own codes, and none of them is 75.
+        for (status, expected) in [(400, ExitCode::ConfigError), (401, ExitCode::AuthError)] {
+            let code = classify_rejection(status, "").exit_code();
+            assert_eq!(code, expected, "HTTP {status}");
+            assert_ne!(code, ExitCode::TempFail, "HTTP {status} must not read as retryable");
+        }
+    }
+
+    /// A Fulcio that cannot be dialled at all is the same transient class as a
+    /// 503, and used to land on `Internal` -> exit 1: indistinguishable from a
+    /// bug in ocx, and unretryable by anything reading `$?`.
+    ///
+    /// The port is bound and released so it is known-closed, which is what
+    /// makes the connect refusal deterministic rather than a race.
+    #[tokio::test]
+    async fn an_unreachable_fulcio_is_retryable_not_an_internal_bug() {
+        use crate::cli::{ClassifyErrorKind, ExitCode};
+
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+            listener.local_addr().expect("local addr").port()
+        };
+        let url = url::Url::parse(&format!("http://127.0.0.1:{port}/")).expect("loopback url");
+
+        // `let Err(..) else` rather than `expect_err`: the Ok type is a
+        // certificate and does not need a `Debug` impl minted for a test.
+        let Err(err) = super::FulcioClient::new(url)
+            .request_certificate("token", "-----BEGIN PUBLIC KEY-----", "sig")
+            .await
+        else {
+            panic!("a closed port cannot issue a certificate");
+        };
+
+        assert!(
+            matches!(err, SignErrorKind::FulcioUnavailable),
+            "connect-refused must be retryable, got {err:?}"
+        );
+        assert_eq!(err.exit_code(), ExitCode::TempFail);
     }
 
     #[test]

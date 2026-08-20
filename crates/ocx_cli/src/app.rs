@@ -269,6 +269,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
         },
         Command::Package(sub) => match sub {
             PackageCmd::Announce(_) => "package announce",
+            PackageCmd::Attest(_) => "package attest",
             PackageCmd::Cascade(sub) => match sub {
                 CascadeCmd::Check(_) => "package cascade check",
                 CascadeCmd::Repair(_) => "package cascade repair",
@@ -282,6 +283,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
             PackageCmd::Install(_) => "package install",
             PackageCmd::Pull(_) => "package pull",
             PackageCmd::Push(_) => "package push",
+            PackageCmd::Sbom(_) => "package sbom",
             PackageCmd::Select(_) => "package select",
             PackageCmd::Deselect(_) => "package deselect",
             PackageCmd::Sign(_) => "package sign",

@@ -10,6 +10,7 @@
 // API surface (which would trip `clippy::new_without_default`). `sign` /
 // `verify` follow the same rule: the CLI reaches them through `PackageManager`,
 // never by module path.
+pub(crate) mod attest;
 pub(crate) mod auto_verify;
 pub(crate) mod clean;
 pub(crate) mod common;
@@ -34,6 +35,7 @@ pub(crate) mod pull;
 pub(crate) mod pull_local;
 pub(crate) mod purge;
 pub(crate) mod resolve;
+pub(crate) mod sbom;
 pub(crate) mod select;
 pub(crate) mod sign;
 pub(crate) mod uninstall;

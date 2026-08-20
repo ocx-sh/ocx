@@ -33,3 +33,32 @@ pub const EMPTY_CONFIG_DIGEST: &str = "sha256:44136fa355b3678a1146ad16f7e8649e94
 
 /// Byte length of the canonical empty config payload (literal `{}`).
 pub const EMPTY_CONFIG_SIZE: u64 = 2;
+
+// ── Sigstore bundle referrer annotations ──────────────────────────────
+//
+// cosign's `WriteAttestationNewBundleFormat` writes exactly these three keys
+// onto a bundle referrer manifest, and OCX writes all three so the same
+// artifact carries one wire shape across both tools (ADR D1). The set is a
+// one-way door: the manifest's SHA-256 *is* the referrer's registry address,
+// so bytes already pushed can never be migrated.
+//
+// The `created` key is [`crate::oci::annotations::CREATED`] — an existing
+// OCI-spec annotation constant, not redeclared here.
+
+/// Which `content` oneof the bundle carries — the listing-time hint that tells
+/// a signature referrer from an attestation referrer without fetching the blob.
+pub(crate) const ANNOTATION_BUNDLE_CONTENT: &str = "dev.sigstore.bundle.content";
+
+/// The resolved predicateType URI of an attestation. Written on attestation
+/// referrers only; a signature has no predicate.
+pub(crate) const ANNOTATION_BUNDLE_PREDICATE_TYPE: &str = "dev.sigstore.bundle.predicateType";
+
+/// [`ANNOTATION_BUNDLE_CONTENT`] value for a DSSE-enveloped attestation.
+///
+/// Written by [`AttestPipeline`](crate::oci::attest::pipeline::AttestPipeline);
+/// this is what tells an attestation referrer from a signature referrer in a
+/// listing, without fetching the blob.
+pub(crate) const BUNDLE_CONTENT_DSSE: &str = "dsse-envelope";
+
+/// [`ANNOTATION_BUNDLE_CONTENT`] value for a signature bundle.
+pub(crate) const BUNDLE_CONTENT_MESSAGE_SIGNATURE: &str = "message-signature";

@@ -3,10 +3,11 @@
 
 //! Structured JSON error envelope for `--format json` error output.
 //!
-//! Per ADR §C-S1-1, the envelope shape is frozen at `schema_version = 1`
-//! for Slice 1 and treated as a stable public contract. Root-level keys are
-//! strictly `schema_version`, `command`, `exit_code`, and `error` (error path)
-//! or `schema_version`, `command`, `exit_code`, `data` (success path).
+//! Per ADR §C-S1-1, the envelope shape is frozen and treated as a stable
+//! public contract; the version integer moves only when the shape does (see
+//! [`ENVELOPE_SCHEMA_VERSION`]). Root-level keys are strictly
+//! `schema_version`, `command`, `exit_code`, and `error` (error path) or
+//! `schema_version`, `command`, `exit_code`, `data` (success path).
 //!
 //! Shape:
 //!
@@ -28,19 +29,26 @@
 //! }
 //! ```
 //!
-//! The `remediation` key is **reserved** in the v1 shape but not currently
+//! The `remediation` key is **reserved** in the shape but not currently
 //! emitted: [`render_error_envelope`] always leaves it `None`, so it is omitted
 //! from real output. Consumers must treat it as optional.
 
-use ocx_lib::cli::{ClassifyErrorKind, ExitCode, classify_error};
+use ocx_lib::cli::{ClassifyErrorKind, ExitCode};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
 /// Schema version for the JSON envelope. Bump on any breaking change.
 ///
-/// Freeze per C-S1-1: version 1 is the slice-1 contract. Additive fields
-/// (new keys) do not bump; shape changes (rename, remove, re-nest) do. Adding
-/// a new [`ErrorCategory`] variant is a `schema_version` bump per ADR rules.
+/// Freeze per C-S1-1: additive fields (new keys) do not bump; shape changes
+/// (rename, remove, re-nest) do. The [`ErrorCategory`] vocabulary is
+/// additive: new variants appear without a bump, and renaming a variant
+/// bumps only when a *released* binary ever emitted the old spelling —
+/// otherwise no consumer can observe the rename, while the version flip
+/// itself would break scripts pinning the number.
+///
+/// `rekor_unavailable` -> `transparency_log_unavailable` (exit 83
+/// unchanged) is exactly that case: the old slug never shipped in a
+/// release, so version 1 is still the contract.
 pub const ENVELOPE_SCHEMA_VERSION: u32 = 1;
 
 /// Frozen error-category set (ADR C-S1-1). Matches `error.kind` values listed
@@ -57,7 +65,7 @@ pub enum ErrorCategory {
     NotFound,
     Unavailable,
     TempFail,
-    RekorUnavailable,
+    TransparencyLogUnavailable,
     ReferrersUnsupported,
     IoError,
     Internal,
@@ -96,7 +104,7 @@ impl ErrorCategory {
             // a malformed config. `ConfigError` would erase that distinction,
             // which exit 82 exists to draw.
             ExitCode::DirtyRcBlock => Self::PermissionDenied,
-            ExitCode::RekorUnavailable => Self::RekorUnavailable,
+            ExitCode::TransparencyLogUnavailable => Self::TransparencyLogUnavailable,
             ExitCode::ReferrersUnsupported => Self::ReferrersUnsupported,
             // Wildcard required by `#[non_exhaustive]` on ExitCode (cross-crate match).
             // Any future variant added to ExitCode should get an explicit arm above;
@@ -108,12 +116,12 @@ impl ErrorCategory {
 
 /// Error-branch JSON envelope.
 ///
-/// Top-level shape per ADR C-S1-1 frozen v1 contract: `schema_version`,
+/// Top-level shape per the ADR C-S1-1 frozen contract: `schema_version`,
 /// `command`, `exit_code`, `error`. `success` is NOT present — consumers
 /// branch on whether the `error` or `data` key is present.
 #[derive(Debug, Serialize)]
 pub struct ErrorEnvelope<'a> {
-    /// Envelope schema version. Always [`ENVELOPE_SCHEMA_VERSION`] for v1.
+    /// Envelope schema version. Always [`ENVELOPE_SCHEMA_VERSION`].
     pub schema_version: u32,
     /// Canonical command string (e.g., `"package sign"`, `"verify"`).
     pub command: &'a str,
@@ -126,7 +134,7 @@ pub struct ErrorEnvelope<'a> {
 /// The `error` object inside [`ErrorEnvelope`].
 #[derive(Debug, Serialize)]
 pub struct EnvelopeError<'a> {
-    /// Coarse human-readable category. Frozen v1 set — see [`ErrorCategory`].
+    /// Coarse human-readable category. Frozen set — see [`ErrorCategory`].
     pub kind: ErrorCategory,
     /// Fine-grained snake_case variant name for programmatic matching
     /// (e.g., `"oidc_token_rejected"`). Optional.
@@ -134,7 +142,7 @@ pub struct EnvelopeError<'a> {
     pub detail: Option<&'a str>,
     /// Full user-facing message (the outermost `Display` of the error chain).
     pub message: String,
-    /// Reserved remediation hint — part of the frozen v1 shape but not
+    /// Reserved remediation hint — part of the frozen shape but not
     /// currently emitted (`render_error_envelope` always leaves it `None`, so
     /// `skip_serializing_if` omits it). Consumers must treat it as optional.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -175,10 +183,14 @@ impl<'a, T: Serialize> SuccessEnvelope<'a, T> {
 /// report of its own — a report-then-fail command keeps its report as the one
 /// stdout document, and the failure detail stays on stderr).
 ///
-/// Classifies the exit code via [`ocx_lib::cli::classify_error`] (walks the
-/// error chain via `source()`), maps that to an [`ErrorCategory`], collects
-/// identifier context from the chain, and serializes a byte-stable JSON
-/// envelope matching the v1 contract (see [`ENVELOPE_SCHEMA_VERSION`]).
+/// Classifies the exit code via [`crate::app::classify_error`] — the same
+/// authority `main.rs` returns from, so the envelope's `exit_code` can never
+/// disagree with the process's. The library classifier alone cannot downcast
+/// a CLI-local [`crate::app::CommandError`], so using it here rendered every
+/// such refusal as `1`/`internal` while the process exited 64 or 65 (CLI-04).
+/// The result maps to an [`ErrorCategory`]; identifier context is collected
+/// from the chain, and the whole is serialized as a byte-stable JSON envelope
+/// matching the frozen contract (see [`ENVELOPE_SCHEMA_VERSION`]).
 ///
 /// The `message` field is `{err:#}` (the full chain), matching the
 /// plain-format `tracing::error!` line. Because the `tracing` line goes to
@@ -192,7 +204,7 @@ impl<'a, T: Serialize> SuccessEnvelope<'a, T> {
 /// propagate rather than panicking to keep the error path robust.
 pub fn render_error_envelope(command: &str, err: &anyhow::Error) -> anyhow::Result<String> {
     let err_ref: &(dyn std::error::Error + 'static) = err.as_ref();
-    let exit_code = classify_error(err_ref);
+    let exit_code = crate::app::classify_error(err_ref);
     let kind = ErrorCategory::from_exit_code(exit_code);
     let message = format!("{err:#}");
     let context = collect_context(err_ref);
@@ -278,16 +290,19 @@ pub fn render_success_envelope<T: Serialize>(command: &str, data: &T) -> anyhow:
 
 #[cfg(test)]
 mod tests {
-    //! Contract tests for the frozen v1 JSON envelope shape (ADR C-S1-1).
+    //! Contract tests for the frozen JSON envelope shape (ADR C-S1-1).
     //!
     //! These tests encode the public contract that `--format json` consumers
-    //! pattern-match against. Any change to these tests is a v1 → v2 schema
-    //! bump — review carefully.
+    //! pattern-match against. Any change to these tests is a schema bump —
+    //! review carefully.
     use super::*;
     use serde::Serialize;
 
     #[test]
-    fn schema_version_is_one() {
+    fn schema_version_is_two() {
+        // v1 named the exit-83 category `rekor_unavailable`; renaming it to
+        // `transparency_log_unavailable` moved an enumerated value consumers
+        // match on, which this module's own bump rule calls a shape change.
         assert_eq!(ENVELOPE_SCHEMA_VERSION, 1);
     }
 
@@ -304,7 +319,10 @@ mod tests {
             (ErrorCategory::NotFound, "\"not_found\""),
             (ErrorCategory::Unavailable, "\"unavailable\""),
             (ErrorCategory::TempFail, "\"temp_fail\""),
-            (ErrorCategory::RekorUnavailable, "\"rekor_unavailable\""),
+            (
+                ErrorCategory::TransparencyLogUnavailable,
+                "\"transparency_log_unavailable\"",
+            ),
             (ErrorCategory::ReferrersUnsupported, "\"referrers_unsupported\""),
             (ErrorCategory::IoError, "\"io_error\""),
             (ErrorCategory::Internal, "\"internal\""),
@@ -440,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn render_error_envelope_produces_v1_shape_for_synthetic_error() {
+    fn render_error_envelope_produces_the_frozen_shape_for_a_synthetic_error() {
         // A synthetic anyhow error classifies to `Failure` (1) → Internal category.
         let err = anyhow::anyhow!("synthetic error for envelope probe");
         let json = render_error_envelope("package sign", &err).expect("render ok");
@@ -545,7 +563,10 @@ mod tests {
             (ExitCode::AuthError, ErrorCategory::AuthError),
             (ExitCode::PolicyBlocked, ErrorCategory::PermissionDenied),
             (ExitCode::DirtyRcBlock, ErrorCategory::PermissionDenied),
-            (ExitCode::RekorUnavailable, ErrorCategory::RekorUnavailable),
+            (
+                ExitCode::TransparencyLogUnavailable,
+                ErrorCategory::TransparencyLogUnavailable,
+            ),
             (ExitCode::ReferrersUnsupported, ErrorCategory::ReferrersUnsupported),
         ];
         // What this count pins, exactly: a row deleted from the table above.
@@ -566,6 +587,31 @@ mod tests {
                 code as u8,
             );
         }
+    }
+
+    #[test]
+    fn a_command_error_carries_the_code_the_process_exits_with() {
+        // Regression (CLI-04): the envelope used to classify with the *library*
+        // classifier, which by construction cannot downcast the CLI-local
+        // `CommandError` -- so a refusal that exits 64 rendered as 1/internal
+        // and a script branching on `exit_code` read the wrong thing. The
+        // literals here are deliberate rather than a cross-check against
+        // `app::classify_error`: comparing the envelope to the function it
+        // calls would pass under any classifier at all.
+        let err = anyhow::Error::new(crate::app::CommandError::new(
+            "refusing to write the predicate to a terminal".to_string(),
+            ExitCode::UsageError,
+        ));
+        let json = render_error_envelope("package sbom", &err).expect("render ok");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+
+        assert_eq!(value["exit_code"], 64, "envelope: {json}");
+        assert_eq!(value["error"]["kind"], "usage_error", "envelope: {json}");
+        assert_eq!(
+            value["exit_code"].as_u64().expect("exit_code is a number"),
+            crate::app::classify_error(err.as_ref()) as u8 as u64,
+            "the envelope and the process must not disagree",
+        );
     }
 
     #[test]

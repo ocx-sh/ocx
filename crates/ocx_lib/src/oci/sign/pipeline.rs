@@ -26,7 +26,10 @@ use crate::oci::client::{Client, OciTransport};
 use crate::oci::index::{Index, IndexOperation, SelectResult};
 use crate::oci::referrer::ReferrerManifest;
 use crate::oci::referrer::capability::{ReferrersApiCapability, ReferrersSupport};
-use crate::oci::referrer::media_types::{EMPTY_CONFIG_DIGEST, EMPTY_CONFIG_PAYLOAD, SIGSTORE_BUNDLE_V03};
+use crate::oci::referrer::manifest::{bundle_annotations, bundle_created, bundle_now};
+use crate::oci::referrer::media_types::{
+    BUNDLE_CONTENT_MESSAGE_SIGNATURE, EMPTY_CONFIG_DIGEST, EMPTY_CONFIG_PAYLOAD, SIGSTORE_BUNDLE_V03,
+};
 use crate::oci::sign::bundle::BUNDLE_V03_MEDIA_TYPE;
 use crate::oci::{Descriptor, Digest, Identifier, OCI_IMAGE_MEDIA_TYPE, Platform, native};
 
@@ -229,7 +232,16 @@ impl SignPipeline {
             size: bundle.bytes.len() as i64,
             ..Descriptor::default()
         };
-        let manifest = ReferrerManifest::build(subject_descriptor, SIGSTORE_BUNDLE_V03, bundle_descriptor);
+        // cosign parity (ADR D1): a signature referrer carries `created` and
+        // `content: message-signature`, which is what distinguishes it from an
+        // attestation referrer in a listing without fetching the blob.
+        let annotations = bundle_annotations(&bundle_created(bundle_now()), BUNDLE_CONTENT_MESSAGE_SIGNATURE, None);
+        let manifest = ReferrerManifest::build(
+            subject_descriptor,
+            SIGSTORE_BUNDLE_V03,
+            bundle_descriptor,
+            Some(annotations),
+        );
         let manifest_bytes = manifest.to_canonical_json()?;
         let referrer_descriptor = transport
             .push_referrer_manifest(&write_image, &subject_digest, &manifest_bytes, OCI_IMAGE_MEDIA_TYPE)
@@ -622,6 +634,18 @@ mod tests {
                 certificate_identity: "me@example.com".to_string(),
                 certificate_oidc_issuer: "https://issuer.example".to_string(),
             })
+        }
+
+        async fn sign_dsse(
+            &self,
+            _: &[u8],
+            _: &super::super::oidc::OidcToken,
+            _: &Url,
+            _: &Url,
+        ) -> Result<crate::oci::sign::bundle::SignedBundle, SignErrorKind> {
+            // `SignPipeline` never calls this; the attest pipeline is its own
+            // type with its own double. Present because `Signer` requires it.
+            unreachable!("SignPipeline signs message signatures, never DSSE")
         }
 
         fn signer_kind(&self) -> &'static str {

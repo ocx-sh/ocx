@@ -10,7 +10,7 @@
 //!
 //! Wired end to end by [`pipeline::VerifyPipeline`]. Read-only throughout —
 //! every registry call routes through the mirror-aware read seam. The
-//! A self-hosted stack supplies its trust root out of band — `--trusted-root`,
+//! A self-hosted stack supplies its trust root out of band — `--sigstore-trusted-root`,
 //! `OCX_SIGSTORE_TRUSTED_ROOT`, `[trust.sigstore]`, or
 //! `$OCX_HOME/sigstore/trusted-root.json`; see
 //! `self-hosted-sigstore.md`. Design record:
@@ -28,11 +28,18 @@ pub mod trust_cache;
 pub mod trust_resolve;
 pub mod trust_root;
 
+// OCX's own layer around the delegated verification of a DSSE attestation:
+// the structural half before that call, the row-12 tlog binding after it.
+mod dsse;
+
 // Rekor SET + Merkle inclusion, delegated to sigstore-rs.
 mod tlog;
 
+pub use dsse::VerifiedAttestation;
 pub use error::{VerifyError, VerifyErrorKind};
-pub use pipeline::{VerifyContext, VerifyPipeline, VerifyResult};
+pub use pipeline::{
+    AttestationMatch, AttestationScan, RefusedCandidate, VerifyContentMode, VerifyContext, VerifyPipeline, VerifyResult,
+};
 pub use trust_cache::TrustRootCache;
 pub use trust_resolve::resolve_trust_root;
 pub use trust_root::TrustRoot;

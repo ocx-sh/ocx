@@ -597,12 +597,14 @@ mod tests {
     fn merge_trust_policies_appends_across_tiers() {
         // Lower tier pins one scope; higher tier adds another. Both survive —
         // trust policies pool (union), they do not replace like scalars do.
-        let mut lower: Config =
-            toml::from_str("[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nidentity = \"a\"\noidc_issuer = \"iss\"")
-                .unwrap();
-        let higher: Config =
-            toml::from_str("[[trust.policy]]\nscope = \"ghcr.io/other/*\"\nidentity = \"b\"\noidc_issuer = \"iss\"")
-                .unwrap();
+        let mut lower: Config = toml::from_str(
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nkeyless = { identity = \"a\", oidc_issuer = \"iss\" }",
+        )
+        .unwrap();
+        let higher: Config = toml::from_str(
+            "[[trust.policy]]\nscope = \"ghcr.io/other/*\"\nkeyless = { identity = \"b\", oidc_issuer = \"iss\" }",
+        )
+        .unwrap();
         lower.merge(higher);
         assert_eq!(lower.trust_policies().len(), 2);
     }

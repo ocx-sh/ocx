@@ -14,6 +14,7 @@ use ocx_lib::{
 };
 
 use crate::api;
+use crate::command::package_sign_common::{SigstoreEndpoint, resolve_endpoint};
 
 use super::ContextOptions;
 
@@ -482,7 +483,8 @@ impl Context {
                 options.offline,
                 file_structure.state.clone(),
                 no_verify_env,
-            )
+            )?
+            .map(package_manager::AutoVerify::new)
         };
         let manager = manager.with_auto_verify(auto_verify);
 
@@ -974,8 +976,12 @@ fn build_registry_client(
         .build()
 }
 
-/// Build the shared policy-gated auto-verify config, or `None` when no operator
+/// Build the shared policy-gated auto-verify inputs, or `None` when no operator
 /// `[[trust.policy]]` is configured.
+///
+/// Returns the `AutoVerifyInput` rather than the wrapped `AutoVerify` so the
+/// resolved endpoint stays readable — `AutoVerify` keeps its fields private,
+/// and a test that cannot see the Rekor URL cannot pin it.
 ///
 /// Attached once on the manager (every install surface inherits it). Carries the
 /// always-available registry client (verify reads the signature referrer from
@@ -992,16 +998,24 @@ fn build_auto_verify(
     offline: bool,
     state: StateStore,
     user_opted_out: bool,
-) -> Option<package_manager::AutoVerify> {
+) -> anyhow::Result<Option<package_manager::AutoVerifyInput>> {
     if operator_policies.is_empty() {
-        return None;
+        return Ok(None);
     }
-    // Compile-time-constant, known-valid URL — validated (not parsed by name) so
-    // the CLI never names `url::Url`. Unused when the trust root pins the Rekor
-    // key (the `OCX_SIGSTORE_TRUSTED_ROOT` / offline path).
-    let rekor_url = oci::endpoint::validate_sigstore_url(oci::endpoint::DEFAULT_REKOR_URL, "rekor")
-        .expect("built-in default Rekor URL is valid");
-    Some(package_manager::AutoVerify::new(package_manager::AutoVerifyInput {
+    // Endpoint precedence, minus the flag tier install/pull do not have:
+    // `[trust.sigstore].rekor_url` > builtin default. Auto-verify keys its
+    // trust-root cache by this URL, so an operator on a self-hosted stack whose
+    // auto-verify still said `rekor.sigstore.dev` cached their private root
+    // under the public-good key.
+    //
+    // Validated (not parsed by name) so the CLI never names `url::Url`, and
+    // fallible now that the value can come from config: a bad
+    // `[trust.sigstore].rekor_url` must fail the run, not panic and not
+    // silently fall back to the public good. Unused when the trust root pins
+    // the Rekor key (the `OCX_SIGSTORE_TRUSTED_ROOT` / offline path).
+    let rekor = resolve_endpoint(None, sigstore_trust.as_ref(), SigstoreEndpoint::Rekor);
+    let rekor_url = oci::endpoint::validate_sigstore_url(&rekor, "[trust.sigstore].rekor_url")?;
+    Ok(Some(package_manager::AutoVerifyInput {
         operator_policies,
         // ponytail: seam for the deferred project-tier auto-verify (#99 known gap
         // — `ocx.toml` policies not yet read on OCI-tier install/pull/exec/env/run
@@ -1174,6 +1188,88 @@ mod tests {
 
     use super::*;
     use ocx_lib::cli::{ClassifyExitCode, ExitCode};
+
+    /// One `[[trust.policy]]`, enough to make `build_auto_verify` return
+    /// `Some` — every field is optional at the serde layer.
+    fn one_policy() -> Vec<ocx_lib::trust::TrustPolicy> {
+        vec![serde_json::from_str("{}").expect("an all-default trust policy parses")]
+    }
+
+    /// Call `build_auto_verify` with `sigstore` as the only varying input.
+    fn auto_verify_input(
+        sigstore: Option<ocx_lib::trust::SigstoreTrust>,
+    ) -> anyhow::Result<Option<package_manager::AutoVerifyInput>> {
+        build_auto_verify(
+            one_policy(),
+            sigstore,
+            &oci::ClientBuilder::new().build(),
+            false,
+            StateStore::new("/state"),
+            false,
+        )
+    }
+
+    /// Install and pull carry no `--rekor-url`, so `[trust.sigstore].rekor_url`
+    /// is the only tier between auto-verify and the builtin default. It used to
+    /// read neither: the endpoint was hardcoded.
+    ///
+    /// The cache-key half is the part that bites. Auto-verify keys its
+    /// trust-root cache by the Rekor instance, so an operator on a self-hosted
+    /// stack was caching their private root under the public-good key.
+    #[test]
+    fn auto_verify_takes_its_rekor_endpoint_from_the_sigstore_config() {
+        use ocx_lib::oci::verify::trust_cache::cache_key_for_rekor;
+
+        let configured = ocx_lib::trust::SigstoreTrust {
+            rekor_url: Some("https://rekor.corp.example".to_string()),
+            ..Default::default()
+        };
+        let from_config = auto_verify_input(Some(configured))
+            .expect("a valid config URL must not fail the run")
+            .expect("a policy is configured, so auto-verify is on");
+        let from_builtin = auto_verify_input(None)
+            .expect("the builtin default is valid")
+            .expect("a policy is configured, so auto-verify is on");
+
+        assert_eq!(
+            from_config.rekor_url.host_str(),
+            Some("rekor.corp.example"),
+            "config must supply the Rekor endpoint"
+        );
+        assert_eq!(
+            from_builtin.rekor_url.as_str().trim_end_matches('/'),
+            ocx_lib::oci::endpoint::DEFAULT_REKOR_URL,
+            "with no config, the builtin default still applies"
+        );
+        assert_ne!(
+            cache_key_for_rekor(&from_config.rekor_url),
+            cache_key_for_rekor(&from_builtin.rekor_url),
+            "the trust-root cache key must follow the endpoint, or a private root \
+             is cached under the public-good key"
+        );
+    }
+
+    /// A typo in `[trust.sigstore].rekor_url` must fail the run: not panic (the
+    /// endpoint used to be a compile-time constant and was `.expect()`ed), and
+    /// not silently fall back to the public good, which would downgrade an
+    /// operator's trust configuration without saying so.
+    #[test]
+    fn a_rejected_sigstore_rekor_url_fails_the_run_rather_than_falling_back() {
+        let hostile = ocx_lib::trust::SigstoreTrust {
+            // Plain http off loopback: refused by the same SSRF guard the flag
+            // tier hits.
+            rekor_url: Some("http://rekor.corp.example".to_string()),
+            ..Default::default()
+        };
+        let Err(err) = auto_verify_input(Some(hostile)) else {
+            panic!("a rejected Rekor URL must fail the run");
+        };
+        assert_eq!(
+            crate::app::classify_error(err.as_ref()),
+            ExitCode::UsageError,
+            "a rejected endpoint URL exits 64 whichever tier supplied it"
+        );
+    }
 
     #[test]
     fn global_with_explicit_project_flag_is_usage_error() {

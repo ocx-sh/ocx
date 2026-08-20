@@ -52,6 +52,7 @@ pub mod patch;
 pub mod project;
 pub mod publisher;
 pub mod reference_manager;
+pub mod sbom;
 pub mod script;
 pub mod setup;
 pub mod shell;

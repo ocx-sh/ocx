@@ -120,6 +120,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     };
     use crate::oci::client::error::ClientError;
     use crate::oci::digest::error::DigestError;
+    use crate::oci::endpoint::UrlRejection;
     use crate::oci::identifier::error::IdentifierError;
     use crate::oci::index::error::Error as OciIndexError;
     use crate::oci::layer_layout::LayerLayoutError;
@@ -170,6 +171,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(PlatformError);
     try_downcast!(PinnedIdentifierError);
     try_downcast!(SsrfError);
+    try_downcast!(UrlRejection);
     try_downcast!(ForgeError);
     try_downcast!(AnnounceError);
     try_downcast!(PackageManagerError);
@@ -692,12 +694,12 @@ mod tests {
     }
 
     #[test]
-    fn sign_error_rekor_unavailable_maps_to_rekor_unavailable() {
+    fn sign_error_transparency_log_unavailable_maps_to_transparency_log_unavailable() {
         // Slice 1: distinct exit code 83 so operators can distinguish Rekor
         // outage from registry outage.
         let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
-        let err = crate::oci::sign::SignError::new(id, crate::oci::sign::SignErrorKind::RekorUnavailable);
-        assert_eq!(classify(err), ExitCode::RekorUnavailable);
+        let err = crate::oci::sign::SignError::new(id, crate::oci::sign::SignErrorKind::TransparencyLogUnavailable);
+        assert_eq!(classify(err), ExitCode::TransparencyLogUnavailable);
     }
 
     #[test]

@@ -38,7 +38,13 @@ pub struct Publisher {
 /// Surfaced so callers (notably the `ocx package push` command) can emit a
 /// structured report; `ocx-mirror pipeline push` parses this report to record
 /// the cascade tags written and to distinguish a real publish from a no-op.
+///
+/// `#[non_exhaustive]`: this is an in-process type, not a wire type — the
+/// parsed cross-tool contract is `PushReport`. But ocx-mirror takes `ocx_lib`
+/// as a path dependency, so a later field would break it at a struct literal.
+/// Construct through [`PushOutcome::new`] instead.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct PushOutcome {
     /// Digest of the pushed multi-platform image index. For a multi-platform
     /// fan-out this is the primary tag's index digest after the LAST platform
@@ -63,6 +69,24 @@ pub struct PushOutcome {
     /// may still have HEAD-skipped an already-present blob inside
     /// `push_blob`'s blob-exists short-circuit.
     pub layer_counts: oci::LayerCounts,
+}
+
+impl PushOutcome {
+    /// Construct an outcome. The only constructor available outside this
+    /// crate, because the struct is `#[non_exhaustive]`.
+    pub fn new(
+        manifest_digest: oci::Digest,
+        cascade_tags: Vec<String>,
+        canonical_tags: Vec<String>,
+        layer_counts: oci::LayerCounts,
+    ) -> Self {
+        Self {
+            manifest_digest,
+            cascade_tags,
+            canonical_tags,
+            layer_counts,
+        }
+    }
 }
 
 impl Publisher {
