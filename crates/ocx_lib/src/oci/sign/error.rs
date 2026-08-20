@@ -76,15 +76,26 @@ pub enum SignErrorKind {
     #[error("Fulcio rejected OIDC token")]
     OidcTokenRejected,
 
+    /// Fulcio could not be reached, or answered with a transient fault
+    /// (429 or any 5xx).
+    ///
+    /// Exit 75 (`TempFail`). Remediation: retry. The Rekor twin is
+    /// [`Self::TransparencyLogUnavailable`] (83); the two stay separate codes
+    /// so an operator can tell which service is down, and both stay separate
+    /// from [`Self::FulcioBadRequest`] (78) so retryable is distinguishable
+    /// from terminal (PKG-28).
+    #[error("Fulcio unavailable")]
+    FulcioUnavailable,
+
     /// Rekor unavailable at time of signing.
     ///
-    /// Exit 83 (`RekorUnavailable`). Remediation: retry later.
+    /// Exit 83 (`TransparencyLogUnavailable`). Remediation: retry later.
     #[error("Rekor transparency log unavailable")]
-    RekorUnavailable,
+    TransparencyLogUnavailable,
 
     /// Rekor returned the entry but SET could not be extracted or parsed.
     ///
-    /// Distinct from [`Self::RekorUnavailable`] because the remediation is
+    /// Distinct from [`Self::TransparencyLogUnavailable`] because the remediation is
     /// "file a bug," not "retry." Exit 65 (`DataError`).
     #[error("Rekor SET malformed or missing")]
     RekorSetMalformed,
@@ -174,6 +185,51 @@ pub enum SignErrorKind {
         reason: UrlRejection,
     },
 
+    /// The `--predicate` file did not parse as JSON.
+    ///
+    /// Exit 65 (`DataError`) — the *content* of a file the user named is
+    /// malformed, not the invocation. Contrast
+    /// [`Self::ProvenanceVersionUnsupported`], where the offending value came
+    /// from the command line and the code is 64.
+    #[error("predicate file is not valid JSON")]
+    PredicateNotJson,
+
+    /// The `--predicate` file exceeded `MAX_PREDICATE_FILE_BYTES`.
+    ///
+    /// Exit 65 (`DataError`).
+    #[error("predicate payload is at least {actual} bytes, over the {limit}-byte limit")]
+    PredicateTooLarge {
+        /// The configured ceiling, in bytes.
+        limit: u64,
+        /// Bytes counted before the limit tripped — a lower bound, not the
+        /// size on disk. The signer passes the exact statement length; the
+        /// CLI's `--predicate` read is bounded and stops one byte past the
+        /// ceiling, so it never learns how far over the file actually is.
+        /// Hence "at least" in the message: it is true for both producers.
+        actual: u64,
+    },
+
+    /// Attach resolved a provenance predicateType below SLSA v1.0.
+    ///
+    /// Exit 64 (`UsageError`), not 65: the offending value came from the
+    /// invocation, so the fix is a different flag value rather than a
+    /// different file. The message names that value.
+    #[error("provenance predicate type {resolved} is below v1.0; pass --type slsaprovenance1")]
+    ProvenanceVersionUnsupported {
+        /// The predicateType the requested `--type` resolved to.
+        resolved: String,
+    },
+
+    /// `--offline` was supplied to an attestation-publishing command
+    /// (`ocx package attest`, or `ocx package push --sbom`).
+    ///
+    /// Exit 77 (`PermissionDenied`), reused verbatim from
+    /// [`Self::OfflineSignRefused`]: attesting *is* signing, and a policy
+    /// refusal must not classify differently depending on which verb reached
+    /// it. Refused before token resolution, so no credential is touched.
+    #[error("offline attestation is not supported")]
+    OfflineAttestRefused,
+
     /// Catch-all for Fulcio/Rekor HTTP errors outside the codes above.
     ///
     /// Exit 1 (`Failure`). Carries the underlying error via `#[source]` so
@@ -189,14 +245,18 @@ impl ClassifyErrorKind for SignErrorKind {
             Self::FulcioBadRequest => ExitCode::ConfigError,
             Self::ForbiddenRegistryTarget { .. } => ExitCode::ConfigError,
             Self::OidcTokenRejected => ExitCode::AuthError,
-            Self::RekorUnavailable => ExitCode::RekorUnavailable,
-            Self::RekorSetMalformed => ExitCode::DataError,
+            Self::FulcioUnavailable => ExitCode::TempFail,
+            Self::TransparencyLogUnavailable => ExitCode::TransparencyLogUnavailable,
+            Self::RekorSetMalformed | Self::PredicateNotJson | Self::PredicateTooLarge { .. } => ExitCode::DataError,
             Self::ReferrersUnsupported => ExitCode::ReferrersUnsupported,
             Self::TargetNotFound { .. } => ExitCode::NotFound,
-            Self::OidcPreCheckFailed { .. } | Self::OfflineSignRefused | Self::IdentityTokenFilePermissive { .. } => {
-                ExitCode::PermissionDenied
-            }
-            Self::InvalidEndpointUrl { .. } => ExitCode::UsageError,
+            // OfflineAttestRefused shares 77 with OfflineSignRefused by
+            // design: one policy, two verbs.
+            Self::OidcPreCheckFailed { .. }
+            | Self::OfflineSignRefused
+            | Self::OfflineAttestRefused
+            | Self::IdentityTokenFilePermissive { .. } => ExitCode::PermissionDenied,
+            Self::InvalidEndpointUrl { .. } | Self::ProvenanceVersionUnsupported { .. } => ExitCode::UsageError,
             Self::Internal(_) => ExitCode::Failure,
         }
     }
@@ -207,7 +267,8 @@ impl ClassifyErrorKind for SignErrorKind {
         match self {
             Self::FulcioBadRequest => "fulcio_bad_request",
             Self::OidcTokenRejected => "oidc_token_rejected",
-            Self::RekorUnavailable => "rekor_unavailable",
+            Self::FulcioUnavailable => "fulcio_unavailable",
+            Self::TransparencyLogUnavailable => "transparency_log_unavailable",
             Self::RekorSetMalformed => "rekor_set_malformed",
             Self::ReferrersUnsupported => "referrers_unsupported",
             Self::TargetNotFound { .. } => "target_not_found",
@@ -216,6 +277,10 @@ impl ClassifyErrorKind for SignErrorKind {
             Self::OfflineSignRefused => "offline_sign_refused",
             Self::IdentityTokenFilePermissive { .. } => "identity_token_file_permissive",
             Self::InvalidEndpointUrl { .. } => "invalid_endpoint_url",
+            Self::PredicateNotJson => "predicate_not_json",
+            Self::PredicateTooLarge { .. } => "predicate_too_large",
+            Self::ProvenanceVersionUnsupported { .. } => "provenance_version_unsupported",
+            Self::OfflineAttestRefused => "offline_attest_refused",
             Self::Internal(_) => "internal",
         }
     }
@@ -246,8 +311,11 @@ mod tests {
     }
 
     #[test]
-    fn rekor_unavailable_maps_to_rekor_unavailable() {
-        assert_eq!(SignErrorKind::RekorUnavailable.exit_code(), ExitCode::RekorUnavailable);
+    fn transparency_log_unavailable_maps_to_transparency_log_unavailable() {
+        assert_eq!(
+            SignErrorKind::TransparencyLogUnavailable.exit_code(),
+            ExitCode::TransparencyLogUnavailable
+        );
     }
 
     #[test]
@@ -328,14 +396,14 @@ mod tests {
             "Fulcio rejected OIDC token"
         );
         assert_eq!(
-            format!("{}", SignErrorKind::RekorUnavailable),
+            format!("{}", SignErrorKind::TransparencyLogUnavailable),
             "Rekor transparency log unavailable"
         );
         // No trailing periods on any variant.
         for kind in [
             SignErrorKind::FulcioBadRequest,
             SignErrorKind::OidcTokenRejected,
-            SignErrorKind::RekorUnavailable,
+            SignErrorKind::TransparencyLogUnavailable,
             SignErrorKind::RekorSetMalformed,
             SignErrorKind::ReferrersUnsupported,
             SignErrorKind::OfflineSignRefused,
@@ -351,8 +419,8 @@ mod tests {
 
     #[test]
     fn sign_error_classify_delegates_to_kind() {
-        let err = SignError::new(id(), SignErrorKind::RekorUnavailable);
-        assert_eq!(err.classify(), Some(ExitCode::RekorUnavailable));
+        let err = SignError::new(id(), SignErrorKind::TransparencyLogUnavailable);
+        assert_eq!(err.classify(), Some(ExitCode::TransparencyLogUnavailable));
     }
 
     #[test]
@@ -370,6 +438,52 @@ mod tests {
     }
 
     #[test]
+    fn predicate_content_failures_map_to_data_error() {
+        // 65: the file the user named exists and was read, and its *content* is
+        // wrong. Contrast `ProvenanceVersionUnsupported` below, where the
+        // offending value came from argv.
+        assert_eq!(SignErrorKind::PredicateNotJson.exit_code(), ExitCode::DataError);
+        assert_eq!(
+            SignErrorKind::PredicateTooLarge {
+                limit: 1024,
+                actual: 2048
+            }
+            .exit_code(),
+            ExitCode::DataError
+        );
+    }
+
+    #[test]
+    fn provenance_version_unsupported_maps_to_usage_error() {
+        // 64, not 65. The value came from `--type`, so the remedy is a
+        // different flag value; the message names it.
+        let kind = SignErrorKind::ProvenanceVersionUnsupported {
+            resolved: "https://slsa.dev/provenance/v0.2".into(),
+        };
+        assert_eq!(kind.exit_code(), ExitCode::UsageError);
+        assert!(
+            format!("{kind}").contains("--type slsaprovenance1"),
+            "the message must name the flag value that fixes it, got: {kind}"
+        );
+    }
+
+    #[test]
+    fn offline_attest_refused_maps_to_permission_denied() {
+        // 77, byte-identical to `OfflineSignRefused`: attesting is signing, and
+        // a policy refusal must not classify differently depending on which
+        // verb reached it. Asserted against its twin rather than against the
+        // literal, so the two can never drift apart.
+        assert_eq!(
+            SignErrorKind::OfflineAttestRefused.exit_code(),
+            SignErrorKind::OfflineSignRefused.exit_code()
+        );
+        assert_eq!(
+            SignErrorKind::OfflineAttestRefused.exit_code(),
+            ExitCode::PermissionDenied
+        );
+    }
+
+    #[test]
     fn kind_detail_values_are_stable() {
         // C-S1-1 frozen contract: these strings ship in JSON envelopes and consumer
         // scripts dispatch on them. A rename or typo here is a user-visible breaking
@@ -384,7 +498,8 @@ mod tests {
         let pairs: &[(&'static str, SignErrorKind)] = &[
             ("fulcio_bad_request", FulcioBadRequest),
             ("oidc_token_rejected", OidcTokenRejected),
-            ("rekor_unavailable", RekorUnavailable),
+            ("fulcio_unavailable", FulcioUnavailable),
+            ("transparency_log_unavailable", TransparencyLogUnavailable),
             ("rekor_set_malformed", RekorSetMalformed),
             ("referrers_unsupported", ReferrersUnsupported),
             (
@@ -417,6 +532,21 @@ mod tests {
                     },
                 },
             ),
+            ("predicate_not_json", PredicateNotJson),
+            (
+                "predicate_too_large",
+                PredicateTooLarge {
+                    limit: 1024,
+                    actual: 2048,
+                },
+            ),
+            (
+                "provenance_version_unsupported",
+                ProvenanceVersionUnsupported {
+                    resolved: "https://slsa.dev/provenance/v0.2".into(),
+                },
+            ),
+            ("offline_attest_refused", OfflineAttestRefused),
             ("internal", Internal(Box::new(std::io::Error::other("test")))),
         ];
 
@@ -429,7 +559,7 @@ mod tests {
         // against 12 arms. Closing that gap needs variant enumeration.
         assert_eq!(
             pairs.len(),
-            12,
+            17,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
 

@@ -18,7 +18,7 @@
 //! optional only when such a policy matches, and are required otherwise.
 //!
 //! This command resolves the identifier, validates `--rekor-url` (SSRF guard),
-//! resolves the trust root in precedence order — `--trusted-root` /
+//! resolves the trust root in precedence order — `--sigstore-trusted-root` /
 //! `OCX_SIGSTORE_TRUSTED_ROOT`, then `[trust.sigstore]` from `config.toml`,
 //! then `$OCX_HOME/sigstore/trusted-root.json`, then the fresh trust-root
 //! cache, then the Sigstore TUF root fetched over the network — and drives the verify
@@ -38,18 +38,15 @@
 
 use std::process::ExitCode;
 
-use anyhow::Context as _;
 use clap::Parser;
 
-use ocx_lib::Error as LibError;
 use ocx_lib::oci;
-use ocx_lib::oci::endpoint::{DEFAULT_REKOR_URL, validate_sigstore_url};
-use ocx_lib::oci::verify::{TrustRoot, VerifyError, VerifyErrorKind};
+use ocx_lib::oci::attest::predicate::PredicateType;
+use ocx_lib::oci::verify::VerifyContentMode;
 use ocx_lib::package_manager::VerifyOptions;
-use ocx_lib::package_manager::error::{PackageError, PackageErrorKind};
-use ocx_lib::trust::{self, CompiledPolicy};
 
 use crate::api::data::verification::VerificationReport;
+use crate::command::package_sign_common;
 use crate::options;
 
 #[derive(Parser, Clone)]
@@ -87,9 +84,27 @@ pub struct PackageVerify {
     certificate_oidc_issuer: Option<String>,
 
     // C-S1-3 injection seam: private-Rekor override (validated in `execute`).
-    /// Rekor transparency-log endpoint. Defaults to public Rekor; override for private deployments.
-    #[clap(long = "rekor-url", value_name = "URL", default_value = DEFAULT_REKOR_URL)]
-    rekor_url: String,
+    // `Option`, not a clap default, so `[trust.sigstore].rekor_url` can sit
+    // between the flag and the builtin.
+    /// Rekor transparency-log endpoint
+    ///
+    /// Defaults to [trust.sigstore].rekor_url, else public Rekor.
+    #[clap(long = "rekor-url", value_name = "URL")]
+    rekor_url: Option<String>,
+
+    /// Verify a signed in-toto attestation instead of an artifact signature.
+    ///
+    /// Same trust material and same identity resolution; a different kind of
+    /// signed content. Use `ocx package sbom` to list or extract what an
+    /// artifact carries.
+    #[clap(long = "attestation")]
+    attestation: bool,
+
+    /// Restrict to one predicate type (for example cyclonedx or spdx).
+    ///
+    /// Narrowing is by the signed payload, never by a referrer annotation.
+    #[clap(long = "type", value_name = "TYPE", requires = "attestation")]
+    predicate_type: Option<PredicateType>,
 
     /// Bypass the referrers-capability cache for this invocation.
     #[clap(long = "no-cache")]
@@ -104,7 +119,7 @@ pub struct PackageVerify {
     /// OCX_SIGSTORE_TRUSTED_ROOT env var and over [trust.sigstore] in
     /// config.toml. See
     /// https://ocx.sh/docs/in-depth/self-hosted-sigstore
-    #[clap(long = "trusted-root", value_name = "PATH")]
+    #[clap(long = "sigstore-trusted-root", value_name = "PATH")]
     trusted_root: Option<std::path::PathBuf>,
 
     /// Package identifier to verify (`registry/repo:tag[@digest]`).
@@ -115,20 +130,14 @@ impl PackageVerify {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifier = self.identifier.with_domain(context.default_registry())?;
 
-        // SSRF hardening (CWE-918): validate user-supplied endpoint URL at the
-        // boundary before it becomes an HTTP client target. Wrap the
-        // UrlRejection into `VerifyErrorKind::InvalidEndpointUrl` so the
-        // exit-code classifier maps it to `UsageError` (64) via the verify
-        // error path — no cross-subsystem dependency on SignError.
-        let rekor_url = validate_sigstore_url(&self.rekor_url, "--rekor-url").map_err(|reason| {
-            VerifyError::new(
-                identifier.clone(),
-                VerifyErrorKind::InvalidEndpointUrl {
-                    endpoint: "--rekor-url".into(),
-                    reason,
-                },
-            )
-        })?;
+        // SSRF hardening (CWE-918): validate the user-supplied endpoint at the
+        // boundary before it becomes an HTTP client target. Precedence, guard
+        // and refusal kind are the shared ladder's — see `resolve_rekor_endpoint`.
+        let rekor_url = package_sign_common::resolve_rekor_endpoint(
+            context.config_trust_sigstore(),
+            &identifier,
+            self.rekor_url.as_deref(),
+        )?;
 
         // Verify reads the artifact + its signature referrer from the registry in
         // every mode. `--offline` scopes to the Sigstore trust services (the
@@ -144,14 +153,25 @@ impl PackageVerify {
         // here (where `rekor_url`'s type is in scope) so the resolver takes a
         // plain string and the CLI need not name `url::Url`.
         let rekor_cache_key = ocx_lib::oci::verify::trust_cache::cache_key_for_rekor(&rekor_url);
-        let trust_root = self
-            .resolve_trust_root(&context, &identifier, &rekor_cache_key, offline)
-            .await?;
+        let trust_root = package_sign_common::resolve_trust_root(
+            &context,
+            &identifier,
+            &rekor_cache_key,
+            offline,
+            self.trusted_root.as_deref(),
+        )
+        .await?;
 
         // Resolve the identity constraints: flag override (exact pair), or the
         // scope-matched [[trust.policy]] set pooled across config.toml tiers +
         // the project ocx.toml.
-        let policies = self.resolve_policies(&context, &identifier).await?;
+        let policies = package_sign_common::resolve_policies(
+            &context,
+            &identifier,
+            self.certificate_identity.as_deref(),
+            self.certificate_oidc_issuer.as_deref(),
+        )
+        .await?;
 
         // Route through the PackageManager facade: it assembles the verify
         // pipeline (registry client, index) and returns a per-package error
@@ -164,12 +184,13 @@ impl PackageVerify {
             offline,
             state: &context.file_structure().state,
             no_cache: self.no_cache,
+            content: self.content_mode(),
         };
         let result = context
             .manager()
             .verify_one(&identifier, &self.platform, options)
             .await
-            .map_err(verify_error_into_anyhow)?
+            .map_err(package_sign_common::verify_error_into_anyhow)?
             .result;
 
         let report = VerificationReport::new(
@@ -177,172 +198,82 @@ impl PackageVerify {
             result.referrer_digest,
             result.certificate_identity,
             result.certificate_oidc_issuer,
-            iso8601(result.signed_at),
+            package_sign_common::iso8601(result.signed_at),
         );
         context.api().report(&report)?;
         Ok(ExitCode::SUCCESS)
     }
 
-    /// Build the ANY-of identity constraints the signing certificate must
-    /// satisfy.
-    ///
-    /// Flag mode (`--certificate-identity` + `--certificate-oidc-issuer`, kept
-    /// both-or-neither by clap): a single exact pair that overrides any policy
-    /// — this preserves the original flag-only verify behaviour unchanged.
-    /// Policy mode (neither flag): the scope-matched `[[trust.policy]]` set
-    /// under cross-tier precedence — the operator `config.toml` tiers are
-    /// authoritative; the project `ocx.toml` only adds trust where the operator
-    /// has not governed the scope (see [`trust::resolve_tiered`]). A malformed
-    /// matched policy → [`VerifyErrorKind::TrustPolicyInvalid`] (exit 78); no
-    /// matching policy → [`VerifyErrorKind::NoIdentityProvided`] (exit 64).
-    async fn resolve_policies(
-        &self,
-        context: &crate::app::Context,
-        identifier: &oci::Identifier,
-    ) -> anyhow::Result<Vec<CompiledPolicy>> {
-        if let (Some(identity), Some(issuer)) = (&self.certificate_identity, &self.certificate_oidc_issuer) {
-            return Ok(vec![CompiledPolicy::exact(identity.clone(), issuer.clone())]);
-        }
-
-        let target = format!("{}/{}", identifier.registry(), identifier.repository());
-        let project_policies = self.project_trust_policies(context).await?;
-        // Operator tier (config.toml) is authoritative; the project ocx.toml
-        // only adds trust for scopes the operator has not governed.
-        let compiled = trust::resolve_tiered(context.config_trust_policies(), &project_policies, &target)
-            .map_err(|kind| VerifyError::new(identifier.clone(), VerifyErrorKind::from(kind)))?;
-        if compiled.is_empty() {
-            return Err(VerifyError::new(identifier.clone(), VerifyErrorKind::NoIdentityProvided).into());
-        }
-        Ok(compiled)
-    }
-
-    /// The project `ocx.toml` trust policies for the in-effect project (empty
-    /// when no project file resolves). This is the deliberate OCI-tier carve-out
-    /// for a security concern — verify reads `[[trust.policy]]` from `ocx.toml`,
-    /// which OCI-tier commands otherwise never consult (see `adr_trust_policy.md`).
-    async fn project_trust_policies(&self, context: &crate::app::Context) -> anyhow::Result<Vec<trust::TrustPolicy>> {
-        // A missing/inaccessible CWD is non-fatal: `ProjectConfig::resolve` still
-        // honors an explicit `--project` / `OCX_PROJECT`, and with no project file
-        // resolved the trust-policy set is simply empty (flag-mode verify works).
-        let cwd = std::env::current_dir().ok();
-        let ocx_home = context.file_structure().root();
-        let resolved = ocx_lib::project::ProjectConfig::resolve(
-            cwd.as_deref(),
-            context.project_path(),
-            Some(ocx_home),
-            context.global(),
-        )
-        .await?;
-        match resolved {
-            Some((config_path, _lock_path)) => {
-                // Lenient trust-only parse: an unrelated malformed section (a bad
-                // `[tools]` entry, etc.) must NOT fail verify — only `[trust]`
-                // matters here (the OCI-tier carve-out is scoped to trust policy).
-                let text = tokio::fs::read_to_string(&config_path).await.with_context(|| {
-                    format!("reading project config `{}` for trust policies", config_path.display())
-                })?;
-                Ok(trust::policies_from_ocx_toml(&text)?)
+    /// The kind of signed content to verify: a bare artifact signature, or an
+    /// in-toto attestation optionally narrowed to one predicate type.
+    fn content_mode(&self) -> VerifyContentMode {
+        if self.attestation {
+            VerifyContentMode::Attestation {
+                predicate_type: self.predicate_type.clone(),
             }
-            None => Ok(Vec::new()),
+        } else {
+            VerifyContentMode::Signature
         }
     }
-
-    /// Resolve the trust root in precedence order, offline-aware.
-    ///
-    /// Layers flag-vs-env override resolution on the shared
-    /// [`ocx_lib::oci::verify::resolve_trust_root`] ladder (`--trusted-root` /
-    /// `OCX_SIGSTORE_TRUSTED_ROOT` → `[trust.sigstore]` → the
-    /// `$OCX_HOME/sigstore/trusted-root.json` convention path → trust-root
-    /// cache → embedded root, with the offline pinned-Rekor-key gate). The flag
-    /// wins over the env; the shared ladder is the single source of truth for
-    /// every rung below that (auto-verify reuses it). Any failure is tagged
-    /// with the target identifier.
-    async fn resolve_trust_root(
-        &self,
-        context: &crate::app::Context,
-        identifier: &oci::Identifier,
-        rekor_cache_key: &str,
-        offline: bool,
-    ) -> anyhow::Result<TrustRoot> {
-        let explicit = self
-            .trusted_root
-            .clone()
-            .or_else(|| std::env::var_os("OCX_SIGSTORE_TRUSTED_ROOT").map(std::path::PathBuf::from));
-        let home_trusted_root = ocx_lib::ConfigLoader::home_sigstore_trusted_root_path();
-        ocx_lib::oci::verify::resolve_trust_root(
-            explicit.as_deref(),
-            context.config_trust_sigstore(),
-            home_trusted_root.as_deref(),
-            &context.file_structure().state,
-            rekor_cache_key,
-            offline,
-        )
-        .await
-        .map_err(|kind| VerifyError::new(identifier.clone(), kind).into())
-    }
 }
-
-/// Convert a verify-path [`PackageError`] into an `anyhow::Error`, unwrapping
-/// the inner [`VerifyError`] so the `--format json` error envelope's
-/// `context.identifier` is populated on every pipeline-stage failure — matching
-/// the pre-check paths (URL validation, identity/trust-root resolution) that
-/// already surface a bare `VerifyError`.
-///
-/// `ocx_lib::Error::Verify` is `#[error(transparent)]`, so its `source()`
-/// forwards straight to the inner `VerifyErrorKind`, skipping the `VerifyError`
-/// node the envelope's context walk downcasts to. The exit code, `error.kind`,
-/// and `error.detail` are unchanged — all three reach the same `VerifyErrorKind`
-/// whether or not the `VerifyError` node is preserved.
-fn verify_error_into_anyhow(err: PackageError) -> anyhow::Error {
-    match err.kind {
-        PackageErrorKind::Internal(LibError::Verify(verify_error)) => anyhow::Error::new(*verify_error),
-        kind => anyhow::Error::new(kind),
-    }
-}
-
-/// Format a UTC epoch-seconds timestamp as ISO-8601 (`YYYY-MM-DDThh:mm:ssZ`).
-fn iso8601(epoch_secs: u64) -> String {
-    chrono::DateTime::from_timestamp(epoch_secs as i64, 0)
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::error_envelope::render_error_envelope;
-
-    /// A pipeline-stage `VerifyError` wrapped in a `PackageError` (the shape the
-    /// verify facade and the auto-verify hook both produce) must still surface
-    /// `context.identifier` in the `--format json` envelope.
-    ///
-    /// This is a regression guard for the `verify_error_into_anyhow` unwrap:
-    /// `PackageError` omits `#[source]` on its `kind`, and `Error::Verify` is
-    /// `#[error(transparent)]`, so a naïve `anyhow::Error::new(package_error)`
-    /// would leave the envelope's chain-walk unable to downcast to the
-    /// `VerifyError` node — dropping the identifier. The unwrap re-roots the chain
-    /// on the bare `VerifyError` so the identifier survives. If that unwrap
-    /// regresses, `context.identifier` vanishes and this test fails.
+    /// The `--attestation` / `--type` wiring, asserted through the parser so a
+    /// revert is visible. Both reverts the review named are covered: hardcoding
+    /// `Signature` reds rows 2 and 3, and hardcoding `predicate_type: None`
+    /// reds row 3 alone — which is why the table carries a narrowed row rather
+    /// than stopping at "attestation mode is reachable".
     #[test]
-    fn verify_error_wrapped_in_package_error_still_populates_envelope_identifier() {
-        let id = oci::Identifier::parse("registry.example/pkg:1.0").expect("parse identifier");
-        let package_error = PackageError::new(
-            id.clone(),
-            PackageErrorKind::Internal(LibError::Verify(Box::new(VerifyError::new(
-                id,
-                VerifyErrorKind::IdentityMismatch,
-            )))),
-        );
-        let err = verify_error_into_anyhow(package_error);
-        let json = render_error_envelope("package verify", &err).expect("render envelope");
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+    fn the_content_mode_follows_the_flags() {
+        use ocx_lib::oci::attest::predicate::PredicateType;
 
-        assert_eq!(parsed["exit_code"], 77);
-        assert_eq!(parsed["error"]["kind"], "permission_denied");
-        assert_eq!(parsed["error"]["detail"], "identity_mismatch");
-        assert_eq!(
-            parsed["error"]["context"]["identifier"], "registry.example/pkg:1.0",
-            "identifier must survive the PackageError wrap → verify_error_into_anyhow unwrap",
-        );
+        let cases: [(&[&str], VerifyContentMode); 3] = [
+            (&[], VerifyContentMode::Signature),
+            (
+                &["--attestation"],
+                VerifyContentMode::Attestation { predicate_type: None },
+            ),
+            (
+                &["--attestation", "--type", "cyclonedx"],
+                VerifyContentMode::Attestation {
+                    predicate_type: Some(PredicateType::CycloneDx),
+                },
+            ),
+        ];
+
+        for (flags, expected) in cases {
+            let mut argv = vec!["verify", "-p", "linux/amd64"];
+            argv.extend_from_slice(flags);
+            argv.push("registry.example/pkg:1.0");
+            let parsed =
+                super::PackageVerify::try_parse_from(&argv).unwrap_or_else(|error| panic!("parse {flags:?}: {error}"));
+            assert_eq!(
+                parsed.content_mode(),
+                expected,
+                "flags {flags:?} must select {expected:?}",
+            );
+        }
     }
+
+    /// `--type` narrows a search that only attestation mode performs, so clap
+    /// refuses it alone (`requires = "attestation"`). Asserted because the
+    /// alternative — accepting it and ignoring it — is silent.
+    #[test]
+    fn type_without_attestation_is_a_usage_error() {
+        // `let ... else` rather than `expect_err`: the Ok type is the clap
+        // struct, which carries no `Debug` (no sibling command's does either).
+        let Err(error) = super::PackageVerify::try_parse_from([
+            "verify",
+            "-p",
+            "linux/amd64",
+            "--type",
+            "cyclonedx",
+            "registry.example/pkg:1.0",
+        ]) else {
+            panic!("--type alone must not parse");
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    use super::*;
 }

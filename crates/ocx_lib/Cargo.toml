@@ -47,7 +47,12 @@ lzma-rust2.workspace = true
 # descriptors, docker_credential) flips to insertion order too — verified safe by
 # the full `cargo test -p ocx_lib` pass. Adding ordering-sensitive code elsewhere
 # must account for this.
-serde_json = { workspace = true, features = ["preserve_order"] }
+# `raw_value`: the attestation path splices a caller-supplied predicate into the
+# in-toto Statement verbatim (`serde_json::value::RawValue`) — re-serializing
+# through a `Value` would renormalize whitespace and number spelling and change
+# the bytes the DSSE signature commits to. Additive, orthogonal to
+# `preserve_order` above.
+serde_json = { workspace = true, features = ["preserve_order", "raw_value"] }
 serde_json_canonicalizer.workspace = true
 serde.workspace = true
 sha2.workspace = true

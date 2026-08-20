@@ -94,29 +94,48 @@ fn ambient_env() -> (bool, bool, bool) {
     )
 }
 
-/// Append the audience and apply the SSRF floor before anything dials.
+/// Append the audience and apply both endpoint gates before anything dials.
 ///
-/// Same guard as every other Sigstore dial (CWE-918), and it belongs here most:
-/// this request carries a bearer credential, and its target comes from the
-/// process environment rather than from a flag — so it is the dial most easily
-/// pointed somewhere else and the least likely to be noticed. `trusted_hosts`
-/// is the escape hatch a self-hosted runner uses, identical to Fulcio and
-/// Rekor; loopback is admitted by the shared carve-out when the URL says so
-/// literally.
+/// The same two, in the same order, as every `--fulcio-url` / `--rekor-url`
+/// endpoint — and they belong here most: this request carries a bearer
+/// credential, and its target comes from the process environment rather than
+/// from a flag, so it is the dial most easily pointed somewhere else and the
+/// least likely to be noticed.
+///
+/// 1. [`validate_sigstore_url`](crate::oci::endpoint::validate_sigstore_url) is
+///    the scheme rule — HTTPS anywhere, HTTP only on a literal loopback host —
+///    and it parses, so it stands in for the bare `Url::parse` this used to do.
+///    Without it a runner exporting a plaintext `ACTIONS_ID_TOKEN_REQUEST_URL`
+///    for a non-loopback host sent the bearer token in the clear: the SSRF
+///    guard below judges the *address*, never the scheme, so nothing else on
+///    this path ever looked.
+/// 2. [`resolve_sigstore_url`](crate::oci::endpoint::resolve_sigstore_url) is
+///    the SSRF floor (CWE-918). `trusted_hosts` is the escape hatch a
+///    self-hosted runner uses, identical to Fulcio and Rekor — and it buys a
+///    private *address*, never cleartext, because gate 1 has already run.
+///
+/// One [`SignErrorKind::OidcPreCheckFailed`] with a reason per gate, because
+/// the two remedies are different and only the reason distinguishes them:
+/// `..._forbidden` is fixed by adding the host to `trusted_hosts`, and
+/// `..._insecure_scheme` cannot be — an operator handed the `forbidden` wording
+/// for a plaintext URL would add the host, get a byte-identical refusal, and
+/// have no way to tell the scheme was the problem. An unparseable URL keeps the
+/// scheme reason: it fails the same gate, and neither is fixed by a config
+/// entry.
 ///
 /// Split out from [`InlineAmbientProvider::acquire`] so it is reachable from a
 /// test without mutating the process environment, which is a data race across
 /// parallel tests.
 async fn guarded_request_url(url: &str, audience: &str, trusted_hosts: &[String]) -> Result<String, SignErrorKind> {
+    let refused = |reason: &str| SignErrorKind::OidcPreCheckFailed {
+        reason: reason.to_string(),
+    };
     let request_url = format!("{url}&audience={audience}");
-    let parsed = url::Url::parse(&request_url).map_err(|_| SignErrorKind::OidcPreCheckFailed {
-        reason: "gha_id_token_url_unparseable".to_string(),
-    })?;
+    let parsed = crate::oci::endpoint::validate_sigstore_url(&request_url, GHA_URL)
+        .map_err(|_| refused("gha_id_token_url_insecure_scheme"))?;
     crate::oci::endpoint::resolve_sigstore_url(&parsed, trusted_hosts)
         .await
-        .map_err(|_| SignErrorKind::OidcPreCheckFailed {
-            reason: "gha_id_token_url_forbidden".to_string(),
-        })?;
+        .map_err(|_| refused("gha_id_token_url_forbidden"))?;
     Ok(request_url)
 }
 
@@ -206,7 +225,11 @@ mod tests {
         // environment and the request carries `ACTIONS_ID_TOKEN_REQUEST_TOKEN`
         // as a bearer, so an unguarded dial is a credential-carrying request to
         // wherever that variable points -- the cloud metadata address included.
-        let err = guarded_request_url("http://169.254.169.254/token?api-version=1", "sigstore", &[])
+        //
+        // HTTPS deliberately: the scheme gate would refuse a plaintext URL
+        // first, which would leave this test green with the address guard
+        // deleted. On https it can only red on the address.
+        let err = guarded_request_url("https://169.254.169.254/token?api-version=1", "sigstore", &[])
             .await
             .expect_err("the link-local metadata address must not be dialed");
         assert_eq!(reason(err), "gha_id_token_url_forbidden");
@@ -234,7 +257,10 @@ mod tests {
         // so a self-hosted runner on a private network is configured once. Both
         // outcomes are asserted on one address, so neither arm can pass by
         // accident.
-        let url = "http://10.1.2.3/token?api-version=1";
+        //
+        // HTTPS for the same reason as the metadata test: on http the scheme
+        // gate refuses first and the admitted arm could never pass at all.
+        let url = "https://10.1.2.3/token?api-version=1";
         let err = guarded_request_url(url, "sigstore", &[])
             .await
             .expect_err("a private address is forbidden by default");
@@ -242,6 +268,36 @@ mod tests {
         guarded_request_url(url, "sigstore", &["10.1.2.3".to_string()])
             .await
             .expect("an operator-trusted host is admitted");
+    }
+
+    #[tokio::test]
+    async fn a_plaintext_endpoint_on_a_non_loopback_host_is_refused() {
+        // The gate this path was missing. `ACTIONS_ID_TOKEN_REQUEST_URL` comes
+        // from the runner environment and the exchange carries
+        // `ACTIONS_ID_TOKEN_REQUEST_TOKEN` as a bearer, so a plaintext endpoint
+        // on a routable host puts that credential on the wire in the clear --
+        // and the SSRF guard alone cannot see it, because it judges addresses.
+        //
+        // Asserted twice on one URL: `trusted_hosts` buys a private *address*,
+        // never cleartext, so listing the host must not admit it.
+        //
+        // Arm 1 does not discriminate on refusal alone: with an empty
+        // `trusted_hosts` the SSRF address guard refuses 10.1.2.3 on its own,
+        // scheme-agnostically, so `expect_err` there passes with
+        // `validate_sigstore_url` deleted. What discriminates is the *reason*
+        // -- `..._insecure_scheme` is reachable from no other call, so under
+        // that mutation arm 1 reds on `left: "gha_id_token_url_forbidden"`
+        // (measured, not assumed). Arm 2 reds on the refusal itself, since
+        // there the address guard admits the host.
+        let url = "http://10.1.2.3/token?api-version=1";
+        let err = guarded_request_url(url, "sigstore", &[])
+            .await
+            .expect_err("plaintext to a non-loopback host must not carry the bearer token");
+        assert_eq!(reason(err), "gha_id_token_url_insecure_scheme");
+        let err = guarded_request_url(url, "sigstore", &["10.1.2.3".to_string()])
+            .await
+            .expect_err("trusted_hosts admits a private address, not a plaintext scheme");
+        assert_eq!(reason(err), "gha_id_token_url_insecure_scheme");
     }
 
     // ── ambient-source precedence ────────────────────────────────────────────

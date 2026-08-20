@@ -20,7 +20,7 @@
 //!
 //! - [`TrustRoot::load_trusted_root_json`] — a Sigstore `TrustedRoot` JSON
 //!   document: Fulcio CAs, CTFE keys and the pinned Rekor key. The
-//!   `--trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT` / `[trust.sigstore]`
+//!   `--sigstore-trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT` / `[trust.sigstore]`
 //!   air-gapped seam. No network.
 //! - [`TrustRoot::from_material`] — rebuild from the trust-root cache.
 //! - [`TrustRoot::load_embedded`] — the public-good Sigstore root, fetched and
@@ -203,7 +203,7 @@ impl TrustRoot {
     /// public-good TUF repository serves. Certificate-authority and log-key
     /// validity windows are applied by that codec, not re-derived here.
     ///
-    /// This is the `--trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT` /
+    /// This is the `--sigstore-trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT` /
     /// `[trust.sigstore]` air-gapped seam: it
     /// performs no TUF fetch and no metadata-expiry check, because the operator
     /// supplied the document out of band. [`TrustRoot::load_embedded`] is the

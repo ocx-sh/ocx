@@ -15,6 +15,7 @@ use x509_cert::ext::pkix::SubjectAltName;
 use x509_cert::ext::pkix::name::GeneralName;
 
 use super::error::VerifyErrorKind;
+use crate::trust::PolicyBackend;
 
 /// Fulcio OIDC-issuer extension OID (`1.3.6.1.4.1.57264.1.8`, "Issuer (V2)").
 ///
@@ -71,25 +72,43 @@ pub(crate) fn oidc_issuer(cert: &Certificate) -> Option<String> {
 /// failing part is the issuer → [`VerifyErrorKind::IssuerMismatch`]; otherwise
 /// no identity matched → [`VerifyErrorKind::IdentityMismatch`]. A certificate
 /// with no usable SAN or issuer fails closed.
-pub fn verify_policies(cert_der: &[u8], policies: &[crate::trust::CompiledPolicy]) -> Result<(), VerifyErrorKind> {
+///
+/// Returns **every** satisfied policy rather than only whether one was: the
+/// `builder` pin is ANDed within a policy and ORed across the set (#103), so
+/// deciding it needs the matched subset. An equal-scope policy carrying no pin
+/// weakens the set, which is exactly what `system_locked` exists to contain and
+/// what a boolean would hide.
+pub fn matching_policies<'a>(
+    cert_der: &[u8],
+    policies: &'a [crate::trust::CompiledPolicy],
+) -> Result<Vec<&'a crate::trust::CompiledPolicy>, VerifyErrorKind> {
     let cert = parse_certificate(cert_der)?;
     let san = subject_identity(&cert);
     let issuer = oidc_issuer(&cert);
 
+    let mut matched = Vec::new();
     let mut any_identity_matched = false;
     for policy in policies {
-        let identity_ok = san.as_deref().is_some_and(|san| policy.identity.matches(san));
-        let issuer_ok = issuer.as_deref() == Some(policy.issuer.as_str());
+        // Irrefutable while `Keyless` is the only backend, and deliberately
+        // written as a destructure rather than an accessor: a key-based backend
+        // must break this function, which matches a Fulcio certificate and
+        // could not verify a key signature by falling through.
+        let PolicyBackend::Keyless(keyless) = &policy.backend;
+        let identity_ok = san.as_deref().is_some_and(|san| keyless.identity.matches(san));
+        let issuer_ok = issuer.as_deref() == Some(keyless.issuer.as_str());
         if identity_ok && issuer_ok {
-            return Ok(());
+            matched.push(policy);
         }
         any_identity_matched |= identity_ok;
     }
-    Err(if any_identity_matched {
-        VerifyErrorKind::IssuerMismatch
-    } else {
-        VerifyErrorKind::IdentityMismatch
-    })
+    if matched.is_empty() {
+        return Err(if any_identity_matched {
+            VerifyErrorKind::IssuerMismatch
+        } else {
+            VerifyErrorKind::IdentityMismatch
+        });
+    }
+    Ok(matched)
 }
 
 #[cfg(test)]
@@ -111,21 +130,21 @@ mod tests {
     }
 
     #[test]
-    fn verify_policies_rejects_garbage_cert() {
+    fn matching_policies_rejects_garbage_cert() {
         // A non-parseable cert must fail closed, never match.
         let policies = [crate::trust::CompiledPolicy::exact(
             "test@example.com".to_string(),
             "https://issuer.example".to_string(),
         )];
-        assert!(verify_policies(b"garbage", &policies).is_err());
+        assert!(matching_policies(b"garbage", &policies).is_err());
     }
 
     #[test]
-    fn verify_policies_with_no_policies_is_identity_mismatch() {
+    fn matching_policies_with_no_policies_is_identity_mismatch() {
         // An empty policy set never matches — the pipeline guards against this
         // upstream (NoIdentityProvided), but the primitive must still fail closed.
         assert!(matches!(
-            verify_policies(b"garbage", &[]),
+            matching_policies(b"garbage", &[]),
             Err(VerifyErrorKind::CertChainInvalid) | Err(VerifyErrorKind::IdentityMismatch)
         ));
     }

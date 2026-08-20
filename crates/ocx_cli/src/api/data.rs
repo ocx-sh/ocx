@@ -3,6 +3,7 @@
 
 pub mod about;
 pub mod announce;
+pub mod attestation;
 pub mod catalog;
 // ci_export deleted (C4 — handshake §6: ocx ci removed)
 pub mod clean;
@@ -29,6 +30,7 @@ pub mod paths;
 pub mod pull_dry_run;
 pub mod push;
 pub mod removed;
+pub mod sbom;
 pub mod script_run;
 pub mod self_setup;
 pub mod self_update;
@@ -164,12 +166,14 @@ pub(crate) fn sanitize_error_chain(error: &dyn std::error::Error) -> String {
 }
 
 pub(crate) fn sanitize_for_terminal(raw: &str) -> String {
-    // Both predicates, and the second is not redundant: `char::is_control` is
-    // `Cc` only, and every bidi override is `Cf`. Dropping the second filter as
-    // a "simplification" silently re-opens the half of the finding that was
-    // actually measured — the RLO, which `is_control` returns false for.
+    // Three predicates, and none is redundant: `char::is_control` is `Cc`
+    // only, while both the bidi overrides and the zero-width codepoints are
+    // `Cf`. Dropping either `Cf` filter as a "simplification" silently
+    // re-opens half the finding — the RLO re-orders what follows it, and a
+    // zero-width joiner renders as nothing at all, so `you@exam\u{200b}ple.com`
+    // is pixel-identical to the identity a reader believes they approved.
     raw.chars()
-        .filter(|c| !c.is_control() && !is_bidi_control(*c))
+        .filter(|c| !c.is_control() && !is_bidi_control(*c) && !is_zero_width(*c))
         .collect()
 }
 
@@ -184,4 +188,57 @@ pub(crate) fn is_bidi_control(c: char) -> bool {
         c,
         '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
     )
+}
+
+/// The zero-width formatting characters SEC-34 names, plus the BOM.
+///
+/// Category `Cf` like the bidi controls, so [`char::is_control`] misses them
+/// too, but the attack is the opposite one: these render as *nothing*, so they
+/// split a name into pieces that read as one word while comparing unequal to
+/// it. Stripping U+200D costs the fidelity of emoji ZWJ sequences, which is
+/// the trade a package manager takes for a name that means what it looks like.
+pub(crate) fn is_zero_width(c: char) -> bool {
+    matches!(c, '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One row per stripped codepoint — a corpus that shares a single row per
+    /// *class* cannot tell "all four are stripped" from "the first one is".
+    /// The positive control is what stops a sanitizer that strips everything
+    /// from passing this table.
+    #[test]
+    fn every_zero_width_codepoint_is_stripped_and_ordinary_text_survives() {
+        let identity = "you@example.com";
+        for (name, injected) in [
+            ("ZWSP U+200B", "you@exam\u{200b}ple.com"),
+            ("ZWNJ U+200C", "you@exam\u{200c}ple.com"),
+            ("ZWJ U+200D", "you@exam\u{200d}ple.com"),
+            ("BOM U+FEFF", "you@exam\u{feff}ple.com"),
+        ] {
+            let cleaned = sanitize_for_terminal(injected);
+            assert_eq!(
+                cleaned, identity,
+                "{name} must not survive: a reader cannot see it, so it must not reach the terminal",
+            );
+        }
+
+        // Positive control: the sanitizer is a filter, not a redactor.
+        assert_eq!(
+            sanitize_for_terminal(identity),
+            identity,
+            "ordinary text passes through untouched",
+        );
+    }
+
+    /// The three predicates defend three disjoint sets; a test that only ever
+    /// feeds one class cannot notice a filter being dropped.
+    #[test]
+    fn each_predicate_covers_a_class_the_others_miss() {
+        assert!('\u{0007}'.is_control() && !is_bidi_control('\u{0007}') && !is_zero_width('\u{0007}'));
+        assert!(!'\u{202e}'.is_control() && is_bidi_control('\u{202e}') && !is_zero_width('\u{202e}'));
+        assert!(!'\u{200b}'.is_control() && !is_bidi_control('\u{200b}') && is_zero_width('\u{200b}'));
+    }
 }

@@ -409,18 +409,25 @@ impl ConfigLoader {
         ))
     }
 
-    /// Strips the two `[trust.sigstore]` trust-root forms a remote payload is
-    /// not entitled to set, each for its own reason.
+    /// Strips the `[trust.sigstore]` fields a remote payload is not entitled
+    /// to set, each for its own reason.
     ///
     /// `trusted_root` names a path on the **publisher's** disk. On a fleet
     /// machine it either does not exist or — worse — resolves to some unrelated
     /// local file. `ocx config push` inlines it as `trusted_root_json` at
     /// publish time precisely so this case never has to be honoured.
     ///
-    /// `trusted_root_json` is honoured only behind a **digest-pinned**
-    /// `[managed] source`. Otherwise the trust root arrives over the very
-    /// channel it exists to verify, and a registry able to move the tag can
-    /// swap the CA. The circularity is broken by a pinned seed, not by policy.
+    /// `trusted_root_json`, `fulcio_url` and `rekor_url` are honoured only
+    /// behind a **digest-pinned** `[managed] source`. Otherwise the trust
+    /// material arrives over the very channel it exists to verify, and a
+    /// registry able to move the tag can swap the CA. The circularity is
+    /// broken by a pinned seed, not by policy.
+    ///
+    /// The two endpoints obey that rule for the same reason the trust root
+    /// does, and one sharper: `fulcio_url` is where the OIDC identity token is
+    /// sent. `ocx package push --sbom` has no `--fulcio-url` flag to oppose a
+    /// config value, so an unpinned payload that could set it would name the
+    /// server a signing identity is handed to.
     fn guard_managed_sigstore_trust(parsed: &mut Config, source: &crate::oci::Identifier) {
         let Some(sigstore) = parsed.trust.as_mut().and_then(|trust| trust.sigstore.as_mut()) else {
             return;
@@ -430,11 +437,22 @@ impl ConfigLoader {
                 "managed-config payload for '{source}' set [trust.sigstore] trusted_root to a local path; ignored (a                  remote payload cannot name a path on this machine — publish with `ocx config push`, which inlines                  the file as trusted_root_json)"
             );
         }
-        if sigstore.trusted_root_json.is_some() && source.digest().is_none() {
-            sigstore.trusted_root_json = None;
-            log::warn!(
-                "managed-config payload for '{source}' carries [trust.sigstore] trusted_root_json but the [managed]                  source is not digest-pinned; ignored (pin the source to a digest so the trust root cannot be                  swapped by whoever can move the tag)"
-            );
+        if source.digest().is_none() {
+            if sigstore.trusted_root_json.take().is_some() {
+                log::warn!(
+                    "managed-config payload for '{source}' carries [trust.sigstore] trusted_root_json but the [managed]                      source is not digest-pinned; ignored (pin the source to a digest so the trust root cannot be                      swapped by whoever can move the tag)"
+                );
+            }
+            for (field, name) in [
+                (&mut sigstore.fulcio_url, "fulcio_url"),
+                (&mut sigstore.rekor_url, "rekor_url"),
+            ] {
+                if field.take().is_some() {
+                    log::warn!(
+                        "managed-config payload for '{source}' sets [trust.sigstore] {name} but the [managed] source is                          not digest-pinned; ignored (pin the source to a digest so the Sigstore endpoints cannot be                          repointed by whoever can move the tag)"
+                    );
+                }
+            }
         }
     }
 
@@ -1502,7 +1520,7 @@ mod tests {
     #[test]
     fn a_system_locked_trust_policy_survives_the_accumulator_fold() {
         let mut system: Config = toml::from_str(
-            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nidentity = \"system-ci\"\noidc_issuer = \"iss\"\n",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nkeyless = { identity = \"system-ci\", oidc_issuer = \"iss\" }\n",
         )
         .expect("system tier must parse");
         ConfigLoader::apply_system_locks(&mut system);
@@ -1510,9 +1528,9 @@ mod tests {
         let mut accumulator = ConfigLoader::builtin_defaults();
         accumulator.merge(system);
         for lower in [
-            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nidentity = \"user-Y\"\noidc_issuer = \"iss\"\n",
-            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nidentity = \"managed-Z\"\noidc_issuer = \"iss\"\n",
-            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nidentity = \"overlay-W\"\noidc_issuer = \"iss\"\n",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nkeyless = { identity = \"user-Y\", oidc_issuer = \"iss\" }\n",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nkeyless = { identity = \"managed-Z\", oidc_issuer = \"iss\" }\n",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nkeyless = { identity = \"overlay-W\", oidc_issuer = \"iss\" }\n",
         ] {
             accumulator.merge(toml::from_str(lower).expect("lower tier must parse"));
         }
@@ -1523,7 +1541,13 @@ mod tests {
             1,
             "a narrower lower-tier scope must not outbid the system pin after the fold"
         );
-        assert_eq!(resolved[0].identity.as_deref(), Some("system-ci"));
+        assert_eq!(
+            resolved[0]
+                .keyless
+                .as_ref()
+                .and_then(|keyless| keyless.identity.as_deref()),
+            Some("system-ci")
+        );
     }
 
     /// `local_only` is cloned from the same accumulator as `merged`, so the
@@ -2935,7 +2959,8 @@ mod tests {
             "[registries.corp]\nindex = \"https://registry.corp.example\"\n",
             "[mirrors]\n\"docker.io\" = \"https://mirror.corp.example\"\n",
             "[managed]\nsource = \"corp/managed-config:stable\"\nrequired = true\n",
-            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nidentity = \"ci@acme.example\"\noidc_issuer = \"https://iss.example\"\n",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n",
+            "[trust.policy.keyless]\nidentity = \"ci@acme.example\"\noidc_issuer = \"https://iss.example\"\n",
         ))
         .unwrap();
 
@@ -3101,6 +3126,41 @@ mod tests {
             "ghcr.io/acme/config:v1",
         );
         assert_eq!(sigstore.trusted_root_json, None);
+    }
+
+    /// The endpoints obey the same digest-pin rule as the trust root, and
+    /// `fulcio_url` is the sharper case: it names where the OIDC identity
+    /// token is sent, and `ocx package push --sbom` has no `--fulcio-url` flag
+    /// to oppose a config value.
+    ///
+    /// Stripping the field to `None` is what makes resolution fall back to the
+    /// builtin default — that an absent field yields the builtin is pinned
+    /// separately, by the CLI's endpoint-precedence tests.
+    #[test]
+    fn managed_tier_ignores_sigstore_endpoints_behind_an_unpinned_source() {
+        let sigstore = managed_payload_after_guard(
+            "[trust.sigstore]\nfulcio_url = \"https://fulcio.attacker.example\"\nrekor_url = \"https://rekor.attacker.example\"\n",
+            "ghcr.io/acme/config:v1",
+        );
+        assert_eq!(
+            sigstore.fulcio_url, None,
+            "an unpinned payload must not name the server the identity token is sent to"
+        );
+        assert_eq!(sigstore.rekor_url, None, "same rule for the transparency log");
+    }
+
+    #[test]
+    fn managed_tier_honours_sigstore_endpoints_behind_a_digest_pin() {
+        let sigstore = managed_payload_after_guard(
+            "[trust.sigstore]\nfulcio_url = \"https://fulcio.corp.example\"\nrekor_url = \"https://rekor.corp.example\"\n",
+            "ghcr.io/acme/config@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        assert_eq!(sigstore.fulcio_url.as_deref(), Some("https://fulcio.corp.example"));
+        assert_eq!(
+            sigstore.rekor_url.as_deref(),
+            Some("https://rekor.corp.example"),
+            "a digest-pinned seed breaks the circularity, so the fleet setting applies"
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@ use url::Url;
 
 use crate::file_structure::StateStore;
 use crate::oci::verify::pipeline::VerifyResult;
-use crate::oci::verify::{TrustRoot, VerifyContext, VerifyError, VerifyPipeline};
+use crate::oci::verify::{TrustRoot, VerifyContentMode, VerifyContext, VerifyError, VerifyPipeline};
 use crate::oci::{self};
 use crate::package_manager::error::{PackageError, PackageErrorKind};
 use crate::trust::CompiledPolicy;
@@ -52,6 +52,11 @@ pub struct VerifyOptions<'a> {
     pub state: &'a StateStore,
     /// Bypass the referrers-capability cache for this invocation.
     pub no_cache: bool,
+    /// Which signed content to look for. [`VerifyContentMode::Signature`] is
+    /// what every shipped caller passes and what `ocx package verify` does
+    /// without `--attestation`; the attestation modes carry the `--type`
+    /// narrowing. Not defaulted — a verify run states what it is verifying.
+    pub content: VerifyContentMode,
 }
 
 /// Success payload returned by [`PackageManager::verify_one`].
@@ -95,6 +100,11 @@ impl PackageManager {
             rekor_url: opts.rekor_url,
             state: opts.state,
             offline: opts.offline,
+            // Not provable here — the mode's only observable effects (caps
+            // selection, the attestation arm of `finish_scan`) sit past the
+            // trust-root gate. Closed by S-009/S-016 (WP10b), once
+            // `--attestation` lands (WP9b).
+            content: opts.content,
         };
         let result = VerifyPipeline::run(opts.client, context)
             .await
@@ -105,15 +115,18 @@ impl PackageManager {
 
 /// Wrap a [`VerifyError`] in a [`PackageError`] tagged with `identifier`,
 /// preserving the verify exit code through `PackageErrorKind::Internal`.
-fn map_verify_error(identifier: oci::Identifier, err: VerifyError) -> PackageError {
+pub(super) fn map_verify_error(identifier: oci::Identifier, err: VerifyError) -> PackageError {
     PackageError::new(
         identifier,
         PackageErrorKind::Internal(crate::Error::Verify(Box::new(err))),
     )
 }
 
+// `pub(crate)` under `cfg(test)`: the sibling `sbom` task verifies the same
+// read-only routing against the same single-tag index fixture, and a second
+// copy of it would be a second thing to keep in step.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use async_trait::async_trait;
     use tempfile::TempDir;
     use url::Url;
@@ -124,11 +137,11 @@ mod tests {
     use crate::oci::referrer::{ReferrersApiCapability, ReferrersSupport};
     use crate::oci::verify::VerifyErrorKind;
 
-    const REGISTRY: &str = "example.com";
-    const REPO: &str = "widget";
+    pub(crate) const REGISTRY: &str = "example.com";
+    pub(crate) const REPO: &str = "widget";
     const TAG: &str = "1.0";
 
-    fn tagged_id() -> oci::Identifier {
+    pub(crate) fn tagged_id() -> oci::Identifier {
         oci::Identifier::new_registry(REPO, REGISTRY).clone_with_tag(TAG)
     }
 
@@ -140,7 +153,7 @@ mod tests {
     fn index_bytes() -> &'static [u8] {
         br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":2,"platform":{"os":"linux","architecture":"amd64"}}]}"#
     }
-    fn index_digest() -> oci::Digest {
+    pub(crate) fn index_digest() -> oci::Digest {
         oci::Algorithm::Sha256.hash(index_bytes())
     }
     fn index_manifest() -> oci::Manifest {
@@ -149,7 +162,7 @@ mod tests {
 
     /// A remote source serving exactly one tag → one dispatch-shaped manifest.
     #[derive(Clone)]
-    struct SingleTagSource;
+    pub(crate) struct SingleTagSource;
 
     #[async_trait]
     impl IndexImpl for SingleTagSource {
@@ -193,7 +206,7 @@ mod tests {
     /// (`StubTransport::list_referrers` is `unimplemented!()`). This keeps the
     /// discriminating assertion below scoped to the resolve step's index side
     /// effect, not the rest of the sign-verify pipeline.
-    async fn seed_unsupported_capability(state: &StateStore) {
+    pub(crate) async fn seed_unsupported_capability(state: &StateStore) {
         ReferrersApiCapability {
             registry: REGISTRY.to_string(),
             supported: ReferrersSupport::Unsupported,
@@ -245,6 +258,7 @@ mod tests {
             offline: false,
             state: &state,
             no_cache: false,
+            content: VerifyContentMode::Signature,
         };
 
         // `VerifyReport`/`VerifyResult` (the `Ok` payload) do not implement

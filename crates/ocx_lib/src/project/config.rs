@@ -979,12 +979,19 @@ cmake = "ocx.sh/cmake:3.28"
 
 [[trust.policy]]
 scope = "ocx.sh/*"
+
+[trust.policy.keyless]
 identity = "https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/tags/v1"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 "#;
         let base_config = ProjectConfig::from_toml_str(base).expect("parse base");
         let policy_config = ProjectConfig::from_toml_str(with_policy).expect("parse with policy");
         assert_eq!(policy_config.trust_policies().len(), 1);
+        assert!(
+            policy_config.trust_policies()[0].keyless.is_some(),
+            "the nested [trust.policy.keyless] sub-table must parse through the \
+             deny_unknown_fields ocx.toml root",
+        );
         assert!(base_config.trust_policies().is_empty());
         assert_eq!(
             crate::project::declaration_hash(&base_config),

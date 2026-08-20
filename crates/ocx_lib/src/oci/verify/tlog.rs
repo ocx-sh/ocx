@@ -11,6 +11,13 @@
 //! * the **inclusion proof** — the Merkle audit path from the entry's leaf hash
 //!   to a signed checkpoint root.
 //!
+//! Plus one assertion *about* the entry rather than over it:
+//! [`verify_integrated_time_within_certificate`] re-checks that the entry's
+//! `integratedTime` falls inside the signing certificate's validity window.
+//! It lives here because this is the path both content modes share, so "runs
+//! for signatures and for attestations" is a structural fact rather than a
+//! discipline.
+//!
 //! No cryptography is computed here. [`CosignVerificationKey`] owns the ECDSA
 //! verification, [`InclusionProof::verify`] owns the RFC 6269 leaf hashing, the
 //! audit-path recomputation and the checkpoint signature and root-consistency
@@ -30,12 +37,15 @@
 //! fake proved nothing about the real format (#209).
 
 use base64::Engine as _;
+use chrono::{DateTime, SecondsFormat};
 use serde::Serialize;
 use sigstore::crypto::verification_key::CosignVerificationKey;
 use sigstore::crypto::{Signature, SigningScheme};
 use sigstore::rekor::models::InclusionProof;
 use sigstore::rekor::models::log_entry::RekorInclusionProof;
 use sigstore_protobuf_specs::dev::sigstore::rekor::v1::InclusionProof as ProtoInclusionProof;
+use x509_cert::Certificate;
+use x509_cert::time::Time;
 
 use super::error::VerifyErrorKind;
 
@@ -124,9 +134,176 @@ pub(super) fn verify_inclusion(
         .map_err(|_| VerifyErrorKind::RekorSetInvalid)
 }
 
+/// Re-assert that the entry's `integratedTime` falls inside the signing
+/// certificate's validity window.
+///
+/// Part III row 13 (CVE-2024-55655). The delegated `sigstore` verifier checks
+/// this too; the duplication is the point, because that CVE is precisely a
+/// library dropping the step. The window is **inclusive at both ends** —
+/// `adr_sbom_attestations.md` states it as `NotBefore <= integratedTime <=
+/// NotAfter`.
+///
+/// Takes the already-parsed leaf: `parse_certificate` runs once in
+/// `verify_one_referrer`, so the window checked here is the window the identity
+/// check read, not a second parse that could disagree.
+pub(super) fn verify_integrated_time_within_certificate(
+    integrated_time: i64,
+    leaf: &Certificate,
+) -> Result<(), VerifyErrorKind> {
+    let validity = &leaf.tbs_certificate.validity;
+    let not_before = unix_seconds(validity.not_before);
+    let not_after = unix_seconds(validity.not_after);
+    if integrated_time < not_before || integrated_time > not_after {
+        return Err(VerifyErrorKind::CertificateValidityWindow {
+            integrated_time: rfc3339_utc(integrated_time),
+            not_before: rfc3339_utc(not_before),
+            not_after: rfc3339_utc(not_after),
+        });
+    }
+    Ok(())
+}
+
+/// Seconds since the Unix epoch for an X.509 `Time`.
+///
+/// `to_unix_duration` is non-negative by construction — `x509-cert` floors
+/// `UTCTime` at 1970 — so the only unrepresentable value is a `notAfter` past
+/// year 292277026596, and saturating there refuses nothing a real certificate
+/// asserts.
+fn unix_seconds(time: Time) -> i64 {
+    i64::try_from(time.to_unix_duration().as_secs()).unwrap_or(i64::MAX)
+}
+
+/// Render epoch seconds as RFC 3339 with an explicit `Z` (PLAT-31).
+///
+/// The fallback is the bare integer: a timestamp chrono cannot represent is
+/// already outside every certificate window, so it only ever appears inside a
+/// refusal, where an unformatted number still names the offending value.
+fn rfc3339_utc(epoch_seconds: i64) -> String {
+    DateTime::from_timestamp(epoch_seconds, 0).map_or_else(
+        || epoch_seconds.to_string(),
+        |at| at.to_rfc3339_opts(SecondsFormat::Secs, true),
+    )
+}
+
+#[cfg(test)]
+/// A real P-256 self-signed CA certificate whose validity window is exactly
+/// `2026-01-01T00:00:00Z` .. `2026-01-01T00:10:00Z` — ten minutes, the
+/// shape Fulcio issues. Parsed by the same `x509-cert` code the pipeline
+/// uses, so the boundary cases below are asserted against real DER rather
+/// than a hand-built struct that could encode a window no parser produces.
+///
+/// Regenerate with:
+/// `openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+///   -keyout /dev/null -outform DER -subj /CN=ocx-row13-fixture \
+///   -not_before 260101000000Z -not_after 260101001000Z | base64 -w0`
+const FIXTURE_CERT_DER_BASE64: &str = "MIIBjjCCATOgAwIBAgIUXDerMK9Jof8dxErPo1pTx55fDskwCgYIKoZIzj0EAwIwHDEaMBgGA1UEAwwRb2N4LXJvdzEzLWZpeHR1cmUwHhcNMjYwMTAxMDAwMDAwWhcNMjYwMTAxMDAxMDAwWjAcMRowGAYDVQQDDBFvY3gtcm93MTMtZml4dHVyZTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABFi6Pl8zq1kkrEGV8nr66Trdd7QM0BKnLL0JHXFlZ3rSSW16yLZV7td8RAo0Mqo/VApbH7TeA/bXmByIGzn+8mijUzBRMB0GA1UdDgQWBBQf1NnnrXUcU+VMImU74mm+zuysXjAfBgNVHSMEGDAWgBQf1NnnrXUcU+VMImU74mm+zuysXjAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0kAMEYCIQC+ZkSuPm9qPlJ4GftxDoyvXgo6yKt9zdSrfmsewd+B+gIhAMFZQ7iOfDmrNir7vXT5fXAn6XmS/PCOesmjsnFa9ywB";
+
+/// DER bytes of [`FIXTURE_CERT_DER_BASE64`].
+#[cfg(test)]
+pub(super) fn fixture_certificate_der() -> Vec<u8> {
+    base64::engine::general_purpose::STANDARD
+        .decode(FIXTURE_CERT_DER_BASE64)
+        .expect("fixture is valid base64")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `2026-01-01T00:00:00Z` — the fixture's `notBefore`.
+    const NOT_BEFORE: i64 = 1_767_225_600;
+    /// `2026-01-01T00:10:00Z` — the fixture's `notAfter`.
+    const NOT_AFTER: i64 = 1_767_226_200;
+
+    fn fixture_certificate() -> Certificate {
+        use x509_cert::der::Decode as _;
+        Certificate::from_der(&fixture_certificate_der()).expect("fixture is a valid X.509 certificate")
+    }
+
+    /// The window the fixture actually encodes, asserted before anything is
+    /// built on it. Without this the boundary tests below could pass against a
+    /// window nobody checked, and a regenerated fixture would move the goalposts
+    /// silently.
+    #[test]
+    fn the_fixture_window_is_the_one_the_boundary_tests_assume() {
+        let cert = fixture_certificate();
+        let validity = &cert.tbs_certificate.validity;
+        assert_eq!(validity.not_before.to_unix_duration().as_secs(), NOT_BEFORE as u64);
+        assert_eq!(validity.not_after.to_unix_duration().as_secs(), NOT_AFTER as u64);
+    }
+
+    #[test]
+    fn an_integrated_time_inside_the_window_verifies() {
+        let cert = fixture_certificate();
+        let verdict = verify_integrated_time_within_certificate(NOT_BEFORE + 300, &cert);
+        assert!(verdict.is_ok(), "{verdict:?}");
+    }
+
+    /// Inclusive lower bound. `adr_sbom_attestations.md` states row 13 as
+    /// `NotBefore <= integratedTime <= NotAfter`, so a signature made in the
+    /// certificate's first second is valid, not a boundary refusal.
+    #[test]
+    fn an_integrated_time_exactly_at_not_before_verifies() {
+        let cert = fixture_certificate();
+        let verdict = verify_integrated_time_within_certificate(NOT_BEFORE, &cert);
+        assert!(verdict.is_ok(), "notBefore is inclusive: {verdict:?}");
+    }
+
+    /// Inclusive upper bound, same ADR sentence.
+    #[test]
+    fn an_integrated_time_exactly_at_not_after_verifies() {
+        let cert = fixture_certificate();
+        let verdict = verify_integrated_time_within_certificate(NOT_AFTER, &cert);
+        assert!(verdict.is_ok(), "notAfter is inclusive: {verdict:?}");
+    }
+
+    /// One second below the window. Paired with the exactly-at test above, this
+    /// is what distinguishes an inclusive bound from an exclusive one — either
+    /// test alone passes under both readings.
+    #[test]
+    fn an_integrated_time_one_second_before_the_window_is_refused() {
+        let cert = fixture_certificate();
+        let verdict = verify_integrated_time_within_certificate(NOT_BEFORE - 1, &cert);
+        assert!(
+            matches!(verdict, Err(VerifyErrorKind::CertificateValidityWindow { .. })),
+            "{verdict:?}"
+        );
+    }
+
+    /// One second above the window — the CVE-2024-55655 shape: an entry logged
+    /// after the ephemeral certificate expired. Asserts the reported fields,
+    /// not just the variant, because all three are RFC 3339 with an explicit
+    /// `Z` (PLAT-31) and a wrong rendering would only surface to a user.
+    #[test]
+    fn an_integrated_time_one_second_after_the_window_is_refused_naming_the_window() {
+        let cert = fixture_certificate();
+        let verdict = verify_integrated_time_within_certificate(NOT_AFTER + 1, &cert);
+        let Err(VerifyErrorKind::CertificateValidityWindow {
+            integrated_time,
+            not_before,
+            not_after,
+        }) = verdict
+        else {
+            panic!("expected a validity-window refusal, got {verdict:?}");
+        };
+        assert_eq!(integrated_time, "2026-01-01T00:10:01Z");
+        assert_eq!(not_before, "2026-01-01T00:00:00Z");
+        assert_eq!(not_after, "2026-01-01T00:10:00Z");
+    }
+
+    /// A bundle carrying no `integratedTime` decodes it as protobuf's zero, and
+    /// `BundleParts` widens that to `0`. Epoch zero is outside every real
+    /// certificate window, so absence fails closed through the ordinary
+    /// comparison — there is no separate "missing" branch to forget to write.
+    #[test]
+    fn a_missing_integrated_time_reads_as_epoch_zero_and_is_refused() {
+        let cert = fixture_certificate();
+        let verdict = verify_integrated_time_within_certificate(0, &cert);
+        assert!(
+            matches!(verdict, Err(VerifyErrorKind::CertificateValidityWindow { .. })),
+            "an absent integratedTime must not verify: {verdict:?}"
+        );
+    }
 
     /// The SET is a signature over these exact bytes, so the schema is the
     /// contract: a renamed or retyped field silently fails every verification

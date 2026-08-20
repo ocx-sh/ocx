@@ -51,6 +51,7 @@ use crate::trust::{self, TrustPolicy};
 
 use super::super::PackageManager;
 use super::verify::VerifyOptions;
+use crate::oci::verify::VerifyContentMode;
 
 /// Injected auto-verify configuration for the install/pull pipeline.
 ///
@@ -243,6 +244,10 @@ impl PackageManager {
             offline: auto_verify.offline,
             state: &auto_verify.state,
             no_cache: false,
+            // Auto-verify asks "is this artifact signed", never "what does it
+            // carry": attestations do not participate (S-015). A subject whose
+            // referrers are all attestations still fails closed here.
+            content: VerifyContentMode::Signature,
         };
         self.verify_one(resolved, &oci::Platform::any(), options)
             .await
@@ -284,10 +289,13 @@ mod tests {
 
     fn covering_policy() -> TrustPolicy {
         TrustPolicy {
-            scope: format!("{REGISTRY}/{REPO}"),
-            identity: Some("you@example.com".into()),
-            identity_regexp: None,
-            oidc_issuer: "https://example.com".into(),
+            scope: Some(format!("{REGISTRY}/{REPO}")),
+            builder: None,
+            keyless: Some(crate::trust::KeylessMatcher {
+                identity: Some("you@example.com".into()),
+                identity_regexp: None,
+                oidc_issuer: Some("https://example.com".into()),
+            }),
             system_locked: false,
         }
     }
@@ -298,7 +306,7 @@ mod tests {
     ///
     /// Discriminator: a link-local Rekor endpoint with no `trusted_hosts`
     /// exemption is refused as `InvalidEndpointUrl` before anything is dialed.
-    /// Unguarded, the fetch is attempted and the failure is `RekorUnavailable` —
+    /// Unguarded, the fetch is attempted and the failure is `TransparencyLogUnavailable` —
     /// a transport fault, reported as though the endpoint were legitimate.
     #[tokio::test]
     async fn hoisted_rekor_key_fetch_passes_the_ssrf_floor() {

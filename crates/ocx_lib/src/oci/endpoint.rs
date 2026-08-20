@@ -22,7 +22,16 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use url::{Host, Url};
+use url::Host;
+
+/// Re-exported so a caller can name what [`validate_sigstore_url`] returns
+/// without taking a direct `url` dependency of its own.
+///
+/// `ocx_cli` deliberately does not depend on `url`: a validated endpoint is a
+/// `let` binding threaded from here to the options struct, never a named type
+/// in a CLI signature. That works right up to the first CLI helper that
+/// *returns* one, which is what this re-export is for.
+pub use url::Url;
 
 /// Default public Rekor transparency-log endpoint.
 ///
@@ -38,43 +47,74 @@ const SIGSTORE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Overall request timeout for Sigstore trust-services HTTP calls.
 const SIGSTORE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Idle bound on a Sigstore trust-service response, mapped to
+/// [`reqwest::ClientBuilder::read_timeout`].
+///
+/// `SIGSTORE_REQUEST_TIMEOUT` is armed once at dispatch and bounds the whole
+/// call; it says nothing about a connection that goes quiet. reqwest resets
+/// this one per response-body frame, so a peer that stops answering fails in
+/// seconds instead of waiting out the full request budget. Fulcio, Rekor and an
+/// OIDC token endpoint each answer in a frame or two, so fifteen seconds of
+/// silence means the peer is gone -- and it stays comfortably under the 30 s
+/// ceiling, so this never truncates an honest call the request timeout allows.
+const SIGSTORE_READ_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Idle connections reqwest keeps per Sigstore host.
+///
+/// The default is `usize::MAX`. A sign or verify run talks to at most Fulcio,
+/// Rekor and one OIDC endpoint, one request at a time each, so two spare
+/// sockets per host is already slack -- and this client is process-wide and
+/// long-lived, which is exactly where an unbounded idle pool accumulates.
+const SIGSTORE_MAX_IDLE_PER_HOST: usize = 2;
+
+/// The one builder every Sigstore client is configured from.
+///
+/// Extracted so the timeout wiring has a seam a test can build against with a
+/// short `read_timeout`: nothing on `reqwest::Client` exposes its configured
+/// timeouts, so proving the bound exists means exercising it, and exercising
+/// the shipped 15 s value is not a unit test.
+fn sigstore_client_builder(read_timeout: Duration) -> reqwest::ClientBuilder {
+    // Bundled roots, exactly as `forge::github` and `oci::index::ocx_index`
+    // do it: reqwest's rustls path falls back to the OS trust store and
+    // panics where that store is empty (minimal container, CI runner with
+    // no ca-certificates). Without this, `ocx install` keeps working -- the
+    // `oci_client` transport seeds its own roots in the fork -- while
+    // `ocx package verify` panics on the same host, and auto-verify carries
+    // that panic into every covered install.
+    crate::utility::tls::seed_embedded_roots(reqwest::Client::builder())
+        .connect_timeout(SIGSTORE_CONNECT_TIMEOUT)
+        .timeout(SIGSTORE_REQUEST_TIMEOUT)
+        .read_timeout(read_timeout)
+        .pool_max_idle_per_host(SIGSTORE_MAX_IDLE_PER_HOST)
+        .redirect(refuse_redirects())
+        .dns_resolver(Arc::new(PinnedResolver))
+}
+
 /// Shared HTTP client for Sigstore trust-services calls.
 ///
 /// `reqwest::Client::new()` carries no default timeout, so a stalled Fulcio or
 /// Rekor endpoint hangs verify forever — and via the policy-gated auto-verify
 /// hook, hangs every covered install, turning the fail-closed gate into
-/// fail-hung. A single process-wide client with bounded connect + request
-/// timeouts closes that, and its internal connection pool is reused across the
-/// sign and verify call sites instead of rebuilt per request.
+/// fail-hung. A single process-wide client with bounded connect, request and
+/// per-frame read timeouts closes that, and its internal connection pool -- cap
+/// on idle sockets included, since the default is `usize::MAX` -- is reused
+/// across the sign and verify call sites instead of rebuilt per request.
 ///
 /// Lives at `oci::endpoint` (a peer of `oci::sign`/`oci::verify`) so both
 /// pipelines share one HTTP seam without verify depending on sign.
 pub fn sigstore_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        // Bundled roots, exactly as `forge::github` and `oci::index::ocx_index`
-        // do it: reqwest's rustls path falls back to the OS trust store and
-        // panics where that store is empty (minimal container, CI runner with
-        // no ca-certificates). Without this, `ocx install` keeps working — the
-        // `oci_client` transport seeds its own roots in the fork — while
-        // `ocx package verify` panics on the same host, and auto-verify carries
-        // that panic into every covered install.
-        let bounded = crate::utility::tls::seed_embedded_roots(reqwest::Client::builder())
-            .connect_timeout(SIGSTORE_CONNECT_TIMEOUT)
-            .timeout(SIGSTORE_REQUEST_TIMEOUT)
-            .redirect(refuse_redirects())
-            .dns_resolver(Arc::new(PinnedResolver))
-            .build();
-        match bounded {
+        match sigstore_client_builder(SIGSTORE_READ_TIMEOUT).build() {
             Ok(client) => client,
             // Only a TLS-backend init failure reaches here, and it fails every
-            // HTTPS request that follows anyway. The fallback keeps the
-            // redirect refusal rather than trading it away for a bare client:
-            // a destination the SSRF guard never saw is never dialed, even on
-            // a degraded build.
-            Err(_) => crate::utility::tls::seed_embedded_roots(reqwest::Client::builder())
-                .redirect(refuse_redirects())
-                .dns_resolver(Arc::new(PinnedResolver))
+            // HTTPS request that follows anyway. Retry the same fully-bounded
+            // builder rather than a hand-rolled subset, so no path can hand
+            // out a client missing the timeouts, the redirect refusal or the
+            // pinned resolver. The bare-client terminal is unreachable in
+            // practice: the retry fails identically, and `Client::new()`
+            // panics under the same TLS-init failure.
+            Err(_) => sigstore_client_builder(SIGSTORE_READ_TIMEOUT)
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
@@ -307,8 +347,8 @@ pub async fn resolve_sigstore_url(url: &Url, trusted: &[String]) -> Result<(), c
 /// input (CWE-209 mitigation). The parse-failure branch deliberately omits
 /// the raw input — an unparseable URL may still contain `user:pass@`
 /// substrings whose userinfo cannot be reliably stripped before parsing —
-/// and the post-parse userinfo branch reconstructs a sanitized URL with
-/// `username=""`, `password=None` before formatting.
+/// and every branch that echoes a parsed URL routes it through
+/// [`scrub_for_echo`] first, which clears userinfo, query and fragment.
 #[derive(Debug, thiserror::Error)]
 #[error("{reason}")]
 pub struct UrlRejection {
@@ -333,6 +373,42 @@ impl UrlRejection {
     fn new(reason: impl Into<String>) -> Self {
         Self { reason: reason.into() }
     }
+}
+
+impl crate::cli::ClassifyExitCode for UrlRejection {
+    /// Exit 64 (`UsageError`), the same code
+    /// [`SignErrorKind::InvalidEndpointUrl`](crate::oci::sign::SignErrorKind::InvalidEndpointUrl)
+    /// and its verify twin already give for a rejected endpoint URL.
+    ///
+    /// This impl is what a *bare* rejection classifies to — one that reached
+    /// the exit boundary without a sign- or verify-side wrap, because it came
+    /// from `[trust.sigstore]` rather than from a flag and there was no
+    /// identifier to attach it to. Matching 64 rather than minting a config
+    /// code keeps one answer for one condition: the same bad URL exits the
+    /// same way whichever tier supplied it.
+    fn classify(&self) -> Option<crate::cli::ExitCode> {
+        Some(crate::cli::ExitCode::UsageError)
+    }
+}
+
+/// Strip every part of an operator-supplied URL that can carry a secret,
+/// before it is echoed back inside a rejection message.
+///
+/// Userinfo is the CWE-209 case the credentials branch already handled. Query
+/// and fragment are the same hazard one component over: a `[trust.sigstore]`
+/// entry is operator config, and `http://fulcio.corp/?token=hush` puts a
+/// bearer token in a string that a rejection prints to stderr and into the
+/// JSON error envelope (ERR-17). Scheme, host, port and path survive, so the
+/// operator can still tell which entry was refused.
+fn scrub_for_echo(url: &Url) -> Url {
+    let mut scrubbed = url.clone();
+    // Both setters fail only on a cannot-be-a-base URL, which cannot reach a
+    // rejection that wants to name a host; nothing is lost by ignoring them.
+    let _ = scrubbed.set_username("");
+    let _ = scrubbed.set_password(None);
+    scrubbed.set_query(None);
+    scrubbed.set_fragment(None);
+    scrubbed
 }
 
 /// Validate a user-supplied Sigstore endpoint URL.
@@ -367,14 +443,9 @@ pub fn validate_sigstore_url(raw: &str, _flag_name: &str) -> Result<Url, UrlReje
     // before the post-parse userinfo scrubber below can run (CWE-209).
     let url = Url::parse(raw).map_err(|e| UrlRejection::new(format!("malformed URL: {e}")))?;
     if !url.username().is_empty() || url.password().is_some() {
-        // Strip the userinfo component before echoing the URL back, so that
-        // any password supplied on the command line does not leak into logs
-        // or the structured JSON error envelope (CWE-209).
-        let mut sanitized = url.clone();
-        let _ = sanitized.set_username("");
-        let _ = sanitized.set_password(None);
         return Err(UrlRejection::new(format!(
-            "URL must not embed credentials (sanitized: `{sanitized}`)"
+            "URL must not embed credentials (sanitized: `{}`)",
+            scrub_for_echo(&url)
         )));
     }
     let scheme = url.scheme();
@@ -382,7 +453,8 @@ pub fn validate_sigstore_url(raw: &str, _flag_name: &str) -> Result<Url, UrlReje
         ("https", _) => Ok(url),
         ("http", true) => Ok(url),
         ("http", false) => Err(UrlRejection::new(format!(
-            "URL must use HTTPS (got `{raw}`); HTTP only accepted for loopback hosts"
+            "URL must use HTTPS (sanitized: `{}`); HTTP only accepted for loopback hosts",
+            scrub_for_echo(&url)
         ))),
         (other, _) => Err(UrlRejection::new(format!(
             "URL must use HTTPS or HTTP on loopback (got scheme `{other}`)"
@@ -676,7 +748,7 @@ mod tests {
     fn http_non_loopback_with_percent_encoded_credentials_caught_before_url_echo() {
         // CWE-209 regression: url::Url decodes percent-encoded userinfo, so
         // http://user%3Apass@example.com decodes to username="user:pass" (non-empty).
-        // The credential check at lines 79-88 must fire BEFORE the {raw} echo at line 101.
+        // The credential check must fire BEFORE the scheme branch's URL echo.
         let rejection = validate_sigstore_url("http://user%3Apass@example.com/fulcio", "--fulcio-url").unwrap_err();
         assert!(
             rejection.reason.contains("credentials") || rejection.reason.contains("userinfo"),
@@ -704,6 +776,31 @@ mod tests {
         let text = format!("{rejection}");
         assert!(!text.contains("secret_pass"), "credentials leaked into error: {text}");
         assert!(!text.contains("user:"), "userinfo leaked: {text}");
+    }
+
+    #[test]
+    fn rejected_url_echo_must_not_carry_query_or_fragment() {
+        // ERR-17: a `[trust.sigstore]` endpoint is operator config, and an
+        // operator's URL carries whatever the operator put in it — a bearer
+        // token in the query string is the live case. The scheme rejection
+        // echoes the URL back so the operator can see which entry was refused,
+        // so that echo is scrubbed the same way the credentials branch is:
+        // userinfo, query and fragment cleared, host and path kept.
+        //
+        // Discriminates: echo `raw` (or a scrub that stops at userinfo) and
+        // `token=hush` reappears in stderr and in the JSON envelope message.
+        let rejection = unwrap_err(validate_sigstore_url(
+            "http://203.0.113.7/?token=hush#frag",
+            "--fulcio-url",
+        ));
+        let text = format!("{rejection}");
+        assert!(!text.contains("hush"), "query value leaked: {text}");
+        assert!(!text.contains("token="), "query key leaked: {text}");
+        assert!(!text.contains("#frag"), "fragment leaked: {text}");
+        assert!(
+            text.contains("203.0.113.7"),
+            "the refused host must still be named: {text}"
+        );
     }
 
     /// The second-dial gap. [`resolve_sigstore_url`] clears the endpoint the
@@ -811,6 +908,48 @@ mod tests {
         assert!(
             read_body_capped(response).await.is_none(),
             "an unbounded trust-service body was read into memory instead of being refused"
+        );
+    }
+
+    /// A trust service that accepts the connection and then says nothing is
+    /// the shape `timeout()` alone answers badly: it is armed once at dispatch,
+    /// so a peer that goes quiet holds the call for the whole 30 s budget --
+    /// and on the auto-verify path, holds an install with it.
+    ///
+    /// Built from the shipped [`sigstore_client_builder`] with a short read
+    /// timeout, because nothing on `reqwest::Client` exposes its configured
+    /// timeouts and waiting out the production 15 s is not a unit test. The
+    /// harness bound is what discriminates: drop `.read_timeout(...)` from the
+    /// builder and the request hangs past it instead of failing.
+    #[tokio::test]
+    async fn a_silent_trust_service_is_abandoned_rather_than_awaited_forever() {
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind silent endpoint");
+        let addr = listener.local_addr().expect("silent endpoint address");
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut scratch = [0_u8; 1024];
+                let _ = socket.read(&mut scratch).await;
+                // Never answers, and holds the socket open so the client sees
+                // silence rather than a close.
+                std::future::pending::<()>().await;
+            }
+        });
+
+        let client = sigstore_client_builder(Duration::from_millis(300))
+            .build()
+            .expect("the shared builder produces a client");
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.get(format!("http://{addr}/api/v1/log/entries")).send(),
+        )
+        .await
+        .expect("the read timeout must fire long before this bound -- an unbounded read hangs here");
+        assert!(
+            outcome.is_err(),
+            "a silent trust service answered successfully, which the listener never does"
         );
     }
 

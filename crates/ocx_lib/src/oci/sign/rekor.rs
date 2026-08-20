@@ -19,6 +19,7 @@ use sigstore::rekor::models::log_entry::RekorInclusionProof;
 use url::Url;
 
 use super::error::SignErrorKind;
+use crate::oci::attest::TLOG_KIND_WRITTEN;
 
 /// A Rekor log entry with its Signed Entry Timestamp.
 pub(super) struct RekorEntry {
@@ -82,6 +83,33 @@ struct RekorData<'a> {
 struct RekorHash<'a> {
     algorithm: &'a str,
     value: &'a str,
+}
+
+// ── dsse proposal (uploaded body) ────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct DsseProposal<'a> {
+    kind: &'a str,
+    #[serde(rename = "apiVersion")]
+    api_version: &'a str,
+    spec: DsseSpec<'a>,
+}
+
+#[derive(Serialize)]
+struct DsseSpec<'a> {
+    #[serde(rename = "proposedContent")]
+    proposed_content: DsseProposedContent<'a>,
+}
+
+#[derive(Serialize)]
+struct DsseProposedContent<'a> {
+    /// The envelope as a JSON *string*, not a nested object — `dsse:0.0.1`
+    /// takes the stringified envelope so the log hashes exactly the bytes the
+    /// signer produced.
+    envelope: &'a str,
+    /// A fixed-size array rather than a `Vec`: cosign uploads exactly one
+    /// verifier (the leaf PEM), and the type is where that is said.
+    verifiers: [String; 1],
 }
 
 // ── Rekor v1 response (subset) ───────────────────────────────────────────────
@@ -148,7 +176,36 @@ impl RekorClient {
             },
         };
         let body = serde_json::to_vec(&proposal).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+        self.post_proposal(body).await
+    }
 
+    /// Upload a `dsse:0.0.1` entry for `envelope_json`, returning the log entry.
+    ///
+    /// `envelope_json` is the exact serialized DSSE envelope handed to the log
+    /// — the same bytes the sign-side `envelopeHash` self-check runs over,
+    /// never a re-serialization of a parsed envelope. `leaf_pem` is the Fulcio
+    /// leaf certificate, uploaded as the entry's single verifier.
+    ///
+    /// The returned `canonicalized_body` is the server's, verbatim; the sign
+    /// side never reconstructs one locally.
+    pub(super) async fn upload_dsse_entry(
+        &self,
+        envelope_json: &[u8],
+        leaf_pem: &str,
+    ) -> Result<RekorEntry, SignErrorKind> {
+        // `proposedContent.envelope` is a JSON *string*, so the bytes have to
+        // be text. They always are — this side serialized them — which is why
+        // the failure arm is `Internal` rather than a wire error.
+        let envelope = std::str::from_utf8(envelope_json).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+        self.post_proposal(dsse_proposal_body(envelope, leaf_pem)?).await
+    }
+
+    /// POST a proposed entry and decode the log's answer.
+    ///
+    /// Shared by both entry kinds: the endpoint, the status classification and
+    /// the capped read are properties of the Rekor API, not of what is being
+    /// logged, and a second copy would be a second place for them to drift.
+    async fn post_proposal(&self, body: Vec<u8>) -> Result<RekorEntry, SignErrorKind> {
         let endpoint = self
             .url
             .join("api/v1/log/entries")
@@ -159,7 +216,7 @@ impl RekorClient {
             .body(body)
             .send()
             .await
-            .map_err(|_| SignErrorKind::RekorUnavailable)?;
+            .map_err(|_| SignErrorKind::TransparencyLogUnavailable)?;
 
         let status = response.status();
         if !status.is_success() {
@@ -175,10 +232,32 @@ impl RekorClient {
     }
 }
 
+/// The `dsse:0.0.1` proposed-entry body for `envelope_json` and `leaf_pem`.
+///
+/// Split out of [`RekorClient::upload_dsse_entry`] because the exact field
+/// spelling is the part of this entry kind that a round trip cannot check
+/// cheaply and a typo in silently changes what the log records (ARCH-12).
+fn dsse_proposal_body(envelope_json: &str, leaf_pem: &str) -> Result<Vec<u8>, SignErrorKind> {
+    use base64::Engine as _;
+    let (kind, api_version) = TLOG_KIND_WRITTEN;
+
+    let proposal = DsseProposal {
+        kind,
+        api_version,
+        spec: DsseSpec {
+            proposed_content: DsseProposedContent {
+                envelope: envelope_json,
+                verifiers: [base64::engine::general_purpose::STANDARD.encode(leaf_pem.as_bytes())],
+            },
+        },
+    };
+    serde_json::to_vec(&proposal).map_err(|e| SignErrorKind::Internal(Box::new(e)))
+}
+
 /// Which failure a non-2xx upload response is.
 ///
 /// The two outcomes carry different exit codes and opposite remediations —
-/// `RekorUnavailable` is exit 83 and means retry, `RekorSetMalformed` is exit
+/// `TransparencyLogUnavailable` is exit 83 and means retry, `RekorSetMalformed` is exit
 /// 65 and means file a bug — so classifying a throttle as a malformed request
 /// tells an operator to report a bug for a log that was merely busy. 429 is
 /// grouped with 5xx deliberately: it is not a server error by status class,
@@ -188,7 +267,7 @@ impl RekorClient {
 /// reachable without an HTTP round trip (ARCH-12).
 fn classify_upload_status(status: reqwest::StatusCode) -> SignErrorKind {
     if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        SignErrorKind::RekorUnavailable
+        SignErrorKind::TransparencyLogUnavailable
     } else {
         SignErrorKind::RekorSetMalformed
     }
@@ -196,7 +275,7 @@ fn classify_upload_status(status: reqwest::StatusCode) -> SignErrorKind {
 
 /// Decode a Rekor `POST /api/v1/log/entries` body into the entry it describes.
 ///
-/// Every failure here is `RekorSetMalformed` rather than `RekorUnavailable`:
+/// Every failure here is `RekorSetMalformed` rather than `TransparencyLogUnavailable`:
 /// the log answered 2xx, so it is reachable, and what came back is unusable.
 ///
 /// Split out of [`RekorClient::upload_entry`] so the decoding is reachable
@@ -268,7 +347,7 @@ mod tests {
     fn a_500_is_the_log_being_unavailable() {
         assert!(matches!(
             classify_upload_status(StatusCode::INTERNAL_SERVER_ERROR),
-            SignErrorKind::RekorUnavailable
+            SignErrorKind::TransparencyLogUnavailable
         ));
     }
 
@@ -276,7 +355,7 @@ mod tests {
     fn a_503_is_the_log_being_unavailable() {
         assert!(matches!(
             classify_upload_status(StatusCode::SERVICE_UNAVAILABLE),
-            SignErrorKind::RekorUnavailable
+            SignErrorKind::TransparencyLogUnavailable
         ));
     }
 
@@ -286,7 +365,7 @@ mod tests {
         // told to retry (exit 83), not to file a bug (exit 65).
         assert!(matches!(
             classify_upload_status(StatusCode::TOO_MANY_REQUESTS),
-            SignErrorKind::RekorUnavailable
+            SignErrorKind::TransparencyLogUnavailable
         ));
     }
 
@@ -331,7 +410,7 @@ mod tests {
 
     #[test]
     fn an_empty_entry_map_is_malformed() {
-        // A 2xx that recorded nothing. Reachable, so not `RekorUnavailable`.
+        // A 2xx that recorded nothing. Reachable, so not `TransparencyLogUnavailable`.
         assert!(matches!(
             parse_upload_response(b"{}"),
             Err(SignErrorKind::RekorSetMalformed)
@@ -364,6 +443,28 @@ mod tests {
             parse_upload_response(&raw),
             Err(SignErrorKind::RekorSetMalformed)
         ));
+    }
+
+    // ── dsse:0.0.1 proposal ──────────────────────────────────────────────────
+
+    #[test]
+    fn a_dsse_proposal_is_the_pinned_wire_shape() {
+        // Pinned as a literal, not rebuilt from the inputs: every field name
+        // here is a spelling rekor matches exactly, and a body assembled by the
+        // same code that the assertion re-derives would agree with itself no
+        // matter which spelling it used. `envelope` is the stringified envelope
+        // JSON — a JSON string, not a nested object — and `verifiers` is a
+        // one-element array of the base64 leaf PEM.
+        let body = dsse_proposal_body(r#"{"payload":"cA==","payloadType":"t","signatures":[]}"#, "PEM")
+            .expect("a well-formed envelope encodes");
+        assert_eq!(
+            String::from_utf8(body).expect("the proposal is UTF-8 JSON"),
+            concat!(
+                r#"{"kind":"dsse","apiVersion":"0.0.1","spec":{"proposedContent":{"#,
+                r#""envelope":"{\"payload\":\"cA==\",\"payloadType\":\"t\",\"signatures\":[]}","#,
+                r#""verifiers":["UEVN"]}}}"#
+            )
+        );
     }
 
     #[test]

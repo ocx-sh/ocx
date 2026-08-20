@@ -74,7 +74,7 @@ pub enum ExitCode {
     /// to let operators distinguish "registry down" (retry likely helps) from
     /// "Rekor down" (sign cannot complete, verify of existing v0.3 bundles
     /// fails if Rekor is needed for SET verification).
-    RekorUnavailable = 83,
+    TransparencyLogUnavailable = 83,
     /// Registry does not implement the OCI Referrers API and has no fallback-tag
     /// referrers index. The operation cannot proceed — discovery fails hard rather
     /// than silently returning empty results. OCX-specific.
@@ -177,10 +177,10 @@ mod tests {
     }
 
     #[test]
-    fn exit_code_rekor_unavailable_is_83() {
+    fn exit_code_transparency_log_unavailable_is_83() {
         // Tool-specific; distinct from Unavailable — Rekor is a separate,
         // non-retryable supply-chain dependency (vs registry transient faults).
-        assert_eq!(ExitCode::RekorUnavailable as u8, 83);
+        assert_eq!(ExitCode::TransparencyLogUnavailable as u8, 83);
     }
 
     #[test]

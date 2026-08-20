@@ -16,12 +16,14 @@ use p256::elliptic_curve::rand_core::OsRng;
 use p256::pkcs8::{EncodePublicKey, LineEnding};
 use url::Url;
 
-use super::bundle::{SignedBundle, build_bundle};
+use super::bundle::{SignedBundle, SignedEnvelope, build_bundle, build_dsse_bundle};
 use super::error::SignErrorKind;
-use super::fulcio::FulcioClient;
+use super::fulcio::{FulcioCertificate, FulcioClient};
 use super::oidc::OidcToken;
 use super::rekor::RekorClient;
 use crate::oci::Digest;
+use crate::oci::attest::dsse::{DsseEnvelope, DsseSignature, pae};
+use crate::oci::attest::{DSSE_PAYLOAD_TYPE, MAX_STATEMENT_PAYLOAD_BYTES};
 
 /// Produces a Sigstore bundle for a target digest.
 ///
@@ -37,6 +39,31 @@ pub trait Signer: Send + Sync {
     async fn sign(
         &self,
         target_digest: &Digest,
+        token: &OidcToken,
+        fulcio_url: &Url,
+        rekor_url: &Url,
+    ) -> Result<SignedBundle, SignErrorKind>;
+
+    /// Sign an in-toto Statement as a DSSE envelope, returning a bundle.
+    ///
+    /// The payload type is fixed (`DSSE_PAYLOAD_TYPE`): v1 writes exactly one,
+    /// so it is a constant rather than a stringly-typed parameter (ARCH-05).
+    /// What is signed is `sha256(PAE(payload_type, statement_bytes))` — never
+    /// the statement bytes alone and never the base64 text — the Rekor entry is
+    /// `dsse:0.0.1`, and the returned bundle's content oneof is `dsseEnvelope`.
+    ///
+    /// **Preconditions.** `statement_bytes` is bounded here, against
+    /// `MAX_STATEMENT_PAYLOAD_BYTES` — the same ceiling the read side applies
+    /// in [`DsseEnvelope::parse`](crate::oci::attest::dsse::DsseEnvelope::parse)
+    /// — and the refusal comes *before* any network contact. A Rekor entry is
+    /// permanent, so an over-cap statement that reached the log would be
+    /// published forever and then refused by this tool's own verifier.
+    ///
+    /// A signer that only wants message signatures still supplies this; that
+    /// cost was taken deliberately over generalizing [`Self::sign`].
+    async fn sign_dsse(
+        &self,
+        statement_bytes: &[u8],
         token: &OidcToken,
         fulcio_url: &Url,
         rekor_url: &Url,
@@ -71,53 +98,135 @@ impl Signer for KeylessSigner {
         fulcio_url: &Url,
         rekor_url: &Url,
     ) -> Result<SignedBundle, SignErrorKind> {
-        use base64::Engine as _;
-        let b64 = base64::engine::general_purpose::STANDARD;
+        // 1. Ephemeral keypair + Fulcio certificate — shared with `sign_dsse`.
+        let identity = issue_ephemeral_certificate(token, fulcio_url).await?;
 
-        // 1. Ephemeral P-256 keypair.
-        let signing_key = SigningKey::random(&mut OsRng);
-        let public_key_pem = signing_key
-            .verifying_key()
-            .to_public_key_pem(LineEnding::LF)
-            .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
-
-        // 2. Proof of possession over the identity Fulcio will put in the SAN.
-        //
-        //    Not `unwrap_or_default()`: an empty subject produces a signature
-        //    Fulcio cannot verify, and it answered 400 with a message this side
-        //    discarded. A token carrying no usable identity claim is a rejected
-        //    token, and saying so costs one round trip less to diagnose.
-        let subject = jwt_subject(token.as_str()).ok_or(SignErrorKind::OidcTokenRejected)?;
-        let pop_sig: p256::ecdsa::Signature = signing_key
-            .sign_prehash(&sha256(subject.as_bytes()))
-            .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
-        let pop_b64 = b64.encode(pop_sig.to_der().as_bytes());
-
-        // 3. Fulcio: exchange OIDC token + pubkey for a signing certificate.
-        let cert = FulcioClient::new(fulcio_url.clone())
-            .request_certificate(token.as_str(), &public_key_pem, &pop_b64)
-            .await?;
-
-        // 4. Sign the subject digest (the raw sha256 bytes of the target
+        // 2. Sign the subject digest (the raw sha256 bytes of the target
         //    manifest) with the ephemeral key.
         let subject_raw = hex::decode(target_digest.hex()).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
-        let signature: p256::ecdsa::Signature = signing_key
+        let signature: p256::ecdsa::Signature = identity
+            .signing_key
             .sign_prehash(&subject_raw)
             .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
         let signature_der = signature.to_der().as_bytes().to_vec();
 
-        // 5. Rekor: upload the hashedrekord entry, obtain the SET.
+        // 3. Rekor: upload the hashedrekord entry, obtain the SET.
         let rekor = RekorClient::new(rekor_url.clone())
-            .upload_entry(&signature_der, &cert.leaf_pem, target_digest.hex())
+            .upload_entry(&signature_der, &identity.certificate.leaf_pem, target_digest.hex())
             .await?;
 
-        // 6. Assemble the Sigstore bundle v0.3.
-        build_bundle(&cert, &signature_der, &rekor, target_digest)
+        // 4. Assemble the Sigstore bundle v0.3.
+        build_bundle(&identity.certificate, &signature_der, &rekor, target_digest)
+    }
+
+    async fn sign_dsse(
+        &self,
+        statement_bytes: &[u8],
+        token: &OidcToken,
+        fulcio_url: &Url,
+        rekor_url: &Url,
+    ) -> Result<SignedBundle, SignErrorKind> {
+        // First, before the Fulcio round trip and long before the irreversible
+        // Rekor write: a statement over the verifier's ceiling would be signed,
+        // published to a permanent log, and then refused by this tool's own
+        // verify path. Cheapest possible refusal, at the only point it is
+        // still free.
+        if statement_bytes.len() > MAX_STATEMENT_PAYLOAD_BYTES {
+            return Err(SignErrorKind::PredicateTooLarge {
+                limit: MAX_STATEMENT_PAYLOAD_BYTES as u64,
+                actual: statement_bytes.len() as u64,
+            });
+        }
+
+        // Same first step as `sign`; the two then diverge exactly where the
+        // protocols do — what is signed, what is logged, what the bundle holds.
+        let identity = issue_ephemeral_certificate(token, fulcio_url).await?;
+        let signed = SignedEnvelope::new(sign_envelope(&identity.signing_key, statement_bytes)?)?;
+
+        let rekor = RekorClient::new(rekor_url.clone())
+            .upload_dsse_entry(signed.json(), &identity.certificate.leaf_pem)
+            .await?;
+
+        build_dsse_bundle(&identity.certificate, &signed, &rekor)
     }
 
     fn signer_kind(&self) -> &'static str {
         "keyless-fulcio"
     }
+}
+
+/// An ephemeral signing key and the Fulcio certificate issued for it.
+struct EphemeralIdentity {
+    signing_key: SigningKey,
+    certificate: FulcioCertificate,
+}
+
+/// Mint an ephemeral P-256 keypair and exchange `token` for a Fulcio
+/// certificate over it.
+///
+/// The half [`Signer::sign`] and [`Signer::sign_dsse`] share. Which bytes get
+/// signed afterwards is the only thing that differs between them, so keeping
+/// this in one place is what stops the two paths drifting into obtaining
+/// certificates differently.
+///
+/// A free function rather than a method: `KeylessSigner` is a unit struct and
+/// there is no receiver state to reach.
+async fn issue_ephemeral_certificate(token: &OidcToken, fulcio_url: &Url) -> Result<EphemeralIdentity, SignErrorKind> {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    let signing_key = SigningKey::random(&mut OsRng);
+    let public_key_pem = signing_key
+        .verifying_key()
+        .to_public_key_pem(LineEnding::LF)
+        .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+
+    // Proof of possession over the identity Fulcio will put in the SAN.
+    //
+    // Not `unwrap_or_default()`: an empty subject produces a signature Fulcio
+    // cannot verify, and it answered 400 with a message this side discarded. A
+    // token carrying no usable identity claim is a rejected token, and saying
+    // so costs one round trip less to diagnose.
+    let subject = jwt_subject(token.as_str()).ok_or(SignErrorKind::OidcTokenRejected)?;
+    let pop_sig: p256::ecdsa::Signature = signing_key
+        .sign_prehash(&sha256(subject.as_bytes()))
+        .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+    let pop_b64 = b64.encode(pop_sig.to_der().as_bytes());
+
+    let certificate = FulcioClient::new(fulcio_url.clone())
+        .request_certificate(token.as_str(), &public_key_pem, &pop_b64)
+        .await?;
+
+    Ok(EphemeralIdentity {
+        signing_key,
+        certificate,
+    })
+}
+
+/// Build the DSSE envelope for `statement_bytes`, signed with `signing_key`.
+///
+/// **What gets signed is `sha256(PAE(payload_type, statement_bytes))`.** Not the
+/// statement bytes, not their digest, and not the base64 text of either — the
+/// PAE is what binds the payload to its declared type, and dropping it makes a
+/// signature over a CycloneDX SBOM equally valid over the same bytes claimed as
+/// SLSA provenance.
+///
+/// Pure: no network, no clock. The Fulcio and Rekor halves are the caller's.
+fn sign_envelope(signing_key: &SigningKey, statement_bytes: &[u8]) -> Result<DsseEnvelope, SignErrorKind> {
+    let signature: p256::ecdsa::Signature = signing_key
+        .sign_prehash(&sha256(&pae(DSSE_PAYLOAD_TYPE, statement_bytes)))
+        .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+
+    Ok(DsseEnvelope {
+        payload: statement_bytes.to_vec(),
+        payload_type: DSSE_PAYLOAD_TYPE.to_string(),
+        signatures: vec![DsseSignature {
+            sig: signature.to_der().as_bytes().to_vec(),
+            // Empty by design: cosign omits it on a keyless signature, and it
+            // is a lookup hint that verification never reads.
+            keyid: String::new(),
+        }],
+    })
 }
 
 /// SHA-256 of `bytes` as a 32-byte array.
@@ -165,6 +274,8 @@ mod tests {
     //! opaque name (TEST-04).
 
     use super::*;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
     /// A JWT with the given `header.payload.signature` shape; only the payload
     /// is ever decoded, so the other two segments are placeholders.
@@ -232,6 +343,111 @@ mod tests {
     #[test]
     fn a_string_with_no_second_segment_is_rejected() {
         assert_eq!(jwt_subject("not-a-jwt"), None);
+    }
+
+    // ---- DSSE envelope signing ------------------------------------------
+
+    /// A fixed non-zero scalar, so the signature is reproducible across runs
+    /// and a failure names a real disagreement rather than a fresh key.
+    fn fixed_key() -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32].into()).expect("a fixed non-zero scalar is a valid P-256 key")
+    }
+
+    const STATEMENT: &[u8] = br#"{"_type":"https://in-toto.io/Statement/v1"}"#;
+
+    #[test]
+    fn sign_envelope_signs_the_pae_and_nothing_else() {
+        // The property the whole envelope rests on, and the one a plausible
+        // wrong implementation satisfies structurally: signing the statement
+        // bytes (or their digest) produces an envelope that parses, carries a
+        // real ECDSA signature, and binds the payload to no declared type at
+        // all. Only verifying against the PAE distinguishes the two.
+        use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
+
+        let key = fixed_key();
+        let envelope = sign_envelope(&key, STATEMENT).expect("signing a well-formed statement succeeds");
+        let signature = p256::ecdsa::Signature::from_der(&envelope.signatures[0].sig)
+            .expect("the envelope carries a DER-encoded ECDSA signature");
+        let verifying = key.verifying_key();
+
+        assert!(
+            verifying
+                .verify_prehash(&sha256(&pae(DSSE_PAYLOAD_TYPE, STATEMENT)), &signature)
+                .is_ok(),
+            "the signature must verify against sha256(PAE(payload_type, statement))"
+        );
+        assert!(
+            verifying.verify_prehash(&sha256(STATEMENT), &signature).is_err(),
+            "a signature over the bare statement bytes would not bind the payload type"
+        );
+        assert!(
+            verifying
+                .verify_prehash(
+                    &sha256(&pae(DSSE_PAYLOAD_TYPE, BASE64_STANDARD.encode(STATEMENT).as_bytes())),
+                    &signature
+                )
+                .is_err(),
+            "checklist row 1: the PAE consumes the decoded payload, never the base64 text"
+        );
+    }
+
+    #[test]
+    fn sign_envelope_emits_the_fixed_payload_type_and_exactly_one_signature() {
+        // The payload type is a constant rather than a parameter, and the
+        // one-signature rule is what `DsseEnvelope::parse` enforces on the way
+        // back in — an envelope this side writes must satisfy it.
+        let envelope = sign_envelope(&fixed_key(), STATEMENT).expect("signing succeeds");
+        assert_eq!(envelope.payload_type, DSSE_PAYLOAD_TYPE);
+        assert_eq!(envelope.payload, STATEMENT, "the payload is held decoded");
+        assert_eq!(envelope.signatures.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_statement_is_refused_before_any_endpoint_is_contacted() {
+        // A Rekor entry is permanent. Signing first and discovering the size
+        // afterwards publishes an attestation forever that this tool's own
+        // verifier then refuses — so the bound has to run ahead of both the
+        // Fulcio round trip and the log write, not merely somewhere.
+        //
+        // Both endpoints point at a port nothing listens on, so reaching
+        // either one produces a transport error rather than this refusal:
+        // the assertion on the specific kind is what makes "before" testable
+        // without a recording double.
+        let dead = Url::parse("http://127.0.0.1:1/").expect("a literal URL parses");
+        let oversized = vec![b'x'; MAX_STATEMENT_PAYLOAD_BYTES + 1];
+
+        let err = KeylessSigner::new()
+            .sign_dsse(&oversized, &OidcToken::new(EMAIL_AND_SUB.to_string()), &dead, &dead)
+            .await
+            .expect_err("an over-cap statement must not be signed");
+
+        assert!(
+            matches!(
+                err,
+                SignErrorKind::PredicateTooLarge { limit, actual }
+                    if limit == MAX_STATEMENT_PAYLOAD_BYTES as u64 && actual == oversized.len() as u64
+            ),
+            "expected PredicateTooLarge naming the limit and the actual size, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_statement_exactly_at_the_cap_is_not_refused_by_the_bound() {
+        // The other side of the boundary: `>` not `>=`, so the cap itself is
+        // allowed through. It then fails at the unreachable endpoint, which is
+        // what proves the bound let it past rather than never having run.
+        let dead = Url::parse("http://127.0.0.1:1/").expect("a literal URL parses");
+        let at_cap = vec![b'x'; MAX_STATEMENT_PAYLOAD_BYTES];
+
+        let err = KeylessSigner::new()
+            .sign_dsse(&at_cap, &OidcToken::new(EMAIL_AND_SUB.to_string()), &dead, &dead)
+            .await
+            .expect_err("the dead endpoint fails the sign");
+
+        assert!(
+            !matches!(err, SignErrorKind::PredicateTooLarge { .. }),
+            "a statement at exactly the cap must pass the bound, got: {err:?}"
+        );
     }
 
     // Fixtures: `header.<base64url payload>.signature`.

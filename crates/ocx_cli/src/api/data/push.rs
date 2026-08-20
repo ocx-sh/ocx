@@ -44,6 +44,41 @@ pub struct PushReport {
     /// every platform this push fanned out to. Layer blobs only — the config
     /// blob and manifest are not layers.
     pub layers: LayerCounts,
+    /// `None` unless `--sbom` was passed.
+    ///
+    /// Additive: `ocx-mirror pipeline push` keys its go/no-go off `status`, and
+    /// `status` still reports the push alone. A push that lands and an
+    /// attestation that then fails is a real state — the manifest is immutable
+    /// and OCI offers no un-push — so the two outcomes are reported separately
+    /// rather than folded into one verdict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<AttestationOutcome>,
+}
+
+/// What `--sbom` did after the push landed.
+///
+/// A failure carries the error slug the JSON error envelope would have used
+/// (CLI-04), not a bespoke string, so a script branches on the same vocabulary
+/// either way.
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AttestationOutcome {
+    /// The attestation was published as a referrer on the pushed manifest.
+    Succeeded {
+        /// Digest of the published OCI referrer manifest.
+        referrer_digest: String,
+        /// The resolved `predicateType` URI written into the Statement.
+        predicate_type: String,
+    },
+    /// The push landed and was NOT rolled back; the attestation did not.
+    Failed {
+        /// The error envelope's per-variant slug (`error.detail`), falling
+        /// back to its frozen category (`error.kind`) for errors outside the
+        /// sign and verify taxonomies, which carry no `detail`.
+        kind: String,
+        /// Human-readable cause, sanitized for the terminal.
+        message: String,
+    },
 }
 
 impl PushReport {
@@ -61,7 +96,19 @@ impl PushReport {
             cascade_tags_written: outcome.cascade_tags,
             canonical_tags_written: outcome.canonical_tags,
             layers: outcome.layer_counts,
+            attestation: None,
         }
+    }
+
+    /// Attach the `--sbom` outcome to a report already built from the push.
+    ///
+    /// Separate from [`Self::from_outcome`] because the push report must be
+    /// constructible before the attestation is attempted: the push is not
+    /// undoable, so its result is owed to the caller whatever happens next.
+    #[must_use]
+    pub fn with_attestation(mut self, attestation: AttestationOutcome) -> Self {
+        self.attestation = Some(attestation);
+        self
     }
 }
 
@@ -109,13 +156,23 @@ mod tests {
     use crate::api::Printable as _;
 
     fn outcome(digest_hex: &str, cascade_tags: Vec<String>, canonical_tags: Vec<String>) -> PushOutcome {
-        PushOutcome {
-            manifest_digest: oci::Digest::try_from(format!("sha256:{}", digest_hex.repeat(64)).as_str())
-                .expect("digest parses"),
+        outcome_with_layers(digest_hex, cascade_tags, canonical_tags, LayerCounts::default())
+    }
+
+    /// `PushOutcome` is `#[non_exhaustive]`, so this crate can reach it through
+    /// neither a struct literal nor functional-update syntax.
+    fn outcome_with_layers(
+        digest_hex: &str,
+        cascade_tags: Vec<String>,
+        canonical_tags: Vec<String>,
+        layer_counts: LayerCounts,
+    ) -> PushOutcome {
+        PushOutcome::new(
+            oci::Digest::try_from(format!("sha256:{}", digest_hex.repeat(64)).as_str()).expect("digest parses"),
             cascade_tags,
             canonical_tags,
-            layer_counts: Default::default(),
-        }
+            layer_counts,
+        )
     }
 
     /// Pins the JSON wire format consumed by `ocx-mirror pipeline push`: the
@@ -177,14 +234,16 @@ mod tests {
     fn layers_json_shape() {
         let report = PushReport::from_outcome(
             "tool:1.0.0".to_string(),
-            PushOutcome {
-                layer_counts: LayerCounts {
+            outcome_with_layers(
+                "d",
+                Vec::new(),
+                Vec::new(),
+                LayerCounts {
                     mounted: 2,
                     uploaded: 1,
                     verified: 3,
                 },
-                ..outcome("d", Vec::new(), Vec::new())
-            },
+            ),
         );
         let value = serde_json::to_value(&report).unwrap();
 
@@ -200,20 +259,80 @@ mod tests {
     fn print_plain_smoke() {
         let report = PushReport::from_outcome(
             "tool:1.0.0".to_string(),
-            PushOutcome {
-                layer_counts: LayerCounts {
+            outcome_with_layers(
+                "d",
+                vec!["1".to_string(), "latest".to_string()],
+                vec![format!("sha256.{}", "b".repeat(64))],
+                LayerCounts {
                     mounted: 1,
                     uploaded: 0,
                     verified: 0,
                 },
-                ..outcome(
-                    "d",
-                    vec!["1".to_string(), "latest".to_string()],
-                    vec![format!("sha256.{}", "b".repeat(64))],
-                )
-            },
+            ),
         );
         let data = DataInterface::new(Printer::new(false, false));
         report.print_plain(&data);
+    }
+}
+
+#[cfg(test)]
+mod attestation_tests {
+    use super::{AttestationOutcome, PushReport};
+
+    fn report() -> PushReport {
+        PushReport {
+            identifier: "registry.example/pkg:1.0".into(),
+            status: "pushed".into(),
+            manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            cascade_tags_written: Vec::new(),
+            canonical_tags_written: Vec::new(),
+            layers: ocx_lib::oci::LayerCounts::default(),
+            attestation: None,
+        }
+    }
+
+    /// A push without `--sbom` emits exactly the keys `ocx-mirror pipeline
+    /// push` already parses. The field is additive, so it must be absent
+    /// rather than `null`.
+    #[test]
+    fn a_push_without_sbom_omits_the_attestation_key() {
+        let json = serde_json::to_value(report()).expect("serialize");
+        assert!(
+            json.get("attestation").is_none(),
+            "attestation must be omitted, not null: {json}"
+        );
+        assert_eq!(json["status"], "pushed");
+    }
+
+    /// `status` still reports the push alone: a landed push with a failed
+    /// attestation is a real state, and folding the two into one verdict would
+    /// tell a mirror pipeline the push did not happen.
+    #[test]
+    fn a_failed_attestation_does_not_change_the_push_status() {
+        let json = serde_json::to_value(report().with_attestation(AttestationOutcome::Failed {
+            kind: "offline_attest_refused".into(),
+            message: "offline attestation is not supported".into(),
+        }))
+        .expect("serialize");
+
+        assert_eq!(json["status"], "pushed", "the push landed and is not undoable");
+        assert_eq!(json["attestation"]["status"], "failed");
+        assert_eq!(json["attestation"]["kind"], "offline_attest_refused");
+    }
+
+    #[test]
+    fn a_successful_attestation_reports_the_referrer_and_resolved_type() {
+        let json = serde_json::to_value(report().with_attestation(AttestationOutcome::Succeeded {
+            referrer_digest: format!("sha256:{}", "c".repeat(64)),
+            predicate_type: "https://cyclonedx.org/bom".into(),
+        }))
+        .expect("serialize");
+
+        assert_eq!(json["attestation"]["status"], "succeeded");
+        assert_eq!(
+            json["attestation"]["referrer_digest"],
+            format!("sha256:{}", "c".repeat(64))
+        );
+        assert_eq!(json["attestation"]["predicate_type"], "https://cyclonedx.org/bom");
     }
 }

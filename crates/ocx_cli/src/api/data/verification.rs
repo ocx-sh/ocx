@@ -300,20 +300,27 @@ mod tests {
     }
 
     #[test]
-    fn zero_width_and_bom_pass_through_by_documented_decision() {
-        // Not an omission. The shared sanitizer scopes itself to characters
-        // that are *active* on a terminal; zero-width joiners and the BOM are
-        // invisible rather than screen-controlling (copy-paste confusion, not
-        // screen control) and are excluded by name in `api::data`'s own
-        // contract. Pinned here so widening that scope is a deliberate change
-        // to one function rather than a silent divergence between payloads —
-        // and so this payload never grows a second, hand-rolled filter
-        // (SEC-31: one sanitizer owns every write).
-        for invisible in ["a\u{200d}b", "\u{feff}signer@example.com"] {
+    fn zero_width_and_bom_are_stripped_like_every_other_invisible() {
+        // Inverted from the WP9a-era decision that scoped the sanitizer to
+        // terminal-active characters only. Invisible is not harmless here:
+        // `you@exam\u{200b}ple.com` renders pixel-identical to the identity a
+        // reader believes they approved, so SEC-34's set includes them. Pinned
+        // per payload so the two surfaces cannot diverge, and so this payload
+        // never grows a second hand-rolled filter (SEC-31).
+        for (invisible, visible) in [
+            ("a\u{200d}b", "ab"),
+            ("\u{feff}signer@example.com", "signer@example.com"),
+        ] {
             let rows = rendered_with(invisible);
             assert!(
-                rows.iter().any(|cell| cell == invisible),
-                "the shared sanitizer's documented scope leaves {invisible:?} intact; got {rows:?}"
+                !rows.iter().any(|cell| cell.contains(invisible)),
+                "{invisible:?} survived the sanitizer; got {rows:?}"
+            );
+            // Positive control: the visible remainder must still arrive, or a
+            // sanitizer that dropped the whole field would pass the line above.
+            assert!(
+                rows.iter().any(|cell| cell == visible),
+                "the visible remainder {visible:?} did not reach the report; got {rows:?}"
             );
         }
     }

@@ -12,7 +12,7 @@
 //!
 //! Precedence, cheapest-to-override first:
 //!
-//! 1. `--trusted-root` flag,
+//! 1. `--sigstore-trusted-root` flag,
 //! 2. `OCX_SIGSTORE_TRUSTED_ROOT`,
 //! 3. `[trust.sigstore] trusted_root` / `trusted_root_json` from `config.toml`,
 //! 4. `$OCX_HOME/sigstore/trusted-root.json` (convention path, no config),
@@ -65,7 +65,7 @@ pub async fn resolve_trust_root(
         })
     };
 
-    // 1+2. `--trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT`, already collapsed.
+    // 1+2. `--sigstore-trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT`, already collapsed.
     if let Some(path) = explicit_override {
         let json_path = trusted_root_json_path(path).await;
         let bytes = tokio::fs::read(&json_path).await.map_err(read_err)?;
