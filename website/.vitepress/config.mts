@@ -67,6 +67,10 @@ export default defineConfig({
           link: "/docs/user-guide/patches",
         },
         {
+          text: "Attestations",
+          link: "/docs/user-guide/attestations",
+        },
+        {
           text: "Authoring",
           link: "/docs/authoring/",
           collapsed: true,

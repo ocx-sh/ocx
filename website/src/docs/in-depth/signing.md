@@ -19,7 +19,7 @@ Signing a published package, verifying it against a pinned identity, then verify
 
 OCX verifies [Fulcio][fulcio] certificates against a trust root, and verifies the [Rekor][rekor] Signed Entry Timestamp against Rekor's public key. Against public Sigstore this needs no configuration at all — the material arrives over [TUF][sigstore-tuf]. Against a self-hosted stack it has to come from somewhere you control, and OCX resolves it through six rungs, first hit wins:
 
-1. **`--trusted-root <PATH>`** on `ocx package verify` — a Sigstore [trusted-root][sigstore-tuf] JSON, or a directory holding `trusted_root.json`.
+1. **`--sigstore-trusted-root <PATH>`** on `ocx package verify` — a Sigstore [trusted-root][sigstore-tuf] JSON, or a directory holding `trusted_root.json`.
 2. **[`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root]** — the same value as an environment variable; the flag wins.
 3. **[`[trust.sigstore]`][config-trust-sigstore]** in the operator `config.toml` — `trusted_root` (a path, relative to that config file) or `trusted_root_json` (the document inlined). This is the rung a fleet uses, because a `config.toml` can itself be distributed.
 4. **`$OCX_HOME/sigstore/trusted-root.json`** — a convention path. Drop the file there and nothing needs configuring.
@@ -129,7 +129,7 @@ Two deployments, one command surface. What changes between them is where the tru
 
 ### Public Sigstore {#public-good}
 
-The default, and the case that needs no configuration. [Fulcio][fulcio] and [Rekor][rekor] run as the [Sigstore public-good instance][sigstore-public-good]; the trust root arrives over [TUF][sigstore-tuf] on first use and caches under `$OCX_HOME/state/tuf/`. Neither `--fulcio-url` nor `--rekor-url` is passed, and neither is `--trusted-root`:
+The default, and the case that needs no configuration. [Fulcio][fulcio] and [Rekor][rekor] run as the [Sigstore public-good instance][sigstore-public-good]; the trust root arrives over [TUF][sigstore-tuf] on first use and caches under `$OCX_HOME/state/tuf/`. Neither `--fulcio-url` nor `--rekor-url` is passed, and neither is `--sigstore-trusted-root`:
 
 ```sh
 ocx package sign -p linux/amd64 registry.example.com/acme/mytool:1.0.0
@@ -167,7 +167,9 @@ Passing `--certificate-identity` and `--certificate-oidc-issuer` on every verify
 # $OCX_HOME/config.toml
 [[trust.policy]]
 scope = "acme/mytool"
-identity = "ocx-test@example.com"
+
+[trust.policy.keyless]
+identity    = "ocx-test@example.com"
 oidc_issuer = "http://dex:5556/dex"
 ```
 
@@ -233,12 +235,19 @@ The cryptography is [sigstore-rs][sigstore-rs]'s, not OCX's. Certificate-chain b
 
 The acceptance suite runs against a real Sigstore deployment — Fulcio, Rekor, TesseraCT and dex under the `sigstore` Docker Compose profile (`test/sigstore/README.md`) — not a fake. Hostile artifacts are made the way an attacker would make them: take a genuine signed bundle off the registry, change one field, put it back.
 
+## Attestations {#attestations}
+
+A signature proves *who* published an artifact. An attestation proves a *claim about* it — this build's SBOM, a SLSA provenance statement, a vulnerability scan result — bound to the same manifest digest and signed by the same identity. [`ocx package attest`][cmd-package-attest] wraps an arbitrary predicate file in a [DSSE][dsse]-enveloped [in-toto][in-toto] Statement and pushes it as an [OCI Referrers][oci-referrers-spec] artifact, reusing every piece of the signing pipeline above: the same ephemeral keypair, the same Fulcio certificate request, the same Rekor transparency-log entry. `--offline` refuses attesting the same way it refuses signing.
+
+Reading an attestation back is two commands, not one, because "does this verify" and "what predicate types does this carry" are different questions. [`ocx package verify --attestation`][cmd-package-verify-attestations] answers the first — it swaps the referrer content type it looks for and adds one check the signature path has no need for: the Statement's `subject` must name the target digest with a strong algorithm. [`ocx package sbom`][cmd-package-sbom] answers the second: it lists every verified attestation a manifest carries, or extracts one predicate's bytes byte-exact, and understands CycloneDX well enough to summarize it (spec version, component count, top-level component) without a second tool.
+
+`ocx package push --sbom <PATH>` is sugar for attesting immediately after a push — see [`push`][cmd-package-push] and [`attest`][cmd-package-attest] for the full contract.
+
 ## Current Limitations {#current-limitations}
 
-- **Rekor v1 only.** [sigstore-rs][sigstore-rs] 0.14 ships no Rekor v2 (tiles) client, so OCX targets Rekor v1 `hashedrekord`. A bundle from a Rekor v2 instance carries an RFC 3161 TSA timestamp instead of a SET; OCX rejects it with exit 83 (`RekorUnavailable`) rather than treating it as unsigned. Tracked as [#107][gh-107].
+- **Rekor v1 only.** [sigstore-rs][sigstore-rs] 0.14 ships no Rekor v2 (tiles) client, so OCX targets Rekor v1 transparency-log entries — `hashedrekord` for signatures, `dsse` for attestations. A bundle from a Rekor v2 instance carries an RFC 3161 TSA timestamp instead of a SET; OCX rejects it with exit 83 (`TransparencyLogUnavailable`) rather than treating it as unsigned. Tracked as [#107][gh-107].
 
-  This is a dated dependency, not a static gap: it holds only while the log you sign against speaks v1. The moment an instance — the public-good deployment or your own — serves v2, every **new** signature it issues verifies as exit 83 here, and signatures already in a v1 log keep verifying. Treat a planned Rekor upgrade as a blocking prerequisite on [#107][gh-107], and pin the Rekor URL you verify against rather than following an instance through a migration.
-- **No DSSE attestations.** `ocx package attest` does not exist, and the verify path rejects a DSSE-envelope bundle with exit 79 (`NoUsableBundle`). Deferred until sigstore-rs ships DSSE support.
+  This is a dated dependency, not a static gap: it holds only while the log you sign against speaks v1. The moment an instance — the public-good deployment or your own — serves v2, every **new** signature or attestation it issues verifies as exit 83 here, and entries already in a v1 log keep verifying. Treat a planned Rekor upgrade as a blocking prerequisite on [#107][gh-107], and pin the Rekor URL you verify against rather than following an instance through a migration.
 - **Discovery does not interoperate with cosign** — see [cosign Interoperability](#cosign-interop).
 
 :::tip Automatic verification at install time
@@ -248,7 +257,6 @@ Everything above describes the standalone `ocx package verify` command. Once a [
 ## Deferred to Future Work {#deferred-future-work}
 
 - **Rekor v2** ([#107][gh-107]) — a tiles-based transparency log with RFC 3161 timestamps in place of the SET. Blocked on a Rekor v2 client in [sigstore-rs][sigstore-rs].
-- **DSSE attestations** — `ocx package attest`, and verification of DSSE-envelope bundles. Blocked on DSSE support in sigstore-rs.
 
 ## Offline and Air-Gapped Verification {#offline-verification}
 
@@ -256,7 +264,7 @@ Verifying an artifact means reading it — and its signature — from the regist
 
 There are two offline paths:
 
-- **Supplied trust root.** Any of the first four rungs of the [trust-root ladder](#trust-root) — `--trusted-root`, [`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root], [`[trust.sigstore]`][config-trust-sigstore], or `$OCX_HOME/sigstore/trusted-root.json`. A Sigstore trusted-root JSON carries the Fulcio CA, the CT log keys and the pinned Rekor public key together, so the SET verifies with no fetch. This is the air-gapped seam: point it at a local trust-root mirror, or ship it through configuration — see [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
+- **Supplied trust root.** Any of the first four rungs of the [trust-root ladder](#trust-root) — `--sigstore-trusted-root`, [`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root], [`[trust.sigstore]`][config-trust-sigstore], or `$OCX_HOME/sigstore/trusted-root.json`. A Sigstore trusted-root JSON carries the Fulcio CA, the CT log keys and the pinned Rekor public key together, so the SET verifies with no fetch. This is the air-gapped seam: point it at a local trust-root mirror, or ship it through configuration — see [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
 - **Cached trust root.** A successful **online** `ocx package verify` writes the Fulcio CA and the Rekor key it used to `$OCX_HOME/state/trust_root/<rekor-authority>.json` (24-hour TTL). A later `--offline` verify against the same Rekor instance reuses that cache with no fetch.
 
 Offline verify requires a **pinned Rekor key**, which is why the trust material has to be a full trusted-root JSON and not a bare CA certificate. When no cached or supplied trust material is available offline, verify fails with exit 78 (`ConfigError`) naming the remedy; it never silently skips verification.
@@ -264,7 +272,7 @@ Offline verify requires a **pinned Rekor key**, which is why the trust material 
 ```sh
 # Air-gapped: pin both the Fulcio CA and the Rekor key from a local mirror.
 ocx --offline package verify -p linux/amd64 registry.internal/cmake:3.28 \
-  --trusted-root /etc/ocx/trusted_root.json \
+  --sigstore-trusted-root /etc/ocx/trusted_root.json \
   --certificate-identity ci@example.com \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -294,7 +302,7 @@ The same SSRF floor that guards registry traffic guards these endpoints: a URL i
 - [`package verify` reference][cmd-package-verify] — flags, identity matching options, exit codes
 - [Configuration reference → `[[trust.policy]]`][config-trust] — schema, scope matching, most-specific-wins resolution, operator-vs-project tier precedence
 - [cosign Interoperability](#cosign-interop) — the cosign 3.0 floor and what does and does not interoperate
-- [Deferred to Future Work](#deferred-future-work) — Rekor v2 ([#107][gh-107]) and DSSE attestations
+- [Deferred to Future Work](#deferred-future-work) — Rekor v2 ([#107][gh-107])
 <!-- external -->
 [sigstore]: https://www.sigstore.dev/
 [fulcio]: https://github.com/sigstore/fulcio
@@ -317,11 +325,17 @@ The same SSRF floor that guards registry traffic guards these endpoints: a URL i
 [dex]: https://dexidp.io/
 [gha-oidc]: https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/about-security-hardening-with-openid-connect
 [gitlab-id-tokens]: https://docs.gitlab.com/ee/ci/yaml/#id_tokens
+[in-toto]: https://github.com/in-toto/attestation
+[dsse]: https://github.com/secure-systems-lab/dsse
 
 <!-- commands -->
 [cmd-package-sign]: ../reference/command-line.md#package-sign
 [cmd-package-sign-token-precedence]: ../reference/command-line.md#package-sign
 [cmd-package-verify]: ../reference/command-line.md#package-verify
+[cmd-package-verify-attestations]: ../reference/command-line.md#package-verify-attestations
+[cmd-package-attest]: ../reference/command-line.md#package-attest
+[cmd-package-sbom]: ../reference/command-line.md#package-sbom
+[cmd-package-push]: ../reference/command-line.md#package-push
 [cmd-package-install]: ../reference/command-line.md#package-install
 [cmd-package-pull]: ../reference/command-line.md#package-pull
 

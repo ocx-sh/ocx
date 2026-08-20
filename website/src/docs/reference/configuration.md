@@ -561,7 +561,9 @@ automatically for any package whose identifier falls under a policy's scope.
 
 ```toml
 [[trust.policy]]
-scope       = "ghcr.io/acme/*"
+scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
 identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
@@ -575,9 +577,17 @@ peers, though — see [Tier precedence](#keys-trust-merge) below.
 
 #### Fields {#keys-trust-fields}
 
+Fields split across two levels — `scope` and `builder` are declared directly on `[[trust.policy]]`; `identity`, `identity_regexp` and `oidc_issuer` belong to its `[trust.policy.keyless]` sub-table, since identity matching and provenance-builder matching are independent checks.
+
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `scope` | string | yes | Package prefix this policy applies to, e.g. `"ghcr.io/acme/*"`. See [Scope matching](#keys-trust-scope). |
+| `builder` | string | no | Expected SLSA provenance `builder.id` (byte-equal). Only consulted when verifying an attestation whose predicate is SLSA provenance ([`verify --attestation`][cmd-package-verify-attestations]); ignored for a plain signature or any other predicate type. A mismatch is `builder_mismatch` (exit 65). |
+
+**`[trust.policy.keyless]`:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
 | `identity` | string | XOR with `identity_regexp` | Exact expected certificate SAN (byte-equal). |
 | `identity_regexp` | string | XOR with `identity` | Regex the certificate SAN must match in full. See [Regex identities](#keys-trust-regex). |
 | `oidc_issuer` | string | yes | Exact expected OIDC issuer URL (byte-equal). No regex form in this release — issuer URLs are stable. |
@@ -612,12 +622,16 @@ When more than one policy's scope matches a target, the **longest** literal pref
 
 ```toml
 [[trust.policy]]                          # literal prefix "ghcr.io/acme/" (13 chars)
-scope       = "ghcr.io/acme/*"
+scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
 identity    = "ci@acme.example"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 
 [[trust.policy]]                          # literal prefix "ghcr.io/acme/secret-tool" (24 chars)
-scope       = "ghcr.io/acme/secret-tool"
+scope = "ghcr.io/acme/secret-tool"
+
+[trust.policy.keyless]
 identity    = "release-bot@acme.example"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
@@ -633,12 +647,16 @@ either one verifies until the old entry is removed:
 
 ```toml
 [[trust.policy]]                          # both scopes tie at "ghcr.io/acme/" (13 chars)
-scope       = "ghcr.io/acme/*"
+scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
 identity    = "old-ci@acme.example"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 
 [[trust.policy]]
-scope       = "ghcr.io/acme/*"
+scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
 identity    = "new-ci@acme.example"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
@@ -652,7 +670,9 @@ matching `evil-acme-lookalike`.
 
 ```toml
 [[trust.policy]]
-scope           = "ghcr.io/acme/*"
+scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
 identity_regexp = "^https://github\\.com/acme/.*/\\.github/workflows/release\\.yml@refs/tags/v[0-9.]+$"
 oidc_issuer     = "https://token.actions.githubusercontent.com"
 ```
@@ -707,7 +727,9 @@ scope cannot take over, and an equally specific one cannot join the accepted set
 ```toml [/etc/ocx/config.toml]
 # literal prefix "ghcr.io/acme/" — 13 chars, locked
 [[trust.policy]]
-scope       = "ghcr.io/acme/*"
+scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
 identity    = "ci@acme.example"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
@@ -715,7 +737,9 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
 ```toml [a lower tier]
 # literal prefix "ghcr.io/acme/tool" — 17 chars
 [[trust.policy]]
-scope       = "ghcr.io/acme/tool"
+scope = "ghcr.io/acme/tool"
+
+[trust.policy.keyless]
 identity    = "someone-else@example.test"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
@@ -731,12 +755,16 @@ as two locked entries, and both are accepted for the overlap window.
 
 ```toml [/etc/ocx/config.toml]
 [[trust.policy]]
-scope       = "ghcr.io/acme/*"
+scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
 identity    = "ci@acme.example"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 
 [[trust.policy]]                          # same scope, second accepted signer
-scope       = "ghcr.io/acme/*"
+scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
 identity    = "ci-2027@acme.example"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
@@ -790,8 +818,8 @@ own signatures, which is the entire trust decision.
 |-------|------|-------------|
 | `trusted_root` | string | Path to a Sigstore trusted-root JSON, or a directory holding `trusted_root.json`. A **relative path resolves against the directory of the `config.toml` that declared it** — rewritten to absolute at load time, so the value means the same file regardless of the process working directory. Mutually exclusive with `trusted_root_json` |
 | `trusted_root_json` | string | The trusted-root document inlined verbatim. This is the form a fleet receives — see [Publishing to a fleet](#keys-trust-sigstore-publish). Mutually exclusive with `trusted_root` |
-| `fulcio_url` | string | Default [Fulcio][fulcio] base URL for `ocx package sign` when `--fulcio-url` is omitted |
-| `rekor_url` | string | Default [Rekor][rekor] base URL for `ocx package sign` / `verify` when `--rekor-url` is omitted |
+| `fulcio_url` | string | Default [Fulcio][fulcio] base URL for `ocx package sign` / `attest` when `--fulcio-url` is omitted. Precedence: an explicit flag wins, then this field, then the public-good builtin. `ocx package push --sbom` has no `--fulcio-url` flag at all, so this field is its only override |
+| `rekor_url` | string | Default [Rekor][rekor] base URL for `ocx package sign` / `verify` / `attest` / `sbom` when `--rekor-url` is omitted. Precedence: an explicit flag wins, then this field, then the public-good builtin. `ocx package push --sbom` and auto-verify expose no `--rekor-url` flag, so this field is their only override |
 
 Setting both `trusted_root` and `trusted_root_json` is a configuration error —
 exit `78`, `trust_root_load`. One trust root, one spelling.
@@ -800,7 +828,7 @@ exit `78`, `trust_root_load`. One trust root, one spelling.
 
 Verify resolves its trust root through six rungs, first hit wins:
 
-1. `--trusted-root` on [`ocx package verify`][cmd-package-verify]
+1. `--sigstore-trusted-root` on [`ocx package verify`][cmd-package-verify]
 2. [`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root]
 3. `[trust.sigstore] trusted_root` / `trusted_root_json` — this section
 4. `$OCX_HOME/sigstore/trusted-root.json` — a convention path, no config needed
@@ -840,6 +868,11 @@ The loader enforces the other half on the consuming side:
   digest-pinned** is ignored with a warning. Otherwise the trust root arrives over
   the very channel it exists to verify; the circularity is broken by pinning the
   seed, not by policy.
+- `fulcio_url` and `rekor_url` arriving from a `[managed]` source that is **not
+  digest-pinned** are ignored with a warning too, for the same reason — and
+  `fulcio_url` more sharply so: it names where the OIDC identity token is sent, and
+  `ocx package push --sbom` has no flag to oppose a config value, so an unpinned
+  payload could hand a signing identity to a server of its choosing.
 
 ## Environment Variable Override Table {#env-overrides}
 
@@ -1086,6 +1119,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [cmd-config-push]: ./command-line.md#config-push
 [cmd-package-verify]: ./command-line.md#package-verify
 [cmd-package-sign]: ./command-line.md#package-sign
+[cmd-package-verify-attestations]: ./command-line.md#package-verify-attestations
 
 <!-- environment -->
 [env-ocx-home]: ./environment.md#ocx-home

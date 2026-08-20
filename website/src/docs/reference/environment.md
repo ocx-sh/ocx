@@ -199,13 +199,13 @@ OCX also discovers a configuration file at `$OCX_HOME/config.toml` — see the [
 
 ### `OCX_IDENTITY_TOKEN` {#ocx-identity-token}
 
-OIDC identity token for [`ocx package sign`][cmd-package-sign]. Provides the lowest-precedence token source when no explicit override is given — used only if `--identity-token-file` and `--identity-token-stdin` are both absent. Useful in CI systems that inject OIDC tokens via environment rather than files.
+OIDC identity token for [`ocx package sign`][cmd-package-sign] and [`ocx package attest`][cmd-package-attest] — both share the same token-resolution path. Provides the lowest-precedence token source when no explicit override is given — used only if `--identity-token-file` and `--identity-token-stdin` are both absent. Useful in CI systems that inject OIDC tokens via environment rather than files.
 
 The value must be a short-lived JWT issued by a supported OIDC provider (GitHub Actions, GitLab CI, CircleCI, etc.). The token is consumed once and never logged or written to disk.
 
-**NOT forwarded to subprocess children.** OCX reads `OCX_IDENTITY_TOKEN` directly via `std::env::var` inside `ocx package sign` and never places it in a child process environment via `OcxConfigView`. Security rationale: OIDC tokens are short-lived bearer credentials — forwarding them into every subprocess child env would broaden the attack surface unnecessarily.
+**NOT forwarded to subprocess children.** OCX reads `OCX_IDENTITY_TOKEN` directly via `std::env::var` inside the shared sign/attest token resolver and never places it in a child process environment via `OcxConfigView`. Security rationale: OIDC tokens are short-lived bearer credentials — forwarding them into every subprocess child env would broaden the attack surface unnecessarily.
 
-Token precedence for `ocx package sign` (highest to lowest):
+Token precedence for `ocx package sign` and `ocx package attest` (highest to lowest):
 
 1. `--identity-token-file <PATH>` — file must have mode `0600` or tighter
 2. `--identity-token-stdin`
@@ -214,12 +214,12 @@ Token precedence for `ocx package sign` (highest to lowest):
 5. Interactive browser OAuth (suppressed with `--no-tty`)
 
 ::: warning Short-lived tokens only
-OIDC identity tokens expire quickly (typically under 10 minutes). Do not store a token in a long-lived environment or secret manager entry — fetch a fresh token immediately before calling `ocx package sign`.
+OIDC identity tokens expire quickly (typically under 10 minutes). Do not store a token in a long-lived environment or secret manager entry — fetch a fresh token immediately before calling `ocx package sign` or `ocx package attest`.
 :::
 
 ### `OCX_SIGSTORE_TRUSTED_ROOT` {#ocx-sigstore-trusted-root}
 
-Path to a Sigstore [trusted-root][sigstore-tuf] JSON document — or a directory containing `trusted_root.json` — that [`ocx package verify`][cmd-package-verify] loads its trust material from. Equivalent to the `--trusted-root` flag; the flag takes precedence when both are set.
+Path to a Sigstore [trusted-root][sigstore-tuf] JSON document — or a directory containing `trusted_root.json` — that [`ocx package verify`][cmd-package-verify] loads its trust material from. Equivalent to the `--sigstore-trusted-root` flag; the flag takes precedence when both are set.
 
 A trusted root carries three things together: the [Fulcio][fulcio] CA certificate(s), the certificate-transparency log keys, and the pinned [Rekor][rekor] public key. All three are load-bearing — a Fulcio certificate embeds a Signed Certificate Timestamp that the verifier checks against the CT log's key, so trust material carrying CA anchors alone is refused up front with exit `78` and the message `trust root carries no CT log key`.
 
@@ -227,7 +227,7 @@ This is the air-gapped seam: point it at a local trust-root mirror and verify ag
 
 Combined with [`OCX_OFFLINE`](#ocx-offline), this is the fully offline path: the pinned Rekor key means the Signed Entry Timestamp verifies without contacting Rekor.
 
-This variable is one rung of a six-rung ladder: the `--trusted-root` flag, this variable, `[trust.sigstore]` in `config.toml`, `$OCX_HOME/sigstore/trusted-root.json`, the trust-root cache under `$OCX_HOME/state/trust_root/`, and finally the public-good Sigstore root fetched over [TUF][sigstore-tuf] (cached under `$OCX_HOME/state/tuf/`). Setting an env var on every machine is the most expensive way to reach a private stack — for a fleet, publish the trust root once and let it arrive through configuration instead: see [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
+This variable is one rung of a six-rung ladder: the `--sigstore-trusted-root` flag, this variable, `[trust.sigstore]` in `config.toml`, `$OCX_HOME/sigstore/trusted-root.json`, the trust-root cache under `$OCX_HOME/state/trust_root/`, and finally the public-good Sigstore root fetched over [TUF][sigstore-tuf] (cached under `$OCX_HOME/state/tuf/`). Setting an env var on every machine is the most expensive way to reach a private stack — for a fleet, publish the trust root once and let it arrive through configuration instead: see [Self-hosted Sigstore][in-depth-self-hosted-sigstore].
 
 This variable affects only the local verify operation and is **not** forwarded to subprocess children.
 
@@ -785,6 +785,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cmd-direnv]: command-line.md#direnv
 [cmd-direnv-export]: command-line.md#direnv-export
 [cmd-package-sign]: command-line.md#package-sign
+[cmd-package-attest]: command-line.md#package-attest
 [cmd-package-verify]: command-line.md#package-verify
 [cmd-package-install]: command-line.md#package-install
 [cmd-package-pull]: command-line.md#package-pull
