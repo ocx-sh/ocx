@@ -7,7 +7,7 @@ Contract sources: ``.claude/artifacts/adr_offline_verify_trust_cache.md``
 (amendment: publish-time inlining).
 
 ``test_offline_verify.py`` covers the rungs an operator reaches by hand — the
-``--trusted-root`` flag, ``OCX_SIGSTORE_TRUSTED_ROOT``, and the warm cache. The
+``--sigstore-trusted-root`` flag, ``OCX_SIGSTORE_TRUSTED_ROOT``, and the warm cache. The
 rungs below it are the ones a *fleet* uses, and they are what this file proves:
 
 3. ``[trust.sigstore] trusted_root_json`` in a ``config.toml``

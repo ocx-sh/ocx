@@ -231,12 +231,23 @@ def push_referrer(
     *,
     artifact_type: str,
     payload: bytes = b"referrer",
+    annotations: dict[str, str] | None = None,
     insecure: bool = True,
 ) -> tuple[str, dict[str, str]]:
     """Push an OCI referrer (image manifest with a ``subject``); return (digest, headers).
 
     The returned headers carry ``OCI-Subject`` when the registry processed the
     subject — its presence proves native Referrers API support.
+
+    ``annotations`` defaults to omitted (not an empty dict) so every existing
+    caller's manifest shape is byte-identical to before this parameter existed.
+    A caller that republishes a mutated Sigstore bundle (`attestations.py`'s
+    `tamper_attestation_payload` / `replace_attestation_envelope`) passes
+    ``{"dev.sigstore.bundle.content": "dsse-envelope"}`` so a SECOND mutation
+    can still find the referrer through `_attestation_referrer`'s filter —
+    ocx's own scan never required the annotation (`BundleParts::from_bundle`
+    discriminates by the bundle's actual content oneof), only this test
+    helper's lookup does.
     """
     config_digest = push_blob(registry, repo, _EMPTY_CONFIG, insecure=insecure)
     layer_digest = push_blob(registry, repo, payload, insecure=insecure)
@@ -262,6 +273,8 @@ def push_referrer(
             "size": subject_size,
         },
     }
+    if annotations is not None:
+        manifest["annotations"] = annotations
     return push_manifest(registry, repo, manifest, insecure=insecure)
 
 

@@ -714,9 +714,32 @@ def signing(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[
     (ocx.ocx_home / "config.toml").write_text(
         "[[trust.policy]]\n"
         f'scope = "{repository}"\n'
+        "\n"
+        "[trust.policy.keyless]\n"
         f'identity = "{SIGSTORE_IDENTITY}"\n'
         f'oidc_issuer = "{SIGSTORE_ISSUER}"\n'
     )
+
+    # user-guide/attestations reuses this same setup:signing state (CA5:
+    # the recorder only replays cast-region lines, so a heredoc in the doc
+    # script itself would never run) and needs a CycloneDX predicate file
+    # on disk before its cast region runs.
+    (tmp_path / "sbom.json").write_text(json.dumps(
+        {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.6",
+            "serialNumber": "urn:uuid:3e671687-395b-41f5-a30f-a58921a69b79",
+            "version": 1,
+            "metadata": {
+                "component": {"type": "application", "name": "mytool", "version": "1.0.0"},
+            },
+            "components": [
+                {"type": "library", "name": "libfoo", "version": "1.2.3"},
+                {"type": "library", "name": "libbar", "version": "4.5.6"},
+            ],
+        },
+        indent=2,
+    ))
 
     ocx.env.update(
         {

@@ -1,0 +1,15 @@
+{
+  "_provenance": "Generated once for WP10-fix by signing hand-crafted PAE bytes with a fresh, throwaway ECDSA-P256 key through the pinned cosign v3.1.1 container (same tool + technique as the WP-S spike's item-2 v1-_type probe: `cosign generate-key-pair` + `cosign sign-blob --key cosign.key --bundle out.json --use-signing-config=false pae_input.bin`; see .claude/artifacts/research_cosign_v3_attestation_wire.md 'Spike results' for the technique this mirrors). Consumed by fixtures.malformed_payload_valid_signature_envelope().",
+  "note": "S-009 / CVE-2026-39395 shape / ADR Part III checklist row 2: `payload` decodes to bytes that are NOT valid JSON, so it can never parse as an in-toto Statement -- yet `envelope.signatures[0].sig` is a genuine ECDSA-P256-SHA256 signature over pae(envelope.payloadType, decoded payload), verifiable against `public_key_pem` below. Proves the structural refusal (BundleParseFailed / a Statement-parse-specific kind) is reached AFTER crypto verification would have PASSED, not as a substitute for it -- the exact bug class CVE-2026-39395 is 'signature verified, therefore accepted'. Self-checked both ways in test/tests/fixtures/attestations.py's module-level self_check(): (a) positively, the signature verifies over the exact PAE bytes; (b) against cosign's own verify-blob-attestation with a bit-flipped signature, which fails at 'failed to verify signature' -- distinctly EARLIER than the genuine signature's 'failed to fetch envelope statement: validation error: invalid attestation: decoding json' -- demonstrating cosign's own verifier also reaches the crypto layer before the JSON layer on this exact bundle.",
+  "envelope": {
+    "payload": "eyJfdHlwZSI6ICJodHRwczovL2luLXRvdG8uaW8vU3RhdGVtZW50L3YxIiwgInN1YmplY3QiOiBbIFRISVMgSVMgTk9UIEpTT04=",
+    "payloadType": "application/vnd.in-toto+json",
+    "signatures": [
+      {
+        "sig": "MEQCIBHc5aq4RS4Vch125LpXOK3GCJOm6BzG9cB7vmdPtPhFAiBcJuW+MaSIU5eAY7dL0zBt6Vfymtqc8kfK8Lg4+be2rQ==",
+        "keyid": ""
+      }
+    ]
+  },
+  "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAErfzFcq+Ue5JT7tvIgoaZH+QtM9aQ\nEChwJozWyiaor0sT7Hs6BPwxoPx9wHhtlreELgnk+9knLpZBQsBo0y9wuA==\n-----END PUBLIC KEY-----\n"
+}

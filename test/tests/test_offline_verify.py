@@ -54,7 +54,7 @@ def _verify(
 ) -> subprocess.CompletedProcess[str]:
     """Run ``package verify``. The trust root comes from ``extra_env`` only.
 
-    No ``--trusted-root`` flag: every test here is about what the *environment*
+    No ``--sigstore-trusted-root`` flag: every test here is about what the *environment*
     supplies, which is what an air-gapped deployment actually configures.
     """
     return subprocess.run(
@@ -197,7 +197,7 @@ def test_offline_verify_without_trust_material_fails_not_skips(
         f"offline verify without trust material must fail with exit 78 (never skip), "
         f"got {result.returncode}\nstderr: {result.stderr.strip()}"
     )
-    assert "--trusted-root" in result.stderr or "online verify" in result.stderr, (
+    assert "--sigstore-trusted-root" in result.stderr or "online verify" in result.stderr, (
         f"error must name the remedy, got: {result.stderr.strip()}"
     )
 

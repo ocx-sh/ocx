@@ -1,0 +1,21 @@
+{
+  "components"    :[
+        {
+            "type": "library",
+            "version" :    "2.4.1",
+		"name": "libcafé-π-模块",
+            "description": "Handles café orders — éàü, 中文注释, and 📦 packaging."
+        },
+  {"name":"zlib","type": "library" , "version": "1.3.1"   }
+    ],
+"specVersion": "1.6",
+        "metadata": {
+    "component": {
+        "name"   :"wp10fix-fixture-é",
+            "type": "application"
+        }
+  },
+   "bomFormat":    "CycloneDX"    ,
+  "serialNumber": "urn:uuid:9b6f7b0e-2a3e-4b1a-8e2f-0c1d2e3f4a5b",
+  "version": 1
+}
