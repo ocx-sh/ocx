@@ -15,6 +15,7 @@ Sigstore stack with.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from uuid import uuid4
@@ -45,23 +46,64 @@ def _sign(
     assert sign.returncode == 0, f"sign setup failed: {sign.stderr}"
 
 
+def _attest(
+    ocx: OcxRunner,
+    stack: SigstoreStack,
+    token: Path,
+    pkg: PackageInfo,
+    predicate: Path,
+    predicate_type: str,
+) -> None:
+    """Attach a signed attestation to ``pkg``; asserts the setup step succeeds."""
+    attest = subprocess.run(
+        [
+            str(ocx.binary),
+            "package", "attest",
+            *stack.sign_args(token),
+            "--predicate", str(predicate),
+            "--type", predicate_type,
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert attest.returncode == 0, f"attest setup failed: {attest.stderr}"
+
+
 def _verify(
     ocx: OcxRunner,
     stack: SigstoreStack,
     pkg: PackageInfo,
     extra_env: dict[str, str] | None = None,
     cert_flags: list[str] | None = None,
+    *,
+    attestation: bool = False,
+    predicate_type: str | None = None,
+    json_format: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``package verify``. Omit ``cert_flags`` to exercise policy mode."""
+    """Run ``package verify``. Omit ``cert_flags`` to exercise policy mode.
+
+    ``attestation``/``predicate_type`` mirror ``test_verify.py``'s ``_verify``
+    so a builder-pin check (#103, S-013) can exercise attestation mode without
+    ``--certificate-identity``/``--certificate-oidc-issuer`` -- flag-mode verify
+    always sets ``CompiledPolicy::exact(..)``, whose ``builder`` field is
+    unconditionally ``None`` (see ``trust.rs``'s
+    ``the_flag_override_policy_carries_no_builder_pin``), so only policy mode
+    can reach the code path this section pins.
+    """
     env = {**ocx.env, **(extra_env or {})}
     return subprocess.run(
         [
             str(ocx.binary),
+            *(["--format", "json"] if json_format else []),
             "package", "verify",
             *(cert_flags or []),
+            *(["--attestation"] if attestation else []),
+            *(["--type", predicate_type] if predicate_type else []),
             "--platform", current_platform(),
             "--rekor-url", stack.rekor_url,
-            "--trusted-root", str(stack.trust_root),
+            "--sigstore-trusted-root", str(stack.trust_root),
             pkg.short,
         ],
         capture_output=True,
@@ -76,9 +118,18 @@ def _policy_block(
     *,
     identity: str | None = None,
     identity_regexp: str | None = None,
+    builder: str | None = None,
 ) -> str:
-    """Render one ``[[trust.policy]]`` TOML block."""
+    """Render one ``[[trust.policy]]`` TOML block with its nested keyless matcher.
+
+    ``builder`` is a top-level sibling of ``scope`` -- NOT nested under
+    ``[trust.policy.keyless]`` -- per ``trust.rs``'s
+    ``builder_is_a_backend_independent_sibling_of_scope`` fixture (#103).
+    """
     lines = ["[[trust.policy]]", f'scope = "{scope}"']
+    if builder is not None:
+        lines.append(f'builder = "{builder}"')
+    lines += ["", "[trust.policy.keyless]"]
     if identity is not None:
         lines.append(f'identity = "{identity}"')
     if identity_regexp is not None:
@@ -463,6 +514,8 @@ def test_add_then_remove_preserves_trust_policy_section(
     trust_section = (
         "[[trust.policy]]\n"
         f'scope = "{scope}"\n'
+        "\n"
+        "[trust.policy.keyless]\n"
         "# pinned deliberately, do not relax\n"
         'identity = "release-bot@example.com"\n'
         'oidc_issuer = "https://accounts.example.com"\n'
@@ -504,4 +557,98 @@ def test_add_then_remove_preserves_trust_policy_section(
     after_remove = (project_dir / "ocx.toml").read_text()
     assert trust_section in after_remove, (
         f"[[trust.policy]] must survive ocx remove byte-for-byte; got:\n{after_remove}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Builder pin (#103) — end-to-end through a policy-driven verify --attestation
+# ──────────────────────────────────────────────────────────────────────────────
+
+#: A minimal SLSA v1 provenance predicate carrying a builder id. Predicates
+#: are read as raw, well-formed JSON with no further schema enforcement, so
+#: this is sufficient to exercise `dsse.rs`'s `enforce_builder_pin`.
+_V1_BUILDER_PROVENANCE = (
+    '{"runDetails":{"builder":{"id":"https://ci.example/builder@v1"}}}'
+)
+
+
+def test_builder_pin_matching_builder_passes(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """A `[[trust.policy]]` `builder` pin matching the attested provenance's
+    builder id lets `verify --attestation` pass (exit 0).
+
+    Mirrors the Rust unit `builder_pin_accepts_the_builder_it_pins`
+    (`dsse.rs`) end-to-end through the real config-driven `[[trust.policy]]`
+    resolution path this file otherwise pins -- policy mode only, per
+    `_verify`'s docstring above.
+    """
+    pkg = published_package
+    _sign(ocx, sigstore_stack, identity_token, pkg)
+    predicate = tmp_path / "provenance.json"
+    predicate.write_text(_V1_BUILDER_PROVENANCE)
+    _attest(ocx, sigstore_stack, identity_token, pkg, predicate, "slsaprovenance1")
+
+    scope = f"{ocx.registry}/{pkg.repo}"
+    policy_toml = _policy_block(
+        scope, sigstore_stack.issuer,
+        identity=sigstore_stack.identity,
+        builder="https://ci.example/builder@v1",
+    )
+    (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(policy_toml)
+
+    verify = _verify(
+        ocx, sigstore_stack, pkg, extra_env=_NO_PROJECT,
+        attestation=True, predicate_type="slsaprovenance1",
+    )
+    assert verify.returncode == 0, (
+        f"expected exit 0 (builder pin matches), got {verify.returncode}\n"
+        f"stderr: {verify.stderr.strip()}"
+    )
+
+
+def test_builder_pin_different_builder_refuses(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """A `builder` pin naming a DIFFERENT builder than the attested provenance
+    refuses with `error.detail == "builder_mismatch"`, not just a nonzero exit.
+
+    Mirrors the Rust unit `builder_pin_refuses_a_different_builder`
+    (`dsse.rs`). The slug is asserted because 65 (DataError) is shared by
+    many `VerifyErrorKind` variants -- the whole point of the pin is that the
+    refusal names the RIGHT reason.
+    """
+    pkg = published_package
+    _sign(ocx, sigstore_stack, identity_token, pkg)
+    predicate = tmp_path / "provenance.json"
+    predicate.write_text(_V1_BUILDER_PROVENANCE)
+    _attest(ocx, sigstore_stack, identity_token, pkg, predicate, "slsaprovenance1")
+
+    scope = f"{ocx.registry}/{pkg.repo}"
+    policy_toml = _policy_block(
+        scope, sigstore_stack.issuer,
+        identity=sigstore_stack.identity,
+        builder="https://evil.example/other-builder",
+    )
+    (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(policy_toml)
+
+    verify = _verify(
+        ocx, sigstore_stack, pkg, extra_env=_NO_PROJECT,
+        attestation=True, predicate_type="slsaprovenance1", json_format=True,
+    )
+    assert verify.returncode == 65, (
+        f"expected exit 65 (DataError / BuilderMismatch), got {verify.returncode}\n"
+        f"stderr: {verify.stderr.strip()}"
+    )
+    envelope = json.loads(verify.stdout)
+    assert envelope["error"]["detail"] == "builder_mismatch", (
+        f"a builder-mismatch refusal must name its own slug: {envelope['error']}"
     )

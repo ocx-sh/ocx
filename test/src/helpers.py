@@ -84,6 +84,34 @@ SIGSTORE_DIR = COMPOSE_FILE.parent / "sigstore"
 _WAIT_FOR_STACK = SIGSTORE_DIR / "wait-for-stack.py"
 
 
+#: Host-wide lock serializing compose bring-up across concurrent sessions.
+#: Outside any worktree: two worktrees are exactly the case it exists for.
+_COMPOSE_LOCK = Path.home() / ".cache" / "ocx-compose.lock"
+
+
+def _compose(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["docker", "compose", "-f", str(COMPOSE_FILE), "--profile", "sigstore", *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _stack_is_already_running() -> bool:
+    """True when every service the profile declares is already running.
+
+    The declared set comes from compose itself rather than a list here, so a
+    service added to the profile is covered without a second edit. Other
+    containers sharing the project name are ignored — this asks whether ours
+    are up, not whether the daemon is idle.
+    """
+    declared = _compose("config", "--services")
+    running = _compose("ps", "--services", "--filter", "status=running")
+    if declared.returncode != 0 or running.returncode != 0:
+        return False  # cannot prove it is up, so fall through to `up -d`
+    return set(declared.stdout.split()) <= set(running.stdout.split())
+
+
 def start_sigstore_stack(timeout: float = 300.0) -> None:
     """Bring up the `sigstore` compose profile and block until it answers.
 
@@ -91,12 +119,25 @@ def start_sigstore_stack(timeout: float = 300.0) -> None:
     reimplemented here. That script is also what the self-hosting documentation
     hands an operator, so a second copy of the endpoint list is the one that
     would go stale — and it is the copy the suite would be trusting.
+
+    Two guards make this safe to call from concurrent sessions, which is the
+    normal case whenever more than one worktree runs the suite:
+
+    * **Skip when it is already up.** Every worktree resolves the same compose
+      project name (``test``), but their bind-mount paths differ, so the config
+      hash differs and an ``up -d`` from one worktree *recreates* the other's
+      containers — mid-suite, as connection-refused on every port. Not issuing
+      the command at all is what removes that; the lock alone cannot, because
+      the recreation is legal work correctly serialized.
+    * **Serialize the rest.** Two simultaneous ``up -d`` calls race on creating
+      the same container and one loses outright (``dex exited (2)``,
+      ``No such container: <hash>_test-registry-1``).
+
+    The readiness wait stays outside the lock: it is a read-only poll, and
+    holding an exclusive lock across a 300s timeout would serialize sessions
+    that have nothing left to contend over.
     """
-    subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "--profile", "sigstore", "up", "-d"],
-        check=True,
-        capture_output=True,
-    )
+    _bring_up_serialized()
     done = subprocess.run(
         [sys.executable, str(_WAIT_FOR_STACK), "--timeout", str(timeout)],
         capture_output=True,
@@ -107,6 +148,34 @@ def start_sigstore_stack(timeout: float = 300.0) -> None:
             "the sigstore compose profile did not come up:\n"
             + done.stdout
             + done.stderr
+        )
+
+
+def _bring_up_serialized() -> None:
+    """Check-then-``up`` under an exclusive host lock, so the two are atomic."""
+    try:
+        import fcntl
+    except ImportError:  # Windows: no flock, and no shared stack to contend for
+        if not _stack_is_already_running():
+            _require_up(_compose("up", "-d"))
+        return
+
+    _COMPOSE_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with open(_COMPOSE_LOCK, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # blocking: a peer's `up` is worth waiting for
+        try:
+            if not _stack_is_already_running():
+                _require_up(_compose("up", "-d"))
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _require_up(result: subprocess.CompletedProcess[str]) -> None:
+    if result.returncode != 0:
+        raise RuntimeError(
+            "`docker compose up -d` failed for the sigstore profile:\n"
+            + result.stdout
+            + result.stderr
         )
 
 

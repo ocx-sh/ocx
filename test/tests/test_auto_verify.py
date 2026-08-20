@@ -10,8 +10,9 @@ install fail-closed (no package-store or symlink state). No policy → no verify
 (trust is opt-in). `--no-verify` / `OCX_NO_VERIFY` opt out with a single WARN
 (the flag wins over the env).
 
-Because install/pull carry no `--rekor-url` flag, auto-verify uses the DEFAULT
-public Rekor endpoint — so these tests pin the local stack's Rekor key via
+Auto-verify has no flag tier, so it uses `[trust.sigstore].rekor_url` if set
+and the public default otherwise — these tests set neither, and instead pin
+the local stack's Rekor key via
 `OCX_SIGSTORE_TRUSTED_ROOT`, the same air-gapped seam `test_offline_verify.py`
 exercises. That pin is what makes the tests hermetic AND what makes them
 falsifiable: the SET was signed by the local Rekor, so a verify that reached the
@@ -29,6 +30,7 @@ from pathlib import Path
 
 from src.runner import OcxRunner, PackageInfo, current_platform
 from tests.fixtures.sigstore_stack import SigstoreStack
+from tests.test_attest import attest, cyclonedx_predicate
 
 #: Any identity the local dex cannot mint. Its counterpart — the one that DOES
 #: pass — is `sigstore_stack.identity`, never a literal.
@@ -44,7 +46,8 @@ def _write_operator_policy(ocx: OcxRunner, scope: str, identity: str, issuer: st
     """Write a `[[trust.policy]]` into `$OCX_HOME/config.toml` (operator tier)."""
     config = ocx.ocx_home / "config.toml"
     config.write_text(
-        f'[[trust.policy]]\nscope = "{scope}"\nidentity = "{identity}"\noidc_issuer = "{issuer}"\n'
+        f'[[trust.policy]]\nscope = "{scope}"\n\n'
+        f'[trust.policy.keyless]\nidentity = "{identity}"\noidc_issuer = "{issuer}"\n'
     )
 
 
@@ -382,5 +385,83 @@ def test_run_is_policy_gated(
     assert result.returncode == 79, (
         f"ocx run on a policy-covered unsigned tool must abort (79), not silently install "
         f"and run — got {result.returncode}\nstderr: {result.stderr.strip()}"
+    )
+    _assert_no_partial_state(ocx, pkg)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# S-015 — attestations on the subject must not break or crowd install-time
+# signature verification (`auto_verify.rs`'s `VerifyContentMode::Signature`)
+# ──────────────────────────────────────────────────────────────────────────────
+
+#: A minimal SLSA v1 provenance predicate, distinct from the cyclonedx SBOM
+#: attached alongside it — two attestations of different predicate types on
+#: one subject is closer to a real-world referrer set than one.
+_PROVENANCE_PREDICATE = (
+    '{"runDetails":{"builder":{"id":"https://ci.example/builder@v1"}}}'
+)
+
+
+def _attach_two_attestations(
+    ocx: OcxRunner, stack: SigstoreStack, token: Path, pkg: PackageInfo, tmp_path: Path,
+) -> None:
+    """Attach a cyclonedx SBOM and a slsaprovenance1 attestation to `pkg`."""
+    cdx = attest(ocx, stack, token, pkg, cyclonedx_predicate(tmp_path))
+    assert cdx.returncode == 0, f"cyclonedx attest setup failed: {cdx.stderr}"
+
+    provenance_path = tmp_path / "provenance.json"
+    provenance_path.write_text(_PROVENANCE_PREDICATE)
+    prov = attest(ocx, stack, token, pkg, provenance_path, predicate_type="slsaprovenance1")
+    assert prov.returncode == 0, f"provenance attest setup failed: {prov.stderr}"
+
+
+def test_policy_covered_valid_signature_with_attestations_installs(
+    ocx: OcxRunner, published_package: PackageInfo,
+    sigstore_stack: SigstoreStack, identity_token: Path, tmp_path: Path,
+) -> None:
+    """A matching policy + valid signature installs even with attestations
+    attached to the same subject (S-015): `auto_verify.rs` sets
+    `VerifyContentMode::Signature`, so referrer discovery must not be
+    confused by the attestation referrers sharing the manifest.
+
+    Paired with the mismatch test below on the identical attested subject:
+    together they are this suite's established positive-evidence-of-
+    verification pattern (mirrors `test_policy_covered_valid_signature_installs`
+    / `test_policy_covered_identity_mismatch_aborts_fail_closed` above) — a
+    silently-skipped verify would make BOTH exit 0, so the pair is what
+    proves verification actually ran rather than "attestations happened to
+    not matter here".
+    """
+    pkg = published_package
+    _sign(ocx, sigstore_stack, identity_token, pkg)
+    _attach_two_attestations(ocx, sigstore_stack, identity_token, pkg, tmp_path)
+    _write_operator_policy(ocx, _policy_scope(ocx, pkg), sigstore_stack.identity, sigstore_stack.issuer)
+
+    result = _run(ocx, "install", pkg.short, extra_env=_tuf(sigstore_stack))
+    assert result.returncode == 0, (
+        f"policy-covered valid signature on an attestation-carrying subject must "
+        f"install, got {result.returncode}\nstderr: {result.stderr.strip()}"
+    )
+
+
+def test_policy_covered_identity_mismatch_with_attestations_aborts(
+    ocx: OcxRunner, published_package: PackageInfo,
+    sigstore_stack: SigstoreStack, identity_token: Path, tmp_path: Path,
+) -> None:
+    """Same attested subject, wrong policy identity -> still aborts fail-closed.
+
+    The half of the S-015 pair proving verification did not silently pass:
+    if attestations somehow crowded out signature verification, this would
+    exit 0 instead of 77.
+    """
+    pkg = published_package
+    _sign(ocx, sigstore_stack, identity_token, pkg)
+    _attach_two_attestations(ocx, sigstore_stack, identity_token, pkg, tmp_path)
+    _write_operator_policy(ocx, _policy_scope(ocx, pkg), BAD_IDENTITY, sigstore_stack.issuer)
+
+    result = _run(ocx, "install", pkg.short, extra_env=_tuf(sigstore_stack))
+    assert result.returncode == 77, (
+        f"identity mismatch on an attestation-carrying subject must still abort "
+        f"with exit 77, got {result.returncode}\nstderr: {result.stderr.strip()}"
     )
     _assert_no_partial_state(ocx, pkg)

@@ -11,6 +11,7 @@ the real Sigstore stack (`sigstore` compose profile) through the
 """
 from __future__ import annotations
 
+import base64
 import json
 import re
 import subprocess
@@ -19,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from src.registry import list_referrers
+from src.registry import get_blob, get_manifest, list_referrers
 from src.runner import OcxRunner, PackageInfo, current_platform
 from tests.fixtures import adversarial
 from tests.fixtures.sigstore_stack import SigstoreStack
@@ -730,11 +731,11 @@ def test_sign_no_tty_skips_browser_fallback_exits_77(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Rekor unavailable DURING SIGN — exit 83 (RekorUnavailable)
+# Rekor unavailable DURING SIGN — exit 83 (TransparencyLogUnavailable)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_sign_rekor_unavailable_exits_83(
+def test_sign_transparency_log_unavailable_exits_83(
     ocx: OcxRunner,
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
@@ -744,7 +745,7 @@ def test_sign_rekor_unavailable_exits_83(
 
     Signing requires a Rekor transparency-log entry; when the log is down the
     sign cannot complete. This is a service-availability failure (retry may
-    help), so it maps to ``RekorUnavailable`` (83), distinct from a data
+    help), so it maps to ``TransparencyLogUnavailable`` (83), distinct from a data
     failure. Fulcio stays real, so the failure is isolated to the log step.
     """
     pkg = published_package
@@ -763,7 +764,7 @@ def test_sign_rekor_unavailable_exits_83(
         env=ocx.env,
     )
     assert result.returncode == 83, (
-        f"expected exit 83 (RekorUnavailable) when Rekor 503s during sign, got "
+        f"expected exit 83 (TransparencyLogUnavailable) when Rekor 503s during sign, got "
         f"{result.returncode}\nstderr: {result.stderr.strip()}"
     )
 
@@ -868,3 +869,121 @@ def test_sign_still_accepts_the_explicitly_named_local_stack(
     envelope = ocx.json("package", "sign", *sigstore_stack.sign_args(identity_token), published_package.short)
     assert envelope["exit_code"] == 0, envelope
     assert envelope["data"]["bundle_digest"].startswith("sha256:"), envelope
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SOURCE_DATE_EPOCH — one instant, taken once, reaching every place it belongs
+# ──────────────────────────────────────────────────────────────────────────────
+
+#: An arbitrary fixed instant, and its RFC 3339 rendering with an explicit `Z`
+#: (Go's `time.RFC3339`, second precision — the form cosign writes). Spelled out
+#: rather than computed so the test asserts against a literal a human checked,
+#: not against a second copy of the formatter under test.
+SOURCE_DATE_EPOCH = "1740000000"
+SOURCE_DATE_EPOCH_RFC3339 = "2025-02-19T21:20:00Z"
+
+#: Where a bundle push records its instant. Mirrors `ANNOTATION_CREATED`.
+ANNOTATION_CREATED = "org.opencontainers.image.created"
+
+
+def _bundle_referrer_manifest(ocx: OcxRunner, pkg: PackageInfo) -> dict:
+    """The one Sigstore-bundle referrer manifest attached to ``pkg``'s platform manifest."""
+    subject_digest, _size = adversarial.subject_of(ocx.registry, pkg.repo, pkg.tag)
+    status, index = list_referrers(
+        ocx.registry, pkg.repo, subject_digest, artifact_type=SIGSTORE_BUNDLE_V03
+    )
+    assert status == 200 and index is not None, f"referrers list failed ({status})"
+    manifests = index.get("manifests") or []
+    assert len(manifests) == 1, f"expected exactly 1 bundle referrer, found {len(manifests)}"
+    return get_manifest(ocx.registry, pkg.repo, manifests[0]["digest"])
+
+
+def test_sign_source_date_epoch_pins_the_created_annotation(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """`SOURCE_DATE_EPOCH` in the child's environment fixes the `created` annotation.
+
+    Black-box on purpose. `bundle_now()` reads the variable straight off the
+    process environment (`std::env::var_os`), which no unit test may set —
+    edition 2024 makes `env::set_var` unsafe precisely because it races every
+    other thread — so a child process with the variable in its environment is
+    the only honest way to exercise the read. That leaves the routing itself
+    (does the value actually reach the annotation?) covered nowhere but here.
+    """
+    pkg = published_package
+    result = subprocess.run(
+        [
+            str(ocx.binary), "--format", "json", "package", "sign",
+            *sigstore_stack.sign_args(identity_token), pkg.short,
+        ],
+        capture_output=True, text=True,
+        env={**ocx.env, "SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH},
+    )
+    assert result.returncode == 0, f"sign failed: {result.stderr}"
+
+    annotations = _bundle_referrer_manifest(ocx, pkg).get("annotations") or {}
+    assert annotations.get(ANNOTATION_CREATED) == SOURCE_DATE_EPOCH_RFC3339, (
+        f"SOURCE_DATE_EPOCH={SOURCE_DATE_EPOCH} must stamp "
+        f"{SOURCE_DATE_EPOCH_RFC3339}; got {annotations.get(ANNOTATION_CREATED)!r}. "
+        f"A wall-clock value here means the variable is being ignored."
+    )
+
+
+def test_attest_source_date_epoch_stamps_one_instant_in_both_places(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """The attest path stamps the same instant in the annotation and inside the signature.
+
+    Two renderings of one `bundle_now()` reading: the unsigned
+    `org.opencontainers.image.created` annotation on the referrer manifest, and
+    the `Timestamp` field of the cosign predicate wrapper — which is *inside*
+    the DSSE payload and therefore signed. Two independent clock reads would
+    let one of them stop honouring `SOURCE_DATE_EPOCH` with nothing noticing,
+    so the assertion that matters is that the two agree, not merely that each
+    is right.
+
+    `--type custom` because the wrapper exists only for custom predicates; the
+    other nine types pass the predicate through untouched and carry no
+    `Timestamp` to compare against.
+    """
+    pkg = published_package
+    predicate = tmp_path / "custom.json"
+    predicate.write_text(json.dumps({"hello": "world"}))
+
+    result = subprocess.run(
+        [
+            str(ocx.binary), "--format", "json", "package", "attest",
+            "--platform", current_platform(),
+            "--predicate", str(predicate), "--type", "custom",
+            "--fulcio-url", sigstore_stack.fulcio_url,
+            "--rekor-url", sigstore_stack.rekor_url,
+            "--identity-token-file", str(identity_token),
+            pkg.short,
+        ],
+        capture_output=True, text=True,
+        env={**ocx.env, "SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH},
+    )
+    assert result.returncode == 0, f"attest failed: {result.stderr}"
+
+    manifest = _bundle_referrer_manifest(ocx, pkg)
+    annotations = manifest.get("annotations") or {}
+    assert annotations.get(ANNOTATION_CREATED) == SOURCE_DATE_EPOCH_RFC3339, (
+        f"the attest path must honour SOURCE_DATE_EPOCH too; got "
+        f"{annotations.get(ANNOTATION_CREATED)!r}"
+    )
+
+    bundle = json.loads(get_blob(ocx.registry, pkg.repo, manifest["layers"][0]["digest"]))
+    statement = json.loads(base64.b64decode(bundle["dsseEnvelope"]["payload"]))
+    signed_timestamp = statement["predicate"]["Timestamp"]
+    assert signed_timestamp == SOURCE_DATE_EPOCH_RFC3339, (
+        f"the signed cosign wrapper carries a different instant than the "
+        f"annotation: {signed_timestamp!r} vs {SOURCE_DATE_EPOCH_RFC3339}. One "
+        f"clock read serves both, so a difference means a second one crept in."
+    )

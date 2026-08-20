@@ -47,7 +47,7 @@ class SigstoreStack:
     #: inside it names the address Fulcio resolves. ocx never dials the issuer,
     #: it only compares the string, so the two never have to agree.
     issuer: str
-    #: Directory holding `trusted_root.json`; what `--trusted-root` takes.
+    #: Directory holding `trusted_root.json`; what `--sigstore-trusted-root` takes.
     trust_root: Path
 
     @property
@@ -86,7 +86,7 @@ class SigstoreStack:
         return [
             "--platform", platform or current_platform(),
             "--rekor-url", self.rekor_url,
-            "--trusted-root", str(self.trust_root),
+            "--sigstore-trusted-root", str(self.trust_root),
             "--certificate-identity", self.identity,
             "--certificate-oidc-issuer", self.issuer,
         ]

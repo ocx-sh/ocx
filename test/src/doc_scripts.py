@@ -566,8 +566,10 @@ def run_doc_script(
     Args:
         path: Absolute path to the ``.sh`` script.
         ocx: ``OcxRunner`` instance (test-isolated binary + env).
-        tmp_path: Per-test temporary directory (used for provisioning and as
-            script working directory).
+        tmp_path: Per-test temporary directory (used for provisioning). The
+            script's actual working directory is ``provider.work_dir`` when
+            the provider reports one (setup-family states), else
+            ``tmp_path`` itself (scenario-family states).
 
     Raises:
         DocScriptParseError: Header grammar violation (EX5, EX9).
@@ -604,10 +606,17 @@ def run_doc_script(
     script_env = provider.script_env()
     body = path.read_text()
 
+    # Mirror test_recordings.py's work_dir selection: a setup-family
+    # provider (SetupAdapter) writes every fixture file under its private
+    # `_state` subdir (SP8) and never sees the outer tmp_path at all, so
+    # that subdir — not tmp_path itself — is where a script's relative
+    # paths actually resolve. scenario-family providers report no work_dir
+    # and keep the previous tmp_path behaviour unchanged.
+    cwd = provider.work_dir if provider.work_dir is not None else tmp_path
     result = subprocess.run(
         ["bash", "-c", body],
         env=script_env,
-        cwd=str(tmp_path),
+        cwd=str(cwd),
         capture_output=True,
         text=True,
     )

@@ -160,6 +160,39 @@ def tamper_inclusion_proof(registry: str, repo: str, subject_digest: str, subjec
     _replace_bundle(registry, repo, subject_digest, subject_size, mutate)
 
 
+def shift_integrated_time_outside_certificate_window(
+    registry: str, repo: str, subject_digest: str, subject_size: int, *, seconds_past: int = 3600
+) -> int:
+    """Move the Rekor entry's ``integratedTime`` past the certificate's ``notAfter``.
+
+    Row 13 (CVE-2024-55655): a signature is only trustworthy if the log says it
+    was made while the signing certificate was valid. Everything else — the
+    leaf, the message signature, the logged body, the Merkle proof — stays as
+    the real stack produced it, so a refusal isolates the window check.
+
+    ``integratedTime`` is deliberately the ONE field that is not covered by the
+    logged body: the SET signs it, but the entry body does not contain it, so
+    editing it alone leaves every body-consistency check intact and the run
+    reaches a genuine window comparison rather than dying earlier on a
+    reconstruction mismatch.
+
+    Returns the value written, so the caller can name it in an assertion.
+    """
+    from cryptography import x509
+
+    referrer, bundle = _bundle_of(registry, repo, subject_digest)
+    material = bundle["verificationMaterial"]
+    leaf_b64 = (material.get("certificate") or material["x509CertificateChain"]["certificates"][0])["rawBytes"]
+    not_after = x509.load_der_x509_certificate(base64.b64decode(leaf_b64)).not_valid_after_utc
+    shifted = int(not_after.timestamp()) + seconds_past
+
+    def mutate(target: dict[str, Any]) -> None:
+        _tlog_entry(target)["integratedTime"] = str(shifted)
+
+    _replace_bundle(registry, repo, subject_digest, subject_size, mutate)
+    return shifted
+
+
 def splice_foreign_certificate(
     registry: str, repo: str, subject_digest: str, subject_size: int, leaf_der: bytes
 ) -> None:
@@ -204,7 +237,7 @@ def unreachable_rekor_url() -> str:
 
     The fake stack made Rekor fail by serving a 503 on demand; the real one has
     no such switch, so unavailability is produced by pointing ocx somewhere dead.
-    Connection-refused and 503 both classify as ``RekorUnavailable``, so the exit
+    Connection-refused and 503 both classify as ``TransparencyLogUnavailable``, so the exit
     code under test is unchanged.
 
     Binding then closing is what makes the port free *and* known — an arbitrary

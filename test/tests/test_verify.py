@@ -7,7 +7,7 @@ Contract source: ``.claude/artifacts/adr_oci_referrers_signing_v1.md``
 ``.claude/state/plans/plan_slice1_sign_and_verify.md``.
 
 Trust-root seam: verify runs against the local stack's trusted-root JSON
-(``--trusted-root``), which carries the Fulcio CA and the pinned Rekor key. The
+(``--sigstore-trusted-root``), which carries the Fulcio CA and the pinned Rekor key. The
 one exception is the Rekor-unavailable test, which supplies a document with no
 pinned Rekor key so the key fetch actually happens and can fail.
 """
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -49,19 +50,27 @@ def _verify(
     trusted_root: Path | None = None,
     platform: str | None = None,
     json_format: bool = False,
+    attestation: bool = False,
+    predicate_type: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``package verify``, defaulting every knob to the stack's own values.
 
     ``trusted_root`` points at a different trusted-root document — the way to
     vary what the trust material carries without losing the CT log key.
+
+    ``attestation`` / ``predicate_type`` select the DSSE search and narrow it.
+    Passing ``predicate_type`` without ``attestation`` is rejected by clap
+    (``requires``), so the two are spelled together at every call site.
     """
     env = dict(ocx.env)
-    root = ["--trusted-root", str(trusted_root or stack.trust_root)]
+    root = ["--sigstore-trusted-root", str(trusted_root or stack.trust_root)]
     return subprocess.run(
         [
             str(ocx.binary),
             *(["--format", "json"] if json_format else []),
             "package", "verify",
+            *(["--attestation"] if attestation else []),
+            *(["--type", predicate_type] if predicate_type else []),
             "--platform", platform or current_platform(),
             "--rekor-url", rekor_url or stack.rekor_url,
             *root,
@@ -245,7 +254,7 @@ def test_verify_referrers_unsupported_exits_84(
 def test_verify_error_envelope_golden_shape(
     ocx: OcxRunner, published_package: PackageInfo, sigstore_stack: SigstoreStack
 ) -> None:
-    """Error-branch JSON envelope matches frozen v1 contract (C-S1-1).
+    """Error-branch JSON envelope matches frozen envelope contract (C-S1-1).
 
     Shape check (order-independent, key-presence):
     - Root keys: ``schema_version``, ``command``, ``exit_code``, ``error``.
@@ -307,7 +316,7 @@ def test_verify_success_envelope_golden_shape(
     sigstore_stack: SigstoreStack,
     identity_token: Path,
 ) -> None:
-    """Success-branch JSON envelope matches frozen v1 contract.
+    """Success-branch JSON envelope matches frozen envelope contract.
 
     Shape check:
     - Root keys: ``schema_version``, ``command``, ``exit_code``, ``data``.
@@ -347,7 +356,7 @@ def test_verify_detects_tampered_rekor_set(
     """A tampered Rekor SET → exit 65 (DataError), not exit 83.
 
     RekorSetInvalid is a data-integrity failure (the bundle has been altered) —
-    retry will not help, so it must map to ``DataError`` not ``RekorUnavailable``.
+    retry will not help, so it must map to ``DataError`` not ``TransparencyLogUnavailable``.
     The real log signs what it signs, so the bad SET is made after the fact, by
     corrupting the one field in a bundle that is otherwise entirely authentic.
     """
@@ -443,7 +452,7 @@ def test_verify_invalid_cert_chain_exits_65(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_verify_rekor_unavailable_exits_83(
+def test_verify_transparency_log_unavailable_exits_83(
     ocx: OcxRunner,
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
@@ -466,7 +475,7 @@ def test_verify_rekor_unavailable_exits_83(
         trusted_root=sigstore_stack.trusted_root_without_rekor_key(tmp_path),
     )
     assert verify.returncode == 83, (
-        f"expected exit 83 (RekorUnavailable), got {verify.returncode}\n"
+        f"expected exit 83 (TransparencyLogUnavailable), got {verify.returncode}\n"
         f"stderr: {verify.stderr.strip()}"
     )
 
@@ -600,4 +609,490 @@ def test_verify_malformed_referrer_does_not_block_valid_one(
     assert verify.returncode == 0, (
         f"a malformed referrer must not block the valid signature (ANY-of), "
         f"got {verify.returncode}\nstderr: {verify.stderr.strip()}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Attestation mode — S-009, S-016, S-017
+#
+# `--attestation` and the bare signature mode look for two different kinds of
+# signed content under one artifactType. Every row below asserts the exit code
+# AND the frozen slug: the two modes share exit 79 for "nothing of my kind is
+# here", so the code alone cannot say which search actually ran.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _attest(
+    ocx: OcxRunner,
+    stack: SigstoreStack,
+    token: Path,
+    pkg: PackageInfo,
+    predicate: Path,
+    *,
+    predicate_type: str = "cyclonedx",
+    env: dict[str, str] | None = None,
+) -> dict:
+    """Attach a signed attestation to ``pkg``; return the JSON envelope's ``data``."""
+    result = subprocess.run(
+        [
+            str(ocx.binary), "--format", "json", "package", "attest",
+            "--platform", current_platform(),
+            "--predicate", str(predicate),
+            "--type", predicate_type,
+            "--fulcio-url", stack.fulcio_url,
+            "--rekor-url", stack.rekor_url,
+            "--identity-token-file", str(token),
+            pkg.short,
+        ],
+        capture_output=True, text=True, env=env or ocx.env,
+    )
+    assert result.returncode == 0, f"attest setup failed: {result.stderr}"
+    return json.loads(result.stdout)["data"]
+
+
+def _cyclonedx(padding_bytes: int = 0) -> str:
+    """A minimal valid CycloneDX 1.6 document, optionally padded to a size.
+
+    The padding rides in a string field rather than as trailing bytes so the
+    document stays parseable at every size — a refusal at a cap is then
+    attributable to size alone, never to a parse error arriving with it.
+    """
+    return json.dumps(
+        {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.6",
+            "components": [],
+            "padding": "a" * padding_bytes,
+        }
+    )
+
+
+def test_verify_attestation_verifies_a_published_attestation(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """S-009 happy path: what `attest` published, `verify --attestation` accepts.
+
+    The closing assertion on `VerifyOptions.content` threading (WP8b M4): a
+    revert that hardcodes `VerifyContentMode::Signature` leaves every other
+    attestation row still green — they all assert *refusals*, which a signature-
+    mode search also produces — and reds only here, where a DSSE candidate must
+    actually be found, parsed and verified.
+    """
+    pkg = published_package
+    predicate = tmp_path / "sbom.cdx.json"
+    predicate.write_text(_cyclonedx())
+    published = _attest(ocx, sigstore_stack, identity_token, pkg, predicate)
+
+    verify = _verify(ocx, sigstore_stack, pkg, attestation=True, json_format=True)
+    assert verify.returncode == 0, (
+        f"verify --attestation must accept the attestation `ocx package attest` "
+        f"just published, got {verify.returncode}\n"
+        f"stdout: {verify.stdout.strip()}\nstderr: {verify.stderr.strip()}"
+    )
+    # Exit 0 alone would also be satisfied by a run that verified some *other*
+    # candidate on the subject; the referrer digest names which one was read,
+    # and `attest` reported it, so the two ends are tied together by identity
+    # rather than by both merely succeeding.
+    assert json.loads(verify.stdout)["data"]["referrer_digest"] == published["referrer_digest"], (
+        f"the verified referrer must be the attestation just published "
+        f"({published['referrer_digest']}); got {verify.stdout.strip()}"
+    )
+
+
+def test_verify_attestation_on_a_signature_only_subject_exits_79(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """A subject carrying only a signature has no attestation → 79.
+
+    The signature referrer is a candidate by ``artifactType`` — same media type,
+    same subject — so this is a discrimination test, not a listing one: the
+    bundle is fetched and its content oneof says `messageSignature`, which the
+    attestation mode must refuse to count. The slug separates that from the
+    signature mode's own empty answer, which is `no_signatures_found`.
+    """
+    pkg = published_package
+    _sign(ocx, sigstore_stack, identity_token, pkg)
+
+    verify = _verify(ocx, sigstore_stack, pkg, attestation=True, json_format=True)
+    assert verify.returncode == 79, (
+        f"expected exit 79 (NotFound / AttestationNotFound), got {verify.returncode}\n"
+        f"stderr: {verify.stderr.strip()}"
+    )
+    envelope = json.loads(verify.stdout)
+    assert envelope["error"]["detail"] == "attestation_not_found", (
+        f"a signature must not satisfy an attestation search; got {envelope['error']}"
+    )
+
+
+def test_verify_signature_mode_on_an_attestations_only_subject_exits_79(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """The converse: attestations present, no signature → 79 `no_signatures_found`.
+
+    Renamed from `no_usable_bundle` at WP6 (exit unchanged, wording accurate).
+    Asserted here because the rename is a wire contract — a script branching on
+    the slug breaks silently if it drifts back.
+    """
+    pkg = published_package
+    predicate = tmp_path / "sbom.cdx.json"
+    predicate.write_text(_cyclonedx())
+    _attest(ocx, sigstore_stack, identity_token, pkg, predicate)
+
+    verify = _verify(ocx, sigstore_stack, pkg, json_format=True)
+    assert verify.returncode == 79, (
+        f"expected exit 79 (NotFound), got {verify.returncode}\n"
+        f"stderr: {verify.stderr.strip()}"
+    )
+    envelope = json.loads(verify.stdout)
+    assert envelope["error"]["detail"] == "no_signatures_found", (
+        f"an attestation must not satisfy a signature search; got {envelope['error']}"
+    )
+
+
+def test_verify_attestation_type_narrowing_miss_exits_79(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """S-017: `--type` naming a type nothing carries → 79 `attestation_not_found`.
+
+    A CycloneDX attestation is published and asked for as SPDX. Narrowing is by
+    the *signed* payload, so the miss is decided after the envelope is verified,
+    and it records nothing — no `predicate_type_mismatch` reaches the caller,
+    the aggregate is simply "no attestation of that type". Asserting the slug is
+    what distinguishes a genuine narrowing miss from a verification failure that
+    happens to share exit 65's neighbourhood.
+    """
+    pkg = published_package
+    predicate = tmp_path / "sbom.cdx.json"
+    predicate.write_text(_cyclonedx())
+    _attest(ocx, sigstore_stack, identity_token, pkg, predicate)
+
+    verify = _verify(
+        ocx, sigstore_stack, pkg, attestation=True, predicate_type="spdx", json_format=True,
+    )
+    assert verify.returncode == 79, (
+        f"expected exit 79 for a --type narrowing miss, got {verify.returncode}\n"
+        f"stderr: {verify.stderr.strip()}"
+    )
+    envelope = json.loads(verify.stdout)
+    assert envelope["error"]["detail"] == "attestation_not_found", (
+        f"S-017: a narrowing miss reports attestation_not_found, not a mismatch "
+        f"kind; got {envelope['error']}"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# S-016 — the byte caps are chosen by mode, not shared
+# ──────────────────────────────────────────────────────────────────────────────
+
+#: `MAX_BUNDLE_SIZE_BYTES` (`oci/sign/bundle.rs`) — the per-candidate bundle cap
+#: a signature-mode run enforces. The attestation mode's own cap
+#: (`MAX_ATTESTATION_ENVELOPE_BYTES`, 32 MiB) is 64x larger; a bundle between the
+#: two is the only input that can tell which one is in force.
+SIGNATURE_BUNDLE_CAP_BYTES = 512 * 1024
+
+
+def test_verify_attestation_cap_is_selected_by_mode_not_shared(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """S-016: one bundle, over the signature cap and under the attestation cap.
+
+    A padded CycloneDX predicate makes the published bundle exceed
+    ``MAX_BUNDLE_SIZE_BYTES`` while staying far under
+    ``MAX_ATTESTATION_ENVELOPE_BYTES``. That single artifact is then asked for
+    both ways, and the two answers are the assertion:
+
+    * ``--attestation`` verifies it — only possible if the 32 MiB cap is in
+      force, since the blob is refused before parsing under the 512 KiB one;
+    * the bare signature mode refuses it as a **bundle read**, not as an empty
+      search — the blob is over *its* cap, so the read is cut short.
+
+    The slug on that second answer is the whole discrimination, which is why it
+    is asserted rather than a bare non-zero. Under a shared (hoisted) cap the
+    signature run still fails — it reaches the bundle, finds a DSSE envelope
+    where it wanted a message signature, and reports the ordinary
+    ``no_signatures_found`` (79). A non-zero assertion passes in both worlds
+    and has no reachable red for the property this test exists to prove.
+
+    Hoisting the attestation numbers into the shared path would silently relax
+    `ocx package verify`, and nothing else in this file would notice: every
+    other bundle here is a few kilobytes, so both caps accept them.
+    """
+    pkg = published_package
+    predicate = tmp_path / "big.cdx.json"
+    # 1 MiB of padding: comfortably past the 512 KiB signature cap even before
+    # base64 expands the payload, and three orders of magnitude below 32 MiB.
+    predicate.write_text(_cyclonedx(padding_bytes=1024 * 1024))
+    data = _attest(ocx, sigstore_stack, identity_token, pkg, predicate)
+
+    manifest = get_manifest(ocx.registry, pkg.repo, data["referrer_digest"])
+    bundle_size = manifest["layers"][0]["size"]
+    assert bundle_size > SIGNATURE_BUNDLE_CAP_BYTES, (
+        f"the fixture must exceed the signature cap or it proves nothing about "
+        f"cap selection: bundle is {bundle_size} bytes, cap is "
+        f"{SIGNATURE_BUNDLE_CAP_BYTES}"
+    )
+
+    attestation_mode = _verify(ocx, sigstore_stack, pkg, attestation=True, json_format=True)
+    assert attestation_mode.returncode == 0, (
+        f"a {bundle_size}-byte bundle is under the attestation cap and must "
+        f"verify; got {attestation_mode.returncode}\n"
+        f"stdout: {attestation_mode.stdout.strip()}\n"
+        f"stderr: {attestation_mode.stderr.strip()}"
+    )
+
+    signature_mode = _verify(ocx, sigstore_stack, pkg, json_format=True)
+    assert signature_mode.returncode == 65, (
+        f"the same over-cap bundle must be refused by a signature-mode run as a "
+        f"data error; got {signature_mode.returncode}\n"
+        f"stdout: {signature_mode.stdout.strip()}"
+    )
+    detail = json.loads(signature_mode.stdout)["error"]["detail"]
+    assert detail == "bundle_parse_failed", (
+        f"the refusal must come from the capped bundle read, which is what "
+        f"proves the signature cap is still 512 KiB; got {detail!r}. "
+        f"`no_signatures_found` here means both modes share one cap — the run "
+        f"read the whole blob and only then rejected its content kind."
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Certificate validity window — integratedTime outside [notBefore, notAfter]
+# ──────────────────────────────────────────────────────────────────────────────
+
+#: The two slugs that can carry a window refusal, and which layer each names.
+#: `cert_chain_invalid` is `sigstore`'s own check (`verify_digest` step 7);
+#: `certificate_validity_window` is ocx's re-assertion in `verify_one_referrer`.
+WINDOW_REFUSAL_SLUGS = ("cert_chain_invalid", "certificate_validity_window")
+
+
+def test_verify_integrated_time_outside_certificate_window_is_refused(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """A log entry timestamped after the certificate expired → exit 65.
+
+    CVE-2024-55655: a signature is only evidence if the log says it was made
+    while the signing certificate was valid. ``integratedTime`` is the one entry
+    field the logged body does not contain, so shifting it past ``notAfter``
+    leaves every body-consistency and Merkle check intact and the run reaches a
+    real window comparison.
+
+    Two independent implementations enforce that window over byte-identical
+    inputs — `sigstore`'s `verify_digest` step 7 and ocx's own row-13
+    re-assertion (`tlog::verify_integrated_time_within_certificate`). The
+    security property is that the artifact is refused, and that is asserted
+    strictly. Which of the two catches it is an implementation fact, pinned
+    separately and loudly: with `sigstore` 0.14 the delegated check runs first
+    (`pipeline.rs`, `verifier.verify` ahead of `verify_rekor_set` and the
+    recheck), so the slug is `cert_chain_invalid`. A flip to
+    `certificate_validity_window` is not a regression — it means `sigstore`
+    stopped checking and ocx's backstop earned its keep, which is exactly what
+    it exists for. Update the pin, do not weaken the assertion.
+    """
+    pkg = published_package
+    _sign(ocx, sigstore_stack, identity_token, pkg)
+    subject_digest, subject_size = adversarial.subject_of(ocx.registry, pkg.repo, pkg.tag)
+    shifted_to = adversarial.shift_integrated_time_outside_certificate_window(
+        ocx.registry, pkg.repo, subject_digest, subject_size,
+    )
+
+    verify = _verify(ocx, sigstore_stack, pkg, json_format=True)
+    assert verify.returncode == 65, (
+        f"an integratedTime of {shifted_to} lies past the certificate's notAfter "
+        f"and must be refused as a data error; got {verify.returncode}\n"
+        f"stderr: {verify.stderr.strip()}"
+    )
+    detail = json.loads(verify.stdout)["error"]["detail"]
+    assert detail in WINDOW_REFUSAL_SLUGS, (
+        f"exit 65 must be the validity-window refusal, not an unrelated data "
+        f"error; got {detail!r}"
+    )
+    assert detail == "cert_chain_invalid", (
+        f"expected `sigstore`'s own step-7 check to catch this first, got "
+        f"{detail!r}. If this is `certificate_validity_window`, `sigstore` no "
+        f"longer performs the check and ocx's row-13 re-assertion is now the "
+        f"only one — re-pin this line and say so in the changelog."
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# S-008 / S-019 — `package sbom` refusals, and the envelope that reports them
+#
+# Both rows are about one property: the JSON envelope's `exit_code` is the code
+# the process actually returns. Before WP9b these disagreed — a CLI-local
+# `CommandError` rendered as `1`/`internal` while the process exited 64 or 65
+# (CLI-04) — so a consumer branching on the envelope read a different outcome
+# than a consumer branching on `$?`.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _sbom_args(stack: SigstoreStack, pkg: PackageInfo) -> list[str]:
+    """`package sbom` with the stack's trust material — the shared prefix."""
+    return [
+        "package", "sbom",
+        "--platform", current_platform(),
+        "--rekor-url", stack.rekor_url,
+        "--sigstore-trusted-root", str(stack.trust_root),
+        "--certificate-identity", stack.identity,
+        "--certificate-oidc-issuer", stack.issuer,
+        pkg.short,
+    ]
+
+
+def _run_with_stdout_on_a_terminal(ocx: OcxRunner, *args: str) -> tuple[int, str]:
+    """Run ocx with a pseudo-terminal on **stdout**; return `(exit code, stdout)`.
+
+    The mirror of `test_self_activate.py`'s interactive helper, which puts the
+    pty on stderr: the branch under test here asks `stdout().is_terminal()`, and
+    that is false in every pipe — so a plain captured subprocess exercises the
+    allow branch while reading as though it covered the refusal.
+
+    stderr stays a pipe and is discarded, which is what keeps the returned
+    string parseable: diagnostics share the terminal with the payload the
+    moment both are pointed at one pty.
+    """
+    import pty
+
+    primary, secondary = pty.openpty()
+    try:
+        result = subprocess.run(
+            [str(ocx.binary), *args],
+            stdout=secondary, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+            env=ocx.env,
+        )
+        # Close the write end first: the child has exited, and while any writer
+        # remains open the read below would block instead of reporting EOF.
+        os.close(secondary)
+        secondary = -1
+        chunks: list[bytes] = []
+        while True:
+            try:
+                data = os.read(primary, 4096)
+            except OSError:  # EIO — every writer is gone, which is this pty's EOF
+                break
+            if not data:
+                break
+            chunks.append(data)
+    finally:
+        if secondary != -1:
+            os.close(secondary)
+        os.close(primary)
+    # A pty's line discipline maps \n to \r\n on the way out and does nothing
+    # else, so dropping both rejoins the single-line envelope losslessly.
+    return result.returncode, b"".join(chunks).decode(errors="replace").replace("\r", "").replace("\n", "")
+
+
+def test_sbom_output_to_a_terminal_is_refused_and_the_envelope_agrees(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+) -> None:
+    """S-008 + S-019: `--output -` on a TTY → exit 64, and the envelope says 64.
+
+    Predicate bytes are publisher-authored and unsanitized, so a terminal is the
+    one destination they may not reach (CWE-150). The refusal is a *usage*
+    error, not a data one: the document is fine, the destination is not.
+
+    Driven through a real pseudo-terminal because `is_terminal()` is false in
+    every pipe, which is exactly what a captured-subprocess test gives — a test
+    that ran without a pty would assert against the allow branch while reading
+    as if it covered the refusal. Nothing needs to be published first: the check
+    runs before the network round-trip, so this also pins that ordering.
+    """
+    returncode, terminal = _run_with_stdout_on_a_terminal(
+        ocx, "--format", "json", *_sbom_args(sigstore_stack, published_package), "--output", "-",
+    )
+    assert returncode == 64, (
+        f"writing raw predicate bytes to a terminal must be refused as a usage "
+        f"error (64), got {returncode}\nterminal: {terminal[:400]}"
+    )
+    envelope = json.loads(terminal)
+    assert envelope["exit_code"] == 64, (
+        f"the envelope's exit_code must be the code the process returned "
+        f"({returncode}); got {envelope['exit_code']} — CLI-04"
+    )
+    assert envelope["error"]["kind"] == "usage_error", (
+        f"the destination is the problem, not the data; got {envelope['error']}"
+    )
+
+
+def test_sbom_summary_on_a_non_cyclonedx_predicate_is_partial_failure_not_a_hard_error(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """S-019: `--summary` over a predicate the CycloneDX reader cannot parse
+    exits 0 with that one entry moved to ``refused`` -- never a hard failure.
+
+    WP-R5 correction: this test previously asserted exit 65 with a top-level
+    ``error`` envelope, a contract `--summary` no longer has -- per-candidate
+    independence (PKG-22) means one unreadable document costs its OWN entry,
+    not the run, the same correction already applied to
+    ``test_sbom.py::test_sbom_summary_refuses_a_non_cyclonedx_predicate_but_listing_still_works``.
+    That test covers an SPDX predicate; this one is kept as the DISTINCT
+    ``custom`` predicate-type case -- proving the partial-failure treatment
+    is not special-cased to one foreign type.
+
+    A `custom` attestation is the vehicle: it is signed and verifiable like any
+    other, so the run reaches the summary step and refuses there rather than
+    earlier -- which is what makes the refusal attributable to the reader.
+    """
+    pkg = published_package
+    predicate = tmp_path / "not-a-bom.json"
+    predicate.write_text(json.dumps({"hello": "world"}))
+    attested = _attest(ocx, sigstore_stack, identity_token, pkg, predicate, predicate_type="custom")
+
+    result = subprocess.run(
+        [str(ocx.binary), "--format", "json", *_sbom_args(sigstore_stack, pkg), "--summary"],
+        capture_output=True, text=True, env=ocx.env,
+    )
+    assert result.returncode == 0, (
+        f"an unreadable document refuses its own entry, not the run, got "
+        f"{result.returncode}\nstdout: {result.stdout.strip()}\n"
+        f"stderr: {result.stderr.strip()}"
+    )
+    envelope = json.loads(result.stdout)
+    assert envelope["exit_code"] == 0, (
+        f"the envelope's exit_code must match the process code; got "
+        f"{envelope['exit_code']} — CLI-04"
+    )
+    data = envelope["data"]
+    assert data["summary"] == {
+        "status": "partial_failure", "exit_code": 0, "total": 1, "verified": 0, "refused": 1,
+    }
+    assert data["entries"] == [], "nothing summarized, so nothing is listed as summarized"
+
+    [refusal] = data["refused"]
+    assert refusal["reason_kind"] == "sbom_summary_failed", (
+        f"a script branches on the slug, got: {refusal!r}"
+    )
+    assert refusal["referrer_digest"] == attested["referrer_digest"]
+    # Without the offending type in the message the operator cannot tell which
+    # of several attestations was unreadable.
+    assert "cosign.sigstore.dev/attestation" in refusal["reason"], (
+        f"the refusal must name the predicate type it could not read; got "
+        f"{refusal['reason']!r}"
     )
