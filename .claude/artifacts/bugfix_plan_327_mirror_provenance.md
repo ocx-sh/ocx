@@ -2,10 +2,10 @@
 
 ## Status
 
-- **State**: executing
+- **State**: complete — awaiting owner push/PR
 - **Branch**: `fix/327-mirror-fetch-provenance` (fork: `ocx/integration` in `external/rust-oci-client`)
 - **Issue**: https://github.com/ocx-sh/ocx/issues/327
-- **Progress**: WP0–WP6 done (fork 1f51f32, c8a97d3; ocx cc486d99, e4918a1c, c9260164, 2a578169). WP7 (docs) with the docs agent.
+- **Progress**: WP0–WP7 done. Review round 1 (opus): 1 Block + 1 Warn + 1 Suggest — fixed (fd531d2c, fork rewritten to 693f842+6522f93). Codex terra gate: 3 findings — fixed (d7817bc5, fork b2ebb77+485d2a2). All gates green: fork cargo test 94/1 ignored + clippy clean; ocx 197 client tests; task verify --force 2208 passed; pytest mirror suite 11 passed.
 - **Last update**: 2026-08-21
 
 ## Context
