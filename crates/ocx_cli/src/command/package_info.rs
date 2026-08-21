@@ -75,7 +75,7 @@ impl PackageInfo {
                         .await
                         .map_err(|e| ocx_lib::error::file_error(&temp_dir, e))?;
                     let publisher = Publisher::new(client);
-                    publisher.pull_description(&identifier, &temp_dir).await
+                    publisher.pull_description_mirrored(&identifier, &temp_dir).await
                 }
                 .await;
                 (index, result)

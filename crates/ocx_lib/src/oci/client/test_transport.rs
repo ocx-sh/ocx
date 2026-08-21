@@ -30,7 +30,22 @@ pub(crate) struct StubTransportInner {
     /// as happily against an unordered implementation — proving nothing.
     pub manifest_delays: HashMap<String, std::time::Duration>,
     /// Digest string → blob bytes (written to file by `pull_blob_to_file`).
+    ///
+    /// Content only: which *repository* holds a blob is a separate question,
+    /// answered by [`blob_locations`](Self::blob_locations).
     pub blobs: HashMap<String, Vec<u8>>,
+    /// `"<registry>/<repository>"` → the digests it holds, for `head_blob`.
+    ///
+    /// `None` — the default — makes `head_blob` answer from `blobs` alone: one
+    /// global store, which is right for every test with a single registry in
+    /// play. `Some` scopes presence per repository, which a registry-to-registry
+    /// copy needs, because there the whole question is whether the *target*
+    /// already has a blob the *source* obviously does. `Option` rather than an
+    /// empty map so "not configured" and "configured, holds nothing" stay
+    /// distinguishable — an empty map would make a copy test that forgot to set
+    /// it up pass for the wrong reason.
+    pub blob_locations: Option<HashMap<String, std::collections::BTreeSet<String>>>,
+
     /// Digest string → read-boundary plan for `pull_blob_streaming`.
     ///
     /// When a plan exists for a digest, the stub yields exactly those chunks in
@@ -73,6 +88,34 @@ pub(crate) struct StubTransportInner {
     pub mount_results: Vec<Result<MountOutcome>>,
     /// Log of `mount_blob` calls: `(target_repository, source_repository, digest)`.
     pub mount_calls: Vec<(String, String, String)>,
+    /// `"<repository>@<subject digest>"` → referrer descriptors for that subject.
+    ///
+    /// Seeded directly to stand in for a source registry's referrers index;
+    /// grown by `push_referrer_manifest` when `capture_pushes` is set, which is
+    /// what lets a test push a referrer and then list it back.
+    pub referrers: HashMap<String, Vec<oci::Descriptor>>,
+    /// When true, both referrer methods fail with
+    /// [`ClientError::ReferrersUnsupported`] — a registry with no OCI 1.1
+    /// Referrers API. Distinct from an empty `referrers` map, which is a
+    /// supporting registry answering "no referrers"; conflating the two is the
+    /// bug the hard error exists to prevent.
+    pub referrers_unsupported: bool,
+}
+
+/// Keys [`StubTransportInner::blob_locations`].
+///
+/// Registry *and* repository: a promotion routinely copies `team/demo` on one
+/// host to `team/demo` on another, so a repository-only key would report the
+/// target as already holding every blob the source holds.
+pub(crate) fn blob_location_key(image: &oci::native::Reference) -> String {
+    format!("{}/{}", image.resolve_registry(), image.repository())
+}
+
+/// Keys [`StubTransportInner::referrers`]. Repository-scoped, because a
+/// referrer belongs to a subject in a repository — not to whatever tag the
+/// caller's reference happened to carry.
+pub(crate) fn referrers_key(image: &oci::native::Reference, subject_digest: &oci::Digest) -> String {
+    format!("{}@{}", image.repository(), subject_digest)
 }
 
 /// Shared data handle for [`StubTransport`].
@@ -238,9 +281,18 @@ impl OciTransport for StubTransport {
         let digest_key = digest.to_string();
         self.record(&format!("head_blob:{}", digest_key));
         let inner = self.data.read();
-        match inner.blobs.get(&digest_key) {
-            Some(blob) => Ok(blob.len() as u64),
-            None => Err(ClientError::blob_not_found(image, digest)),
+        let present = match &inner.blob_locations {
+            Some(locations) => locations
+                .get(&blob_location_key(image))
+                .is_some_and(|digests| digests.contains(&digest_key)),
+            None => inner.blobs.contains_key(&digest_key),
+        };
+        match (present, inner.blobs.get(&digest_key)) {
+            (true, Some(blob)) => Ok(blob.len() as u64),
+            // Listed as present but with no seeded content: still a HEAD hit, and
+            // the size is all a caller gets from it.
+            (true, None) => Ok(0),
+            (false, _) => Err(ClientError::blob_not_found(image, digest)),
         }
     }
 
@@ -318,23 +370,27 @@ impl OciTransport for StubTransport {
     ) -> Result<String> {
         self.record("push_manifest_raw");
         let digest = Algorithm::Sha256.hash(&data).to_string();
-        if self.data.read().capture_pushes {
-            self.data
-                .write()
-                .manifests
-                .insert(image.to_string(), (data, digest.clone()));
+        // Consult the queued outcome before recording: a manifest push that
+        // fails did not land, and storing it first made a failed push
+        // indistinguishable from a successful one in `manifests` — which is
+        // what stopped a test modelling a failed index merge.
+        let outcome = {
+            let mut inner = self.data.write();
+            if inner.push_results.is_empty() {
+                Ok(digest.clone())
+            } else {
+                inner.push_results.remove(0)
+            }
+        };
+        if outcome.is_ok() && self.data.read().capture_pushes {
+            self.data.write().manifests.insert(image.to_string(), (data, digest));
         }
-        let mut inner = self.data.write();
-        if inner.push_results.is_empty() {
-            Ok(digest)
-        } else {
-            inner.push_results.remove(0)
-        }
+        outcome
     }
 
     async fn push_blob(
         &self,
-        _image: &oci::native::Reference,
+        image: &oci::native::Reference,
         data: Vec<u8>,
         digest: &oci::Digest,
         on_progress: super::transport::ProgressFn,
@@ -342,7 +398,34 @@ impl OciTransport for StubTransport {
         self.record(&format!("push_blob:{}", digest));
         // Simulate progress: report full size in one shot.
         on_progress(data.len() as u64);
+        // A pushed blob is present in the target repository afterwards, so a
+        // second copy of the same content HEADs it and skips the upload. Without
+        // this an idempotency test could never observe the skip.
+        {
+            let mut inner = self.data.write();
+            let digest_key = digest.to_string();
+            inner.blobs.entry(digest_key.clone()).or_insert_with(|| data.clone());
+            if let Some(locations) = inner.blob_locations.as_mut() {
+                locations
+                    .entry(blob_location_key(image))
+                    .or_default()
+                    .insert(digest_key);
+            }
+        }
         self.next_push_result()
+    }
+
+    /// Buffers, because a stub's blobs are already in memory. Stated here
+    /// rather than inherited: the trait has no default, so a real transport
+    /// cannot reach this shape by forgetting to write one.
+    async fn push_blob_from_path(
+        &self,
+        image: &oci::native::Reference,
+        path: &std::path::Path,
+        digest: &oci::Digest,
+        on_progress: super::transport::ProgressFn,
+    ) -> Result<String> {
+        super::transport::push_blob_buffered(self, image, path, digest, on_progress).await
     }
 
     async fn mount_blob(
@@ -358,33 +441,222 @@ impl OciTransport for StubTransport {
             source_repository.to_string(),
             digest.to_string(),
         ));
-        if inner.mount_results.is_empty() {
+        let outcome = if inner.mount_results.is_empty() {
             Ok(MountOutcome::UploadRequired)
         } else {
             inner.mount_results.remove(0)
+        };
+        if matches!(outcome, Ok(MountOutcome::Mounted))
+            && let Some(locations) = inner.blob_locations.as_mut()
+        {
+            locations
+                .entry(blob_location_key(image))
+                .or_default()
+                .insert(digest.to_string());
         }
+        outcome
     }
 
     async fn push_referrer_manifest(
         &self,
-        _image: &oci::native::Reference,
-        _subject_digest: &oci::Digest,
-        _manifest_bytes: &[u8],
-        _media_type: &str,
+        image: &oci::native::Reference,
+        subject_digest: &oci::Digest,
+        manifest_bytes: &[u8],
+        media_type: &str,
     ) -> Result<oci::Descriptor> {
-        unimplemented!("push_referrer_manifest — Phase 5 adds builder-mode capture to StubTransport")
+        self.record("push_referrer_manifest");
+        if self.data.read().referrers_unsupported {
+            return Err(ClientError::ReferrersUnsupported {
+                registry: image.resolve_registry().to_string(),
+            });
+        }
+        let digest = Algorithm::Sha256.hash(manifest_bytes).to_string();
+        let size = i64::try_from(manifest_bytes.len()).map_err(|_| {
+            ClientError::InvalidManifest(format!(
+                "referrer manifest size {} exceeds i64::MAX",
+                manifest_bytes.len()
+            ))
+        })?;
+        let descriptor = oci::Descriptor {
+            media_type: media_type.to_string(),
+            digest: digest.clone(),
+            size,
+            urls: None,
+            // A real registry copies `artifactType` out of the manifest into the
+            // referrers-index descriptor, and that is the field `list_referrers`
+            // filters on — so a stub that left it `None` would make every
+            // filtered listing come back empty and read as "nothing to copy".
+            artifact_type: referrer_artifact_type(manifest_bytes),
+            annotations: None,
+        };
+        if self.data.read().capture_pushes {
+            let mut inner = self.data.write();
+            inner.manifests.insert(
+                image.clone_with_digest(digest).to_string(),
+                (manifest_bytes.to_vec(), descriptor.digest.clone()),
+            );
+            inner
+                .referrers
+                .entry(referrers_key(image, subject_digest))
+                .or_default()
+                .push(descriptor.clone());
+        }
+        Ok(descriptor)
     }
 
     async fn list_referrers(
         &self,
-        _image: &oci::native::Reference,
-        _subject_digest: &oci::Digest,
-        _artifact_type: Option<&str>,
+        image: &oci::native::Reference,
+        subject_digest: &oci::Digest,
+        artifact_type: Option<&str>,
     ) -> Result<Vec<oci::Descriptor>> {
-        unimplemented!("list_referrers — Phase 5 adds builder-mode referrer injection")
+        self.record("list_referrers");
+        let inner = self.data.read();
+        if inner.referrers_unsupported {
+            return Err(ClientError::ReferrersUnsupported {
+                registry: image.resolve_registry().to_string(),
+            });
+        }
+        Ok(inner
+            .referrers
+            .get(&referrers_key(image, subject_digest))
+            .map(|descriptors| {
+                descriptors
+                    .iter()
+                    .filter(|descriptor| match artifact_type {
+                        Some(wanted) => descriptor.artifact_type.as_deref() == Some(wanted),
+                        None => true,
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     fn box_clone(&self) -> Box<dyn OciTransport> {
         Box::new(self.clone())
+    }
+}
+
+/// Reads the `artifactType` a referrer manifest declares, mirroring what a
+/// registry lifts into its referrers index. Falls back to `None` for bytes that
+/// are not a JSON object carrying the field.
+fn referrer_artifact_type(manifest_bytes: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(manifest_bytes)
+        .ok()?
+        .get("artifactType")?
+        .as_str()
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oci::Digest;
+
+    fn reference(repository: &str) -> oci::native::Reference {
+        format!("registry.test/{repository}:1.0").parse().expect("reference")
+    }
+
+    fn subject() -> Digest {
+        Digest::Sha256("a".repeat(64))
+    }
+
+    fn signature_manifest() -> Vec<u8> {
+        br#"{"artifactType":"application/vnd.dev.sigstore.bundle.v0.3+json"}"#.to_vec()
+    }
+
+    /// A pushed referrer must be listable afterwards — otherwise every
+    /// copy-then-verify test would pass against a stub that dropped the push.
+    #[tokio::test]
+    async fn pushed_referrer_is_listed_back() {
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let transport = StubTransport::new(data);
+        let image = reference("app");
+
+        let pushed = transport
+            .push_referrer_manifest(
+                &image,
+                &subject(),
+                &signature_manifest(),
+                "application/vnd.oci.image.manifest.v1+json",
+            )
+            .await
+            .expect("push referrer");
+
+        let listed = transport.list_referrers(&image, &subject(), None).await.expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].digest, pushed.digest);
+    }
+
+    /// The `artifact_type` filter must actually discriminate. A stub leaving the
+    /// descriptor's `artifact_type` at `None` returns an empty list for every
+    /// filtered query, which reads as "this subject has no signatures".
+    #[tokio::test]
+    async fn artifact_type_filter_selects_and_rejects() {
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let transport = StubTransport::new(data);
+        let image = reference("app");
+
+        transport
+            .push_referrer_manifest(
+                &image,
+                &subject(),
+                &signature_manifest(),
+                "application/vnd.oci.image.manifest.v1+json",
+            )
+            .await
+            .expect("push referrer");
+
+        let matching = transport
+            .list_referrers(
+                &image,
+                &subject(),
+                Some("application/vnd.dev.sigstore.bundle.v0.3+json"),
+            )
+            .await
+            .expect("list");
+        assert_eq!(matching.len(), 1, "the declared artifactType must match");
+
+        let other = transport
+            .list_referrers(&image, &subject(), Some("application/spdx+json"))
+            .await
+            .expect("list");
+        assert!(other.is_empty(), "a different artifactType must not match");
+    }
+
+    /// "No referrers" and "no Referrers API" are different answers, and the
+    /// second one must not degrade into the first.
+    #[tokio::test]
+    async fn unsupported_registry_errors_where_a_supporting_one_answers_empty() {
+        let supporting = StubTransport::new(StubTransportData::new());
+        assert!(
+            supporting
+                .list_referrers(&reference("app"), &subject(), None)
+                .await
+                .expect("supporting registry answers")
+                .is_empty()
+        );
+
+        let data = StubTransportData::new();
+        data.write().referrers_unsupported = true;
+        let unsupported = StubTransport::new(data);
+        assert!(matches!(
+            unsupported.list_referrers(&reference("app"), &subject(), None).await,
+            Err(ClientError::ReferrersUnsupported { .. })
+        ));
+        assert!(matches!(
+            unsupported
+                .push_referrer_manifest(
+                    &reference("app"),
+                    &subject(),
+                    &signature_manifest(),
+                    "application/vnd.oci.image.manifest.v1+json"
+                )
+                .await,
+            Err(ClientError::ReferrersUnsupported { .. })
+        ));
     }
 }

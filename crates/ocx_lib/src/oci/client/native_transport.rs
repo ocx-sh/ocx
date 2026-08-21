@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -433,7 +433,34 @@ impl OciTransport for NativeTransport {
         digest: &oci::Digest,
         on_progress: ProgressFn,
     ) -> Result<String> {
-        self.do_push_blob(image, data, digest, on_progress).await
+        self.do_push_blob(image, BlobBody::Memory(Bytes::from(data)), digest, on_progress)
+            .await
+    }
+
+    async fn push_blob_from_path(
+        &self,
+        image: &oci::native::Reference,
+        path: &Path,
+        digest: &oci::Digest,
+        on_progress: ProgressFn,
+    ) -> Result<String> {
+        let size = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| ClientError::Io {
+                path: path.to_path_buf(),
+                source: e,
+            })?
+            .len();
+        self.do_push_blob(
+            image,
+            BlobBody::File {
+                path: path.to_path_buf(),
+                size,
+            },
+            digest,
+            on_progress,
+        )
+        .await
     }
 
     async fn mount_blob(
@@ -668,7 +695,7 @@ impl NativeTransport {
     async fn do_push_blob(
         &self,
         image: &oci::native::Reference,
-        data: Vec<u8>,
+        body_source: BlobBody,
         digest: &oci::Digest,
         on_progress: ProgressFn,
     ) -> Result<String> {
@@ -677,7 +704,7 @@ impl NativeTransport {
         match self.client.blob_exists(image, digest_str.as_str()).await {
             Ok(true) => {
                 log::debug!("Blob {} already exists, skipping upload", digest_str);
-                on_progress(data.len() as u64);
+                on_progress(body_source.size());
                 return Ok(digest_str);
             }
             Ok(false) => {
@@ -692,18 +719,25 @@ impl NativeTransport {
             }
         }
 
-        let total = data.len() as u64;
-        // `Bytes` clones are refcounted, so each attempt's fresh body — and the
-        // fallback's — costs a pointer, not a copy of the blob.
-        let data = Bytes::from(data);
+        let total = body_source.size();
+        // Checked, not `as`: a narrowing cast would hand the fork a short length
+        // on a 32-bit target, its `while remaining > 0` loop would upload a
+        // prefix, and the failure would surface as a rejected committing PUT
+        // rather than as the size problem it is (PKG-03).
+        let total_len = usize::try_from(total).map_err(|_| ClientError::LayerSizeExceeded {
+            // A file length never exceeds i64::MAX, so both saturations are
+            // unreachable; they exist so the error stays total.
+            declared: i64::try_from(total).unwrap_or(i64::MAX),
+            maximum: u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+        })?;
 
         let mut attempt: u8 = 0;
         let mut backoff = PUSH_RETRY_INITIAL_BACKOFF;
         loop {
-            let body = progress_body_stream(data.clone(), Arc::clone(&on_progress));
+            let body = body_source.stream(Arc::clone(&on_progress)).await?;
             match self
                 .client
-                .push_blob_stream(image, body, digest_str.as_str(), Some(total as usize))
+                .push_blob_stream(image, body, digest_str.as_str(), Some(total_len))
                 .await
             {
                 Ok(url) => {
@@ -723,9 +757,13 @@ impl NativeTransport {
                         return Err(registry_error(error));
                     }
                     log::warn!("Falling back to buffered push (chunked-then-monolithic retry, no progress)");
+                    // Bounded by the cap checked directly above: the fallback ends in one
+                    // request, so reading a file-backed body into RAM here can never exceed
+                    // what that single request was already going to carry.
+                    let data = body_source.read_all().await?;
                     return self
                         .client
-                        .push_blob(image, data.clone(), digest_str.as_str())
+                        .push_blob(image, data, digest_str.as_str())
                         .await
                         .map_err(registry_error);
                 }
@@ -747,37 +785,98 @@ impl NativeTransport {
     }
 }
 
+/// Where a blob's bytes come from for a streamed push.
+///
+/// Both arms produce a *fresh* body on every attempt, which is what makes the
+/// whole-blob restart in [`NativeTransport::do_push_blob`] replayable: an
+/// in-memory body re-reads a refcounted [`Bytes`], a file-backed body re-opens
+/// the file. Neither ever holds a second copy of the blob.
+enum BlobBody {
+    /// Bytes already in RAM — the ordinary publish path, where the caller built
+    /// them.
+    Memory(Bytes),
+    /// Bytes on disk, streamed frame by frame. Used by transfers (a
+    /// registry-to-registry copy) that spooled the source blob to a file rather
+    /// than buffering a whole layer per concurrent transfer.
+    File { path: PathBuf, size: u64 },
+}
+
+impl BlobBody {
+    fn size(&self) -> u64 {
+        match self {
+            Self::Memory(data) => data.len() as u64,
+            Self::File { size, .. } => *size,
+        }
+    }
+
+    /// Opens a fresh progress-reporting body stream for one upload attempt.
+    async fn stream(&self, on_progress: ProgressFn) -> Result<BlobBodyStream> {
+        match self {
+            Self::Memory(data) => Ok(progress_body_stream(std::io::Cursor::new(data.clone()), on_progress)),
+            Self::File { path, .. } => {
+                let file = tokio::fs::File::open(path).await.map_err(|e| ClientError::Io {
+                    path: path.clone(),
+                    source: e,
+                })?;
+                Ok(progress_body_stream(file, on_progress))
+            }
+        }
+    }
+
+    /// Materializes the whole blob in RAM, for the buffered fallback only.
+    async fn read_all(&self) -> Result<Bytes> {
+        match self {
+            Self::Memory(data) => Ok(data.clone()),
+            Self::File { path, .. } => {
+                let data = tokio::fs::read(path).await.map_err(|e| ClientError::Io {
+                    path: path.clone(),
+                    source: e,
+                })?;
+                Ok(Bytes::from(data))
+            }
+        }
+    }
+}
+
+/// The body stream handed to the fork's `push_blob_stream`.
+///
+/// Boxed because [`BlobBody::stream`] returns one of two concrete stream types
+/// from a single call site.
+type BlobBodyStream =
+    futures::stream::BoxStream<'static, std::result::Result<Bytes, oci_client::errors::OciDistributionError>>;
+
 /// Frame size for the streamed push body — the granularity at which upload
 /// progress advances. Small enough that progress looks smooth, large enough that
 /// per-frame overhead stays negligible against the blob size.
 const UPLOAD_FRAME_SIZE: usize = 128 * 1024;
 
-/// Wraps an in-RAM blob as a progress-reporting byte stream for a streamed push.
+/// Wraps a blob's byte source as a progress-reporting stream for a streamed push.
 ///
-/// The blob is exposed as an [`AsyncRead`](tokio::io::AsyncRead) via
-/// [`std::io::Cursor`], teed through [`ProgressReader`] (cumulative byte count on
-/// every read), then framed into [`UPLOAD_FRAME_SIZE`] chunks by
+/// The source is teed through [`ProgressReader`] (cumulative byte count on every
+/// read), then framed into [`UPLOAD_FRAME_SIZE`] chunks by
 /// [`ReaderStream`](tokio_util::io::ReaderStream). The fork's `push_blob_stream`
 /// pulls from this stream only as the socket accepts more of each streamed PATCH
 /// body (backpressure), so `ProgressReader` fires per [`UPLOAD_FRAME_SIZE`] frame
 /// as it is pulled for the wire — progress leads the actual socket hand-off by at
 /// most one frame. This mirrors the pull path (`Client::pull_layer`), which wraps
 /// the fork's streaming reader in the same [`ProgressReader`].
-fn progress_body_stream(
-    data: Bytes,
-    on_progress: ProgressFn,
-) -> impl futures::Stream<Item = std::result::Result<Bytes, oci_client::errors::OciDistributionError>> + Send + 'static
+fn progress_body_stream<R>(source: R, on_progress: ProgressFn) -> BlobBodyStream
+where
+    R: tokio::io::AsyncRead + Send + Unpin + 'static,
 {
-    let reader = ProgressReader::new(std::io::Cursor::new(data), on_progress);
-    tokio_util::io::ReaderStream::with_capacity(reader, UPLOAD_FRAME_SIZE).map(|frame| {
-        // `Cursor` reads never fail; this only reconciles the frame error type with
-        // the fork's stream item (`Result<Bytes, OciDistributionError>`).
-        frame.map_err(|error| oci_client::errors::OciDistributionError::GenericError(Some(error.to_string())))
-    })
+    let reader = ProgressReader::new(source, on_progress);
+    tokio_util::io::ReaderStream::with_capacity(reader, UPLOAD_FRAME_SIZE)
+        .map(|frame| {
+            // A read error is real for a file-backed body and impossible for a
+            // `Cursor`; either way this reconciles it with the fork's stream item.
+            frame.map_err(|error| oci_client::errors::OciDistributionError::GenericError(Some(error.to_string())))
+        })
+        .boxed()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::transport::no_progress;
     use super::*;
     use futures::StreamExt;
     use futures::stream;
@@ -1076,7 +1175,7 @@ mod tests {
         let reports_clone = Arc::clone(&reports);
         let on_progress: ProgressFn = Arc::new(move |n| reports_clone.lock().unwrap().push(n));
 
-        let frames: Vec<Bytes> = progress_body_stream(Bytes::from(blob), on_progress)
+        let frames: Vec<Bytes> = progress_body_stream(std::io::Cursor::new(Bytes::from(blob)), on_progress)
             .map(|frame| frame.expect("Cursor-backed frames never error"))
             .collect()
             .await;
@@ -1297,5 +1396,60 @@ mod tests {
 
         assert!(matches!(mapped, ClientError::Registry(_)), "got {mapped:?}");
         assert_eq!(mapped.classify(), Some(ExitCode::Unavailable));
+    }
+
+    /// A file-backed body must be byte-identical to the in-memory one, and must
+    /// stay replayable: `do_push_blob`'s transient-failure path restarts the whole
+    /// blob, so `stream()` is called again on the same `BlobBody` and the second
+    /// body has to carry the same bytes as the first. A source consumed by its
+    /// first read would upload a truncated blob on the retry and only fail later,
+    /// at the registry's digest check.
+    #[tokio::test]
+    async fn file_backed_body_streams_the_same_bytes_as_memory_and_replays() {
+        // Larger than one frame, so the equality is over a real multi-frame stream
+        // rather than a single chunk that any source shape would get right.
+        let blob: Vec<u8> = (0..(UPLOAD_FRAME_SIZE * 2 + 7)).map(|i| (i % 251) as u8).collect();
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("layer.bin");
+        std::fs::write(&path, &blob).expect("write blob");
+
+        let memory = BlobBody::Memory(Bytes::from(blob.clone()));
+        let file = BlobBody::File {
+            path: path.clone(),
+            size: blob.len() as u64,
+        };
+        assert_eq!(memory.size(), file.size());
+
+        async fn drain(body: &BlobBody) -> Vec<u8> {
+            let frames: Vec<Bytes> = body
+                .stream(no_progress())
+                .await
+                .expect("open body")
+                .map(|frame| frame.expect("frames never error here"))
+                .collect()
+                .await;
+            reassemble(&frames)
+        }
+
+        assert_eq!(drain(&memory).await, blob, "in-memory body");
+        assert_eq!(drain(&file).await, blob, "first file-backed attempt");
+        assert_eq!(drain(&file).await, blob, "restarted file-backed attempt");
+    }
+
+    /// The buffered fallback reads the whole blob back, so a file-backed body has
+    /// to materialize the same bytes the streamed path would have sent.
+    #[tokio::test]
+    async fn file_backed_body_reads_back_the_whole_blob() {
+        let blob: Vec<u8> = (0..5000).map(|i| (i % 97) as u8).collect();
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("layer.bin");
+        std::fs::write(&path, &blob).expect("write blob");
+
+        let body = BlobBody::File {
+            path,
+            size: blob.len() as u64,
+        };
+        assert_eq!(body.read_all().await.expect("read back"), Bytes::from(blob));
     }
 }

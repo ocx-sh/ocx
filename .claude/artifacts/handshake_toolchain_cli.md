@@ -5,6 +5,10 @@
 under `ocx package which` for tier consistency — see §2 table + §7 removed list.
 **Amendment 2026-05-18 (post-sign-off, user-approved):** `ocx deps` moved
 under `ocx package deps` for tier consistency — see §2 table + §7 removed list.
+**Amendment 2026-08-19 (post-sign-off, user-approved):** `ocx package copy`
+added to the OCI tier — registry-to-registry promotion of an already-published
+package. No root form and no `promote` alias; the tier rule is unchanged
+(identifier-driven, no `ocx.toml` at any tier) — see §2 table.
 **Date:** 2026-05-16
 **Parties:** Michael Herwig, Claude (architect seat)
 **Base commit:** `a4211591` (`fix(project): fail-closed GC ledger + global/project conflict seam`)
@@ -55,6 +59,7 @@ Per-package, identifier-driven, no `ocx.toml` at any tier. Owns the
 | `ocx package env <ids...>` | composed env for the named packages |
 | `ocx package which <ids...>` | resolve installed packages to paths (package-root, or `--candidate`/`--current` symlink anchor) — OCI-tier query, never reads `ocx.toml` (amendment 2026-05-17) |
 | `ocx package deps <ids...>` | show dependency tree/flat/why for installed packages — OCI-tier query, never reads `ocx.toml` (amendment 2026-05-18) |
+| `ocx package copy <src>` | copy a published package to another registry or repository, leaf digests preserved — OCI-tier write, never reads `ocx.toml` (amendment 2026-08-19) |
 
 Devcontainer-of-a-tool stays: `ocx package install X && ocx package select X
 && ocx package env --current X`. Untouched by this handshake.

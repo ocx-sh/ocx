@@ -227,13 +227,15 @@ pub fn render_error_envelope(command: &str, err: &anyhow::Error) -> anyhow::Resu
 /// Walk the error chain via `std::iter::successors` and collect structured
 /// context (identifier, etc.) for the envelope's `context` map.
 ///
-/// Currently pulls the identifier from `SignError` / `VerifyError` — the only
-/// two subsystems that carry a user-visible identifier in their Slice 1 error
-/// surface. Additional subsystems attach their own context as they gain
+/// Pulls the identifier from `SignError` / `VerifyError`, and both endpoints
+/// from `CopyError` — a copy is the one operation whose failure is about a pair
+/// of repositories, so a single `identifier` key could not say which end
+/// refused. Additional subsystems attach their own context as they gain
 /// envelope-relevant metadata.
 fn collect_context(err: &(dyn std::error::Error + 'static)) -> BTreeMap<&'static str, serde_json::Value> {
     use ocx_lib::oci::sign::SignError;
     use ocx_lib::oci::verify::VerifyError;
+    use ocx_lib::publisher::CopyError;
 
     let mut context = BTreeMap::new();
     for cause in std::iter::successors(Some(err), |e| e.source()) {
@@ -245,6 +247,17 @@ fn collect_context(err: &(dyn std::error::Error + 'static)) -> BTreeMap<&'static
             context.insert(
                 "identifier",
                 serde_json::Value::String(verify_err.identifier.to_string()),
+            );
+            return context;
+        }
+        if let Some(copy_err) = cause.downcast_ref::<CopyError>() {
+            context.insert(
+                "source",
+                serde_json::Value::String(copy_err.source_identifier.to_string()),
+            );
+            context.insert(
+                "target",
+                serde_json::Value::String(copy_err.target_identifier.to_string()),
             );
             return context;
         }
@@ -264,12 +277,16 @@ fn collect_context(err: &(dyn std::error::Error + 'static)) -> BTreeMap<&'static
 fn collect_detail(err: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
     use ocx_lib::oci::sign::SignErrorKind;
     use ocx_lib::oci::verify::VerifyErrorKind;
+    use ocx_lib::publisher::CopyErrorKind;
 
     for cause in std::iter::successors(Some(err), |e| e.source()) {
         if let Some(kind) = cause.downcast_ref::<SignErrorKind>() {
             return Some(kind.kind_detail());
         }
         if let Some(kind) = cause.downcast_ref::<VerifyErrorKind>() {
+            return Some(kind.kind_detail());
+        }
+        if let Some(kind) = cause.downcast_ref::<CopyErrorKind>() {
             return Some(kind.kind_detail());
         }
     }
@@ -367,6 +384,49 @@ mod tests {
             r#""rekor_url":"https://rekor.sigstore.dev"}}}"#,
         );
         assert_eq!(actual, expected);
+    }
+
+    /// ADR item 6: a `--format json` copy failure has to carry the same
+    /// machine-readable `detail` slug and identifier context that sign and
+    /// verify already do. Before this arm existed a structural refusal
+    /// serialized with no `detail` at all and an empty `context`, so a CI job
+    /// could only match on prose.
+    ///
+    /// Rendered end to end through `render_error_envelope`, not by building an
+    /// `ErrorEnvelope` by hand — the defect was in the two collectors, which a
+    /// hand-built envelope never calls.
+    #[test]
+    fn a_copy_refusal_carries_its_slug_and_both_endpoints() {
+        use ocx_lib::publisher::{CopyError, CopyErrorKind};
+
+        let error = anyhow::Error::new(CopyError {
+            source_identifier: "dev.example.com/acme/tool:1.4.2".parse().expect("source"),
+            target_identifier: "prod.example.com/acme/tool:1.4.2".parse().expect("target"),
+            kind: CopyErrorKind::IndexNamedByDigest,
+        });
+        let rendered = render_error_envelope("package copy", &error).expect("render");
+
+        assert!(
+            rendered.contains(r#""detail":"index_named_by_digest""#),
+            "the frozen kind slug must reach the envelope: {rendered}"
+        );
+        assert!(
+            rendered.contains(r#""source":"dev.example.com/acme/tool:1.4.2""#)
+                && rendered.contains(r#""target":"prod.example.com/acme/tool:1.4.2""#),
+            "a copy failure is about a pair of repositories, and both must be named: {rendered}"
+        );
+        assert!(
+            rendered.contains(r#""exit_code":64"#),
+            "a structural refusal is a usage fault: {rendered}"
+        );
+
+        // Positive control: same renderer, an error with no `CopyError` on the
+        // chain. `detail` is absent and `context` is empty, so the assertions
+        // above cannot be the collectors emitting those keys unconditionally.
+        let unrelated = anyhow::anyhow!("dev.example.com/acme/tool:1.4.2 to prod.example.com/acme/tool:1.4.2");
+        let control = render_error_envelope("package copy", &unrelated).expect("render");
+        assert!(!control.contains(r#""detail""#), "control leaked a detail: {control}");
+        assert!(control.contains(r#""context":{}"#), "control leaked context: {control}");
     }
 
     #[test]

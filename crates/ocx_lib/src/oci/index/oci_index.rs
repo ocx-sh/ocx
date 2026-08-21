@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 
 use super::{IndexOperation, index_impl};
-use crate::{Result, oci, package::tag::Tag};
+use crate::{Result, oci, oci::client::ReadAddressing, package::tag::Tag};
 
 mod cache;
 mod config;
@@ -49,7 +49,7 @@ impl index_impl::IndexImpl for OciIndex {
 
         let tags: Vec<String> = self
             .client
-            .list_tags(identifier.clone())
+            .list_tags_addressed(identifier.clone(), ReadAddressing::Mirrored)
             .await?
             .into_iter()
             .filter(|t| !Tag::is_reserved_str(t))
@@ -64,7 +64,11 @@ impl index_impl::IndexImpl for OciIndex {
         identifier: &oci::Identifier,
         _op: IndexOperation,
     ) -> Result<Option<(oci::Digest, oci::Manifest)>> {
-        Ok(Some(self.client.fetch_manifest(identifier).await?))
+        Ok(Some(
+            self.client
+                .fetch_manifest_addressed(identifier, ReadAddressing::Mirrored)
+                .await?,
+        ))
     }
 
     async fn fetch_manifest_digest(
@@ -76,7 +80,12 @@ impl index_impl::IndexImpl for OciIndex {
             return Ok(Some(cached));
         }
 
-        let digest = self.client.fetch_manifest_digest(identifier).await?;
+        // Deriving an index from a registry's tags API backs no write, so the
+        // mirror is the right host to ask (Invariant #5).
+        let digest = self
+            .client
+            .fetch_manifest_digest_addressed(identifier, crate::oci::client::ReadAddressing::Mirrored)
+            .await?;
         self.cache.set_tag_digest(identifier, digest.clone()).await;
         Ok(Some(digest))
     }
@@ -93,7 +102,10 @@ impl index_impl::IndexImpl for OciIndex {
         &self,
         identifier: &oci::Identifier,
     ) -> Result<Option<(Vec<u8>, oci::Digest, oci::Manifest)>> {
-        Ok(self.client.fetch_manifest_raw_bytes(identifier).await?)
+        Ok(self
+            .client
+            .fetch_manifest_raw_bytes_addressed(identifier, ReadAddressing::Mirrored)
+            .await?)
     }
 
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {

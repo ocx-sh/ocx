@@ -5,6 +5,8 @@
 #
 #   OCX_TEST_REGISTRY_PORT   primary registry (default 5000)
 #   OCX_TEST_MIRROR_PORT     mirror registry  (default 5001)
+#   OCX_TEST_TARGET_PORT     promotion target (default 5003)
+#   OCX_TEST_PROD_PORT       promotion prod   (default 5004)
 #
 # Set them for `task test` and the whole suite follows: `test/conftest.py`
 # derives the `REGISTRY` / `MIRROR_REGISTRY` defaults from the same two
@@ -60,6 +62,41 @@ services:
     image: registry:2
     ports:
       - "${OCX_TEST_MIRROR_PORT:-5001}:5000"
+
+  # Promotion target — a SECOND zot, so `ocx package copy` can be exercised
+  # across two registries with the Referrers API at both ends.
+  #
+  # It cannot be the `mirror-registry` service above: that one is registry:2 and
+  # has no Referrers API by design, so a cross-registry copy carrying a
+  # signature would fail there for a reason that has nothing to do with the
+  # copy. Keeping both means the suite can assert the good path against this
+  # service AND the exit-84 refusal against that one, which is what proves the
+  # 84 comes from the capability probe rather than merely from the target being
+  # a different host.
+  #
+  # 5003 rather than 5002: the bench profile's toxiproxy owns 5002 and reads its
+  # own un-parametrized overrides, so reusing it would bind one port and dial
+  # another.
+  target-registry:
+    image: ghcr.io/project-zot/zot:v2.1.18
+    ports:
+      - "${OCX_TEST_TARGET_PORT:-5003}:5000"
+    volumes:
+      - ./zot-config.json:/etc/zot/config.json:ro
+
+  # Third registry — the `prod` end of the dev -> staging -> prod promotion the
+  # user guide documents and records as an asciicast.
+  #
+  # A third real host rather than a second repository on `target-registry`,
+  # because the whole shape `--to` documents is a HOST rewrite that preserves
+  # the repository path and tag. Recording that against one registry would put a
+  # command on the docs page that nobody runs in production.
+  prod-registry:
+    image: ghcr.io/project-zot/zot:v2.1.18
+    ports:
+      - "${OCX_TEST_PROD_PORT:-5004}:5000"
+    volumes:
+      - ./zot-config.json:/etc/zot/config.json:ro
 
   # toxiproxy — TCP proxy with programmable toxics (bandwidth throttle,
   # latency injection) used by the bench harness (test/bench/) to simulate

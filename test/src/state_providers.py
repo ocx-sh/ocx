@@ -260,6 +260,9 @@ DECLARED_PACKAGES: dict[str, dict[str, str]] = {
     "setup:signing": {
         "acme/mytool": "acme/mytool:1.0.0",
     },
+    "setup:promotion": {
+        "acme/mytool": "acme/mytool:1.4.2",
+    },
     # ---- scenario family (src.scenarios.SCENARIOS) ----
     "scenario:BasicPackage": {
         "hello": "hello:1.0.0",

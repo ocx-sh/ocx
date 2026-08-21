@@ -183,6 +183,34 @@ pub trait OciTransport: Send + Sync {
         on_progress: ProgressFn,
     ) -> Result<String>;
 
+    /// Pushes a blob whose bytes live in a file, without holding them in RAM.
+    ///
+    /// Exists for transfers where the blob never needed to be in memory in the
+    /// first place — a registry-to-registry copy spools the source blob to disk
+    /// and hands the path here, so a 200 MB layer costs a file handle rather
+    /// than a 200 MB allocation per concurrent layer.
+    ///
+    /// # No default
+    ///
+    /// Required, deliberately. The obvious default — read the file, delegate to
+    /// [`Self::push_blob`] — allocates the whole blob, which is the one thing
+    /// this method exists to avoid, so a future transport that never noticed the
+    /// method would compile and quietly reintroduce the allocation. A test
+    /// double that genuinely does not care writes one line:
+    /// [`push_blob_buffered`], where buffering is stated rather than inherited.
+    ///
+    /// Contrast [`Self::mount_blob`], whose default *is* correct for a transport
+    /// with no mounting — that is what earns a default.
+    ///
+    /// [`NativeTransport`]: super::native_transport::NativeTransport
+    async fn push_blob_from_path(
+        &self,
+        image: &oci::native::Reference,
+        path: &Path,
+        digest: &oci::Digest,
+        on_progress: ProgressFn,
+    ) -> Result<String>;
+
     /// Attempts to mount `digest` from `source_repository` into `image`'s
     /// repository, avoiding a redundant upload when the blob is already
     /// present elsewhere in the registry.
@@ -245,6 +273,29 @@ pub trait OciTransport: Send + Sync {
 }
 
 // ── Default-impl helpers and tests ───────────────────────────────────────────
+
+/// Reads `path` into memory and pushes it through [`OciTransport::push_blob`].
+///
+/// The body a test double gives [`OciTransport::push_blob_from_path`] when it
+/// has no streaming to preserve — buffering stated at the call site instead of
+/// inherited from a default nobody read. A production transport must not use
+/// it: the point of the file-backed push is that a 200 MB layer costs a file
+/// handle rather than a 200 MB allocation, several times over concurrently —
+/// which is why it is `cfg(test)`: production code cannot reach it.
+#[cfg(test)]
+pub(crate) async fn push_blob_buffered<T: OciTransport + ?Sized>(
+    transport: &T,
+    image: &oci::native::Reference,
+    path: &Path,
+    digest: &oci::Digest,
+    on_progress: ProgressFn,
+) -> Result<String> {
+    let data = tokio::fs::read(path).await.map_err(|e| ClientError::Io {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    transport.push_blob(image, data, digest, on_progress).await
+}
 
 /// RAII wrapper that holds a temporary file open for reading while keeping the
 /// [`tempfile::NamedTempFile`] guard alive so the underlying path is not
@@ -385,6 +436,16 @@ mod tests {
             &self,
             _image: &oci::native::Reference,
             _data: Vec<u8>,
+            _digest: &oci::Digest,
+            _on_progress: ProgressFn,
+        ) -> Result<String> {
+            unimplemented!("not needed for pull_blob_streaming default-impl test")
+        }
+
+        async fn push_blob_from_path(
+            &self,
+            _image: &oci::native::Reference,
+            _path: &Path,
             _digest: &oci::Digest,
             _on_progress: ProgressFn,
         ) -> Result<String> {

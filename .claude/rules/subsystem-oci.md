@@ -541,7 +541,7 @@ Subset semantics apply **only** to `os_features`. Extending subset or any non-eq
 2. **Internal tags filtered** — tags prefixed `__ocx.` stripped by every `IndexImpl::list_tags()` auto.
 3. **Digest overrides tag** — when identifier has both, `fetch_manifest()` uses digest direct.
 4. **Auth at Client level** — index impls don't handle auth; `Client::ensure_auth()` called before operations.
-5. **A read that backs a write shares the write's addressing** — reads are mirror-aware by default (`transport_reference`), writes are always canonical. Any read whose answer decides, gates, or verifies a write must ask for `ReadAddressing::Canonical` (the `*_addressed` variants on `Client`) so the whole transaction stays on one host; deciding from a mirror and applying to the canonical registry is CWE-345/367. Precedent: `merge_platform_into_index` (one canonical ref for read + write), `ocx package cascade check|repair`.
+5. **A read that backs a write shares the write's addressing** — reads address the canonical registry by default (`list_tags`, `fetch_manifest`, `fetch_manifest_raw_bytes`, `pull_description`); a mirror is asked for by name through the `*_addressed` variants. Writes are always canonical. Any read whose answer decides, gates, or verifies a write therefore takes the plain short form and must never name `ReadAddressing::Mirrored`, so the whole transaction stays on one host; deciding from a mirror and applying to the canonical registry is CWE-345/367. Precedent: `merge_platform_into_index` (one canonical ref for read + write), `ocx package cascade check|repair`.
 
 ## Pull Path (streaming single-pass pipeline) {#pull-path}
 

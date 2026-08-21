@@ -320,6 +320,16 @@ mod tests {
             unimplemented!()
         }
 
+        async fn push_blob_from_path(
+            &self,
+            _image: &oci::native::Reference,
+            _path: &std::path::Path,
+            _digest: &Digest,
+            _on_progress: Arc<dyn Fn(u64) + Send + Sync>,
+        ) -> Result<String, ClientError> {
+            unimplemented!()
+        }
+
         async fn push_referrer_manifest(
             &self,
             _image: &oci::native::Reference,

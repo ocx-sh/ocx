@@ -74,6 +74,21 @@ pub enum ClientError {
     /// fetched). Raised by [`crate::oci::Client::fetch_single_layer_artifact`].
     #[error("layer size {declared} exceeds the maximum allowed {maximum} bytes")]
     LayerSizeExceeded { declared: i64, maximum: u64 },
+    /// A registry-supplied graph exceeded a traversal limit, so the operation
+    /// would only ever have completed in part.
+    ///
+    /// Refusing is the point: a copy that silently dropped a signature past its
+    /// referrer limit reports success for an artifact that is no longer signed
+    /// at the target. Carries the limit and the value that crossed it so a
+    /// caller can tell hostile input from a ceiling that wants raising without
+    /// parsing the message.
+    #[error("{limit_kind} limit of {limit} exceeded (reached {actual}) while copying {subject}")]
+    TraversalLimitExceeded {
+        limit_kind: TraversalLimit,
+        limit: usize,
+        actual: usize,
+        subject: String,
+    },
     /// The requested manifest does not exist in the registry.
     #[error("manifest not found: {0}")]
     ManifestNotFound(String),
@@ -150,6 +165,31 @@ pub enum ClientError {
     /// the endpoint simply is not served — a rerun can never change that.
     #[error("registry {registry} does not support the OCI Referrers API")]
     ReferrersUnsupported { registry: String },
+}
+
+/// Which bounded traversal ran out of room, for
+/// [`ClientError::TraversalLimitExceeded`].
+///
+/// A closed set rather than a message fragment, so the text cannot drift from
+/// the constant that produced it and a caller can match on the kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraversalLimit {
+    /// How deep a referrer-of-a-referrer chain is followed.
+    ReferrerDepth,
+    /// How many referrer manifests one leaf may carry, across the whole chain.
+    ReferrersPerLeaf,
+    /// How many distinct blobs one manifest may name.
+    BlobsPerManifest,
+}
+
+impl std::fmt::Display for TraversalLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::ReferrerDepth => "referrer depth",
+            Self::ReferrersPerLeaf => "referrers per leaf",
+            Self::BlobsPerManifest => "blobs per manifest",
+        })
+    }
 }
 
 impl ClientError {
@@ -269,6 +309,9 @@ impl ClassifyExitCode for ClientError {
             | Self::WrongLayerCount { .. }
             | Self::UnexpectedLayerMediaType { .. }
             | Self::LayerSizeExceeded { .. }
+            // A graph too large to traverse completely is registry-supplied
+            // input this build refuses, not a fault that a rerun can clear.
+            | Self::TraversalLimitExceeded { .. }
             | Self::Serialization(_)
             | Self::InvalidEncoding(_) => ExitCode::DataError,
             Self::Internal(_) => ExitCode::Failure,

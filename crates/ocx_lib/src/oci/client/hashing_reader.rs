@@ -102,7 +102,7 @@ impl DigestState {
 /// let (digest, byte_count) = reader.finalize();
 /// assert_eq!(digest, expected_digest);
 /// ```
-pub(super) struct HashingAsyncReader<R> {
+pub(in crate::oci) struct HashingAsyncReader<R> {
     inner: R,
     state: DigestState,
     bytes_read: u64,

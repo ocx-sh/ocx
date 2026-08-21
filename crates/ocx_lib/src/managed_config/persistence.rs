@@ -31,6 +31,7 @@
 //! tick) are responsible for building that client.
 
 use crate::config::managed::ManagedConfigSnapshot;
+use crate::oci::client::ReadAddressing;
 use crate::oci::{Digest, Identifier};
 
 // ── Fetched payload (intermediate transfer object) ────────────────────────────
@@ -256,7 +257,7 @@ pub async fn fetch_managed_config(
     let maximum = crate::managed_config::MAX_MANAGED_CONFIG_BYTES;
 
     let Some((_, top_digest, top_manifest)) = client
-        .fetch_manifest_raw_bytes(identifier)
+        .fetch_manifest_raw_bytes_addressed(identifier, ReadAddressing::Mirrored)
         .await
         .map_err(|source| ManagedConfigFetchError::FetchFailed { source })?
     else {
@@ -285,7 +286,7 @@ pub async fn fetch_managed_config(
             // Content-addressed child fetch: tag dropped, digest pins.
             let child_identifier = identifier.without_specifiers().clone_with_digest(child_digest);
             let child = client
-                .fetch_manifest_raw_bytes(&child_identifier)
+                .fetch_manifest_raw_bytes_addressed(&child_identifier, ReadAddressing::Mirrored)
                 .await
                 .map_err(|source| ManagedConfigFetchError::FetchFailed { source })?
                 .ok_or_else(|| ManagedConfigFetchError::UnexpectedManifest {
@@ -429,7 +430,7 @@ pub async fn probe_managed_config_digest(
     identifier: &Identifier,
 ) -> Result<Option<Digest>, ManagedConfigFetchError> {
     client
-        .probe_manifest_digest(identifier)
+        .probe_manifest_digest_addressed(identifier, ReadAddressing::Mirrored)
         .await
         .map_err(|source| ManagedConfigFetchError::FetchFailed { source })
 }

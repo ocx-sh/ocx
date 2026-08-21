@@ -71,6 +71,10 @@ export default defineConfig({
           link: "/docs/user-guide/attestations",
         },
         {
+          text: "Promoting",
+          link: "/docs/user-guide/promoting-packages",
+        },
+        {
           text: "Authoring",
           link: "/docs/authoring/",
           collapsed: true,

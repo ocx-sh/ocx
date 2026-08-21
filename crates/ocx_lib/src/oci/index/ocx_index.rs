@@ -70,7 +70,7 @@ use tokio::sync::RwLock;
 
 use super::wire::{CatalogDocument, CatalogIndex, IndexFormatConfig, IndexRoot, RootTag, gate_format_version};
 use super::{IndexOperation, error, index_impl};
-use crate::{Result, log, oci};
+use crate::{Result, log, oci, oci::client::ReadAddressing};
 
 // ── Frozen wire shapes (● contract) ──────────────────────────────────────────
 //
@@ -1083,7 +1083,11 @@ impl index_impl::IndexImpl for OcxIndex {
             let Some(physical) = self.physical_identifier(identifier).await? else {
                 return Ok(None);
             };
-            return Ok(Some(self.client.fetch_manifest(&physical).await?));
+            return Ok(Some(
+                self.client
+                    .fetch_manifest_addressed(&physical, ReadAddressing::Mirrored)
+                    .await?,
+            ));
         }
 
         // Tag-addressed: resolve the image index the tag was locked to and hand
@@ -1137,7 +1141,10 @@ impl index_impl::IndexImpl for OcxIndex {
             let Some(physical) = self.physical_identifier(identifier).await? else {
                 return Ok(None);
             };
-            return Ok(self.client.fetch_manifest_raw_bytes(&physical).await?);
+            return Ok(self
+                .client
+                .fetch_manifest_raw_bytes_addressed(&physical, ReadAddressing::Mirrored)
+                .await?);
         }
 
         // Tag: the verbatim image-index bytes (which hash to the dispatch-object

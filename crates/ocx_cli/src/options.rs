@@ -14,6 +14,7 @@ mod lazy_mode;
 mod lazy_report;
 mod platform;
 mod pull;
+mod referrers;
 mod verification;
 mod verify;
 
@@ -30,5 +31,6 @@ pub use lazy_mode::LazyMode;
 pub use lazy_report::LazyReport;
 pub use platform::PlatformOption;
 pub use pull::Pull;
+pub use referrers::Referrers;
 pub use verification::Verification;
 pub use verify::{SignatureVerify, Verify};

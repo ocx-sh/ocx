@@ -49,6 +49,7 @@ pub mod layer_layout;
 pub use layer_layout::{LayerLayoutError, LayerLayoutSpec, resolve_layer_placement};
 
 pub mod client;
+pub mod copy;
 pub use client::Client;
 pub use client::ClientBuilder;
 pub use client::LayerCounts;

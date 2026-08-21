@@ -138,7 +138,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::package_manager::error::{DependencyError, Error as PackageManagerError, PackageErrorKind};
     use crate::patch::PatchError;
     use crate::project::error::Error as ProjectError;
-    use crate::publisher::{LayerRefParseError, PublishGateError};
+    use crate::publisher::{CopyError, LayerRefParseError, PublishGateError};
     use crate::setup::error::Error as SetupError;
     use crate::utility::fs::path::PathEscapeError;
     use crate::utility::fs::{EmptyOrAbsentError, SameFilesystemError, SymlinkWalkError};
@@ -155,6 +155,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     }
 
     try_downcast!(UsageError);
+    try_downcast!(CopyError);
     try_downcast!(MetadataResolutionError);
     try_downcast!(SymlinkWalkError);
     try_downcast!(SameFilesystemError);

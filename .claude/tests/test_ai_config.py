@@ -1983,6 +1983,7 @@ class TestSubsystemCliCommandsTableCoverage:
         "env": "package env",
         "deps": "package deps",
         "which": "package which",
+        "package_copy": "package copy",
         "package_create": "package create",
         "package_describe": "package describe",
         "package_info": "package info",

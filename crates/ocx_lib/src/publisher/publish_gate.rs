@@ -12,6 +12,7 @@
 use futures::stream::{self, StreamExt, TryStreamExt};
 
 use crate::cli::{ClassifyExitCode, ExitCode};
+use crate::oci::client::ReadAddressing;
 use crate::oci::{self, Platform, client::error::ClientError};
 use crate::package::metadata::Metadata;
 use crate::{log, oci::Client};
@@ -133,12 +134,16 @@ async fn verify_any_pin_provenance(
     dependency_identifier: &oci::Identifier,
     pin: &oci::PinnedIdentifier,
 ) -> Result<(), PublishGateError> {
-    let (digest, manifest) = client.fetch_manifest(dependency_identifier).await.map_err(|source| {
-        PublishGateError::AnyPinProvenanceUnavailable {
+    // Mirrored is inherited, not chosen: this read gates a publish, which
+    // Invariant #5 says must be decided on the canonical host. Moving it is a
+    // behaviour change to every publish, so it is a decision of its own.
+    let (digest, manifest) = client
+        .fetch_manifest_addressed(dependency_identifier, ReadAddressing::Mirrored)
+        .await
+        .map_err(|source| PublishGateError::AnyPinProvenanceUnavailable {
             identifier: Box::new(dependency_identifier.clone()),
             source,
-        }
-    })?;
+        })?;
 
     let advertised_as_any = match manifest {
         oci::Manifest::Image(_) => digest == pin.digest(),

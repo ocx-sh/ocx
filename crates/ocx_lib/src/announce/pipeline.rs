@@ -21,6 +21,7 @@ use super::error::AnnounceError;
 use super::request::TagSelection;
 use crate::oci;
 use crate::oci::annotations;
+use crate::oci::client::ReadAddressing;
 use crate::package::tag::{InternalTag, Tag};
 use crate::publisher::Publisher;
 
@@ -320,9 +321,12 @@ pub async fn observe_curated(
 /// indices only, so a bare image manifest is refused (D4(a)).
 async fn observe_one_tag(publisher: &Publisher, physical: &Physical, tag: &str) -> Result<Observed, AnnounceError> {
     let tagged = physical.identifier.clone_with_tag(tag);
+    // Mirrored is inherited, not chosen: these bytes become the published
+    // index's record of the tag, so Invariant #5 argues for Canonical here.
+    // Changing the host announce observes from is its own decision.
     let fetched = publisher
         .client()
-        .fetch_manifest_raw_bytes(&tagged)
+        .fetch_manifest_raw_bytes_addressed(&tagged, ReadAddressing::Mirrored)
         .await
         .map_err(|source| AnnounceError::Observe {
             tag: tag.to_string(),
@@ -388,9 +392,11 @@ pub async fn observe_desc(
         .and_then(|desc| desc.get("digest"))
         .and_then(Value::as_str);
     let desc_identifier = physical.identifier.clone_with_tag(InternalTag::DESCRIPTION_TAG);
+    // Mirrored is inherited, not chosen — same Invariant #5 question as
+    // `observe_one_tag`: this digest is written into the published index.
     let observed = publisher
         .client()
-        .probe_manifest_digest(&desc_identifier)
+        .probe_manifest_digest_addressed(&desc_identifier, ReadAddressing::Mirrored)
         .await
         .map_err(|source| AnnounceError::ObserveDesc {
             repository: physical.display.clone(),
@@ -422,7 +428,7 @@ pub async fn observe_desc(
     })?;
     let description = publisher
         .client()
-        .pull_description(&physical.identifier, temporary.path())
+        .pull_description_addressed(&physical.identifier, temporary.path(), ReadAddressing::Mirrored)
         .await
         .map_err(|source| AnnounceError::ObserveDesc {
             repository: physical.display.clone(),

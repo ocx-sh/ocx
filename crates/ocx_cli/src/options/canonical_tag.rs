@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-/// Whether `ocx package push` also pushes a digest-named `sha256.<hex>` tag
-/// for each pushed platform manifest.
+/// Whether a command also writes a digest-named `sha256.<hex>` tag for each
+/// platform manifest it publishes.
 ///
 /// Flatten into a command with `#[clap(flatten)]` to add the paired
 /// `--canonical-tag` / `--no-canonical-tag` flags. Canonical tagging is the
@@ -12,19 +12,19 @@
 /// Resolve with [`CanonicalTag::enabled`].
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct CanonicalTag {
-    /// Push a `sha256.<hex>` tag pointing at each pushed platform manifest
+    /// Write a `sha256.<hex>` tag for each platform manifest published
     /// (default).
     #[clap(long = "canonical-tag", overrides_with = "no_canonical_tag")]
     canonical_tag: bool,
 
-    /// Skip the canonical tag push.
+    /// Skip the canonical tag.
     #[clap(long = "no-canonical-tag", overrides_with = "canonical_tag")]
     no_canonical_tag: bool,
 }
 
 impl CanonicalTag {
-    /// Resolve whether the canonical tag push is enabled. Default is on;
-    /// only an explicit (last-wins) `--no-canonical-tag` turns it off.
+    /// Resolve whether the canonical tag is written. Default is on; only an
+    /// explicit (last-wins) `--no-canonical-tag` turns it off.
     pub fn enabled(&self) -> bool {
         !self.no_canonical_tag
     }

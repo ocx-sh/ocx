@@ -32,6 +32,13 @@ pub enum Package {
     /// already holds.
     #[command(subcommand)]
     Cascade(super::package_cascade::CascadeGroup),
+    /// Promote an already-published package to another registry or repository.
+    ///
+    /// Copies the platform manifests, their blobs and their referrers verbatim,
+    /// so the digest never moves and every signature and lock pin naming it
+    /// still resolves. The target's index is merged one platform at a time,
+    /// never overwritten.
+    Copy(super::package_copy::PackageCopy),
     /// Creates an archive from a local package directory.
     Create(super::package_create::PackageCreate),
     /// Push a description (README + optional logo) to a package repository.
@@ -77,6 +84,7 @@ impl Package {
             Package::Announce(announce) => announce.execute(context).await,
             Package::Attest(attest) => attest.execute(context).await,
             Package::Cascade(cascade) => cascade.execute(context).await,
+            Package::Copy(copy) => copy.execute(context).await,
             Package::Create(create) => create.execute(context).await,
             Package::Describe(describe) => describe.execute(context).await,
             Package::Deps(deps) => deps.execute(context).await,

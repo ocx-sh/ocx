@@ -784,6 +784,43 @@ def signing(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[
     }
 
 
+def promotion(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
+    """One package published to the dev registry, plus a staging and a prod one.
+
+    Three real registries rather than three repositories on one, because the
+    shape `--to` documents is a HOST rewrite that preserves the repository path
+    and the tag — recording it against a single host would put a command on the
+    docs page that nobody runs in production.
+
+    The two downstream addresses reach the script as `$STAGING` / `$PROD`
+    (compose ports are overridable), and `OCX_INSECURE_REGISTRIES` names all
+    three, because a copy dials two of them at once and the runner's own value
+    names only the source.
+    """
+    staging = f"localhost:{os.environ.get('OCX_TEST_TARGET_PORT', '5003')}"
+    prod = f"localhost:{os.environ.get('OCX_TEST_PROD_PORT', '5004')}"
+    ocx.env.update(
+        {
+            "STAGING": staging,
+            "PROD": prod,
+            "OCX_INSECURE_REGISTRIES": f"{ocx.registry},{staging},{prod}",
+        }
+    )
+
+    mytool_env = [
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+    ]
+    return {
+        "acme/mytool": [
+            make_package(
+                ocx, f"{prefix}acme/mytool", "1.4.2", tmp_path, bins=["mytool"],
+                env=mytool_env, platform="linux/amd64",
+            ),
+        ],
+    }
+
+
 SetupFn = Callable[[OcxRunner, Path, str], dict[str, list[PackageInfo]]]
 
 SETUPS: dict[str, SetupFn] = {
@@ -799,4 +836,5 @@ SETUPS: dict[str, SetupFn] = {
     "managed-config-onboard": managed_config_onboard,
     "managed-config-ci": managed_config_ci,
     "signing": signing,
+    "promotion": promotion,
 }

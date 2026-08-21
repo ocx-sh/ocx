@@ -400,7 +400,7 @@ impl PackagePush {
 /// the key may not be empty. Beyond that OCX does not police annotation keys —
 /// the OCI spec only *recommends* reverse-domain notation, and a registry is
 /// free to define its own.
-fn parse_annotation(argument: &str) -> anyhow::Result<(String, String)> {
+pub(crate) fn parse_annotation(argument: &str) -> anyhow::Result<(String, String)> {
     let (key, value) = argument
         .split_once('=')
         .ok_or_else(|| anyhow::anyhow!("expected KEY=VALUE, got '{argument}'"))?;

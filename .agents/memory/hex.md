@@ -212,3 +212,71 @@ research-axes:
   with an inherited working directory landed it on the fixed `soraka` branch (repaired
   same turn; `soraka` moved back to its prior tip). Every git call in an orchestrator
   turn carries `-C <worktree>` or a leading `cd &&` — no exceptions.
+- **2026-08-21 `/hex-review high` on `ocx package copy` (branch `evelynn`, 33 files, +3757).**
+  Verdict Request Changes. 8-worker panel + Codex gate; 73 severity-tagged findings.
+  - **The adversary produced the run's best finding for the THIRD time.** Codex found a
+    Block the entire 8-worker Claude panel missed: `fetch_manifest_raw_bytes_addressed`
+    (`oci/client.rs:2060-2062`) verifies bytes against the **registry-supplied**
+    `Docker-Content-Digest`, never against the **requested** digest, and
+    `oci/copy.rs:125` never compares the two. A registry answering `GET /manifests/A`
+    with self-consistent bytes for B gets B pushed while `publisher/copy.rs:240` merges
+    **A** into the target index — pointing it at a manifest that was never copied. The
+    re-run reports `Unchanged` (`:188` compares source-vs-target, both A) over a
+    permanently broken index. Never treat the cross-model pass as the optional layer.
+  - **A read-site audit table is worth more than a security narrative.** Asking
+    reviewer:security for "every read: file:line, addressing, does it decide a write,
+    verdict" produced 15 rows and found **4** Invariant #5 violations where Stage 1 had
+    found 1 — proving the obvious one-line fix was insufficient. Ask for the enumeration,
+    not the opinion.
+  - **`worker-researcher` still has no Write tool** (confirmed again). It returned inline;
+    the orchestrator persisted `.claude/artifacts/review_r1_sota_package_copy.md`. Its
+    outside-in lens found the mount auth-scope gap all seven Claude reviewers missed.
+  - **File-first delivery defeats the idle-worker failure.** Every worker was told to write
+    its artifact BEFORE returning a summary. Five of eight then went idle without a
+    summary — and lost nothing, because the file was on disk. Make this the default brief.
+  - **Two workers disagreed on a fix direction and the file settled it.** spec said "amend
+    the ADR to match the code" on the canonical-tag phase; architect said "fix the code".
+    Reading `client.rs:642-682` showed the merged index is used for one digest lookup the
+    copy path already has — architect right. Open the file; do not pick the confident one.
+- **2026-08-21/22 `/hex-execute high` on `ocx package copy` (branch `evelynn`).** Applied every
+  finding from the round-1 panel, ran a second 5-worker panel plus the Codex `terra` gate, and
+  converged. `task verify` exit 0. Plan at `review`; nothing pushed.
+  - **The adversary earned its keep a FOURTH time — but differently.** It found nothing blocking
+    in the diff and instead surfaced two *pre-existing* defects in a file the diff merely touched:
+    an unbounded description-layer ingestion path (`client.rs:1819`, no size pre-check, no stream
+    cap, `fs::read` of the whole blob) and a lost-update RMW on the target index (`:531`, no
+    conditional PUT). Both verified byte-identical at the base commit. This is exactly the class
+    `quality-core.md` calls invisible to diff-scoped review: the file already existed, so nobody
+    reviewing the *change* was prompted to question it. Ask the cross-model pass for that class
+    explicitly — it is the one thing the Claude panel structurally cannot produce.
+  - **"My verification was wrong" happened twice, both times in my own work.** I verified a retry
+    *helper* red/green and reported the Block closed; a round-2 reviewer found the warm-primary
+    path still emptied the suite green. And I claimed the addressing inversion closed the cascade
+    Block "for every caller"; security showed push's blocker *list* was still mirrored. Both times
+    the mistake was verifying the mechanism rather than the path that reaches it.
+  - **A `#[error(transparent)]` variant forwards `source()` PAST the wrapped error.** A worker's
+    `classify()` returned `None` expecting the chain walker to reach the cause; exits 79/80/84 all
+    collapsed to 1. Its own test — "the failure kind is reachable by a chain walk" — passed
+    throughout, because reachability and classification are different properties. When a test and
+    a behaviour disagree, check whether the test asserts the property you actually care about.
+  - **`task test:build` does not exist.** It silently no-op'd, I read the following `ls` as proof
+    of a rebuild, and re-ran the acceptance suite against a six-minute-stale binary. The real
+    command is `cargo build --release -p ocx --features ocx/__testing --locked` then `cp` to
+    `test/bin/ocx`. A task runner's unknown target is not an error here.
+  - **Two more silently-empty checks, same session as the three already logged above.** A
+    tolerance-band grep died on a regex parse error and printed `0 matches`, which reads as a
+    clean result; and `find -newermt '-90 minutes'` was rejected by `bfs` with the error on stderr
+    and nothing on stdout, so "no Codex artifact was written" was an unfounded conclusion until I
+    re-checked with `ls -t`. Both were caught only by deliberately falsifying the check. Make the
+    canary explicit: prove the pattern can match before trusting that it did not.
+  - **Never edit the tree while `task verify` runs.** I fixed a CLI message mid-gate; the release
+    binary the acceptance suite would have used no longer matched HEAD. Killed the run, committed,
+    re-ran clean. A gate result against a tree that moved under it is not evidence.
+  - **`--theirs` on a test-file conflict silently drops coverage.** Taking one WP's side removed
+    another's two assertions. Graft the dropped assertions back and anchor each with an
+    asserted-once check rather than trusting the merge.
+  - **Idle-worker failure reproduced again, and the file-first fix worked again.** The Codex gate
+    went idle three times delivering nothing; the third pull replaced its deliverable with "write
+    findings to `<path>`, append each as you confirm it, reply with just the path" and it
+    delivered a full report immediately. Make the file the deliverable in the first brief, not the
+    third.

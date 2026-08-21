@@ -274,6 +274,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
                 CascadeCmd::Check(_) => "package cascade check",
                 CascadeCmd::Repair(_) => "package cascade repair",
             },
+            PackageCmd::Copy(_) => "package copy",
             PackageCmd::Create(_) => "package create",
             PackageCmd::Describe(_) => "package describe",
             PackageCmd::Deps(_) => "package deps",

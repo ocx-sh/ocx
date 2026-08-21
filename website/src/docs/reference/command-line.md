@@ -3628,6 +3628,86 @@ Entrypoint conflicts name the colliding packages without their digests — *whic
 - `81` (`PolicyBlocked`) — a local policy (`--offline` or `--frozen`) refused the resolution: the manifest or config blob is absent from the local cache, or an unpinned tag was not in the local index. With `--closure`, the same code covers a dependency's manifest or metadata blob missing from the local cache under `--offline` — run the same `--closure` inspection online once (or `ocx package pull` the dependency) to warm the cache, then retry offline.
 - `65` (`DataError`) — the resolved metadata is malformed, fails validation, or exceeds the metadata size cap; with `--resolve -p <platform>`, also a platform feature mismatch or an ambiguous dual-libc selection (see [exit codes](#exit-codes)). With `--closure`, the same checks apply to every dependency in the closure — one bad dependency fails the whole request rather than a smaller closure.
 
+#### `copy` {#package-copy}
+
+Promotes an already-published package to another registry or repository without rebuilding it.
+
+The platform manifests and their blobs are copied **verbatim**, so every digest stays the same. That is the whole point: a [Sigstore signature][in-depth-signing]'s subject *is* the platform manifest digest, and an [`ocx.lock`][cmd-lock-file] entry pins it. Rebuilding the package for production would produce a different digest — orphaning the signature you verified in staging and invalidating every lock pinned against it — while looking like it worked. See [Promoting packages][ug-promoting] for the dev → staging → prod walkthrough.
+
+Three kinds of object, three different rules, because only one of them is content:
+
+| Object | Treatment |
+|---|---|
+| Platform manifest + its blobs | Copied byte for byte; the digest never changes. |
+| The tag's [image index][oci-image-index] | Merged one platform at a time. Copying `linux/amd64` never removes a `darwin/arm64` the target already offers. |
+| Rolling tags (`1.4`, `1`, `latest`) | Recomputed against the **target**'s tag list under `--cascade`, never carried over from the source's. |
+
+**Usage**
+
+```shell
+ocx package copy [OPTIONS] <SOURCE>
+```
+
+**Arguments**
+
+- `<SOURCE>`: The published package to promote, as `registry/repository:tag` or `registry/repository@sha256:<hex>`. A tag names an image index (or, for a single-platform package, a bare manifest); a digest names one platform manifest and then `--platform` is required, because a platform manifest carries no platform of its own — OCX records the platform in the index entry, never in the manifest.
+
+**Options**
+
+- `--to <REGISTRY>`: Rewrite only the registry host, keeping the repository path and the tag. `dev.example.com/team/tool:1.4.2 --to prod.example.com` lands at `prod.example.com/team/tool:1.4.2`. Mutually exclusive with `--identifier`.
+- `-i`, `--identifier <IDENTIFIER>`: The full target reference, for when the repository path or the tag changes too. Required when `<SOURCE>` names a digest — a digest carries no tag for `--to` to preserve.
+- `-p`, `--platform <PLATFORM>`: Repeatable. Against a tag it *filters* the source index; omit it to copy every platform the source offers. Against a digest it *declares* the platform, and exactly one is required. See [Platforms][reference-platforms] for the grammar.
+- `-c`, `--cascade`: Also re-point the rolling ancestors (`1.4`, `1`, `latest`) at the target. The blocker checks read the target's tag list, so promoting `1.4.1` into a production registry that already publishes `1.4.2` leaves `1.4` where it is.
+- `--canonical-tag` / `--no-canonical-tag`: `--canonical-tag` (default) also writes a digest-named `sha256.<hex>` tag for each copied platform manifest at the target — the same registry-side deletion safety net [`push`](#package-push) writes.
+- `--referrers` / `--no-referrers`: `--referrers` (default) also copies everything anchored to each manifest — signatures, SBOMs, attestations — following referrer chains recursively. Requires the [OCI Referrers API][oci-referrers-spec] at the target; a registry without it exits 84 rather than accepting a referrer manifest it will never list. `--no-referrers` promotes the package alone.
+- `--description`: Also copy the repository description (README, logo, catalog annotations) from the `__ocx.desc` tag. Off by default — a description is repository-level prose rather than part of the version being promoted, and environments legitimately carry different ones. [`ocx package describe --from`](#package-describe) copies it on its own.
+- `--annotation <KEY=VALUE>`: Record an [OCI annotation][oci-annotations] on the target's image index. Repeatable, same semantics as [`push`](#package-push-annotations). Platform manifests are never annotated — that would change their digest, which is the one thing a copy must not do.
+- `--dry-run`: Report what would be copied and write nothing. The preview covers only the per-platform disposition below — a `--cascade` or `--canonical-tag` promotion's rolling-tag and canonical-tag moves are never computed under `--dry-run`, so those fields report empty regardless of what a real run would write. See **Output** below.
+- `-h`, `--help`: Print help information.
+
+**Output**
+
+One row per platform the target offers after the copy, each labelled with what happened to it — this is the result, on stdout:
+
+| Result | Meaning |
+|---|---|
+| `added` | The target's index had no entry for this platform. |
+| `unchanged` | The target already pointed at this exact digest. |
+| `replaced` | The target pointed at a different digest for this platform. |
+| `kept (not in source)` | The target offers this platform and the source does not, so the merge left it alone. |
+
+The last row is why the report is per platform: a filtered promotion that leaves a mixed index behind is a legitimate outcome and a serious mistake, and only the row list tells them apart.
+
+The `Digest` column means two things, and the `Result` column says which: on an `added`, `replaced` or `unchanged` row it is the digest this copy put there, and on a `kept (not in source)` row it is the digest the target already had and this copy never touched.
+
+Under `--dry-run` the two write results read `would add` and `would replace` in the table. The JSON `disposition` keeps `added` / `replaced` either way — the top-level `status` (`copied` or `planned`) is what a script branches on.
+
+The tags written, the blob traffic and the description outcome go to stderr as one status line, leaving stdout to the table. `--format json` carries all of it: `cascade_tags_written`, `canonical_tags_written`, `referrers_copied`, `blobs` (`present` / `mounted` / `uploaded`), and `description` — `copied`, `absent` when the source publishes none, `skipped-dry-run`, or `null` when `--description` was not passed.
+
+Under `--dry-run` both `cascade_tags_written` and `canonical_tags_written` are always empty, whatever `--cascade` and `--canonical-tag` say: the tag phase is the part a dry run does not run.
+
+**Exit codes**
+
+| Condition | Exit code |
+|---|---|
+| `<SOURCE>` names a digest and `--platform` is absent, or given more than once | 64 |
+| `<SOURCE>` names a digest and `--identifier` is absent | 64 |
+| `<SOURCE>` names an [image index][oci-image-index] by digest — name the tag instead | 64 |
+| `--to` and `--identifier` together | 64 |
+| No platform in the source matches `--platform` | 64 |
+| The source tag or digest does not resolve | 79 |
+| Authentication to either registry fails | 80 |
+| `--referrers` (the default) and the target has no [Referrers API][oci-referrers-spec] | 84 |
+| `--offline` is set — a copy always needs network access to both registries | 81 |
+
+::: tip Promotion is safe to re-run
+A second identical copy is idempotent in effect — no new content lands and no tag moves — but it is not a no-op on the wire. Every platform still re-verifies: the leaf manifest is re-fetched and re-PUT, and with `--referrers` (the default) its referrer set is re-copied too, because the target's index entry proves the manifest is there, not that every blob it names still is. Only blob *bodies* are skipped, via a HEAD against the target. The index is re-PUT too: each platform's entry is merged into every tag it lands on, and the merge is a read-modify-write that writes even when the entry it would set is already there. Pipelines can re-run a promotion step without special-casing it — the cost is a HEAD per blob, a manifest re-PUT per platform, and an index re-PUT per platform per tag, not a re-upload.
+:::
+
+::: warning A copy is not a re-sign
+The signature travels with the manifest, so it still names the identity that signed it in the source environment. If your policy requires a production-specific attestation, sign again at the target — promotion preserves provenance, it does not create it.
+:::
+
 #### `describe` {#package-describe}
 
 Pushes package description metadata (title, description, keywords, README, logo) to the registry.
@@ -3649,9 +3729,23 @@ ocx package describe [OPTIONS] <IDENTIFIER>
 - `--title <TITLE>`: Short display title for the package catalog.
 - `--description <TEXT>`: One-line summary.
 - `--keywords <LIST>`: Comma-separated search keywords.
+- `--from <SOURCE>`: Copy the whole description — README, logo and catalog annotations — from another package repository, replacing the target's. Mutually exclusive with the field options above: this is a copy, not a merge, so mixing the two would silently pick a winner. Use it to promote a catalog page reviewed in staging without re-authoring it, or after an [`ocx package copy`](#package-copy) that ran without `--description`. A source that publishes no description exits 79 and the target is left untouched; the same code covers a source repository that does not exist at all.
 - `-h`, `--help`: Print help information.
 
-At least one of the above metadata options must be provided.
+At least one of the above metadata options must be provided, or `--from`.
+
+**Exit codes**
+
+| Condition | Exit code |
+|---|---|
+| `--from` combined with `--readme`, `--logo`, `--title`, `--description`, or `--keywords` | 64 |
+| Neither `--from` nor any metadata option given | 1 |
+| `--from <SOURCE>` names a repository with no published description (or whose `__ocx.desc` tag does not resolve — the two are indistinguishable at this point) | 79 |
+| A `--logo` file's bytes do not match the format its extension names | 65 |
+| `--offline` is set | 81 |
+| Authentication fails | 80 |
+
+The "nothing to update" case exits `1` (`Failure`) rather than a more specific code: it raises a plain error with no `ClassifyExitCode` source, so classification falls through to the generic case. "No description to copy" carries the registry's own not-found cause, so it reaches `79` — a script can tell "there was nothing to promote" from "the command was wrong".
 
 #### `sign` {#package-sign}
 
@@ -5170,6 +5264,9 @@ or a registry error) — the report then degrades to a local-state-only summary
 [in-depth-ci]: ../in-depth/ci.md
 [in-depth-indices-layout]: ../in-depth/indices.md#local-layout
 [in-depth-indices-update]: ../in-depth/indices.md#update-modes
+[in-depth-signing]: ../in-depth/signing.md
+[cmd-lock-file]: ../in-depth/project.md#lock-format
+[ug-promoting]: ../user-guide/promoting-packages.md
 [in-depth-indices-public]: ../in-depth/indices.md#public-index
 [in-depth-indices-servable]: ../in-depth/indices.md#servable
 [in-depth-lazy-loading]: ../in-depth/lazy-loading.md

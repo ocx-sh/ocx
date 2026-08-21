@@ -8,9 +8,11 @@
 //! It is the publishing counterpart to [`PackageManager`](crate::package_manager::PackageManager),
 //! which handles local-store operations.
 
+pub mod copy;
 mod layer_ref;
 pub mod publish_gate;
 
+pub use copy::{CopiedPlatform, CopyError, CopyErrorKind, CopyOutcome, CopyRequest, Disposition};
 pub use layer_ref::{ArchiveMediaType, LayerRef, LayerRefParseError};
 pub use publish_gate::{PublishGateError, verify_dependency_pins};
 
@@ -19,6 +21,7 @@ use std::path::Path;
 
 use crate::{
     log, oci,
+    oci::client::ReadAddressing,
     package::{self, description::Description, info::Info, version::Version},
     prelude::*,
 };
@@ -242,19 +245,47 @@ impl Publisher {
         Ok(())
     }
 
-    /// Pull the existing description from the `__ocx.desc` tag.
+    /// Pull the existing description from the `__ocx.desc` tag, from the
+    /// canonical registry.
     ///
     /// Returns `Ok(None)` if no description exists yet.
+    ///
+    /// Canonical because every caller of this form writes back what it returns —
+    /// `package copy --description`, `package describe --from`, and the merge in
+    /// `package describe` (invariant 5, `subsystem-oci.md`). A read that only
+    /// renders is [`pull_description_mirrored`](Self::pull_description_mirrored).
     pub async fn pull_description(&self, identifier: &oci::Identifier, temp_dir: &Path) -> Result<Option<Description>> {
         Ok(self.client.pull_description(identifier, temp_dir).await?)
+    }
+
+    /// [`pull_description`](Self::pull_description) served by a configured
+    /// mirror.
+    ///
+    /// Only for a description nothing is written from — `ocx package info`
+    /// renders one and stops. Named rather than implied, because nothing in a
+    /// call site's shape says whether its answer will back a write.
+    pub async fn pull_description_mirrored(
+        &self,
+        identifier: &oci::Identifier,
+        temp_dir: &Path,
+    ) -> Result<Option<Description>> {
+        Ok(self
+            .client
+            .pull_description_addressed(identifier, temp_dir, ReadAddressing::Mirrored)
+            .await?)
     }
 
     /// Lists existing tags for the given identifier from the registry.
     ///
     /// Convenience method for callers that need to fetch existing versions
     /// before calling [`push_cascade`](Self::push_cascade).
+    /// Mirrored is inherited, not chosen: callers feed these tags to
+    /// [`push_cascade`](Self::push_cascade), which makes it the same Invariant
+    /// #5 case the copy path fixed. Moving it changes every push.
     pub async fn list_tags(&self, identifier: oci::Identifier) -> Result<Vec<String>> {
-        self.client.list_tags(identifier).await
+        self.client
+            .list_tags_addressed(identifier, ReadAddressing::Mirrored)
+            .await
     }
 
     /// Parses a list of tag strings into a set of valid versions,

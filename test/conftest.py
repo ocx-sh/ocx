@@ -8,6 +8,8 @@ import stat
 import sys
 import textwrap
 import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -26,10 +28,32 @@ from src.runner import OcxRunner
 # move together. An explicit REGISTRY / MIRROR_REGISTRY still wins over both.
 _DEFAULT_REGISTRY = f"localhost:{os.environ.get('OCX_TEST_REGISTRY_PORT', '5000')}"
 _DEFAULT_MIRROR_REGISTRY = f"localhost:{os.environ.get('OCX_TEST_MIRROR_PORT', '5001')}"
+_DEFAULT_TARGET_REGISTRY = f"localhost:{os.environ.get('OCX_TEST_TARGET_PORT', '5003')}"
+
+
+def _wait_for_reachable(
+    is_reachable: Callable[[], bool],
+    *,
+    attempts: int = 10,
+    delay_seconds: float = 0.5,
+    sleep: Callable[[float], None] = time.sleep,
+) -> bool:
+    """Polls ``is_reachable`` up to ``attempts`` times, sleeping between tries.
+
+    Returns ``True`` the moment a call succeeds, ``False`` once every attempt
+    is exhausted. ``sleep`` is injectable so a test can prove the polling
+    shape (attempt count, no sleep after the last try) without a real clock.
+    """
+    for attempt in range(attempts):
+        if is_reachable():
+            return True
+        if attempt < attempts - 1:
+            sleep(delay_seconds)
+    return False
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Start the registry (and mirror registry) once before xdist workers spawn.
+    """Start the registry (and secondary registries) once before xdist workers spawn.
 
     Registry-independent opt-out (``OCX_TESTS_NO_REGISTRY=1``): the Windows
     native-shim acceptance suite (``tests/test_windows_shim.py``) builds a
@@ -39,10 +63,17 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     sets this flag so ``pytest_sessionstart`` does not hard-fail trying to
     ``docker compose up`` a registry no collected test needs.
 
-    The mirror registry (``localhost:5001``) is started under the same
-    opt-out guard. Tests in ``test_oci_registry_mirror.py`` skip if the
-    mirror registry is not reachable after the compose-up so that a
-    single-registry environment does not regress.
+    The mirror registry (``localhost:5001``) and the promotion target
+    (``localhost:5003``) are started under the same opt-out guard. Both are
+    declared in the same docker-compose.yml as the primary registry, but
+    ``start_registry`` returns early when the primary is already warm, so it
+    cannot be relied on to have created them: each secondary is brought up
+    here in its own right, then given a bounded retry for the beat its port
+    takes to bind. A secondary that is still unreachable after both is a
+    hard failure — Docker is available, so an absent service is a broken
+    environment, and skipping instead would empty whole suites (every test
+    in ``test_package_copy.py`` depends on ``target-registry``) while the
+    run still exits 0.
     """
     if os.environ.get("PYTEST_XDIST_WORKER") is not None:
         return
@@ -50,24 +81,34 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         return
     registry = os.environ.get("REGISTRY", _DEFAULT_REGISTRY)
     start_registry(registry)
-    # Mirror registry: best-effort start alongside the main registry; both
-    # are declared in the same docker-compose.yml so a single `docker compose
-    # up -d` starts both. The readiness wait is handled inside start_registry
-    # for the primary port; we issue a separate reachability check here so
-    # ``mirror_registry`` can skip gracefully if the second service is absent.
-    mirror_registry = os.environ.get("MIRROR_REGISTRY", _DEFAULT_MIRROR_REGISTRY)
+
     from src.helpers import registry_is_reachable  # noqa: PLC0415
-    if not registry_is_reachable(mirror_registry):
-        # Compose was already run for the primary registry; ports may not be
-        # bound yet. Give the second service up to 5 s.
-        import time  # noqa: PLC0415
-        for _ in range(10):
-            if registry_is_reachable(mirror_registry):
-                break
-            time.sleep(0.5)
-        # If still unreachable, tests that need it will skip — not a hard
-        # failure here because this session hook also runs for test suites
-        # that don't need the mirror.
+
+    from src.helpers import compose_up  # noqa: PLC0415
+
+    secondaries = (
+        ("mirror-registry", os.environ.get("MIRROR_REGISTRY", _DEFAULT_MIRROR_REGISTRY)),
+        ("target-registry", os.environ.get("TARGET_REGISTRY", _DEFAULT_TARGET_REGISTRY)),
+    )
+    for service, address in secondaries:
+        if registry_is_reachable(address):
+            continue
+        # A warm primary makes `start_registry` a no-op, so a sibling service
+        # that was never created stays absent — the retry alone would just
+        # burn its budget against a container that does not exist. Issue the
+        # compose up here rather than assuming the primary's start did it.
+        compose_up()
+        if _wait_for_reachable(lambda address=address: registry_is_reachable(address)):
+            continue
+        # Hard failure, not a skip. Docker is available (the opt-out above did
+        # not fire), so an absent service is a broken environment, not a
+        # legitimately reduced one — and a skip here silently empties whole
+        # suites while the run still exits 0.
+        raise RuntimeError(
+            f"{service} at {address} did not become reachable after "
+            f"`docker compose up -d` and a bounded retry; the suites that "
+            f"need it would otherwise skip and the run would still pass"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +145,33 @@ def mirror_registry() -> str:
         pytest.skip(
             f"mirror registry at {addr} is not reachable; "
             "test_oci_registry_mirror.py requires the docker-compose 'mirror-registry' service"
+        )
+    return addr
+
+
+@pytest.fixture(scope="session")
+def target_registry() -> str:
+    """Session-scoped promotion target (the second zot, localhost:5003).
+
+    A cross-registry ``ocx package copy`` needs a target that implements the OCI
+    1.1 Referrers API, so it cannot be ``mirror_registry`` — that one is
+    registry:2 and deliberately has none. Consumed by
+    ``tests/test_package_copy.py``.
+
+    Skips when the service is unreachable, on the same terms as
+    ``mirror_registry``: a single-registry environment, no Docker, or a Windows
+    runner that sets ``OCX_TESTS_NO_REGISTRY=1``.
+    """
+    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
+        pytest.skip("OCX_TESTS_NO_REGISTRY=1: target registry not started")
+
+    addr = os.environ.get("TARGET_REGISTRY", _DEFAULT_TARGET_REGISTRY)
+
+    from src.helpers import registry_is_reachable  # noqa: PLC0415
+    if not registry_is_reachable(addr):
+        pytest.skip(
+            f"target registry at {addr} is not reachable; "
+            "test_package_copy.py requires the docker-compose 'target-registry' service"
         )
     return addr
 

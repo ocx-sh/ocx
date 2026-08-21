@@ -2924,6 +2924,16 @@ mod tests {
             unimplemented!("verify never pushes")
         }
 
+        async fn push_blob_from_path(
+            &self,
+            _: &native::Reference,
+            _: &std::path::Path,
+            _: &Digest,
+            _: std::sync::Arc<dyn Fn(u64) + Send + Sync>,
+        ) -> std::result::Result<String, ClientError> {
+            unimplemented!("verify never pushes a file-backed blob")
+        }
+
         async fn push_referrer_manifest(
             &self,
             _: &native::Reference,
@@ -4199,6 +4209,16 @@ mod tests {
             _: std::sync::Arc<dyn Fn(u64) + Send + Sync>,
         ) -> std::result::Result<String, ClientError> {
             unimplemented!("reading an SBOM never pushes")
+        }
+
+        async fn push_blob_from_path(
+            &self,
+            _: &native::Reference,
+            _: &std::path::Path,
+            _: &Digest,
+            _: std::sync::Arc<dyn Fn(u64) + Send + Sync>,
+        ) -> std::result::Result<String, ClientError> {
+            unimplemented!("verify never pushes a file-backed blob")
         }
 
         async fn push_referrer_manifest(

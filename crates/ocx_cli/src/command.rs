@@ -41,6 +41,7 @@ pub mod package_attest;
 pub mod package_cascade;
 pub mod package_cascade_check;
 pub mod package_cascade_repair;
+pub mod package_copy;
 pub mod package_create;
 pub mod package_describe;
 pub mod package_info;

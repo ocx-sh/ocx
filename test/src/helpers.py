@@ -60,16 +60,27 @@ def registry_is_reachable(registry: str) -> bool:
         return False
 
 
-def start_registry(registry: str) -> None:
-    """Start the registry via docker-compose if it is not already running."""
-    if registry_is_reachable(registry):
-        return
+def compose_up() -> None:
+    """Bring the whole docker-compose stack up.
 
+    ``start_registry`` short-circuits on a warm primary, so a *sibling*
+    service that was never created stays absent for the rest of the session.
+    A caller that needs a specific service must issue this itself rather than
+    assume the primary's start created everything.
+    """
     subprocess.run(
         ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d"],
         check=True,
         capture_output=True,
     )
+
+
+def start_registry(registry: str) -> None:
+    """Start the registry via docker-compose if it is not already running."""
+    if registry_is_reachable(registry):
+        return
+
+    compose_up()
 
     # Wait for the registry to become reachable (up to 15 s).
     for _ in range(30):

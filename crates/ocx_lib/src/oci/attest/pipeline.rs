@@ -717,6 +717,16 @@ mod tests {
             Ok(digest.to_string())
         }
 
+        async fn push_blob_from_path(
+            &self,
+            image: &native::Reference,
+            path: &std::path::Path,
+            digest: &Digest,
+            on_progress: Arc<dyn Fn(u64) + Send + Sync>,
+        ) -> std::result::Result<String, ClientError> {
+            crate::oci::client::push_blob_buffered(self, image, path, digest, on_progress).await
+        }
+
         async fn push_referrer_manifest(
             &self,
             image: &native::Reference,

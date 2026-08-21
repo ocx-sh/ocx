@@ -850,6 +850,7 @@ fn classify(client: &ClientError) -> ClientFailure {
         | ClientError::WrongLayerCount { .. }
         | ClientError::UnexpectedLayerMediaType { .. }
         | ClientError::LayerSizeExceeded { .. }
+        | ClientError::TraversalLimitExceeded { .. }
         | ClientError::Serialization(_)
         | ClientError::InvalidEncoding(_)
         | ClientError::ReferrersUnsupported { .. }

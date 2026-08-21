@@ -302,6 +302,17 @@ pub async fn push_with_cascade(
 ///
 /// Returns `Err` on registry errors — the caller decides how to handle
 /// (typically: stop cascade conservatively with a warning).
+///
+/// The blocker manifests are read from the **canonical** registry
+/// ([`ReadAddressing::Canonical`]), never a configured mirror, for every caller
+/// — `subsystem-oci.md` Invariant #5. This probe's answer decides whether a
+/// rolling tag at the canonical registry moves, and the two outcomes are not
+/// symmetric: an `Err` stops the cascade conservatively (the caller's `Err`
+/// arms above), but a *successful* answer that merely omits the platform is
+/// taken at face value and moves the tag. A stale or hostile mirror therefore
+/// does not need to fail to walk `latest` backwards onto an older release — it
+/// only needs to under-report the platforms of the version that should have
+/// blocked (CWE-345/367).
 async fn has_blocking_platform(
     client: &oci::Client,
     identifier: &oci::Identifier,
@@ -750,6 +761,93 @@ mod tests {
             data.write()
                 .manifests
                 .insert(id.canonical_reference().to_string(), (manifest_data, digest));
+        }
+
+        /// Seeds an index under an explicit reference string, so a test can
+        /// give the mirror host and the canonical host *different* answers.
+        fn seed_index_at(data: &StubTransportData, reference: &str, platforms: &[&str]) {
+            let manifests: Vec<oci::ImageIndexEntry> = platforms
+                .iter()
+                .map(|p| {
+                    let plat: oci::Platform = p.parse().unwrap();
+                    oci::ImageIndexEntry {
+                        media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                        digest: format!("sha256:fake_{p}"),
+                        size: 100,
+                        platform: Some(plat.into()),
+                        artifact_type: None,
+                        annotations: None,
+                    }
+                })
+                .collect();
+            let index = oci::Manifest::ImageIndex(oci::ImageIndex {
+                schema_version: 2,
+                media_type: None,
+                artifact_type: None,
+                manifests,
+                annotations: None,
+            });
+            let manifest_data = serde_json::to_vec(&index).unwrap();
+            let digest = oci::Algorithm::Sha256.hash(&manifest_data).to_string();
+            data.write()
+                .manifests
+                .insert(reference.to_string(), (manifest_data, digest));
+        }
+
+        /// The blocker probe decides whether a rolling tag at the **canonical**
+        /// registry moves, so it must read the canonical registry — Invariant #5.
+        ///
+        /// The two hosts are seeded with *different* answers, which is what makes
+        /// this discriminate: the mirror under-reports the platform (the cheap
+        /// half of the attack — the mirror never has to fail), the canonical host
+        /// carries it. A mirrored read therefore reports "nothing blocks" and
+        /// walks the rolling tag backwards onto the older release; a canonical
+        /// read blocks. Asserting only that the mirror 404s would pass for a
+        /// mirrored implementation too, via the conservative `Err` arm.
+        #[tokio::test]
+        async fn the_blocker_probe_reads_the_canonical_registry_not_a_mirror() {
+            let data = StubTransportData::new();
+            let blocker = Version::new_build(3, 28, 1, "b1");
+            let identifier = test_identifier().clone_with_tag(blocker.to_string());
+            let mirrored = test_client(&data).with_test_mirror("example.com", "mirror.invalid", "upstream");
+
+            let mirror_reference = mirrored
+                .read_reference(&identifier, crate::oci::client::ReadAddressing::Mirrored)
+                .to_string();
+            let canonical_reference = identifier.canonical_reference().to_string();
+            assert_ne!(
+                mirror_reference, canonical_reference,
+                "the fixture only discriminates while the two hosts differ"
+            );
+
+            // The mirror omits the platform; the canonical registry carries it.
+            seed_index_at(&data, &mirror_reference, &["linux/arm64"]);
+            seed_index_at(&data, &canonical_reference, &["linux/amd64"]);
+
+            let blocked = has_blocking_platform(
+                &mirrored,
+                &test_identifier(),
+                std::slice::from_ref(&blocker),
+                &platform("linux/amd64"),
+            )
+            .await
+            .expect("the canonical registry is seeded, so the probe resolves");
+
+            assert!(
+                blocked,
+                "the probe must see the canonical registry's platform list; a mirror that merely \
+                 under-reports would report 'nothing blocks' and move the rolling tag backwards"
+            );
+            let auth_hosts: Vec<String> = data
+                .read()
+                .auth_calls
+                .iter()
+                .map(|(registry, _)| registry.clone())
+                .collect();
+            assert!(
+                auth_hosts.iter().all(|host| host == "example.com"),
+                "a canonical read authenticates against the canonical host, got {auth_hosts:?}"
+            );
         }
 
         // ── has_blocking_platform ───────────────────────────────
