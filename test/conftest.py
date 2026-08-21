@@ -203,6 +203,39 @@ def fake_forge():
         thread.join(timeout=5)
 
 
+def _load_fake_registry_module():
+    """Loads `test/tests/fake_registry.py` by path — same reason as
+    `_load_fake_forge_module` above (`tests/` is not an importable package)."""
+    module_path = Path(__file__).parent / "tests" / "fake_registry.py"
+    spec = importlib.util.spec_from_file_location("fake_registry", module_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture()
+def html_mirror():
+    """A host that answers every manifest request with an HTML portal page
+    (`test/tests/fake_registry.py`).
+
+    The shape of ocx-sh/ocx#327: a mirror pointed at a tenant that no longer
+    serves the registry. Neither `registry:2` nor `zot` can be made to do this
+    — both refuse to serve bytes that are not the manifest they claim to be.
+
+    Bound to an ephemeral loopback port, zero real network. Point OCX at it
+    with ``[mirrors] "<upstream>" = "<html_mirror.base_url>"``.
+    """
+    server = _load_fake_registry_module().HtmlMirror()
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 # ---------------------------------------------------------------------------
 # Mock docker credential helper
 # ---------------------------------------------------------------------------

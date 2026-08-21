@@ -753,3 +753,65 @@ def test_mirror_install_clean_reachability_is_mirror_agnostic(
     ocx.plain("clean")
     assert_not_exists(content)
     assert_no_mirror_slug_leak()
+
+
+# ---------------------------------------------------------------------------
+# Scenario — a mirror that answers every manifest with HTML (issue #327)
+# ---------------------------------------------------------------------------
+
+
+def test_mirror_serving_html_fails_as_a_data_error_naming_the_mirror(
+    ocx: OcxRunner,
+    registry: str,
+    html_mirror,
+    unique_repo: str,
+) -> None:
+    """A mirror answering with a login portal fails 65 and names the routing.
+
+    The shape of https://github.com/ocx-sh/ocx/issues/327: a placeholder
+    ``[mirrors]`` entry pointed at a host that does not serve the registry,
+    which answers 200 with an HTML page. Before the fix that HTML reached
+    digest verification and was reported as a digest mismatch, exit 69, naming
+    neither the mirror nor the upstream it stood in for — the same "got" digest
+    for every package, because it was the digest of the same portal page.
+
+    Four things must appear, and each is a separate diagnosis the user cannot
+    reach without it: the exit code says it is bad data and not an unavailable
+    registry, ``via mirror`` plus the mirror authority say the request went
+    somewhere the user did not type, the upstream says which config entry sent
+    it there, and ``text/html`` says what actually came back.
+
+    Nothing is pushed anywhere: the mirror answers everything, so the upstream
+    is never contacted.
+    """
+    write_home_config(ocx, f'[mirrors]\n"{registry}" = "{html_mirror.base_url}"\n')
+
+    result = run_with_env(
+        ocx,
+        "package",
+        "install",
+        f"{registry}/{unique_repo}:1.0.0",
+        extra_env={
+            "OCX_INSECURE_REGISTRIES": f"{registry},{html_mirror.authority}",
+        },
+        check=False,
+    )
+
+    assert result.returncode == 65, (
+        "a mirror answering with HTML is bad data (65), not an unavailable "
+        f"registry (69) or a generic failure; got rc={result.returncode}\n"
+        f"stdout: {result.stdout.strip()}\nstderr: {result.stderr.strip()}"
+    )
+    stderr = result.stderr
+    assert "via mirror" in stderr, f"the failure must say it was routed through a mirror: {stderr}"
+    assert html_mirror.authority in stderr, (
+        f"the failure must name the mirror actually contacted ({html_mirror.authority}): {stderr}"
+    )
+    assert registry in stderr, (
+        f"the failure must name the upstream the mirror stands in for ({registry}): {stderr}"
+    )
+    assert "text/html" in stderr, f"the failure must name what the mirror actually returned: {stderr}"
+
+    assert any(path.startswith("/v2/") for _, path in html_mirror.requests), (
+        f"the mirror must have been contacted at all; recorded: {html_mirror.requests}"
+    )
