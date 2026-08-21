@@ -838,6 +838,7 @@ fn classify(client: &ClientError) -> ClientFailure {
         }
         // Data errors and other structural failures — not retryable.
         ClientError::InvalidManifest(_)
+        | ClientError::NotAManifest(_)
         | ClientError::InvalidImageIndex(_)
         | ClientError::DigestMismatch { .. }
         | ClientError::DecompressionCapExceeded { .. }
@@ -946,6 +947,15 @@ mod classify_tests {
         let pinned =
             PinnedIdentifier::try_from(id.clone_with_digest(Digest::Sha256("a".repeat(64)))).expect("valid pinned");
         assert_not_found(ClientError::BlobNotFound(pinned));
+    }
+
+    /// A mirror answering with a login portal must not be retried: the
+    /// response was wrong, not missing, so the resolve loop stops.
+    #[test]
+    fn not_a_manifest_is_other() {
+        assert_other(ClientError::NotAManifest(Box::new(std::io::Error::other(
+            "unexpected content type 'text/html'",
+        ))));
     }
 
     #[test]

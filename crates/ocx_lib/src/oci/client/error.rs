@@ -40,6 +40,16 @@ pub enum ClientError {
     /// Manifest structure is invalid (e.g. wrong layer count, missing fields).
     #[error("invalid manifest: {0}")]
     InvalidManifest(String),
+    /// The registry answered a manifest request with something that cannot be
+    /// a manifest — an HTML login portal, a proxy error page, a mirror pointed
+    /// at a host that no longer serves the registry.
+    ///
+    /// Distinct from [`Self::DigestMismatch`], which is what this used to be
+    /// reported as: the bytes are not corrupted, they are the wrong bytes
+    /// entirely, and the source names the content type and the URL they
+    /// finally came from. Both exit 65 — rerunning fixes neither.
+    #[error("registry did not answer with a manifest")]
+    NotAManifest(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// A registry served an image index that deserialised but violates the OCI
     /// image spec (wrong `schemaVersion`, unaddressable descriptor). Refused at
     /// registry admission so malformed bytes never reach the index.
@@ -229,6 +239,7 @@ impl ClassifyExitCode for ClientError {
             | Self::DecompressionCapExceeded { .. }
             | Self::UnexpectedManifestType
             | Self::InvalidManifest(_)
+            | Self::NotAManifest(_)
             | Self::InvalidImageIndex(_)
             | Self::UnexpectedArtifactType { .. }
             | Self::WrongLayerCount { .. }

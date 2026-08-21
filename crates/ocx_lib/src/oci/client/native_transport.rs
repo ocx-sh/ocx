@@ -95,7 +95,7 @@ impl NativeTransport {
 /// above.
 fn registry_error(e: oci_client::errors::OciDistributionError) -> ClientError {
     use oci_client::errors::OciDistributionError::{
-        AuthenticationFailure, RegistryError, RequestError, ServerError, UnauthorizedError,
+        AuthenticationFailure, RegistryError, RequestError, ServerError, UnauthorizedError, UnexpectedContentType,
     };
     use oci_client::errors::OciErrorCode;
     match &e {
@@ -118,6 +118,10 @@ fn registry_error(e: oci_client::errors::OciDistributionError) -> ClientError {
                 ClientError::Registry(Box::new(e))
             }
         }
+        // A manifest request answered with HTML is a mis-delivered response, not
+        // an unavailable registry: 65 says the bytes were wrong, 69 would tell a
+        // retry wrapper the registry might answer differently next time.
+        UnexpectedContentType { .. } => ClientError::NotAManifest(Box::new(e)),
         _ => ClientError::Registry(Box::new(e)),
     }
 }
@@ -1214,5 +1218,28 @@ mod tests {
         let reports = reports.lock().unwrap();
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0], 0); // nothing confirmed when yielding the only chunk
+    }
+
+    /// The response-shape split, pinned end to end: a manifest request answered
+    /// with a login portal exits 65 (the bytes were wrong, rerunning changes
+    /// nothing), not 69 (the registry is unavailable). Before the fork read the
+    /// content type this arrived as a digest mismatch; before this arm it fell
+    /// to the catch-all and exited 69.
+    #[test]
+    fn an_html_manifest_response_classifies_as_a_data_error() {
+        use crate::cli::{ClassifyExitCode as _, ExitCode};
+
+        let mapped = registry_error(OciDistributionError::UnexpectedContentType {
+            content_type: "text/html; charset=utf-8".to_string(),
+            url: "https://portal.example.com/login".to_string(),
+        });
+
+        assert!(matches!(mapped, ClientError::NotAManifest(_)), "got {mapped:?}");
+        assert_eq!(mapped.classify(), Some(ExitCode::DataError));
+        let rendered = format!("{:#}", anyhow::Error::from(mapped));
+        assert!(
+            rendered.contains("text/html") && rendered.contains("portal.example.com"),
+            "the chain must name what arrived and where from, got: {rendered}"
+        );
     }
 }
