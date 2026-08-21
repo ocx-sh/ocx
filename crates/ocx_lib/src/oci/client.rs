@@ -312,6 +312,7 @@ impl Client {
                 | ClientError::RegistryTransient(_)
                 | ClientError::Authentication(_)
                 | ClientError::NotAManifest(_)
+                | ClientError::UnexpectedManifestType
                 | ClientError::DigestMismatch { .. }
                 | ClientError::ShortBlobRead { .. }
                 | ClientError::InvalidManifest(_)
@@ -439,7 +440,10 @@ impl Client {
     /// Fetches the digest of a manifest from the remote, trying to avoid pulling the entire manifest if possible.
     pub async fn fetch_manifest_digest(&self, identifier: &Identifier) -> Result<oci::Digest> {
         let ref_ = self.transport_reference(identifier);
-        self.transport.ensure_auth(&ref_, oci::RegistryOperation::Pull).await?;
+        self.transport
+            .ensure_auth(&ref_, oci::RegistryOperation::Pull)
+            .await
+            .map_err(|e| self.via_mirror(identifier, &ref_, e))?;
         let digest = self
             .transport
             .fetch_manifest_digest(&ref_)
@@ -452,7 +456,10 @@ impl Client {
     /// Fetches the manifest for the given image reference, returning both the manifest and its digest.
     pub async fn fetch_manifest(&self, identifier: &Identifier) -> Result<(Digest, oci::Manifest)> {
         let ref_ = self.transport_reference(identifier);
-        self.transport.ensure_auth(&ref_, oci::RegistryOperation::Pull).await?;
+        self.transport
+            .ensure_auth(&ref_, oci::RegistryOperation::Pull)
+            .await
+            .map_err(|e| self.via_mirror(identifier, &ref_, e))?;
         let (manifest, digest_str) = self
             .fetch_manifest_raw(&ref_)
             .await
@@ -714,7 +721,10 @@ impl Client {
         let expected_digest = identifier.digest().to_string();
         let image = self.transport_reference(identifier);
 
-        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+        self.transport
+            .ensure_auth(&image, oci::RegistryOperation::Pull)
+            .await
+            .map_err(|e| self.via_mirror(identifier, &image, e))?;
 
         let (manifest, digest_str) = self
             .fetch_manifest_raw(&image)
@@ -732,7 +742,7 @@ impl Client {
         }
         let manifest = match manifest {
             oci::Manifest::Image(m) => m,
-            _ => return Err(ClientError::UnexpectedManifestType),
+            _ => return Err(self.via_mirror(identifier, &image, ClientError::UnexpectedManifestType)),
         };
 
         Ok(manifest)
@@ -746,7 +756,10 @@ impl Client {
     /// content interpretation.
     pub async fn pull_blob(&self, blob_ref: &oci::PinnedIdentifier) -> std::result::Result<Vec<u8>, ClientError> {
         let image = self.transport_reference(blob_ref);
-        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+        self.transport
+            .ensure_auth(&image, oci::RegistryOperation::Pull)
+            .await
+            .map_err(|e| self.via_mirror(blob_ref, &image, e))?;
         self.transport
             .pull_blob(&image, &blob_ref.digest())
             .await
@@ -1939,7 +1952,10 @@ impl Client {
         addressing: ReadAddressing,
     ) -> std::result::Result<Option<Digest>, ClientError> {
         let image = self.read_reference(identifier, addressing);
-        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+        self.transport
+            .ensure_auth(&image, oci::RegistryOperation::Pull)
+            .await
+            .map_err(|e| self.via_mirror(identifier, &image, e))?;
         match self.transport.fetch_manifest_digest(&image).await {
             Ok(digest_str) => Ok(Some(Digest::try_from(digest_str.as_str()).map_err(|e| {
                 ClientError::InvalidManifest(format!("digest '{digest_str}' from registry HEAD is malformed: {e}"))
@@ -2014,7 +2030,10 @@ impl Client {
         addressing: ReadAddressing,
     ) -> std::result::Result<Option<(Vec<u8>, Digest, oci::Manifest)>, ClientError> {
         let image = self.read_reference(identifier, addressing);
-        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+        self.transport
+            .ensure_auth(&image, oci::RegistryOperation::Pull)
+            .await
+            .map_err(|e| self.via_mirror(identifier, &image, e))?;
 
         let (raw_bytes, digest_str) = match self
             .transport
@@ -6195,14 +6214,29 @@ mod tests {
         /// (or fail harmlessly downstream) — only the reference actually
         /// handed to the transport matters for these tests, never the
         /// method's return value.
-        #[derive(Clone)]
+        /// What the stub answers a manifest pull with. `NotFound` is the
+        /// harmless default every routing test above relies on; the others
+        /// exist to drive the error-annotation paths.
+        #[derive(Clone, Copy, Default)]
+        enum ManifestAnswer {
+            /// The not-found sentinel — every caller maps it to `Ok(None)` or
+            /// propagates it, so only the recorded reference matters.
+            #[default]
+            NotFound,
+            /// A hard registry failure.
+            HardFailure,
+            /// A well-formed image index, where the caller wanted an image
+            /// manifest.
+            ImageIndex,
+        }
+
+        #[derive(Clone, Default)]
         struct RecordingTransport {
             data: RecordingTransportData,
-            /// Answer manifest pulls with a hard registry failure rather than
-            /// the not-found sentinel, so the error-annotation path can be
-            /// driven. Default `false` keeps every routing test above on the
-            /// harmless not-found answer.
-            manifest_fails_hard: bool,
+            manifest: ManifestAnswer,
+            /// Fail the auth handshake, so the pre-fetch failure path can be
+            /// driven.
+            auth_fails: bool,
         }
 
         #[async_trait::async_trait]
@@ -6213,6 +6247,11 @@ mod tests {
                 _operation: oci::RegistryOperation,
             ) -> TransportResult<()> {
                 self.data.record("ensure_auth", image);
+                if self.auth_fails {
+                    return Err(ClientError::Authentication(Box::new(std::io::Error::other(
+                        "registry rejected the credentials",
+                    ))));
+                }
                 Ok(())
             }
 
@@ -6275,15 +6314,18 @@ mod tests {
                 _accepted_media_types: &[&str],
             ) -> TransportResult<(Vec<u8>, String)> {
                 self.data.record("pull_manifest_raw", image);
-                if self.manifest_fails_hard {
-                    return Err(ClientError::Registry(Box::new(std::io::Error::other(
+                match self.manifest {
+                    ManifestAnswer::HardFailure => Err(ClientError::Registry(Box::new(std::io::Error::other(
                         "registry refused the manifest",
-                    ))));
+                    )))),
+                    ManifestAnswer::ImageIndex => {
+                        let bytes = br#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}"#.to_vec();
+                        // Echo the requested digest so the digest check passes
+                        // and the caller reaches the shape check.
+                        Ok((bytes, image.digest().unwrap_or_default().to_string()))
+                    }
+                    ManifestAnswer::NotFound => Err(ClientError::ManifestNotFound(image.to_string())),
                 }
-                // Not-found is a legitimate, harmless outcome for every caller
-                // exercised below (each either propagates the error or maps
-                // it to `Ok(None)`) — only the recorded reference matters here.
-                Err(ClientError::ManifestNotFound(image.to_string()))
             }
 
             async fn pull_blob(
@@ -6359,16 +6401,30 @@ mod tests {
         /// [`MIRROR_PREFIX`]. Returns the data handle alongside the client so
         /// tests can inspect recorded calls after driving a method.
         fn mirrored_client() -> (Client, RecordingTransportData) {
-            mirrored_client_with(false)
+            mirrored_client_with(ManifestAnswer::NotFound)
         }
 
-        /// [`mirrored_client`] with the transport's manifest answer selectable:
-        /// `true` fails hard, so the mirror-annotation path is reachable.
-        fn mirrored_client_with(manifest_fails_hard: bool) -> (Client, RecordingTransportData) {
+        /// [`mirrored_client`] with the transport's manifest answer selectable.
+        fn mirrored_client_with(manifest: ManifestAnswer) -> (Client, RecordingTransportData) {
+            mirrored_client_from(RecordingTransport {
+                manifest,
+                ..Default::default()
+            })
+        }
+
+        /// [`mirrored_client`] whose transport rejects the auth handshake.
+        fn mirrored_client_failing_auth() -> (Client, RecordingTransportData) {
+            mirrored_client_from(RecordingTransport {
+                auth_fails: true,
+                ..Default::default()
+            })
+        }
+
+        fn mirrored_client_from(transport: RecordingTransport) -> (Client, RecordingTransportData) {
             let data = RecordingTransportData::new();
             let mut client = Client::with_transport(Box::new(RecordingTransport {
                 data: data.clone(),
-                manifest_fails_hard,
+                ..transport
             }));
             client.mirrors = MirrorMap::new([(
                 UPSTREAM_REGISTRY.to_string(),
@@ -6660,7 +6716,7 @@ mod tests {
         /// upstream that mirror stands in for.
         #[tokio::test]
         async fn a_mirrored_fetch_failure_names_the_physical_reference_and_its_upstream() {
-            let (client, _) = mirrored_client_with(true);
+            let (client, _) = mirrored_client_with(ManifestAnswer::HardFailure);
 
             let error = client
                 .pull_manifest(&pinned_identifier('b'))
@@ -6681,6 +6737,51 @@ mod tests {
             assert!(
                 physical.contains(MIRROR_HOST) && physical.contains(&mirrored_repository()),
                 "must name the reference actually fetched, got: {physical}"
+            );
+        }
+
+        /// Auth is attempted against the mirror, not the upstream, so a
+        /// credential rejection is a statement about the mirror's registry —
+        /// unannotated it sends the reader to look for upstream credentials
+        /// that were never used.
+        #[tokio::test]
+        async fn a_mirrored_auth_failure_names_the_mirror() {
+            let (client, _) = mirrored_client_failing_auth();
+
+            let error = client
+                .pull_manifest(&pinned_identifier('b'))
+                .await
+                .expect_err("the transport was told to reject the credentials");
+
+            let ClientError::Mirrored { mirror, source, .. } = &error else {
+                panic!("a mirrored auth failure must be annotated, got {error:?}");
+            };
+            assert_eq!(mirror, MIRROR_HOST);
+            assert!(
+                matches!(**source, ClientError::Authentication(_)),
+                "the wrapped verdict must still be the auth failure, got {source:?}"
+            );
+        }
+
+        /// A mirror serving the wrong document shape is still the mirror's
+        /// answer. Unannotated it reads as the upstream publishing something
+        /// malformed.
+        #[tokio::test]
+        async fn a_mirrored_index_where_a_manifest_was_expected_names_the_mirror() {
+            let (client, _) = mirrored_client_with(ManifestAnswer::ImageIndex);
+
+            let error = client
+                .pull_manifest(&pinned_identifier('b'))
+                .await
+                .expect_err("an image index is not an image manifest");
+
+            let ClientError::Mirrored { mirror, source, .. } = &error else {
+                panic!("a mirrored shape failure must be annotated, got {error:?}");
+            };
+            assert_eq!(mirror, MIRROR_HOST);
+            assert!(
+                matches!(**source, ClientError::UnexpectedManifestType),
+                "the wrapped verdict must still be the shape refusal, got {source:?}"
             );
         }
 
@@ -6707,7 +6808,7 @@ mod tests {
         /// a config entry that had nothing to do with it.
         #[tokio::test]
         async fn a_direct_fetch_from_a_host_that_mirrors_another_upstream_is_not_annotated() {
-            let (client, _) = mirrored_client_with(true);
+            let (client, _) = mirrored_client_with(ManifestAnswer::HardFailure);
             // MIRROR_HOST is UPSTREAM_REGISTRY's mirror, but this identifier
             // names it directly — no rewrite happens.
             let direct = Identifier::new_registry("internal/tool", MIRROR_HOST).clone_with_tag("1.0");
@@ -6729,7 +6830,7 @@ mod tests {
         /// claiming a mirror was involved when none was would be a lie.
         #[tokio::test]
         async fn a_canonical_read_failure_is_not_annotated_as_mirrored() {
-            let (client, _) = mirrored_client_with(true);
+            let (client, _) = mirrored_client_with(ManifestAnswer::HardFailure);
 
             let error = client
                 .fetch_manifest_raw_bytes_addressed(&identifier_with_tag("1.0"), ReadAddressing::Canonical)
