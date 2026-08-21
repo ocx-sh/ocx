@@ -177,7 +177,7 @@ pub struct MirrorConfig {
 pub struct ParsedMirror {
     /// URL scheme without the `://` separator, e.g. `"https"` or `"http"`.
     pub protocol: String,
-    /// Mirror host (and optional port), e.g. `"company.jfrog.io"`.
+    /// Mirror host (and optional port), e.g. `"artifactory.example.com"`.
     pub host: String,
     /// Repository-key path prefix, verbatim, with no leading or trailing `/`.
     /// Empty for a host-only (subdomain-method) mirror.

@@ -243,7 +243,7 @@ A mirror replaces the network endpoint for one host — but a host can serve two
 
 ```toml
 [mirrors]
-"ghcr.io" = "https://company.jfrog.io/ghcr-remote"                     # both roles → one host
+"ghcr.io" = "https://artifactory.example.com/ghcr-remote"              # both roles → one host
 "index.ocx.sh" = { index = "https://artifactory.corp/ocx-index" }      # index role only
 "registry-1.docker.io" = { registry = "http://mirror.local:5000" }     # registry role only
 ```
@@ -262,14 +262,14 @@ Each role's value is `scheme://host[/repo-key-prefix]`. For the **registry** rol
 
 ```toml
 # Artifactory path-based routing (repository-path method):
-# ghcr.io/owner/tool:1.2  →  company.jfrog.io/ghcr-remote/owner/tool:1.2
+# ghcr.io/owner/tool:1.2  →  artifactory.example.com/ghcr-remote/owner/tool:1.2
 [mirrors]
-"ghcr.io" = "https://company.jfrog.io/ghcr-remote"
+"ghcr.io" = "https://artifactory.example.com/ghcr-remote"
 
 # Subdomain / host-only form (empty prefix):
-# ghcr.io/owner/tool:1.2  →  ghcr-remote.company.jfrog.io/owner/tool:1.2
+# ghcr.io/owner/tool:1.2  →  ghcr-remote.artifactory.example.com/owner/tool:1.2
 [mirrors]
-"ghcr.io" = "https://ghcr-remote.company.jfrog.io"
+"ghcr.io" = "https://ghcr-remote.artifactory.example.com"
 ```
 
 **Artifactory note.** The registry-role value is the Docker/OCI *pull* path: `<host>/<repo-key>`. This is not the Artifactory admin REST path (`/artifactory/api/docker/<repo-key>`) — that path is for administrative operations and is not a valid Docker pull URL. The pull path is what you would use with `docker pull` or `oras pull`.
@@ -331,6 +331,12 @@ Credentials are resolved against the **mirror** host, not the upstream. Configur
 | `ocx.lock` | Stores canonical upstream coordinates and per-platform leaf digests — not the mirror host. A lock made behind a mirror is valid on a machine with direct egress, and vice versa. |
 | `push` | Push is not mirror-redirected. The canonical upstream host is contacted. Remote/proxy repositories are read-only; redirecting push would fail confusingly. |
 | `ocx index catalog` / `ocx index update` | Against a namespace resolving through the [ocx-index protocol][in-depth-indices-public], every root, index-object, and catalog fetch honors that host's **index** role only — unrelated to the same host's `registry` role, if any. Against a plain OCI registry mirror, the catalog lists only repositories a proxy-type mirror has cached — a registry-side constraint, not an OCX behavior. |
+
+#### Diagnosing a failed mirror fetch {#keys-mirrors-diagnostics}
+
+A mirror sits between OCX and the package it asked for, so a failure needs to say which side of that redirect broke. A fetch routed through a mirror that fails names both the physical reference it fetched and the upstream host the mirror is configured for, so the error is diagnosable without cross-referencing `[mirrors]` by hand.
+
+A mirror that answers a manifest request with anything other than a manifest — an HTML portal page, a login redirect, a landing page served by a dead or misconfigured proxy repository — is refused before digest verification runs, and the command exits with a [data error][exit-codes] naming the response's content type. Without this check, that HTML body would otherwise reach the digest comparison and fail there instead, reporting a digest mismatch for a problem that was never about digests.
 
 ### `[patches]` section {#keys-patches}
 
@@ -1120,6 +1126,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [cmd-package-verify]: ./command-line.md#package-verify
 [cmd-package-sign]: ./command-line.md#package-sign
 [cmd-package-verify-attestations]: ./command-line.md#package-verify-attestations
+[exit-codes]: ./command-line.md#exit-codes
 
 <!-- environment -->
 [env-ocx-home]: ./environment.md#ocx-home

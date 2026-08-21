@@ -62,7 +62,7 @@ pub mod keys {
     /// JSON object mapping an upstream traffic host to its mirror value —
     /// either a bare string (both traffic roles) or a `{"registry"?, "index"?}`
     /// object (per-role split), the same F5b union `[mirrors."<host>"]`
-    /// accepts in TOML (e.g. `{"ghcr.io":"https://company.jfrog.io/ghcr-remote",
+    /// accepts in TOML (e.g. `{"ghcr.io":"https://artifactory.example.com/ghcr-remote",
     /// "index.ocx.sh":{"index":"https://artifactory.corp/ocx-index"}}`).
     /// Resolution-affecting → forwarded to child ocx processes. A single JSON
     /// object is used (not a comma/`=` list) because mirror values are

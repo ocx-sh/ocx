@@ -348,7 +348,7 @@ value is either a plain string — redirecting both the `registry` and `index` r
 `scheme://host[/repo-key-prefix]`.
 
 ```sh
-export OCX_MIRRORS='{"ghcr.io":"https://company.jfrog.io/ghcr-remote","index.ocx.sh":{"index":"https://artifactory.corp/ocx-index"}}'
+export OCX_MIRRORS='{"ghcr.io":"https://artifactory.example.com/ghcr-remote","index.ocx.sh":{"index":"https://artifactory.corp/ocx-index"}}'
 ```
 
 This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx run` calls — see the same mirror map.

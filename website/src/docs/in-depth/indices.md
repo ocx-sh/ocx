@@ -433,7 +433,7 @@ The [`[mirrors]`][config-mirrors] table value is either a plain string, which re
 ```toml
 [mirrors]
 "index.ocx.sh" = { index = "https://artifactory.corp/ocx-index" }   # index role only
-"ghcr.io" = "https://company.jfrog.io/ghcr-remote"                  # both roles → registry-only host
+"ghcr.io" = "https://artifactory.example.com/ghcr-remote"           # both roles → registry-only host
 ```
 
 Same doctrine as the registry role: the value replaces the base URL wholesale, there is no fallback to the public origin, and the table merges through the [managed-config][config-managed] tier the same way, per role. Every root, index-object, and catalog fetch still verifies its content against the recorded SHA-256 digest — the mirror changes only where the bytes come from, never whether they are trusted.

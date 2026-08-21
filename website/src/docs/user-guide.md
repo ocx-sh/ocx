@@ -756,11 +756,11 @@ The `[mirrors]` config table maps each host to its mirror endpoint. OCX appends 
 ```toml
 # ~/.ocx/config.toml  (or $XDG_CONFIG_HOME/ocx/config.toml)
 [mirrors]
-"ghcr.io" = "https://company.jfrog.io/ghcr-remote"
-"docker.io" = "https://company.jfrog.io/dockerhub-remote"
+"ghcr.io" = "https://artifactory.example.com/ghcr-remote"
+"docker.io" = "https://artifactory.example.com/dockerhub-remote"
 ```
 
-With this config, `ocx package install ghcr.io/owner/tool:1.2` fetches the manifest and blobs from `company.jfrog.io/ghcr-remote/owner/tool`. The canonical identifier — `ghcr.io/owner/tool:1.2` — is never changed.
+With this config, `ocx package install ghcr.io/owner/tool:1.2` fetches the manifest and blobs from `artifactory.example.com/ghcr-remote/owner/tool`. The canonical identifier — `ghcr.io/owner/tool:1.2` — is never changed.
 
 A plain string, as above, redirects every kind of traffic OCX sends that host. A host that also serves an [ocx-index][in-depth-indices-public] can be split per role instead — see [Route index traffic through a mirror][in-depth-indices-mirroring].
 
@@ -800,8 +800,8 @@ Publisher-signature verification (e.g. [cosign][cosign], [Notation][notation]) a
 Authenticate against the **mirror** host, not the upstream. Set `OCX_AUTH_<mirror_slug>_*` (replacing non-alphanumeric characters with underscores) or run `ocx login <mirror-host>`. The upstream's credentials are never used on the read path.
 
 ```sh
-export OCX_AUTH_company_jfrog_io_TYPE=bearer
-export OCX_AUTH_company_jfrog_io_TOKEN="<artifactory-token>"
+export OCX_AUTH_artifactory_example_com_TYPE=bearer
+export OCX_AUTH_artifactory_example_com_TOKEN="<artifactory-token>"
 ```
 
 ### Set mirrors in CI via `OCX_MIRRORS` {#mirrors-env}
@@ -809,7 +809,7 @@ export OCX_AUTH_company_jfrog_io_TOKEN="<artifactory-token>"
 For CI or container setups where the command line is not controlled, set mirrors via [`OCX_MIRRORS`][env-mirrors] instead of a config file. The value is a JSON object:
 
 ```sh
-export OCX_MIRRORS='{"ghcr.io":"https://company.jfrog.io/ghcr-remote"}'
+export OCX_MIRRORS='{"ghcr.io":"https://artifactory.example.com/ghcr-remote"}'
 ```
 
 `OCX_MIRRORS` wins over `[mirrors]` on a per-host, per-role basis and is forwarded to every subprocess `ocx` spawns, so nested invocations — generated launchers, `ocx run` — see the same mirror map automatically.
