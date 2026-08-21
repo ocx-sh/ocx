@@ -4,8 +4,8 @@
 
 - **Plan:** plan_wasm_platform_pairs
 - **Active phase:** done — implemented, reviewed (opus round 1: 1 docs finding fixed; Codex terra gate: 1 finding filtered by scope), merged ff onto soraka
-- **Step:** awaiting /finalize
-- **Last update:** 2026-08-21 (after 1f94857f: feat(oci): add wasm platforms (wasip1/wasm, wasip2/wasm) and enforce supported platform pairs)
+- **Step:** finalized
+- **Last update:** 2026-08-22 (after fb9dbfef: chore(claude): record the wasm platform pairs plan)
 
 ## Context
 
