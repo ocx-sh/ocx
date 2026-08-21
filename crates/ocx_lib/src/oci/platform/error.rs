@@ -33,6 +33,11 @@ pub enum PlatformErrorKind {
     #[error("unsupported architecture '{arch}'. Possible values are: {}", Architecture::VARIANTS.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "))]
     UnsupportedArch { arch: String },
 
+    /// The OS and architecture are each recognized, but the pairing is not
+    /// one OCX supports.
+    #[error("unsupported platform '{os}/{arch}'. Possible values are: {}", super::SUPPORTED_PAIRS.iter().map(|(os, arch)| format!("{os}/{arch}")).collect::<Vec<_>>().join(", "))]
+    UnsupportedPair { os: OperatingSystem, arch: Architecture },
+
     /// The platform is syntactically valid but not supported by OCX.
     #[error("unsupported platform: {0}")]
     Unsupported(String),

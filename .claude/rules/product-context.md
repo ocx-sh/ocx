@@ -150,7 +150,7 @@ Global flags: `--offline`, `--remote`, `--format json`.
 - **Language**: Rust 2024 (async-native with Tokio)
 - **Workspace**: `crates/ocx_lib` (core) + `crates/ocx_cli` (CLI); the mirror tool lives in its own repo ([ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror))
 - **Default registry**: `ocx.sh` (configurable via `OCX_DEFAULT_REGISTRY`)
-- **Platform support**: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64
+- **Platform support**: linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64 (native); wasip1/wasm, wasip2/wasm (WebAssembly, explicit `--platform` only). `SUPPORTED_PAIRS` in `crates/ocx_lib/src/oci/platform.rs` is the source of truth — a pairing outside it is refused at parse
 - **Testing**: pytest acceptance tests against real OCI registries via docker-compose — zot (OCI 1.1 Referrers API primary) + registry:2 (mirror / referrers-negative fixture)
 
 ## Update Protocol

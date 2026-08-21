@@ -919,6 +919,43 @@ repository = "ocx.sh/cmake"
         assert_eq!(key, "linux/amd64+b,a");
     }
 
+    /// A wasm platform key is canonical and survives a load/write round
+    /// trip — the lock accepts every pairing `SUPPORTED_PAIRS` names, not
+    /// just the native ones.
+    #[test]
+    fn read_accepts_wasm_platform_key() {
+        let toml_str = format!(
+            r#"
+[metadata]
+lock_version = 3
+declaration_hash_version = 1
+declaration_hash = "sha256:{cafe}"
+generated_by = "ocx 0.3.0"
+generated_at = "2026-04-19T00:00:00Z"
+
+[[tool]]
+name = "wasm-tool"
+group = "default"
+repository = "ocx.sh/wasm-tool"
+
+[tool.platforms]
+"wasip1/wasm" = "sha256:{leaf}"
+"#,
+            cafe = sha256_of('c'),
+            leaf = sha256_of('1'),
+        );
+        let lock = ProjectLock::from_toml_str(&toml_str).expect("wasip1/wasm is a canonical key");
+        let tool = lock.tools.first().expect("one tool");
+        assert_eq!(tool.platforms.get("wasip1/wasm"), Some(&digest_of('1')));
+        let written = lock
+            .to_toml_string()
+            .expect("canonical key must survive the write gate");
+        assert!(
+            written.contains("\"wasip1/wasm\""),
+            "wasm key must round-trip verbatim: {written}"
+        );
+    }
+
     /// A redundant duplicate feature (`+a,a` instead of the canonical `+a`)
     /// is likewise a noncanonical spelling — rejected.
     #[test]

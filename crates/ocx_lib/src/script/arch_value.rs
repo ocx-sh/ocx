@@ -49,6 +49,7 @@ impl ArchValue {
         match self.0 {
             Architecture::Amd64 => "Amd64",
             Architecture::Arm64 => "Arm64",
+            Architecture::Wasm => "Wasm",
         }
     }
 }

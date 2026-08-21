@@ -14,7 +14,9 @@
 //!
 //! To add a new architecture: add a variant here, update [`Display`],
 //! [`FromStr`], [`VARIANTS`](Architecture::VARIANTS), and both `From`/`TryFrom`
-//! impls for `native::Arch`.
+//! impls for `native::Arch`. Append the variant **last** — [`Ord`] derives
+//! from declaration order and `variants_is_sorted` pins it. The `(os, arch)`
+//! pairings it is legal in belong in [`SUPPORTED_PAIRS`](super::SUPPORTED_PAIRS).
 
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +34,10 @@ pub enum Architecture {
     // --- Supported ---
     Amd64,
     Arm64,
+    /// 32 bit WebAssembly. Paired only with a `wasip*` operating system: a
+    /// wasm module is a distribution target OCX never executes natively, so
+    /// there is no host that reports `Wasm` from [`current`](Self::current).
+    Wasm,
     // --- Unsupported (upstream oci_spec::image::Arch values from Go GOARCH) ---
     // i386,          // 32 bit x86, little-endian
     // Amd64p32,      // 64 bit x86 with 32 bit pointers, little-endian
@@ -54,12 +60,11 @@ pub enum Architecture {
     // s390x,         // 64 bit IBM System/390, big-endian
     // SPARC,         // 32 bit SPARC, big-endian
     // SPARC64,       // 64 bit SPARC, bi-endian
-    // Wasm,          // 32 bit Web Assembly
 }
 
 impl Architecture {
     /// All supported variants, in the order used for error messages.
-    pub const VARIANTS: &[Self] = &[Self::Amd64, Self::Arm64];
+    pub const VARIANTS: &[Self] = &[Self::Amd64, Self::Arm64, Self::Wasm];
 
     /// Detects the CPU architecture of the current host.
     ///
@@ -80,6 +85,7 @@ impl std::fmt::Display for Architecture {
         match self {
             Self::Amd64 => write!(f, "amd64"),
             Self::Arm64 => write!(f, "arm64"),
+            Self::Wasm => write!(f, "wasm"),
         }
     }
 }
@@ -92,6 +98,7 @@ impl std::str::FromStr for Architecture {
         match s {
             "amd64" => Ok(Self::Amd64),
             "arm64" => Ok(Self::Arm64),
+            "wasm" => Ok(Self::Wasm),
             _ => Err(PlatformErrorKind::UnsupportedArch { arch: s.to_string() }),
         }
     }
@@ -117,6 +124,7 @@ impl From<Architecture> for native::Arch {
         match arch {
             Architecture::Amd64 => native::Arch::Amd64,
             Architecture::Arm64 => native::Arch::ARM64,
+            Architecture::Wasm => native::Arch::Wasm,
         }
     }
 }
@@ -129,6 +137,7 @@ impl TryFrom<native::Arch> for Architecture {
         match arch {
             native::Arch::Amd64 => Ok(Self::Amd64),
             native::Arch::ARM64 => Ok(Self::Arm64),
+            native::Arch::Wasm => Ok(Self::Wasm),
             other => Err(PlatformErrorKind::UnsupportedArch {
                 arch: other.to_string(),
             }),
@@ -153,12 +162,21 @@ mod tests {
     fn display_values() {
         assert_eq!(Architecture::Amd64.to_string(), "amd64");
         assert_eq!(Architecture::Arm64.to_string(), "arm64");
+        assert_eq!(Architecture::Wasm.to_string(), "wasm");
     }
 
     #[test]
     fn fromstr_valid() {
         assert_eq!("amd64".parse::<Architecture>().unwrap(), Architecture::Amd64);
         assert_eq!("arm64".parse::<Architecture>().unwrap(), Architecture::Arm64);
+        assert_eq!("wasm".parse::<Architecture>().unwrap(), Architecture::Wasm);
+    }
+
+    #[test]
+    fn current_never_reports_wasm() {
+        // No host executes wasm natively; `Wasm` exists purely as a
+        // distribution label, so host detection must never produce it.
+        assert_ne!(Architecture::current(), Some(Architecture::Wasm));
     }
 
     #[test]
@@ -183,7 +201,6 @@ mod tests {
         assert!("ppc64le".parse::<Architecture>().is_err());
         assert!("s390x".parse::<Architecture>().is_err());
         assert!("riscv64".parse::<Architecture>().is_err());
-        assert!("wasm".parse::<Architecture>().is_err());
     }
 
     #[test]
@@ -211,7 +228,6 @@ mod tests {
             native::Arch::PowerPC64,
             native::Arch::s390x,
             native::Arch::RISCV64,
-            native::Arch::Wasm,
         ];
         for arch in unsupported {
             assert!(Architecture::try_from(arch).is_err());

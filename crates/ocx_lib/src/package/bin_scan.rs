@@ -217,16 +217,24 @@ async fn collect_directory_candidates(
     Ok(())
 }
 
-/// Claims `file_name` under `platform`'s executable-file convention: Unix
-/// exec-bit for every non-Windows platform (including `any` — no native OS
+/// Claims `file_name` under `platform`'s executable-file convention: nothing
+/// at all for a wasm target, Windows extension allowlist for a Windows
+/// target, Unix exec-bit for everything else (including `any` — no native OS
 /// convention exists for it, so it falls back to the exec-bit check per the
-/// ADR edge case table), Windows extension allowlist for a Windows target.
+/// ADR edge case table).
 /// Returns `None` when the convention itself doesn't claim the file at all
 /// (e.g. a non-allowlisted Windows extension); the boolean tracks whether
 /// the claimed name is executable. The [`BinaryName`] grammar check is
 /// applied separately by the caller.
 fn claim_name(file_name: &str, metadata: &std::fs::Metadata, platform: &Platform) -> Option<(String, bool)> {
-    if is_windows_target(platform) {
+    if is_wasm_target(platform) {
+        // A wasm module is a data artifact, not a host executable: no host
+        // ever exec's it, so neither the exec bit nor a filename extension
+        // carries a claim. A package needing a named entry point declares it
+        // explicitly in metadata. An extension-based scan (`*.wasm`) is
+        // addable later without disturbing any other target's convention.
+        None
+    } else if is_windows_target(platform) {
         windows_claim_name(file_name).map(|stem| (stem.to_string(), true))
     } else {
         Some((file_name.to_string(), unix_is_executable(metadata)))
@@ -243,17 +251,30 @@ fn is_windows_target(platform: &Platform) -> bool {
     )
 }
 
+fn is_wasm_target(platform: &Platform) -> bool {
+    matches!(
+        platform,
+        Platform::Specific {
+            os: OperatingSystem::Wasip1 | OperatingSystem::Wasip2,
+            ..
+        }
+    )
+}
+
 /// True when the compiled host can evaluate `platform`'s executable-file
 /// convention. The Windows extension allowlist is pure string matching —
-/// host-independent. The Unix exec-bit convention (every non-Windows
-/// platform, including `any`) needs a Unix host: there is no portable API to
-/// inspect POSIX permission bits from a non-Unix build, so
-/// [`unix_is_executable`] can only ever report "not executable" there,
-/// silently corrupting both an Auto-mode fill and a Verify-mode diff.
+/// host-independent. A wasm target claims nothing on any host, so its
+/// (empty) result is host-independent too: the skip is a convention, not a
+/// host limitation, and refusing on a non-Unix host would turn a
+/// deterministic empty claim into an error for no reason. The Unix exec-bit
+/// convention (every remaining platform, including `any`) needs a Unix host:
+/// there is no portable API to inspect POSIX permission bits from a non-Unix
+/// build, so [`unix_is_executable`] can only ever report "not executable"
+/// there, silently corrupting both an Auto-mode fill and a Verify-mode diff.
 /// `cfg!(unix)` folds to a compile-time constant, so this is trivially `true`
 /// on a Unix build.
 fn host_can_scan(platform: &Platform) -> bool {
-    is_windows_target(platform) || cfg!(unix)
+    is_windows_target(platform) || is_wasm_target(platform) || cfg!(unix)
 }
 
 /// Strips the first matching allowlisted extension, claiming the bare,
@@ -489,6 +510,10 @@ mod tests {
         "windows/amd64".parse().expect("windows/amd64 parses")
     }
 
+    fn wasm_platform() -> Platform {
+        "wasip1/wasm".parse().expect("wasip1/wasm parses")
+    }
+
     /// Builds `AuthoringMetadata` declaring one interface-visible `Path` var
     /// at `${installPath}/<rel>` — the exact scan-scope shape from ADR §2
     /// step 1. `visibility` is the wire value (`"interface"`, `"public"`,
@@ -549,6 +574,61 @@ mod tests {
             vec!["cmake"],
             "only the executable regular file must be claimed; non-exec file and subdirectory excluded"
         );
+    }
+
+    // ── Wasm targets claim nothing ──────────────────────────────────────
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scan_claims_nothing_for_a_wasm_target() {
+        // A wasm artifact is data, not a host executable: neither the Unix
+        // exec bit nor a Windows extension says anything about it. The scan
+        // is skipped by convention, so the claim is deterministically empty
+        // even on a tree carrying exec-bit files and `.wasm` modules.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_exec_file(&bin.join("build-helper"));
+        write_nonexec_file(&bin.join("tool.wasm"));
+        write_exec_file(&bin.join("other.wasm"));
+
+        let metadata = interface_path_metadata("bin", "interface", None);
+        let found = scan_interface_binaries(dir.path(), &metadata, &wasm_platform())
+            .await
+            .expect("scan succeeds");
+
+        assert!(
+            found.is_empty(),
+            "a wasm target claims no binaries, got {:?}",
+            names(&found)
+        );
+
+        // The same tree under a native target still claims — proving the
+        // empty result above is the wasm rule, not an unreadable fixture.
+        let native = scan_interface_binaries(dir.path(), &metadata, &linux_platform())
+            .await
+            .expect("scan succeeds");
+        assert_eq!(names(&native), vec!["build-helper", "other.wasm"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_binaries_fills_an_empty_claim_for_a_wasm_target() {
+        // Auto mode with no declared claim must FILL (an empty list), not
+        // refuse: skipping the scan is a convention, not a host limitation,
+        // so `UnsupportedHostScan` must not fire.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_exec_file(&bin.join("build-helper"));
+
+        let metadata = interface_path_metadata("bin", "interface", None);
+        let resolved = resolve_binaries(dir.path(), metadata, &wasm_platform(), ScanMode::Auto)
+            .await
+            .expect("auto fill succeeds for a wasm target");
+
+        let binaries = resolved.binaries().expect("claim is filled, not left absent");
+        assert_eq!(binaries.iter().count(), 0, "the filled claim is empty");
     }
 
     // ── Symlink follow + dangling symlink exclude ───────────────────────

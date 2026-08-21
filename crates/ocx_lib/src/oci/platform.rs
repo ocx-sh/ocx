@@ -16,6 +16,46 @@ use crate::{Result, log};
 
 const ANY_STR: &str = "any";
 
+/// Every `(os, arch)` pairing OCX accepts.
+///
+/// [`OperatingSystem`] and [`Architecture`] are closed sets, but their cross
+/// product is not: `linux/wasm` and `wasip1/amd64` name no artifact anyone
+/// can build. This array is the single source of truth for which pairings
+/// exist, enforced at the two construction choke points
+/// ([`FromStr`](std::str::FromStr) and
+/// [`TryFrom<native::Platform>`](TryFrom)) by [`validate_pair`].
+///
+/// Two tiers, and the distinction is load-bearing:
+///
+/// - **Native pairs** are the platforms OCX itself ships for and CI tests on.
+///   [`Platform::current`] can produce any of them.
+/// - **Wasm pairs** are distribution labels only. OCX never executes on a
+///   `wasip*` host, so host detection can never produce one and they are
+///   reachable exclusively through an explicit `--platform`.
+pub const SUPPORTED_PAIRS: &[(OperatingSystem, Architecture)] = &[
+    (OperatingSystem::Linux, Architecture::Amd64),
+    (OperatingSystem::Linux, Architecture::Arm64),
+    (OperatingSystem::Darwin, Architecture::Amd64),
+    (OperatingSystem::Darwin, Architecture::Arm64),
+    (OperatingSystem::Windows, Architecture::Amd64),
+    (OperatingSystem::Windows, Architecture::Arm64),
+    (OperatingSystem::Wasip1, Architecture::Wasm),
+    (OperatingSystem::Wasip2, Architecture::Wasm),
+];
+
+/// Rejects an `(os, arch)` pairing absent from [`SUPPORTED_PAIRS`].
+///
+/// Called from both places a [`Platform::Specific`] is built out of separate
+/// `os` and `arch` values; every other site destructures an already-validated
+/// platform, so these two are the complete gate.
+fn validate_pair(os: OperatingSystem, arch: Architecture) -> std::result::Result<(), PlatformErrorKind> {
+    if SUPPORTED_PAIRS.contains(&(os, arch)) {
+        Ok(())
+    } else {
+        Err(PlatformErrorKind::UnsupportedPair { os, arch })
+    }
+}
+
 /// Target platform for an OCX package.
 ///
 /// This is OCX's owned representation of the
@@ -570,6 +610,10 @@ impl std::str::FromStr for Platform {
             input: value.to_string(),
             kind,
         })?;
+        validate_pair(os, arch).map_err(|kind| PlatformError {
+            input: value.to_string(),
+            kind,
+        })?;
 
         let variant = match parts.get(2) {
             Some(segment) => {
@@ -767,6 +811,10 @@ impl TryFrom<native::Platform> for Platform {
             input: input.clone(),
             kind,
         })?;
+        validate_pair(os, arch).map_err(|kind| PlatformError {
+            input: input.clone(),
+            kind,
+        })?;
 
         // `features` is RESERVED by OCI v1.1.1. Foreign manifests written by
         // stale tooling may still carry a value — warn and drop it rather than
@@ -869,6 +917,136 @@ impl<'de> Deserialize<'de> for Platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- supported (os, arch) pairs ---
+
+    #[test]
+    fn from_str_rejects_unsupported_pairs() {
+        // Both halves parse on their own; the pairing is what is refused.
+        // `wasm` only ever pairs with a `wasip*` OS, and a `wasip*` OS only
+        // ever pairs with `wasm`.
+        for value in [
+            "wasip1/amd64",
+            "wasip2/arm64",
+            "linux/wasm",
+            "windows/wasm",
+            "darwin/wasm",
+        ] {
+            let parsed = value.parse::<Platform>();
+            assert!(parsed.is_err(), "'{value}' must not parse: {parsed:?}");
+        }
+    }
+
+    #[test]
+    fn from_str_rejects_unsupported_pair_with_the_pair_error_kind() {
+        let error = "wasip1/amd64".parse::<Platform>().expect_err("pairing is refused");
+        assert!(
+            matches!(
+                error.kind,
+                PlatformErrorKind::UnsupportedPair {
+                    os: OperatingSystem::Wasip1,
+                    arch: Architecture::Amd64,
+                }
+            ),
+            "expected UnsupportedPair, got {:?}",
+            error.kind
+        );
+        // The message must name the way out, not just the refusal.
+        let message = error.to_string();
+        assert!(
+            message.contains("wasip1/wasm"),
+            "message should list supported pairs: {message}"
+        );
+    }
+
+    #[test]
+    fn from_str_accepts_wasm_pairs() {
+        for value in ["wasip1/wasm", "wasip2/wasm"] {
+            let parsed: Platform = value.parse().unwrap_or_else(|e| panic!("'{value}' must parse: {e}"));
+            assert_eq!(parsed.to_string(), value, "canonical round-trip for {value}");
+        }
+    }
+
+    #[test]
+    fn from_str_accepts_every_supported_pair() {
+        for (os, arch) in SUPPORTED_PAIRS {
+            let value = format!("{os}/{arch}");
+            let parsed: Platform = value.parse().unwrap_or_else(|e| panic!("'{value}' must parse: {e}"));
+            assert_eq!(parsed.to_string(), value);
+        }
+    }
+
+    #[test]
+    fn supported_pairs_covers_the_variant_cross_product_exactly_once() {
+        // Every pair must name a real variant combination, and no pair may
+        // appear twice — the array is the single source of truth for the
+        // validation, so a duplicate would silently pass unnoticed.
+        let mut seen = std::collections::BTreeSet::new();
+        for (os, arch) in SUPPORTED_PAIRS {
+            assert!(OperatingSystem::VARIANTS.contains(os), "{os} missing from VARIANTS");
+            assert!(Architecture::VARIANTS.contains(arch), "{arch} missing from VARIANTS");
+            assert!(seen.insert((os, arch)), "duplicate pair {os}/{arch}");
+        }
+    }
+
+    #[test]
+    fn native_conversion_accepts_wasi_and_rejects_a_bad_pair() {
+        // The second choke point: a platform arriving off the wire.
+        let native_plat = native_platform(native::Os::Other("wasip1".to_string()), native::Arch::Wasm);
+        assert_eq!(
+            Platform::try_from(native_plat).expect("wasip1/wasm is supported"),
+            Platform::Specific {
+                os: OperatingSystem::Wasip1,
+                arch: Architecture::Wasm,
+                variant: None,
+                os_features: Vec::new(),
+            }
+        );
+
+        let bad_pair = native_platform(native::Os::Linux, native::Arch::Wasm);
+        assert!(
+            Platform::try_from(bad_pair).is_err(),
+            "linux/wasm is not a supported pair"
+        );
+    }
+
+    #[test]
+    fn native_conversion_still_rejects_an_unknown_other_os() {
+        let junk = native_platform(native::Os::Other("junk".to_string()), native::Arch::Amd64);
+        assert!(Platform::try_from(junk).is_err());
+    }
+
+    #[test]
+    fn candidate_from_descriptor_still_skips_an_unsupported_pair() {
+        // The read path stays tolerant: a foreign index entry naming a pair
+        // OCX does not support is not a candidate, never a hard error.
+        let entry = descriptor(
+            "sha256:aa",
+            Some(native_platform(native::Os::Linux, native::Arch::Wasm)),
+        );
+        assert_eq!(Platform::candidate_from_descriptor(&entry), None);
+    }
+
+    #[test]
+    fn wasm_is_incompatible_with_a_native_host() {
+        let host: Platform = "linux/amd64".parse().expect("parses");
+        let wasm: Platform = "wasip1/wasm".parse().expect("parses");
+        assert!(
+            !is_compatible(&host, &wasm),
+            "a wasm offer must not satisfy a native host"
+        );
+        assert!(
+            !is_compatible(&wasm, &host),
+            "a native offer must not satisfy a wasm requirement"
+        );
+        assert!(is_compatible(&wasm, &wasm), "wasip1/wasm satisfies itself");
+        assert!(
+            !is_compatible(&wasm, &"wasip2/wasm".parse::<Platform>().expect("parses")),
+            "the two WASI ABIs are distinct targets"
+        );
+        // An `any` offer still satisfies a wasm requirement (D1 unchanged).
+        assert!(is_compatible(&wasm, &Platform::Any));
+    }
 
     // --- with_os_feature: namespace replacement, round-tripping ---
 
@@ -1899,19 +2077,26 @@ mod tests {
 
     #[test]
     fn serde_roundtrip_all_supported_combinations() {
-        for os in OperatingSystem::VARIANTS {
-            for arch in Architecture::VARIANTS {
-                let platform = Platform::Specific {
-                    os: *os,
-                    arch: *arch,
-                    variant: None,
-                    os_features: Vec::new(),
-                };
-                let json = serde_json::to_string(&platform).unwrap();
-                let parsed: Platform = serde_json::from_str(&json).unwrap();
-                assert_eq!(platform, parsed, "roundtrip failed for {}/{}", os, arch);
-            }
+        // Iterates `SUPPORTED_PAIRS`, not the `VARIANTS` cross product: the
+        // cross product now contains pairings deserialization rejects by
+        // design (`linux/wasm`, `wasip1/amd64`).
+        for (os, arch) in SUPPORTED_PAIRS {
+            let platform = Platform::Specific {
+                os: *os,
+                arch: *arch,
+                variant: None,
+                os_features: Vec::new(),
+            };
+            let json = serde_json::to_string(&platform).unwrap();
+            let parsed: Platform = serde_json::from_str(&json).unwrap();
+            assert_eq!(platform, parsed, "roundtrip failed for {}/{}", os, arch);
         }
+    }
+
+    #[test]
+    fn serde_rejects_an_unsupported_pair_from_registry() {
+        let json = r#"{"architecture":"wasm","os":"linux"}"#;
+        assert!(serde_json::from_str::<Platform>(json).is_err());
     }
 
     #[test]
@@ -2088,18 +2273,18 @@ mod tests {
 
     #[test]
     fn native_roundtrip_all_supported_combinations() {
-        for os in OperatingSystem::VARIANTS {
-            for arch in Architecture::VARIANTS {
-                let platform = Platform::Specific {
-                    os: *os,
-                    arch: *arch,
-                    variant: None,
-                    os_features: Vec::new(),
-                };
-                let native_plat: native::Platform = platform.clone().into();
-                let back = Platform::try_from(native_plat).unwrap();
-                assert_eq!(platform, back, "native roundtrip failed for {}/{}", os, arch);
-            }
+        // Same reason as `serde_roundtrip_all_supported_combinations`: the
+        // `VARIANTS` cross product contains pairings `TryFrom` refuses.
+        for (os, arch) in SUPPORTED_PAIRS {
+            let platform = Platform::Specific {
+                os: *os,
+                arch: *arch,
+                variant: None,
+                os_features: Vec::new(),
+            };
+            let native_plat: native::Platform = platform.clone().into();
+            let back = Platform::try_from(native_plat).unwrap();
+            assert_eq!(platform, back, "native roundtrip failed for {}/{}", os, arch);
         }
     }
 

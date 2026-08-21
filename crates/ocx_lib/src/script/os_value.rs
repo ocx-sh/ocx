@@ -53,6 +53,8 @@ impl OsValue {
             OperatingSystem::Linux => "Linux",
             OperatingSystem::Darwin => "Darwin",
             OperatingSystem::Windows => "Windows",
+            OperatingSystem::Wasip1 => "Wasip1",
+            OperatingSystem::Wasip2 => "Wasip2",
         }
     }
 }

@@ -165,6 +165,45 @@ Libc       libc.glibc
 
 When the host provides more than one libc family, the `Libc` row lists each one (e.g. `Libc       libc.glibc, libc.musl`). On a host where libc detection failed, the `Libc` row is absent — the host still resolves as the bare `os/arch` platform with no declared features, so install matches only manifests declaring no `os_features` of their own. For machine-readable output use `ocx --format json about`, which includes a `libc` array (empty when undetected).
 
+## WebAssembly {#wasm}
+
+A `.wasm` file is not a native executable — it needs a runtime to load it, and the same bytes run
+unchanged on every host that has one. That makes it a poor fit for `any`, which claims no platform
+requirement at all: a WASI 0.1 module and a WASI 0.2 component target different ABIs, and a
+consumer resolving one needs to say which.
+
+OCX gives each [WASI][wasi] ABI its own platform, so the choice is expressed the same way every
+other platform choice is:
+
+| Platform | Artifact |
+|---|---|
+| `wasip1/wasm` | A module targeting the WASI 0.1 (Preview 1) ABI |
+| `wasip2/wasm` | A component targeting the WASI 0.2 (Preview 2) ABI |
+
+Publishing is the ordinary per-platform push — nothing about the flow is wasm-specific:
+
+```sh
+ocx package create -i my/tool:1.0.0 -p wasip1/wasm -m metadata.json -o tool.tar.xz ./dist
+ocx package push -p wasip1/wasm -i my/tool:1.0.0 tool.tar.xz
+```
+
+Consuming one always names the platform explicitly. No machine reports `wasip1` or `wasip2` as its
+host, so an omitted `--platform` resolves to the native host platform and will not find a wasm
+manifest:
+
+```sh
+ocx package install -p wasip1/wasm my/tool:1.0.0
+```
+
+:::warning No binaries are scanned for a wasm target
+For native targets, [`ocx package create`][cmd-package-create] scans the interface-visible `PATH`
+directories and fills the `binaries` claim from what it finds. A wasm target is skipped: OCX never
+exec's a `.wasm` file, so neither the executable bit nor a filename extension says anything about
+what a consumer should invoke. The claim comes back empty even when the content tree carries
+executable files, and a package that needs a named entry point declares one explicitly in its
+metadata.
+:::
+
 ## Dependencies with Platform-Specific Builds {#dependency-platforms}
 
 A package built once with `--platform any` — a shell script, a Python entry point, anything without native code of its own — can still depend on a package that ships different manifests per platform, such as the native binary the script wraps. A single dependency identifier can only carry one digest, so which platform's build does that digest name?
@@ -224,6 +263,7 @@ A pin is a snapshot of the dependency's platform coverage at the moment `create`
 
 <!-- external -->
 [oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
+[wasi]: https://wasi.dev/
 [in-tree-mirror-spec]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
 [glibc]: https://www.gnu.org/software/libc/
 [musl]: https://musl.libc.org/

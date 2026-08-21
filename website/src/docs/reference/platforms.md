@@ -24,8 +24,8 @@ os/arch[/variant][+feature[,feature...]]      |      any
 platform      = "any" | specific ;
 specific      = os "/" arch [ "/" variant ] [ "+" feature-list ] ;
 
-os            = "linux" | "darwin" | "windows" ;
-arch          = "amd64" | "arm64" ;
+os            = "linux" | "darwin" | "windows" | "wasip1" | "wasip2" ;
+arch          = "amd64" | "arm64" | "wasm" ;
 
 variant       = value ;                       (* e.g. "v7", "v8" *)
 feature-list  = feature { "," feature } ;
@@ -39,13 +39,39 @@ feature       = value ;                       (* e.g. "libc.glibc" *)
 | `linux/amd64+libc.glibc` | Linux on x86-64, requires the `libc.glibc` [`os.features`][oci-image-index] tag |
 | `linux/amd64+libc.glibc,libc.musl` | Linux on x86-64, requires both glibc and musl (a dual-libc override) |
 | `linux/arm64/v8+libc.glibc` | Every field combined |
+| `wasip1/wasm` | A WebAssembly module targeting the WASI 0.1 ABI |
 | `any` | Platform-agnostic — no OS, architecture, or feature requirement |
 
 `/` introduces `variant`, and a single `+` introduces the comma-separated feature list — each
 occupies a structurally distinct slot, so `linux/arm64/v8` (a variant) can never be confused with
-a `+`-list. `os` and `arch` are closed sets (see the table above); adding a value to either
-requires an OCX release. `any` carries no fields — `any+libc.glibc` and `any/amd64` are both
-rejected as malformed.
+a `+`-list. `os` and `arch` are closed sets; adding a value to either requires an OCX release.
+`any` carries no fields — `any+libc.glibc` and `any/amd64` are both rejected as malformed.
+
+## Supported pairs {#supported-pairs}
+
+Being in the `os` set and being in the `arch` set is not enough — the pairing has to name an
+artifact somebody can build. `linux/wasm` and `wasip1/amd64` are each assembled from valid
+components and describe nothing, so OCX enforces an explicit list rather than the cross product:
+
+| Platform | Tier |
+|---|---|
+| `linux/amd64` | Native |
+| `linux/arm64` | Native |
+| `darwin/amd64` | Native |
+| `darwin/arm64` | Native |
+| `windows/amd64` | Native |
+| `windows/arm64` | Native |
+| `wasip1/wasm` | Wasm |
+| `wasip2/wasm` | Wasm |
+
+The two tiers differ in how a platform is reached, not in how it is written. **Native** pairs are
+the ones OCX itself runs on and CI tests against, so host detection can produce any of them and
+they are what an omitted `--platform` resolves to. **Wasm** pairs are distribution labels only:
+no host reports `wasip1` or `wasip2`, so they are reachable exclusively through an explicit
+`--platform` — see [publishing for wasm][authoring-multi-platform-wasm].
+
+A pairing outside this list is refused while parsing, before resolution is attempted, and the
+refusal lists the pairs above.
 
 This is the single grammar for every platform string surface in OCX: [`--platform`][cmd-platform-option],
 [`ocx.lock`][in-depth-project-lock-format]'s `[tool.platforms]` keys, and the build receipt
@@ -193,3 +219,4 @@ this property.
 <!-- authoring -->
 [authoring-multi-platform]: ../authoring/multi-platform.md
 [authoring-libc]: ../authoring/multi-platform.md#libc
+[authoring-multi-platform-wasm]: ../authoring/multi-platform.md#wasm

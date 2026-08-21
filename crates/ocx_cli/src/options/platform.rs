@@ -18,8 +18,10 @@ pub struct PlatformOption {
     /// for example `linux/amd64`, `linux/arm64`, or `linux/amd64+libc.glibc`.
     /// The optional `+feature` suffix filters by `os.features`: OCX selects
     /// the manifest whose features are a subset of the value you pass, so
-    /// `+libc.glibc` or `+libc.musl` forces a specific libc variant. Defaults
-    /// to the auto-detected host platform. Details:
+    /// `+libc.glibc` or `+libc.musl` forces a specific libc variant.
+    /// WebAssembly targets are `wasip1/wasm` and `wasip2/wasm`; no host
+    /// reports either, so they are reachable only by naming them here.
+    /// Defaults to the auto-detected host platform. Details:
     /// <https://ocx.sh/docs/authoring/multi-platform>
     #[clap(short = 'p', long = "platform", value_name = "PLATFORM")]
     pub platform: Option<oci::Platform>,
