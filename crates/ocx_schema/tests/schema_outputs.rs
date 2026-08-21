@@ -459,6 +459,59 @@ fn patch_schema_exposes_version_and_rules() {
     );
 }
 
+/// A `[[trust.policy]]` scope is a string-or-table union, and the table arm
+/// carries a constraint no derive can express: one of `include` / `exclude`
+/// must be present, because a table naming neither would otherwise read as a
+/// fleet-wide catch-all and `ocx` refuses it at parse time (exit 78).
+///
+/// Without this pin the schema and the deserializer can drift silently — an
+/// editor bound to this schema would show no error for `scope = {}` while the
+/// binary rejects the same file. Nothing else in the suite touches `[trust]`.
+#[test]
+fn config_schema_trust_scope_is_a_union_whose_table_arm_requires_a_list() {
+    let schema = parse("config");
+    let scope = schema
+        .get("$defs")
+        .and_then(|defs| defs.get("ScopeSpec"))
+        .expect("config schema must define `$defs.ScopeSpec`");
+
+    let arms = scope.get("oneOf").and_then(Value::as_array).unwrap_or_else(|| {
+        panic!(
+            "`ScopeSpec` must be a `oneOf` union — a derive emits `anyOf` and drops the required-key rule. Got: {scope}"
+        )
+    });
+    assert_eq!(
+        arms.len(),
+        2,
+        "expected exactly the string and table arms, got {arms:?}"
+    );
+
+    assert!(
+        arms.iter()
+            .any(|arm| arm.get("type").and_then(Value::as_str) == Some("string")),
+        "union must keep the bare-string arm — the common `scope = \"ghcr.io/acme/*\"` case"
+    );
+
+    let table = arms
+        .iter()
+        .find(|arm| arm.get("type").and_then(Value::as_str) == Some("object"))
+        .expect("union must carry the include/exclude table arm");
+    let required = table
+        .get("anyOf")
+        .and_then(Value::as_array)
+        .expect("the table arm must constrain which keys are required; got {table}");
+    let required: Vec<&str> = required
+        .iter()
+        .filter_map(|clause| clause.get("required")?.as_array()?.first()?.as_str())
+        .collect();
+    assert_eq!(
+        required,
+        vec!["include", "exclude"],
+        "the table arm must require one of `include` / `exclude`, or `scope = {{}}` validates in an editor and \
+         then fails the parse"
+    );
+}
+
 #[test]
 fn unknown_schema_kind_returns_none() {
     assert!(

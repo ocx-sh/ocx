@@ -289,7 +289,7 @@ mod tests {
 
     fn covering_policy() -> TrustPolicy {
         TrustPolicy {
-            scope: Some(format!("{REGISTRY}/{REPO}")),
+            scope: Some(crate::trust::ScopeSpec::Prefix(format!("{REGISTRY}/{REPO}"))),
             builder: None,
             keyless: Some(crate::trust::KeylessMatcher {
                 identity: Some("you@example.com".into()),

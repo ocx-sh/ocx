@@ -22,10 +22,13 @@
 //! is ignored for that package, so a project config can never override or weaken
 //! an operator pin. When no operator policy matches, the project tier applies
 //! and may *add* trust for scopes the operator has not governed. Within the
-//! chosen tier, resolution is most-specific-wins (longest literal scope prefix)
-//! with **ANY-of** among equal-specificity scopes, which is what makes
-//! key/workflow rotation work — the old and new identity coexist during the
-//! overlap window and either one passes.
+//! chosen tier, resolution is most-specific-wins with **ANY-of** among
+//! equal-specificity scopes, which is what makes key/workflow rotation work —
+//! the old and new identity coexist during the overlap window and either one
+//! passes. Specificity is measured **against the target**
+//! ([`ScopeSpec::specificity_for`]): the literal prefix length for a string
+//! scope, and for an include/exclude set the longest literal prefix among the
+//! includes that actually matched.
 //!
 //! The operator tier itself pools three `config.toml` files, and one of them is
 //! privileged: a policy declared at the SYSTEM scope carries
@@ -211,6 +214,243 @@ impl SigstoreTrust {
     }
 }
 
+/// The `scope` value of a `[[trust.policy]]` entry: one prefix pattern, or an
+/// include/exclude set of them.
+///
+/// ```toml
+/// scope = "ghcr.io/acme/*"
+/// scope = { include = ["ghcr.io/acme/*"], exclude = ["ghcr.io/acme/experimental/*"] }
+/// ```
+///
+/// Both forms are built from the same per-pattern rule — a pattern with no `*`
+/// matches on `/`-separated path-segment boundaries, a pattern with one is a
+/// literal-prefix glob, an empty pattern matches everything (see
+/// [`pattern_matches`]). The set form only says how several of them combine: a
+/// target matches when it matches at least one `include` (or `include` is
+/// empty, which reads as a catch-all) and no `exclude`. `exclude` therefore
+/// beats `include` whenever both match, which is what makes the headline
+/// carve-out — govern a whole registry, exempt one subtree — expressible in one
+/// entry.
+///
+/// A table must carry `include` or `exclude`; one naming neither is refused
+/// rather than read as a catch-all. Unknown keys are still dropped (fleet
+/// forward-compat), so without that floor a typo'd `includ` would parse to an
+/// empty table and silently widen a narrow pin to every package — the failure
+/// direction that loses trust instead of failing loudly. `scope = ""`, or
+/// omitting `scope`, is the catch-all spelling.
+///
+/// No regex form: `identity_regexp` is the only regex surface in `[trust]`, and
+/// a scope pattern picks which packages a pin *covers*, where an over-broad
+/// pattern silently widens trust instead of failing loudly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum ScopeSpec {
+    /// The string form: one prefix pattern.
+    Prefix(String),
+    /// The object form: patterns to cover, minus patterns to carve out.
+    ///
+    /// One of the two keys is required; the other defaults to empty. A table
+    /// carrying only keys a newer ocx understands is therefore refused, not
+    /// read as an accidental catch-all — the one place the fleet forward-compat
+    /// tolerance [`TrustConfig`] describes stops, because here dropping the
+    /// unknown key would *widen* trust rather than narrow it.
+    Set {
+        /// Patterns the policy covers. Empty is a catch-all.
+        include: Vec<String>,
+        /// Patterns carved back out. Beats [`Self::Set::include`].
+        exclude: Vec<String>,
+    },
+}
+
+impl schemars::JsonSchema for ScopeSpec {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("ScopeSpec")
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // Hand-written for the same reason `ProjectEnv`'s is: a derive reads
+        // the Rust type, so it cannot see what the hand-rolled `Deserialize`
+        // above actually accepts. Two divergences would otherwise ship — the
+        // derive emits `anyOf` where the shared union helper emits `oneOf`,
+        // and it cannot express "one of `include`/`exclude` is required",
+        // which is the whole point of the refusal. An editor bound to this
+        // schema would then show no error for `scope = {}` and ocx would exit
+        // 78 on the same file.
+        crate::utility::schema::string_or_table(
+            "One scope pattern. Segment-bounded without a `*`, literal-prefix glob with one; the empty string is a catch-all.",
+            serde_json::json!({
+                "type": "object",
+                "description": "Patterns to cover, minus patterns to carve back out. A target matches when it matches at least one `include` (an empty `include` is a catch-all) and no `exclude`.",
+                "properties": {
+                    "include": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Patterns the policy covers. Empty is a catch-all."
+                    },
+                    "exclude": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Patterns carved back out. Beats `include` wherever both match."
+                    }
+                },
+                "anyOf": [
+                    { "required": ["include"] },
+                    { "required": ["exclude"] }
+                ]
+            }),
+        )
+    }
+}
+
+impl<'de> Deserialize<'de> for ScopeSpec {
+    /// Hand-written rather than `#[serde(untagged)]`, for two reasons the derive
+    /// cannot give: a malformed value reports what a scope may be instead of
+    /// `data did not match any variant of untagged enum ScopeSpec`, and a table
+    /// naming neither `include` nor `exclude` is refused instead of defaulting
+    /// both lists to empty and becoming a catch-all.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ScopeSpecVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ScopeSpecVisitor {
+            type Value = ScopeSpec;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter
+                    .write_str("a scope pattern string, or a table with an `include` and/or `exclude` list of them")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(ScopeSpec::Prefix(value.to_string()))
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                let mut include: Option<Vec<String>> = None;
+                let mut exclude: Option<Vec<String>> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "include" => include = Some(map.next_value()?),
+                        "exclude" => exclude = Some(map.next_value()?),
+                        // Fleet forward-compat, same as one level up: a key a
+                        // newer ocx added is dropped, never a hard failure.
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                if include.is_none() && exclude.is_none() {
+                    return Err(serde::de::Error::custom(
+                        "a table scope needs `include` or `exclude`; write `scope = \"\"`, or omit `scope`, for a \
+                         catch-all",
+                    ));
+                }
+                Ok(ScopeSpec::Set {
+                    include: include.unwrap_or_default(),
+                    exclude: exclude.unwrap_or_default(),
+                })
+            }
+        }
+
+        deserializer.deserialize_any(ScopeSpecVisitor)
+    }
+}
+
+/// Whether one scope pattern matches the canonical `registry/repository`
+/// target.
+///
+/// A no-wildcard pattern matches on **path-segment boundaries**: `ghcr.io/acme`
+/// matches `ghcr.io/acme` and `ghcr.io/acme/tool`, but never `ghcr.io/acmecorp`.
+/// A `*` makes it a glob on the literal prefix before the wildcard
+/// (`ghcr.io/acme/*` covers the subtree; a bare `ghcr.io/acme*` is an
+/// intentional substring glob). An empty pattern is a catch-all.
+#[must_use]
+pub fn pattern_matches(pattern: &str, target: &str) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    match pattern.find('*') {
+        Some(index) => target.starts_with(&pattern[..index]),
+        None => target == pattern || target.starts_with(&format!("{pattern}/")),
+    }
+}
+
+/// The literal prefix of one scope pattern: everything before the first `*`
+/// (the whole pattern when there is no wildcard). Its length is the pattern's
+/// specificity.
+fn pattern_literal_prefix(pattern: &str) -> &str {
+    match pattern.find('*') {
+        Some(index) => &pattern[..index],
+        None => pattern,
+    }
+}
+
+impl ScopeSpec {
+    /// Whether this scope matches the canonical `registry/repository` target.
+    #[must_use]
+    pub fn matches(&self, target: &str) -> bool {
+        match self {
+            Self::Prefix(pattern) => pattern_matches(pattern, target),
+            Self::Set { include, exclude } => {
+                let covered = include.is_empty() || include.iter().any(|pattern| pattern_matches(pattern, target));
+                covered && !exclude.iter().any(|pattern| pattern_matches(pattern, target))
+            }
+        }
+    }
+
+    /// How specifically this scope matches `target` — the resolution rank
+    /// [`resolve`] takes its winning level from.
+    ///
+    /// Per-target, not a property of the scope alone: a set can match one
+    /// target through a long `include` and another through a short one, and the
+    /// rank must reflect which pattern actually did the covering. For a string
+    /// scope that collapses to the literal-prefix length, unchanged. Excludes
+    /// never contribute — they subtract coverage, and letting a carve-out raise
+    /// a policy's rank would let one lower-tier `exclude` outbid the pin it was
+    /// carving out of.
+    #[must_use]
+    pub fn specificity_for(&self, target: &str) -> usize {
+        match self {
+            Self::Prefix(pattern) => pattern_literal_prefix(pattern).len(),
+            Self::Set { include, .. } => include
+                .iter()
+                .filter(|pattern| pattern_matches(pattern, target))
+                .map(|pattern| pattern_literal_prefix(pattern).len())
+                .max()
+                // No include matched: the set covered this target as a
+                // catch-all, which ranks 0 exactly like `scope = ""`.
+                .unwrap_or_default(),
+        }
+    }
+}
+
+impl std::fmt::Display for ScopeSpec {
+    /// Renders a scope for the one place it reaches a human: a
+    /// [`TrustPolicyError`]'s `scope` field, and the refused-entry debug log in
+    /// [`resolve`]. The string form is verbatim, so every existing diagnostic
+    /// reads exactly as before.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Prefix(pattern) => formatter.write_str(pattern),
+            Self::Set { include, exclude } => {
+                write!(
+                    formatter,
+                    "include=[{}] exclude=[{}]",
+                    include.join(", "),
+                    exclude.join(", ")
+                )
+            }
+        }
+    }
+}
+
 /// A single `[[trust.policy]]` entry.
 ///
 /// The matchers naming an acceptable signer are **nested per backend**: keyless
@@ -222,6 +462,8 @@ impl SigstoreTrust {
 /// ```toml
 /// [[trust.policy]]
 /// scope = "ghcr.io/acme/*"
+/// # or, to carve a subtree back out:
+/// # scope = { include = ["ghcr.io/acme/*"], exclude = ["ghcr.io/acme/experimental/*"] }
 ///
 /// [trust.policy.keyless]
 /// identity = "https://github.com/acme/tool/.github/workflows/release.yml@refs/tags/v1.2.3"
@@ -238,18 +480,26 @@ impl SigstoreTrust {
 /// with [`TrustPolicyError::NoBackend`] naming the sub-table it expected.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct TrustPolicy {
-    /// Package prefix this policy applies to, e.g. `ghcr.io/acme/*`.
+    /// Which packages this policy applies to — one prefix pattern, or an
+    /// include/exclude set of them ([`ScopeSpec`]).
     ///
-    /// A scope with no `*` matches the target's canonical `registry/repository`
-    /// on `/`-separated path-segment boundaries: `ghcr.io/acme/tool` matches the
-    /// exact repo `ghcr.io/acme/tool` and any sub-path under it
-    /// (`ghcr.io/acme/tool/plugin`), but NOT a sibling that merely shares the
-    /// prefix text — `ghcr.io/acme/tool` does **not** cover
+    /// A pattern with no `*` matches the target's canonical
+    /// `registry/repository` on `/`-separated path-segment boundaries:
+    /// `ghcr.io/acme/tool` matches the exact repo `ghcr.io/acme/tool` and any
+    /// sub-path under it (`ghcr.io/acme/tool/plugin`), but NOT a sibling that
+    /// merely shares the prefix text — `ghcr.io/acme/tool` does **not** cover
     /// `ghcr.io/acme/tool-cli`. A trailing `/*` covers the subtree; a mid-string
-    /// `*` is a literal-prefix substring glob (see [`Self::matches_scope`]).
-    /// Absent reads exactly like `""`: a catch-all.
+    /// `*` is a literal-prefix substring glob (see [`pattern_matches`]).
+    ///
+    /// ```toml
+    /// scope = "ghcr.io/acme/*"
+    /// scope = { include = ["ghcr.io/acme/*"], exclude = ["ghcr.io/acme/experimental/*"] }
+    /// ```
+    ///
+    /// Absent reads exactly like `""`: a catch-all. So does an object form with
+    /// an empty `include` and no `exclude`.
     #[serde(default)]
-    pub scope: Option<String>,
+    pub scope: Option<ScopeSpec>,
 
     /// Expected SLSA provenance builder identity, matched against the
     /// provenance predicate during attestation verify.
@@ -311,41 +561,24 @@ pub struct KeylessMatcher {
 }
 
 impl TrustPolicy {
-    /// The declared scope, with an absent one read as the empty catch-all.
-    fn scope_str(&self) -> &str {
-        self.scope.as_deref().unwrap_or_default()
-    }
-
-    /// The literal scope prefix: everything before the first `*` (the whole
-    /// scope when there is no wildcard).
-    #[must_use]
-    pub fn literal_prefix(&self) -> &str {
-        let scope = self.scope_str();
-        match scope.find('*') {
-            Some(index) => &scope[..index],
-            None => scope,
-        }
+    /// The declared scope rendered for a diagnostic, with an absent one read as
+    /// the empty catch-all.
+    fn scope_label(&self) -> String {
+        self.scope.as_ref().map(ScopeSpec::to_string).unwrap_or_default()
     }
 
     /// Whether this policy's scope matches the canonical `registry/repository`
-    /// target.
-    ///
-    /// A no-wildcard scope matches on **path-segment boundaries**: `ghcr.io/acme`
-    /// matches `ghcr.io/acme` and `ghcr.io/acme/tool`, but never
-    /// `ghcr.io/acmecorp`. A `*` makes it a glob on the literal prefix before
-    /// the wildcard (`ghcr.io/acme/*` covers the subtree; a bare `ghcr.io/acme*`
-    /// is an intentional substring glob). An empty — or absent — scope is a
-    /// catch-all.
+    /// target. An absent scope is a catch-all.
     #[must_use]
     pub fn matches_scope(&self, target: &str) -> bool {
-        let scope = self.scope_str();
-        if scope.is_empty() {
-            return true;
-        }
-        match scope.find('*') {
-            Some(index) => target.starts_with(&scope[..index]),
-            None => target == scope || target.starts_with(&format!("{scope}/")),
-        }
+        self.scope.as_ref().is_none_or(|scope| scope.matches(target))
+    }
+
+    /// How specifically this policy matches `target` — the rank [`resolve`]
+    /// picks its winning level from. An absent scope ranks 0, like `""`.
+    #[must_use]
+    pub fn specificity_for(&self, target: &str) -> usize {
+        self.scope.as_ref().map_or(0, |scope| scope.specificity_for(target))
     }
 
     /// Resolve this entry into the ready-to-match [`CompiledPolicy`]: pick the
@@ -368,7 +601,7 @@ impl TrustPolicy {
         // a config that can express the conflict — written now it could never
         // fail, which is not a check.
         let keyless = self.keyless.as_ref().ok_or_else(|| TrustPolicyError::NoBackend {
-            scope: self.scope_str().to_string(),
+            scope: self.scope_label(),
         })?;
         Ok(CompiledPolicy {
             builder: self.builder.clone(),
@@ -379,22 +612,21 @@ impl TrustPolicy {
     /// Enforce the keyless invariants: identity XOR identity_regexp, and an
     /// issuer present.
     fn compile_keyless(&self, keyless: &KeylessMatcher) -> Result<CompiledKeyless, TrustPolicyError> {
-        let scope = self.scope_str();
         let identity = match (&keyless.identity, &keyless.identity_regexp) {
             (Some(_), Some(_)) => {
                 return Err(TrustPolicyError::IdentityConflict {
-                    scope: scope.to_string(),
+                    scope: self.scope_label(),
                 });
             }
             (None, None) => {
                 return Err(TrustPolicyError::IdentityUnset {
-                    scope: scope.to_string(),
+                    scope: self.scope_label(),
                 });
             }
             (Some(exact), None) => IdentityRule::Exact(exact.clone()),
             (None, Some(pattern)) => {
                 IdentityRule::compile_regex(pattern).map_err(|source| TrustPolicyError::InvalidRegex {
-                    scope: scope.to_string(),
+                    scope: self.scope_label(),
                     source,
                 })?
             }
@@ -403,7 +635,7 @@ impl TrustPolicy {
             .oidc_issuer
             .clone()
             .ok_or_else(|| TrustPolicyError::IssuerUnset {
-                scope: scope.to_string(),
+                scope: self.scope_label(),
             })?;
         Ok(CompiledKeyless { identity, issuer })
     }
@@ -495,11 +727,12 @@ impl IdentityRule {
 /// target: the matching policies at the **winning specificity level**, returned
 /// as a set for ANY-of evaluation. Empty when no scope matches.
 ///
-/// The winning level is the longest literal scope prefix among the matching
-/// policies (most-specific-wins) — **unless** a [system-locked][TrustPolicy::system_locked]
-/// policy matches, in which case only the locked policies govern the target at
-/// all: the level is the longest literal prefix among them, and every unlocked
-/// match is dropped whatever its scope. A system pin is therefore
+/// The winning level is the highest [per-target specificity][ScopeSpec::specificity_for]
+/// among the matching policies (most-specific-wins) — **unless** a
+/// [system-locked][TrustPolicy::system_locked] policy matches, in which case
+/// only the locked policies govern the target at all: the level is the highest
+/// specificity among them, and every unlocked match is dropped whatever its
+/// scope. A system pin is therefore
 /// admission-authoritative, not a specificity floor. Equal-scope array-append
 /// across tiers is otherwise a signer-enrollment channel — a user-writable
 /// `config.toml`, or the untrusted managed payload, could add its own identity
@@ -519,9 +752,9 @@ pub fn resolve<'a>(policies: impl IntoIterator<Item = &'a TrustPolicy>, target: 
     let locked_pin = matching
         .iter()
         .filter(|policy| policy.system_locked)
-        .max_by_key(|policy| policy.literal_prefix().len());
-    let locked_max = locked_pin.map(|policy| policy.literal_prefix().len());
-    let Some(level) = locked_max.or_else(|| matching.iter().map(|policy| policy.literal_prefix().len()).max()) else {
+        .max_by_key(|policy| policy.specificity_for(target));
+    let locked_max = locked_pin.map(|policy| policy.specificity_for(target));
+    let Some(level) = locked_max.or_else(|| matching.iter().map(|policy| policy.specificity_for(target)).max()) else {
         return Vec::new();
     };
     // A matching system pin governs the target alone. Without the log the
@@ -529,26 +762,26 @@ pub fn resolve<'a>(policies: impl IntoIterator<Item = &'a TrustPolicy>, target: 
     // pin that discarded the entry they authored. Silent on the no-op path: a
     // pin that drops nothing is the ordinary case.
     if let Some(pin) = locked_pin {
-        let refused: Vec<&str> = matching
+        let refused: Vec<String> = matching
             .iter()
             .filter(|policy| !policy.system_locked)
-            .map(|policy| policy.scope_str())
+            .map(|policy| policy.scope_label())
             .collect();
         if !refused.is_empty() {
             log::debug!(
                 "system-locked trust scope '{}' governs '{target}' alone; lower-tier scopes {refused:?} are \
                  refused — rotate the identity in the system config that declares the pin",
-                pin.scope_str()
+                pin.scope_label()
             );
         }
         return matching
             .into_iter()
-            .filter(|policy| policy.system_locked && policy.literal_prefix().len() == level)
+            .filter(|policy| policy.system_locked && policy.specificity_for(target) == level)
             .collect();
     }
     matching
         .into_iter()
-        .filter(|policy| policy.literal_prefix().len() == level)
+        .filter(|policy| policy.specificity_for(target) == level)
         .collect()
 }
 
@@ -660,7 +893,7 @@ mod tests {
 
     fn policy(scope: &str, identity: Option<&str>, regexp: Option<&str>, issuer: &str) -> TrustPolicy {
         TrustPolicy {
-            scope: Some(scope.to_string()),
+            scope: Some(ScopeSpec::Prefix(scope.to_string())),
             builder: None,
             keyless: Some(KeylessMatcher {
                 identity: identity.map(str::to_string),
@@ -695,14 +928,16 @@ mod tests {
     }
 
     #[test]
-    fn literal_prefix_stops_at_wildcard() {
+    fn specificity_is_the_literal_prefix_length_and_stops_at_the_wildcard() {
+        // The rank a string scope contributes to `resolve`: everything before
+        // the first `*`, or the whole scope when there is none.
         assert_eq!(
-            policy("ghcr.io/acme/*", None, None, "i").literal_prefix(),
-            "ghcr.io/acme/"
+            policy("ghcr.io/acme/*", None, None, "i").specificity_for("ghcr.io/acme/tool"),
+            "ghcr.io/acme/".len()
         );
         assert_eq!(
-            policy("ghcr.io/acme/tool", None, None, "i").literal_prefix(),
-            "ghcr.io/acme/tool"
+            policy("ghcr.io/acme/tool", None, None, "i").specificity_for("ghcr.io/acme/tool"),
+            "ghcr.io/acme/tool".len()
         );
     }
 
@@ -724,6 +959,317 @@ mod tests {
         assert!(policy("ghcr.io/acme/*", Some("i"), None, "iss").matches_scope("ghcr.io/acme/tool"));
         assert!(!policy("ghcr.io/acme/*", Some("i"), None, "iss").matches_scope("ghcr.io/acmecorp/x"));
         assert!(policy("", Some("i"), None, "iss").matches_scope("anything/at/all"));
+    }
+
+    /// An object-scope policy pinning `identity`, built without going through TOML.
+    fn set_policy(include: &[&str], exclude: &[&str], identity: &str) -> TrustPolicy {
+        TrustPolicy {
+            scope: Some(ScopeSpec::Set {
+                include: include.iter().map(|pattern| (*pattern).to_string()).collect(),
+                exclude: exclude.iter().map(|pattern| (*pattern).to_string()).collect(),
+            }),
+            ..policy("", Some(identity), None, "iss")
+        }
+    }
+
+    #[test]
+    fn both_scope_forms_deserialize_and_an_object_survives_an_unknown_key() {
+        // The untagged enum has to admit the string form verbatim AND the
+        // object form, and the object form inherits the fleet forward-compat
+        // tolerance the rest of `[trust]` has: a key a newer ocx added must
+        // degrade to the known parts, not fail the entry — otherwise one
+        // fleet-distributed config bricks every older binary that reads it.
+        let toml = r#"
+[[trust.policy]]
+scope = "ghcr.io/acme/*"
+
+[trust.policy.keyless]
+identity = "a"
+oidc_issuer = "iss"
+
+[[trust.policy]]
+scope = { include = ["ghcr.io/acme/*", "ocx.sh/cmake"], exclude = ["ghcr.io/acme/experimental/*"], future_key = "newer ocx" }
+
+[trust.policy.keyless]
+identity = "b"
+oidc_issuer = "iss"
+"#;
+        #[derive(Deserialize)]
+        struct Root {
+            trust: TrustConfig,
+        }
+        let root: Root = toml::from_str(toml).expect("both forms parse, unknown key tolerated");
+        assert_eq!(
+            root.trust.policy[0].scope,
+            Some(ScopeSpec::Prefix("ghcr.io/acme/*".to_string()))
+        );
+        assert_eq!(
+            root.trust.policy[1].scope,
+            Some(ScopeSpec::Set {
+                include: vec!["ghcr.io/acme/*".to_string(), "ocx.sh/cmake".to_string()],
+                exclude: vec!["ghcr.io/acme/experimental/*".to_string()],
+            }),
+            "the unknown key is dropped and the known parts survive intact"
+        );
+    }
+
+    #[test]
+    fn policies_from_ocx_toml_reads_the_object_scope_form() {
+        // The lenient project-tier reader shares the serde surface, so this
+        // rides along for free — pinned because "for free" is exactly the kind
+        // of coupling a later refactor can quietly sever.
+        let toml = r#"
+[[trust.policy]]
+scope = { include = ["ocx.sh/*"], exclude = ["ocx.sh/experimental"] }
+
+[trust.policy.keyless]
+identity = "id"
+oidc_issuer = "iss"
+"#;
+        let policies = policies_from_ocx_toml(toml).expect("the object form parses in an ocx.toml");
+        assert_eq!(policies.len(), 1);
+        assert!(policies[0].matches_scope("ocx.sh/cmake"));
+        assert!(!policies[0].matches_scope("ocx.sh/experimental"));
+    }
+
+    #[test]
+    fn include_is_any_of_and_exclude_beats_it() {
+        // Two unrelated subtrees under one pin (ANY-of), minus a carve-out that
+        // sits INSIDE one of them — so `exclude` and `include` both match the
+        // carved target and `exclude` has to win. Ordering the other way would
+        // make every carve-out inert while still parsing.
+        let scope = set_policy(
+            &["ghcr.io/acme/*", "ocx.sh/cmake"],
+            &["ghcr.io/acme/experimental/*"],
+            "ci",
+        );
+        assert!(scope.matches_scope("ghcr.io/acme/tool"), "first include matches");
+        assert!(scope.matches_scope("ocx.sh/cmake"), "second include matches");
+        assert!(!scope.matches_scope("ghcr.io/other/tool"), "neither include matches");
+        assert!(
+            !scope.matches_scope("ghcr.io/acme/experimental/thing"),
+            "exclude beats a matching include"
+        );
+    }
+
+    #[test]
+    fn exclude_patterns_honour_segment_boundaries() {
+        // An exclude uses the SAME per-pattern rule as a string scope, so a
+        // no-wildcard exclude must not carve out a sibling that merely shares
+        // the prefix text. Getting this wrong silently un-governs a package
+        // nobody named — the failure direction that loses trust, not the one
+        // that fails loudly.
+        let scope = set_policy(&["ghcr.io/acme/*"], &["ghcr.io/acme/tool"], "ci");
+        assert!(
+            !scope.matches_scope("ghcr.io/acme/tool"),
+            "the exact repo is carved out"
+        );
+        assert!(
+            !scope.matches_scope("ghcr.io/acme/tool/plugin"),
+            "and so is everything under it"
+        );
+        assert!(
+            scope.matches_scope("ghcr.io/acme/tool-cli"),
+            "but NOT a sibling sharing the prefix text"
+        );
+    }
+
+    #[test]
+    fn specificity_is_measured_per_target_against_the_matching_include() {
+        // A set has no single literal prefix — only the include that actually
+        // covered THIS target does. Both directions are asserted from one
+        // policy pair, because a per-scope (target-blind) rank would have to
+        // pick one number for the whole set and would therefore get one of the
+        // two targets wrong.
+        let broad = policy("ghcr.io/*", Some("broad"), None, "iss");
+        let set = set_policy(&["ghcr.io/acme/tool", "ghcr.io"], &[], "set");
+
+        let resolved = resolve([&broad, &set], "ghcr.io/acme/tool");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            pinned_identity(resolved[0]),
+            Some("set"),
+            "the long include (17) outbids the string scope (8) for this target"
+        );
+
+        let resolved = resolve([&broad, &set], "ghcr.io/x/thing");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            pinned_identity(resolved[0]),
+            Some("broad"),
+            "the same set matches the other target through a SHORT include (7), \
+             so the string scope (8) wins there — one rank per set could not do both"
+        );
+    }
+
+    #[test]
+    fn an_exclude_never_raises_a_policys_specificity() {
+        // Excludes subtract coverage; letting one contribute to the rank would
+        // hand a lower tier a way to outbid a pin with a long carve-out string
+        // that governs nothing. The set below matches only via its empty
+        // include (rank 0), so the len-8 string scope must win outright.
+        let broad = policy("ghcr.io/*", Some("broad"), None, "iss");
+        let carve = set_policy(&[], &["ghcr.io/acme/experimental/a-very-long-carve-out"], "carve");
+        let resolved = resolve([&broad, &carve], "ghcr.io/acme/tool");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(pinned_identity(resolved[0]), Some("broad"));
+    }
+
+    #[test]
+    fn a_system_locked_object_scope_still_governs_its_targets_alone() {
+        // The twin of `system_locked_pin_refuses_a_more_specific_unlocked_entry`
+        // with the pin written in the object form: the lock rides on the entry,
+        // not on how its scope is spelled, so a narrower lower-tier entry is
+        // refused exactly as before. Its carve-out is still honoured — an
+        // excluded target is simply not one the pin matches, so the lower tier
+        // governs there with full authority.
+        let system = TrustPolicy {
+            system_locked: true,
+            ..set_policy(&["ghcr.io/acme/*"], &["ghcr.io/acme/experimental/*"], "system-X")
+        };
+        let managed = policy("ghcr.io/acme/tool", Some("managed-Y"), None, "iss");
+
+        let resolved = resolve([&system, &managed], "ghcr.io/acme/tool");
+        assert_eq!(resolved.len(), 1, "the locked object scope governs alone");
+        assert_eq!(pinned_identity(resolved[0]), Some("system-X"));
+
+        let carved = policy("ghcr.io/acme/experimental/thing", Some("project-Z"), None, "iss");
+        let resolved = resolve([&system, &carved], "ghcr.io/acme/experimental/thing");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            pinned_identity(resolved[0]),
+            Some("project-Z"),
+            "the pin does not match a target it carved out, so it locks nothing there"
+        );
+    }
+
+    #[test]
+    fn an_object_scope_renders_compactly_in_a_refusal() {
+        // `TrustPolicyError` carries the scope as text, so the object form
+        // needs a rendering — and the string form must still come through
+        // verbatim, or every existing diagnostic changes wording.
+        let bare = TrustPolicy {
+            keyless: None,
+            ..set_policy(&["ghcr.io/acme/*"], &["ghcr.io/acme/experimental/*"], "unused")
+        };
+        let rendered = bare.compile().expect_err("no backend").to_string();
+        assert!(
+            rendered.contains("include=[ghcr.io/acme/*] exclude=[ghcr.io/acme/experimental/*]"),
+            "the refusal must name which entry is at fault; got: {rendered}"
+        );
+        assert_eq!(
+            ScopeSpec::Prefix("ghcr.io/acme/*".to_string()).to_string(),
+            "ghcr.io/acme/*",
+            "the string form renders verbatim"
+        );
+    }
+
+    #[test]
+    fn an_include_free_object_scope_is_a_catch_all_minus_its_exclusions() {
+        // The headline carve-out: trust everything, except one subtree. An
+        // empty `include` must not read as "matches nothing" — that inversion
+        // would silently un-govern the entire fleet.
+        let toml = r#"
+[[trust.policy]]
+scope = { exclude = ["ghcr.io/acme/experimental/*"] }
+
+[trust.policy.keyless]
+identity = "ci@acme.example"
+oidc_issuer = "iss"
+"#;
+        #[derive(Deserialize)]
+        struct Root {
+            trust: TrustConfig,
+        }
+        let root: Root = toml::from_str(toml).expect("an object scope parses");
+        let policies = root.trust.policy;
+        assert_eq!(
+            resolve(&policies, "ghcr.io/other/tool").len(),
+            1,
+            "catch-all still covers everything else"
+        );
+        assert_eq!(
+            resolve(&policies, "ghcr.io/acme/tool").len(),
+            1,
+            "a sibling of the carve-out stays governed"
+        );
+        assert!(
+            resolve(&policies, "ghcr.io/acme/experimental/thing").is_empty(),
+            "the excluded subtree must fall through resolve() to an empty set"
+        );
+    }
+
+    #[test]
+    fn a_table_scope_naming_neither_list_is_refused_not_read_as_a_catch_all() {
+        // The one place the fleet forward-compat tolerance stops. Dropping an
+        // unknown key normally narrows nothing, but inside a scope table it
+        // would leave both lists empty — turning a typo'd `includ` into a pin
+        // over every package. Refusing costs no expressiveness: `scope = ""`
+        // and an absent `scope` both already spell the catch-all.
+        for scope in [
+            r#"scope = { includ = ["ghcr.io/acme/*"] }"#,
+            r#"scope = { future_only = "added by a newer ocx" }"#,
+            r#"scope = {}"#,
+        ] {
+            let toml = format!(
+                "[[trust.policy]]\n{scope}\n\n[trust.policy.keyless]\nidentity = \"id\"\noidc_issuer = \"iss\"\n"
+            );
+            let error = policies_from_ocx_toml(&toml)
+                .expect_err("a table naming neither list must not parse")
+                .to_string();
+            assert!(
+                error.contains("needs `include` or `exclude`"),
+                "the refusal must name the fix; got: {error}"
+            );
+        }
+
+        // The floor is "one recognized key", not "no unknown keys" — an unknown
+        // key riding ALONGSIDE a real one still degrades to the known parts.
+        let toml = "[[trust.policy]]\nscope = { include = [\"ghcr.io/acme/*\"], future_key = 1 }\n\n[trust.policy.keyless]\nidentity = \"id\"\noidc_issuer = \"iss\"\n";
+        let policies = policies_from_ocx_toml(toml).expect("an unknown key beside a real one is tolerated");
+        assert_eq!(
+            policies[0].scope,
+            Some(ScopeSpec::Set {
+                include: vec!["ghcr.io/acme/*".to_string()],
+                exclude: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_malformed_scope_names_the_two_accepted_forms() {
+        // `#[serde(untagged)]` reports only "data did not match any variant of
+        // untagged enum ScopeSpec" for every one of these, which tells an
+        // operator nothing about what to write instead.
+        for scope in [
+            "scope = 42",
+            "scope = true",
+            r#"scope = ["a", "b"]"#,
+            r#"scope = { include = "notalist" }"#,
+        ] {
+            let toml = format!(
+                "[[trust.policy]]\n{scope}\n\n[trust.policy.keyless]\nidentity = \"id\"\noidc_issuer = \"iss\"\n"
+            );
+            let error = policies_from_ocx_toml(&toml)
+                .expect_err("a malformed scope must not parse")
+                .to_string();
+            assert!(
+                !error.contains("untagged"),
+                "the untagged-enum wording must not reach an operator; got: {error}"
+            );
+        }
+
+        // The three scalar shapes reach the visitor and get the full sentence;
+        // a bad `include` element type is serde's own typed message one level
+        // down, which is already actionable, so it is asserted separately.
+        let toml = "[[trust.policy]]\nscope = 42\n\n[trust.policy.keyless]\nidentity = \"id\"\noidc_issuer = \"iss\"\n";
+        let error = policies_from_ocx_toml(toml)
+            .expect_err("an integer scope must not parse")
+            .to_string();
+        assert!(
+            error.contains("scope pattern string") && error.contains("include"),
+            "the refusal must name both accepted forms; got: {error}"
+        );
     }
 
     #[test]
@@ -944,7 +1490,7 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
         // "More than one" is unwritable until a second backend field exists,
         // and a check that cannot fail is not a check — see `compile`.
         let bare = TrustPolicy {
-            scope: Some("ghcr.io/acme/*".to_string()),
+            scope: Some(ScopeSpec::Prefix("ghcr.io/acme/*".to_string())),
             builder: None,
             keyless: None,
             system_locked: false,
@@ -958,7 +1504,7 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
         // and mandatory here: an identity with no issuer would accept the same
         // SAN minted by any OIDC provider.
         let no_issuer = TrustPolicy {
-            scope: Some("ghcr.io/acme/*".to_string()),
+            scope: Some(ScopeSpec::Prefix("ghcr.io/acme/*".to_string())),
             builder: None,
             keyless: Some(KeylessMatcher {
                 identity: Some("release@acme.example".to_string()),
@@ -1002,7 +1548,7 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
         // A builder pin says who built the artifact, never who may sign it, so
         // it cannot stand in for the missing matcher.
         let builder_only = TrustPolicy {
-            scope: Some("ghcr.io/acme/*".to_string()),
+            scope: Some(ScopeSpec::Prefix("ghcr.io/acme/*".to_string())),
             builder: Some("https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main".to_string()),
             keyless: None,
             system_locked: false,
@@ -1029,7 +1575,7 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
             system_locked: false,
         };
         assert!(catch_all.matches_scope("anything/at/all"));
-        assert_eq!(catch_all.literal_prefix(), "");
+        assert_eq!(catch_all.specificity_for("anything/at/all"), 0);
         assert!(catch_all.compile().is_ok(), "an unscoped policy still names a signer");
     }
 
@@ -1153,7 +1699,10 @@ oidc_issuer = "https://example.com"
         }
         let root: Root = toml::from_str(toml).expect("parse");
         assert_eq!(root.trust.policy.len(), 2);
-        assert_eq!(root.trust.policy[0].scope.as_deref(), Some("ghcr.io/acme/*"));
+        assert_eq!(
+            root.trust.policy[0].scope,
+            Some(ScopeSpec::Prefix("ghcr.io/acme/*".to_string()))
+        );
         assert_eq!(
             root.trust.policy[0]
                 .keyless
@@ -1195,7 +1744,7 @@ nested_future_field = "added by a newer ocx, inside the backend sub-table"
         let root: Root = toml::from_str(toml).expect("unknown field is tolerated, not rejected");
         assert_eq!(root.trust.policy.len(), 1);
         let policy = &root.trust.policy[0];
-        assert_eq!(policy.scope.as_deref(), Some("ghcr.io/acme/*"));
+        assert_eq!(policy.scope, Some(ScopeSpec::Prefix("ghcr.io/acme/*".to_string())));
         let keyless = policy.keyless.as_ref().expect("the backend sub-table survives");
         assert_eq!(
             keyless.identity.as_deref(),
@@ -1234,7 +1783,10 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
         }
         let root: Root = toml::from_str(toml).expect("unknown top-level field is tolerated, not rejected");
         assert_eq!(root.trust.policy.len(), 1);
-        assert_eq!(root.trust.policy[0].scope.as_deref(), Some("ghcr.io/acme/*"));
+        assert_eq!(
+            root.trust.policy[0].scope,
+            Some(ScopeSpec::Prefix("ghcr.io/acme/*".to_string()))
+        );
     }
 
     #[test]

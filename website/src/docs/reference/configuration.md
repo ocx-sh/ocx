@@ -587,7 +587,7 @@ Fields split across two levels — `scope` and `builder` are declared directly o
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `scope` | string | yes | Package prefix this policy applies to, e.g. `"ghcr.io/acme/*"`. See [Scope matching](#keys-trust-scope). |
+| `scope` | string or table | no | Which packages this policy applies to — one prefix pattern (`"ghcr.io/acme/*"`), or an `{ include, exclude }` table of them. **Omitting it is a catch-all**: the policy governs every package. See [Scope matching](#keys-trust-scope). |
 | `builder` | string | no | Expected SLSA provenance `builder.id` (byte-equal). Only consulted when verifying an attestation whose predicate is SLSA provenance ([`verify --attestation`][cmd-package-verify-attestations]); ignored for a plain signature or any other predicate type. A mismatch is `builder_mismatch` (exit 65). |
 
 **`[trust.policy.keyless]`:**
@@ -602,9 +602,16 @@ Exactly one of `identity` / `identity_regexp` must be set — both present, or b
 configuration error. Unknown keys are ignored, like everywhere else in `config.toml`: a file
 written for a newer ocx must still load on an older one, so a typo'd key (e.g. `scop`) is
 silently dropped rather than rejected. What still fails the entry is a missing **required**
-field — a policy without `scope` or `oidc_issuer` is a parse error, and one that ends up with
-neither `identity` nor `identity_regexp` is rejected when the policy compiles, never silently
-treated as "trust anything".
+field — a policy without `oidc_issuer` is a parse error, and one that ends up with neither
+`identity` nor `identity_regexp` is rejected when the policy compiles, never silently treated
+as "trust anything".
+
+::: warning A dropped `scope` key widens the policy
+`scope` is optional and an absent one is a catch-all, so the tolerance above cuts both ways: a
+policy whose `scope` key is misspelled loses its scope and then governs **every** package
+rather than none. The one place the tolerance stops is inside a `scope` table — see
+[Include and exclude](#keys-trust-scope-set).
+:::
 
 #### Scope matching {#keys-trust-scope}
 
@@ -623,6 +630,63 @@ placed anywhere else globs on the literal text before it, with no `/` boundary e
 plain literal-prefix (substring) match on `ghcr.io/acme`. Prefer `ghcr.io/acme/*` (or a bare
 `ghcr.io/acme`) unless you specifically intend the substring behavior.
 :::
+
+##### Include and exclude {#keys-trust-scope-set}
+
+A scope can also be written as a table of patterns instead of a single one. Each pattern
+follows the per-pattern rules above unchanged — segment-bounded without a `*`, literal-prefix
+glob with one — and the table only says how they combine:
+
+```toml
+[[trust.policy]]
+scope = { include = ["ghcr.io/acme/*", "ocx.sh/cmake"], exclude = ["ghcr.io/acme/experimental/*"] }
+
+[trust.policy.keyless]
+identity    = "ci@acme.example"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+```
+
+A target matches when it matches **at least one** `include` **and no** `exclude`. The table must
+carry one of the two keys; the other then defaults to an empty list. An empty `include` reads as
+a catch-all — so `exclude` on its own is the carve-out form: govern everything, except one
+subtree.
+
+```toml
+# Every package must be signed by CI — except the experimental namespace,
+# which is left ungoverned and installs unverified as before.
+[[trust.policy]]
+scope = { exclude = ["ghcr.io/acme/experimental/*"] }
+
+[trust.policy.keyless]
+identity    = "ci@acme.example"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+```
+
+`exclude` beats `include` whenever both match. An excluded package is not "denied" — it is
+simply **not covered by this policy**, so resolution continues without it: another policy may
+still cover the package, and if none does, it is ungoverned and installs unverified. Carving a
+scope out of one policy therefore removes a pin; it never adds a prohibition.
+
+::: warning `exclude` is segment-bounded too
+`exclude = ["ghcr.io/acme/tool"]` carves out `ghcr.io/acme/tool` and everything under it, but
+**not** `ghcr.io/acme/tool-cli` — the same boundary rule that governs a plain `scope` string.
+Use `ghcr.io/acme/tool*` if you do mean the substring.
+:::
+
+::: warning A table naming neither key is refused
+`scope = {}` — or a table whose only keys ocx does not recognise, such as a misspelled
+`includ` — is a **parse error**, not a catch-all. This is the single exception to the
+unknown-key tolerance described under [Fields](#keys-trust-fields): dropping an unrecognised
+key elsewhere narrows nothing, but here it would leave both lists empty and turn a narrow pin
+into one over every package. An unknown key riding *alongside* `include` or `exclude` is still
+dropped as usual. Write `scope = ""`, or omit `scope`, when you do mean a catch-all.
+:::
+
+There is no regex form for scopes, in either spelling. [`identity_regexp`](#keys-trust-regex)
+is the only regex surface here: a scope decides which packages a pin *covers*, where an
+over-broad pattern silently widens trust rather than failing loudly.
+
+#### Resolution: most-specific-wins {#keys-trust-specificity}
 
 When more than one policy's scope matches a target, the **longest** literal prefix wins:
 
@@ -667,6 +731,12 @@ identity    = "new-ci@acme.example"
 oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
 
+A policy whose scope is an `{ include, exclude }` table ranks by the **longest literal prefix
+among the includes that matched this target** — measured per target, because one table can
+cover two packages through two different patterns. `exclude` patterns never contribute: they
+subtract coverage, so a long carve-out string cannot buy a policy a higher rank than the
+packages it actually governs. An `include`-free carve-all ranks 0, exactly like `scope = ""`.
+
 #### Regex identities {#keys-trust-regex}
 
 `identity_regexp` compiles to an **anchored, full-string** match, not a substring search — a
@@ -710,7 +780,7 @@ priority:
   can therefore **add** trust for scopes the operator has not governed, but it can never
   step in front of a scope the operator already pins.
 
-Within whichever set is chosen, [most-specific-wins + ANY-of resolution](#keys-trust-scope)
+Within whichever set is chosen, [most-specific-wins + ANY-of resolution](#keys-trust-specificity)
 still applies — signer rotation works within the operator set, and separately within the
 project set, but the two sets never mix for one target.
 
@@ -752,7 +822,7 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
 :::
 
 Verifying `ghcr.io/acme/tool:1.0` accepts `ci@acme.example` only. Without the lock the
-narrower entry would win outright by [most-specific-wins](#keys-trust-scope). With it, every
+narrower entry would win outright by [most-specific-wins](#keys-trust-specificity). With it, every
 lower-tier entry matching the pinned scope is discarded — a longer literal prefix, a shorter
 one (`ghcr.io/*`, say), and an exact tie at 13 characters alike.
 

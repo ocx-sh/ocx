@@ -1059,6 +1059,21 @@ Declare it in a `config.toml` tier (system, user, or `$OCX_HOME`) or in the proj
 ocx package verify -p linux/amd64 --sigstore-trusted-root /etc/ocx/trusted_root.json ghcr.io/acme/tool:1.0
 ```
 
+A scope can also name several patterns and carve some back out, which is what you want when one namespace under a governed registry is deliberately unsigned:
+
+```toml
+# Everything under ghcr.io/acme/ must be signed by CI — except the
+# experimental namespace, which stays ungoverned.
+[[trust.policy]]
+scope = { include = ["ghcr.io/acme/*"], exclude = ["ghcr.io/acme/experimental/*"] }
+
+[trust.policy.keyless]
+identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main"
+oidc_issuer = "https://token.actions.githubusercontent.com"
+```
+
+An empty (or omitted) `include` is a catch-all, so `exclude` on its own governs the whole fleet minus the listed subtrees. An excluded package is not *denied* — it is simply not covered by this policy, so it installs unverified unless another policy covers it. See [Scope matching][config-trust-scope] for the full rule.
+
 The two locations are not interchangeable: an operator's `config.toml` policy always wins over a project's `ocx.toml` policy for a package it covers, even if the project's scope is narrower. A project `ocx.toml` only adds trust for packages the operator hasn't already pinned — it can never override or narrow an operator's pin. See [Tier precedence][config-trust] in the configuration reference for the full rule.
 
 When the signing workflow moves (a renamed workflow file, a new repository, a rotated identity), add a second entry at the same scope in the **same file** instead of replacing the first. Both are accepted until you remove the old one, so there is no window where CI fails because the signer changed mid-rotation. (Rotation-by-addition only works within one tier — an old entry in `config.toml` and a new entry in `ocx.toml` do not combine; see the tip below.)
@@ -1081,7 +1096,7 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
 
 ::: tip Learn more
 [Signing In Depth][in-depth-signing] — trust root mechanics, OCI 1.1 referrers hard-fail policy, Sigstore bundle storage, slice boundaries, and offline semantics.
-[Configuration reference → `[[trust.policy]]`][config-trust] — full schema, scope matching, most-specific-wins resolution, and operator-vs-project tier precedence.
+[Configuration reference → `[[trust.policy]]`][config-trust] — full schema, scope matching (including `include`/`exclude`), most-specific-wins resolution, and operator-vs-project tier precedence.
 [`package sign` reference][cmd-package-sign] and [`package verify` reference][cmd-package-verify] — flags, exit codes, and CI examples.
 :::
 
@@ -1098,7 +1113,7 @@ ocx package install ghcr.io/acme/tool:1.0
 
 The check runs before any layer is downloaded, at the point where the manifest digest has just resolved. A tampered digest or a signer outside the pinned identity aborts the install right there, with the same exit codes [`ocx package verify`][cmd-package-verify] uses — `77` for a certificate identity or issuer mismatch, `78` for a trust-root or policy problem, `79` for a missing signature, `65` for a tampered bundle. Nothing has been written to the package store or a symlink yet, so a rejected artifact costs a manifest fetch, not a wasted download.
 
-Trust stays opt-in, and it is opt-in *per scope*. A package outside every `[[trust.policy]]` scope installs exactly as it did before this feature existed — OCX logs an `INFO` line noting that no policy covered it, and nothing blocks. The same rule applies to a covered package's transitive dependencies: each is verified only if a policy also covers *its* scope. Pin a scope broad enough (`ghcr.io/acme/*`) to cover a dependency closure you want verified end to end. Auto-verify also reads the operator `config.toml` tier only: unlike [`ocx package verify`][cmd-package-verify], a project `ocx.toml` policy never gates an install or pull.
+Trust stays opt-in, and it is opt-in *per scope*. A package outside every `[[trust.policy]]` scope installs exactly as it did before this feature existed — OCX logs an `INFO` line noting that no policy covered it, and nothing blocks. The same rule applies to a covered package's transitive dependencies: each is verified only if a policy also covers *its* scope. Pin a scope broad enough (`ghcr.io/acme/*`) to cover a dependency closure you want verified end to end, and use `exclude` to carve back out any subtree that must stay unsigned. Auto-verify also reads the operator `config.toml` tier only: unlike [`ocx package verify`][cmd-package-verify], a project `ocx.toml` policy never gates an install or pull.
 
 Sometimes you need to skip the check anyway — a mirror with no referrers support, a package you're debugging. Pass `--no-verify` to skip it for one invocation, or set [`OCX_NO_VERIFY`][env-no-verify] for a CI-wide opt-out; `--verify` re-enables the check for one invocation even with the environment variable set, since the flag always wins. Either bypass logs one `WARN` per invocation — a skipped check is visible in the logs, never silent.
 
@@ -1340,6 +1355,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [config-managed-one-hop]: ./reference/configuration.md#keys-managed-one-hop
 [config-unknown-keys]: ./reference/configuration.md#unknown-keys
 [config-trust]: ./reference/configuration.md#keys-trust
+[config-trust-scope]: ./reference/configuration.md#keys-trust-scope
 [env-mirrors]: ./reference/environment.md#ocx-mirrors
 [env-ocx-managed-config]: ./reference/environment.md#ocx-managed-config
 [env-composition-strict-isolation]: ./reference/env-composition.md#strict-isolation
