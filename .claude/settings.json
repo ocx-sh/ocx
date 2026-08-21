@@ -1,4 +1,8 @@
 {
+  "claudeMdExcludes": [
+    "**/.claude/rules/rust-quality/**",
+    "**/.claude/rules/rust-cargo/**"
+  ],
   "permissions": {
     "allow": [
       "Read",
