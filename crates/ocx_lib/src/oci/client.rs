@@ -290,16 +290,22 @@ impl Client {
     ///
     /// A mirrored read fails against a host the caller never typed: the
     /// identifier says `ghcr.io`, the request went to the mirror, and every
-    /// error in between names exactly one of the two. Reverse-looking the
-    /// physical host up in the mirror map is what closes that gap. A miss —
-    /// a canonical read, or a host no mirror claims — returns the error
-    /// untouched, which is why canonical-addressed reads are never annotated.
+    /// error in between names exactly one of the two.
+    ///
+    /// The question is whether *this* fetch was rewritten, which is why the
+    /// logical identifier is a parameter rather than something recovered from
+    /// the physical host. A host configured as one upstream's mirror is still
+    /// an ordinary registry anyone may pull from directly, so asking "who
+    /// mirrors this host" answers for the wrong request and names a config
+    /// entry that had nothing to do with the failure. Asking "was the host
+    /// this identifier resolves to swapped for a mirror" cannot: a
+    /// canonical-addressed read leaves the two equal and goes unannotated.
     ///
     /// Only failures where the routing is the missing context are wrapped.
     /// The not-found sentinels are control flow: callers match on them to
     /// produce `Ok(None)`, so burying one behind [`ClientError::Mirrored`]
     /// would turn a missing tag into a hard failure.
-    fn via_mirror(&self, image: &native::Reference, error: ClientError) -> ClientError {
+    fn via_mirror(&self, logical: &Identifier, physical: &native::Reference, error: ClientError) -> ClientError {
         if !matches!(
             error,
             ClientError::Registry(_)
@@ -314,13 +320,14 @@ impl Client {
         ) {
             return error;
         }
-        let Some(origin) = self.mirrors.upstream_for_host(image.registry()) else {
+        let origin = logical.registry();
+        let Some(mirror) = self.mirrors.get(origin).filter(|m| m.host == physical.registry()) else {
             return error;
         };
         ClientError::Mirrored {
             origin: origin.to_string(),
-            mirror: image.registry().to_string(),
-            physical: image.to_string(),
+            mirror: mirror.host.clone(),
+            physical: physical.to_string(),
             source: Box::new(error),
         }
     }
@@ -437,7 +444,7 @@ impl Client {
             .transport
             .fetch_manifest_digest(&ref_)
             .await
-            .map_err(|e| self.via_mirror(&ref_, e))?;
+            .map_err(|e| self.via_mirror(identifier, &ref_, e))?;
         log::trace!("Fetched manifest digest for {}: {}", identifier, digest);
         Ok(digest.try_into()?)
     }
@@ -446,7 +453,10 @@ impl Client {
     pub async fn fetch_manifest(&self, identifier: &Identifier) -> Result<(Digest, oci::Manifest)> {
         let ref_ = self.transport_reference(identifier);
         self.transport.ensure_auth(&ref_, oci::RegistryOperation::Pull).await?;
-        let (manifest, digest_str) = self.fetch_manifest_raw(&ref_).await?;
+        let (manifest, digest_str) = self
+            .fetch_manifest_raw(&ref_)
+            .await
+            .map_err(|e| self.via_mirror(identifier, &ref_, e))?;
         let digest = digest_str.try_into()?;
         Ok((digest, manifest))
     }
@@ -706,9 +716,13 @@ impl Client {
 
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
 
-        let (manifest, digest_str) = self.fetch_manifest_raw(&image).await?;
+        let (manifest, digest_str) = self
+            .fetch_manifest_raw(&image)
+            .await
+            .map_err(|e| self.via_mirror(identifier, &image, e))?;
         if digest_str != expected_digest {
             return Err(self.via_mirror(
+                identifier,
                 &image,
                 ClientError::DigestMismatch {
                     expected: expected_digest,
@@ -736,7 +750,7 @@ impl Client {
         self.transport
             .pull_blob(&image, &blob_ref.digest())
             .await
-            .map_err(|e| self.via_mirror(&image, e))
+            .map_err(|e| self.via_mirror(blob_ref, &image, e))
     }
 
     /// Downloads and extracts a single OCI layer to the specified directory.
@@ -803,7 +817,7 @@ impl Client {
 
         self.pull_layer_with_caps(identifier, layer, output_dir, blob_total_size, decompressed_cap)
             .await
-            .map_err(|e| self.via_mirror(&self.transport_reference(identifier), e))
+            .map_err(|e| self.via_mirror(identifier, &self.transport_reference(identifier), e))
     }
 
     /// Pipeline body for [`pull_layer`] with the decompressed-side cap passed in.
@@ -1931,7 +1945,7 @@ impl Client {
                 ClientError::InvalidManifest(format!("digest '{digest_str}' from registry HEAD is malformed: {e}"))
             })?)),
             Err(ClientError::ManifestNotFound(_)) => Ok(None),
-            Err(e) => Err(self.via_mirror(&image, e)),
+            Err(e) => Err(self.via_mirror(identifier, &image, e)),
         }
     }
 
@@ -2009,7 +2023,7 @@ impl Client {
         {
             Ok(pair) => pair,
             Err(ClientError::ManifestNotFound(_)) => return Ok(None),
-            Err(e) => return Err(self.via_mirror(&image, e)),
+            Err(e) => return Err(self.via_mirror(identifier, &image, e)),
         };
 
         // Fail closed before parsing or returning: an over-cap body is refused
@@ -2022,10 +2036,10 @@ impl Client {
             )));
         }
 
-        let manifest = parse_registry_manifest(&raw_bytes).map_err(|e| self.via_mirror(&image, e))?;
+        let manifest = parse_registry_manifest(&raw_bytes).map_err(|e| self.via_mirror(identifier, &image, e))?;
         let digest: Digest =
             Digest::try_from(digest_str.as_str()).map_err(|e| ClientError::InvalidManifest(format!("{e}")))?;
-        verify_raw_bytes_digest(&raw_bytes, &digest).map_err(|e| self.via_mirror(&image, e))?;
+        verify_raw_bytes_digest(&raw_bytes, &digest).map_err(|e| self.via_mirror(identifier, &image, e))?;
         Ok(Some((raw_bytes, digest, manifest)))
     }
 
@@ -2094,9 +2108,8 @@ impl Client {
         let (data, digest) = self
             .transport
             .pull_manifest_raw(image, ACCEPTED_MANIFEST_MEDIA_TYPES)
-            .await
-            .map_err(|e| self.via_mirror(image, e))?;
-        let manifest = parse_registry_manifest(&data).map_err(|e| self.via_mirror(image, e))?;
+            .await?;
+        let manifest = parse_registry_manifest(&data)?;
         Ok((manifest, digest))
     }
 }
@@ -6683,6 +6696,31 @@ mod tests {
             assert!(
                 matches!(result, Ok(None)),
                 "a missing tag behind a mirror must stay absent, not become a failure: {result:?}"
+            );
+        }
+
+        /// Naming a mirror requires that this fetch was actually rewritten, not
+        /// merely that the host appears somewhere in the mirror table. A host
+        /// configured as one upstream's mirror is still an ordinary registry
+        /// anyone may pull from directly, and reporting that pull as "via
+        /// mirror ... configured for <unrelated upstream>" sends the reader to
+        /// a config entry that had nothing to do with it.
+        #[tokio::test]
+        async fn a_direct_fetch_from_a_host_that_mirrors_another_upstream_is_not_annotated() {
+            let (client, _) = mirrored_client_with(true);
+            // MIRROR_HOST is UPSTREAM_REGISTRY's mirror, but this identifier
+            // names it directly — no rewrite happens.
+            let direct = Identifier::new_registry("internal/tool", MIRROR_HOST).clone_with_tag("1.0");
+
+            let error = client
+                .fetch_manifest_raw_bytes(&direct)
+                .await
+                .expect_err("the transport was told to fail hard");
+
+            assert!(
+                matches!(error, ClientError::Registry(_)),
+                "a direct pull from a host that happens to mirror another upstream must not be \
+                 reported as mirrored, got {error:?}"
             );
         }
 

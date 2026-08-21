@@ -778,8 +778,13 @@ def test_mirror_serving_html_fails_as_a_data_error_naming_the_mirror(
     Four things must appear, and each is a separate diagnosis the user cannot
     reach without it: the exit code says it is bad data and not an unavailable
     registry, ``via mirror`` plus the mirror authority say the request went
-    somewhere the user did not type, the upstream says which config entry sent
-    it there, and ``text/html`` says what actually came back.
+    somewhere the user did not type, ``configured for '<upstream>'`` says which
+    config entry sent it there, and ``text/html`` says what actually came back.
+
+    The upstream is asserted through the ``configured for`` fragment rather
+    than on its own: the identifier is echoed back in the install line, so a
+    bare substring check for the registry passes with the annotation removed
+    entirely.
 
     Nothing is pushed anywhere: the mirror answers everything, so the upstream
     is never contacted.
@@ -807,8 +812,10 @@ def test_mirror_serving_html_fails_as_a_data_error_naming_the_mirror(
     assert html_mirror.authority in stderr, (
         f"the failure must name the mirror actually contacted ({html_mirror.authority}): {stderr}"
     )
-    assert registry in stderr, (
-        f"the failure must name the upstream the mirror stands in for ({registry}): {stderr}"
+    assert f"configured for '{registry}'" in stderr, (
+        "the failure must attribute the routing to the upstream's config entry "
+        f"(configured for '{registry}'); the bare registry name also appears in "
+        f"the echoed identifier, so only this fragment discriminates: {stderr}"
     )
     assert "text/html" in stderr, f"the failure must name what the mirror actually returned: {stderr}"
 
