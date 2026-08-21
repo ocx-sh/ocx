@@ -93,9 +93,19 @@ impl NativeTransport {
 /// registry, and the case it would cover is already transient by another
 /// route: reqwest surfaces a client-side timeout as `RequestError`, matched
 /// above.
+///
+/// # Why two wire failures leave the registry buckets entirely
+///
+/// A content-type refusal and a digest verification failure both say the same
+/// thing: the bytes that arrived are not the bytes that were asked for. Exit 65
+/// says exactly that, and says a rerun cannot fix it. Exit 69 says the opposite
+/// -- it invites a retry wrapper to fetch the same wrong bytes again, and it
+/// reports a mis-routed mirror as an unavailable registry.
 fn registry_error(e: oci_client::errors::OciDistributionError) -> ClientError {
+    use oci_client::errors::DigestError as WireDigestError;
     use oci_client::errors::OciDistributionError::{
-        AuthenticationFailure, RegistryError, RequestError, ServerError, UnauthorizedError, UnexpectedContentType,
+        AuthenticationFailure, DigestError, RegistryError, RequestError, ServerError, UnauthorizedError,
+        UnexpectedContentType,
     };
     use oci_client::errors::OciErrorCode;
     match &e {
@@ -122,6 +132,14 @@ fn registry_error(e: oci_client::errors::OciDistributionError) -> ClientError {
         // an unavailable registry: 65 says the bytes were wrong, 69 would tell a
         // retry wrapper the registry might answer differently next time.
         UnexpectedContentType { .. } => ClientError::NotAManifest(Box::new(e)),
+        // The wire proved the bytes are not what the digest claimed. Same 65,
+        // same reason. Only this one `DigestError` variant moves: the others
+        // (an unusable algorithm, a malformed header) are the registry giving a
+        // bad answer rather than serving corrupted content, so they stay 69.
+        DigestError(WireDigestError::VerificationError { expected, actual }) => ClientError::DigestMismatch {
+            expected: expected.clone(),
+            actual: actual.clone(),
+        },
         _ => ClientError::Registry(Box::new(e)),
     }
 }
@@ -1241,5 +1259,43 @@ mod tests {
             rendered.contains("text/html") && rendered.contains("portal.example.com"),
             "the chain must name what arrived and where from, got: {rendered}"
         );
+    }
+
+    /// The wire told us the bytes are not what they claimed to be. That is a
+    /// data fault (65) -- rerunning fetches the same wrong bytes -- where the
+    /// catch-all's 69 tells a retry wrapper the opposite.
+    #[test]
+    fn a_wire_digest_mismatch_maps_to_digest_mismatch() {
+        use crate::cli::{ClassifyExitCode as _, ExitCode};
+        use oci_client::errors::DigestError as WireDigestError;
+
+        let mapped = registry_error(OciDistributionError::DigestError(WireDigestError::VerificationError {
+            expected: format!("sha256:{}", "a".repeat(64)),
+            actual: format!("sha256:{}", "b".repeat(64)),
+        }));
+
+        let ClientError::DigestMismatch { expected, actual } = &mapped else {
+            panic!("expected DigestMismatch, got {mapped:?}");
+        };
+        assert_eq!(expected, &format!("sha256:{}", "a".repeat(64)));
+        assert_eq!(actual, &format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(mapped.classify(), Some(ExitCode::DataError));
+    }
+
+    /// The other half of the split: a digest header naming an algorithm we
+    /// cannot compute is a bad answer, not corrupted content, so it stays a
+    /// registry failure. Pinning both directions is what keeps the arm from
+    /// widening to every `DigestError` on the next edit.
+    #[test]
+    fn an_unusable_digest_header_stays_a_registry_failure() {
+        use crate::cli::{ClassifyExitCode as _, ExitCode};
+        use oci_client::errors::DigestError as WireDigestError;
+
+        let mapped = registry_error(OciDistributionError::DigestError(
+            WireDigestError::UnsupportedAlgorithm("md5".to_string()),
+        ));
+
+        assert!(matches!(mapped, ClientError::Registry(_)), "got {mapped:?}");
+        assert_eq!(mapped.classify(), Some(ExitCode::Unavailable));
     }
 }
