@@ -824,6 +824,9 @@ fn classify_client_error(err: &crate::Error) -> ClientFailure {
 
 fn classify(client: &ClientError) -> ClientFailure {
     match client {
+        // Mirror routing is provenance, not a failure kind: the retry decision
+        // belongs to whatever actually failed behind it.
+        ClientError::Mirrored { source, .. } => classify(source),
         // Transient: registry-side failures, file I/O, and an incomplete blob
         // delivery are all retryable.
         ClientError::Registry(_)

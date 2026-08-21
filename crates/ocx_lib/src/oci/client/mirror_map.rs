@@ -73,6 +73,24 @@ impl MirrorMap {
         };
         Some((mirror.host.clone(), rewritten))
     }
+
+    /// The upstream host a mirror host stands in for — the reverse of
+    /// [`rewrite_repository`](Self::rewrite_repository).
+    ///
+    /// A failed read carries only the physical reference it fetched, so the
+    /// config entry that sent it there is invisible unless it can be looked
+    /// back up. Two upstreams configured onto one mirror host resolve to the
+    /// lexicographically smallest, so the answer is deterministic; the
+    /// ambiguity belongs to the config, and either name points at the same
+    /// table.
+    #[must_use]
+    pub fn upstream_for_host(&self, host: &str) -> Option<&str> {
+        self.entries
+            .iter()
+            .filter(|(_, mirror)| mirror.host == host)
+            .map(|(upstream, _)| upstream.as_str())
+            .min()
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +205,29 @@ mod tests {
     /// Empty map has no entries — `is_empty()` returns true; `rewrite_repository`
     /// returns `None` for any input.
     ///
+    /// The reverse lookup is what lets a failed read name the config entry that
+    /// routed it — the physical reference alone never mentions the upstream.
+    #[test]
+    fn upstream_for_host_names_the_origin_a_mirror_stands_in_for() {
+        let map = MirrorMap::new([
+            ("ghcr.io".to_string(), mirror("artifactory.example.com", "ghcr-remote")),
+            ("docker.io".to_string(), mirror("docker-mirror.corp", "dockerhub-proxy")),
+        ]);
+        assert_eq!(map.upstream_for_host("artifactory.example.com"), Some("ghcr.io"));
+        assert_eq!(map.upstream_for_host("docker-mirror.corp"), Some("docker.io"));
+    }
+
+    /// A canonical read addresses the upstream host directly, so the reverse
+    /// lookup must miss — that miss is what keeps an unmirrored failure from
+    /// being reported as a mirror problem.
+    #[test]
+    fn upstream_for_host_is_none_for_a_host_no_mirror_claims() {
+        let map = MirrorMap::new([("ghcr.io".to_string(), mirror("artifactory.example.com", "ghcr-remote"))]);
+        assert_eq!(map.upstream_for_host("ghcr.io"), None);
+        assert_eq!(map.upstream_for_host("quay.io"), None);
+        assert_eq!(MirrorMap::default().upstream_for_host("artifactory.example.com"), None);
+    }
+
     /// Traces: plan Testing Strategy — identity map is the default.
     #[test]
     fn empty_map_is_identity() {

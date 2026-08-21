@@ -286,6 +286,45 @@ impl Client {
         native::Reference::with_tag(host, repository, "latest".into())
     }
 
+    /// Annotates `error` with the mirror routing that produced it.
+    ///
+    /// A mirrored read fails against a host the caller never typed: the
+    /// identifier says `ghcr.io`, the request went to the mirror, and every
+    /// error in between names exactly one of the two. Reverse-looking the
+    /// physical host up in the mirror map is what closes that gap. A miss —
+    /// a canonical read, or a host no mirror claims — returns the error
+    /// untouched, which is why canonical-addressed reads are never annotated.
+    ///
+    /// Only failures where the routing is the missing context are wrapped.
+    /// The not-found sentinels are control flow: callers match on them to
+    /// produce `Ok(None)`, so burying one behind [`ClientError::Mirrored`]
+    /// would turn a missing tag into a hard failure.
+    fn via_mirror(&self, image: &native::Reference, error: ClientError) -> ClientError {
+        if !matches!(
+            error,
+            ClientError::Registry(_)
+                | ClientError::RegistryTransient(_)
+                | ClientError::Authentication(_)
+                | ClientError::NotAManifest(_)
+                | ClientError::DigestMismatch { .. }
+                | ClientError::ShortBlobRead { .. }
+                | ClientError::InvalidManifest(_)
+                | ClientError::InvalidImageIndex(_)
+                | ClientError::Serialization(_)
+        ) {
+            return error;
+        }
+        let Some(origin) = self.mirrors.upstream_for_host(image.registry()) else {
+            return error;
+        };
+        ClientError::Mirrored {
+            origin: origin.to_string(),
+            mirror: image.registry().to_string(),
+            physical: image.to_string(),
+            source: Box::new(error),
+        }
+    }
+
     /// Builds the reference for a read that has been told which host to
     /// address.
     ///
@@ -394,7 +433,11 @@ impl Client {
     pub async fn fetch_manifest_digest(&self, identifier: &Identifier) -> Result<oci::Digest> {
         let ref_ = self.transport_reference(identifier);
         self.transport.ensure_auth(&ref_, oci::RegistryOperation::Pull).await?;
-        let digest = self.transport.fetch_manifest_digest(&ref_).await?;
+        let digest = self
+            .transport
+            .fetch_manifest_digest(&ref_)
+            .await
+            .map_err(|e| self.via_mirror(&ref_, e))?;
         log::trace!("Fetched manifest digest for {}: {}", identifier, digest);
         Ok(digest.try_into()?)
     }
@@ -665,10 +708,13 @@ impl Client {
 
         let (manifest, digest_str) = self.fetch_manifest_raw(&image).await?;
         if digest_str != expected_digest {
-            return Err(ClientError::DigestMismatch {
-                expected: expected_digest,
-                actual: digest_str,
-            });
+            return Err(self.via_mirror(
+                &image,
+                ClientError::DigestMismatch {
+                    expected: expected_digest,
+                    actual: digest_str,
+                },
+            ));
         }
         let manifest = match manifest {
             oci::Manifest::Image(m) => m,
@@ -687,7 +733,10 @@ impl Client {
     pub async fn pull_blob(&self, blob_ref: &oci::PinnedIdentifier) -> std::result::Result<Vec<u8>, ClientError> {
         let image = self.transport_reference(blob_ref);
         self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
-        self.transport.pull_blob(&image, &blob_ref.digest()).await
+        self.transport
+            .pull_blob(&image, &blob_ref.digest())
+            .await
+            .map_err(|e| self.via_mirror(&image, e))
     }
 
     /// Downloads and extracts a single OCI layer to the specified directory.
@@ -754,6 +803,7 @@ impl Client {
 
         self.pull_layer_with_caps(identifier, layer, output_dir, blob_total_size, decompressed_cap)
             .await
+            .map_err(|e| self.via_mirror(&self.transport_reference(identifier), e))
     }
 
     /// Pipeline body for [`pull_layer`] with the decompressed-side cap passed in.
@@ -1881,7 +1931,7 @@ impl Client {
                 ClientError::InvalidManifest(format!("digest '{digest_str}' from registry HEAD is malformed: {e}"))
             })?)),
             Err(ClientError::ManifestNotFound(_)) => Ok(None),
-            Err(e) => Err(e),
+            Err(e) => Err(self.via_mirror(&image, e)),
         }
     }
 
@@ -1959,7 +2009,7 @@ impl Client {
         {
             Ok(pair) => pair,
             Err(ClientError::ManifestNotFound(_)) => return Ok(None),
-            Err(e) => return Err(e),
+            Err(e) => return Err(self.via_mirror(&image, e)),
         };
 
         // Fail closed before parsing or returning: an over-cap body is refused
@@ -1972,10 +2022,10 @@ impl Client {
             )));
         }
 
-        let manifest = parse_registry_manifest(&raw_bytes)?;
+        let manifest = parse_registry_manifest(&raw_bytes).map_err(|e| self.via_mirror(&image, e))?;
         let digest: Digest =
             Digest::try_from(digest_str.as_str()).map_err(|e| ClientError::InvalidManifest(format!("{e}")))?;
-        verify_raw_bytes_digest(&raw_bytes, &digest)?;
+        verify_raw_bytes_digest(&raw_bytes, &digest).map_err(|e| self.via_mirror(&image, e))?;
         Ok(Some((raw_bytes, digest, manifest)))
     }
 
@@ -2044,8 +2094,9 @@ impl Client {
         let (data, digest) = self
             .transport
             .pull_manifest_raw(image, ACCEPTED_MANIFEST_MEDIA_TYPES)
-            .await?;
-        let manifest = parse_registry_manifest(&data)?;
+            .await
+            .map_err(|e| self.via_mirror(image, e))?;
+        let manifest = parse_registry_manifest(&data).map_err(|e| self.via_mirror(image, e))?;
         Ok((manifest, digest))
     }
 }
@@ -3096,8 +3147,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         let result = client.pull_layer(&id, &layer, dir.path()).await;
-        match result {
-            Err(ClientError::DigestMismatch { expected, actual }) => {
+        // A mirrored failure carries the routing that produced it (#327); the
+        // verdict underneath must still be the digest mismatch, unchanged.
+        let inner = match result {
+            Err(ClientError::Mirrored { mirror, source, .. }) => {
+                assert_eq!(mirror, "mirror.corp", "the annotation must name the mirror host");
+                *source
+            }
+            other => panic!("expected a mirrored failure from the streaming pipeline, got {other:?}"),
+        };
+        match inner {
+            ClientError::DigestMismatch { expected, actual } => {
                 assert_eq!(
                     expected, claimed_digest,
                     "DigestMismatch must report the declared (claimed) digest even under mirror"
@@ -6125,6 +6185,11 @@ mod tests {
         #[derive(Clone)]
         struct RecordingTransport {
             data: RecordingTransportData,
+            /// Answer manifest pulls with a hard registry failure rather than
+            /// the not-found sentinel, so the error-annotation path can be
+            /// driven. Default `false` keeps every routing test above on the
+            /// harmless not-found answer.
+            manifest_fails_hard: bool,
         }
 
         #[async_trait::async_trait]
@@ -6197,6 +6262,11 @@ mod tests {
                 _accepted_media_types: &[&str],
             ) -> TransportResult<(Vec<u8>, String)> {
                 self.data.record("pull_manifest_raw", image);
+                if self.manifest_fails_hard {
+                    return Err(ClientError::Registry(Box::new(std::io::Error::other(
+                        "registry refused the manifest",
+                    ))));
+                }
                 // Not-found is a legitimate, harmless outcome for every caller
                 // exercised below (each either propagates the error or maps
                 // it to `Ok(None)`) — only the recorded reference matters here.
@@ -6276,8 +6346,17 @@ mod tests {
         /// [`MIRROR_PREFIX`]. Returns the data handle alongside the client so
         /// tests can inspect recorded calls after driving a method.
         fn mirrored_client() -> (Client, RecordingTransportData) {
+            mirrored_client_with(false)
+        }
+
+        /// [`mirrored_client`] with the transport's manifest answer selectable:
+        /// `true` fails hard, so the mirror-annotation path is reachable.
+        fn mirrored_client_with(manifest_fails_hard: bool) -> (Client, RecordingTransportData) {
             let data = RecordingTransportData::new();
-            let mut client = Client::with_transport(Box::new(RecordingTransport { data: data.clone() }));
+            let mut client = Client::with_transport(Box::new(RecordingTransport {
+                data: data.clone(),
+                manifest_fails_hard,
+            }));
             client.mirrors = MirrorMap::new([(
                 UPSTREAM_REGISTRY.to_string(),
                 ParsedMirror {
@@ -6555,6 +6634,74 @@ mod tests {
                 "fetch_layer_blob_capped must hand the transport the mirror host"
             );
             assert_eq!(repository, mirrored_repository());
+        }
+
+        // ── Mirror provenance on failure (issue #327) ────────────────────────
+        //
+        // Routing a read through a mirror is invisible in every error the
+        // mirror produces: the identifier names the upstream, the request went
+        // somewhere else, and neither error names both.
+
+        /// The whole point of the annotation: the failure names the physical
+        /// reference that was fetched, the mirror host it went to, and the
+        /// upstream that mirror stands in for.
+        #[tokio::test]
+        async fn a_mirrored_fetch_failure_names_the_physical_reference_and_its_upstream() {
+            let (client, _) = mirrored_client_with(true);
+
+            let error = client
+                .pull_manifest(&pinned_identifier('b'))
+                .await
+                .expect_err("the transport was told to fail hard");
+
+            let ClientError::Mirrored {
+                origin,
+                mirror,
+                physical,
+                ..
+            } = &error
+            else {
+                panic!("a mirrored read failure must be annotated, got {error:?}");
+            };
+            assert_eq!(origin, UPSTREAM_REGISTRY, "must name the upstream that was asked for");
+            assert_eq!(mirror, MIRROR_HOST, "must name the mirror it was routed to");
+            assert!(
+                physical.contains(MIRROR_HOST) && physical.contains(&mirrored_repository()),
+                "must name the reference actually fetched, got: {physical}"
+            );
+        }
+
+        /// The silent-regression case. Callers match `ManifestNotFound` to mean
+        /// "absent"; wrapping it would make a missing tag a hard failure while
+        /// every routing assertion above still passed.
+        #[tokio::test]
+        async fn a_mirrored_missing_tag_is_still_a_not_found() {
+            let (client, _) = mirrored_client();
+
+            let result = client.fetch_manifest_raw_bytes(&identifier_with_tag("1.0")).await;
+
+            assert!(
+                matches!(result, Ok(None)),
+                "a missing tag behind a mirror must stay absent, not become a failure: {result:?}"
+            );
+        }
+
+        /// A canonical read addresses the upstream host directly, so the
+        /// reverse lookup misses and the failure is reported unannotated —
+        /// claiming a mirror was involved when none was would be a lie.
+        #[tokio::test]
+        async fn a_canonical_read_failure_is_not_annotated_as_mirrored() {
+            let (client, _) = mirrored_client_with(true);
+
+            let error = client
+                .fetch_manifest_raw_bytes_addressed(&identifier_with_tag("1.0"), ReadAddressing::Canonical)
+                .await
+                .expect_err("the transport was told to fail hard");
+
+            assert!(
+                matches!(error, ClientError::Registry(_)),
+                "a canonical read must surface the failure unannotated, got {error:?}"
+            );
         }
     }
 

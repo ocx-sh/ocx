@@ -123,6 +123,27 @@ pub enum ClientError {
     #[error("{0}")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 
+    /// A read routed through a configured mirror failed.
+    ///
+    /// Carries the routing alongside the failure: the upstream host the caller
+    /// asked for, the mirror host that stood in for it, and the physical
+    /// reference actually fetched. Without it a mirror failure names a host the
+    /// user never typed and a config entry nothing points back to.
+    ///
+    /// Adds provenance, never a verdict — [`ClassifyExitCode`] delegates
+    /// straight to the wrapped error, so wrapping can never change an exit
+    /// code. Not-found sentinels are deliberately never wrapped: callers match
+    /// on them to mean "absent", and burying one here would turn a missing tag
+    /// into a hard failure.
+    #[error("fetching '{physical}' via mirror '{mirror}' configured for '{origin}'")]
+    Mirrored {
+        origin: String,
+        mirror: String,
+        physical: String,
+        #[source]
+        source: Box<ClientError>,
+    },
+
     /// The registry does not implement the OCI Referrers API and has no
     /// fallback-tag referrers index. Distinct from [`Self::Registry`] and
     /// [`Self::RegistryTransient`]: the registry is reachable and answering,
@@ -218,6 +239,9 @@ impl ArtifactFetchError {
 impl ClassifyExitCode for ClientError {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
+            // Provenance only: the routing does not change what went wrong, so
+            // the wrapped error keeps its own code.
+            Self::Mirrored { source, .. } => return source.classify(),
             Self::Authentication(_) => ExitCode::AuthError,
             Self::ManifestNotFound(_) | Self::BlobNotFound(_) | Self::RepositoryNotFound(_) => ExitCode::NotFound,
             Self::Io { .. } => ExitCode::IoError,
@@ -260,6 +284,62 @@ mod tests {
     /// content exits 65 (terminal). Asserting both pins the *distinction* —
     /// folding `ShortBlobRead` into the `DataError` bucket would make a
     /// transient truncation look like a supply-chain failure to `case $?`.
+    /// Mirror routing is provenance, so the exit code must be whatever the
+    /// wrapped failure would have exited with on its own. Asserting two
+    /// different codes is what pins the delegation — a single case passes just
+    /// as well against a hardcoded constant.
+    #[test]
+    fn a_mirrored_failure_delegates_its_exit_code_to_the_wrapped_one() {
+        let mirrored = |source: ClientError| ClientError::Mirrored {
+            origin: "ghcr.io".to_string(),
+            mirror: "artifactory.example.com".to_string(),
+            physical: "artifactory.example.com/ghcr-remote/owner/tool:1.0".to_string(),
+            source: Box::new(source),
+        };
+
+        assert_eq!(
+            mirrored(ClientError::DigestMismatch {
+                expected: "sha256:aaa".to_string(),
+                actual: "sha256:bbb".to_string(),
+            })
+            .classify(),
+            Some(ExitCode::DataError)
+        );
+        assert_eq!(
+            mirrored(ClientError::RegistryTransient(Box::new(std::io::Error::other(
+                "connect timed out"
+            ))))
+            .classify(),
+            Some(ExitCode::TempFail)
+        );
+    }
+
+    /// The message must name all three: what was fetched, the mirror it went
+    /// to, and the upstream that mirror stands in for. Any one alone leaves the
+    /// reader unable to connect the failure to the config entry behind it.
+    #[test]
+    fn a_mirrored_failure_names_the_routing_in_its_message() {
+        let rendered = ClientError::Mirrored {
+            origin: "ghcr.io".to_string(),
+            mirror: "artifactory.example.com".to_string(),
+            physical: "artifactory.example.com/ghcr-remote/owner/tool:1.0".to_string(),
+            source: Box::new(ClientError::NotAManifest(Box::new(std::io::Error::other(
+                "unexpected content type 'text/html'",
+            )))),
+        }
+        .to_string();
+
+        assert!(rendered.contains("ghcr.io"), "must name the upstream, got: {rendered}");
+        assert!(
+            rendered.contains("artifactory.example.com"),
+            "must name the mirror, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("ghcr-remote/owner/tool:1.0"),
+            "must name the physical reference, got: {rendered}"
+        );
+    }
+
     #[test]
     fn short_blob_read_is_temp_fail_while_digest_mismatch_stays_data_error() {
         assert_eq!(
