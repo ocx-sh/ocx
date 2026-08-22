@@ -325,6 +325,7 @@ mod tests {
             if self.failures.lock().expect("stub lock").contains(url) {
                 return Err(crate::oci::index::error::Error::IndexHttpFailed {
                     url: url.to_string(),
+                    status: None,
                     source: "simulated index transport failure".into(),
                 }
                 .into());

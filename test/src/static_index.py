@@ -28,7 +28,7 @@ import json
 import socket
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 
@@ -84,6 +84,13 @@ class PackageEntry:
     root_digest: str
     index_digest: str
     logical_id: str
+    # Every tag this root carries, mapped to the content digest of its dispatch
+    # object — `{tag: index_digest}`, the named tag included. A single-tag entry
+    # holds one pair; `extra_tags` is what makes it longer. Tests that have to
+    # reach one specific tag's `o/` object (delete it, truncate it, refuse it)
+    # need the digest, and finding it by globbing would pick an arbitrary
+    # sibling.
+    tag_digests: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 def write_package(
@@ -99,11 +106,18 @@ def write_package(
     deprecated_message: str | None = None,
     superseded_by: str | None = None,
     yanked: bool = False,
+    extra_tags: Sequence[str] = (),
 ) -> PackageEntry:
     """Writes a root document + its OCI image index under `repository`.
 
     Returns the entry's digests and its `ocx.sh/<repository>:<tag>` logical
     identifier for use in `ocx` invocations.
+
+    `extra_tags` adds further tags to the same root, each with its **own**
+    dispatch object: the platform digest is mixed with the tag name, so no two
+    tags share a content digest. Distinctness is the point — the refresh loop
+    dedups its fetches by content digest, so tags aliased onto one object would
+    collapse into a single request and could not exercise a per-tag failure.
     """
     index_body = index_bytes(platform_digest, os=os, architecture=architecture)
     index_hex = hashlib.sha256(index_body).hexdigest()
@@ -114,6 +128,15 @@ def write_package(
         # `wire.rs`), never a bare boolean — a publisher's reason + timestamp.
         tag_entry["yanked"] = {"reason": "critical security issue", "at": "2026-02-01T00:00:00Z"}
     root: dict = {"repository": physical_repository, "tags": {tag: tag_entry}}
+    tag_digests = {tag: f"sha256:{index_hex}"}
+    extra_bodies: dict[str, bytes] = {}
+    for extra in extra_tags:
+        extra_platform = "sha256:" + hashlib.sha256(f"{platform_digest}:{extra}".encode()).hexdigest()
+        extra_body = index_bytes(extra_platform, os=os, architecture=architecture)
+        extra_hex = hashlib.sha256(extra_body).hexdigest()
+        root["tags"][extra] = {"content": f"sha256:{extra_hex}", "observed": "2026-01-01T00:00:00Z"}
+        tag_digests[extra] = f"sha256:{extra_hex}"
+        extra_bodies[extra_hex] = extra_body
     if status is not None:
         root["status"] = status
     if deprecated_message is not None:
@@ -127,9 +150,11 @@ def write_package(
     root_path.parent.mkdir(parents=True, exist_ok=True)
     root_path.write_bytes(root_bytes)
 
-    index_path = fixture_root / "p" / repository / "o" / "sha256" / f"{index_hex}.json"
-    index_path.parent.mkdir(parents=True, exist_ok=True)
-    index_path.write_bytes(index_body)
+    objects_dir = fixture_root / "p" / repository / "o" / "sha256"
+    objects_dir.mkdir(parents=True, exist_ok=True)
+    (objects_dir / f"{index_hex}.json").write_bytes(index_body)
+    for extra_hex, extra_body in extra_bodies.items():
+        (objects_dir / f"{extra_hex}.json").write_bytes(extra_body)
 
     return PackageEntry(
         repository=repository,
@@ -137,6 +162,7 @@ def write_package(
         root_digest=f"sha256:{root_hex}",
         index_digest=f"sha256:{index_hex}",
         logical_id=f"ocx.sh/{repository}:{tag}",
+        tag_digests=tag_digests,
     )
 
 
@@ -169,10 +195,17 @@ def read_catalog(path: Path) -> dict[str, str]:
 
 @dataclasses.dataclass(slots=True)
 class RequestRecord:
-    """One served request: the raw path, the `If-None-Match` it carried, and
-    the status this fixture answered with.
+    """One served request: the method, the raw path, the `If-None-Match` it
+    carried, and the status this fixture answered with.
+
+    `method` exists so a count can never be satisfied by a request shape it
+    cannot see. Recording GETs alone would leave a HEAD invisible rather than
+    conflated — an assertion of "zero fetches of this object" would stay green
+    against an implementation that HEADed it. Both methods land in one log, so
+    an exact-multiset assertion covers the pair.
     """
 
+    method: str
     path: str
     if_none_match: str | None
     status: int
@@ -195,6 +228,12 @@ class _StaticIndexHandler(http.server.SimpleHTTPRequestHandler):
         with self.server.in_flight():
             self._serve()
 
+    def do_HEAD(self) -> None:  # noqa: N802 (stdlib override name)
+        # Same path, same log, no body — so a HEAD is measured rather than
+        # missed. `_serve` reads `self.command` to decide about the body.
+        with self.server.in_flight():
+            self._serve()
+
     def _serve(self) -> None:
         if_none_match = self.headers.get("If-None-Match")
         # A path the test declared unservable — an origin whose catalog endpoint
@@ -202,32 +241,64 @@ class _StaticIndexHandler(http.server.SimpleHTTPRequestHandler):
         # file on purpose: only a confirmed 404 may read as absence, and the
         # difference between the two is what several scenarios here turn on.
         if (status := self.server.refusals.get(self.path)) is not None:
-            self.server.requests.append(RequestRecord(self.path, if_none_match, status))
+            self.server.requests.append(RequestRecord(self.command, self.path, if_none_match, status))
             self.send_error(status)
+            return
+
+        # A refusal this path answers ONCE, then forgets — the transient class.
+        # `refusals` above is permanent, so it can only ever model a hard
+        # failure; a retry that succeeds needs the origin to change its answer
+        # between attempts, which is the whole of what a transient 503 is.
+        if (transient := self.server.take_transient_refusal(self.path)) is not None:
+            self.server.requests.append(RequestRecord(self.command, self.path, if_none_match, transient))
+            self.send_error(transient)
             return
 
         local_path = Path(self.translate_path(self.path))
         if not local_path.is_file():
-            self.server.requests.append(RequestRecord(self.path, if_none_match, 404))
+            self.server.requests.append(RequestRecord(self.command, self.path, if_none_match, 404))
             self.send_error(404)
             return
 
         body = local_path.read_bytes()
         etag = hashlib.sha256(body).hexdigest()
         if if_none_match == etag:
-            self.server.requests.append(RequestRecord(self.path, if_none_match, 304))
+            self.server.requests.append(RequestRecord(self.command, self.path, if_none_match, 304))
             self.send_response(304)
             self.send_header("ETag", etag)
             self.end_headers()
             return
 
-        self.server.requests.append(RequestRecord(self.path, if_none_match, 200))
+        self.server.requests.append(RequestRecord(self.command, self.path, if_none_match, 200))
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("ETag", etag)
         self.end_headers()
+        if self.command == "HEAD":
+            return
+        if (pacing := self.server.slow_bodies.get(self.path)) is not None:
+            self._dribble(body, pacing)
+            return
         self.wfile.write(body)
+
+    def _dribble(self, body: bytes, pacing: tuple[int, float]) -> None:
+        """Writes `body` in `chunks` pieces, pausing `gap` seconds between them.
+
+        A slow-but-progressing peer: every pause is a gap between two frames
+        that do arrive, so a per-frame idle bound never trips while the total
+        transfer runs as long as the test needs. `Content-Length` is sent up
+        front and honoured exactly, so the client reads this as one ordinary
+        body that simply takes its time — not as a truncation.
+        """
+        chunks, gap = pacing
+        size = max(1, -(-len(body) // chunks))
+        pieces = [body[start : start + size] for start in range(0, len(body), size)]
+        for position, piece in enumerate(pieces):
+            if position:
+                time.sleep(gap)
+            self.wfile.write(piece)
+            self.wfile.flush()
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002 (stdlib signature)
         pass  # quiet test output — assertions read `server.requests` instead
@@ -253,6 +324,14 @@ class StaticIndexServer(http.server.ThreadingHTTPServer):
         # Path -> HTTP status this fixture answers instead of serving the file.
         # Populated by tests that need an origin which refuses rather than 404s.
         self.refusals: dict[str, int] = {}
+        # Path -> the statuses it answers before the file is served, one per
+        # request, in order. `[503]` is one transient failure then success —
+        # the shape a retry ladder is supposed to absorb.
+        self.transient_refusals: dict[str, list[int]] = {}
+        # Path -> (chunks, gap_seconds): serve this file's body in pieces with a
+        # pause between them, so the transfer is slow without ever stalling.
+        self.slow_bodies: dict[str, tuple[int, float]] = {}
+        self._transient_lock = threading.Lock()
         # Seconds each request is held inside the handler. A static file is
         # served far faster than a client can fan out, so with no hold the peak
         # overlap is 1 however wide the fan-out is — the delay is what makes
@@ -261,6 +340,15 @@ class StaticIndexServer(http.server.ThreadingHTTPServer):
         self._counter = _InFlight()
         handler = functools.partial(_StaticIndexHandler, directory=str(root))
         super().__init__(("127.0.0.1", 0), handler)
+
+    def take_transient_refusal(self, path: str) -> int | None:
+        """The next one-shot status queued for `path`, consumed; `None` when the
+        queue is empty. Locked because the fan-out serves several paths at once
+        and a check-then-pop across threads is not atomic.
+        """
+        with self._transient_lock:
+            pending = self.transient_refusals.get(path)
+            return pending.pop(0) if pending else None
 
     @property
     def peak_in_flight(self) -> int:

@@ -60,6 +60,8 @@ pub mod ssrf;
 pub mod index;
 pub use index::Index;
 
+pub mod transport_policy;
+
 pub mod manifest;
 pub mod manifest_builder;
 pub use manifest_builder::{ManifestArtifacts, ManifestBuilder};
