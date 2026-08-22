@@ -252,6 +252,7 @@ mod tests {
         let error = AnnounceError::Forge(crate::forge::ForgeError::Status {
             url: "https://api.github.com/user".to_string(),
             status: 401,
+            detail: String::new(),
         });
         assert_eq!(error.classify(), Some(ExitCode::AuthError));
     }

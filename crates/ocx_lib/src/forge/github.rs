@@ -23,11 +23,16 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 
-use super::identity::{verify_fork_identity, verify_fork_owner};
+use super::error::status_detail;
+use super::http::build_forge_http_client;
+use super::identity::{verify_fork_namespace, verify_github_fork};
 use super::poll::{PollSchedule, backoff_delays};
-use super::{ForgeError, ForgeToken, ForkIdentity, PullRequest, RepoCoordinate};
+use super::{
+    BranchComparison, CommitBase, Forge, ForgeError, ForgeToken, ForkIdentity, PullRequest, RefUpdate, RepoCoordinate,
+};
 
-/// Canonical GitHub REST base URL. Overridable only under the test seam.
+/// Canonical github.com REST base URL — a dedicated API origin, not a path on
+/// the web host. Overridable only under the test seam.
 const DEFAULT_BASE_URL: &str = "https://api.github.com";
 /// GitHub REST API version header value.
 const API_VERSION: &str = "2022-11-28";
@@ -35,8 +40,6 @@ const API_VERSION: &str = "2022-11-28";
 const ACCEPT_JSON: &str = "application/vnd.github+json";
 /// Raw media type — returns file bytes directly from the contents API.
 const ACCEPT_RAW: &str = "application/vnd.github.raw+json";
-/// Client user-agent (GitHub requires one).
-const USER_AGENT_VALUE: &str = concat!("ocx/", env!("CARGO_PKG_VERSION"));
 /// Total per-request timeout for ordinary forge calls.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Backoff delays before each replay of the git-data commit sequence.
@@ -47,56 +50,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// registry and only owes the index its announce.
 const GIT_DATA_RETRY_DELAYS: [Duration; 3] = [Duration::from_secs(3), Duration::from_secs(9), Duration::from_secs(27)];
 
-/// How a branch stands relative to a base ref, as GitHub's compare API reports it.
-///
-/// The distinction that matters to announce is [`Ahead`](Self::Ahead) versus
-/// [`Diverged`](Self::Diverged), and it is not cosmetic. An `Ahead` branch
-/// fast-forwards onto the base, so appending to it always produces a mergeable
-/// pull request. A `Diverged` branch does not — and the ordinary way an announce
-/// branch becomes `Diverged` is that its pull request was **squash-merged**, which
-/// puts its content on the base under a new commit while leaving none of its own
-/// commits in the base's history. Appending there re-proposes work that is already
-/// merged, and the pull request conflicts on the very file every announce edits
-/// (ocx-sh/ocx#228).
-///
-/// Git alone cannot tell that case apart from "my commits are genuinely unmerged
-/// and the base moved on underneath me", so `Diverged` is never a verdict by
-/// itself: the caller pairs it with whether an open pull request still exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BranchComparison {
-    /// The branch is the base commit.
-    Identical,
-    /// The branch holds commits the base does not, and the base holds none the
-    /// branch does not — a fast-forward.
-    Ahead,
-    /// The base has moved on; the branch holds nothing of its own.
-    Behind,
-    /// Both sides hold commits the other does not.
-    Diverged,
-}
-
-/// Whether a ref update may rewrite history.
-///
-/// [`FastForward`](Self::FastForward) is the default and the one every ordinary
-/// announce uses: it is the compare-and-swap that makes a concurrent announce
-/// surface as [`ForgeError::NonFastForward`] instead of being silently
-/// overwritten (design register C4). [`Reset`](Self::Reset) is reserved for the
-/// one case where a non-fast-forward is the *intent* — repointing a spent
-/// announce branch at the upstream base, where refusing to rewrite would preserve
-/// exactly the already-merged commits that make the branch unusable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefUpdate {
-    /// Reject an update that is not a fast-forward.
-    FastForward,
-    /// Repoint the ref even when the new commit is not a descendant.
-    Reset,
-}
-
-impl RefUpdate {
-    /// The value GitHub's ref-update endpoint expects in its `force` field.
-    fn force(self) -> bool {
-        matches!(self, Self::Reset)
-    }
+/// The value GitHub's ref-update endpoint expects in its `force` field.
+fn force_flag(update: RefUpdate) -> bool {
+    matches!(update, RefUpdate::Reset)
 }
 
 /// GitHub REST forge client.
@@ -110,7 +66,13 @@ pub struct GitHubForge {
 }
 
 impl GitHubForge {
-    /// Build a client for `api.github.com` (or the test-seam base URL override).
+    /// Build a client for `host` — `None` for github.com, `Some` for a GitHub
+    /// Enterprise Server instance.
+    ///
+    /// The two differ in more than the hostname: github.com serves its API from
+    /// a dedicated `api.github.com` origin, while Enterprise Server serves it
+    /// from the instance itself under `/api/v3`. Composing the wrong one yields
+    /// 404s that look like missing repositories.
     ///
     /// Under `cfg(any(test, feature = "__testing"))` the
     /// `__OCX_TESTING_FORGE_BASE_URL` env var redirects the client so the
@@ -120,8 +82,8 @@ impl GitHubForge {
     ///
     /// Returns [`ForgeError::ClientBuild`] when the hardened HTTP client cannot
     /// be constructed.
-    pub fn new(token: ForgeToken) -> Result<Self, ForgeError> {
-        let base_url = testing_base_url_override().unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+    pub fn new(token: ForgeToken, host: Option<&str>) -> Result<Self, ForgeError> {
+        let base_url = testing_base_url_override().unwrap_or_else(|| api_base_url(host));
         Self::build(token, base_url)
     }
 
@@ -187,6 +149,19 @@ impl GitHubForge {
         Ok((status, body))
     }
 
+    /// A non-success status as an error, carrying the forge's own reason.
+    ///
+    /// GitHub puts the reason in the response body (`{"message": ...}`) and
+    /// nowhere else, so every non-success return goes through here rather than
+    /// dropping the body and reporting a bare number.
+    fn status_error(&self, url: &str, status: StatusCode, body: &[u8]) -> ForgeError {
+        ForgeError::Status {
+            url: url.to_string(),
+            status: status.as_u16(),
+            detail: status_detail(body, self.token.0.as_str()),
+        }
+    }
+
     fn parse_json(url: &str, body: &[u8]) -> Result<Value, ForgeError> {
         serde_json::from_slice(body).map_err(|source| ForgeError::Decode {
             url: url.to_string(),
@@ -201,10 +176,7 @@ impl GitHubForge {
             return Ok(None);
         }
         if !status.is_success() {
-            return Err(ForgeError::Status {
-                url: url.to_string(),
-                status: status.as_u16(),
-            });
+            return Err(self.status_error(url, status, &body));
         }
         Ok(Some(Self::parse_json(url, &body)?))
     }
@@ -213,10 +185,7 @@ impl GitHubForge {
     async fn post_json(&self, url: &str, body: &Value) -> Result<Value, ForgeError> {
         let (status, response) = self.send(self.json_request(Method::POST, url, body)?, url).await?;
         if !status.is_success() {
-            return Err(ForgeError::Status {
-                url: url.to_string(),
-                status: status.as_u16(),
-            });
+            return Err(self.status_error(url, status, &response));
         }
         Self::parse_json(url, &response)
     }
@@ -243,7 +212,7 @@ impl GitHubForge {
     /// verified identity, never an API-returned URL). Each probe carries a short
     /// per-request timeout so one black-holed GET cannot eat the deadline.
     async fn wait_fork_ready(&self, identity: &ForkIdentity) -> Result<(), ForgeError> {
-        let url = self.url(&format!("/repos/{}", identity.full_name));
+        let url = self.url(&format!("/repos/{}", identity.full_path));
         let schedule = PollSchedule::default();
         if self.probe_ready(&url, schedule.request_timeout).await {
             return Ok(());
@@ -269,7 +238,7 @@ impl GitHubForge {
     // ── git data API (multi-file atomic commit, design register C15) ──
 
     async fn base_tree_sha(&self, repo: &RepoCoordinate, base_sha: &str) -> Result<String, ForgeError> {
-        let url = self.url(&format!("/repos/{}/{}/git/commits/{base_sha}", repo.owner, repo.repo));
+        let url = self.url(&format!("/repos/{}/git/commits/{base_sha}", repo.full_path()));
         // A 404 here is NOT a malformed response: this is the first request of
         // the commit sequence, and a brand-new fork's git object store may not
         // be provisioned yet (design register X5). Surface it as the status it
@@ -278,6 +247,9 @@ impl GitHubForge {
         let body = self.get_json_optional(&url).await?.ok_or_else(|| ForgeError::Status {
             url: url.clone(),
             status: StatusCode::NOT_FOUND.as_u16(),
+            // Synthesised from an absent resource, not from a response body:
+            // there is no forge message to quote.
+            detail: String::new(),
         })?;
         body.get("tree")
             .and_then(|tree| tree.get("sha"))
@@ -290,7 +262,7 @@ impl GitHubForge {
     }
 
     async fn create_blob(&self, repo: &RepoCoordinate, contents: &[u8]) -> Result<String, ForgeError> {
-        let url = self.url(&format!("/repos/{}/{}/git/blobs", repo.owner, repo.repo));
+        let url = self.url(&format!("/repos/{}/git/blobs", repo.full_path()));
         // base64 so arbitrary CAS bytes round-trip, not just UTF-8 text.
         let body = json!({ "content": BASE64_STANDARD.encode(contents), "encoding": "base64" });
         let value = self.post_json(&url, &body).await?;
@@ -303,7 +275,7 @@ impl GitHubForge {
         base_tree_sha: &str,
         entries: Vec<Value>,
     ) -> Result<String, ForgeError> {
-        let url = self.url(&format!("/repos/{}/{}/git/trees", repo.owner, repo.repo));
+        let url = self.url(&format!("/repos/{}/git/trees", repo.full_path()));
         let body = json!({ "base_tree": base_tree_sha, "tree": entries });
         let value = self.post_json(&url, &body).await?;
         object_sha(&url, &value)
@@ -316,7 +288,7 @@ impl GitHubForge {
         tree_sha: &str,
         parent_sha: &str,
     ) -> Result<String, ForgeError> {
-        let url = self.url(&format!("/repos/{}/{}/git/commits", repo.owner, repo.repo));
+        let url = self.url(&format!("/repos/{}/git/commits", repo.full_path()));
         let body = json!({ "message": message, "tree": tree_sha, "parents": [parent_sha] });
         let value = self.post_json(&url, &body).await?;
         object_sha(&url, &value)
@@ -343,9 +315,9 @@ impl GitHubForge {
         commit_sha: &str,
         update: RefUpdate,
     ) -> Result<(), ForgeError> {
-        let update_url = self.url(&format!("/repos/{}/{}/git/refs/heads/{branch}", repo.owner, repo.repo));
-        let update_body = json!({ "sha": commit_sha, "force": update.force() });
-        let (status, _) = self
+        let update_url = self.url(&format!("/repos/{}/git/refs/heads/{branch}", repo.full_path()));
+        let update_body = json!({ "sha": commit_sha, "force": force_flag(update) });
+        let (status, update_response) = self
             .send(
                 self.json_request(Method::PATCH, &update_url, &update_body)?,
                 &update_url,
@@ -366,19 +338,16 @@ impl GitHubForge {
         // too — so the create below runs and its own 404 drives the X5 retry,
         // exactly as before.
         if status != StatusCode::UNPROCESSABLE_ENTITY && status != StatusCode::NOT_FOUND {
-            return Err(ForgeError::Status {
-                url: update_url,
-                status: status.as_u16(),
-            });
+            return Err(self.status_error(&update_url, status, &update_response));
         }
         if self.get_ref_sha(repo, &format!("heads/{branch}")).await?.is_some() {
             return Err(ForgeError::NonFastForward {
                 branch: branch.to_string(),
             });
         }
-        let create_url = self.url(&format!("/repos/{}/{}/git/refs", repo.owner, repo.repo));
+        let create_url = self.url(&format!("/repos/{}/git/refs", repo.full_path()));
         let create_body = json!({ "ref": format!("refs/heads/{branch}"), "sha": commit_sha });
-        let (create_status, _) = self
+        let (create_status, create_response) = self
             .send(self.json_request(Method::POST, &create_url, &create_body)?, &create_url)
             .await?;
         if create_status.is_success() {
@@ -391,25 +360,53 @@ impl GitHubForge {
                 branch: branch.to_string(),
             });
         }
-        Err(ForgeError::Status {
-            url: create_url,
-            status: create_status.as_u16(),
-        })
+        Err(self.status_error(&create_url, create_status, &create_response))
     }
 
+    /// One attempt at the [`Forge::commit_files`] sequence: base tree -> blobs ->
+    /// tree -> commit -> fast-forward-only ref update.
+    async fn commit_files_once(
+        &self,
+        repo: &RepoCoordinate,
+        branch: &str,
+        base_sha: &str,
+        message: &str,
+        files: &BTreeMap<String, Vec<u8>>,
+        update: RefUpdate,
+    ) -> Result<String, ForgeError> {
+        let base_tree_sha = self.base_tree_sha(repo, base_sha).await?;
+        let mut tree_entries = Vec::with_capacity(files.len());
+        for (path, contents) in files {
+            let blob_sha = self.create_blob(repo, contents).await?;
+            tree_entries.push(json!({ "path": path, "mode": "100644", "type": "blob", "sha": blob_sha }));
+        }
+        let tree_sha = self.create_tree(repo, &base_tree_sha, tree_entries).await?;
+        let commit_sha = self.create_commit(repo, message, &tree_sha, base_sha).await?;
+        self.upsert_branch(repo, branch, &commit_sha, update).await?;
+        Ok(commit_sha)
+    }
+}
+
+/// The GitHub REST realization of the announce operation set.
+///
+/// Every method below holds the [`Forge`] contract with GitHub's own wire
+/// shapes; the notes on each are GitHub specifics, not restatements of the
+/// contract, which lives on the trait.
+#[async_trait::async_trait]
+impl Forge for GitHubForge {
     /// Read a file's bytes at `r#ref`, or `None` when the path does not exist.
     ///
     /// # Errors
     ///
     /// Returns a [`ForgeError`] on transport failure, a non-success status
     /// other than 404, or a response-decode failure.
-    pub async fn get_file_contents(
+    async fn get_file_contents(
         &self,
         repo: &RepoCoordinate,
         path: &str,
         r#ref: &str,
     ) -> Result<Option<Vec<u8>>, ForgeError> {
-        let url = self.url(&format!("/repos/{}/{}/contents/{path}", repo.owner, repo.repo));
+        let url = self.url(&format!("/repos/{}/contents/{path}", repo.full_path()));
         let request = self
             .request(Method::GET, &url)
             .header(ACCEPT, ACCEPT_RAW)
@@ -419,10 +416,7 @@ impl GitHubForge {
             return Ok(None);
         }
         if !status.is_success() {
-            return Err(ForgeError::Status {
-                url,
-                status: status.as_u16(),
-            });
+            return Err(self.status_error(&url, status, &body));
         }
         Ok(Some(body.to_vec()))
     }
@@ -434,8 +428,8 @@ impl GitHubForge {
     ///
     /// Returns a [`ForgeError`] on transport failure, a non-success status
     /// other than 404, or a missing `object.sha` field in the response.
-    pub async fn get_ref_sha(&self, repo: &RepoCoordinate, r#ref: &str) -> Result<Option<String>, ForgeError> {
-        let url = self.url(&format!("/repos/{}/{}/git/ref/{}", repo.owner, repo.repo, r#ref));
+    async fn get_ref_sha(&self, repo: &RepoCoordinate, r#ref: &str) -> Result<Option<String>, ForgeError> {
+        let url = self.url(&format!("/repos/{}/git/ref/{}", repo.full_path(), r#ref));
         let Some(body) = self.get_json_optional(&url).await? else {
             return Ok(None);
         };
@@ -475,21 +469,24 @@ impl GitHubForge {
     /// Returns a [`ForgeError`] on transport failure, any non-success status
     /// (404 included), a missing `status` field, or a `status` value the client
     /// does not model.
-    pub async fn compare_branch(
+    async fn compare_branch(
         &self,
         repo: &RepoCoordinate,
         base: &str,
-        head_owner: &str,
+        head: &RepoCoordinate,
         head_branch: &str,
     ) -> Result<BranchComparison, ForgeError> {
+        let head_owner = require_flat_namespace(head)?;
         let url = self.url(&format!(
-            "/repos/{}/{}/compare/{base}...{head_owner}:{head_branch}",
-            repo.owner, repo.repo
+            "/repos/{}/compare/{base}...{head_owner}:{head_branch}",
+            repo.full_path()
         ));
         let Some(body) = self.get_json_optional(&url).await? else {
             return Err(ForgeError::Status {
                 url,
                 status: StatusCode::NOT_FOUND.as_u16(),
+                // Synthesised from an absent comparison, not a response body.
+                detail: String::new(),
             });
         };
         let status = body
@@ -502,7 +499,7 @@ impl GitHubForge {
         parse_compare_status(&url, status)
     }
 
-    /// The open pull request whose head is `head_owner:branch`, or `None`.
+    /// The open pull request whose head is `head`'s `branch`, or `None`.
     ///
     /// Read-only, and deliberately scoped to **open** pull requests: the
     /// announce branch is per package and outlives every pull request opened
@@ -513,23 +510,20 @@ impl GitHubForge {
     ///
     /// Returns a [`ForgeError`] on transport failure, a non-success status, or
     /// a malformed pull-request response body.
-    pub async fn find_open_pull_request(
+    async fn find_open_pull_request(
         &self,
         index: &RepoCoordinate,
-        head_owner: &str,
+        head: &RepoCoordinate,
         branch: &str,
     ) -> Result<Option<PullRequest>, ForgeError> {
-        let pulls_url = self.url(&format!("/repos/{}/{}/pulls", index.owner, index.repo));
-        let head = pr_head(head_owner, branch);
+        let pulls_url = self.url(&format!("/repos/{}/pulls", index.full_path()));
+        let head_spec = pr_head(require_flat_namespace(head)?, branch);
         let request = self
             .request(Method::GET, &pulls_url)
-            .query(&[("head", head.as_str()), ("state", "open")]);
+            .query(&[("head", head_spec.as_str()), ("state", "open")]);
         let (status, body) = self.send(request, &pulls_url).await?;
         if !status.is_success() {
-            return Err(ForgeError::Status {
-                url: pulls_url,
-                status: status.as_u16(),
-            });
+            return Err(self.status_error(&pulls_url, status, &body));
         }
         let list = Self::parse_json(&pulls_url, &body)?;
         let Some(existing) = list.as_array().and_then(|pulls| pulls.first()) else {
@@ -545,65 +539,63 @@ impl GitHubForge {
     /// Read-only by contract: the caller resolves the fork's real identity
     /// before deciding whether any write is needed at all, so a pure no-op run
     /// never provokes a fork create. It honours the full requested coordinate —
-    /// a fork renamed away from the upstream's repository name resolves here,
-    /// where deriving the path from `upstream.repo` would miss it.
+    /// a fork renamed away from the upstream's project name resolves here, where
+    /// deriving the path from the upstream's own project name would miss it.
     ///
     /// # Errors
     ///
     /// Returns a [`ForgeError`] on transport failure, a non-success status
     /// other than 404, or a verified fork living under an unexpected owner.
-    pub async fn find_fork(
+    async fn find_fork(
         &self,
         upstream: &RepoCoordinate,
         fork: &RepoCoordinate,
     ) -> Result<Option<ForkIdentity>, ForgeError> {
-        let url = self.url(&format!("/repos/{}/{}", fork.owner, fork.repo));
+        require_flat_namespace(fork)?;
+        let url = self.url(&format!("/repos/{}", fork.full_path()));
         let Some(body) = self.get_json_optional(&url).await? else {
             return Ok(None);
         };
         // A same-named stranger repository is "no fork here", not a hard error:
         // the caller's create path is what refuses it (X5).
-        let Ok(identity) = verify_fork_identity(&body, upstream) else {
+        let Ok(identity) = verify_github_fork(&body, upstream) else {
             return Ok(None);
         };
-        verify_fork_owner(&identity, &fork.owner)?;
+        verify_fork_namespace(&identity, &fork.namespace)?;
         Ok(Some(identity))
     }
 
-    /// Ensure a fork of `upstream` exists and is ready, returning its verified
-    /// identity. `target_owner` = `None` forks under the token identity; `Some`
-    /// forks into that owner (organization) and verifies the returned identity
-    /// against it (design register S12).
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`ForgeError`] on transport failure, a non-success status, a
-    /// fork identity that fails verification against `upstream` or the
-    /// expected owner, or a readiness poll that exceeds its deadline.
-    pub async fn ensure_fork(
+    async fn ensure_fork(
         &self,
         upstream: &RepoCoordinate,
         target_owner: Option<&str>,
     ) -> Result<ForkIdentity, ForgeError> {
-        // The fork must live under an explicit target owner, else the token
+        // The fork must live under an explicit target namespace, else the token
         // identity. This anchor is verified against the fork's own identity.
-        let expected_owner = match target_owner {
+        let expected_namespace = match target_owner {
             Some(owner) => owner.to_string(),
             None => self.authenticated_login().await?,
         };
+        // A namespace cannot fork a repository it already owns. GitHub answers
+        // that POST with an opaque 403, and the publisher's real intent — a pull
+        // request from a branch on the index itself — is a different code path
+        // entirely, so name it rather than letting the fork API refuse it.
+        if expected_namespace.eq_ignore_ascii_case(&upstream.namespace) {
+            return Err(ForgeError::SelfForkRefused {
+                upstream: upstream.to_string(),
+                namespace: expected_namespace,
+            });
+        }
         // Reuse a verified existing fork at the conventional path. A renamed
         // fork (or a same-named stranger) fails verification and falls through
         // to the idempotent create below.
-        let conventional = RepoCoordinate {
-            owner: expected_owner.clone(),
-            repo: upstream.repo.clone(),
-        };
+        let conventional = upstream.with_namespace(expected_namespace.clone());
         if let Some(identity) = self.find_fork(upstream, &conventional).await? {
             return Ok(identity);
         }
         // Create (or adopt a renamed) fork; the identity is built ONLY from the
-        // response body, never `{expected_owner}/{upstream.repo}`.
-        let create_url = self.url(&format!("/repos/{}/{}/forks", upstream.owner, upstream.repo));
+        // response body, never a composed `{namespace}/{project}`.
+        let create_url = self.url(&format!("/repos/{}/forks", upstream.full_path()));
         let (status, body) = self
             .send(
                 self.json_request(Method::POST, &create_url, &fork_create_body(target_owner))?,
@@ -611,14 +603,11 @@ impl GitHubForge {
             )
             .await?;
         if !status.is_success() {
-            return Err(ForgeError::Status {
-                url: create_url,
-                status: status.as_u16(),
-            });
+            return Err(self.status_error(&create_url, status, &body));
         }
         let value = Self::parse_json(&create_url, &body)?;
-        let identity = verify_fork_identity(&value, upstream)?;
-        verify_fork_owner(&identity, &expected_owner)?;
+        let identity = verify_github_fork(&value, upstream)?;
+        verify_fork_namespace(&identity, &expected_namespace)?;
         self.wait_fork_ready(&identity).await?;
         Ok(identity)
     }
@@ -641,10 +630,10 @@ impl GitHubForge {
     /// that has diverged from upstream answers 409, one with nothing to pull
     /// answers non-success too, and in both cases the commit sequence is
     /// unaffected — so a failure is logged and the announce proceeds.
-    pub async fn sync_fork(&self, fork: &RepoCoordinate, branch: &str) {
-        let url = self.url(&format!("/repos/{}/{}/merge-upstream", fork.owner, fork.repo));
+    async fn sync_fork(&self, fork: &RepoCoordinate, branch: &str) {
+        let url = self.url(&format!("/repos/{}/merge-upstream", fork.full_path()));
         if let Err(error) = self.post_json(&url, &json!({ "branch": branch })).await {
-            tracing::debug!(%error, fork = %fork.full_name(), "fork sync skipped");
+            tracing::debug!(%error, fork = %fork.full_path(), "fork sync skipped");
         }
     }
 
@@ -669,8 +658,8 @@ impl GitHubForge {
     /// Returns [`ForgeError::PushAccessDenied`] when the repository is invisible
     /// to the credential or reports no push permission, or any other
     /// [`ForgeError`] on transport, status, or decode failure.
-    pub async fn ensure_push_access(&self, repo: &RepoCoordinate) -> Result<(), ForgeError> {
-        let url = self.url(&format!("/repos/{}/{}", repo.owner, repo.repo));
+    async fn ensure_push_access(&self, repo: &RepoCoordinate) -> Result<(), ForgeError> {
+        let url = self.url(&format!("/repos/{}", repo.full_path()));
         let allowed = self
             .get_json_optional(&url)
             .await?
@@ -679,7 +668,7 @@ impl GitHubForge {
         if allowed {
             return Ok(());
         }
-        Err(ForgeError::PushAccessDenied { repo: repo.full_name() })
+        Err(ForgeError::PushAccessDenied { repo: repo.full_path() })
     }
 
     /// Commit `files` atomically onto `branch` at `base_sha`, returning the new
@@ -705,17 +694,17 @@ impl GitHubForge {
     /// a malformed git-data-API response. A rejected fast-forward-only ref
     /// update surfaces as [`ForgeError::NonFastForward`] and is **not** retried
     /// here — it needs the caller's re-read-and-regenerate (design register C4).
-    pub async fn commit_files(
+    async fn commit_files(
         &self,
         repo: &RepoCoordinate,
         branch: &str,
-        base_sha: &str,
+        base: CommitBase<'_>,
         message: &str,
         files: &BTreeMap<String, Vec<u8>>,
         update: RefUpdate,
     ) -> Result<String, ForgeError> {
         let mut outcome = self
-            .commit_files_once(repo, branch, base_sha, message, files, update)
+            .commit_files_once(repo, branch, base.sha, message, files, update)
             .await;
         for delay in GIT_DATA_RETRY_DELAYS {
             let Err(error) = &outcome else { break };
@@ -725,36 +714,13 @@ impl GitHubForge {
             tracing::debug!(%error, "replaying the git-data commit sequence");
             tokio::time::sleep(delay).await;
             outcome = self
-                .commit_files_once(repo, branch, base_sha, message, files, update)
+                .commit_files_once(repo, branch, base.sha, message, files, update)
                 .await;
         }
         outcome
     }
 
-    /// One attempt at the [`Self::commit_files`] sequence: base tree -> blobs ->
-    /// tree -> commit -> fast-forward-only ref update.
-    async fn commit_files_once(
-        &self,
-        repo: &RepoCoordinate,
-        branch: &str,
-        base_sha: &str,
-        message: &str,
-        files: &BTreeMap<String, Vec<u8>>,
-        update: RefUpdate,
-    ) -> Result<String, ForgeError> {
-        let base_tree_sha = self.base_tree_sha(repo, base_sha).await?;
-        let mut tree_entries = Vec::with_capacity(files.len());
-        for (path, contents) in files {
-            let blob_sha = self.create_blob(repo, contents).await?;
-            tree_entries.push(json!({ "path": path, "mode": "100644", "type": "blob", "sha": blob_sha }));
-        }
-        let tree_sha = self.create_tree(repo, &base_tree_sha, tree_entries).await?;
-        let commit_sha = self.create_commit(repo, message, &tree_sha, base_sha).await?;
-        self.upsert_branch(repo, branch, &commit_sha, update).await?;
-        Ok(commit_sha)
-    }
-
-    /// Open a pull request from `head_owner:branch` into `index`'s `base`, or
+    /// Open a pull request from `head`'s `branch` into `index`'s `base`, or
     /// reuse the existing open one (never duplicate — design register C9).
     ///
     /// # Errors
@@ -762,18 +728,18 @@ impl GitHubForge {
     /// Returns a [`ForgeError`] on transport failure, a non-success status
     /// other than the "pull request already exists" 422/409, or a malformed
     /// pull-request response body.
-    pub async fn open_or_update_pull_request(
+    async fn open_or_update_pull_request(
         &self,
         index: &RepoCoordinate,
-        head_owner: &str,
+        head: &RepoCoordinate,
         branch: &str,
         base: &str,
         title: &str,
         body: &str,
     ) -> Result<PullRequest, ForgeError> {
-        let pulls_url = self.url(&format!("/repos/{}/{}/pulls", index.owner, index.repo));
-        let head = pr_head(head_owner, branch);
-        let create_body = json!({ "title": title, "head": head, "base": base, "body": body });
+        let pulls_url = self.url(&format!("/repos/{}/pulls", index.full_path()));
+        let head_spec = pr_head(require_flat_namespace(head)?, branch);
+        let create_body = json!({ "title": title, "head": head_spec, "base": base, "body": body });
         let (status, response) = self
             .send(self.json_request(Method::POST, &pulls_url, &create_body)?, &pulls_url)
             .await?;
@@ -788,12 +754,9 @@ impl GitHubForge {
         let already_exists =
             status.as_u16() == 409 || (status.as_u16() == 422 && pull_request_already_exists(&response));
         if !already_exists {
-            return Err(ForgeError::Status {
-                url: pulls_url,
-                status: status.as_u16(),
-            });
+            return Err(self.status_error(&pulls_url, status, &response));
         }
-        self.find_open_pull_request(index, head_owner, branch)
+        self.find_open_pull_request(index, head, branch)
             .await?
             .ok_or_else(|| ForgeError::MissingField {
                 url: pulls_url,
@@ -802,22 +765,20 @@ impl GitHubForge {
     }
 }
 
-/// Build the no-redirect forge HTTP client (design register X5).
+/// The REST base URL for a GitHub host.
 ///
-/// Redirects are disabled because reqwest otherwise replays the bearer
-/// `Authorization` header on a cross-host 3xx `Location`, exfiltrating the
-/// token. These REST endpoints never legitimately redirect; a non-2xx surfaces
-/// as an error, never chased. Embedded Mozilla roots are seeded so TLS works
-/// with no system trust store (minimal CI runner), mirroring the index HTTP
-/// client's hardening (`oci/index/ocx_index.rs`).
-fn build_forge_http_client(timeout: Duration) -> Result<reqwest::Client, ForgeError> {
-    let builder = reqwest::Client::builder()
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(USER_AGENT_VALUE);
-    crate::utility::tls::seed_embedded_roots(builder)
-        .build()
-        .map_err(|source| ForgeError::ClientBuild { source })
+/// github.com answers on `api.github.com`; every Enterprise Server instance
+/// answers on itself under `/api/v3`. Always https: the announce credential
+/// rides these requests as a bearer header, and a plaintext scheme would put it
+/// on the wire.
+fn api_base_url(host: Option<&str>) -> String {
+    match host {
+        None => DEFAULT_BASE_URL.to_string(),
+        Some(host) if host.eq_ignore_ascii_case("github.com") || host.eq_ignore_ascii_case("api.github.com") => {
+            DEFAULT_BASE_URL.to_string()
+        }
+        Some(host) => format!("https://{host}/api/v3"),
+    }
 }
 
 /// The fork-create request body: `organization` when a target owner is named
@@ -829,7 +790,25 @@ fn fork_create_body(target_owner: Option<&str>) -> Value {
     }
 }
 
-/// The cross-repo pull-request head, `head_owner:branch`.
+/// The GitHub owner of a coordinate, refusing a nested namespace.
+///
+/// GitHub organizations do not nest: every repository is exactly `owner/repo`.
+/// The coordinate type is forge-neutral and permits `a/b/c` so GitLab subgroups
+/// are expressible, so the flatness rule lives here, at the one forge that has
+/// it — and it is enforced before any request, since GitHub would otherwise
+/// answer a nested path with a bare 404 that reads as "no such repository"
+/// rather than "that path shape cannot exist here".
+pub(super) fn require_flat_namespace(coordinate: &RepoCoordinate) -> Result<&str, ForgeError> {
+    if coordinate.namespace.contains('/') {
+        return Err(ForgeError::NestedNamespaceUnsupported {
+            forge: "GitHub".to_string(),
+            namespace: coordinate.namespace.clone(),
+        });
+    }
+    Ok(&coordinate.namespace)
+}
+
+/// The cross-repo pull-request head, `owner:branch`.
 fn pr_head(head_owner: &str, branch: &str) -> String {
     format!("{head_owner}:{branch}")
 }
@@ -1057,8 +1036,9 @@ mod tests {
 
     fn test_repo() -> RepoCoordinate {
         RepoCoordinate {
-            owner: "forkuser".to_string(),
-            repo: "index".to_string(),
+            host: None,
+            namespace: "forkuser".to_string(),
+            project: "index".to_string(),
         }
     }
 
@@ -1246,8 +1226,8 @@ mod tests {
 
     #[test]
     fn only_a_reset_forces_the_ref_update() {
-        assert!(!RefUpdate::FastForward.force());
-        assert!(RefUpdate::Reset.force());
+        assert!(!force_flag(RefUpdate::FastForward));
+        assert!(force_flag(RefUpdate::Reset));
     }
 
     #[test]
@@ -1258,6 +1238,7 @@ mod tests {
             let error = ForgeError::Status {
                 url: "https://api/git/commits".to_string(),
                 status: transient,
+                detail: String::new(),
             };
             assert!(is_retryable(&error), "{transient} must replay");
         }
@@ -1268,6 +1249,7 @@ mod tests {
             let error = ForgeError::Status {
                 url: "https://api/git/trees".to_string(),
                 status: terminal,
+                detail: String::new(),
             };
             assert!(!is_retryable(&error), "{terminal} must not replay");
         }

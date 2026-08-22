@@ -2552,7 +2552,27 @@ The `version` key is the only field the [self update](#self-update) parser reads
 
 Observes an owner-curated set of registry tags for one package and publishes the rebuilt entry into the index: written to a local directory (`--out`), or opened as a pull request against the index repository.
 
-The pull request comes from a fork with `--fork`. Omit `--fork` and the announce branch is pushed to `--index-repo` itself — for a publisher whose credential can already push there, which is the only working path when the publishing repository and the index share an owner, since a repository cannot be forked into the organization that already owns it. Either way the change arrives as a pull request; `announce` never commits to the index's default branch.
+The pull request comes from a fork with `--fork`. Omit `--fork` and the announce branch is pushed to `--index-repo` itself — for a publisher whose credential can already push there, which is the only working path when the publishing repository and the index share an owner, since a repository cannot be forked into the namespace that already owns it. Either way the change arrives as a pull request; `announce` never commits to the index's default branch.
+
+**GitHub and GitLab are both supported**, on their public hosts and on self-hosted instances. On GitLab the change arrives as a **merge request**; everything else in this section reads the same. Which forge a run talks to comes from `--index-repo`:
+
+| `--index-repo` | Forge | API base |
+|---|---|---|
+| `ocx-sh/index` (no host) | GitHub | `https://api.github.com` |
+| `github.com/acme/index` | GitHub | `https://api.github.com` |
+| `gitlab.com/acme/index` | GitLab | `https://gitlab.com/api/v4` |
+| `github.example.com/acme/index` + `--forge github` | GitHub Enterprise Server | `https://github.example.com/api/v3` |
+| `gitlab.example.com/acme/index` + `--forge gitlab` | Self-managed GitLab | `https://gitlab.example.com/api/v4` |
+
+A self-hosted host **must** name its forge with `--forge`; a run without it exits 64 and says so. A hostname carries no reliable signal of which forge runs behind it, and a wrong guess would send your credential to the wrong API — so `ocx` asks instead of guessing. `--forge` also overrides the inferred forge for `github.com` and `gitlab.com`, for an instance sitting behind a proxy under one of those names.
+
+GitLab groups nest, and so does the coordinate: `--index-repo gitlab.example.com/acme/platform/tooling/index` names the project `index` inside the group path `acme/platform/tooling`. `--fork` takes the same form. On GitHub, where organizations do not nest, a nested namespace is rejected before any request is made.
+
+Because a host and a group are both just a leading segment, a **dotted top-level group** is ambiguous: `acme.team/platform/index` reads as the host `acme.team`, and the run stops asking for `--forge` rather than guessing where to send your credential. Write the host out to say what you meant — `gitlab.com/acme.team/platform/index` names the group `acme.team/platform` on gitlab.com.
+
+One self-hosted shape is **not** supported: an instance mounted under a path prefix, where the API lives at `https://example.com/gitlab/api/v4` rather than at the host root. The `[HOST/]NAMESPACE/PROJECT` grammar has nowhere to put the prefix, and GitLab's own `glab` has the same open gap. Instances served at the host root — the default for every standard install — work.
+
+Both forges use the same credential variable, [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] — a GitHub personal access token or a GitLab personal access token, depending on which forge the run targets.
 
 A run that produces no change — the rebuilt entry is byte-identical to the one already committed — makes no commit, and the report's `status` reads `unchanged` instead of `updated`. Running `announce` again for a package already announced from the same branch updates the existing pull request in place rather than opening a second one.
 
@@ -2569,7 +2589,7 @@ A tag that is not a version — the OCX-internal `__ocx` namespace, or a canonic
 **Usage**
 
 ```shell
-ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-file <PATH> | --tags-from-registry | --refresh) [--out <DIRECTORY> | --fork <OWNER>/<REPO>] [OPTIONS]
+ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-file <PATH> | --tags-from-registry | --refresh) [--out <DIRECTORY> | --fork <REPOSITORY>] [OPTIONS]
 ```
 
 **Options**
@@ -2582,8 +2602,9 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-f
 | `--tags-from-registry` | Add every tag the package's registry repository currently holds to the already-committed curated set. Never removes a committed tag; a yanked tag stays yanked. Reserved tags are filtered out of the listing before the union. | — |
 | `--refresh` | Re-observe every already-committed tag, picking up a digest that moved (e.g. `latest`) without changing which tags are curated. | — |
 | `--out <DIRECTORY>` | Write the rebuilt index entry under this directory instead of opening a pull request. Written on every run, including one that changes nothing. Mutually exclusive with `--fork`, and the one mode that needs no credential. | — |
-| `--fork <OWNER>/<REPO>` | Open (or update) the pull request from this fork. Omit it to push the announce branch straight to `--index-repo`, which needs push access on that repository. Requires [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token]. | — |
-| `--index-repo <OWNER>/<REPO>` | Index repository the pull request targets. | `ocx-sh/index` |
+| `--fork <REPOSITORY>` | Open (or update) the pull or merge request from this fork, as `[HOST/]NAMESPACE/PROJECT`. Omit it to push the announce branch straight to `--index-repo`, which needs push access on that repository. Requires [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token]. | — |
+| `--index-repo <REPOSITORY>` | Index repository the pull or merge request targets, as `[HOST/]NAMESPACE/PROJECT`. Give the host for a self-hosted instance; the namespace may be a nested GitLab group path. | `ocx-sh/index` |
+| `--forge <FORGE>` | Which forge hosts the index: `github` or `gitlab`. Inferred for `github.com` and `gitlab.com`; **required** for a self-hosted host. | inferred |
 | `--yank <TAG>` | Mark a tag as yanked — a publisher signal that content should no longer be installed, not a delete. Repeatable. Requires `--yank-reason`; only applies to a tag already in the curated set. | — |
 | `--unyank <TAG>` | Clear the yanked marker from a tag. Repeatable. | — |
 | `--yank-reason <TEXT>` | Reason recorded on every tag named by `--yank` in this run. | — |
@@ -2600,6 +2621,9 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-f
 | The namespace is unclaimed — no committed root exists for the package yet. Claiming one is a human-lane action, never something announce performs | 79 |
 | The forge rate-limited the run (429), or a concurrent announce kept winning the branch — retry | 75 |
 | The curated set resolved to nothing but reserved tags — nothing left to announce | 64 |
+| `--index-repo` names a self-hosted host and no `--forge` was given, or `--fork` names the namespace that already owns the index (fork it into itself — omit `--fork` instead) | 64 |
+| `--fork` names a different host than `--index-repo`, or either coordinate's host is malformed. A fork lives on the same instance as its upstream, and a host that is not a hostname is refused rather than interpreted | 64 |
+| `--index-repo` or `--fork` names a nested namespace on GitHub, which has no nested organizations. Checked before any request | 64 |
 | The description recorded in the index no longer exists on the registry — republish it, or ask for it to be cleared in the index | 65 |
 
 **JSON report**
@@ -2625,6 +2649,28 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-f
 ```shell
 ocx package push -i acme/widget:1.2.3 -c --announce-file tags.txt widget.tar.xz
 ocx package announce --package acme/widget --tags-from-file tags.txt --fork myuser/index
+```
+
+Announce to a GitLab index, opening a merge request from a fork:
+
+```shell
+ocx package announce --package acme/widget --tags 1.0.0 \
+  --index-repo gitlab.com/acme/index --fork gitlab.com/myuser/index
+```
+
+Announce to a self-managed GitLab in a nested group, from a fork in another group:
+
+```shell
+ocx package announce --package acme/widget --tags 1.0.0 --forge gitlab \
+  --index-repo gitlab.example.com/acme/platform/tooling/index \
+  --fork gitlab.example.com/contrib/team/index
+```
+
+Announce to a GitHub Enterprise Server index, pushing the branch to the index itself:
+
+```shell
+ocx package announce --package acme/widget --tags 1.0.0 --forge github \
+  --index-repo github.example.com/acme/index
 ```
 :::
 

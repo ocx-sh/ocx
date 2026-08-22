@@ -29,7 +29,7 @@
 //! and one atomic multi-file commit (C15). The SSRF guard runs before the first
 //! registry request (X3); the announce credential never leaves the ambient
 //! `OCX_ANNOUNCE_TOKEN` (X6), carried only by the passed-in
-//! [`GitHubForge`](crate::forge::GitHubForge).
+//! [`Forge`](crate::forge::Forge) implementation.
 //!
 //! ADR: `adr_announce_publisher_surface.md` (D5 — orchestration in `ocx_lib`,
 //! the CLI a thin wrapper).
@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::forge::{BranchComparison, ForkIdentity, GitHubForge, RefUpdate, RepoCoordinate};
+use crate::forge::{BranchComparison, CommitBase, Forge, RefUpdate, RepoCoordinate};
 use crate::oci::index::serialize_root;
 use crate::publisher::Publisher;
 
@@ -68,7 +68,7 @@ const INDEX_BASE_REF: &str = "main";
 /// [`AnnounceError`] for the full taxonomy.
 pub async fn announce(
     publisher: &Publisher,
-    forge: Option<&GitHubForge>,
+    forge: Option<&dyn Forge>,
     request: AnnounceRequest,
 ) -> Result<AnnounceOutcome, AnnounceError> {
     let forge = forge.ok_or(AnnounceError::ForgeRequired)?;
@@ -95,7 +95,7 @@ pub async fn announce(
     // paths share the whole branch-state / root-read / commit sequence below.
     let branch_repo = match &request.target {
         AnnounceTarget::Direct => Some(request.index_repo.clone()),
-        AnnounceTarget::Fork(_) => existing_fork.as_ref().map(ForkIdentity::coordinate),
+        AnnounceTarget::Fork(_) => existing_fork.as_ref().map(|fork| fork.coordinate(&request.index_repo)),
         AnnounceTarget::Out(_) => None,
     };
 
@@ -190,7 +190,7 @@ pub async fn announce(
                     let pull_request = forge
                         .open_or_update_pull_request(
                             &request.index_repo,
-                            &repo.owner,
+                            repo,
                             &branch,
                             INDEX_BASE_REF,
                             &message,
@@ -232,9 +232,9 @@ pub async fn announce(
                 Some(target) => {
                     let fork = match existing_fork {
                         Some(fork) => fork,
-                        None => forge.ensure_fork(&request.index_repo, Some(&target.owner)).await?,
+                        None => forge.ensure_fork(&request.index_repo, Some(&target.namespace)).await?,
                     };
-                    let coordinate = fork.coordinate();
+                    let coordinate = fork.coordinate(&request.index_repo);
                     // The commit below parents off a SHA read from the upstream
                     // repository but is written to the fork, so the base object
                     // reaches it only through the shared fork network. Land that
@@ -247,15 +247,18 @@ pub async fn announce(
                     (request.index_repo.clone(), None)
                 }
             };
-            let base_sha = match root_read.branch_sha {
-                Some(sha) => sha,
-                None => forge
-                    .get_ref_sha(&request.index_repo, &format!("heads/{INDEX_BASE_REF}"))
-                    .await?
-                    .ok_or_else(|| AnnounceError::MissingBaseRef {
-                        repo: request.index_repo.full_name(),
-                    })?,
+            // C4/C8 and the stale-fork guard in one place: an accumulating run
+            // bases on the branch head in the repository the branch lives in; a
+            // fresh or rebuilt branch bases on the **upstream** index's default
+            // branch, never on the fork's own copy of it, which is routinely far
+            // behind and would re-propose content the index already has.
+            // The SHA is the one the root was READ at, never a fresh resolution
+            // of the same ref name — see `RootRead::base_sha`.
+            let base_repo = match root_read.branch_sha {
+                Some(_) => commit_repo.clone(),
+                None => request.index_repo.clone(),
             };
+            let base_sha = root_read.base_sha;
             // F2/C4: the ref update is fast-forward-only (CAS). If a concurrent
             // announce advanced the branch between our read and our commit,
             // re-read the new head, re-run the WHOLE regeneration against it,
@@ -265,7 +268,10 @@ pub async fn announce(
                 .commit_files(
                     &commit_repo,
                     &branch,
-                    &base_sha,
+                    CommitBase {
+                        repo: &base_repo,
+                        sha: &base_sha,
+                    },
                     &message,
                     &files,
                     branch_state.ref_update(),
@@ -278,13 +284,13 @@ pub async fn announce(
                         .get_ref_sha(&commit_repo, &format!("heads/{branch}"))
                         .await?
                         .ok_or_else(|| AnnounceError::MissingBaseRef {
-                            repo: commit_repo.full_name(),
+                            repo: commit_repo.full_path(),
                         })?;
                     let head_bytes = forge
                         .get_file_contents(&commit_repo, &root_path, &head_sha)
                         .await?
                         .ok_or_else(|| AnnounceError::MissingHeadRoot {
-                            repo: commit_repo.full_name(),
+                            repo: commit_repo.full_path(),
                             path: root_path.clone(),
                             sha: head_sha.clone(),
                         })?;
@@ -320,7 +326,12 @@ pub async fn announce(
                             .commit_files(
                                 &commit_repo,
                                 &branch,
-                                &head_sha,
+                                // The winning head is in the branch's own
+                                // repository, so that is where the base lives.
+                                CommitBase {
+                                    repo: &commit_repo,
+                                    sha: &head_sha,
+                                },
                                 &message,
                                 &merged.files,
                                 RefUpdate::FastForward,
@@ -335,7 +346,7 @@ pub async fn announce(
             let pull_request = forge
                 .open_or_update_pull_request(
                     &request.index_repo,
-                    &commit_repo.owner,
+                    &commit_repo,
                     &branch,
                     INDEX_BASE_REF,
                     &message,
@@ -450,6 +461,14 @@ async fn observe_and_rebuild(
 struct RootRead {
     bytes: Option<Vec<u8>>,
     branch_sha: Option<String>,
+    /// The commit the bytes were actually read at, and therefore the only sound
+    /// commit base. Reading the content through a *ref name* and resolving that
+    /// ref to a SHA in a second call leaves a window: the ref can advance in
+    /// between, and the commit would then be based on a head whose version of
+    /// the root it never saw — on GitLab that even passes the `last_commit_id`
+    /// check, because the check is against the newer commit. Resolving first and
+    /// reading at the resolved SHA closes it.
+    base_sha: String,
     base_ref: String,
 }
 
@@ -510,7 +529,7 @@ impl BranchState {
 /// from "my commits are unmerged and the base moved on underneath me". An open
 /// pull request means the latter.
 async fn resolve_branch_state(
-    forge: &GitHubForge,
+    forge: &dyn Forge,
     index_repo: &RepoCoordinate,
     fork: Option<&RepoCoordinate>,
     branch: &str,
@@ -521,21 +540,14 @@ async fn resolve_branch_state(
     if forge.get_ref_sha(fork, &format!("heads/{branch}")).await?.is_none() {
         return Ok(BranchState::Absent);
     }
-    match forge
-        .compare_branch(index_repo, INDEX_BASE_REF, &fork.owner, branch)
-        .await?
-    {
+    match forge.compare_branch(index_repo, INDEX_BASE_REF, fork, branch).await? {
         // Strictly ahead: the commits are unmerged and they fast-forward, so
         // keep them whether or not a pull request is open — when none is, the
         // C6 amendment opens the one they never got.
         BranchComparison::Ahead => Ok(BranchState::Live),
         BranchComparison::Identical | BranchComparison::Behind => Ok(BranchState::Spent),
         BranchComparison::Diverged => {
-            if forge
-                .find_open_pull_request(index_repo, &fork.owner, branch)
-                .await?
-                .is_some()
-            {
+            if forge.find_open_pull_request(index_repo, fork, branch).await?.is_some() {
                 Ok(BranchState::Live)
             } else {
                 Ok(BranchState::Spent)
@@ -545,7 +557,7 @@ async fn resolve_branch_state(
 }
 
 async fn read_committed_root(
-    forge: &GitHubForge,
+    forge: &dyn Forge,
     index_repo: &RepoCoordinate,
     fork: Option<&RepoCoordinate>,
     root_path: &str,
@@ -553,21 +565,28 @@ async fn read_committed_root(
 ) -> Result<RootRead, AnnounceError> {
     // The announce branch only ever exists on the fork; an absent branch reads
     // back as `None`, falling through to `main`.
-    if let Some(fork) = fork {
-        let branch_sha = forge.get_ref_sha(fork, &format!("heads/{branch}")).await?;
-        if branch_sha.is_some() {
-            let bytes = forge.get_file_contents(fork, root_path, branch).await?;
-            return Ok(RootRead {
-                bytes,
-                branch_sha,
-                base_ref: branch.to_string(),
-            });
-        }
+    if let Some(fork) = fork
+        && let Some(branch_sha) = forge.get_ref_sha(fork, &format!("heads/{branch}")).await?
+    {
+        let bytes = forge.get_file_contents(fork, root_path, &branch_sha).await?;
+        return Ok(RootRead {
+            bytes,
+            branch_sha: Some(branch_sha.clone()),
+            base_sha: branch_sha,
+            base_ref: branch.to_string(),
+        });
     }
-    let bytes = forge.get_file_contents(index_repo, root_path, INDEX_BASE_REF).await?;
+    let base_sha = forge
+        .get_ref_sha(index_repo, &format!("heads/{INDEX_BASE_REF}"))
+        .await?
+        .ok_or_else(|| AnnounceError::MissingBaseRef {
+            repo: index_repo.full_path(),
+        })?;
+    let bytes = forge.get_file_contents(index_repo, root_path, &base_sha).await?;
     Ok(RootRead {
         bytes,
         branch_sha: None,
+        base_sha,
         base_ref: INDEX_BASE_REF.to_string(),
     })
 }
@@ -598,8 +617,9 @@ mod tests {
             curated,
             target: AnnounceTarget::Out(std::path::PathBuf::from("unused")),
             index_repo: crate::forge::RepoCoordinate {
-                owner: "ocx-sh".to_string(),
-                repo: "index".to_string(),
+                host: None,
+                namespace: "ocx-sh".to_string(),
+                project: "index".to_string(),
             },
             yank: Vec::new(),
             unyank: Vec::new(),

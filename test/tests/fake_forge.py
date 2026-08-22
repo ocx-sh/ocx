@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Stdlib fake GitHub REST forge server for `ocx package announce` acceptance tests.
+"""Stdlib fake forge server for `ocx package announce` acceptance tests.
+
+Serves **both** forge surfaces from one process over one git object graph:
+GitHub under `/repos/...` (below) and GitLab under `/projects/...`
+(`fake_gitlab.py`). One graph is deliberate — it lets every announce scenario run
+against both clients and assert the same outcome, instead of each client
+agreeing with a fixture written for it.
 
 Implements exactly the REST surface `GitHubForge`
 (`crates/ocx_lib/src/forge/github.rs`) calls: repo/fork metadata (also used as
@@ -27,6 +33,8 @@ import re
 import threading
 import urllib.parse
 from typing import Any
+
+from fake_gitlab import GitLabRoutes
 
 # A repo/branch path segment (owner, repo names never contain '/').
 _SEGMENT = r"[^/]+"
@@ -97,10 +105,19 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         parts = urllib.parse.urlsplit(self.path)
         path = parts.path
         query = urllib.parse.parse_qs(parts.query)
-        self.server.record("GET", path)
+        self.server.record("GET", path, self.path)
 
         if path == "/user":
-            self._reply_json(200, {"login": self.server.token_identity_login})
+            # One identity endpoint, two field names: GitHub reads `login`,
+            # GitLab reads `username`. Serving both keeps the two surfaces on one
+            # account rather than inventing a second test identity.
+            self._reply_json(
+                200,
+                {"login": self.server.token_identity_login, "username": self.server.token_identity_login},
+            )
+            return
+
+        if self.server.gitlab_get(self, path, query):
             return
 
         match = _REPO_RE.fullmatch(path)
@@ -143,6 +160,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.server.record("POST", path)
         body = self._read_body()
         self.server.record_body(path, body)
+
+        if self.server.gitlab_post(self, path, body):
+            return
 
         match = _FORKS_RE.fullmatch(path)
         if match:
@@ -189,12 +209,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._reply_json(404, {"message": "not found"})
 
 
-class FakeForge(http.server.ThreadingHTTPServer):
-    """A per-test fake GitHub REST forge, bound to an ephemeral loopback port."""
+class FakeForge(GitLabRoutes, http.server.ThreadingHTTPServer):
+    """A per-test fake forge (GitHub and GitLab surfaces), bound to an ephemeral
+    loopback port."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.requests: list[tuple[str, str]] = []
+        # The same log with the query string kept. `requests` is matched
+        # exactly by `request_count`, so it cannot carry one; assertions about
+        # WHICH ref a read named (a branch name versus a pinned commit) have
+        # nowhere else to look.
+        self.raw_requests: list[tuple[str, str]] = []
         self.bodies: list[tuple[str, dict[str, Any]]] = []
         self.token_identity_login = "test-forge-bot"
 
@@ -206,6 +232,10 @@ class FakeForge(http.server.ThreadingHTTPServer):
         self.commits: dict[str, dict[str, Any]] = {}  # sha -> {"tree", "parent"}
         self.trees: dict[str, dict[str, str]] = {}  # sha -> {path: blob_sha} (flattened)
         self.blobs: dict[str, bytes] = {}  # sha -> raw bytes
+        # commit sha -> {path: the commit that last changed that path}. GitLab's
+        # only compare-and-swap is per file, so the fake must track it; GitHub
+        # never reads it.
+        self.file_last_commit: dict[str, dict[str, str]] = {}
         self._commit_counter = 0
 
         # Idempotent fork-create tracking: (upstream_full_name, target_owner) -> record.
@@ -255,10 +285,41 @@ class FakeForge(http.server.ThreadingHTTPServer):
         # value verbatim — used to prove a value the client does not model is
         # refused, not guessed. Fires once, then clears.
         self.compare_status_once: str | None = None
-        # "owner/repo" repos whose metadata reports `permissions.push: false` —
-        # the fork-free announce path's up-front push probe
-        # (`GitHubForge::ensure_push_access`) must refuse before writing anything.
+        # "owner/repo" repos whose metadata reports no push permission — the
+        # fork-free announce path's up-front push probe must refuse before
+        # writing anything. Read by both surfaces.
         self.no_push_access: set[str] = set()
+
+        # ── GitLab surface state (see `fake_gitlab.py`) ───────────────────
+        # Project paths carry numeric ids on GitLab; they are assigned lazily
+        # and are stable for the life of the server.
+        self.gitlab_ids: dict[str, int] = {}
+        self._gitlab_id_counter = 0
+        # (target_path, source_path, source_branch) -> open merge request.
+        self.gitlab_merge_requests: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._gitlab_mr_counter = 0
+        # Project path -> reported `import_status`.
+        self.gitlab_import_status: dict[str, str] = {}
+        # Project path -> remaining reads that report an unfinished import;
+        # -1 means "never finishes" (the bounded-wait proof).
+        self.gitlab_import_pending: dict[str, int] = {}
+        # A renamed fork: overrides the fork-create response path.
+        self.gitlab_rename_fork_to: str | None = None
+        # Forces a fork's parent to a stranger project, exercising the
+        # parent-verification guard.
+        self.gitlab_fork_parent_override: str | None = None
+        # "project/branch" -> files a racing announce lands first, moving the
+        # root's last commit so the next commit's `last_commit_id` is stale.
+        self.gitlab_concurrent_advance: dict[str, dict[str, bytes]] = {}
+        # When True the NEXT compare reports `compare_timeout`, an answer the
+        # client must refuse rather than read as "no commits".
+        self.gitlab_compare_timeout_once: bool = False
+        # When True the NEXT compare replies 200 with NO `commits` key — the
+        # shape a proxy or an API change can produce, and one the client must
+        # refuse rather than count as zero commits.
+        self.gitlab_compare_malformed_once: bool = False
+        # When True the NEXT merge-request create replies 500 once.
+        self.gitlab_merge_request_fail_once: bool = False
 
         super().__init__(("127.0.0.1", 0), _Handler)
 
@@ -267,9 +328,10 @@ class FakeForge(http.server.ThreadingHTTPServer):
         host, port = self.server_address[:2]
         return f"http://{host}:{port}"
 
-    def record(self, method: str, path: str) -> None:
+    def record(self, method: str, path: str, raw: str | None = None) -> None:
         with self.lock:
             self.requests.append((method, path))
+            self.raw_requests.append((method, raw if raw is not None else path))
 
     def record_body(self, path: str, body: dict[str, Any]) -> None:
         with self.lock:
@@ -377,6 +439,17 @@ class FakeForge(http.server.ThreadingHTTPServer):
         key = f"commit:{tree_sha}:{parent_sha}:{self._commit_counter}".encode()
         sha = hashlib.sha1(key).hexdigest()
         self.commits[sha] = {"tree": tree_sha, "parent": parent_sha}
+        # Per-path provenance: a path whose blob is unchanged from the parent
+        # keeps the parent's answer, everything else was last changed here. This
+        # is what GitLab's `last_commit_id` means, and getting it wrong would
+        # make the compare-and-swap either never fire or always fire.
+        tree = self.trees.get(tree_sha, {})
+        parent_tree = self.trees.get(self.commits.get(parent_sha, {}).get("tree", ""), {}) if parent_sha else {}
+        inherited = self.file_last_commit.get(parent_sha or "", {})
+        self.file_last_commit[sha] = {
+            path: inherited[path] if parent_tree.get(path) == blob and path in inherited else sha
+            for path, blob in tree.items()
+        }
         return sha
 
     # ── route handlers ───────────────────────────────────────────────────
