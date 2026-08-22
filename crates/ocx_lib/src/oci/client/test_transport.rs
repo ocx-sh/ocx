@@ -54,6 +54,16 @@ pub(crate) struct StubTransportInner {
     /// the shape a real network produces by chance, and the one that decides
     /// whether the compressed-side digest covers the whole blob or a prefix.
     pub blob_stream_chunks: HashMap<String, Vec<Vec<u8>>>,
+    /// Artificial latency before `list_tags` / `fetch_manifest_digest` answer.
+    ///
+    /// The tag-read sibling of [`manifest_delays`](Self::manifest_delays), and
+    /// there for the same reason: an in-memory stub answers instantly, so a
+    /// caller that read-checks a cache, misses and fetches can complete before
+    /// the next one starts. A "these N concurrent reads made one request"
+    /// assertion then passes just as happily against no coalescing at all.
+    /// Under `tokio::time::pause()` the clock only advances once every task is
+    /// parked, so the delay releases exactly when all N callers have arrived.
+    pub tag_read_delay: Option<std::time::Duration>,
     /// Digest returned by `fetch_manifest_digest`.
     pub digest: Option<String>,
     /// Successive results for push operations (consumed FIFO).
@@ -207,6 +217,11 @@ impl OciTransport for StubTransport {
         _last: Option<String>,
     ) -> Result<Vec<String>> {
         self.record("list_tags");
+        // Bind the delay out first: the read guard must not span the await.
+        let delay = self.data.read().tag_read_delay;
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         let mut inner = self.data.write();
         if inner.tags.is_empty() {
             Ok(vec![])
@@ -232,6 +247,10 @@ impl OciTransport for StubTransport {
 
     async fn fetch_manifest_digest(&self, image: &oci::native::Reference) -> Result<String> {
         self.record("fetch_manifest_digest");
+        let delay = self.data.read().tag_read_delay;
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         let key = image.to_string();
         let inner = self.data.read();
         // A per-image error wins over every other answer, including a seeded

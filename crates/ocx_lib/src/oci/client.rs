@@ -7551,4 +7551,398 @@ mod tests {
             );
         }
     }
+
+    // ── Wire-level auth caching (the fork pin) ──────────────────────────
+
+    /// The fork's `auth()` used to run the whole handshake — `GET /v2/` plus a
+    /// token-realm exchange — ahead of *every* registry operation and once per
+    /// layer of a pull, so two of every three requests were wasted, warm or
+    /// cold, forever.
+    ///
+    /// No test in `ensure_auth` above can see that: all of them assert at the
+    /// [`OciTransport`] boundary through an in-memory stub and never open a
+    /// socket. These do, against a real `TcpListener`, and they are what pins
+    /// the fork's behaviour from ocx's side — the fork's own suite is excluded
+    /// from this workspace and runs in no CI, so a rebase that dropped the
+    /// caching would otherwise leave every gate here green.
+    mod auth_wire_tests {
+        use super::*;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::sync::watch;
+
+        /// What the stub registry counted, and what it was told to do.
+        struct StubState {
+            /// `GET /v2/` — the challenge probe. Host-invariant, so one per host
+            /// is the target however many repositories are touched.
+            probes: AtomicUsize,
+            /// `GET /token` — the token-realm exchange, one per scope.
+            exchanges: AtomicUsize,
+            /// Everything else under `/v2/`.
+            resource_requests: AtomicUsize,
+            /// `Authorization` header of every request that carried one, in order.
+            authorizations: Mutex<Vec<String>>,
+            /// Whether `GET /v2/` answers with a `WWW-Authenticate` challenge.
+            challenges: AtomicBool,
+            /// When set, the token endpoint waits for this to flip before it
+            /// answers, so no leader can finish before its peers have arrived.
+            hold: Mutex<Option<watch::Receiver<bool>>>,
+            address: Mutex<String>,
+        }
+
+        impl StubState {
+            fn new(challenges: bool) -> Self {
+                StubState {
+                    probes: AtomicUsize::new(0),
+                    exchanges: AtomicUsize::new(0),
+                    resource_requests: AtomicUsize::new(0),
+                    authorizations: Mutex::new(Vec::new()),
+                    challenges: AtomicBool::new(challenges),
+                    hold: Mutex::new(None),
+                    address: Mutex::new(String::new()),
+                }
+            }
+
+            fn total(&self) -> usize {
+                self.probes.load(Ordering::SeqCst)
+                    + self.exchanges.load(Ordering::SeqCst)
+                    + self.resource_requests.load(Ordering::SeqCst)
+            }
+
+            async fn respond(&self, target: &str) -> String {
+                if target.starts_with("/token") {
+                    let minted = self.exchanges.fetch_add(1, Ordering::SeqCst) + 1;
+                    // Clone the receiver out before awaiting it — the lock must
+                    // not be held across the wait, or the callers this hold
+                    // exists to collect could never arrive.
+                    let hold = self.hold.lock().unwrap().clone();
+                    if let Some(mut hold) = hold {
+                        let _ = hold.wait_for(|released| *released).await;
+                    }
+                    return json_response(&format!(r#"{{"token":"minted-{minted}"}}"#));
+                }
+                if target == "/v2/" {
+                    self.probes.fetch_add(1, Ordering::SeqCst);
+                    if !self.challenges.load(Ordering::SeqCst) {
+                        return json_response("{}");
+                    }
+                    let realm = format!("http://{}/token", self.address.lock().unwrap());
+                    return format!(
+                        "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm=\"{realm}\",service=\"stub\"\r\nContent-Length: 0\r\n\r\n"
+                    );
+                }
+                self.resource_requests.fetch_add(1, Ordering::SeqCst);
+                if target.contains("/tags/list") {
+                    return json_response(r#"{"name":"stub","tags":["1.0"]}"#);
+                }
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+            }
+        }
+
+        fn json_response(body: &str) -> String {
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        }
+
+        /// Minimal HTTP/1.1 stub of the two endpoints an authentication
+        /// handshake touches, plus the tag listing that proves a warm client
+        /// still sends credentials.
+        struct StubRegistry {
+            state: Arc<StubState>,
+            address: String,
+        }
+
+        impl StubRegistry {
+            async fn start() -> Self {
+                Self::start_with(true).await
+            }
+
+            /// `challenges = false` answers `GET /v2/` with `200` and no
+            /// `WWW-Authenticate`. Nothing is inserted into the token cache on
+            /// that path, so it is the case a token-cache-only shortcut cannot
+            /// reach — reaching zero there is the host challenge cache's doing.
+            async fn start_with(challenges: bool) -> Self {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap().to_string();
+                let state = Arc::new(StubState::new(challenges));
+                *state.address.lock().unwrap() = address.clone();
+
+                let serving = Arc::clone(&state);
+                tokio::spawn(async move {
+                    while let Ok((socket, _)) = listener.accept().await {
+                        let state = Arc::clone(&serving);
+                        tokio::spawn(async move { serve_connection(socket, state).await });
+                    }
+                });
+
+                StubRegistry { state, address }
+            }
+
+            fn hold(&self) -> watch::Sender<bool> {
+                let (release, held) = watch::channel(false);
+                *self.state.hold.lock().unwrap() = Some(held);
+                release
+            }
+
+            fn client(&self) -> Client {
+                ClientBuilder::new()
+                    .plain_http_registries(vec![self.address.clone()])
+                    .build()
+            }
+
+            fn identifier(&self, repository: &str) -> Identifier {
+                Identifier::new_registry(repository, &self.address).clone_with_tag("1.0")
+            }
+        }
+
+        async fn serve_connection(socket: tokio::net::TcpStream, state: Arc<StubState>) {
+            let (read_half, mut write_half) = socket.into_split();
+            let mut reader = tokio::io::BufReader::new(read_half);
+
+            loop {
+                let mut request_line = String::new();
+                match reader.read_line(&mut request_line).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {}
+                }
+                let mut parts = request_line.split_whitespace();
+                let (Some(_method), Some(target)) = (parts.next(), parts.next()) else {
+                    return;
+                };
+                let target = target.to_string();
+
+                let mut content_length = 0usize;
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let header = header.trim_end();
+                    if header.is_empty() {
+                        break;
+                    }
+                    let Some((name, value)) = header.split_once(':') else {
+                        continue;
+                    };
+                    let value = value.trim();
+                    match name.to_ascii_lowercase().as_str() {
+                        "content-length" => content_length = value.parse().unwrap_or(0),
+                        "authorization" => state.authorizations.lock().unwrap().push(value.to_string()),
+                        _ => {}
+                    }
+                }
+                if content_length > 0 {
+                    let mut body = vec![0u8; content_length];
+                    if reader.read_exact(&mut body).await.is_err() {
+                        return;
+                    }
+                }
+
+                let response = state.respond(&target).await;
+                if write_half.write_all(response.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+        }
+
+        /// C-001. The first `ensure_auth` pays the probe and the exchange; the
+        /// second pays nothing at all.
+        ///
+        /// This is the whole regression guard for the fork's cache-first
+        /// `auth()`. Red against the pre-change submodule commit, where the
+        /// second call issued the same two requests as the first.
+        #[tokio::test]
+        async fn a_warm_ensure_auth_issues_no_wire_requests() {
+            let registry = StubRegistry::start().await;
+            let client = registry.client();
+            let identifier = registry.identifier("test/pkg");
+
+            client
+                .ensure_auth(&identifier, oci::RegistryOperation::Pull)
+                .await
+                .unwrap();
+            let cold = registry.state.total();
+            assert!(
+                cold <= 2,
+                "a cold handshake is one probe plus one exchange, got {cold} requests"
+            );
+            assert!(
+                cold > 0,
+                "the cold call must actually reach the wire, or this proves nothing"
+            );
+
+            client
+                .ensure_auth(&identifier, oci::RegistryOperation::Pull)
+                .await
+                .unwrap();
+            assert_eq!(
+                registry.state.total(),
+                cold,
+                "a warm ensure_auth must issue zero requests"
+            );
+        }
+
+        /// C-001 edge (b). A registry answering `200` with no `WWW-Authenticate`
+        /// inserts nothing into the token cache, so the second call reaches zero
+        /// only if the *challenge probe* is what was cached.
+        #[tokio::test]
+        async fn an_unchallenged_registry_is_probed_once() {
+            let registry = StubRegistry::start_with(false).await;
+            let client = registry.client();
+            let identifier = registry.identifier("test/pkg");
+
+            for _ in 0..2 {
+                client
+                    .ensure_auth(&identifier, oci::RegistryOperation::Pull)
+                    .await
+                    .unwrap();
+            }
+
+            assert_eq!(
+                registry.state.probes.load(Ordering::SeqCst),
+                1,
+                "the probe answer is host-invariant and must be reused"
+            );
+            assert_eq!(
+                registry.state.exchanges.load(Ordering::SeqCst),
+                0,
+                "an unchallenged registry has no token to exchange"
+            );
+        }
+
+        /// C-001 edges (c) and (d). The cache key is the full scope — another
+        /// repository, or another verb set, is a different token. Serving one
+        /// for the other is buildkit's `insufficient_scope` class.
+        #[tokio::test]
+        async fn another_repository_or_operation_gets_its_own_exchange() {
+            let registry = StubRegistry::start().await;
+            let client = registry.client();
+
+            client
+                .ensure_auth(&registry.identifier("test/one"), oci::RegistryOperation::Pull)
+                .await
+                .unwrap();
+            client
+                .ensure_auth(&registry.identifier("test/two"), oci::RegistryOperation::Pull)
+                .await
+                .unwrap();
+            client
+                .ensure_auth(&registry.identifier("test/one"), oci::RegistryOperation::Push)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                registry.state.exchanges.load(Ordering::SeqCst),
+                3,
+                "repository and operation are both part of the token cache key"
+            );
+        }
+
+        /// C-003, from ocx's side. `store_auth_if_needed` is the side effect the
+        /// cache-first shortcut must not skip: it is the record the header-attach
+        /// path reads to decide a request is authenticated at all. A warm
+        /// `ensure_auth` followed by a real request proves the credentials
+        /// survived the shortcut end to end.
+        #[tokio::test]
+        async fn a_warm_ensure_auth_still_authenticates_the_next_request() {
+            let registry = StubRegistry::start().await;
+            let client = registry.client();
+            let identifier = registry.identifier("test/pkg");
+
+            for _ in 0..2 {
+                client
+                    .ensure_auth(&identifier, oci::RegistryOperation::Pull)
+                    .await
+                    .unwrap();
+            }
+            let tags = client.list_tags(identifier).await.unwrap();
+            assert_eq!(tags, vec!["1.0".to_string()]);
+
+            let sent = registry.state.authorizations.lock().unwrap().clone();
+            assert_eq!(
+                sent.last().map(String::as_str),
+                Some("Bearer minted-1"),
+                "the request after a warm ensure_auth must carry the cached token, saw {sent:?}"
+            );
+            assert_eq!(
+                registry.state.exchanges.load(Ordering::SeqCst),
+                1,
+                "the warm calls and the listing must all ride one exchange"
+            );
+        }
+
+        /// C-023. Eight concurrent *cold* `ensure_auth` calls for one identifier
+        /// produce one token exchange — the shape `ocx index sync` actually
+        /// makes, which neither a sequential test nor a fork-level unit test
+        /// covers.
+        ///
+        /// The token endpoint holds until the test releases it: without the hold
+        /// the leader can finish before the others reach the miss, and the
+        /// assertion passes on serial execution whether or not anything is
+        /// coalesced.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_cold_ensure_auth_shares_one_token_exchange() {
+            const CALLERS: usize = 8;
+
+            let registry = StubRegistry::start().await;
+            let client = Arc::new(registry.client());
+            let identifier = registry.identifier("test/pkg");
+            let release = registry.hold();
+
+            let mut handles = Vec::new();
+            for _ in 0..CALLERS {
+                let client = Arc::clone(&client);
+                let identifier = identifier.clone();
+                handles.push(tokio::spawn(async move {
+                    client.ensure_auth(&identifier, oci::RegistryOperation::Pull).await
+                }));
+            }
+
+            // Release only once every caller has had the chance to enter the
+            // miss path — the count means nothing if the leader could finish
+            // before its peers arrived.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            release.send(true).unwrap();
+            for handle in handles {
+                handle.await.unwrap().unwrap();
+            }
+
+            assert_eq!(
+                registry.state.exchanges.load(Ordering::SeqCst),
+                1,
+                "{CALLERS} concurrent cold callers for one scope must share one token exchange"
+            );
+        }
+
+        /// C-025. The `GET /v2/` probe is issued once per host, not once per
+        /// repository. Asserted as `== 1`, never `<= N`: before the change the
+        /// count equalled the repository count, so an inequality would pass
+        /// against the bug.
+        #[tokio::test]
+        async fn three_repositories_share_one_challenge_probe() {
+            let registry = StubRegistry::start().await;
+            let client = registry.client();
+
+            for repository in ["test/one", "test/two", "test/three"] {
+                client
+                    .ensure_auth(&registry.identifier(repository), oci::RegistryOperation::Pull)
+                    .await
+                    .unwrap();
+            }
+
+            assert_eq!(
+                registry.state.probes.load(Ordering::SeqCst),
+                1,
+                "three repositories under one host must share one challenge probe"
+            );
+            assert_eq!(
+                registry.state.exchanges.load(Ordering::SeqCst),
+                3,
+                "each repository still mints its own scoped token"
+            );
+        }
+    }
 }
