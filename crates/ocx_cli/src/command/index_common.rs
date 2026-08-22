@@ -285,10 +285,15 @@ mod tests {
         // that, and covers this guard's whole failure mode besides.
         //
         // Two exemptions, both fan-outs C-024 does not govern: `index_catalog.rs`
-        // resolves tags for one package (`JoinSet`), `index_list.rs` reads local
+        // lists tags per repository (`JoinSet`), `index_list.rs` reads local
         // roots (`join_all`). Neither refreshes, so neither multiplies the
-        // per-package ceiling. The list is asserted non-vacuous below: a rename
-        // that empties it fails here rather than silently exempting nothing.
+        // per-package ceiling — read-only is the whole reason, and it is not
+        // "unbounded is fine here": `index_catalog.rs` carries its own bound on
+        // its own permit class (`CATALOG_TAG_CONCURRENCY`), deliberately not
+        // this module's, so an inner fan-out can never contend with an ancestor
+        // holding the same class. The list is asserted non-vacuous below: a
+        // rename that empties it fails here rather than silently exempting
+        // nothing.
         let exempt = ["index_common.rs", "index_catalog.rs", "index_list.rs"];
         let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/command");
         let mut scanned = Vec::new();
