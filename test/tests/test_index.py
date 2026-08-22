@@ -1,5 +1,6 @@
 import json
 from collections.abc import Iterator
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
@@ -523,6 +524,92 @@ def test_index_catalog_tags_remote_fetch_failure_exits_nonzero(
     result = ocx.plain("--remote", "index", "catalog", "--tags", namespace, check=False)
     assert result.returncode != 0, (
         f"total remote tag-fetch failure must not read as success: {result.stdout}"
+    )
+
+
+# `CATALOG_TAG_CONCURRENCY` in `crates/ocx_cli/src/command/index_catalog.rs`.
+# Duplicated rather than imported because the constant is Rust and this suite is
+# not; the assertion below names it so a reader can find the pair, and the
+# fixture is sized so that a change to either side shows up as a failure rather
+# than as slack.
+CATALOG_TAG_CONCURRENCY = 16
+CATALOG_REPOSITORY_COUNT = 100
+
+
+def test_index_catalog_tags_bounds_its_in_flight_listings(
+    ocx: OcxRunner,
+    index_server: static_index.StaticIndexServer,
+):
+    """`ocx --remote index catalog --tags` fans out over a whole registry's
+    repository list, and that fan-out is bounded.
+
+    Every number here is measured, not reasoned. A static file is served far
+    faster than the client can fan out, so with no hold the peak overlap is 1
+    however wide the loop is — the hold is what makes concurrency observable at
+    all, and it has to be long enough that a widened loop actually shows. The
+    calibration this borrows (`design_spec_servable_index_snapshot.md`, for the
+    sibling fan-out) found 20 ms far too short and 200 ms adequate there. Here
+    200 ms was NOT adequate: with the bound raised to 512 the fixture peaked at
+    25-35 against a threshold of 32, so the check passed on unbounded code some
+    of the time. The limiter is this fixture's own accept path, not the client,
+    and a longer hold is what moves it: at 500 ms the same widened build peaked
+    at 37, 48 and 55 over three runs while the real bound stayed at 16.
+
+    Ten runs of the real bound gave 16 nine times and 17 once. The permit cap
+    is hard at 16, so the 17th is the catalog listing's own handler still
+    winding down as the first tasks start — hence a threshold above the
+    constant rather than equal to it. It is the module's constant it is derived
+    from, NOT the `index` family's stated 512: 100 repositories cannot reach
+    512, so asserting that would pass with the semaphore deleted.
+    """
+    namespace = "127.0.0.1:1"
+    repositories = [f"bounded/pkg{number:03d}" for number in range(CATALOG_REPOSITORY_COUNT)]
+    for repository in repositories:
+        static_index.write_package(
+            index_server.root,
+            repository=repository,
+            tag="1.0.0",
+            physical_repository=f"oci://{ocx.registry}/{repository}",
+            platform_digest="sha256:" + sha256(repository.encode()).hexdigest(),
+        )
+    static_index.write_config(index_server.root)
+    static_index.write_catalog(
+        index_server.root,
+        {
+            repository: "sha256:" + sha256(repository.encode()).hexdigest()
+            for repository in repositories
+        },
+    )
+
+    config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    config_path.write_text(f'[registries."{namespace}"]\nindex = "{index_server.base_url}"\n')
+    ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
+
+    index_server.hold_seconds = 0.5
+    catalog = ocx.json("--remote", "index", "catalog", "--tags", namespace)
+
+    # Non-vacuity first, three ways: the run listed every repository, each
+    # listing actually resolved its tags off the fixture, and the requests
+    # overlapped at all. Without these a run that fanned out over nothing
+    # satisfies the bound trivially — a green indistinguishable from the test
+    # never having run.
+    listed = catalog["repositories"]
+    assert len(listed) == CATALOG_REPOSITORY_COUNT, (
+        f"precondition: every repository must have been listed, got {len(listed)}"
+    )
+    assert all(tags == ["1.0.0"] for tags in listed.values()), (
+        "precondition: each listing resolved its tags rather than reporting an empty set"
+    )
+    assert index_server.peak_in_flight > 1, "precondition: some concurrency was observable at all"
+
+    # 24: above the 17 the real bound was measured at, and comfortably below the
+    # 37 that was the LOWEST peak a widened build produced. Sitting on 16 exactly
+    # would red on the catalog listing's trailing handler; doubling to 32 lands
+    # inside the widened build's own range and passes on unbounded code.
+    assert index_server.peak_in_flight <= CATALOG_TAG_CONCURRENCY + 8, (
+        f"`index catalog --tags` must hold roughly CATALOG_TAG_CONCURRENCY "
+        f"({CATALOG_TAG_CONCURRENCY}) tag listings in flight rather than one per repository; "
+        f"the fixture saw {index_server.peak_in_flight} over {CATALOG_REPOSITORY_COUNT} repositories"
     )
 
 
