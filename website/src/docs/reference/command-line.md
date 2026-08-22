@@ -1038,10 +1038,12 @@ On the first successful update for a given published source, `ocx index update` 
 source's `config.json` if one is not already present. See
 [Serving a local index snapshot][in-depth-indices-servable] for what that unlocks.
 
-A tag-refresh failure for any requested package fails the whole invocation; the
-[exit code][exit-codes] corresponds to the first failure in request order
-(deterministic across repeated runs). Packages that refresh successfully keep
-their updated tags.
+A tag-refresh failure never discards a package's other, successfully-refreshed tags. Within one
+package's root, only the failing tag — and any other tag that shares its content digest — is
+withheld from the commit; every other tag in that package is still pinned at its newly fetched
+digest. The invocation as a whole still reports failure: the [exit code][exit-codes] corresponds to
+the first failure in request order (deterministic across repeated runs). A package with no failing
+tag keeps every requested tag.
 
 **Arguments**
 
