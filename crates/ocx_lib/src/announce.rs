@@ -254,9 +254,9 @@ pub async fn announce(
             // behind and would re-propose content the index already has.
             // The SHA is the one the root was READ at, never a fresh resolution
             // of the same ref name — see `RootRead::base_sha`.
-            let base_repo = match root_read.branch_sha {
-                Some(_) => commit_repo.clone(),
-                None => request.index_repo.clone(),
+            let (base_repo, base_branch) = match root_read.branch_sha {
+                Some(_) => (commit_repo.clone(), branch.as_str()),
+                None => (request.index_repo.clone(), INDEX_BASE_REF),
             };
             let base_sha = root_read.base_sha;
             // F2/C4: the ref update is fast-forward-only (CAS). If a concurrent
@@ -271,6 +271,7 @@ pub async fn announce(
                     CommitBase {
                         repo: &base_repo,
                         sha: &base_sha,
+                        branch: base_branch,
                     },
                     &message,
                     &files,
@@ -331,6 +332,7 @@ pub async fn announce(
                                 CommitBase {
                                     repo: &commit_repo,
                                     sha: &head_sha,
+                                    branch: &branch,
                                 },
                                 &message,
                                 &merged.files,

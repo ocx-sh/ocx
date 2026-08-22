@@ -294,6 +294,14 @@ impl GitHubForge {
         object_sha(&url, &value)
     }
 
+    /// `POST /merge-upstream` — the request behind [`Forge::sync_fork`], kept
+    /// separate from it so the commit retry can re-run the sync and report what
+    /// it answered, which the trait method deliberately swallows.
+    async fn merge_upstream(&self, fork: &RepoCoordinate, branch: &str) -> Result<(), ForgeError> {
+        let url = self.url(&format!("/repos/{}/merge-upstream", fork.full_path()));
+        self.post_json(&url, &json!({ "branch": branch })).await.map(|_| ())
+    }
+
     /// Point `refs/heads/<branch>` at `commit_sha`, creating the ref when it
     /// does not yet exist.
     ///
@@ -631,9 +639,16 @@ impl Forge for GitHubForge {
     /// answers non-success too, and in both cases the commit sequence is
     /// unaffected — so a failure is logged and the announce proceeds.
     async fn sync_fork(&self, fork: &RepoCoordinate, branch: &str) {
-        let url = self.url(&format!("/repos/{}/merge-upstream", fork.full_path()));
-        if let Err(error) = self.post_json(&url, &json!({ "branch": branch })).await {
-            tracing::debug!(%error, fork = %fork.full_path(), "fork sync skipped");
+        if let Err(error) = self.merge_upstream(fork, branch).await {
+            // WARN, not debug: this is the single most useful fact when the ref
+            // write later 404s, and CI runs at INFO — at debug a skipped sync was
+            // invisible, so the 404 read as a credential, permission, or ruleset
+            // fault and cost ~15 probes to rule all three out.
+            tracing::warn!(
+                %error,
+                fork = %fork.full_path(),
+                "fork sync failed; a fork behind upstream cannot reach the announce base commit"
+            );
         }
     }
 
@@ -706,6 +721,8 @@ impl Forge for GitHubForge {
         let mut outcome = self
             .commit_files_once(repo, branch, base.sha, message, files, update)
             .await;
+        let cross_repo_base = base.repo != repo;
+        let mut sync: Option<String> = None;
         for delay in GIT_DATA_RETRY_DELAYS {
             let Err(error) = &outcome else { break };
             if !is_retryable(error) {
@@ -713,9 +730,25 @@ impl Forge for GitHubForge {
             }
             tracing::debug!(%error, "replaying the git-data commit sequence");
             tokio::time::sleep(delay).await;
+            // A base in another repository reaches this one only through the
+            // shared fork network (see `sync_fork`), so a fork that has fallen
+            // behind fails every replay identically — replaying blind waits out
+            // three delays and surfaces the same status. Re-sync first, and keep
+            // what the sync said for the error below.
+            if cross_repo_base {
+                sync = Some(match self.merge_upstream(repo, base.branch).await {
+                    Ok(()) => "ok".to_string(),
+                    Err(error) => error.to_string(),
+                });
+            }
             outcome = self
                 .commit_files_once(repo, branch, base.sha, message, files, update)
                 .await;
+        }
+        if let Err(error) = &outcome
+            && let Some(named) = fork_base_unreachable(error, repo, base, sync.as_deref())
+        {
+            return Err(named);
         }
         outcome
     }
@@ -847,6 +880,33 @@ fn parse_compare_status(url: &str, status: &str) -> Result<BranchComparison, For
 /// response body tells them apart; replaying the latter only defers the same
 /// error. A rejected fast-forward needs the caller's regeneration against the
 /// winning head, never a blind replay of the same commit.
+/// Rename a spent-retry 404 on a base that lives in another repository into its
+/// cause.
+///
+/// Only that shape: the base object reaches the target only through the shared
+/// fork network, so a 404 there is what a fork left behind upstream looks like
+/// from the git-data API — not a missing repository, and not the credential,
+/// permission, or ruleset fault a bare status naming an endpoint reads as.
+/// `sync` is what the last re-sync answered, which is the fact that explains it.
+fn fork_base_unreachable(
+    error: &ForgeError,
+    target: &RepoCoordinate,
+    base: CommitBase<'_>,
+    sync: Option<&str>,
+) -> Option<ForgeError> {
+    let ForgeError::Status { status, .. } = error else {
+        return None;
+    };
+    if base.repo == target || *status != StatusCode::NOT_FOUND.as_u16() {
+        return None;
+    }
+    Some(ForgeError::ForkBaseUnreachable {
+        fork: target.full_path(),
+        branch: base.branch.to_string(),
+        sync: sync.unwrap_or("not attempted").to_string(),
+    })
+}
+
 fn is_retryable(error: &ForgeError) -> bool {
     matches!(
         error,
@@ -1047,6 +1107,10 @@ mod tests {
     const PROBE_PATH: &str = "/repos/forkuser/index/git/ref/heads/indexbot-announce-acme-widget";
     const CREATE_PATH: &str = "/repos/forkuser/index/git/refs";
     const MERGE_UPSTREAM_PATH: &str = "/repos/forkuser/index/merge-upstream";
+    const BASE_COMMIT_PATH: &str = "/repos/forkuser/index/git/commits/basesha";
+    const BLOBS_PATH: &str = "/repos/forkuser/index/git/blobs";
+    const TREES_PATH: &str = "/repos/forkuser/index/git/trees";
+    const COMMITS_PATH: &str = "/repos/forkuser/index/git/commits";
     /// GitHub's real answer to a PATCH of a ref that does not exist — a 422,
     /// not the 404 the endpoint shape suggests.
     const REFERENCE_DOES_NOT_EXIST: &str = r#"{"message":"Reference does not exist"}"#;
@@ -1289,6 +1353,108 @@ mod tests {
         fake.forge().sync_fork(&test_repo(), "main").await;
 
         assert_eq!(fake.routes(), [format!("POST {MERGE_UPSTREAM_PATH}")]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn commit_files_resyncs_the_fork_before_replaying_the_sequence() {
+        // The 2026-08-22 announce failures: the fork sat behind upstream, so the
+        // base commit read from the index was out of reach and the sequence
+        // 404'd. Replaying it unchanged asks the same unreachable object again —
+        // the sync that makes it reachable has to run between the attempts.
+        let attempts = Arc::new(Mutex::new(0_usize));
+        let seen = Arc::clone(&attempts);
+        let fake = FakeForge::start(move |method, path| match (method, path) {
+            ("POST", MERGE_UPSTREAM_PATH) => (200, r#"{"merge_type":"fast-forward"}"#.to_string()),
+            ("GET", BASE_COMMIT_PATH) => {
+                let mut attempts = seen.lock().expect("counter not poisoned");
+                *attempts += 1;
+                if *attempts == 1 {
+                    // What a base object the fork cannot reach answers.
+                    (404, r#"{"message":"Not Found"}"#.to_string())
+                } else {
+                    (200, r#"{"tree":{"sha":"treesha"}}"#.to_string())
+                }
+            }
+            ("POST", BLOBS_PATH | TREES_PATH | COMMITS_PATH) => (201, r#"{"sha":"newsha"}"#.to_string()),
+            ("PATCH", UPDATE_PATH) => (200, r#"{"object":{"sha":"newsha"}}"#.to_string()),
+            _ => (599, r#"{"message":"unexpected request"}"#.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+        let upstream = RepoCoordinate {
+            host: None,
+            namespace: "acme".to_string(),
+            project: "index".to_string(),
+        };
+        let files = BTreeMap::from([("packages/acme/widget.json".to_string(), b"{}".to_vec())]);
+
+        let commit = fake
+            .forge()
+            .commit_files(
+                &test_repo(),
+                BRANCH,
+                CommitBase {
+                    repo: &upstream,
+                    sha: "basesha",
+                    branch: "main",
+                },
+                "announce acme/widget",
+                &files,
+                RefUpdate::FastForward,
+            )
+            .await
+            .expect("the replay commits once the fork can reach the base");
+
+        assert_eq!(commit, "newsha");
+        assert_eq!(
+            fake.routes(),
+            [
+                format!("GET {BASE_COMMIT_PATH}"),
+                format!("POST {MERGE_UPSTREAM_PATH}"),
+                format!("GET {BASE_COMMIT_PATH}"),
+                format!("POST {BLOBS_PATH}"),
+                format!("POST {TREES_PATH}"),
+                format!("POST {COMMITS_PATH}"),
+                format!("PATCH {UPDATE_PATH}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_spent_404_on_a_cross_repository_base_is_named_not_left_as_a_status() {
+        // A bare status naming an endpoint pointed every investigation at
+        // credentials, permissions, and rulesets — none of them involved.
+        let upstream = RepoCoordinate {
+            host: None,
+            namespace: "acme".to_string(),
+            project: "index".to_string(),
+        };
+        let base = |repo| CommitBase {
+            repo,
+            sha: "basesha",
+            branch: "main",
+        };
+        let status = |code: u16| ForgeError::Status {
+            url: "https://api/repos/forkuser/index/git/refs".to_string(),
+            status: code,
+            detail: String::new(),
+        };
+
+        let fork = test_repo();
+        let named = fork_base_unreachable(&status(404), &fork, base(&upstream), Some("HTTP status 409"))
+            .expect("a 404 on a base in another repository is the fork-behind shape");
+        let rendered = named.to_string();
+        assert!(rendered.contains("forkuser/index"), "{rendered}");
+        assert!(rendered.contains("main"), "{rendered}");
+        assert!(
+            rendered.contains("409"),
+            "the sync's own answer is the fact that explains it: {rendered}"
+        );
+
+        // A base in the repository being committed to cannot be a fork-reach
+        // problem, and a non-404 is some other fault — both keep their status.
+        assert!(fork_base_unreachable(&status(404), &fork, base(&fork), None).is_none());
+        assert!(fork_base_unreachable(&status(500), &fork, base(&upstream), None).is_none());
     }
 
     #[test]

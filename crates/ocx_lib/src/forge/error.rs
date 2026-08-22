@@ -146,6 +146,20 @@ pub enum ForgeError {
     /// re-reads the new head, regenerates, and retries.
     #[error("ref update for branch {branch} is not a fast-forward")]
     NonFastForward { branch: String },
+
+    /// A commit onto a fork exhausted its git-data retries on a 404 while its
+    /// base commit lived in another repository — what a fork left behind
+    /// upstream looks like from the git-data API, since the base object then
+    /// reaches the fork only through the shared fork network.
+    ///
+    /// Replaces the bare [`Self::Status`] this used to surface, which named an
+    /// endpoint and nothing else and so pointed every investigation at
+    /// credentials, permissions, or the index repository — none of which are
+    /// involved.
+    #[error(
+        "git write onto fork {fork} failed with 404: the base commit is not reachable there, which is what a fork behind upstream looks like — syncing {branch} from upstream reported: {sync}"
+    )]
+    ForkBaseUnreachable { fork: String, branch: String, sync: String },
 }
 
 /// How many characters of a forge's error body [`status_detail`] keeps.

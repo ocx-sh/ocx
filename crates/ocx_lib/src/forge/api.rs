@@ -82,6 +82,13 @@ pub struct CommitBase<'a> {
     pub repo: &'a RepoCoordinate,
     /// The base commit sha.
     pub sha: &'a str,
+    /// The branch in `repo` the base sha was read from.
+    ///
+    /// Only meaningful when `repo` is **not** the repository being committed to:
+    /// the base object then reaches the target only through the fork network, so
+    /// an implementation that has to sync a fork before it can parent off that
+    /// object needs the branch name to sync (see [`Forge::sync_fork`]).
+    pub branch: &'a str,
 }
 
 /// The forge operations `announce` drives.

@@ -58,6 +58,10 @@ _BLOBS_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGMENT})/git
 _TREES_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGMENT})/git/trees$")
 _COMMITS_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGMENT})/git/commits$")
 _REFS_CREATE_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGMENT})/git/refs$")
+# `POST /repos/<owner>/<repo>/merge-upstream` — GitHub's "Sync fork". The client
+# calls it before every fork announce and once before each git-data replay, so a
+# fake without this route answers 404 and the client warns on every run.
+_MERGE_UPSTREAM_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGMENT})/merge-upstream$")
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -192,6 +196,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         match = _PULLS_RE.fullmatch(path)
         if match:
             self.server.handle_post_pull(self, match.group("owner"), match.group("repo"), body)
+            return
+
+        if _MERGE_UPSTREAM_RE.fullmatch(path):
+            self._reply_json(200, {"merge_type": "fast-forward"})
             return
 
         self._reply_json(404, {"message": "not found"})
