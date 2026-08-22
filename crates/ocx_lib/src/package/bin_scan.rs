@@ -510,6 +510,10 @@ mod tests {
         "windows/amd64".parse().expect("windows/amd64 parses")
     }
 
+    // Both callers are `#[cfg(unix)]` (the wasm scans assert on unix file
+    // modes), so without the same gate this helper is dead code on Windows and
+    // `-D warnings` turns that into a build failure.
+    #[cfg(unix)]
     fn wasm_platform() -> Platform {
         "wasip1/wasm".parse().expect("wasip1/wasm parses")
     }
