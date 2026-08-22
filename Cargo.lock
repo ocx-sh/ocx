@@ -3712,6 +3712,7 @@ dependencies = [
  "oci-client",
  "p256",
  "pem",
+ "percent-encoding",
  "regex",
  "reqwest",
  "rpassword",

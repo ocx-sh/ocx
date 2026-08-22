@@ -61,6 +61,15 @@ def branch_name(package: str) -> str:
     return f"indexbot-announce-{package.replace('/', '-')}"
 
 
+def forge_args(forge: str | None) -> list[str]:
+    """`--forge <kind>` when a forge is named, nothing otherwise.
+
+    The default (no flag) is GitHub, so a GitHub scenario passes `None` and the
+    identical scenario passes `"gitlab"` — the one-flag difference that lets both
+    clients be held to one oracle."""
+    return [] if forge is None else ["--forge", forge]
+
+
 def announce(
     ocx: OcxRunner,
     fake_forge: FakeForge,
@@ -68,6 +77,7 @@ def announce(
     token: str | None = TOKEN,
     check: bool = True,
     extra_env: dict[str, str] | None = None,
+    forge: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Runs `ocx package announce`, pointed at `fake_forge` via the
     `__OCX_TESTING_FORGE_BASE_URL` test seam, with the `observed` timestamp
@@ -81,7 +91,9 @@ def announce(
         env_overrides["OCX_ANNOUNCE_TOKEN"] = token
     if extra_env:
         env_overrides.update(extra_env)
-    return ocx.run("package", "announce", *args, format="json", check=check, env_overrides=env_overrides)
+    return ocx.run(
+        "package", "announce", *forge_args(forge), *args, format="json", check=check, env_overrides=env_overrides
+    )
 
 
 def announce_json(ocx: OcxRunner, fake_forge: FakeForge, *args: str, **kwargs: Any) -> dict:

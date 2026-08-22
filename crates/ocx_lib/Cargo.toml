@@ -76,6 +76,7 @@ regex.workspace = true
 # Near-miss root suggestion in the unknown-token message (D13).
 strsim.workspace = true
 async-trait.workspace = true
+percent-encoding.workspace = true
 docker_credential.workspace = true
 secrecy.workspace = true
 base64.workspace = true

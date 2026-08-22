@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use anyhow::Context as _;
 use clap::Parser;
-use ocx_lib::forge::{ForgeToken, GitHubForge, RepoCoordinate};
+use ocx_lib::forge::{ForgeKind, ForgeToken, RepoCoordinate};
 use ocx_lib::{
     announce::{self, AnnounceRequest, AnnounceTarget, TagSelection},
     cli, oci,
@@ -82,17 +82,26 @@ pub struct PackageAnnounce {
     #[clap(long = "out", value_name = "DIRECTORY", conflicts_with = "fork")]
     out: Option<PathBuf>,
 
-    /// Open (or update) the pull request from this fork, as `<owner>/<repo>`.
-    /// Omit it to push the announce branch straight to `--index-repo` and open
-    /// the pull request from there, which needs push access on that repository.
-    /// Either way the change lands as a pull request, never a direct commit to
-    /// the index's default branch.
-    #[clap(long = "fork", value_name = "OWNER/REPO", conflicts_with = "out")]
+    /// Open (or update) the pull request from this fork, as
+    /// `[HOST/]NAMESPACE/PROJECT`. Omit it to push the announce branch straight
+    /// to `--index-repo` and open the pull request from there, which needs push
+    /// access on that repository. Either way the change lands as a pull or merge
+    /// request, never a direct commit to the index's default branch.
+    #[clap(long = "fork", value_name = "REPOSITORY", conflicts_with = "out")]
     fork: Option<RepoCoordinate>,
 
-    /// Index repository the pull request targets, as `<owner>/<repo>`.
-    #[clap(long = "index-repo", value_name = "OWNER/REPO", default_value = "ocx-sh/index")]
+    /// Index repository the pull request targets, as
+    /// `[HOST/]NAMESPACE/PROJECT`. Give the host for a self-hosted GitHub
+    /// Enterprise Server or GitLab instance; omit it for github.com. The
+    /// namespace may be a nested GitLab group path.
+    #[clap(long = "index-repo", value_name = "REPOSITORY", default_value = "ocx-sh/index")]
     index_repo: RepoCoordinate,
+
+    /// Which forge hosts the index repository. Inferred from the host in
+    /// `--index-repo` for github.com and gitlab.com; required for a self-hosted
+    /// instance, whose hostname says nothing about which forge runs there.
+    #[clap(long = "forge", value_name = "FORGE")]
+    forge: Option<ForgeKind>,
 
     /// Mark a tag as yanked. Repeat for multiple tags. Requires
     /// `--yank-reason`; only applies to a tag already in the curated set.
@@ -150,6 +159,42 @@ impl PackageAnnounce {
             trusted_hosts: trusted_hosts.clone(),
         };
 
+        // Argv faults are diagnosed BEFORE the credential check, so a malformed
+        // command line reports what is wrong with it (exit 64) rather than
+        // reporting a missing token the operator would then go and set only to
+        // hit the real error on the next run.
+        //
+        // The forge is resolved from the index coordinate, never from the fork:
+        // a fork always lives on the same instance as the repository it forks,
+        // and letting the two disagree would send the credential to one host
+        // while addressing repositories on another.
+        let kind = ForgeKind::resolve(self.forge, &self.index_repo)?;
+        kind.validate_coordinate(&self.index_repo)?;
+        if let Some(fork) = &self.fork {
+            kind.validate_coordinate(fork)?;
+            // The client is built for the index's host, so a fork naming another
+            // one was addressed on the index's instance regardless — writing to
+            // a repository the operator never named.
+            //
+            // Compared through `same_host`, never by `Option` equality: an
+            // omitted host MEANS the forge's canonical host, so `ocx-sh/index`
+            // with `--fork github.com/me/index` names one instance twice and must
+            // not be refused. Case folds for the same reason.
+            if !kind.same_host(fork, &self.index_repo) {
+                let named = |coordinate: &ocx_lib::forge::RepoCoordinate| {
+                    coordinate
+                        .host
+                        .clone()
+                        .unwrap_or_else(|| kind.canonical_host().to_string())
+                };
+                return Err(ocx_lib::forge::ForgeError::ForkHostMismatch {
+                    fork_host: named(fork),
+                    index_host: named(&self.index_repo),
+                }
+                .into());
+            }
+        }
+
         // A forge is needed for every mode (`--out` reads the committed root
         // over the contents API too); the token is required by every mode that
         // writes, which is every mode except `--out`.
@@ -163,11 +208,11 @@ impl PackageAnnounce {
             )
             .into());
         }
-        let forge = GitHubForge::new(ForgeToken::new(token.unwrap_or_default()))?;
+        let forge = kind.client(ForgeToken::new(token.unwrap_or_default()), &self.index_repo)?;
 
         let publisher = Publisher::new(announce_client(&context, trusted_hosts)?);
 
-        let outcome = announce::announce(&publisher, Some(&forge), request).await?;
+        let outcome = announce::announce(&publisher, Some(forge.as_ref()), request).await?;
 
         // Reserved tags are dropped, not refused — the run succeeded, so the
         // notice is a diagnostic on stderr and the drops also ride out in the
@@ -369,7 +414,7 @@ mod tests {
         ])
         .expect("valid invocation parses");
         assert!(
-            matches!(fork.target(), AnnounceTarget::Fork(coordinate) if coordinate.full_name() == "ocx-contrib/index")
+            matches!(fork.target(), AnnounceTarget::Fork(coordinate) if coordinate.full_path() == "ocx-contrib/index")
         );
     }
 
@@ -393,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn fork_parses_owner_repo() {
+    fn fork_parses_a_namespace_and_project() {
         let args = PackageAnnounce::try_parse_from([
             "announce",
             "--package",
@@ -405,8 +450,8 @@ mod tests {
         ])
         .expect("valid invocation parses");
         let fork = args.fork.expect("--fork given");
-        assert_eq!(fork.owner, "ocx-contrib");
-        assert_eq!(fork.repo, "index");
+        assert_eq!(fork.namespace, "ocx-contrib");
+        assert_eq!(fork.project, "index");
     }
 
     #[test]
@@ -414,8 +459,9 @@ mod tests {
         let args =
             PackageAnnounce::try_parse_from(["announce", "--package", "acme/widget", "--tags", "1.0.0", "--out", "d"])
                 .expect("valid invocation parses");
-        assert_eq!(args.index_repo.owner, "ocx-sh");
-        assert_eq!(args.index_repo.repo, "index");
+        assert_eq!(args.index_repo.host, None);
+        assert_eq!(args.index_repo.namespace, "ocx-sh");
+        assert_eq!(args.index_repo.project, "index");
     }
 
     #[test]

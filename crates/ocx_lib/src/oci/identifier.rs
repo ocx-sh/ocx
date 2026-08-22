@@ -418,12 +418,24 @@ fn validate_segments(input: &str) -> Result<(), IdentifierError> {
     Ok(())
 }
 
+/// Whether a leading path segment names a host rather than a path component.
+///
+/// The rule every caller shares: a segment is a host when it carries a `.` (a
+/// domain), a `:` (an explicit port), or is the bare name `localhost`. Anything
+/// else is an ordinary path segment. Exported because the forge coordinate
+/// grammar (`[HOST/]NAMESPACE/PROJECT`) asks the identical question, and two
+/// spellings of it would drift apart the first time either is relaxed.
+#[must_use]
+pub fn segment_is_host(segment: &str) -> bool {
+    segment.contains('.') || segment.contains(':') || segment == "localhost"
+}
+
 /// Checks whether the input contains an explicit registry in the first path segment.
 fn has_explicit_registry(input: &str) -> bool {
     let name_part = input.split_once('@').map_or(input, |(name, _)| name);
     match name_part.split_once('/') {
         None => false,
-        Some((first, _)) => first.contains('.') || first.contains(':') || first == "localhost",
+        Some((first, _)) => segment_is_host(first),
     }
 }
 

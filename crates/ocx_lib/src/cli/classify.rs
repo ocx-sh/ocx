@@ -1162,6 +1162,7 @@ mod tests {
         let err = AnnounceError::Forge(ForgeError::Status {
             url: "https://api.github.com/user".to_string(),
             status: 401,
+            detail: String::new(),
         });
         assert_eq!(classify(err), ExitCode::AuthError);
     }

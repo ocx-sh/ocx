@@ -114,6 +114,11 @@ rpassword = "7.5.3"
 zeroize = { version = "1.8", features = ["derive"] }
 pem = "3.0.6"
 url = { version = "2.5.8", features = ["serde"] }
+# Percent-encoding for GitLab REST path segments (a project path is one
+# URL-encoded `:id` segment). Already in the tree as `url`'s own dependency —
+# naming it directly adds no crate, and hand-rolling an escaper for a wire
+# format is the class of bug a maintained library exists to prevent.
+percent-encoding = "2.3.2"
 
 # Keyless Sigstore signing (issue #194). `default-features = false` + `rustls-tls`
 # avoids native-tls/openssl — the workspace is rustls-only. The RustCrypto crates

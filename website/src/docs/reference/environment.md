@@ -91,13 +91,25 @@ nested `ocx run` calls — honor the same opt-in.
 
 ### `OCX_ANNOUNCE_TOKEN` {#ocx-announce-token}
 
-A GitHub personal access token, read only by [`ocx package announce`][cmd-package-announce] when it opens or updates a pull request against the index repository — from a fork with `--fork`, or from a branch on the index repository itself when `--fork` is omitted. Writing locally with `--out` does not need one.
+A forge personal access token, read only by [`ocx package announce`][cmd-package-announce] when it opens or updates a pull or merge request against the index repository — from a fork with `--fork`, or from a branch on the index repository itself when `--fork` is omitted. Writing locally with `--out` does not need one.
+
+One variable serves both forges; which kind of token to put in it follows the forge the run targets:
+
+| Index forge | Token | Required scope |
+|---|---|---|
+| GitHub, GitHub Enterprise Server | Personal access token | `repo` (or fine-grained: read + pull-request write on the index and the fork) |
+| GitLab, self-managed GitLab | Personal, project or group access token | `api` |
+
+A GitLab **CI job token** (`CI_JOB_TOKEN`) does not work here. GitLab's job-token access table covers packages, releases, artifacts and environments; it lists none of repository files, commits, branches, merge requests or forking — every endpoint announce needs. Announcing from GitLab CI needs a real access token in a masked variable.
 
 ```sh
+# GitHub
 export OCX_ANNOUNCE_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# GitLab
+export OCX_ANNOUNCE_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
 ```
 
-This is the only credential surface for announce — the token never enters the registry credential store `ocx login` writes to, and is sent solely as a bearer header on requests to the index's forge, never logged or placed in a URL. Any mode other than `--out` fails immediately without this variable rather than falling back to an unauthenticated attempt. Without `--fork` the token must also carry push permission on the index repository, which announce verifies before writing anything.
+This is the only credential surface for announce — the token never enters the registry credential store `ocx login` writes to, and is sent solely as a request header (`Authorization: Bearer` on GitHub, `PRIVATE-TOKEN` on GitLab), never logged and never placed in a URL. Redirects are disabled on the forge client, so a cross-host redirect cannot replay the header at another host. A forge's error body is echoed back in diagnostics, so the token is redacted out of it first — a reverse proxy that reflects request headers cannot put your credential in a CI log. The host in `--index-repo` and `--fork` must be a well-formed hostname; anything that could shift the URL's authority (userinfo, a query, a path) is refused rather than interpreted. Any mode other than `--out` fails immediately without this variable rather than falling back to an unauthenticated attempt. Without `--fork` the token must also carry push permission on the index repository, which announce verifies before writing anything.
 
 ### `OCX_AUTH_<REGISTRY>_TYPE` {#ocx-auth-registry-type}
 

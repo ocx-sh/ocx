@@ -64,7 +64,7 @@ impl AnnounceReport {
             desc_status: status_label(outcome.desc_status).to_string(),
             pull_request_url: outcome.pull_request.as_ref().map(|pr| pr.html_url.clone()),
             pull_request_number: outcome.pull_request.as_ref().map(|pr| pr.number),
-            fork: outcome.fork.as_ref().map(|fork| fork.full_name.clone()),
+            fork: outcome.fork.as_ref().map(|fork| fork.full_path.clone()),
             written_paths: outcome.written_paths,
             reserved_tags_dropped: outcome.reserved_tags_dropped,
         }
@@ -126,9 +126,10 @@ mod tests {
                 updated: false,
             }),
             fork: Some(ForkIdentity {
-                full_name: "forkuser/index".to_string(),
-                owner: "forkuser".to_string(),
-                repo: "index".to_string(),
+                full_path: "forkuser/index".to_string(),
+                namespace: "forkuser".to_string(),
+                project: "index".to_string(),
+                id: None,
             }),
             written_paths: Vec::new(),
             reserved_tags_dropped: Vec::new(),
