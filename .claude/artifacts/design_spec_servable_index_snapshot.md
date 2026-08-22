@@ -1030,15 +1030,20 @@ the number a per-registry fan-out actually moves, and the number no spelling of 
 evade — which is what makes this half, and not the source-text denylists beside it, the thing holding
 C-024's multi-registry claim up.
 
-> **The `≤ 512` bound is vacuous, here and in C-024's own prescribed test.** 42 single-tag packages
-> cannot reach 512 even with the fan-out removed entirely, so the assertion passes against an
-> unbounded implementation — WP10 measured exactly that. C-024's 200-package version is vacuous for
-> the same reason. Two things are needed for a bound that bites: assert against
-> `INDEX_REFRESH_CONCURRENCY`, not 512, and make the fixture **hold** each request long enough for
-> overlap to exist — without a hold the peak is 1 however wide the loop is. WP10's measurements, kept
-> in the test so the numbers are reproducible rather than folklore: 7 real / 15 mutated at a 20 ms
-> hold, 8 / 26 at 200 ms. Reaching 512 at all would need multi-tag roots to exercise the nested
-> 64-wide fan-out.
+> **Resolved — the `≤ 512` bound was vacuous and no longer carries this scenario alone.** 42
+> single-tag packages cannot reach 512 even with the fan-out removed entirely, so that assertion
+> passed against an unbounded implementation — WP10 measured exactly that, and C-024's 200-package
+> version was vacuous for the same reason. The harness now asserts **`peak <= 16`** — the loop's own
+> constant (`INDEX_REFRESH_CONCURRENCY = 8`) with room for scheduling — behind a **`peak > 1`
+> non-vacuity precondition**, and `test_two_registries_overlap_rather_than_draining_one_at_a_time`
+> carries the matching **lower** bound of `peak >= 6` over eight packages split across two
+> registries, which is what separates a flattened set from a per-registry drain. `≤ 512` stays
+> beside them as the contract's *stated* ceiling, no longer as the falsifiable one. Two things made
+> the bound bite: asserting against `INDEX_REFRESH_CONCURRENCY` rather than 512, and making the
+> fixture **hold** each request long enough for overlap to exist — without a hold the peak is 1
+> however wide the loop is. WP10's measurements, kept in the test so the numbers are reproducible
+> rather than folklore: 7 real / 15 mutated at a 20 ms hold, 8 / 26 at 200 ms. Reaching 512 at all
+> would need multi-tag roots to exercise the nested 64-wide fan-out.
 
 ### S-005 — Policy asymmetry, asserted together
 
