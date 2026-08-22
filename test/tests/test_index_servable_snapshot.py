@@ -37,6 +37,22 @@ Scenario coverage (`design_spec` §7), one test per scenario unless noted:
 | S-018 | `test_the_dry_run_grammar_refusals_and_offline` |
 | S-019 | `test_only_the_update_path_creates_config_json` |
 
+A **second, unrelated** `S-` series also lands in this file: the sync-performance
+scenarios of `adr_index_sync_performance.md` §8, which reuse the same numbers
+with different meanings. Those tests live in the last section and every one of
+them says `sync-perf S-0NN` in its docstring; a bare `S-0NN` is always the
+snapshot spec's.
+
+| sync-perf scenario | Test |
+|---|---|
+| S-001 | `test_an_unchanged_resync_fetches_no_dispatch_object` |
+| S-002 | `test_a_refused_dispatch_object_costs_its_own_tag_and_no_other` |
+| S-003 | `test_a_transient_unavailable_is_absorbed_without_an_operator_warning` |
+| S-005 | `test_a_slow_but_progressing_root_outlives_the_retired_total_deadline` |
+| S-007 | `test_a_corrupt_local_dispatch_object_is_repaired_without_a_warning` |
+| S-009 | `test_a_dry_run_previews_the_catalog_and_writes_nothing` (request-count half) |
+| C-027 | `test_reading_semantics_are_unchanged_by_the_sync_rework` |
+
 **Two scenario halves are not runnable here and are not claimed anywhere
 below.** S-002's first half ("a tree built by a *pre-change* ocx resolves as
 not-found") and S-010's first half ("a tree carrying `config.json` is read by a
@@ -60,6 +76,8 @@ import json
 import os
 import shutil
 import sys
+import time
+from collections import Counter
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
@@ -189,6 +207,49 @@ def error_messages(stderr: str) -> list[str]:
     stripped — what an operator reads, comparable across invocations.
     """
     return [line.split(" ERROR ", 1)[1] for line in stderr.splitlines() if " ERROR " in line]
+
+
+def warning_messages(stderr: str) -> list[str]:
+    """The `WARN`-level lines, same treatment as `error_messages`.
+
+    Two sync-perf scenarios turn on a state being absorbed *silently*, and
+    silence is only a claim against the level that would otherwise carry the
+    noise — hence a reader for that level rather than a substring search over
+    the whole stream.
+    """
+    return [line.split(" WARN ", 1)[1] for line in stderr.splitlines() if " WARN " in line]
+
+
+def dispatch_object_requests(server: static_index.StaticIndexServer) -> list[str]:
+    """Every `p/<repository>/o/sha256/<hex>.json` the fixture has served as a
+    **body GET**.
+
+    Method-filtered on purpose. "Zero dispatch-object fetches" is a claim about
+    bodies transferred, so a counter that lumped a HEAD in with a GET could not
+    tell a skipped object from a probed one. The fixture records both methods
+    (`RequestRecord.method`), so the two are separable here and a HEAD still
+    shows up in any assertion made over the whole request log.
+    """
+    return [record.path for record in server.requests if record.method == "GET" and "/o/sha256/" in record.path]
+
+
+def root_document_requests(server: static_index.StaticIndexServer) -> list[str]:
+    """Every `p/<repository>.json` the fixture has served as a body GET — root
+    documents only, not the dispatch objects under the same `p/` prefix.
+    """
+    return [
+        record.path
+        for record in server.requests
+        if record.method == "GET" and record.path.startswith("/p/") and "/o/sha256/" not in record.path
+    ]
+
+
+def dispatch_object_path(repository: str, content_digest: str) -> str:
+    """The served path of one tag's dispatch object, from the digest its root
+    pins. Derived rather than globbed: a glob picks an arbitrary sibling, and
+    every assertion below is about one specific object.
+    """
+    return f"/p/{repository}/o/sha256/{content_digest.split(':', 1)[1]}.json"
 
 
 def leaf_blob_data_file(ocx_home: Path, leaf_digest: str) -> Path:
@@ -1530,12 +1591,21 @@ def test_a_dry_run_previews_the_catalog_and_writes_nothing(
     ocx.plain("--index", str(index_dir), "index", "update", entries[repositories[0]].logical_id)
     before = snapshot(index_dir)
 
+    del index_server.requests[:]
     preview = ocx.run("--index", str(index_dir), "index", "sync", NAMESPACE, "--dry-run")
     assert preview.returncode == 0
     assert json.loads(preview.stdout) == [{"registry": NAMESPACE, "packages": sorted(repositories)}], (
         f"the preview must list every package the source catalog holds, sorted: {preview.stdout}"
     )
     assert snapshot(index_dir) == before, "a dry run opens nothing under the index home for write"
+    # sync-perf S-009's other half, and the one an "index home untouched" check
+    # cannot see: enumeration runs and the refresh loop does not. A dry run that
+    # fetched every root would still write nothing, so only the request log
+    # separates "previewed" from "did the work and discarded it".
+    assert sorted(record.path for record in index_server.requests) == ["/c/index.json", "/config.json"], (
+        "a dry run costs exactly the enumeration — the source's format declaration and its catalog: "
+        f"{[record.path for record in index_server.requests]}"
+    )
     assert "patch sync" not in preview.stderr, (
         "the dry run must return before the patch-descriptor piggyback, which writes outside the "
         f"index home: {preview.stderr}"
@@ -1655,3 +1725,433 @@ def test_only_the_update_path_creates_config_json(
 
     ocx.plain("--index", str(index_dir), "index", "update", entries[repositories[0]].logical_id)
     assert config_path.is_file(), "the update path, and only it, declares the tree an OCX index"
+
+
+# ---------------------------------------------------------------------------
+# `adr_index_sync_performance.md` §8 — the sync-perf scenarios
+#
+# A SECOND `S-` series, colliding with this file's own by number and meaning.
+# Every ID below is written `sync-perf S-0NN` and belongs to
+# `adr_index_sync_performance.md`; a bare `S-0NN` anywhere above is the
+# snapshot spec's.
+#
+# What every one of these is really asserting is a REQUEST COUNT. Each scenario
+# succeeded before the change too — the pre-change sync fetched every dispatch
+# object it already held, and still exited 0. Outcome assertions therefore
+# cannot see the work, so they are the control here and the counts are the
+# claim.
+# ---------------------------------------------------------------------------
+
+
+def test_an_unchanged_resync_fetches_no_dispatch_object(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
+) -> None:
+    """sync-perf S-001 (A3). Re-syncing a source whose every package the local
+    copy already holds, unchanged, costs **one** `config.json`, **one**
+    `c/index.json`, **one root GET per package** and **zero** dispatch-object
+    GETs — and rewrites nothing under the index home.
+
+    The zero is the whole scenario. Before the gate, the second run refetched
+    all D dispatch objects, hashed them, and wrote back bytes identical to the
+    ones already on disk; it exited 0 either way, so nothing about the outcome
+    distinguishes the two. The cold sync above the assertion is the control
+    that keeps the zero from being a fixture that serves no objects at all.
+
+    The byte-and-mtime comparison carries the other half of the scenario's
+    promise: `CatalogTransaction::commit` writes nothing when the merged map
+    equals what it read, and `merge_root` returns `None` when nothing in scope
+    changed, so a re-sync leaves a served tree's cache validators untouched.
+    """
+    configure_index_source(ocx, index_server.base_url, insecure_host=index_server.host)
+    repositories = [f"{unique_repo}/pkg{number}" for number in range(4)]
+    entries = publish(index_server.root, repositories, registry=ocx.registry)
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    ocx.plain("--index", str(index_dir), "index", "sync", NAMESPACE)
+
+    assert sorted(dispatch_object_requests(index_server)) == sorted(
+        dispatch_object_path(repository, entries[repository].index_digest) for repository in repositories
+    ), (
+        "control: the FIRST sync fetches every dispatch object, so the zero asserted below is a "
+        "property of the second run and not of a fixture that serves none"
+    )
+
+    before = snapshot(index_dir)
+    del index_server.requests[:]
+    result = ocx.plain("--index", str(index_dir), "index", "sync", NAMESPACE, check=False)
+
+    assert result.returncode == 0, f"an unchanged re-sync succeeds: rc={result.returncode}\n{result.stderr}"
+    assert dispatch_object_requests(index_server) == [], (
+        "every dispatch object the catalog's roots pin is already on disk and hash-verified, so a "
+        f"re-sync must fetch none of them; the fixture served {dispatch_object_requests(index_server)}"
+    )
+    # Over METHOD and path together, so the claim cannot be evaded by a request
+    # shape the count does not look at: a HEAD against a dispatch object is a
+    # fetch this scenario forbids just as much as a GET is, and it would land in
+    # this multiset as a `("HEAD", ...)` key with no counterpart on the right.
+    assert Counter((record.method, record.path) for record in index_server.requests) == Counter(
+        [
+            ("GET", "/config.json"),
+            ("GET", "/c/index.json"),
+            *(("GET", f"/p/{repository}.json") for repository in repositories),
+        ]
+    ), (
+        "the whole cost of an unchanged re-sync is one config.json, one catalog and one root per "
+        f"package: {sorted(Counter((r.method, r.path) for r in index_server.requests).items())}"
+    )
+    assert snapshot(index_dir) == before, (
+        "an unchanged re-sync rewrites nothing — the tree stays byte- and mtime-identical"
+    )
+
+
+def test_a_refused_dispatch_object_costs_its_own_tag_and_no_other(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
+) -> None:
+    """sync-perf S-002 (A7). One tag's dispatch object is unretrievable: every
+    other tag of that package is still pinned, the failing tag is not, the run
+    exits non-zero, and the other packages in the catalog are untouched.
+
+    **The refusal is a 403 and not the 404 the scenario text names, and that is
+    a correction rather than a convenience.** On the published wire an absent
+    `o/` object is not an error at all — it is how a single-platform (leaf) tag
+    looks, since a leaf's `content` is its own manifest digest and no leaf is
+    ever copied into `o/` (A3/B2). Measured against this branch, a 404'd
+    dispatch object exits **0** and pins the tag. So "404" cannot be the
+    fixture for a failing tag; only a refusal the client may not read as
+    absence can be, which is exactly the distinction
+    `StaticIndexServer.refusals` exists to model. 403 additionally sits outside
+    the retryable set, so the count below is 1 and not 3 — the failure is
+    reached once, deliberately, rather than through the ladder.
+    """
+    configure_index_source(ocx, index_server.base_url, insecure_host=index_server.host)
+    partial = f"{unique_repo}/partial"
+    untouched = f"{unique_repo}/untouched"
+    entry = static_index.write_package(
+        index_server.root,
+        repository=partial,
+        tag="1.0.0",
+        physical_repository=f"oci://{ocx.registry}/{partial}",
+        platform_digest="sha256:" + hashlib.sha256(partial.encode()).hexdigest(),
+        extra_tags=["2.0.0", "3.0.0"],
+    )
+    sibling = static_index.write_package(
+        index_server.root,
+        repository=untouched,
+        tag="1.0.0",
+        physical_repository=f"oci://{ocx.registry}/{untouched}",
+        platform_digest="sha256:" + hashlib.sha256(untouched.encode()).hexdigest(),
+    )
+    static_index.write_catalog(
+        index_server.root, {partial: entry.root_digest, untouched: sibling.root_digest}
+    )
+    static_index.write_config(index_server.root)
+
+    refused = dispatch_object_path(partial, entry.tag_digests["2.0.0"])
+    index_server.refusals[refused] = 403
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    result = ocx.plain("--index", str(index_dir), "index", "sync", NAMESPACE, check=False)
+
+    assert result.returncode == 69, (
+        f"an unretrievable dispatch object fails the run: rc={result.returncode}\n{result.stderr}"
+    )
+    subtree = index_dir / NAMESPACE
+    partial_root = subtree / "p" / f"{partial}.json"
+    assert partial_root.is_file(), (
+        "the package's root is committed at all: one tag's failure must not roll back the tags that "
+        "succeeded, and rolling them back looks exactly like never writing the root"
+    )
+    assert sorted(json.loads(partial_root.read_text())["tags"]) == ["1.0.0", "3.0.0"], (
+        "the tags whose objects landed keep their pins and the failing tag gets none — a sibling's "
+        "failure must not throw away the work the others completed, and a tag may never be pinned "
+        "without the object its pin resolves through"
+    )
+    for tag in ("1.0.0", "3.0.0"):
+        held = subtree / "p" / partial / "o" / "sha256" / f"{entry.tag_digests[tag].split(':', 1)[1]}.json"
+        assert held.is_file(), f"tag {tag} is pinned, so its dispatch object must be on disk"
+    withheld = subtree / "p" / partial / "o" / "sha256" / f"{entry.tag_digests['2.0.0'].split(':', 1)[1]}.json"
+    assert not withheld.exists(), "the refused object is not on disk, which is why its tag is not pinned"
+
+    assert (subtree / "p" / f"{untouched}.json").is_file(), "the other package refreshes on its own terms"
+    assert (
+        subtree / "p" / untouched / "o" / "sha256" / f"{sibling.index_digest.split(':', 1)[1]}.json"
+    ).is_file(), "and lands its dispatch object — one package's failure is not the batch's"
+    assert sorted(static_index.read_catalog(subtree / "c" / "index.json")) == sorted([partial, untouched]), (
+        "both packages hold a catalog entry: the partial commit narrows what is pinned, never what "
+        "the catalog lists"
+    )
+
+    assert dispatch_object_requests(index_server).count(refused) == 1, (
+        "403 is outside the retryable set, so the refused object is asked for exactly once"
+    )
+
+
+def test_a_transient_unavailable_is_absorbed_without_an_operator_warning(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
+) -> None:
+    """sync-perf S-003 (A5). A handful of `503`s mid-sync are retried and the
+    run exits **0**, with no operator-facing diagnostic — a retried transient is
+    a common benign state, and one warning per retry across a wide fan-out is
+    noise rather than signal.
+
+    Three assertions, and each one needs the other two. The exit code alone
+    passes on a build with no ladder at all if nothing ever fails; the served
+    log is what proves the fixture really did refuse and really was re-asked
+    (`503` then `200` on the same path); and the silence is only meaningful
+    against a control showing the retry *is* recorded — at `debug`. Without
+    that last one, "no warning" is indistinguishable from a retry that never
+    happened.
+    """
+    configure_index_source(ocx, index_server.base_url, insecure_host=index_server.host)
+    repositories = [f"{unique_repo}/pkg{number}" for number in range(3)]
+    entries = publish(index_server.root, repositories, registry=ocx.registry)
+    flaky = {
+        "/c/index.json",
+        f"/p/{repositories[0]}.json",
+        dispatch_object_path(repositories[1], entries[repositories[1]].index_digest),
+    }
+    for path in flaky:
+        index_server.transient_refusals[path] = [503]
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    result = ocx.plain("--index", str(index_dir), "index", "sync", NAMESPACE, check=False)
+
+    assert result.returncode == 0, (
+        f"a transient 503 is retried, not surfaced: rc={result.returncode}\n{result.stderr}"
+    )
+    served = Counter((record.path, record.status) for record in index_server.requests)
+    for path in sorted(flaky):
+        assert served[(path, 503)] == 1 and served[(path, 200)] == 1, (
+            f"{path} must have been refused once and then served: {sorted(served.items())}"
+        )
+    for repository in repositories:
+        assert (index_dir / NAMESPACE / "p" / f"{repository}.json").is_file(), (
+            f"{repository} landed despite the transient failures"
+        )
+    assert warning_messages(result.stderr) == [], (
+        f"a retried transient must not reach the operator: {result.stderr}"
+    )
+    assert error_messages(result.stderr) == [], f"nor as an error: {result.stderr}"
+
+    # Control for the silence: the same run at `debug` records every retry. A
+    # needle asserted absent needs a run where it is present, or "no warning"
+    # and "no retry" look the same from here.
+    for path in flaky:
+        index_server.transient_refusals[path] = [503]
+    verbose_dir = tmp_path / "verbose_dir"
+    verbose_dir.mkdir()
+    verbose = ocx.plain(
+        "--log-level", "debug", "--index", str(verbose_dir), "index", "sync", NAMESPACE, check=False
+    )
+    assert verbose.returncode == 0
+    assert "retrying index request" in verbose.stderr, (
+        "control: the retry IS recorded, at debug — so the quiet run above is a level decision and "
+        f"not a ladder that never ran: {verbose.stderr}"
+    )
+    assert warning_messages(verbose.stderr) == [], (
+        "and raising the level is not a way for it to become a warning"
+    )
+
+
+def test_a_slow_but_progressing_root_outlives_the_retired_total_deadline(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
+) -> None:
+    """sync-perf S-005 (A6). A root document that takes longer to arrive than
+    the **retired 60 s hard total deadline**, but never stalls past the idle
+    bound, now succeeds.
+
+    This test costs its wall clock — a bit over a minute — and there is no way
+    around that at this tier: the two bounds are compile-time constants and the
+    only injection seam (`ReqwestIndexTransport::with_hardening`) is private to
+    the crate, so a fixture in Python has to out-wait the real deadline to say
+    anything at all. The unit tier asserts the same semantics in milliseconds;
+    what only this tier can show is that the shipped binary carries them.
+
+    The pacing is what makes it a *slow* link rather than a stalled one: the
+    body arrives in `SLOW_ROOT_CHUNKS` pieces with `SLOW_ROOT_GAP_SECONDS`
+    between them, every gap comfortably inside the 30 s idle bound and every
+    piece real progress. The measured elapsed time is asserted, not assumed —
+    a fixture that quietly served the body at once would otherwise make the
+    scenario pass without ever crossing the deadline it is about.
+    """
+    slow_chunks = 5
+    slow_gap_seconds = 16.0
+    retired_total_deadline_seconds = 60
+
+    configure_index_source(ocx, index_server.base_url, insecure_host=index_server.host)
+    repositories = [f"{unique_repo}/slow", f"{unique_repo}/brisk"]
+    publish(index_server.root, repositories, registry=ocx.registry)
+    index_server.slow_bodies[f"/p/{repositories[0]}.json"] = (slow_chunks, slow_gap_seconds)
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    began = time.monotonic()
+    result = ocx.plain("--index", str(index_dir), "index", "sync", NAMESPACE, check=False)
+    elapsed = time.monotonic() - began
+
+    assert elapsed > retired_total_deadline_seconds, (
+        "precondition: the fixture has to hold the transfer open longer than the deadline this "
+        f"scenario is about, or the success below proves nothing. Elapsed {elapsed:.1f}s"
+    )
+    assert result.returncode == 0, (
+        f"a slow-but-progressing link must not be aborted at a fixed total deadline: "
+        f"rc={result.returncode} after {elapsed:.1f}s\n{result.stderr}"
+    )
+    for repository in repositories:
+        assert (index_dir / NAMESPACE / "p" / f"{repository}.json").is_file(), (
+            f"{repository} landed — the slow root as much as the brisk one"
+        )
+    assert root_document_requests(index_server).count(f"/p/{repositories[0]}.json") == 1, (
+        "the slow root arrives on its first attempt: a timeout followed by a retry would also end "
+        "in success, and would be a different (and worse) behaviour than the one under test"
+    )
+
+
+def test_a_corrupt_local_dispatch_object_is_repaired_without_a_warning(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
+) -> None:
+    """sync-perf S-007 (A3's `Err` arm). A truncated `o/` object is refetched
+    and repaired on the next sync; every other object is still skipped; the
+    exit code is unaffected and no warning is emitted.
+
+    The gate is `read_dispatch_object`, never `Path::exists()`, and this is the
+    difference between the two made observable: an existence check reads a
+    truncated file as "already held", strands the corruption forever — nothing
+    else repairs it — and leaves the run green while the pin no longer
+    resolves. Here the corrupt object costs exactly one refetch and its
+    siblings cost none, which is a shape neither an existence check nor an
+    unconditional refetch can produce.
+    """
+    configure_index_source(ocx, index_server.base_url, insecure_host=index_server.host)
+    repositories = [f"{unique_repo}/pkg{number}" for number in range(3)]
+    entries = publish(index_server.root, repositories, registry=ocx.registry)
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    ocx.plain("--index", str(index_dir), "index", "sync", NAMESPACE)
+
+    damaged = repositories[1]
+    content_hex = entries[damaged].index_digest.split(":", 1)[1]
+    object_path = index_dir / NAMESPACE / "p" / damaged / "o" / "sha256" / f"{content_hex}.json"
+    intact = object_path.read_bytes()
+    object_path.write_bytes(intact[: len(intact) // 2])
+    assert hashlib.sha256(object_path.read_bytes()).hexdigest() != content_hex, (
+        "precondition: the file on disk no longer hashes to the digest its root pins"
+    )
+
+    del index_server.requests[:]
+    result = ocx.plain("--index", str(index_dir), "index", "sync", NAMESPACE, check=False)
+
+    assert result.returncode == 0, (
+        f"a self-heal is not a failure: rc={result.returncode}\n{result.stderr}"
+    )
+    assert dispatch_object_requests(index_server) == [
+        dispatch_object_path(damaged, entries[damaged].index_digest)
+    ], (
+        "exactly one object is refetched — the corrupt one. Its intact siblings are skipped, and "
+        f"the corrupt file is not: {dispatch_object_requests(index_server)}"
+    )
+    assert object_path.read_bytes() == intact, "the refetch overwrote the truncated file with the real bytes"
+    assert warning_messages(result.stderr) == [], (
+        f"a repaired object is a common benign state: debug and self-heal, never a WARN: {result.stderr}"
+    )
+    assert error_messages(result.stderr) == [], f"nor an error: {result.stderr}"
+
+
+def test_reading_semantics_are_unchanged_by_the_sync_rework(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
+) -> None:
+    """C-027 — the non-regression guard the whole initiative is held to: the
+    index is central, and **existing read behaviour does not change**. Three
+    claims, asserted end to end against a synced home.
+
+    (a) *Local tags are read first.* A resolve the local copy can answer
+    contacts no source — proved twice over, because either half alone is weak:
+    the request log shows nothing was asked of a source that was up and
+    answering, and the same resolve repeated against a **dead** source still
+    succeeds, which a lazily-cached-but-still-dialling implementation could
+    not do.
+
+    (b) *Offline capability.* `--offline index sync` refuses ahead of any
+    network contact (81, zero requests), and every resolve the local copy can
+    answer still succeeds under the same flag.
+
+    (c) *`index update`'s remote default.* Unchanged grammar — the verb takes
+    package identifiers and no options at all — and unchanged source selection:
+    a bare `index update` goes to the configured index source and pins from it.
+    """
+    configure_index_source(ocx, index_server.base_url, insecure_host=index_server.host)
+    repositories = [f"{unique_repo}/pkg{number}" for number in range(3)]
+    entries = publish(index_server.root, repositories, registry=ocx.registry)
+    resolved, offline_read, later = (entries[repository] for repository in repositories)
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    # `later` is deliberately excluded from this sync, so (c) has a package the
+    # local copy cannot answer for and the remote fetch is observable.
+    ocx.plain("--index", str(index_dir), "index", "update", resolved.logical_id, offline_read.logical_id)
+
+    # ── (a) local first ──────────────────────────────────────────────────────
+    del index_server.requests[:]
+    listed = ocx.plain(
+        "--index", str(index_dir), "index", "list", resolved.logical_id, "--platforms", check=False
+    )
+    assert listed.returncode == 0, f"a locally-held tag resolves: {listed.stderr}"
+    assert "linux/amd64" in listed.stdout, (
+        f"precondition: the resolve really produced the tag's platform, so the silence below is a "
+        f"resolve that happened locally rather than one that did nothing: {listed.stdout}"
+    )
+    assert index_server.requests == [], (
+        "a resolve answerable from the local copy must contact no source; the fixture was asked for "
+        f"{[record.path for record in index_server.requests]}"
+    )
+
+    # The same resolve with the source pointed at a port nothing listens on. A
+    # request log can only say the source was not asked; this says it could not
+    # have been.
+    configure_index_source(ocx, "http://127.0.0.1:1", insecure_host="127.0.0.1:1")
+    dead = ocx.plain(
+        "--index", str(index_dir), "index", "list", resolved.logical_id, "--platforms", check=False
+    )
+    assert dead.returncode == 0 and "linux/amd64" in dead.stdout, (
+        f"the local copy answers with no reachable source at all: rc={dead.returncode}\n{dead.stderr}"
+    )
+
+    # ── (b) offline ──────────────────────────────────────────────────────────
+    configure_index_source(ocx, index_server.base_url, insecure_host=index_server.host)
+    del index_server.requests[:]
+    refused = ocx.plain("--offline", "--index", str(index_dir), "index", "sync", NAMESPACE, check=False)
+    assert refused.returncode == 81, (
+        f"--offline refuses the whole command: rc={refused.returncode}\n{refused.stderr}"
+    )
+    assert index_server.requests == [], (
+        "and refuses BEFORE any network contact; the fixture was asked for "
+        f"{[record.path for record in index_server.requests]}"
+    )
+    offline_listed = ocx.plain(
+        "--offline", "--index", str(index_dir), "index", "list", offline_read.logical_id, "--platforms",
+        check=False,
+    )
+    assert offline_listed.returncode == 0 and "linux/amd64" in offline_listed.stdout, (
+        f"every locally-answerable resolve still succeeds offline: {offline_listed.stderr}"
+    )
+
+    # ── (c) `index update`'s grammar and default source ──────────────────────
+    options = ocx.plain("index", "update", "-h").stdout.split("Options:", 1)[1]
+    assert sorted({word for word in options.split() if word.startswith("--")}) == ["--help"], (
+        f"`index update` takes package identifiers and no options; its help now lists: {options}"
+    )
+
+    del index_server.requests[:]
+    updated = ocx.plain("--index", str(index_dir), "index", "update", later.logical_id, check=False)
+    assert updated.returncode == 0, f"a bare `index update` succeeds: {updated.stderr}"
+    assert root_document_requests(index_server) == [f"/p/{later.repository}.json"], (
+        "with no flags, `index update` goes to the configured index source for the package it names "
+        f"and no other: {[record.path for record in index_server.requests]}"
+    )
+    assert (index_dir / NAMESPACE / "p" / f"{later.repository}.json").is_file(), (
+        "and pins it from there"
+    )

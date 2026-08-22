@@ -103,6 +103,14 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 # Mozilla CA roots compiled into the binary so TLS works without a system
 # trust store (minimal container / CI runner without ca-certificates).
 webpki-root-certs = "1"
+# Test-only (ocx_lib `[dev-dependencies]`). An HTTP/2 *server* the retry
+# ladder's classifier can be driven against: no HTTP/1.1 fixture can produce a
+# `GOAWAY`/`RST_STREAM`, so without one the h2 branch of
+# `is_retryable_transport_error` has no reachable red state. Both crates are
+# already in the tree under `reqwest`'s `http2` feature — these edges add no
+# crate to the dependency graph and none to the shipped binary.
+h2 = "0.4.15"
+http = "1.5"
 
 # Crypto / encoding
 sha2 = "0.11.0"

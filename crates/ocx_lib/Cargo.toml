@@ -163,5 +163,21 @@ windows-sys.workspace = true
 # `script::dependency_hygiene_tests::anyhow_is_dev_dependency_only`.
 anyhow.workspace = true
 
+# `test-util` ONLY — `tokio::time::pause()` for the retry ladder's virtual-clock
+# tests (`oci/transport_policy.rs`). Real time makes the `Retry-After` contract
+# cost >= 3 s per case and the jitter contract >= 20 sleeps, and makes both
+# timing-flaky; virtual time tells "slept 2 s" from "returned immediately"
+# deterministically. Not in `features = ["full"]`, and deliberately dev-only:
+# `pause()` reachable from production code would be a runtime footgun.
+tokio = { workspace = true, features = ["test-util"] }
+
+# The HTTP/2 peer behind `oci/transport_policy.rs`'s `h2_wire_tests`. A
+# `GOAWAY` or `RST_STREAM` is only expressible by an h2 server, and it is the
+# failure a CDN emits when it recycles an edge connection — so this is the only
+# way the retry classifier's h2 branch has a reachable red state at all.
+# Test-only on purpose: production speaks h2 through `reqwest`, never directly.
+h2.workspace = true
+http.workspace = true
+
 [lints]
 workspace = true

@@ -152,10 +152,13 @@ type WatchValue<V> = Option<Result<V, Error>>;
 /// are coalesced: the first caller becomes the leader, subsequent callers
 /// block on a `tokio::sync::watch` channel until the leader broadcasts.
 ///
-/// Resolved entries are retained for the group's lifetime so that later
-/// callers (e.g. diamond dependencies discovered deeper in the tree) get
-/// an instant cache hit instead of re-doing work. Scope the group to a
-/// single logical operation so entries are freed when the group is dropped.
+/// A **successful** entry is retained for the group's lifetime so that later
+/// callers (e.g. diamond dependencies discovered deeper in the tree) get an
+/// instant cache hit instead of re-doing work. A failed or abandoned entry is
+/// **not** an answer: the next caller to ask for that key drops it and is
+/// handed fresh leadership, so the work is retried. Concurrent waiters already
+/// blocked on the leader still receive its error — one in-flight operation,
+/// one outcome.
 ///
 /// # Synchronization
 ///
@@ -199,6 +202,17 @@ where
         }
     }
 
+    /// Registers `key` as in-flight and hands back the leadership handle.
+    ///
+    /// Inserting over an existing entry is deliberate — see the failed-entry
+    /// arm of [`try_acquire`](Self::try_acquire): replacing in place leaves
+    /// `entries.len()` unchanged, so a failed key never holds a capacity slot.
+    fn lead(entries: &mut HashMap<K, watch::Receiver<WatchValue<V>>>, key: K) -> Acquisition<V> {
+        let (tx, rx) = watch::channel(None);
+        entries.insert(key, rx);
+        Acquisition::Leader(Handle { sender: Some(tx) })
+    }
+
     /// Attempt to acquire leadership for the given key.
     ///
     /// Returns [`Acquisition::Leader`] if this task is responsible for
@@ -207,20 +221,28 @@ where
     pub async fn try_acquire(&self, key: K) -> Result<Acquisition<V>, Error> {
         let mut rx = {
             let mut entries = self.entries.lock().await;
-            if let Some(rx) = entries.get(&key) {
-                let current = rx.borrow().clone();
-                match current {
-                    Some(Ok(value)) => return Ok(Acquisition::Resolved(value)),
-                    Some(Err(e)) => return Err(e),
-                    None => rx.clone(),
+            // Read the entry's state out first so the map borrow ends before
+            // the failed-entry arm re-inserts under the same key.
+            let existing = entries.get(&key).map(|rx| (rx.borrow().clone(), rx.clone()));
+            match existing {
+                Some((Some(Ok(value)), _)) => return Ok(Acquisition::Resolved(value)),
+                // A resolved-to-error entry is not an answer, it is the absence
+                // of one: drop it and hand this caller fresh leadership so the
+                // work is retried. Only a success is memoized. Waiters already
+                // blocked on the OLD channel hold their own receiver clone and
+                // never re-consult the map, so they still receive the leader's
+                // `Failed`/`Abandoned` verbatim — one in-flight operation still
+                // yields one outcome, and only callers of a *later* operation
+                // stop inheriting it.
+                Some((Some(Err(_)), _)) => return Ok(Self::lead(&mut entries, key)),
+                // In flight: wait on the leader's channel.
+                Some((None, rx)) => rx,
+                None => {
+                    if entries.len() >= self.max_entries {
+                        return Err(Error::CapacityExceeded { max: self.max_entries });
+                    }
+                    return Ok(Self::lead(&mut entries, key));
                 }
-            } else {
-                if entries.len() >= self.max_entries {
-                    return Err(Error::CapacityExceeded { max: self.max_entries });
-                }
-                let (tx, rx) = watch::channel(None);
-                entries.insert(key, rx);
-                return Ok(Acquisition::Leader(Handle { sender: Some(tx) }));
             }
         };
 
@@ -404,17 +426,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subsequent_acquire_after_failure_returns_error() {
+    async fn subsequent_acquire_after_failure_returns_a_fresh_leader() {
         let g = group(10);
         let Acquisition::Leader(handle) = g.try_acquire(key("key-a")).await.unwrap() else {
             panic!("expected Leader");
         };
         handle.fail(TestError("boom"));
 
-        let err = g.try_acquire(key("key-a")).await.unwrap_err();
+        // A failure is the absence of an answer, not a cached one: the next
+        // caller leads a retry rather than inheriting the leader's error.
+        let acquisition = g.try_acquire(key("key-a")).await.unwrap();
         assert!(
-            matches!(err, Error::Failed(ref shared) if shared.to_string() == "boom"),
-            "expected Failed with message, got: {err:?}"
+            matches!(acquisition, Acquisition::Leader(_)),
+            "a failed key must be retryable, not poisoned for the group's lifetime"
         );
     }
 
@@ -435,20 +459,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_error_is_durable_across_multiple_acquires() {
+    async fn failed_key_is_retried_by_a_later_acquire() {
         let g = group(10);
         let Acquisition::Leader(handle) = g.try_acquire(key("key-a")).await.unwrap() else {
             panic!("expected Leader");
         };
-        handle.fail(TestError("persistent failure"));
+        handle.fail(TestError("transient outage"));
 
-        for _ in 0..3 {
-            let err = g.try_acquire(key("key-a")).await.unwrap_err();
-            assert!(
-                matches!(err, Error::Failed(ref shared) if shared.to_string() == "persistent failure"),
-                "expected durable Failed, got: {err:?}"
-            );
-        }
+        let Acquisition::Leader(retry) = g.try_acquire(key("key-a")).await.unwrap() else {
+            panic!("a failed key must be retryable, not poisoned for the group's lifetime");
+        };
+        retry.complete("recovered".to_owned());
+
+        let Acquisition::Resolved(value) = g.try_acquire(key("key-a")).await.unwrap() else {
+            panic!("expected Resolved");
+        };
+        assert_eq!(value, "recovered", "the retry's value must be the memoized one");
+    }
+
+    #[tokio::test]
+    async fn abandoned_key_is_retried_by_a_later_acquire() {
+        let g = group(10);
+        let Acquisition::Leader(handle) = g.try_acquire(key("key-a")).await.unwrap() else {
+            panic!("expected Leader");
+        };
+        // A cancelled leader (a `select!` loser, an aborted `JoinSet` —
+        // `project/resolve.rs`'s `abort_all` — or a `?` higher in the same
+        // task) has learned nothing, and must not poison the key for every
+        // later caller.
+        drop(handle);
+
+        let Acquisition::Leader(retry) = g.try_acquire(key("key-a")).await.unwrap() else {
+            panic!("an abandoned key must be reclaimable by the next caller");
+        };
+        retry.complete("recovered".to_owned());
+    }
+
+    /// A failed key is replaced in place, so it costs the same one capacity
+    /// slot a successful key costs — never one slot plus a refusal.
+    #[tokio::test]
+    async fn a_failed_key_holds_no_capacity_slot() {
+        let g = group(1);
+        let Acquisition::Leader(handle) = g.try_acquire(key("key-a")).await.unwrap() else {
+            panic!("expected Leader");
+        };
+        handle.fail(TestError("boom"));
+
+        let acquisition = g.try_acquire(key("key-a")).await.unwrap();
+        assert!(
+            matches!(acquisition, Acquisition::Leader(_)),
+            "retrying a failed key must not trip the capacity limit"
+        );
     }
 
     #[tokio::test]

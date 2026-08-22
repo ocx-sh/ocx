@@ -63,6 +63,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -70,6 +71,8 @@ use tokio::sync::RwLock;
 
 use super::wire::{CatalogDocument, CatalogIndex, IndexFormatConfig, IndexRoot, RootTag, gate_format_version};
 use super::{IndexOperation, error, index_impl};
+use crate::oci::transport_policy::{self, Attempt, RetryBudget, RetryPolicy, TransportHardening};
+use crate::utility::singleflight::{self, Acquisition};
 use crate::{Result, log, oci, oci::client::ReadAddressing};
 
 // ── Frozen wire shapes (● contract) ──────────────────────────────────────────
@@ -92,11 +95,43 @@ use crate::oci::client::MAX_INDEX_DOCUMENT_BYTES;
 /// slow-to-accept endpoint must not stall a resolve indefinitely.
 const INDEX_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Total request timeout (connect + response + capped body read) for an index
-/// document fetch (CWE-400). Index documents are small (see
-/// [`MAX_INDEX_DOCUMENT_BYTES`]), so a generous ceiling still bounds a
-/// slowloris-style stall that a byte-cap alone cannot.
-const INDEX_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// Per-frame idle bound for an index document fetch (CWE-400), replacing the
+/// hard 60 s total-request deadline this path used to carry
+/// (`adr_index_sync_performance.md` D-011).
+///
+/// The old deadline bought slowloris protection at the price of the throttled
+/// link: a root document arriving honestly over 90 s through a corporate proxy
+/// failed at 60 s with nothing wrong. An idle bound gives both — a connection
+/// that goes genuinely quiet for 30 s still fires, an honest slow body never
+/// does, however long it runs.
+const INDEX_IDLE_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Per-attempt outer cap for an index document fetch, the backstop
+/// [`INDEX_IDLE_BOUND`] alone cannot provide.
+///
+/// A peer dribbling one byte every 29 s never trips the idle bound and never
+/// reaches [`MAX_INDEX_DOCUMENT_BYTES`] in any human timeframe; multiplied by
+/// the sync fan-out, the run simply does not terminate.
+///
+/// # Why this is a memory bound, not only a liveness one
+///
+/// [`MAX_INDEX_DOCUMENT_BYTES`] is 32 MiB of *per-request* allocation,
+/// accumulated into an in-memory `Vec` by the body loop below. The sync's
+/// ceiling is `INDEX_REFRESH_CONCURRENCY` (8) x `TAG_REFRESH_CONCURRENCY` (64)
+/// = 512 in-flight requests, so the resident high-water mark is 16 GiB. The
+/// byte cap bounds that peak; only a deadline bounds the peak's *duration*, and
+/// duration is what turns a peak into exhaustion. Today's 60 s total deadline
+/// is what stops a hostile peer holding all 512 allocations at once, so
+/// dropping it with nothing in its place would be a regression rather than a
+/// relaxation. The retry ladder compounds it on the traffic axis: a peer
+/// serving `MAX_INDEX_DOCUMENT_BYTES - 1` and then resetting is a retryable
+/// transport error, so cumulative transfer per logical fetch is up to 3x the
+/// cap — bounded by the attempt count, which is why that bound is not optional
+/// either.
+///
+/// Generous because it is a backstop and not an SLA: it must not fire on any
+/// honest transfer.
+const INDEX_OUTER_CAP: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Redacts any `user[:password]@` userinfo from `url`'s authority before it
 /// lands in an error or log line (CWE-532). A `[registries."<ns>"] index` or
@@ -157,12 +192,22 @@ impl Clone for Box<dyn IndexTransport> {
 /// Reuses the workspace `reqwest` (already in the tree via the `oci-client`
 /// fork; F7). TLS is rustls, matching the fork so the build carries one
 /// provider.
+/// # Retry and budget
+///
+/// Every clone shares one [`RetryBudget`]: `IndexTransport` requires
+/// `box_clone` and the sync fan-out builds one index — and so one cloned
+/// transport — per package, so counters held as plain fields would meter
+/// per-package, which is exactly the uncapped per-request policy the budget
+/// replaces (D-010 rule 2).
 #[derive(Clone)]
 pub struct ReqwestIndexTransport {
     client: reqwest::Client,
+    policy: RetryPolicy,
+    budget: RetryBudget,
 }
 
-/// Builds the index HTTP client with the bundled Mozilla CA roots.
+/// Builds the index HTTP client with the bundled Mozilla CA roots, under
+/// `hardening`'s three timeout bounds.
 ///
 /// Without an explicit root set, reqwest 0.13's rustls path uses the OS trust
 /// store via `rustls_platform_verifier::Verifier::new`, which **panics** on a
@@ -174,17 +219,19 @@ pub struct ReqwestIndexTransport {
 /// different client type, so it cannot share a builder with this one); the
 /// root-seeding loop itself is shared with `forge::github`'s bare-`reqwest`
 /// client via [`crate::utility::tls::seed_embedded_roots`].
-fn build_index_http_client() -> reqwest::Client {
-    // Transport hardening applied to both the primary and the (unreachable)
-    // fallback build so the degraded path never silently drops the gates:
-    // bounded connect + total timeout (CWE-400), and no redirect following
-    // (CWE-918 / CWE-319) — a static-file index needs no redirects, and a 3xx
-    // must not relocate the fetch to http:// or an internal host AFTER the
-    // plain-HTTP gate in `resolve_base_url` already ran.
+fn build_index_http_client(hardening: &TransportHardening) -> reqwest::Client {
+    // Transport hardening applied to every build this function can return, so
+    // no unhardened client can escape it: bounded connect, a per-frame idle
+    // bound and a per-attempt outer cap (CWE-400, all three composed — see
+    // `TransportHardening`), and no redirect following (CWE-918 / CWE-319) —
+    // a static-file index needs no redirects, and a 3xx must not relocate the
+    // fetch to http:// or an internal host AFTER the plain-HTTP gate in
+    // `resolve_base_url` already ran.
     let harden = |builder: reqwest::ClientBuilder| {
         builder
-            .connect_timeout(INDEX_CONNECT_TIMEOUT)
-            .timeout(INDEX_REQUEST_TIMEOUT)
+            .connect_timeout(hardening.connect_timeout)
+            .read_timeout(hardening.idle_bound)
+            .timeout(hardening.outer_cap)
             .redirect(reqwest::redirect::Policy::none())
     };
     let builder = crate::utility::tls::seed_embedded_roots(harden(reqwest::Client::builder()));
@@ -193,17 +240,168 @@ fn build_index_http_client() -> reqwest::Client {
         // non-empty). A different init failure is not expected; fall back so
         // construction stays infallible, logging so it is not silent — the
         // fallback keeps the same timeout + no-redirect hardening.
+        //
+        // There is deliberately no third arm. It used to be a bare
+        // `reqwest::Client::new()`, which carries reqwest's defaults — no
+        // timeouts, redirects *followed* up to 10 hops — i.e. remote-controlled
+        // egress that could relocate the fetch to http:// after the plain-HTTP
+        // gate already ran. It also bought nothing: `Client::new()` is itself
+        // `builder().build().expect(..)`, so "this build fails but that one
+        // succeeds" is unreachable, and the arm only traded a panic for an
+        // unhardened client (D-011b).
         log::warn!("index HTTP client build with bundled roots failed ({error}); using hardened reqwest defaults");
         harden(reqwest::Client::builder())
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+            .expect("a client with no custom roots and only timeout and redirect settings always builds")
     })
 }
 
 impl ReqwestIndexTransport {
     pub fn new() -> Self {
+        Self::with_hardening(
+            &TransportHardening {
+                connect_timeout: INDEX_CONNECT_TIMEOUT,
+                idle_bound: INDEX_IDLE_BOUND,
+                outer_cap: INDEX_OUTER_CAP,
+            },
+            RetryPolicy::default(),
+        )
+    }
+
+    /// Construction with the bounds injected — the seam D-011 keeps so a
+    /// fixture can assert the same semantics in milliseconds rather than
+    /// waiting out the shipped minutes against a real socket.
+    fn with_hardening(hardening: &TransportHardening, policy: RetryPolicy) -> Self {
         Self {
-            client: build_index_http_client(),
+            client: build_index_http_client(hardening),
+            policy,
+            budget: RetryBudget::new(),
+        }
+    }
+
+    /// One attempt at `url`: everything from dispatching the request to the
+    /// last body byte, classified for the ladder above it.
+    ///
+    /// Retryable outcomes carry the terminal value the caller gets if no
+    /// further attempt is admitted, so giving up costs nothing extra and never
+    /// changes the error the caller sees.
+    async fn attempt(client: &reqwest::Client, url: &str) -> Attempt<Result<IndexFetch>> {
+        let mut response = match client.get(url).send().await {
+            Ok(response) => response,
+            Err(source) => return Self::transport_failure(url, None, source),
+        };
+
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Attempt::Done(Ok(IndexFetch::NotFound));
+        }
+        // Everything else — including a `304` answering this unconditional
+        // `GET` (RFC 9110 §15.4.5, a misbehaving edge) — is an error. Only a
+        // confirmed `404` above may read as absence: that `None` is what
+        // [`OcxIndex::jurisdiction`] settles an `Outside` verdict off, and the
+        // verdict is memoized, so one bad response would decide a name for the
+        // rest of the process.
+        if !status.is_success() {
+            // Parsed before the error is built: ACR counts `Retry-After` down
+            // across polls, so every attempt reads its own header and none
+            // caches the first value seen.
+            let retry_after = transport_policy::honours_retry_after(status.as_u16())
+                .then(|| {
+                    response
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| transport_policy::parse_retry_after(value, std::time::SystemTime::now()))
+                })
+                .flatten();
+            let failure = super::error::Error::IndexHttpFailed {
+                url: redact_url(url),
+                status: Some(status.as_u16()),
+                source: format!("unexpected status {status}").into(),
+            };
+            // The classifier reads the typed field, not the formatted message
+            // (D-010a/C-024) — which is what makes the field load-bearing
+            // rather than decoration.
+            let retryable = matches!(
+                &failure,
+                super::error::Error::IndexHttpFailed { status: Some(code), .. }
+                    if transport_policy::is_retryable_status(*code)
+            );
+            return if retryable {
+                Attempt::Retry {
+                    retry_after,
+                    terminal: Err(failure.into()),
+                }
+            } else {
+                Attempt::Done(Err(failure.into()))
+            };
+        }
+
+        // Reject a declared oversize body before reading a single byte (CWE-400).
+        // Not retryable: the server has already stated the size, and asking
+        // again gets the same answer.
+        if let Some(declared) = response.content_length()
+            && declared > MAX_INDEX_DOCUMENT_BYTES as u64
+        {
+            return Attempt::Done(Err(super::error::Error::IndexHttpFailed {
+                url: redact_url(url),
+                status: Some(status.as_u16()),
+                source: format!(
+                    "response body {declared} bytes exceeds the {MAX_INDEX_DOCUMENT_BYTES}-byte index-document cap"
+                )
+                .into(),
+            }
+            .into()));
+        }
+
+        // Stream the body under a hard cap (CWE-400): a server that omits or lies
+        // about Content-Length (chunked transfer, or a hostile endpoint) still
+        // cannot stream more than the cap into memory — the running total is
+        // checked before each chunk is appended. The cap, not the timeout, is
+        // what bounds memory here, and relaxing the deadline does not relax it.
+        let mut body = Vec::new();
+        loop {
+            match response.chunk().await {
+                // A mid-body failure re-issues the whole `GET`, which is safe
+                // because every request on this path is idempotent (D-010c).
+                Err(source) => return Self::transport_failure(url, Some(status.as_u16()), source),
+                Ok(None) => break,
+                Ok(Some(chunk)) => {
+                    if body.len() + chunk.len() > MAX_INDEX_DOCUMENT_BYTES {
+                        return Attempt::Done(Err(super::error::Error::IndexHttpFailed {
+                            url: redact_url(url),
+                            status: Some(status.as_u16()),
+                            source: format!(
+                                "response body exceeds the {MAX_INDEX_DOCUMENT_BYTES}-byte index-document cap"
+                            )
+                            .into(),
+                        }
+                        .into()));
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+            }
+        }
+        Attempt::Done(Ok(IndexFetch::Found { bytes: body }))
+    }
+
+    /// Wraps a `reqwest` failure as [`Error::IndexHttpFailed`], retryable only
+    /// for the transient transport class (connect, timeout, reset/close).
+    fn transport_failure(url: &str, status: Option<u16>, source: reqwest::Error) -> Attempt<Result<IndexFetch>> {
+        let retryable = transport_policy::is_retryable_transport_error(&source);
+        let failure: Result<IndexFetch> = Err(super::error::Error::IndexHttpFailed {
+            url: redact_url(url),
+            status,
+            source: Box::new(source),
+        }
+        .into());
+        if retryable {
+            Attempt::Retry {
+                retry_after: None,
+                terminal: failure,
+            }
+        } else {
+            Attempt::Done(failure)
         }
     }
 }
@@ -216,73 +414,34 @@ impl Default for ReqwestIndexTransport {
 
 #[async_trait]
 impl IndexTransport for ReqwestIndexTransport {
+    /// Fetches `url`, retrying the transient classes under
+    /// [`RetryPolicy`] and the run-global [`RetryBudget`] (D-010).
+    ///
+    /// The ladder wraps the whole attempt — dispatch through last body byte —
+    /// because a `GET` on this path is idempotent, so re-issuing one is always
+    /// safe. It is deliberately not wrapped in a wall-clock cap of its own:
+    /// retry *volume* is what the budget bounds, and per-attempt duration is
+    /// what `TransportHardening::outer_cap` bounds.
     async fn get(&self, url: &str) -> Result<IndexFetch> {
-        let mut response =
-            self.client
-                .get(url)
-                .send()
-                .await
-                .map_err(|source| super::error::Error::IndexHttpFailed {
-                    url: redact_url(url),
-                    source: Box::new(source),
-                })?;
-
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Ok(IndexFetch::NotFound);
-        }
-        // Everything else — including a `304` answering this unconditional
-        // `GET` (RFC 9110 §15.4.5, a misbehaving edge) — is an error. Only a
-        // confirmed `404` above may read as absence: that `None` is what
-        // [`OcxIndex::jurisdiction`] settles an `Outside` verdict off, and the
-        // verdict is memoized, so one bad response would decide a name for the
-        // rest of the process.
-        if !status.is_success() {
-            return Err(super::error::Error::IndexHttpFailed {
-                url: redact_url(url),
-                source: format!("unexpected status {status}").into(),
+        let client = &self.client;
+        let policy = &self.policy;
+        transport_policy::run(policy, &self.budget, move |attempt| async move {
+            if attempt > 0 {
+                // `debug!`, never `warn!`: a retried transient is a common
+                // benign state, and an operator-facing warning per retry across
+                // a 512-wide fan-out is noise, not signal (S-003). Redacted
+                // because an index base URL may embed `user:password@`
+                // (CWE-532) — same reason every error below this line is.
+                log::debug!(
+                    "retrying index request to {} (attempt {} of {})",
+                    redact_url(url),
+                    attempt + 1,
+                    policy.attempts
+                );
             }
-            .into());
-        }
-
-        // Reject a declared oversize body before reading a single byte (CWE-400).
-        if let Some(declared) = response.content_length()
-            && declared > MAX_INDEX_DOCUMENT_BYTES as u64
-        {
-            return Err(super::error::Error::IndexHttpFailed {
-                url: redact_url(url),
-                source: format!(
-                    "response body {declared} bytes exceeds the {MAX_INDEX_DOCUMENT_BYTES}-byte index-document cap"
-                )
-                .into(),
-            }
-            .into());
-        }
-
-        // Stream the body under a hard cap (CWE-400): a server that omits or lies
-        // about Content-Length (chunked transfer, or a hostile endpoint) still
-        // cannot stream more than the cap into memory — the running total is
-        // checked before each chunk is appended.
-        let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|source| super::error::Error::IndexHttpFailed {
-                url: redact_url(url),
-                source: Box::new(source),
-            })?
-        {
-            if body.len() + chunk.len() > MAX_INDEX_DOCUMENT_BYTES {
-                return Err(super::error::Error::IndexHttpFailed {
-                    url: redact_url(url),
-                    source: format!("response body exceeds the {MAX_INDEX_DOCUMENT_BYTES}-byte index-document cap")
-                        .into(),
-                }
-                .into());
-            }
-            body.extend_from_slice(&chunk);
-        }
-        Ok(IndexFetch::Found { bytes: body })
+            Self::attempt(client, url).await
+        })
+        .await
     }
 
     fn box_clone(&self) -> Box<dyn IndexTransport> {
@@ -463,6 +622,32 @@ struct SourceCacheInner {
     config: Option<Arc<IndexFormatConfig>>,
 }
 
+/// Max keys a source's singleflight group admits.
+///
+/// **Sized for the run, not copied.** `chained_index.rs`'s `1024` was chosen
+/// for a group whose keys are the identifiers of one refresh; these groups live
+/// for the process and are shared across every `box_clone`, so one key accrues
+/// per repository an `ocx index sync` touches. At `1024` a sync against a
+/// registry holding more packages than that answers `CapacityExceeded` →
+/// `TempFail(75)` — an exit code advertising "retry" for a condition no retry
+/// inside the process can clear — on **successes** alone.
+///
+/// This is a memory backstop, never a throughput limit: the entries front
+/// [`SourceCacheInner::roots`], which is itself unbounded, so a run that could
+/// reach this ceiling has already stored strictly more in the map beside it.
+const SOURCE_SINGLEFLIGHT_MAX_KEYS: usize = 1 << 20;
+
+/// How long a coalesced caller blocks for the leader's fetch.
+///
+/// Derived from the transport underneath rather than copied: one index fetch is
+/// up to [`RetryPolicy::attempts`] attempts, each bounded by
+/// [`INDEX_OUTER_CAP`], plus a bounded backoff between them. A waiter that gave
+/// up before the leader could finish would turn one slow-but-honest link into a
+/// spurious `TempFail(75)` for every caller but one — the opposite of what the
+/// coalescing is for. Four attempt-caps covers the three attempts and the
+/// backoff between them.
+const SOURCE_SINGLEFLIGHT_TIMEOUT: Duration = Duration::from_secs(INDEX_OUTER_CAP.as_secs() * 4);
+
 /// A live `index.ocx.sh`-style source.
 #[derive(Clone)]
 pub struct OcxIndex {
@@ -486,6 +671,21 @@ pub struct OcxIndex {
     /// refusal (`[registries."<ns>"].trusted_hosts`, X2).
     trusted_hosts: Vec<String>,
     cache: Arc<RwLock<SourceCacheInner>>,
+    /// Coalesces the concurrent cold misses on `config.json`. Only a **served**
+    /// document is broadcast as this group's answer — see
+    /// [`Self::check_format_version`] for why an assumed v1 must not be.
+    config_group: singleflight::Group<(), Option<Arc<IndexFormatConfig>>>,
+    /// Coalesces the concurrent cold misses on `p/<repo>.json`, keyed exactly
+    /// like [`SourceCacheInner::roots`].
+    ///
+    /// Shared across `box_clone` like `cache`, deliberately — and this is the
+    /// half of `chained_index.rs`'s precedent that does **not** carry over
+    /// there. That group's key does not encode write policy, so its
+    /// `read_only()` / `remote_view()` build a *fresh* group rather than
+    /// coalescing a read-only resolve onto a persisting leader. `OcxIndex`
+    /// carries no write policy at all — nothing here writes locally — so
+    /// sharing is safe and is what makes the coalescing reach the fan-out.
+    root_group: singleflight::Group<String, Option<Arc<IndexRoot>>>,
 }
 
 /// Construction inputs for [`OcxIndex::new`].
@@ -510,6 +710,9 @@ impl OcxIndex {
             allow_yanked: config.allow_yanked,
             trusted_hosts: config.trusted_hosts,
             cache: Arc::new(RwLock::new(SourceCacheInner::default())),
+            // One key (`()`), so one slot is the whole capacity.
+            config_group: singleflight::Group::new(1, SOURCE_SINGLEFLIGHT_TIMEOUT),
+            root_group: singleflight::Group::new(SOURCE_SINGLEFLIGHT_MAX_KEYS, SOURCE_SINGLEFLIGHT_TIMEOUT),
         }
     }
 
@@ -769,26 +972,70 @@ impl OcxIndex {
     /// # Errors
     ///
     /// [`Error::UnsupportedIndexFormat`](super::error::Error::UnsupportedIndexFormat)
-    /// on a served-but-unknown version; the transport error otherwise.
+    /// on a served-but-unknown version; the transport error otherwise. Both
+    /// arrive inside a transparent
+    /// [`Error::SourceFetchFailed`](super::error::Error::SourceFetchFailed)
+    /// when this call led the coalesced fetch — same message, same exit code,
+    /// one `source()` hop further down.
     async fn check_format_version(&self) -> Result<Arc<IndexFormatConfig>> {
         if let Some(config) = &self.cache.read().await.config {
             return Ok(config.clone());
         }
-        let url = format!("{}/config.json", self.base_url);
-        let fetched = self.transport.get(&url).await?;
-        let config = match &fetched {
-            IndexFetch::Found { bytes } => parse_document(bytes, &url)?,
-            IndexFetch::NotFound => IndexFormatConfig::assumed_v1(),
+        // Coalesce the cold misses: this is a read-check-then-fetch, so under
+        // the sync fan-out every task read-checks together, all miss and all
+        // fetch the same document.
+        let handle = match self
+            .config_group
+            .try_acquire(())
+            .await
+            .map_err(error::Error::SingleflightFailed)?
+        {
+            Acquisition::Leader(handle) => handle,
+            Acquisition::Resolved(Some(config)) => return Ok(config),
+            // The leader found no `config.json` and assumed v1. That answer is
+            // deliberately never memoized (C-005), and a group entry retains
+            // for the process — so this arm **bypasses the group** and asks the
+            // wire again, which is how a tree that later publishes one is
+            // picked up without a restart. Eviction-on-failure cannot cover
+            // this: the assumed value is an `Ok`.
+            Acquisition::Resolved(None) => return Ok(or_assumed_v1(self.fetch_format_config().await?)),
         };
-        gate_format_version(config.format_version)?;
-        let config = Arc::new(config);
-        // Only a document that was actually served is memoized. An assumed v1
-        // is re-derived every call, so a tree that later publishes a
-        // `config.json` is picked up without restarting the process (C-005).
-        if matches!(fetched, IndexFetch::Found { .. }) {
-            self.cache.write().await.config = Some(config.clone());
+        match self.fetch_format_config().await {
+            Ok(served) => {
+                // Only a served document is broadcast, on the same terms it is
+                // memoized: `None` tells a waiter to derive its own assumed v1.
+                handle.complete(served.clone());
+                Ok(or_assumed_v1(served))
+            }
+            Err(error) => Err(error::broadcast_failure(handle, error)),
         }
-        Ok(config)
+    }
+
+    /// One `GET config.json`, version-gated, memoizing **only** a document that
+    /// was actually served.
+    ///
+    /// `Ok(None)` is the absent-`config.json` case, which the caller resolves
+    /// to [`IndexFormatConfig::assumed_v1`] without memoizing it anywhere
+    /// (C-005). Splitting that distinction out of the return type is what lets
+    /// the coalescing group in [`Self::check_format_version`] retain the served
+    /// case and only the served case.
+    async fn fetch_format_config(&self) -> Result<Option<Arc<IndexFormatConfig>>> {
+        let url = format!("{}/config.json", self.base_url);
+        match self.transport.get(&url).await? {
+            IndexFetch::Found { bytes } => {
+                let config: IndexFormatConfig = parse_document(&bytes, &url)?;
+                gate_format_version(config.format_version)?;
+                let config = Arc::new(config);
+                self.cache.write().await.config = Some(config.clone());
+                Ok(Some(config))
+            }
+            IndexFetch::NotFound => {
+                // The substitution happens before the gate, which is why the
+                // gate takes a version and never a "was it there?" flag (C-004).
+                gate_format_version(IndexFormatConfig::assumed_v1().format_version)?;
+                Ok(None)
+            }
+        }
     }
 
     // ── root (F1 volatile) ──────────────────────────────────────────────────
@@ -799,9 +1046,13 @@ impl OcxIndex {
     /// # Errors
     ///
     /// [`Error::IndexHttpFailed`](super::error::Error::IndexHttpFailed) for any
-    /// non-404 failure the transport surfaces. Only a *confirmed* 404 reads as a
+    /// non-404 failure the transport surfaces — inside a transparent
+    /// [`Error::SourceFetchFailed`](super::error::Error::SourceFetchFailed)
+    /// when this call led the coalesced fetch. Only a *confirmed* 404 reads as a
     /// miss: this `None` is what [`Self::jurisdiction`] settles an `Outside`
-    /// verdict off, and it is memoized, so no other status may fold into it.
+    /// verdict off, and it is memoized, so no other status may fold into it. A
+    /// failure memoizes nothing, and the singleflight entry is evicted on the
+    /// next read, so a repeat ask re-requests.
     async fn resolve_root(&self, repository: &str) -> Result<Option<Arc<IndexRoot>>> {
         // The version gate runs before any root is consumed (F1). Absence is
         // v1, not a refusal (C-005) — an unsupported served version still is.
@@ -809,20 +1060,53 @@ impl OcxIndex {
         if let Some(root) = self.cache.read().await.roots.get(repository) {
             return Ok(root.clone());
         }
+        // Coalesce the cold misses: the per-tag fan-out asks for one
+        // repository's root once per tag, and all of them read-check together.
+        let handle = match self
+            .root_group
+            .try_acquire(repository.to_string())
+            .await
+            .map_err(error::Error::SingleflightFailed)?
+        {
+            Acquisition::Leader(handle) => handle,
+            // Both a hit and a confirmed miss are answers here, unlike the
+            // assumed v1 above: `resolve_root` memoizes each on the same terms.
+            Acquisition::Resolved(root) => return Ok(root),
+        };
+        match self.fetch_root(repository).await {
+            Ok(root) => {
+                self.memoize_root(repository, root.clone()).await;
+                handle.complete(root.clone());
+                Ok(root)
+            }
+            Err(error) => Err(error::broadcast_failure(handle, error)),
+        }
+    }
+
+    /// One `GET p/<repo>.json`. `Ok(None)` on a confirmed 404, which is a
+    /// result and not a failure — nothing else may fold into it.
+    async fn fetch_root(&self, repository: &str) -> Result<Option<Arc<IndexRoot>>> {
         let url = format!("{}/p/{}.json", self.base_url, repository);
-        let root = match self.transport.get(&url).await? {
+        match self.transport.get(&url).await? {
             IndexFetch::Found { bytes } => {
                 let parsed: IndexRoot = parse_document(&bytes, &url)?;
-                Some(Arc::new(parsed))
+                Ok(Some(Arc::new(parsed)))
             }
-            IndexFetch::NotFound => None,
-        };
-        self.cache
-            .write()
-            .await
-            .roots
-            .insert(repository.to_string(), root.clone());
-        Ok(root)
+            IndexFetch::NotFound => Ok(None),
+        }
+    }
+
+    /// Memoizes a root lookup under the key [`Self::resolve_root`] reads.
+    ///
+    /// The key is the bare repository — **no registry component** — so only a
+    /// call that actually issued `GET p/<repo>.json` against *this* source may
+    /// memoize (D-004a). A path that answered without contacting anything must
+    /// memoize nothing: caching a foreign identifier's `None` here would settle
+    /// [`Self::jurisdiction`] as `Outside` for the served registry's
+    /// identically-named repository, and that package would silently stop
+    /// resolving through the index for the rest of the process.
+    async fn memoize_root(&self, repository: &str, root: Option<Arc<IndexRoot>>) {
+        self.cache.write().await.roots.insert(repository.to_string(), root);
     }
 
     // ── dispatch object (F1 immutable, VERIFIED) ─────────────────────────────
@@ -1031,6 +1315,15 @@ pub(super) fn surface_root_status(
     Ok(())
 }
 
+/// Resolves the absent-`config.json` case to [`IndexFormatConfig::assumed_v1`].
+///
+/// Kept as a substitution over `Option` rather than folded into the fetch so
+/// the one caller that must **not** memoize the result — every caller, per
+/// C-005 — cannot accidentally hand it to a memo or a coalescing group.
+fn or_assumed_v1(served: Option<Arc<IndexFormatConfig>>) -> Arc<IndexFormatConfig> {
+    served.unwrap_or_else(|| Arc::new(IndexFormatConfig::assumed_v1()))
+}
+
 /// Parses `bytes` as `T`, wrapping a serde failure with the source `url` so a
 /// malformed index document reports where it came from.
 fn parse_document<T: for<'de> Deserialize<'de>>(bytes: &[u8], url: &str) -> Result<T> {
@@ -1171,19 +1464,39 @@ impl index_impl::IndexImpl for OcxIndex {
         // with the parsed root, so `LocalIndex::persist_published_root` grows the
         // local copy byte-for-byte (copy-a-mirror, A2). The bytes are returned
         // verbatim (never re-serialized) so they hash to the catalog entry (F1).
+        // Memoizes NOTHING: no request was issued, and the memo key carries no
+        // registry (D-004a, and `memoize_root`'s doc comment).
         if !self.serves_registry(identifier.registry()) {
             return Ok(None);
         }
         // The version gate runs before any root is consumed (F1).
         self.check_format_version().await?;
+        // A memoized **miss** is the whole answer, so it short-circuits: a flat
+        // name costs one 404 per process however many times it is asked for. A
+        // memoized hit cannot, because the caller needs the verbatim bytes and
+        // the memo holds only the parse.
+        if let Some(None) = self.cache.read().await.roots.get(identifier.repository()) {
+            return Ok(None);
+        }
         let url = format!("{}/p/{}.json", self.base_url, identifier.repository());
+        // Both arms below issued the request, so both memoize — the miss on
+        // exactly the same terms as the hit, because a confirmed 404 is what
+        // `jurisdiction` settles an `Outside` verdict off. Without this the
+        // per-tag fan-out that follows re-fetches this same root once per tag
+        // (D-004): a sequencing bug, not a race, which is why coalescing alone
+        // would not fix it — the leader finishes without ever registering.
         match self.transport.get(&url).await? {
             IndexFetch::Found { bytes } => {
                 let root: IndexRoot = parse_document(&bytes, &url)?;
+                self.memoize_root(identifier.repository(), Some(Arc::new(root.clone())))
+                    .await;
                 Ok(Some((bytes, root)))
             }
             // A 404 is a clean miss, never an error.
-            IndexFetch::NotFound => Ok(None),
+            IndexFetch::NotFound => {
+                self.memoize_root(identifier.repository(), None).await;
+                Ok(None)
+            }
         }
     }
 
@@ -1225,6 +1538,12 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
+    // Peels the wrapper a coalesced fetch's leader returns. Imported, never
+    // re-implemented: these assertions and `ChainedIndex::is_source_outage`
+    // must agree on what a leader's error *is*, and the two drifting apart is
+    // exactly how the wrapper reached production recognised here and
+    // unrecognised by the guard.
+    use super::super::error::coalesced_cause;
     use super::super::index_impl::IndexImpl;
     use super::super::wire::YankMarker;
     use super::*;
@@ -1242,12 +1561,26 @@ mod tests {
     /// Recorded request URLs, for assertions.
     type StubRequests = Arc<Mutex<Vec<String>>>;
 
+    /// How long a held response is withheld, in **virtual** time.
+    ///
+    /// Only ever elapsed under `tokio::time::pause()`, where the clock advances
+    /// solely once every task is parked — so the hold is released exactly when
+    /// every concurrent caller has arrived, which is the deterministic form of
+    /// the "hold the response until all N callers are here" fixture C-007 and
+    /// C-008 require. Without the hold a coalescing assertion passes on serial
+    /// execution and proves nothing: both `check_format_version` and
+    /// `resolve_root` are read-check-then-fetch, so whether N tasks each fetch
+    /// is otherwise a scheduling accident.
+    const HELD_RESPONSE: std::time::Duration = std::time::Duration::from_secs(1);
+
     #[derive(Clone, Default)]
     struct StubIndexTransport {
         responses: StubResponses,
         requests: StubRequests,
         /// URLs that return a transport error (simulate a dead endpoint).
         failures: Arc<Mutex<std::collections::HashSet<String>>>,
+        /// URLs whose response is withheld for [`HELD_RESPONSE`].
+        held: Arc<Mutex<std::collections::HashSet<String>>>,
     }
 
     impl StubIndexTransport {
@@ -1261,6 +1594,10 @@ mod tests {
 
         fn fail(&self, url: &str) {
             self.failures.lock().unwrap().insert(url.to_string());
+        }
+
+        fn hold(&self, url: &str) {
+            self.held.lock().unwrap().insert(url.to_string());
         }
 
         fn request_urls(&self) -> Vec<String> {
@@ -1281,9 +1618,15 @@ mod tests {
     impl IndexTransport for StubIndexTransport {
         async fn get(&self, url: &str) -> Result<IndexFetch> {
             self.requests.lock().unwrap().push(url.to_string());
+            // Read the flag out before awaiting — the guard must not span it.
+            let held = self.held.lock().unwrap().contains(url);
+            if held {
+                tokio::time::sleep(HELD_RESPONSE).await;
+            }
             if self.failures.lock().unwrap().contains(url) {
                 return Err(super::super::error::Error::IndexHttpFailed {
                     url: url.to_string(),
+                    status: None,
                     source: "simulated transport failure".into(),
                 }
                 .into());
@@ -1546,7 +1889,7 @@ mod tests {
             .expect_err("a malformed tag content digest must fail the whole root document parse");
         assert!(
             matches!(
-                error,
+                coalesced_cause(&error),
                 crate::Error::OciIndex(super::super::error::Error::MalformedIndexDocument { .. })
             ),
             "expected MalformedIndexDocument, got {error:?}"
@@ -1773,10 +2116,17 @@ mod tests {
             .expect_err("unknown format_version must fail closed");
         assert!(
             matches!(
-                error,
+                coalesced_cause(&error),
                 crate::Error::OciIndex(super::super::error::Error::UnsupportedIndexFormat { version: 2 })
             ),
             "expected UnsupportedIndexFormat{{2}}, got {error:?}"
+        );
+        // The coalescing wrapper is transparent, so the message a caller reads
+        // is the one a direct, uncoalesced fetch would have produced.
+        assert_eq!(
+            error.to_string(),
+            "index format_version 2 is not supported",
+            "coalescing must not prefix the message a direct fetch produced"
         );
         assert_eq!(
             crate::cli::ClassifyExitCode::classify(&error),
@@ -2307,8 +2657,9 @@ mod tests {
             converted, total,
             "every bundled root must convert to a reqwest Certificate"
         );
-        // Construction (which runs the seeding) must not panic.
-        let _client = build_index_http_client();
+        // Construction (which runs the seeding) must not panic — including the
+        // `expect` that is now the last resort (D-011b).
+        let _client = ReqwestIndexTransport::new();
     }
 
     // ── chain ordering: index BEFORE registry (HIGH, Codex R3) ────────────────
@@ -2745,6 +3096,341 @@ mod tests {
         );
     }
 
+    // ── root cache + coalescing (C-006, C-007, C-008) ────────────────────────
+    //
+    // `fetch_root_document` populates the memo `resolve_root` reads, and both
+    // it and `check_format_version` coalesce their concurrent cold misses.
+    // Every assertion below is on the REQUEST COUNT, never the return value: a
+    // poisoned memo and a genuine miss both answer `Ok(None)`, so only the
+    // count discriminates.
+
+    /// C-006 — a published refresh of one package issues exactly **one** root
+    /// GET. `fetch_root_document` fetches the root; the per-tag fan-out that
+    /// follows it must find that root already memoized.
+    ///
+    /// *Red-reachability:* without the memoizing insert the count is
+    /// `1 + min(T, 64)`. The assertion is `== 1`, never `<= 64`.
+    #[tokio::test]
+    async fn a_published_refresh_of_one_package_issues_one_root_get() {
+        let transport = StubIndexTransport::new();
+        let digest = seed_package(&transport, false);
+        // A second tag on a second content digest, so T = 2 with T distinct
+        // dispatch objects and neither tag can be answered from the other's.
+        // Byte-distinct from the first (one more byte of trailing JSON
+        // whitespace), so it hashes to a different dispatch digest and neither
+        // tag can be answered from the other's object.
+        let second = [glibc_musl_index(), b"\n"].concat();
+        let second_digest = Algorithm::Sha256.hash(&second);
+        let root = format!(
+            r#"{{"repository":"oci://ghcr.io/ocx-contrib/cmake","tags":{{"3.28":{{"content":"{digest}"}},"3.29":{{"content":"{second_digest}"}}}}}}"#
+        );
+        transport.insert(&root_url(), root.as_bytes());
+        transport.insert(&dispatch_url(&second_digest), &second);
+        let source = make_source(transport.clone(), false);
+
+        source
+            .fetch_root_document(&oci::Identifier::new_registry(REPO, NAMESPACE))
+            .await
+            .unwrap()
+            .expect("the published root is served");
+        for tag in ["3.28", "3.29"] {
+            source
+                .fetch_manifest(
+                    &oci::Identifier::new_registry(REPO, NAMESPACE).clone_with_tag(tag),
+                    IndexOperation::Resolve,
+                )
+                .await
+                .unwrap()
+                .expect("each tag resolves through the memoized root");
+        }
+
+        assert_eq!(
+            transport.request_count(&root_url()),
+            1,
+            "the root fetch must populate the memo the per-tag fan-out reads"
+        );
+    }
+
+    /// C-006 edge case (a) — a root that 404s costs exactly one request, and
+    /// the miss is memoized: a second `fetch_root_document` for the same
+    /// repository issues nothing.
+    #[tokio::test]
+    async fn a_confirmed_root_miss_is_memoized_and_never_re_requested() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        let source = make_source(transport.clone(), false);
+        let identifier = oci::Identifier::new_registry(REPO, NAMESPACE);
+
+        assert!(source.fetch_root_document(&identifier).await.unwrap().is_none());
+        assert!(source.fetch_root_document(&identifier).await.unwrap().is_none());
+        assert!(source.resolve_root(REPO).await.unwrap().is_none());
+
+        assert_eq!(
+            transport.request_count(&root_url()),
+            1,
+            "a confirmed 404 is a result and is memoized like a hit"
+        );
+    }
+
+    /// C-006 edge case (a2) — a **foreign-registry** identifier memoizes
+    /// nothing.
+    ///
+    /// The memo key is the bare repository with no registry component, so a
+    /// tail-position insert would poison `ns/pkg` with `None` for the served
+    /// registry, `jurisdiction` would settle `Outside`, and the package would
+    /// silently stop resolving through the index for the rest of the process
+    /// (D-004a). *Red-reachability:* both a poisoned entry and a genuine miss
+    /// return `Ok(None)`, so the assertion is on the request count.
+    #[tokio::test]
+    async fn a_foreign_registry_root_fetch_memoizes_nothing() {
+        let transport = StubIndexTransport::new();
+        seed_package(&transport, false);
+        let source = make_source(transport.clone(), false);
+
+        let foreign = oci::Identifier::new_registry(REPO, "other.io");
+        assert!(
+            source.fetch_root_document(&foreign).await.unwrap().is_none(),
+            "a foreign-namespace identifier is not this source's concern"
+        );
+        assert_eq!(
+            transport.request_count(&root_url()),
+            0,
+            "the foreign early return issues no request"
+        );
+
+        // The count, not the return value, is the discriminator: a poisoned
+        // entry and a genuine miss both answer `Ok(None)`.
+        let resolved = source.resolve_root(REPO).await.unwrap();
+        assert_eq!(
+            transport.request_count(&root_url()),
+            1,
+            "the served registry's resolve must still issue its own GET, not read a poisoned memo"
+        );
+        assert!(
+            resolved.is_some(),
+            "the served registry's identically-named repository still resolves"
+        );
+    }
+
+    /// C-006 edge case (b), first half — a **non-404** root failure memoizes
+    /// nothing, so a repeat ask re-requests. Needs the singleflight primitive's
+    /// eviction-on-read: without it the group answers the leader's error
+    /// forever and the repeat ask issues nothing.
+    #[tokio::test]
+    async fn a_failed_root_fetch_memoizes_nothing_and_is_re_requested() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        transport.fail(&root_url());
+        let source = make_source(transport.clone(), false);
+
+        source
+            .resolve_root(REPO)
+            .await
+            .expect_err("a non-404 failure propagates");
+        source.resolve_root(REPO).await.expect_err("and propagates again");
+
+        assert_eq!(
+            transport.request_count(&root_url()),
+            2,
+            "a transport failure is not a result: nothing is memoized and the repeat ask re-requests"
+        );
+    }
+
+    /// C-006 edge case (b), second half — the discriminating companion. A
+    /// `404` on the same code path memoizes, so the repeat ask issues nothing.
+    /// Without both halves the test cannot tell the two cache policies apart.
+    #[tokio::test]
+    async fn a_404_root_fetch_memoizes_and_is_not_re_requested() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        let source = make_source(transport.clone(), false);
+
+        assert!(source.resolve_root(REPO).await.unwrap().is_none());
+        assert!(source.resolve_root(REPO).await.unwrap().is_none());
+
+        assert_eq!(
+            transport.request_count(&root_url()),
+            1,
+            "only a confirmed 404 folds into the memoized miss"
+        );
+    }
+
+    /// C-006 edge case (b), the eviction half at the source level — a failed
+    /// root fetch that later succeeds must be picked up, not answered from a
+    /// poisoned singleflight entry.
+    #[tokio::test]
+    async fn a_root_that_recovers_after_a_failure_resolves() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        transport.fail(&root_url());
+        let source = make_source(transport.clone(), false);
+        source.resolve_root(REPO).await.expect_err("the first ask fails");
+
+        transport.failures.lock().unwrap().remove(&root_url());
+        transport.insert(&root_url(), br#"{"repository":"oci://ghcr.io/x/y","tags":{}}"#);
+        assert!(
+            source.resolve_root(REPO).await.unwrap().is_some(),
+            "a transient outage must not poison the name for the life of the process"
+        );
+    }
+
+    /// D-005b(2) — the group is sized for the run, not copied.
+    ///
+    /// These groups live for the process, so one key accrues per repository an
+    /// `ocx index sync` touches. `chained_index.rs`'s `SINGLEFLIGHT_MAX_KEYS =
+    /// 1024` was chosen for a per-refresh group; copied here it would answer
+    /// `CapacityExceeded` → `TempFail(75)` — an exit code promising a retry
+    /// nothing inside the process can make succeed — on **successes** alone.
+    ///
+    /// *Red-reachability:* set `SOURCE_SINGLEFLIGHT_MAX_KEYS` to `1024`.
+    #[tokio::test]
+    async fn a_registry_larger_than_the_chained_index_key_budget_still_resolves() {
+        const PACKAGES: usize = 1500;
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        for package in 0..PACKAGES {
+            transport.insert(
+                &format!("{BASE}/p/ns/pkg{package}.json"),
+                br#"{"repository":"oci://ghcr.io/x/y","tags":{}}"#,
+            );
+        }
+        let source = make_source(transport, false);
+
+        for package in 0..PACKAGES {
+            source
+                .resolve_root(&format!("ns/pkg{package}"))
+                .await
+                .unwrap_or_else(|error| panic!("package {package} must resolve, got: {error}"))
+                .expect("the stub serves every root");
+        }
+    }
+
+    /// C-007 — `check_format_version` fetches a **served** `config.json` at
+    /// most once per process, per source, under a fan-out.
+    ///
+    /// "Served" is the whole scope of the claim, not a hedge: an **absent**
+    /// `config.json` deliberately bypasses the group (the
+    /// `Acquisition::Resolved(None)` arm) so a tree that later publishes one is
+    /// picked up without a restart, which means later callers each re-fetch it.
+    /// That is the baseline behaviour — it re-derived on every call before any
+    /// coalescing existed — and its own guards are
+    /// [`an_absent_config_json_is_never_memoized_and_a_later_one_is_picked_up`]
+    /// and [`concurrent_absent_config_json_reads_stay_unmemoized`].
+    ///
+    /// The stub **holds** the response, and virtual time only advances once
+    /// every task is parked, so the leader cannot answer before all N callers
+    /// have arrived. *Red-reachability:* without the hold this passes today —
+    /// the function is a read-check-then-fetch, so serial execution gives a
+    /// green that proves nothing.
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_config_json_reads_produce_one_get() {
+        const CALLERS: usize = 8;
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        transport.hold(&config_url());
+        let source = make_source(transport.clone(), false);
+
+        let results =
+            futures::future::join_all((0..CALLERS).map(|_| async { source.check_format_version().await })).await;
+        for result in results {
+            result.expect("every caller gets the served document");
+        }
+
+        assert_eq!(
+            transport.request_count(&config_url()),
+            1,
+            "a served config.json is fetched once per source, however wide the fan-out"
+        );
+    }
+
+    /// C-007 edge case, load-bearing and inverting the headline — an **absent**
+    /// `config.json` resolves to `assumed_v1()` and is deliberately **not**
+    /// memoized, so a tree that later publishes one is picked up without
+    /// restarting the process (snapshot-spec C-005). A coalescing group that
+    /// retained the assumed value would break that silently, and
+    /// eviction-on-failure cannot catch it: the assumed value is an `Ok`.
+    #[tokio::test]
+    async fn an_absent_config_json_is_never_memoized_and_a_later_one_is_picked_up() {
+        let transport = StubIndexTransport::new();
+        let source = make_source(transport.clone(), false);
+
+        assert_eq!(
+            source.check_format_version().await.unwrap().name_segments,
+            None,
+            "an absent config.json is assumed v1"
+        );
+        assert_eq!(transport.request_count(&config_url()), 1, "the first ask fetches");
+        source.check_format_version().await.unwrap();
+        assert_eq!(
+            transport.request_count(&config_url()),
+            2,
+            "an assumed v1 is re-derived every call, never memoized and never retained by the group"
+        );
+
+        transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
+        assert_eq!(
+            source
+                .check_format_version()
+                .await
+                .unwrap()
+                .name_segments
+                .map(std::num::NonZeroU32::get),
+            Some(2),
+            "a tree that later publishes a config.json is picked up without a restart"
+        );
+    }
+
+    /// C-007's absent-`config.json` case under the same held-response fan-out:
+    /// the coalescing must not turn "never memoized" into "memoized once".
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_absent_config_json_reads_stay_unmemoized() {
+        const CALLERS: usize = 8;
+        let transport = StubIndexTransport::new();
+        transport.hold(&config_url());
+        let source = make_source(transport.clone(), false);
+
+        futures::future::join_all((0..CALLERS).map(|_| async { source.check_format_version().await }))
+            .await
+            .into_iter()
+            .for_each(|result| {
+                result.expect("every caller assumes v1");
+            });
+
+        transport.insert(&config_url(), br#"{"format_version":1,"name_segments":2}"#);
+        assert_eq!(
+            source
+                .check_format_version()
+                .await
+                .unwrap()
+                .name_segments
+                .map(std::num::NonZeroU32::get),
+            Some(2),
+            "coalescing an absent config.json must not memoize the assumed v1"
+        );
+    }
+
+    /// C-008 — concurrent `resolve_root` for one repository produces one GET.
+    /// Same held-response shape as C-007, width 8, one repository.
+    #[tokio::test(start_paused = true)]
+    async fn concurrent_resolve_root_for_one_repository_produces_one_get() {
+        const CALLERS: usize = 8;
+        let transport = StubIndexTransport::new();
+        seed_package(&transport, false);
+        transport.hold(&root_url());
+        let source = make_source(transport.clone(), false);
+
+        let results = futures::future::join_all((0..CALLERS).map(|_| async { source.resolve_root(REPO).await })).await;
+        for result in results {
+            assert!(result.unwrap().is_some(), "every caller gets the same root");
+        }
+
+        assert_eq!(
+            transport.request_count(&root_url()),
+            1,
+            "one repository's concurrent root reads coalesce onto one leader"
+        );
+    }
+
     // ── jurisdiction: the INDEX declares what it can express, the client asks ──
     //
     // `name_segments` in `config.json` is the index operator's own published
@@ -3108,6 +3794,893 @@ mod tests {
             1,
             "both paths skip the declined source off ONE memoized jurisdiction probe: {:?}",
             transport.request_urls()
+        );
+    }
+}
+
+// ── Retry ladder and timeout inversion, at the wire ──────────────────────────
+
+/// `C-016`, `C-017`'s wiring, `C-019`, `C-021` and `C-028` against a real
+/// socket through the production [`ReqwestIndexTransport`].
+///
+/// These are the half the virtual-clock tests in
+/// [`crate::oci::transport_policy`] cannot cover: that `get` *reads* the
+/// header, *classifies* the status and *composes* the three timeout bounds.
+/// The clock is real here on purpose — a paused clock auto-advances whenever
+/// the runtime is idle waiting on a socket, which fires the very timeouts
+/// [`TransportHardening`] exists to bound. The bounds are injected instead, so
+/// the same semantics cost milliseconds rather than the shipped minutes.
+///
+/// Pattern lifted from `oci/client/builder.rs`'s `push_wire_tests` /
+/// `read_timeout_tests` — the only place in the tree counting real wire
+/// requests — rather than invented here.
+#[cfg(test)]
+mod transport_wire_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    const BODY: &str = r#"{"formatVersion":1}"#;
+
+    /// One scripted response. The stub answers request *n* with `script[n]`,
+    /// repeating the last entry once the script runs out.
+    #[derive(Clone)]
+    enum Reply {
+        /// A complete response: status line, extra headers, whole body at once.
+        Status {
+            code: u16,
+            headers: Vec<(&'static str, String)>,
+            body: &'static str,
+        },
+        /// `Content-Length: body.len()`, then one byte every `interval` until
+        /// the body is delivered. Honest but slow — never idle longer than
+        /// `interval`, so an idle bound above `interval` must not fire.
+        Dribble { interval: Duration, body: &'static str },
+        /// A `Content-Length` far beyond what is ever sent, then one byte every
+        /// `interval`, forever. Trips no idle bound above `interval` and never
+        /// approaches the byte cap in any human timeframe — so only an outer
+        /// cap can end it.
+        DribbleForever { interval: Duration },
+        /// Headers, then silence with the socket held open. Silent-but-open is
+        /// the case an idle bound exists for at all: a close yields EOF, which
+        /// every layer above already handles.
+        Stall,
+        /// A `200` declaring `declared` bytes and sending none — a body the
+        /// client must refuse on the declaration alone.
+        ForgedLength { declared: u64 },
+        /// A `200`, headers, a partial body, then the connection closed with
+        /// the promised `Content-Length` unfulfilled — the shape a
+        /// TLS-inspecting proxy produces. The only reply here whose failure
+        /// lands in the body loop rather than in `send()`.
+        AbortMidBody { sent: &'static str },
+    }
+
+    fn ok() -> Reply {
+        Reply::Status {
+            code: 200,
+            headers: Vec::new(),
+            body: BODY,
+        }
+    }
+
+    fn status(code: u16) -> Reply {
+        Reply::Status {
+            code,
+            headers: Vec::new(),
+            body: "",
+        }
+    }
+
+    fn status_with_retry_after(code: u16, retry_after: &str) -> Reply {
+        Reply::Status {
+            code,
+            headers: vec![("Retry-After", retry_after.to_string())],
+            body: "",
+        }
+    }
+
+    fn reason(code: u16) -> &'static str {
+        match code {
+            200 => "OK",
+            403 => "Forbidden",
+            404 => "Not Found",
+            429 => "Too Many Requests",
+            503 => "Service Unavailable",
+            _ => "Unknown",
+        }
+    }
+
+    /// A minimal HTTP/1.1 index endpoint that counts every request it serves.
+    ///
+    /// Answers with `Connection: close` so one connection is exactly one
+    /// request — otherwise keep-alive reuse would decouple the connection count
+    /// from the request count the retry contracts assert on.
+    struct StubIndexEndpoint {
+        address: String,
+        served: Arc<AtomicUsize>,
+        /// Every request target the endpoint saw. A request *count* cannot show
+        /// that a redirect went unfollowed — only the absence of the redirect's
+        /// own target from this list can.
+        targets: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl StubIndexEndpoint {
+        async fn start(script: Vec<Reply>) -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap().to_string();
+            let served = Arc::new(AtomicUsize::new(0));
+
+            let counter = Arc::clone(&served);
+            let targets = Arc::new(Mutex::new(Vec::new()));
+            let log = Arc::clone(&targets);
+            tokio::spawn(async move {
+                while let Ok((socket, _)) = listener.accept().await {
+                    let script = script.clone();
+                    let counter = Arc::clone(&counter);
+                    let log = Arc::clone(&log);
+                    tokio::spawn(async move {
+                        let index = counter.fetch_add(1, Ordering::SeqCst);
+                        let reply = script[index.min(script.len() - 1)].clone();
+                        serve(socket, reply, log).await;
+                    });
+                }
+            });
+
+            Self {
+                address,
+                served,
+                targets,
+            }
+        }
+
+        fn url(&self) -> String {
+            format!("http://{}/p/ocx.sh/tool.json", self.address)
+        }
+
+        fn served(&self) -> usize {
+            self.served.load(Ordering::SeqCst)
+        }
+
+        fn targets(&self) -> Vec<String> {
+            self.targets.lock().unwrap().clone()
+        }
+    }
+
+    async fn serve(socket: tokio::net::TcpStream, reply: Reply, targets: Arc<Mutex<Vec<String>>>) {
+        let (read_half, mut write_half) = socket.into_split();
+        let mut reader = tokio::io::BufReader::new(read_half);
+
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).await.unwrap_or(0) == 0 {
+            return;
+        }
+        if let Some(target) = request_line.split_whitespace().nth(1) {
+            targets.lock().unwrap().push(target.to_string());
+        }
+        loop {
+            let mut header = String::new();
+            match reader.read_line(&mut header).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) if header.trim_end().is_empty() => break,
+                Ok(_) => {}
+            }
+        }
+
+        match reply {
+            Reply::Status { code, headers, body } => {
+                let mut response = format!(
+                    "HTTP/1.1 {code} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    reason(code),
+                    body.len()
+                );
+                for (name, value) in headers {
+                    response.push_str(&format!("{name}: {value}\r\n"));
+                }
+                response.push_str("\r\n");
+                response.push_str(body);
+                let _ = write_half.write_all(response.as_bytes()).await;
+                let _ = write_half.flush().await;
+            }
+            Reply::Dribble { interval, body } => {
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                if write_half.write_all(head.as_bytes()).await.is_err() {
+                    return;
+                }
+                for byte in body.as_bytes() {
+                    tokio::time::sleep(interval).await;
+                    if write_half.write_all(&[*byte]).await.is_err() || write_half.flush().await.is_err() {
+                        return;
+                    }
+                }
+            }
+            Reply::DribbleForever { interval } => {
+                let head = "HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n";
+                if write_half.write_all(head.as_bytes()).await.is_err() {
+                    return;
+                }
+                loop {
+                    tokio::time::sleep(interval).await;
+                    if write_half.write_all(b".").await.is_err() || write_half.flush().await.is_err() {
+                        return;
+                    }
+                }
+            }
+            Reply::Stall => {
+                let head = "HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\nx";
+                let _ = write_half.write_all(head.as_bytes()).await;
+                let _ = write_half.flush().await;
+                std::future::pending::<()>().await;
+            }
+            Reply::ForgedLength { declared } => {
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n");
+                let _ = write_half.write_all(head.as_bytes()).await;
+                let _ = write_half.flush().await;
+            }
+            Reply::AbortMidBody { sent } => {
+                // Promise the whole document, deliver a prefix, then drop —
+                // the client's body read ends short of the declared length.
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    BODY.len()
+                );
+                let _ = write_half.write_all(head.as_bytes()).await;
+                let _ = write_half.write_all(sent.as_bytes()).await;
+                let _ = write_half.flush().await;
+                drop(write_half);
+            }
+        }
+    }
+
+    /// Bounds generous enough that only the retry ladder is under test.
+    fn quick_bounds() -> TransportHardening {
+        TransportHardening {
+            connect_timeout: Duration::from_secs(5),
+            idle_bound: Duration::from_secs(5),
+            outer_cap: Duration::from_secs(10),
+        }
+    }
+
+    /// A ladder whose backoff is negligible, so a request-count assertion does
+    /// not also pay for the shipped 250 ms base.
+    fn quick_ladder() -> RetryPolicy {
+        RetryPolicy {
+            base: Duration::from_millis(1),
+            cap: Duration::from_millis(1),
+            ..RetryPolicy::default()
+        }
+    }
+
+    // ── C-016 — a retryable status is retried; a terminal one is not ─────────
+
+    #[tokio::test]
+    async fn a_503_then_200_yields_the_body_in_two_requests() {
+        let endpoint = StubIndexEndpoint::start(vec![status(503), ok()]).await;
+        let transport = ReqwestIndexTransport::with_hardening(&quick_bounds(), quick_ladder());
+
+        match transport.get(&endpoint.url()).await {
+            Ok(IndexFetch::Found { bytes }) => assert_eq!(bytes, BODY.as_bytes()),
+            other => panic!("a transient 503 must be retried into a body, got {other:?}"),
+        }
+        assert_eq!(endpoint.served(), 2, "one initial attempt plus exactly one retry");
+    }
+
+    #[tokio::test]
+    async fn a_404_is_a_confirmed_absence_and_is_never_re_asked() {
+        let endpoint = StubIndexEndpoint::start(vec![status(404)]).await;
+        let transport = ReqwestIndexTransport::with_hardening(&quick_bounds(), quick_ladder());
+
+        assert!(matches!(transport.get(&endpoint.url()).await, Ok(IndexFetch::NotFound)));
+        assert_eq!(
+            endpoint.served(),
+            1,
+            "a 404 settles jurisdiction; re-asking cannot change it and must not be attempted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_403_fails_after_one_request() {
+        let endpoint = StubIndexEndpoint::start(vec![status(403)]).await;
+        let transport = ReqwestIndexTransport::with_hardening(&quick_bounds(), quick_ladder());
+
+        assert!(transport.get(&endpoint.url()).await.is_err());
+        assert_eq!(endpoint.served(), 1, "a 403 will not change on re-ask");
+    }
+
+    /// **A `3xx` is neither retried nor followed.**
+    ///
+    /// `Policy::none()` stops *reqwest* following it, but the ladder puts a
+    /// classifier and a live 3xx response in the same function, where the
+    /// obvious next step is to re-issue against `Location`. That would be
+    /// manual redirect-following on a client carrying no `GuardedResolver`,
+    /// after `resolve_base_url`'s plain-HTTP gate has already run: a
+    /// remote-controlled `Location` is arbitrary egress (CWE-918) and an
+    /// `http://` one is a silent scheme downgrade (CWE-319).
+    ///
+    /// Both halves are asserted. The error and the request count alone would
+    /// pass against a follower whose second hop happened to fail — only the
+    /// redirect target's absence from the endpoint's request log shows it was
+    /// never asked for.
+    #[tokio::test]
+    async fn a_redirect_is_neither_retried_nor_followed() {
+        const TRAP: &str = "/p/ocx.sh/elsewhere.json";
+        let endpoint = StubIndexEndpoint::start(vec![Reply::Status {
+            code: 302,
+            headers: vec![("Location", TRAP.to_string())],
+            body: "",
+        }])
+        .await;
+        let transport = ReqwestIndexTransport::with_hardening(&quick_bounds(), quick_ladder());
+
+        let outcome = transport.get(&endpoint.url()).await;
+
+        // The security assertion goes first: it is the one a follower violates
+        // even when its second hop happens to fail, which would leave the error
+        // and the count both looking correct.
+        let targets = endpoint.targets();
+        assert!(
+            !targets.iter().any(|target| target.contains("elsewhere")),
+            "the `Location` target was requested — that is manual redirect-following past the SSRF and \
+             plain-HTTP gates (CWE-918 / CWE-319): {targets:?}"
+        );
+        assert!(
+            outcome.is_err(),
+            "an unfollowed redirect is a failure with the status intact, never a silent success"
+        );
+        assert_eq!(endpoint.served(), 1, "retrying a redirect re-fetches the same redirect");
+    }
+
+    /// **The ladder covers the body stream, not just `send()`.**
+    ///
+    /// This is the discriminator for the failure the whole work package exists
+    /// for: a TLS-inspecting proxy that accepts, answers `200` with headers,
+    /// then resets mid-body. A ladder wrapped around `send()` alone — the
+    /// literal reading of "where the response and its status are in hand" —
+    /// retries it zero times, and passes every other contract here, because
+    /// every one of them fails before the first body byte.
+    #[tokio::test]
+    async fn a_body_that_aborts_mid_stream_is_retried_from_the_start() {
+        let endpoint = StubIndexEndpoint::start(vec![Reply::AbortMidBody { sent: "{\"format" }, ok()]).await;
+        let transport = ReqwestIndexTransport::with_hardening(&quick_bounds(), quick_ladder());
+
+        match transport.get(&endpoint.url()).await {
+            Ok(IndexFetch::Found { bytes }) => assert_eq!(
+                bytes,
+                BODY.as_bytes(),
+                "the retry must deliver the whole document, not the aborted prefix"
+            ),
+            other => panic!("a reset mid-body is transient and must be retried, got {other:?}"),
+        }
+        assert_eq!(
+            endpoint.served(),
+            2,
+            "the whole GET is re-issued — safe because every request on this path is idempotent"
+        );
+    }
+
+    /// C-024: the status rides the variant structurally, and the exit code is
+    /// unchanged at 69 — both halves, because the second is the non-regression
+    /// promise the plan makes about the CLI surface.
+    #[tokio::test]
+    async fn a_failing_status_lands_on_the_variant_and_still_exits_69() {
+        use crate::cli::ClassifyExitCode as _;
+
+        let endpoint = StubIndexEndpoint::start(vec![status(503)]).await;
+        let transport = ReqwestIndexTransport::with_hardening(
+            &quick_bounds(),
+            RetryPolicy {
+                attempts: 1,
+                ..quick_ladder()
+            },
+        );
+
+        let error = transport.get(&endpoint.url()).await.expect_err("503 is a failure");
+        let crate::Error::OciIndex(index_error) = &error else {
+            panic!("expected an index error, got {error:?}");
+        };
+        match index_error {
+            super::super::error::Error::IndexHttpFailed { status, .. } => assert_eq!(
+                *status,
+                Some(503),
+                "the retry classifier reads this field; a formatted message is unreadable to it"
+            ),
+            other => panic!("expected IndexHttpFailed, got {other:?}"),
+        }
+        assert_eq!(
+            index_error.classify(),
+            Some(crate::cli::ExitCode::Unavailable),
+            "the status field is for the retry classifier, not for reclassifying the exit code — \
+             exit codes are the CLI surface other tools branch on"
+        );
+    }
+
+    // ── C-017 — the header is actually read off the wire ─────────────────────
+
+    /// The virtual-clock tests prove the ladder sleeps a stated interval; this
+    /// proves `get` parses one off a real response and hands it over.
+    #[tokio::test]
+    async fn a_retry_after_on_the_wire_is_waited_out() {
+        let endpoint = StubIndexEndpoint::start(vec![status_with_retry_after(429, "1"), ok()]).await;
+        let transport = ReqwestIndexTransport::with_hardening(&quick_bounds(), quick_ladder());
+
+        let start = std::time::Instant::now();
+        assert!(matches!(
+            transport.get(&endpoint.url()).await,
+            Ok(IndexFetch::Found { .. })
+        ));
+        assert!(
+            start.elapsed() >= Duration::from_secs(1),
+            "the 1 ms ladder backoff would finish instantly; only the header's second explains the wait, got {:?}",
+            start.elapsed()
+        );
+        assert_eq!(endpoint.served(), 2);
+    }
+
+    /// C-017 edge case (a), at the wire. Without the clamp this test does not
+    /// fail — it hangs for a day, which is the exposure (CWE-400).
+    #[tokio::test]
+    async fn a_retry_after_above_the_clamp_fails_fast_instead_of_freezing_the_run() {
+        let endpoint = StubIndexEndpoint::start(vec![status_with_retry_after(503, "86400"), ok()]).await;
+        let transport = ReqwestIndexTransport::with_hardening(&quick_bounds(), quick_ladder());
+
+        let start = std::time::Instant::now();
+        assert!(transport.get(&endpoint.url()).await.is_err());
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "above the clamp means stop retrying now, never sleep the stated day"
+        );
+        assert_eq!(endpoint.served(), 1, "the ladder stopped rather than waiting");
+    }
+
+    // ── C-019 — the budget is shared across every clone of the transport ─────
+
+    /// The discriminator: `index_common.rs` builds one index per package inside
+    /// the fan-out, so each package holds a *cloned* transport. A budget on a
+    /// plain field would be per-package, and a single-package test would pass
+    /// either way — so this fans out across several cloned transports at once
+    /// and measures the wire.
+    #[tokio::test]
+    async fn the_retry_budget_is_run_global_across_cloned_transports() {
+        const CLONES: usize = 3;
+        const REQUESTS_PER_CLONE: usize = 10;
+
+        let endpoint = StubIndexEndpoint::start(vec![status(503)]).await;
+        let transport = ReqwestIndexTransport::with_hardening(&quick_bounds(), quick_ladder());
+        let url = endpoint.url();
+
+        let mut fan_out = tokio::task::JoinSet::new();
+        for _ in 0..CLONES {
+            // `box_clone` is the exact call the fan-out makes.
+            let cloned = IndexTransport::box_clone(&transport);
+            let url = url.clone();
+            fan_out.spawn(async move {
+                for _ in 0..REQUESTS_PER_CLONE {
+                    let _ = cloned.get(&url).await;
+                }
+            });
+        }
+        while let Some(joined) = fan_out.join_next().await {
+            joined.expect("no fan-out task panics");
+        }
+
+        let issued = CLONES * REQUESTS_PER_CLONE;
+        let total = endpoint.served();
+        let retries = total - issued;
+        let allowed = std::cmp::max(10, total / 10);
+        assert!(
+            retries <= allowed,
+            "{retries} retries over {total} requests exceeds the run budget of {allowed}; a per-clone \
+             budget would admit {CLONES} floors instead of one"
+        );
+        assert!(
+            retries > 0,
+            "non-vacuity: the ladder must have retried at least once, or the bound proves nothing"
+        );
+    }
+
+    // ── C-021 / C-028 — the three bounds compose ─────────────────────────────
+
+    /// S-005: an honest slow body is no longer aborted. The transfer runs far
+    /// past the idle bound without ever idling that long — exactly the case the
+    /// old hard total deadline killed.
+    #[tokio::test]
+    async fn an_honest_slow_body_completes_however_long_it_takes() {
+        let idle_bound = Duration::from_millis(200);
+        let endpoint = StubIndexEndpoint::start(vec![Reply::Dribble {
+            interval: Duration::from_millis(50),
+            body: BODY,
+        }])
+        .await;
+        let transport = ReqwestIndexTransport::with_hardening(
+            &TransportHardening {
+                connect_timeout: Duration::from_secs(5),
+                idle_bound,
+                outer_cap: Duration::from_secs(30),
+            },
+            quick_ladder(),
+        );
+
+        let start = std::time::Instant::now();
+        match transport.get(&endpoint.url()).await {
+            Ok(IndexFetch::Found { bytes }) => assert_eq!(bytes, BODY.as_bytes()),
+            other => panic!("a body that never stalls must arrive, got {other:?}"),
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed > idle_bound * 3,
+            "non-vacuity: the transfer must outlast a hard total deadline of the idle bound's size to \
+             prove the inversion, took only {elapsed:?}"
+        );
+        assert_eq!(endpoint.served(), 1, "no retry — nothing failed");
+    }
+
+    /// The other half of C-021: a connection that genuinely goes quiet still
+    /// fires, at roughly the idle bound.
+    #[tokio::test]
+    async fn a_stalled_body_fails_at_the_idle_bound() {
+        let idle_bound = Duration::from_millis(300);
+        let endpoint = StubIndexEndpoint::start(vec![Reply::Stall]).await;
+        let transport = ReqwestIndexTransport::with_hardening(
+            &TransportHardening {
+                connect_timeout: Duration::from_secs(5),
+                idle_bound,
+                outer_cap: Duration::from_secs(30),
+            },
+            RetryPolicy {
+                attempts: 1,
+                ..quick_ladder()
+            },
+        );
+
+        let start = std::time::Instant::now();
+        assert!(transport.get(&endpoint.url()).await.is_err(), "a silent peer must fail");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= idle_bound && elapsed < idle_bound * 20,
+            "the idle bound, not the outer cap, must end a stall; took {elapsed:?}"
+        );
+    }
+
+    /// C-021's byte-cap edge: relaxing the deadline must not relax the cap.
+    ///
+    /// Both halves, because either alone is half a proof — a cap that refuses
+    /// everything and a cap that refuses nothing are indistinguishable from one
+    /// assertion. The oversize half declares a `Content-Length` past the cap and
+    /// sends nothing, so it also pins the "refused before a single byte is read"
+    /// property.
+    #[tokio::test]
+    async fn the_byte_cap_still_fires_and_still_lets_an_ordinary_body_through() {
+        let endpoint = StubIndexEndpoint::start(vec![
+            Reply::ForgedLength {
+                declared: MAX_INDEX_DOCUMENT_BYTES as u64 + 1,
+            },
+            ok(),
+        ])
+        .await;
+        let transport = ReqwestIndexTransport::with_hardening(
+            &quick_bounds(),
+            RetryPolicy {
+                attempts: 1,
+                ..quick_ladder()
+            },
+        );
+        let url = endpoint.url();
+
+        let refusal = transport
+            .get(&url)
+            .await
+            .expect_err("a declared oversize body is refused");
+        assert!(
+            refusal.to_string().contains("index request to"),
+            "the refusal is an IndexHttpFailed, got {refusal}"
+        );
+        assert_eq!(
+            endpoint.served(),
+            1,
+            "the declaration is refused before the body is read, and an oversize body is not retryable"
+        );
+
+        match transport.get(&url).await {
+            Ok(IndexFetch::Found { bytes }) => assert_eq!(bytes, BODY.as_bytes()),
+            other => panic!("a body inside the cap must still be served, got {other:?}"),
+        }
+    }
+
+    /// **C-028 — the contract that makes dropping the total deadline
+    /// detectable at all.**
+    ///
+    /// The peer dribbles one byte every `idle_bound − ε`: it never trips the
+    /// per-frame bound and never approaches the 32 MiB byte cap, so nothing but
+    /// the outer cap can end it. C-021's two halves pass identically with or
+    /// without an outer cap, which is why C-021 alone is not enough.
+    ///
+    /// *Red-reachability:* remove `.timeout(hardening.outer_cap)` from
+    /// `build_index_http_client` and this test hangs past the cap.
+    #[tokio::test]
+    async fn a_dribbling_peer_is_ended_by_the_outer_cap() {
+        let idle_bound = Duration::from_millis(500);
+        let outer_cap = Duration::from_secs(2);
+        let endpoint = StubIndexEndpoint::start(vec![Reply::DribbleForever {
+            // Comfortably under the idle bound, so the idle bound never fires.
+            interval: Duration::from_millis(200),
+        }])
+        .await;
+        let transport = ReqwestIndexTransport::with_hardening(
+            &TransportHardening {
+                connect_timeout: Duration::from_secs(5),
+                idle_bound,
+                outer_cap,
+            },
+            RetryPolicy {
+                attempts: 1,
+                ..quick_ladder()
+            },
+        );
+
+        let start = std::time::Instant::now();
+        let outcome = tokio::time::timeout(outer_cap * 5, transport.get(&endpoint.url())).await;
+        let elapsed = start.elapsed();
+        let outcome = outcome.expect("without an outer cap a dribbling peer never terminates — this is the red");
+        assert!(
+            outcome.is_err(),
+            "a peer that never finishes must fail, got {outcome:?}"
+        );
+        assert!(
+            elapsed >= outer_cap && elapsed < outer_cap * 3,
+            "the failure must land at roughly the outer cap, not the idle bound; took {elapsed:?}"
+        );
+    }
+}
+
+// ── Diagnostic-surface guards (C-026, C-031) ─────────────────────────────────
+
+#[cfg(test)]
+mod diagnostic_surface_tests {
+    /// The module's own source, non-test half only, comments intact.
+    ///
+    /// Splitting on the first `#[cfg(test)]` is the
+    /// `local_index.rs::the_per_tag_fan_out_is_sized_by_the_constant_at_every_site`
+    /// preprocessing, copied rather than re-invented: a raw grep counts
+    /// occurrences inside the test half and reports a break that is not there.
+    fn production_source() -> &'static str {
+        include_str!("ocx_index.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the module has a non-test half")
+    }
+
+    /// Drops `//`-prefixed lines.
+    ///
+    /// Required before any denylist scan: a comment that quotes the form it
+    /// forbids — the right thing for a comment to do — otherwise matches
+    /// itself. Applied *after* slicing, never before, because the section
+    /// dividers that delimit a region are themselves comments.
+    fn strip_comments(source: &str) -> String {
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The transport region: `ReqwestIndexTransport`'s inherent methods and its
+    /// `IndexTransport` impl — where the retry ladder lives and where a new
+    /// diagnostic would land.
+    fn transport_region() -> String {
+        let source = production_source();
+        let start = source
+            .find("impl ReqwestIndexTransport {")
+            .expect("the transport's inherent impl anchors the region");
+        let end = source
+            .find("// ── Physical reference parsing")
+            .expect("the next section divider closes the region");
+        assert!(end > start, "the region anchors must be in source order");
+        strip_comments(&source[start..end])
+    }
+
+    /// The operator-facing `warn!` inventory this module is allowed to have —
+    /// each entry the site's **whole** format string, compared by equality.
+    ///
+    /// Four are publisher-signal advisories from the yank/deprecation/supersede
+    /// feature; the fifth reports a degraded HTTP-client build. None came from
+    /// the retry work, and none may be removed to satisfy a count — they are
+    /// another feature's operator surface.
+    ///
+    /// Whole strings, not fragments, because a fragment check on a fixed-width
+    /// window around each site lets one site's window run into its neighbour's
+    /// text: deleting the supersede advisory then still "matched", inside the
+    /// deprecation site's window, and the guard stayed green.
+    const ALLOWED_WARN_SITES: [&str; 5] = [
+        "index HTTP client build with bundled roots failed ({error}); using hardened reqwest defaults",
+        "'{identifier}' resolves to a yanked entry — a yank is a publisher signal, not a delete",
+        "'{identifier}' is deprecated: {message}",
+        "'{identifier}' is deprecated",
+        "'{identifier}' is superseded by '{successor}' (advisory; not followed automatically)",
+    ];
+
+    /// The format string of one `log::` site, given the source text following
+    /// the macro name.
+    fn format_string(site: &str) -> &str {
+        let open = site.find('"').expect("a log site opens a format string");
+        let rest = &site[open + 1..];
+        let close = rest.find('"').expect("the format string closes");
+        &rest[..close]
+    }
+
+    /// **C-026 — the retry ladder adds no operator-facing line.**
+    ///
+    /// Per site, not a count. A count is the wrong instrument twice over: at
+    /// zero the contract is red before any of this work exists (the five sites
+    /// below predate it), and at five a green says only that the total did not
+    /// move — a retry `warn!` added while an advisory was deleted passes.
+    /// Matching each site against a known inventory says what the contract
+    /// actually means: *this* line is one we already had.
+    ///
+    /// `index_common.rs::the_funnel_neutralizes_both_halves` is the precedent.
+    ///
+    /// *Red-reachability:* any new `log::warn!` or `log::info!` matches no
+    /// entry and fails; deleting an advisory fails the inventory check.
+    #[test]
+    fn no_operator_facing_diagnostic_is_added_to_this_module() {
+        let source = strip_comments(production_source());
+        assert!(!source.is_empty(), "non-vacuity: the scanned window must not be empty");
+        // Anchored on text that exists ONLY in the excluded half, which is the
+        // one form of this check that can actually fail.
+        //
+        // Two earlier forms could not. `!source.contains("#[cfg(test)]")` is the
+        // prefix before the first occurrence, so it holds in every state of the
+        // file. Comparing lengths fails for the same reason one step removed:
+        // the needle appears *in this file* (in the `split` call below and in
+        // this very comment), so `split` always finds a separator and the prefix
+        // is always strictly shorter — true whether or not the truncation landed
+        // where it should. Both are self-matching detectors, and no choice of
+        // needle repairs either: a `#[cfg(all(test))]` regate leaves the window
+        // spanning both test modules while every assertion here stays green.
+        //
+        // A module name cannot self-match, because it is declared only in the
+        // half this window must not reach.
+        for excluded in ["mod tests {", "mod diagnostic_surface_tests {"] {
+            assert!(
+                !source.contains(excluded),
+                "non-vacuity: the window reached `{excluded}`, so the split did not truncate the test \
+                 half and a truncation bug fakes a low count"
+            );
+        }
+        assert!(
+            source.contains("impl IndexTransport for ReqwestIndexTransport"),
+            "non-vacuity: the window must actually reach the transport, or it scans nothing"
+        );
+        // The other truncation direction, and the one the message above names:
+        // a window that stops *early* drops production `log::warn!` sites and
+        // fakes a low count, which the length check cannot see. This anchor is
+        // the last item of the production half, so the window has to span all
+        // of it.
+        assert!(
+            source.contains("impl index_impl::IndexImpl for OcxIndex"),
+            "non-vacuity: the window must reach the production half's last item, or it scans only a prefix of it"
+        );
+        assert_eq!(
+            source.matches("log::info!").count(),
+            0,
+            "a retried transient is a common benign state; `info!` per retry is noise across a 512-wide fan-out"
+        );
+
+        let sites: Vec<&str> = source.split("log::warn!").skip(1).map(format_string).collect();
+        for site in &sites {
+            assert!(
+                ALLOWED_WARN_SITES.contains(site),
+                "new operator-facing `warn!` in this module — S-003 says retries are `debug!` and S-007 \
+                 says a self-heal is silent: \"{site}\""
+            );
+        }
+        for known in ALLOWED_WARN_SITES {
+            assert!(
+                sites.contains(&known),
+                "the `{known}` advisory is gone — it is publisher semantics, not retry noise, and this \
+                 inventory must be edited deliberately, never emptied to make a guard pass"
+            );
+        }
+    }
+
+    /// **C-031 — every diagnostic in the retry region redacts the URL.**
+    ///
+    /// Checked **per site**, never as a count: a count budget is satisfied by
+    /// one raw call paired with one redacted call elsewhere. Precedent:
+    /// `index_common.rs::the_funnel_neutralizes_both_halves`.
+    ///
+    /// An index base URL may embed `user:password@` — that is what `redact_url`
+    /// exists for (CWE-532), and the retry ladder's natural line ("retrying
+    /// {url}, attempt 2/3") is a new emission site in exactly this region.
+    #[test]
+    fn every_diagnostic_and_error_in_the_retry_region_redacts_the_url() {
+        let region = transport_region();
+        assert!(
+            region.contains("transport_policy::run("),
+            "non-vacuity: the region must contain the retry ladder, or it watches the wrong code"
+        );
+
+        let mut log_sites = 0;
+        for site in region.split("log::").skip(1) {
+            let statement = site.split(");").next().expect("a macro invocation ends somewhere");
+            assert!(
+                statement.starts_with("debug!"),
+                "only `debug!` belongs in the retry region (C-026); found `log::{}`",
+                statement.lines().next().unwrap_or_default()
+            );
+            assert!(
+                statement.contains("redact_url(url)"),
+                "this diagnostic renders a URL raw (CWE-532): log::{statement}"
+            );
+            log_sites += 1;
+        }
+        assert!(
+            log_sites >= 1,
+            "non-vacuity: the retry ladder must emit at least one diagnostic, or this guard watches nothing"
+        );
+
+        // Tripwire for the likely accident, not the contract itself — the
+        // contract is `a_redirect_is_neither_retried_nor_followed`. A ladder
+        // that reads `Location` at all is re-issuing against it.
+        for needle in ["LOCATION", "\"location\"", "Location\""] {
+            assert!(
+                !region.contains(needle),
+                "`{needle}` in the retry region: following a redirect here bypasses `resolve_base_url`'s \
+                 plain-HTTP gate on a client with no `GuardedResolver` (CWE-918 / CWE-319)"
+            );
+        }
+
+        let mut error_sites = 0;
+        for site in region.split("IndexHttpFailed {").skip(1) {
+            // The classifier's `matches!` pattern binds fields rather than
+            // constructing; only construction carries a `url:`.
+            let Some(fields) = site.split('}').next() else {
+                continue;
+            };
+            if !fields.contains("url:") {
+                continue;
+            }
+            assert!(
+                fields.contains("redact_url(url)"),
+                "every failure raised here echoes the request URL and must redact it: {fields}"
+            );
+            error_sites += 1;
+        }
+        assert!(
+            error_sites >= 4,
+            "non-vacuity: the region raises several IndexHttpFailed variants; saw {error_sites}"
+        );
+    }
+
+    /// The three bounds must all be applied, and applied from the injected
+    /// hardening rather than from a re-introduced constant.
+    ///
+    /// *Red-reachability:* delete any one builder call and the matching
+    /// assertion fails — including `.timeout(...)`, whose absence
+    /// `a_dribbling_peer_is_ended_by_the_outer_cap` detects behaviourally.
+    #[test]
+    fn the_client_builder_applies_all_three_bounds_and_follows_no_redirect() {
+        let source = strip_comments(production_source());
+        for needle in [
+            ".connect_timeout(hardening.connect_timeout)",
+            ".read_timeout(hardening.idle_bound)",
+            ".timeout(hardening.outer_cap)",
+            ".redirect(reqwest::redirect::Policy::none())",
+        ] {
+            assert!(
+                source.contains(needle),
+                "`{needle}` is missing: the index client must fast-fail connects, detect stalls, cap one \
+                 attempt, and never follow a redirect (CWE-918 / CWE-319)"
+            );
+        }
+        assert!(
+            !source.contains("reqwest::Client::new()"),
+            "D-011b: a bare `Client::new()` carries reqwest's defaults — no timeouts, redirects followed \
+             up to 10 hops — which is remote-controlled egress able to relocate the fetch to http:// \
+             after the plain-HTTP gate already ran"
         );
     }
 }

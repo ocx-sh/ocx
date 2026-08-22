@@ -72,8 +72,24 @@ fn is_local_read_refusal(err: &crate::Error) -> bool {
 /// joining the held set: an `SsrfError` held here would be a guard that fires and
 /// is then discarded, and a `MalformedPhysicalRef` held here would answer around
 /// malformed publisher data with a stale local pointer.
+///
+/// **Peel before matching.** That fail-closed argument covers a new *sibling*
+/// variant and says nothing about a **wrapper around the existing one**, which
+/// is the direction the defect actually came from: coalescing the source's
+/// `config.json` / root fetches made a leader return its transport error inside
+/// a transparent `SourceFetchFailed`, so a bare `matches!` stopped recognising
+/// an outage it had recognised for the whole life of the offline fallback, and
+/// a warm machine with the index site unreachable started exiting 69. The
+/// wrapper is invisible to `Display` and to exit-code classification, so
+/// nothing else in the chain reported the change. Every structural test of a
+/// source error therefore runs against
+/// [`error::coalesced_cause`](super::error::coalesced_cause), never against the
+/// error as returned.
 fn is_source_outage(err: &crate::Error) -> bool {
-    matches!(err, crate::Error::OciIndex(super::error::Error::IndexHttpFailed { .. }))
+    matches!(
+        super::error::coalesced_cause(err),
+        crate::Error::OciIndex(super::error::Error::IndexHttpFailed { .. })
+    )
 }
 
 /// Whether a *failed* host lookup may be tolerated by [`ChainedIndex::guard_local_physical`].
@@ -782,7 +798,7 @@ impl ChainedIndex {
                                     .expect("grow branch is gated on identifier.tag().is_some()");
                                 if let Some((root_bytes, _root)) = source.fetch_root_document(identifier).await? {
                                     self.local_index
-                                        .commit_published_root(identifier, &root_bytes, RootScope::Tag(tag))
+                                        .commit_published_root(identifier, &root_bytes, RootScope::Tags(&[tag]))
                                         .await?;
                                 }
                             }
@@ -1513,7 +1529,11 @@ mod chain_refs_tests {
     use crate::{
         Result,
         file_structure::{BlobStore, IndexStore},
-        oci::index::{ChainMode, Index, IndexOperation, Jurisdiction, LocalConfig, LocalIndex, index_impl},
+        oci::client::test_transport::{StubTransport, StubTransportData},
+        oci::index::{
+            ChainMode, Index, IndexFetch, IndexOperation, IndexTransport, Jurisdiction, LocalConfig, LocalIndex,
+            OcxIndex, OcxIndexConfig, index_impl,
+        },
         oci::{Algorithm, Digest, Identifier, ImageManifest, Manifest},
     };
 
@@ -4282,6 +4302,7 @@ mod chain_refs_tests {
         async fn physical_reference(&self, _: &Identifier) -> Result<Option<Identifier>> {
             Err(super::super::error::Error::IndexHttpFailed {
                 url: "https://index.example.com/config.json".to_string(),
+                status: None,
                 source: "connection refused".into(),
             }
             .into())
@@ -4945,6 +4966,176 @@ mod chain_refs_tests {
             .expect("a transport outage is held, not propagated")
             .expect("the local root answers around the outage");
         assert_is_physical(&physical);
+    }
+
+    // ── the same two invariants, driven by a REAL `OcxIndex` ─────────────
+    //
+    // Both stub-driven guards above emit a **bare** `IndexHttpFailed`, which no
+    // real source has returned since its `config.json` / root fetches were
+    // coalesced: a singleflight leader hands its error to the broadcast and
+    // returns `SourceFetchFailed(ArcError)` instead. So neither stub can
+    // express the shape `is_source_outage` actually meets in production, and
+    // both stayed green while the offline fallback was broken. These two drive
+    // `OcxIndex` itself over an unreachable transport, which is the only way to
+    // produce the wrapper.
+
+    /// An [`IndexTransport`] whose every request fails at the transport layer.
+    /// The index site is unreachable and has no other symptom — the warm
+    /// machine, network down.
+    #[derive(Clone)]
+    struct UnreachableIndexTransport;
+
+    #[async_trait]
+    impl IndexTransport for UnreachableIndexTransport {
+        async fn get(&self, url: &str) -> Result<IndexFetch> {
+            Err(super::super::error::Error::IndexHttpFailed {
+                url: url.to_string(),
+                status: None,
+                source: "connection refused".into(),
+            }
+            .into())
+        }
+        fn box_clone(&self) -> Box<dyn IndexTransport> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// **The owner's red line, under concurrency.** A coalesced fetch has two
+    /// losing shapes for one failure: the **leader** returns
+    /// `SourceFetchFailed`, and every **waiter** that lost the race receives the
+    /// same failure as `SingleflightFailed(Failed(..))`. Peeling only the leader
+    /// would make "outage held" vs "outage propagated" depend on which caller
+    /// happened to win — and the group exists *because* there is a concurrent
+    /// fan-out, so the waiter shape is the common one under load.
+    ///
+    /// Drives the real primitive rather than fabricating the shape: a genuine
+    /// leader handle is failed through `broadcast_failure`, and the waiter's
+    /// error is the one `try_acquire` actually hands back, mapped exactly as
+    /// production maps it.
+    ///
+    /// *Red-reachability:* with only the leader form peeled, the waiter
+    /// assertion below fails. Demonstrated red before the peel was added.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_waiters_outage_is_held_just_like_the_leaders() {
+        use crate::utility::singleflight::{Acquisition, Group};
+
+        let group: Group<(), Option<u8>> = Group::new(1, std::time::Duration::from_secs(5));
+        let handle = match group.try_acquire(()).await.expect("the first caller acquires") {
+            Acquisition::Leader(handle) => handle,
+            Acquisition::Resolved(_) => panic!("the first caller must lead an empty group"),
+        };
+
+        let waiting = group.clone();
+        let waiter = tokio::spawn(async move { waiting.try_acquire(()).await });
+        // The waiter must be parked on the leader's channel *before* the failure
+        // lands: eviction-on-read means a caller arriving afterwards finds the
+        // entry gone and is handed fresh leadership instead — the sequential
+        // case, which is already safe and is not what this test is about. The
+        // `Ok(_)` arm below fails loudly if that is what happened.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let outage: crate::Error = super::super::error::Error::IndexHttpFailed {
+            url: "https://index.example.com/config.json".to_string(),
+            status: None,
+            source: "connection refused".into(),
+        }
+        .into();
+        let leader_error = super::super::error::broadcast_failure(handle, outage);
+
+        let cause = match waiter.await.expect("the waiter task joins") {
+            Err(cause) => cause,
+            Ok(_) => panic!(
+                "non-vacuity: the waiter must observe the leader's failure, not be handed fresh \
+                 leadership — it did not park before the failure landed"
+            ),
+        };
+        let waiter_error: crate::Error = super::super::error::Error::SingleflightFailed(cause).into();
+
+        assert!(
+            super::is_source_outage(&leader_error),
+            "the leader's outage must be held, got: {leader_error:?}"
+        );
+        assert!(
+            super::is_source_outage(&waiter_error),
+            "the WAITER's outage must be held on the same terms as the leader's, got: {waiter_error:?}"
+        );
+    }
+
+    /// A real published source for [`REGISTRY`] that cannot be reached.
+    ///
+    /// The OCI client underneath is never dialled: every path here fails at the
+    /// index transport, before a physical reference exists to fetch with.
+    fn unreachable_ocx_source() -> Index {
+        Index::from_impl(OcxIndex::new(OcxIndexConfig {
+            transport: Box::new(UnreachableIndexTransport),
+            base_url: "https://index.example.com".to_string(),
+            namespace: REGISTRY.to_string(),
+            client: crate::oci::Client::with_transport(Box::new(StubTransport::new(StubTransportData::new()))),
+            allow_yanked: false,
+            trusted_hosts: Vec::new(),
+        }))
+    }
+
+    /// **The owner's red line, end to end.** A warm machine whose index site is
+    /// unreachable resolves from the committed local root — it does not exit 69.
+    ///
+    /// `Remote` because that is the mode whose source walk runs *before* the
+    /// local read, so "the outage was held rather than propagated" is
+    /// observable; under the local-first modes the committed root answers before
+    /// a source is ever asked.
+    ///
+    /// *Red-reachability:* this is the guard the stub-driven
+    /// [`a_source_outage_is_still_held_while_a_refusal_is_not`] could not be.
+    /// Matching `is_source_outage` against the error **as returned** rather than
+    /// against its `coalesced_cause` fails here — the leader's wrapper reads as
+    /// a refusal, propagates, and the local root is never consulted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_real_sources_outage_is_held_and_the_committed_root_answers() {
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        seed_indirected_root(&cache).await;
+
+        let chained = Index::from_chained(cache, vec![unreachable_ocx_source()], ChainMode::Remote);
+        let physical = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .expect("a real source's transport outage is held, not propagated")
+            .expect("the committed local root answers around the outage");
+        assert_is_physical(&physical);
+    }
+
+    /// The re-raise half against the same real source: with no local root the
+    /// outage still fails loudly, and it still exits 69.
+    ///
+    /// The exit code is the assertion that carries, not the variant: what
+    /// re-raises is the leader's transparent `SourceFetchFailed` wrapper, so a
+    /// structural `matches!` on `IndexHttpFailed` — what the stub-driven twin
+    /// below asserts — would fail here despite the behaviour being identical.
+    /// `Unavailable` (69) is what a script actually branches on, and it reads
+    /// through the wrapper.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_real_sources_outage_still_exits_unavailable_when_no_local_root_answers() {
+        use crate::cli::{ExitCode, classify_error};
+
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        let chained = Index::from_chained(cache, vec![unreachable_ocx_source()], ChainMode::Default);
+        let error = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .expect_err("with no local root the source failure must surface");
+        assert_eq!(
+            classify_error(&error),
+            ExitCode::Unavailable,
+            "a genuine outage must still exit 69, got: {error:?}"
+        );
+        assert!(
+            matches!(
+                super::super::error::coalesced_cause(&error),
+                crate::Error::OciIndex(super::super::error::Error::IndexHttpFailed { .. })
+            ),
+            "expected the source's own transport error under the leader's wrapper, got: {error:?}"
+        );
     }
 
     /// The held source error is re-raised when the local copy cannot answer

@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::stream::{self, StreamExt, TryStreamExt};
+use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
@@ -224,10 +224,11 @@ impl LocalIndex {
         bytes: &[u8],
         root: &super::wire::IndexRoot,
     ) -> Result<()> {
-        let scope = match identifier.tag() {
-            Some(tag) => RootScope::Tag(tag),
-            None => RootScope::Package,
-        };
+        // The identifier's shape is the scope, for both halves of this refresh:
+        // which dispatch objects get persisted, and which tags the commit adopts.
+        let named = identifier.tag();
+        let in_scope = |tag: &str| named.is_none_or(|only| tag == only);
+
         // Every tag this write adopts needs its dispatch object present, or the
         // pin it lands could not resolve offline (B2). Tags NOT adopted keep
         // whatever object they already had — their pins are untouched, so their
@@ -236,37 +237,129 @@ impl LocalIndex {
         // once — one representative tag per distinct digest is enough, since
         // `persist_dispatch` fetches the object by tag.
         let mut seen: std::collections::HashSet<oci::Digest> = std::collections::HashSet::new();
-        let tags: Vec<String> = root
+        let representatives: Vec<(String, oci::Digest)> = root
             .tags
             .iter()
-            .filter(|(tag, _)| match scope {
-                RootScope::Tag(named) => *tag == named,
-                RootScope::Package => true,
-            })
+            .filter(|(tag, _)| in_scope(tag))
             .filter(|(_, entry)| seen.insert(entry.content.clone()))
-            .map(|(tag, _)| tag.clone())
+            .map(|(tag, entry)| (tag.clone(), entry.content.clone()))
             .collect();
 
         // Persist each distinct tag's dispatch object concurrently — each is a
         // latency-bound fetch + a CAS write to a distinct `o/` path, so the burst
         // is capped at `TAG_REFRESH_CONCURRENCY` (issue #154's polite-citizen
         // contract, carried forward).
+        //
+        // `collect`, not `try_collect` (D-008): a sibling tag's failure must not
+        // throw away the work every other tag already completed. Each result
+        // carries its INPUT index, because `buffer_unordered` completes out of
+        // order and the returned failure must be the same one on every run
+        // (D-008e), not whichever finished first.
         let this = self;
-        stream::iter(tags)
-            .map(|tag| {
+        let registry = identifier.registry();
+        let repository = identifier.repository();
+        let outcomes: Vec<(usize, oci::Digest, Result<()>)> = stream::iter(representatives.into_iter().enumerate())
+            .map(|(position, (tag, content))| {
                 let tagged = identifier.clone_with_tag(&tag);
                 async move {
                     log::debug!("Refreshing published tag '{}' for identifier '{}'.", tag, identifier);
-                    // `persist_dispatch` returns the fetched bytes/digest/manifest
-                    // — a refresh only needs the write side-effect.
-                    this.persist_dispatch(source, &tagged).await.map(|_| ())
+                    // D-006 — the content-addressed store IS the gate, and it
+                    // sits HERE rather than inside `persist_dispatch`: that
+                    // method is also on the ordinary resolve path, receives a
+                    // TAGGED identifier so it cannot know the digest without
+                    // the fetch it would be skipping, and returns bytes its
+                    // resolve callers consume. `refresh_published` already
+                    // holds `root.tags[tag].content`, so the check is free.
+                    //
+                    // Never a bare existence check (C-030): `exists()` cannot
+                    // tell a valid object from a zero-byte crash artifact or a
+                    // tampered file, and a caller reading "exists" as "already
+                    // have it" strands the corruption forever — nothing else
+                    // repairs it, `resolve_dispatch` propagates a
+                    // `DigestMismatch` as fatal.
+                    let outcome = match this
+                        .index_store
+                        .read_dispatch_object(registry, repository, &content)
+                        .await
+                    {
+                        // Present AND hash-verified against the digest the
+                        // committed root pins: the fetch would re-download
+                        // bytes this machine already holds and re-hash them
+                        // twice to reach the same answer.
+                        Ok(Some(_)) => Ok(()),
+                        // Absent — including every single-platform (leaf) tag,
+                        // which by design never has an `o/` object — or present
+                        // but corrupt / unreadable. The `Err` arm fetches
+                        // deliberately: this is the self-heal, and the fetch's
+                        // `write_dispatch_object` overwrites the bad file.
+                        Ok(None) | Err(_) => {
+                            // `persist_dispatch` returns the fetched
+                            // bytes/digest/manifest — a refresh only needs the
+                            // write side-effect.
+                            this.persist_dispatch(source, &tagged).await.map(|_| ())
+                        }
+                    };
+                    (position, content, outcome)
                 }
             })
             .buffer_unordered(TAG_REFRESH_CONCURRENCY)
-            .try_collect::<()>()
-            .await?;
+            .collect()
+            .await;
 
-        self.commit_published_root(identifier, bytes, scope).await
+        // The failure unit is the CONTENT DIGEST, not the tag (D-008a): the
+        // fan-out ran one representative per distinct digest, so a failure for
+        // that representative leaves every tag aliasing the same digest equally
+        // unpersisted — none of them may be pinned.
+        let mut unpersisted: std::collections::HashSet<oci::Digest> = std::collections::HashSet::new();
+        let mut failure: Option<(usize, crate::Error)> = None;
+        for (position, content, outcome) in outcomes {
+            let Err(error) = outcome else { continue };
+            unpersisted.insert(content);
+            if failure.as_ref().is_none_or(|(lowest, _)| position < *lowest) {
+                failure = Some((position, error));
+            }
+        }
+
+        let Some((_, error)) = failure else {
+            // Full success: the pre-D-008 commit, unchanged. A bare identifier
+            // takes the package-level fields (routing included) because the user
+            // named the package and nothing narrower; a tagged one adopts
+            // exactly its tag.
+            let scope = match &named {
+                Some(tag) => RootScope::Tags(std::slice::from_ref(tag)),
+                None => RootScope::Package,
+            };
+            return self.commit_published_root(identifier, bytes, scope).await;
+        };
+
+        // Partial success (D-008b/c). Commit ONLY the tags whose dispatch object
+        // is on disk, and only ever under a tag scope: `RootScope::Package`
+        // adopts every tag the fetched root lists with no filter, which would
+        // pin a tag whose object was never written — the tag-without-an-object
+        // state D1 abolished — and would take a routing migration
+        // (`repository`) for a package this run did not fully observe, leaving
+        // the unrefreshed pins routing through a location they were never seen
+        // at. Withholding both is the conservative half: its failure mode is one
+        // extra sync, the other's is silent.
+        let adopted: Vec<&str> = root
+            .tags
+            .iter()
+            .filter(|(tag, entry)| in_scope(tag) && !unpersisted.contains(&entry.content))
+            .map(|(tag, _)| tag.as_str())
+            .collect();
+        //
+        // The commit is matched, never `?`-ed: a `?` here returns the commit's
+        // own failure and drops `error` — the withheld tag failure this whole
+        // branch exists to report — on the floor (see
+        // [`withheld_by_commit_failure`]).
+        if !adopted.is_empty()
+            && let Err(commit) = self
+                .commit_published_root(identifier, bytes, RootScope::Tags(&adopted))
+                .await
+        {
+            return Err(withheld_by_commit_failure(identifier, &error, commit));
+        }
+        Err(error)
     }
 
     /// Derived-source refresh (`adr_index_indirection.md` A2/A3): persist each
@@ -304,27 +397,65 @@ impl LocalIndex {
         // Fan the per-tag dispatch persists out concurrently (issue #154); each
         // returns `(tag, content)`. The commit step below serializes on the root
         // file lock, so the concurrency lives here, on the fetches.
+        //
+        // `collect`, not `try_collect` (D-008): a sibling tag's failure must not
+        // throw away the work every other tag already completed. The input index
+        // rides along so the returned failure is the lowest-index one on every
+        // run, not whichever `buffer_unordered` finished first (D-008e).
         let this = self;
-        let fetched: Vec<(String, oci::Digest)> = stream::iter(tags)
-            .map(|tag| {
+        // Each element is `(input index, Result<Option<(tag, content)>>)`.
+        let outcomes = stream::iter(tags.into_iter().enumerate())
+            .map(|(position, tag)| {
                 let tagged = identifier.clone_with_tag(&tag);
                 async move {
                     log::debug!("Refreshing derived tag '{}' for identifier '{}'.", tag, identifier);
-                    match this.persist_dispatch(source, &tagged).await? {
-                        Some((_, content, manifest)) => {
-                            Ok::<_, crate::Error>(records_root_tag(&tag, &manifest).then_some((tag, content)))
+                    let outcome = match this.persist_dispatch(source, &tagged).await {
+                        Ok(Some((_, content, manifest))) => {
+                            Ok(records_root_tag(&tag, &manifest).then_some((tag, content)))
                         }
-                        None => {
+                        Ok(None) => {
                             log::debug!("Source has no manifest for tag '{}' — skipping.", tag);
                             Ok(None)
                         }
-                    }
+                        Err(error) => Err(error),
+                    };
+                    (position, outcome)
                 }
             })
             .buffer_unordered(TAG_REFRESH_CONCURRENCY)
-            .try_filter_map(|entry| async move { Ok(entry) })
-            .try_collect()
-            .await?;
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut fetched: Vec<(String, oci::Digest)> = Vec::new();
+        let mut failure: Option<(usize, crate::Error)> = None;
+        for (position, outcome) in outcomes {
+            match outcome {
+                Ok(Some(entry)) => fetched.push(entry),
+                Ok(None) => {}
+                Err(error) => {
+                    if failure.as_ref().is_none_or(|(lowest, _)| position < *lowest) {
+                        failure = Some((position, error));
+                    }
+                }
+            }
+        }
+
+        if let Some((_, error)) = failure {
+            // Partial success (D-008): commit the tags that DID persist, then
+            // report the failure. A derived root is authored per tag — there is
+            // no package-level field to withhold, so D-008c's scope choice does
+            // not arise here; `commit_root_tags` upserts exactly these entries
+            // and leaves every other pin alone.
+            //
+            // Matched, never `?`-ed, for the same reason as the published half:
+            // a `?` returns the commit failure and silently discards `error`.
+            if !fetched.is_empty()
+                && let Err(commit) = self.commit_root_tags(identifier, &fetched).await
+            {
+                return Err(withheld_by_commit_failure(identifier, &error, commit));
+            }
+            return Err(error);
+        }
 
         if fetched.is_empty() {
             // There WERE candidate tags; none could carry a version — each
@@ -985,10 +1116,15 @@ pub(super) enum DispatchResolution {
 /// disappears because the site stopped listing it.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum RootScope<'a> {
-    /// One named tag's entry. Every sibling pin and every package-level field —
-    /// `repository` included — stays exactly as committed. This is
-    /// `ocx index update pkg:3.28`, and every grow-on-resolve.
-    Tag(&'a str),
+    /// A named SET of tags' entries. Every sibling pin and every package-level
+    /// field — `repository` included — stays exactly as committed. This is
+    /// `ocx index update pkg:3.28` and every grow-on-resolve (one tag), and
+    /// `refresh_published`'s partial-success commit (D-008b: the tags whose
+    /// dispatch object this run actually persisted, and only those).
+    ///
+    /// A set rather than a third variant, for type economy: one shape covers
+    /// the named-tag write, the grow-on-resolve, and the partial commit.
+    Tags(&'a [&'a str]),
     /// Every tag the remote lists, plus the package-level fields. This is
     /// `ocx index update pkg` — the sanctioned point to take a routing
     /// migration, because the user named the package and nothing narrower.
@@ -1018,6 +1154,38 @@ fn is_lock_timeout(error: &crate::Error) -> bool {
     )
 }
 
+/// The D-008 **double fault**: the partial commit that was carrying a refresh's
+/// surviving tags failed too. Returns the error to propagate, having put the
+/// other one somewhere the operator can still read it.
+///
+/// `commit` is what propagates, and `withheld` — the tag failure D-008 held back
+/// so the survivors could land — is logged. Two reasons, and the exit code is
+/// the sharper one. A failed commit means **nothing** was written: the partial
+/// success this branch reports around no longer exists, so `withheld`'s "one tag
+/// of many" framing is now simply false. And `withheld` is a transport failure
+/// (69 / 75, "retry"), while a commit failure is local and durable — a full
+/// disk, a root lock another process is holding — so surfacing `withheld` would
+/// advertise a retry that fails identically until someone frees the disk, and
+/// would keep doing so for every other package in the same run.
+///
+/// The withheld failure is not thereby optional: it names the tag that did not
+/// refresh, which nothing else records once the commit has failed. Hence a
+/// `warn!` and not `debug!` — this is the one path in this module where a tag's
+/// per-tag detail is the only detail there is.
+fn withheld_by_commit_failure(
+    identifier: &oci::Identifier,
+    withheld: &crate::Error,
+    commit: crate::Error,
+) -> crate::Error {
+    log::warn!(
+        "Index refresh for '{identifier}' could not commit the tags that did refresh ({}). The \
+         tag failure it was holding back is reported here and nowhere else: {}",
+        crate::error::render_chain(&commit),
+        crate::error::render_chain(withheld)
+    );
+    commit
+}
+
 /// Merge a fetched published root into the `committed` one within `scope`,
 /// returning the bytes to write — or `None` when nothing in scope changed.
 ///
@@ -1038,14 +1206,29 @@ fn is_lock_timeout(error: &crate::Error) -> bool {
 fn merge_root(committed: Option<&[u8]>, fetched: &[u8], scope: RootScope<'_>) -> Option<Vec<u8>> {
     let fetched_root: serde_json::Value = serde_json::from_slice(fetched).ok()?;
     let adopted: Vec<(String, serde_json::Value)> = match scope {
-        RootScope::Tag(tag) => {
-            let Some(entry) = fetched_root.get("tags").and_then(|tags| tags.get(tag)).cloned() else {
-                // Publish skew: the source resolved the tag but its root does
-                // not list it. Inventing the pointer is not this path's business.
-                log::debug!("fetched root does not carry '{tag}' — leaving the committed root alone");
+        RootScope::Tags(named) => {
+            let entries: Vec<(String, serde_json::Value)> = named
+                .iter()
+                .filter_map(|tag| {
+                    let entry = fetched_root.get("tags").and_then(|tags| tags.get(tag)).cloned();
+                    if entry.is_none() {
+                        // Publish skew: the source resolved the tag but its root
+                        // does not list it. Inventing the pointer is not this
+                        // path's business.
+                        log::debug!("fetched root does not carry '{tag}' — leaving the committed root alone");
+                    }
+                    entry.map(|entry| ((*tag).to_string(), entry))
+                })
+                .collect();
+            if entries.is_empty() {
+                // Nothing in scope is expressible from the fetched document, so
+                // there is no write to make — NOT a write of an empty tag map,
+                // which for a first-sight package would land the fetched
+                // package-level fields (`repository`) on the strength of a tag
+                // the root never listed.
                 return None;
-            };
-            vec![(tag.to_string(), entry)]
+            }
+            entries
         }
         RootScope::Package => fetched_root
             .get("tags")
@@ -1266,6 +1449,84 @@ mod tests {
     const REGISTRY: &str = "example.com";
     const REPO: &str = "cmake";
 
+    /// Every `warn!` this test binary emits, in arrival order.
+    ///
+    /// The D-008 double fault is only observable here: both errors are real, one
+    /// of them has to be the return value, and the other survives as a log line.
+    /// A source-text guard would pin the line's existence but not that the
+    /// withheld error actually reaches it, which is the whole bug.
+    static CAPTURED_WARNINGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    struct CapturingLogger;
+
+    impl crate::log::Log for CapturingLogger {
+        fn enabled(&self, metadata: &crate::log::Metadata) -> bool {
+            metadata.level() <= crate::log::Level::Warn
+        }
+        fn log(&self, record: &crate::log::Record) {
+            if self.enabled(record.metadata()) {
+                CAPTURED_WARNINGS.lock().unwrap().push(record.args().to_string());
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    /// Install the capture once for the whole test binary — the `log` facade's
+    /// logger is process-global and cannot be scoped to one test.
+    ///
+    /// The buffer is therefore shared, so it is never drained and never counted:
+    /// each caller searches it for a needle unique to its own fixture, which
+    /// keeps these assertions independent of test order and of what else ran.
+    fn install_warning_capture() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            crate::log::set_boxed_logger(Box::new(CapturingLogger))
+                .expect("nothing else in ocx_lib's test binary installs a logger");
+            // Below `Warn` nothing is captured, so the macros' level check drops
+            // every `debug!`/`trace!` in the crate before it formats anything.
+            crate::log::set_max_level(crate::log::LevelFilter::Warn);
+        });
+    }
+
+    /// Whether any captured warning contains `needle`.
+    fn warned_about(needle: &str) -> bool {
+        CAPTURED_WARNINGS
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains(needle))
+    }
+
+    /// This module's PRODUCTION half with comment lines stripped — the one
+    /// window every source-text guard here counts over.
+    ///
+    /// Two details are load-bearing. The cut is at the test MODULE, not at the
+    /// first `#[cfg(test)]`: a small `#[cfg(test)] impl LocalIndex` block of
+    /// scaffolding sits well above it, and a window stopping there silently
+    /// drops `merge_root`, `RootScope` and `records_root_tag` — production code
+    /// the guards exist to watch. And comments go first, or a denylist matches
+    /// the comment that quotes the forms it forbids.
+    fn production_half() -> String {
+        let (production, _) = include_str!("local_index.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the module has a production half followed by its test module");
+        let window = production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Non-vacuity: a truncation bug must not be able to fake a zero count.
+        assert!(
+            window.contains("async fn refresh_published") && window.contains("fn merge_root"),
+            "the scanned window must reach the code the guards are about"
+        );
+        assert!(
+            !window.contains("mod tests {"),
+            "the window must stop before the test module, or every count is polluted by tests"
+        );
+        window
+    }
+
     /// The inner factor of the ceiling `ocx index sync` states (C-024: ≤ 512
     /// in-flight requests, `INDEX_REFRESH_CONCURRENCY` × this constant).
     ///
@@ -1277,14 +1538,7 @@ mod tests {
     /// publishes one tag per repository, so this nested fan-out runs at width 1.
     #[test]
     fn the_per_tag_fan_out_is_sized_by_the_constant_at_every_site() {
-        let source: String = include_str!("local_index.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("the module has a non-test half")
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let source = production_half();
         assert_eq!(
             source.matches("buffer_unordered(").count(),
             2,
@@ -1296,6 +1550,100 @@ mod tests {
             2,
             "both must be sized by the constant: a literal leaves the constant true and the \
              ceiling false"
+        );
+    }
+
+    /// C-030 — the dispatch gate is `read_dispatch_object`, and no existence
+    /// check can creep in.
+    ///
+    /// D-006 makes the whole self-heal property rest on one line, and a rule
+    /// that important with no enforcement is exactly the asymmetry the design
+    /// record flags. Both halves are required: a negative-only guard keeps
+    /// passing once its needles stop matching anything, which reads as coverage
+    /// while providing none.
+    #[test]
+    fn the_dispatch_gate_is_content_addressed_and_never_an_existence_check() {
+        let production = production_half();
+
+        // NEGATIVE half. A bare existence check cannot tell a valid object from
+        // a zero-byte crash artifact or a tampered one, so a caller reading
+        // "exists" as "already have it" skips the fetch and strands the
+        // corruption permanently — nothing else repairs it.
+        for forbidden in [
+            ".exists()",
+            "try_exists",
+            "path_exists_lossy",
+            "symlink_metadata",
+            "metadata().is_ok()",
+        ] {
+            assert_eq!(
+                production.matches(forbidden).count(),
+                0,
+                "'{forbidden}' is an existence check: it cannot verify the bytes, and this \
+                 module decides from it whether to skip a fetch"
+            );
+        }
+
+        // POSITIVE half: the gate that must be there, located in the function
+        // that must hold it.
+        let gate = production
+            .split_once("async fn refresh_published")
+            .and_then(|(_, rest)| rest.split_once("async fn refresh_derived"))
+            .map(|(body, _)| body)
+            .expect("refresh_published precedes refresh_derived in this module");
+        assert!(
+            gate.contains("read_dispatch_object"),
+            "the published refresh must gate its fetch on the content-addressed store, which \
+             hash-verifies the bytes against the digest the root pins"
+        );
+        assert!(
+            gate.contains("persist_dispatch"),
+            "non-vacuity: the gate is only a gate if a real fetch sits behind it"
+        );
+    }
+
+    /// C-026 — the self-heal and the partial commit are silent.
+    ///
+    /// Counted per site, not merely as a budget: a count alone is satisfied by
+    /// deleting one line and adding another. The four lines below are the
+    /// module's entire operator-facing output — per-tag detail stays at
+    /// `debug!`, because an index update over a many-tagged package must not
+    /// flood the log, and a repaired object is a self-heal, not a warning.
+    ///
+    /// The double-fault line is the one exception, and only because it is not
+    /// per-tag detail: when the partial commit fails, the withheld tag failure
+    /// is not the return value and nothing else records it, so `debug!` would
+    /// mean losing it. One site, shared by both provenance kinds.
+    #[test]
+    fn no_operator_facing_log_line_grows_in_this_module() {
+        let production = production_half();
+
+        assert_eq!(
+            production.matches("log::warn!").count(),
+            3,
+            "the three warnings below are the whole warn budget of this module"
+        );
+        assert!(
+            production.contains("derived root for '{source}/{repository}' is unparseable"),
+            "warn 1 of 3: the kill-9 recovery of an unparseable derived root"
+        );
+        assert!(
+            production.contains("was published without a 'config.json'"),
+            "warn 2 of 3: the config.json hook losing its second lock"
+        );
+        assert!(
+            production.contains("could not commit the tags that did refresh"),
+            "warn 3 of 3: the D-008 double fault, the only record of the withheld tag failure"
+        );
+
+        assert_eq!(
+            production.matches("log::info!").count(),
+            1,
+            "one info line per identifier, and no more"
+        );
+        assert!(
+            production.contains(r#"log::info!("Refreshing tags for identifier"#),
+            "the single info line is the per-identifier refresh announcement"
         );
     }
 
@@ -1748,6 +2096,753 @@ mod tests {
         assert!(
             store(&dir).dispatch_object_path(REGISTRY, REPO, &obs2).exists(),
             "the second tag's distinct dispatch object must be persisted under o/"
+        );
+    }
+
+    // ── D-006 / D-008: the CAS gate, and partial success ─────────────────────
+
+    /// The dispatch object a scripted tag resolves to: a single-platform image
+    /// index over the leaf `<char> x 64`. Distinct chars ⇒ distinct dispatch
+    /// digests; the SAME char on two tags ⇒ two tags ALIASED onto one object,
+    /// which is the shape C-013 is about.
+    fn object_for(leaf: char) -> (Vec<u8>, oci::Digest) {
+        index_for_leaf(&oci::Digest::Sha256(leaf.to_string().repeat(64)))
+    }
+
+    /// Just the digest half of [`object_for`] — what a scripted root pins.
+    fn content_for(leaf: char) -> oci::Digest {
+        object_for(leaf).1
+    }
+
+    /// A source driven by a per-tag script, counting every manifest fetch.
+    ///
+    /// The counter is the point: the D-006 gate is invisible in behaviour (the
+    /// tag resolves and the object is on disk either way) and shows up only as a
+    /// request that was not made, so every assertion here is on the fetch LIST,
+    /// never on success.
+    ///
+    /// - `script` — tag → the leaf char its dispatch object names.
+    /// - `leaves` — tags that resolve to a BARE platform manifest instead: no
+    ///   `o/` object exists for one by design, so it must be fetched every run
+    ///   (C-009 edge case (b)).
+    /// - `fail` — tags whose fetch answers with an error.
+    /// - `hold` — one tag that waits for another to finish before answering, so
+    ///   a test can force completion order against input order (C-012(b)).
+    /// - `published` — serve a verbatim root document (published provenance) or
+    ///   `None` (derived, OCX authors the root field-wise).
+    #[derive(Clone)]
+    struct ScriptedSource {
+        script: BTreeMap<String, char>,
+        leaves: std::collections::BTreeSet<String>,
+        fail: std::collections::BTreeSet<String>,
+        repository: String,
+        published: bool,
+        fetched: Arc<std::sync::Mutex<Vec<String>>>,
+        completed: Arc<std::sync::Mutex<Vec<String>>>,
+        hold: Option<(String, Arc<tokio::sync::Notify>)>,
+    }
+
+    impl ScriptedSource {
+        fn new(script: &[(&str, char)]) -> Self {
+            Self {
+                script: script.iter().map(|(tag, leaf)| ((*tag).to_string(), *leaf)).collect(),
+                leaves: std::collections::BTreeSet::new(),
+                fail: std::collections::BTreeSet::new(),
+                repository: format!("oci://{REGISTRY}/{REPO}"),
+                published: true,
+                fetched: Arc::new(std::sync::Mutex::new(Vec::new())),
+                completed: Arc::new(std::sync::Mutex::new(Vec::new())),
+                hold: None,
+            }
+        }
+        fn failing(mut self, tags: &[&str]) -> Self {
+            self.fail = tags.iter().map(|tag| (*tag).to_string()).collect();
+            self
+        }
+        fn with_leaves(mut self, tags: &[&str]) -> Self {
+            self.leaves = tags.iter().map(|tag| (*tag).to_string()).collect();
+            self
+        }
+        fn at_repository(mut self, repository: &str) -> Self {
+            self.repository = repository.to_string();
+            self
+        }
+        fn derived(mut self) -> Self {
+            self.published = false;
+            self
+        }
+        /// `tag` answers only after every other tag has answered.
+        fn holding(mut self, tag: &str) -> Self {
+            self.hold = Some((tag.to_string(), Arc::new(tokio::sync::Notify::new())));
+            self
+        }
+        /// Drain the recorded fetches, so a second refresh is measured on its
+        /// own. SORTED: `buffer_unordered` gives no ordering guarantee, and
+        /// every assertion here is about WHICH objects were fetched, never in
+        /// what order — the one test that is about order reads `completed`.
+        fn take_fetched(&self) -> Vec<String> {
+            let mut fetched = std::mem::take(&mut *self.fetched.lock().unwrap());
+            fetched.sort();
+            fetched
+        }
+        fn completed(&self) -> Vec<String> {
+            self.completed.lock().unwrap().clone()
+        }
+        fn index(&self) -> super::super::Index {
+            super::super::Index::from_impl(self.clone())
+        }
+    }
+
+    #[async_trait]
+    impl super::super::index_impl::IndexImpl for ScriptedSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &oci::Identifier) -> Result<Option<Vec<String>>> {
+            Ok(Some(self.script.keys().cloned().collect()))
+        }
+        async fn fetch_manifest(
+            &self,
+            id: &oci::Identifier,
+            _: IndexOperation,
+        ) -> Result<Option<(oci::Digest, Manifest)>> {
+            Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, d, m)| (d, m)))
+        }
+        async fn fetch_manifest_digest(&self, id: &oci::Identifier, _: IndexOperation) -> Result<Option<oci::Digest>> {
+            Ok(self.fetch_manifest_raw_bytes(id).await?.map(|(_, d, _)| d))
+        }
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_raw_bytes(
+            &self,
+            id: &oci::Identifier,
+        ) -> Result<Option<(Vec<u8>, oci::Digest, Manifest)>> {
+            let tag = id
+                .tag()
+                .expect("the scripted source is only ever asked by tag")
+                .to_string();
+            self.fetched.lock().unwrap().push(tag.clone());
+            if let Some((held, notify)) = &self.hold
+                && *held == tag
+            {
+                // `notify_one` stores a permit when nobody is waiting yet, so
+                // this cannot lose the wake-up to a scheduling race.
+                notify.notified().await;
+            }
+            let outcome = if self.fail.contains(&tag) {
+                // A TRANSPORT failure (ExitCode::Unavailable, 69), not a
+                // not-found: `refresh_derived`'s `NoIndexableTag` fallback is
+                // also 79, so a not-found fixture could not tell a surfaced
+                // transport error from the fallback that replaced it. The tag
+                // rides in the URL so the message still names which one failed.
+                Err(super::super::error::Error::IndexHttpFailed {
+                    url: format!("https://scripted.example/{tag}"),
+                    // A connection-level failure carries no HTTP status — the
+                    // shape a proxy reset produces, which is what this fixture
+                    // stands in for.
+                    status: None,
+                    source: "scripted transport failure".into(),
+                }
+                .into())
+            } else if self.leaves.contains(&tag) {
+                let (bytes, digest) = image_manifest_bytes();
+                Ok(Some((bytes.clone(), digest, serde_json::from_slice(&bytes).unwrap())))
+            } else {
+                match self.script.get(&tag) {
+                    Some(leaf) => {
+                        let (bytes, digest) = object_for(*leaf);
+                        Ok(Some((bytes.clone(), digest, serde_json::from_slice(&bytes).unwrap())))
+                    }
+                    None => Ok(None),
+                }
+            };
+            self.completed.lock().unwrap().push(tag.clone());
+            if let Some((held, notify)) = &self.hold
+                && *held != tag
+            {
+                notify.notify_one();
+            }
+            outcome
+        }
+        async fn fetch_root_document(
+            &self,
+            _: &oci::Identifier,
+        ) -> Result<Option<(Vec<u8>, super::super::wire::IndexRoot)>> {
+            if !self.published {
+                return Ok(None);
+            }
+            let tags = self
+                .script
+                .iter()
+                .map(|(tag, leaf)| {
+                    let content = if self.leaves.contains(tag) {
+                        image_manifest_bytes().1
+                    } else {
+                        content_for(*leaf)
+                    };
+                    format!(r#""{tag}":{{"content":"{content}"}}"#)
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let bytes = format!(r#"{{"repository":"{}","tags":{{{tags}}}}}"#, self.repository).into_bytes();
+            let root = serde_json::from_slice(&bytes).unwrap();
+            Ok(Some((bytes, root)))
+        }
+        fn source_kind(&self) -> SourceKind {
+            if self.published {
+                SourceKind::Published
+            } else {
+                SourceKind::Derived
+            }
+        }
+        fn box_clone(&self) -> Box<dyn super::super::index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// C-009 — an unchanged published re-sync issues zero dispatch-object fetches.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unchanged_published_resync_fetches_no_dispatch_object() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let source = ScriptedSource::new(&[("1.0", 'a'), ("2.0", 'b')]);
+
+        index.refresh_tags(&repo_id(), &source.index()).await.unwrap();
+        assert_eq!(
+            source.take_fetched().len(),
+            2,
+            "prerequisite: the cold run really does fetch both dispatch objects"
+        );
+
+        index.refresh_tags(&repo_id(), &source.index()).await.unwrap();
+
+        assert_eq!(
+            source.take_fetched(),
+            Vec::<String>::new(),
+            "every object the root names is on disk and hash-verifies, so the warm re-sync \
+             must issue no dispatch fetch at all"
+        );
+        // The skip is a skip of the FETCH, never of the pin: both tags stay
+        // pinned at exactly what the root names.
+        let root = read_root_value(&dir);
+        assert_eq!(
+            root["tags"]["1.0"]["content"].as_str(),
+            Some(content_for('a').to_string().as_str())
+        );
+        assert_eq!(
+            root["tags"]["2.0"]["content"].as_str(),
+            Some(content_for('b').to_string().as_str())
+        );
+    }
+
+    /// C-009 edge (a) — one tag repointed at a new digest costs exactly one
+    /// dispatch GET, for that digest.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_repointed_tag_is_the_only_one_refetched() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+
+        index
+            .refresh_tags(&repo_id(), &ScriptedSource::new(&[("1.0", 'a'), ("2.0", 'b')]).index())
+            .await
+            .unwrap();
+
+        // The publisher moved `2.0` onto a new image index; `1.0` is untouched.
+        let moved = ScriptedSource::new(&[("1.0", 'a'), ("2.0", 'c')]);
+        index.refresh_tags(&repo_id(), &moved.index()).await.unwrap();
+
+        assert_eq!(
+            moved.take_fetched(),
+            vec!["2.0".to_string()],
+            "only the tag whose content digest changed may be fetched"
+        );
+        assert_eq!(
+            read_root_value(&dir)["tags"]["2.0"]["content"].as_str(),
+            Some(content_for('c').to_string().as_str()),
+            "and the moved pin is adopted"
+        );
+    }
+
+    /// C-009 edge (b) — a single-platform (leaf) tag has no `o/` object by
+    /// design, so it is fetched every run. That is correct, not a gate miss.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_leaf_tag_is_refetched_every_run_because_it_has_no_object() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let source = ScriptedSource::new(&[("1.0", 'a')]).with_leaves(&["1.0"]);
+
+        index.refresh_tags(&repo_id(), &source.index()).await.unwrap();
+        assert_eq!(source.take_fetched(), vec!["1.0".to_string()]);
+
+        index.refresh_tags(&repo_id(), &source.index()).await.unwrap();
+        assert_eq!(
+            source.take_fetched(),
+            vec!["1.0".to_string()],
+            "a leaf tag writes nothing to o/, so the gate must keep fetching it — reading \
+             its absence as 'skip' would stop refreshing single-platform packages entirely"
+        );
+    }
+
+    /// C-010 — a corrupt dispatch object is refetched and repaired, never
+    /// skipped and never fatal.
+    ///
+    /// The gate's `Err(DigestMismatch) ⇒ fetch` arm is the ONLY thing that
+    /// repairs a tampered object: `resolve_dispatch` propagates the mismatch
+    /// with `?`, `ocx index regenerate` never touches `o/` bytes, and
+    /// `ocx package verify` is Sigstore signature verification. Collapse this
+    /// arm into "skip" and the corruption is stranded forever.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tampered_dispatch_object_is_refetched_and_repaired() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let source = ScriptedSource::new(&[("1.0", 'a')]);
+        let (verbatim, content) = object_for('a');
+
+        // Seed the object's own path with bytes that do NOT hash to `content` —
+        // a tampered file, indistinguishable from a valid one by `exists()`.
+        let path = store(&dir).dispatch_object_path(REGISTRY, REPO, &content);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, br#"{"schemaVersion":2,"manifests":[]}"#).unwrap();
+        assert_ne!(
+            Algorithm::Sha256.hash(std::fs::read(&path).unwrap()),
+            content,
+            "prerequisite: the seeded object really is corrupt"
+        );
+
+        index
+            .refresh_tags(&repo_id(), &source.index())
+            .await
+            .expect("a corrupt local object is a self-heal, never a failure the operator sees");
+
+        assert_eq!(
+            source.take_fetched(),
+            vec!["1.0".to_string()],
+            "the corrupt object must be refetched — a skip here strands it forever"
+        );
+        let repaired = std::fs::read(&path).unwrap();
+        assert_eq!(
+            repaired, verbatim,
+            "the fetched bytes overwrite the tampered file verbatim"
+        );
+        assert_eq!(
+            Algorithm::Sha256.hash(&repaired),
+            content,
+            "and the file on disk now hashes to the digest the root pins"
+        );
+    }
+
+    /// C-027(a) — `persist_dispatch` still returns the fetched
+    /// `(bytes, digest, manifest)` for an object the store already holds.
+    ///
+    /// This is the test the gate's PLACEMENT rests on. `persist_dispatch` is
+    /// also the resolve path's fetch (`ChainedIndex::fetch_and_persist_chain`),
+    /// it is handed a TAGGED identifier so it cannot know the digest without the
+    /// fetch it would skip, and all three tuple members are consumed by that
+    /// caller. Move the gate inside it and this goes red.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn persist_dispatch_still_returns_the_manifest_for_an_object_already_held() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let source = super::super::Index::from_impl(CountingDispatchSource {
+            fetches: fetches.clone(),
+        });
+        let (verbatim, content) = two_platform_index();
+        store(&dir)
+            .write_dispatch_object(REGISTRY, REPO, &content, &verbatim)
+            .await
+            .unwrap();
+
+        let (bytes, digest, manifest) = index
+            .persist_dispatch(&source, &tagged_id("3.28"))
+            .await
+            .unwrap()
+            .expect("persist_dispatch must still answer with the manifest, held object or not");
+
+        assert_eq!(digest, content);
+        assert_eq!(bytes, verbatim, "the resolve path consumes these bytes");
+        assert!(
+            matches!(manifest, Manifest::ImageIndex(_)),
+            "and it consumes the decoded manifest"
+        );
+        assert_eq!(
+            fetches.load(Ordering::SeqCst),
+            1,
+            "the resolve path's fetch is NOT gated: gating it would have to return None or \
+             re-read and re-parse the object, on the hottest path in the binary"
+        );
+    }
+
+    /// C-012 — a failing tag does not discard its package's succeeded tags.
+    ///
+    /// Covers edge (c) with them: a tag only the LOCAL copy holds must survive
+    /// the partial commit too. `merge_root` only ever inserts, so it holds by
+    /// construction — but D-008b authored the scope arm that decides what the
+    /// partial commit writes, and "merge never deletes" is exactly the property
+    /// a later rewrite of that arm would take away silently.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failing_tag_does_not_discard_its_packages_succeeded_tags() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        // A tag this machine snapshotted and the source no longer lists.
+        index
+            .seed_root_document(
+                &repo_id(),
+                format!(
+                    r#"{{"repository":"oci://{REGISTRY}/{REPO}","tags":{{"retired":{{"content":"{}"}}}}}}"#,
+                    content_for('9')
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let source = ScriptedSource::new(&[("a", '1'), ("b", '2'), ("c", '3')]).failing(&["b"]);
+
+        let error = index
+            .refresh_tags(&repo_id(), &source.index())
+            .await
+            .expect_err("the failing tag must still be reported");
+        assert!(
+            crate::error::render_chain(&error).contains("scripted.example/b"),
+            "the reported failure is the failing tag's, got: {}",
+            crate::error::render_chain(&error)
+        );
+
+        let root = read_root_value(&dir);
+        assert_eq!(
+            root["tags"]["a"]["content"].as_str(),
+            Some(content_for('1').to_string().as_str()),
+            "a's completed work survives its sibling's failure"
+        );
+        assert_eq!(
+            root["tags"]["c"]["content"].as_str(),
+            Some(content_for('3').to_string().as_str()),
+            "and so does c's"
+        );
+        assert!(
+            root["tags"].get("b").is_none(),
+            "but b, whose dispatch object was never written, must NOT be pinned — that is \
+             exactly the tag-without-an-object state the index design abolished"
+        );
+        assert_eq!(
+            root["tags"]["retired"]["content"].as_str(),
+            Some(content_for('9').to_string().as_str()),
+            "C-012(c): a tag only the local copy holds survives the partial commit — the copy \
+             records what this machine snapshotted, so a publisher retiring a version cannot \
+             unpin a machine that took it"
+        );
+    }
+
+    /// C-012 edge (a) — when every tag fails, nothing is committed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn when_every_tag_fails_nothing_is_committed() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let source = ScriptedSource::new(&[("a", '1'), ("b", '2')]).failing(&["a", "b"]);
+
+        index
+            .refresh_tags(&repo_id(), &source.index())
+            .await
+            .expect_err("every tag failed, so the refresh failed");
+
+        assert!(
+            !store(&dir).root_document_path(REGISTRY, REPO).exists(),
+            "no tag survived, so there is nothing to commit — not even an empty root carrying \
+             the fetched package-level fields"
+        );
+    }
+
+    /// C-012 edge (b) — the returned failure is the LOWEST-INPUT-INDEX one, not
+    /// whichever completed first. `buffer_unordered` finishes out of order, so
+    /// without the input index the reported error would depend on scheduling.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_returned_failure_is_deterministic_not_the_first_to_complete() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        // `a` sorts first (BTreeMap ⇒ input index 0) but is held until `b` has
+        // already failed, so completion order is the reverse of input order.
+        let source = ScriptedSource::new(&[("a", '1'), ("b", '2')])
+            .failing(&["a", "b"])
+            .holding("a");
+
+        let error = index
+            .refresh_tags(&repo_id(), &source.index())
+            .await
+            .expect_err("both tags failed");
+
+        assert_eq!(
+            source.completed(),
+            vec!["b".to_string(), "a".to_string()],
+            "non-vacuity: this test is only about determinism if b really did finish first"
+        );
+        assert!(
+            crate::error::render_chain(&error).contains("scripted.example/a"),
+            "the lowest-index failure is returned, not the first to complete; got: {}",
+            crate::error::render_chain(&error)
+        );
+    }
+
+    /// C-013 — tags aliasing a failed digest are excluded with it.
+    ///
+    /// `refresh_published` dedups by content digest, so only one of the aliased
+    /// tags is ever fetched. The other must not free-ride on a fetch that never
+    /// happened.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tags_aliasing_a_failed_digest_are_excluded_with_it() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        // `x` and `y` both point at leaf '1'; `x` sorts first, so it is the
+        // representative the dedup keeps — and the one that fails.
+        let source = ScriptedSource::new(&[("x", '1'), ("y", '1'), ("z", '2')]).failing(&["x"]);
+
+        index
+            .refresh_tags(&repo_id(), &source.index())
+            .await
+            .expect_err("the representative tag failed");
+
+        assert_eq!(
+            source.take_fetched(),
+            vec!["x".to_string(), "z".to_string()],
+            "prerequisite: y is deduped away, so nothing ever fetched its object"
+        );
+        let root = read_root_value(&dir);
+        assert!(
+            root["tags"].get("x").is_none(),
+            "the failing representative is not pinned"
+        );
+        assert!(
+            root["tags"].get("y").is_none(),
+            "and neither is the tag aliased onto its digest — the failure unit is the digest"
+        );
+        assert_eq!(
+            root["tags"]["z"]["content"].as_str(),
+            Some(content_for('2').to_string().as_str()),
+            "the unrelated tag is still adopted"
+        );
+    }
+
+    /// C-014 — a partial commit does not adopt package-level fields.
+    ///
+    /// `repository` is the OTHER half of what the local copy pins (logical →
+    /// physical routing). Taking a routing migration while some of the package's
+    /// tags were not refreshed would leave the unrefreshed pins routing through
+    /// a location they were never observed at.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_partial_commit_does_not_adopt_package_level_fields() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        index
+            .seed_root_document(&repo_id(), br#"{"repository":"oci://old.example/ns/pkg","tags":{}}"#)
+            .await
+            .unwrap();
+
+        let source = ScriptedSource::new(&[("a", '1'), ("b", '2')])
+            .at_repository("oci://new.example/ns/pkg")
+            .failing(&["b"]);
+        index
+            .refresh_tags(&repo_id(), &source.index())
+            .await
+            .expect_err("one tag failed");
+
+        let root = read_root_value(&dir);
+        assert_eq!(
+            root["repository"].as_str(),
+            Some("oci://old.example/ns/pkg"),
+            "a partial refresh must not take the routing migration"
+        );
+        assert_eq!(
+            root["tags"]["a"]["content"].as_str(),
+            Some(content_for('1').to_string().as_str()),
+            "prerequisite: the partial commit really did happen"
+        );
+    }
+
+    /// C-014 complement — with no failing tag the fetched `repository` IS
+    /// adopted. Without this half the test cannot tell "conservative" from
+    /// "broken".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_full_commit_still_adopts_package_level_fields() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        index
+            .seed_root_document(&repo_id(), br#"{"repository":"oci://old.example/ns/pkg","tags":{}}"#)
+            .await
+            .unwrap();
+
+        let source = ScriptedSource::new(&[("a", '1'), ("b", '2')]).at_repository("oci://new.example/ns/pkg");
+        index.refresh_tags(&repo_id(), &source.index()).await.unwrap();
+
+        assert_eq!(
+            read_root_value(&dir)["repository"].as_str(),
+            Some("oci://new.example/ns/pkg"),
+            "a bare identifier that fully succeeded is the sanctioned point to take a routing \
+             migration — RootScope::Package, unchanged"
+        );
+    }
+
+    /// C-012, derived provenance — the other `try_collect` site. A derived root
+    /// is authored per tag, so there is no package-level field to withhold; the
+    /// contract is just that a sibling's failure keeps its own scope.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failing_derived_tag_does_not_discard_its_packages_succeeded_tags() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let source = ScriptedSource::new(&[("a", '1'), ("b", '2'), ("c", '3')])
+            .derived()
+            .failing(&["b"]);
+
+        let error = index
+            .refresh_tags(&repo_id(), &source.index())
+            .await
+            .expect_err("the failing tag must still be reported");
+        assert_eq!(
+            crate::cli::classify_error(&error),
+            crate::cli::ExitCode::Unavailable,
+            "the transport failure keeps its own exit code, got: {}",
+            crate::error::render_chain(&error)
+        );
+
+        let root = read_root_value(&dir);
+        assert_eq!(
+            root["tags"]["a"]["content"].as_str(),
+            Some(content_for('1').to_string().as_str())
+        );
+        assert_eq!(
+            root["tags"]["c"]["content"].as_str(),
+            Some(content_for('3').to_string().as_str())
+        );
+        assert!(root["tags"].get("b").is_none(), "the failing tag is not authored");
+    }
+
+    /// The derived half of C-012, and the one that is about the EXIT CODE.
+    ///
+    /// `refresh_derived` falls back to `NoIndexableTag` (79, "package absent")
+    /// when nothing was fetched. `try_collect` used to propagate a transport
+    /// failure before that gate could run; `collect` does not, so the failure
+    /// has to be surfaced explicitly ahead of it. Get the order wrong and a
+    /// package whose tag manifests all 503 transiently reports 79 instead of
+    /// 69, and the transport error never reaches the operator at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_derived_refresh_whose_every_tag_fails_keeps_its_transport_exit_code() {
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        let source = ScriptedSource::new(&[("a", '1'), ("b", '2')])
+            .derived()
+            .failing(&["a", "b"]);
+
+        let error = index
+            .refresh_tags(&repo_id(), &source.index())
+            .await
+            .expect_err("every tag failed, so the refresh failed");
+
+        let rendered = crate::error::render_chain(&error);
+        assert_eq!(
+            crate::cli::classify_error(&error),
+            crate::cli::ExitCode::Unavailable,
+            "a transient outage is 69, never the 79 the no-indexable-tag fallback gives; got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("no indexable tag"),
+            "and the fallback must not have replaced the real cause; got: {rendered}"
+        );
+        assert!(
+            !store(&dir).root_document_path(REGISTRY, REPO).exists(),
+            "no tag survived, so nothing is authored"
+        );
+    }
+
+    /// D-008 double fault, PUBLISHED — the partial commit fails too.
+    ///
+    /// The commit is what propagates (it is the local, durable fault, and it
+    /// means nothing was written at all), so the withheld tag failure survives
+    /// only as a log line. Written with `?` the commit's error propagated and
+    /// the withheld one was dropped entirely: an operator saw a data error and
+    /// was never told which tag failed, or that the refresh had been partial.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_published_partial_commit_that_fails_still_reports_the_withheld_tag() {
+        install_warning_capture();
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        // `gone` fails in transport, so `keep` alone goes to a partial commit —
+        // and that commit fails, because a first-sight package merges onto the
+        // fetched document and this one's routing pointer has no `oci://`.
+        let source = ScriptedSource::new(&[("gone", '2'), ("keep", '1')])
+            .at_repository("host.example/ns/pkg")
+            .failing(&["gone"]);
+
+        let error = index
+            .refresh_tags(&repo_id(), &source.index())
+            .await
+            .expect_err("the tag fetch failed AND the commit of the survivor failed");
+
+        assert_eq!(
+            source.take_fetched(),
+            vec!["gone".to_string(), "keep".to_string()],
+            "non-vacuity: both tags were attempted, so there really was a survivor to commit"
+        );
+        assert!(
+            !store(&dir).root_document_path(REGISTRY, REPO).exists(),
+            "non-vacuity: the partial commit really did fail — nothing was written"
+        );
+
+        let rendered = crate::error::render_chain(&error);
+        assert!(
+            rendered.contains("host.example/ns/pkg"),
+            "the commit failure propagates: it is local and durable, and it means the partial \
+             success the other error frames itself against did not happen; got: {rendered}"
+        );
+        assert!(
+            warned_about("scripted.example/gone"),
+            "and the withheld tag failure must still reach the operator — naming which tag did \
+             not refresh is the entire point of the partial-commit branch"
+        );
+    }
+
+    /// D-008 double fault, DERIVED — the same, at the other commit site.
+    ///
+    /// A derived root is authored, so its commit fails on the F1 cross-check
+    /// instead of the physical-ref parse; the contract is identical.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_derived_partial_commit_that_fails_still_reports_the_withheld_tag() {
+        install_warning_capture();
+        let dir = TempDir::new().unwrap();
+        let index = make_index(&dir);
+        // An authored root naming a different physical location: committing over
+        // it is corruption, so `commit_root_tags` refuses.
+        index
+            .seed_root_document(&repo_id(), br#"{"repository":"oci://other.example/ns/pkg","tags":{}}"#)
+            .await
+            .unwrap();
+
+        let source = ScriptedSource::new(&[("kept", '3'), ("lost", '4')])
+            .derived()
+            .failing(&["lost"]);
+
+        let error = index
+            .refresh_tags(&repo_id(), &source.index())
+            .await
+            .expect_err("the tag fetch failed AND the commit of the survivor failed");
+
+        assert_eq!(
+            source.take_fetched(),
+            vec!["kept".to_string(), "lost".to_string()],
+            "non-vacuity: both tags were attempted, so there really was a survivor to commit"
+        );
+
+        let rendered = crate::error::render_chain(&error);
+        assert!(
+            rendered.contains("oci://other.example/ns/pkg"),
+            "the commit failure propagates, same as the published half; got: {rendered}"
+        );
+        assert_eq!(
+            read_root_value(&dir)["tags"].as_object().map(|tags| tags.len()),
+            Some(0),
+            "non-vacuity: the commit really did refuse — the survivor was not authored"
+        );
+        assert!(
+            warned_about("scripted.example/lost"),
+            "and the withheld tag failure must still reach the operator"
         );
     }
 
@@ -3265,7 +4360,11 @@ mod tests {
         let (_, content) = two_platform_index();
 
         index
-            .commit_published_root(&tagged_id("3.28"), &root_bytes_for(&content), RootScope::Tag("3.28"))
+            .commit_published_root(
+                &tagged_id("3.28"),
+                &root_bytes_for(&content),
+                RootScope::Tags(&["3.28"]),
+            )
             .await
             .unwrap();
 
@@ -3296,7 +4395,7 @@ mod tests {
         assert!(!config_path.exists(), "prerequisite: the seeded tree carries no config");
 
         index
-            .commit_published_root(&tagged_id("3.28"), &bytes, RootScope::Tag("3.28"))
+            .commit_published_root(&tagged_id("3.28"), &bytes, RootScope::Tags(&["3.28"]))
             .await
             .unwrap();
 
@@ -3322,7 +4421,7 @@ mod tests {
         let bytes = root_bytes_for(&content);
 
         index
-            .commit_published_root(&tagged_id("3.28"), &bytes, RootScope::Tag("3.28"))
+            .commit_published_root(&tagged_id("3.28"), &bytes, RootScope::Tags(&["3.28"]))
             .await
             .unwrap();
         let config_path = store(&dir).source_config_path(REGISTRY);
@@ -3330,7 +4429,7 @@ mod tests {
         let stamped = std::fs::metadata(&config_path).unwrap().modified().unwrap();
 
         index
-            .commit_published_root(&tagged_id("3.28"), &bytes, RootScope::Tag("3.28"))
+            .commit_published_root(&tagged_id("3.28"), &bytes, RootScope::Tags(&["3.28"]))
             .await
             .unwrap();
 
@@ -3362,7 +4461,11 @@ mod tests {
 
         let (_, content) = two_platform_index();
         index
-            .commit_published_root(&tagged_id("3.28"), &root_bytes_for(&content), RootScope::Tag("3.28"))
+            .commit_published_root(
+                &tagged_id("3.28"),
+                &root_bytes_for(&content),
+                RootScope::Tags(&["3.28"]),
+            )
             .await
             .unwrap();
 

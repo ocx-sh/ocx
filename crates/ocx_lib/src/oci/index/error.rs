@@ -17,6 +17,74 @@ pub fn index_url_from_mirrors(upstream: &str) -> String {
     format!("[mirrors.\"{upstream}\"] index")
 }
 
+/// Hands `error` to a singleflight leader's in-flight cohort and returns the
+/// leader's own form of it.
+///
+/// The leader gives its error to the broadcast, so it cannot also return it by
+/// value; both ends carry the same [`ArcError`](crate::error::ArcError)
+/// instead, under [`Error::SourceFetchFailed`] — transparent, so neither sees a
+/// prefix an uncoalesced fetch would not have produced.
+pub fn broadcast_failure<V: Clone>(
+    handle: crate::utility::singleflight::Handle<V>,
+    error: crate::Error,
+) -> crate::Error {
+    let shared = crate::error::ArcError::from(error);
+    handle.fail(shared.clone());
+    Error::SourceFetchFailed(shared).into()
+}
+
+/// Peels the wrapper a coalesced fetch's leader returns — the inverse of
+/// [`broadcast_failure`].
+///
+/// `Display` and exit-code classification already read *through*
+/// [`Error::SourceFetchFailed`]: it is `#[error(transparent)]` and its
+/// `classify` arm delegates to the wrapped error. Anything matching on the
+/// error's **structure** does not — a `matches!` over the typed variants sees
+/// the wrapper, not the variant underneath — so every structural test of a
+/// source error goes through here first. `ChainedIndex::is_source_outage`,
+/// which decides whether an index outage may be answered from the committed
+/// local root, is the load-bearing one.
+///
+/// One hop, deliberately, because one is all a leader can add:
+/// `OcxIndex::resolve_root` runs its `check_format_version()?` *before* it
+/// acquires the root handle, so the config and root fetches are never both in
+/// flight on one call. Were a second layer ever introduced, a single peel
+/// leaves the outer wrapper in place and a structural test says "no" — the
+/// caller then propagates, which is the safe direction for every consumer here
+/// (holding an error is what would be unsafe).
+///
+/// Both halves of a coalesced call are peeled, because both are the same
+/// leader's error wearing a different wrapper. The **leader** returns
+/// [`Error::SourceFetchFailed`]; a **waiter** that lost the race receives
+/// [`Error::SingleflightFailed`] carrying the leader's error type-erased
+/// through [`SharedError`](crate::utility::singleflight::SharedError). Peeling
+/// only the leader would make the held-vs-propagated verdict depend on which
+/// caller happened to win — and since the coalescing group exists precisely
+/// because there *is* a concurrent fan-out, the waiter shape is the common one
+/// under load, not the exotic one.
+///
+/// `SharedError` keeps its payload private but exposes it as its `source()`
+/// (deliberately, so `classify_error` can recover the discriminant), so the
+/// peel needs no new accessor on the primitive.
+///
+/// Only [`singleflight::Error::Failed`](crate::utility::singleflight::Error::Failed)
+/// is peeled. `Abandoned`, `Timeout` and `CapacityExceeded` are the primitive's
+/// own coordination failures, not a source's verdict — they carry no leader
+/// error to peel and must keep propagating.
+pub fn coalesced_cause(error: &crate::Error) -> &crate::Error {
+    use std::error::Error as _;
+    match error {
+        crate::Error::OciIndex(Error::SourceFetchFailed(arc)) => arc.as_error(),
+        crate::Error::OciIndex(Error::SingleflightFailed(crate::utility::singleflight::Error::Failed(shared))) => {
+            shared
+                .source()
+                .and_then(|cause| cause.downcast_ref::<crate::error::ArcError>())
+                .map_or(error, crate::error::ArcError::as_error)
+        }
+        other => other,
+    }
+}
+
 /// Errors specific to OCI index operations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -44,10 +112,29 @@ pub enum Error {
     SourceWalkFailed(#[source] crate::error::ArcError),
 
     /// A singleflight coordination primitive failed (capacity exceeded,
-    /// timeout, or abandoned leader) while walking the chain. Distinct
-    /// from [`Self::SourceWalkFailed`], which reports a source-side failure.
-    #[error("chained index singleflight failed")]
+    /// timeout, or abandoned leader). Distinct from [`Self::SourceWalkFailed`],
+    /// which reports a source-side failure.
+    ///
+    /// Raised by every coalescing group under `oci/index`, not just the chain
+    /// walk: `ChainedIndex`'s resolve group, `OcxIndex`'s `config_group` /
+    /// `root_group`, and `OciIndex`'s tag groups. The message names no
+    /// component for that reason — it said "chained index" while
+    /// `ChainedIndex` was the only raiser, and a capacity refusal inside
+    /// `OcxIndex` then pointed the operator at a subsystem that was not
+    /// involved. Which group it was is a `source()` hop away.
+    #[error("index singleflight failed")]
     SingleflightFailed(#[source] crate::utility::singleflight::Error),
+
+    /// A coalesced fetch **within one source** failed — the `config.json` or
+    /// root-document leader in [`OcxIndex`](super::OcxIndex).
+    ///
+    /// The same `ArcError` mechanism as [`Self::SourceWalkFailed`], for the
+    /// same reason: a singleflight leader hands its error to the broadcast, so
+    /// it cannot also return it by value. Transparent rather than prefixed —
+    /// unlike a chain walk, there is no second layer here to name, and the
+    /// caller must read the same message a direct, uncoalesced fetch produced.
+    #[error(transparent)]
+    SourceFetchFailed(crate::error::ArcError),
 
     /// A platform-selected child manifest turned out to be another image
     /// index. The OCI spec does not describe an image index nested inside
@@ -157,9 +244,23 @@ pub enum Error {
     /// permission, path-containment or file-type refusal from the `file://`
     /// transport, which raises this same variant. The source is boxed so the
     /// index error type stays free of a `reqwest` dependency edge.
+    ///
+    /// `status` carries the HTTP status **structurally** when one was received
+    /// (`None` for a pre-response transport failure, and for every `file://`
+    /// refusal, which has no status). Formatting it into the boxed source, as
+    /// this variant used to, leaves the retry classifier unable to read it back
+    /// out of a `Box<dyn Error>` message
+    /// (`adr_index_sync_performance.md` D-010a). It is `u16` rather than
+    /// `reqwest::StatusCode` to keep that dependency edge out of this type.
+    ///
+    /// It does **not** affect exit-code classification: every arm of this
+    /// variant is [`ExitCode::Unavailable`] (69), unchanged. Exit codes are the
+    /// CLI surface other tools branch on, and nothing about a retry decision
+    /// needs them split.
     #[error("index request to {url} failed")]
     IndexHttpFailed {
         url: String,
+        status: Option<u16>,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -250,7 +351,9 @@ impl ClassifyExitCode for Error {
             // the `PackageErrorKind::Internal(inner)` pattern so nested causes
             // (e.g. a `ClientError::Authentication` inside a `crate::Error`)
             // are resolved via the generic `try_classify` ladder.
-            Self::SourceWalkFailed(arc) => return Some(crate::cli::classify_error(arc.as_error())),
+            Self::SourceWalkFailed(arc) | Self::SourceFetchFailed(arc) => {
+                return Some(crate::cli::classify_error(arc.as_error()));
+            }
             // Yield to the chain walker rather than answering here: the variant
             // carries the singleflight error as `#[source]`, and that type
             // classifies itself (a broadcast leader failure defers to the
@@ -280,6 +383,10 @@ impl ClassifyExitCode for Error {
             // absent catalog document is the same class for the same reason:
             // the source is reachable but is not serving what a published index
             // must serve, and every cause of it is external and retryable.
+            //
+            // Deliberately status-blind: `IndexHttpFailed::status` exists for
+            // the retry classifier, not to split this arm. Fanning it out would
+            // be a CLI-surface break for a distinction nothing asked for.
             Self::IndexHttpFailed { .. } | Self::CatalogDocumentAbsent { .. } => ExitCode::Unavailable,
             // A misconfigured index-role traffic target — a configuration fault.
             Self::PlainHttpIndexNotAllowed { .. } | Self::InvalidIndexUrl { .. } => ExitCode::ConfigError,
@@ -340,6 +447,7 @@ mod tests {
             (
                 crate::Error::OciIndex(Error::IndexHttpFailed {
                     url: "https://index.ocx.sh/c/index.json".to_string(),
+                    status: None,
                     source: Box::new(std::io::Error::other("connection reset")),
                 }),
                 ExitCode::Unavailable,

@@ -130,6 +130,9 @@ fn redact_url(url: &str) -> String {
 fn refused(url: &str, source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> crate::Error {
     super::error::Error::IndexHttpFailed {
         url: redact_url(url),
+        // A `file://` refusal has no HTTP status, and the retry ladder never
+        // reaches this transport.
+        status: None,
         source: source.into(),
     }
     .into()
