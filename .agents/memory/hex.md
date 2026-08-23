@@ -280,3 +280,66 @@ research-axes:
     findings to `<path>`, append each as you confirm it, reply with just the path" and it
     delivered a full report immediately. Make the file the deliverable in the first brief, not the
     third.
+- **2026-08-23 `/hex-execute high` on the ocx#272 review set (branch
+  `fix/oci-cross-host-upload-auth-272`).** Rebased onto a `main` that had moved 9 commits, then
+  applied the `/hex-review` actionable set across three parallel work packages.
+  - **`worker-researcher` has no Write tool — THIRD run in a row I briefed it with a file
+    deliverable.** It routed around the gap by pasting the whole report into its reply, which
+    works but defeats the file-first rule that exists precisely because workers go idle holding
+    their output. Stop writing "write your findings to `<path>`" for this role: either brief it
+    to reply inline, or spawn `worker-explorer`/`general-purpose` when the deliverable must
+    land on disk. The orchestrator persists its output by hand.
+  - **The `Cargo.lock` inside `external/rust-oci-client` is gitignored.** A review finding read
+    it as a committed second lockfile pinning `reqwest 0.13.2` against the workspace's 0.13.4
+    and graded it High. It is a local artefact — but the real consequence survived the regrade:
+    every mutation proof ever run *inside* the fork executed against a dependency graph that is
+    not what ships. Any fork work package must `cargo update` and assert the resolved version
+    before producing evidence. Check whether a lockfile is tracked before grading a lockfile
+    finding.
+  - **`rtk` rewrites `cargo test` output into its own summary line.** `cargo test | grep
+    '^test result'` returns silently empty — a passing-looking gate that never ran. Same class
+    as the greps already logged above; the tell was an empty section where a number belonged.
+    Run the command unfiltered, or match `rtk`'s own `cargo test: N passed` line.
+  - **A mutation that fails to red is a lead, not a weakness — and reading the dependency
+    settled it.** A 307-shaped redirect test stayed green when the guard was removed. The cause
+    was in `tower-http`'s `follow_redirect`: the body is *moved* into the inner service and
+    `reqwest::Body::wrap_stream` is not cloneable, so a 307 is never followed at all. A 303
+    zeroes the body before the take and IS followed, so only that shape discriminates. The
+    worker root-caused it out of the vendored source rather than concluding the guard was fine.
+  - **Ask the research axis "does refusing this break anyone?" before shipping a hard refusal.**
+    A behaviour change (any 3xx on an upload `PUT`/`PATCH` is now fatal) looked like a
+    compatibility risk worth deferring to review. One sonnet researcher retired it instead, and
+    turned up the strongest evidence in the run: `distribution` computes the blob digest
+    server-side as bytes stream past, so a registry *structurally cannot* delegate an upload via
+    redirect; and oras-go shipped CVE-2026-50151 for this exact function shape. Prior art beat
+    a review round.
+  - **The cross-model gate earned its keep a FIFTH time, and this was its clearest win yet.** Seven
+    Claude reviewers — including a security pass that enumerated all 24 sites where a
+    registry-supplied URL reaches a request builder — produced two Blocks between them. Codex
+    then found two more that every one of them had missed:
+    - **A zero-padded port defeated the system lock.** The round had just fixed the *case* axis
+      of the same comparison and nobody asked what else two spellings of one authority could do.
+      `OCX_INSECURE_REGISTRIES=registry.corp:05000` misses a lock on `:5000` at every string
+      compare, and `url::parse_port` accumulates `port*10+digit`, so the socket lands on 5000
+      anyway. Lesson: when you normalise one axis of an identity comparison, enumerate the other
+      axes in the same sitting — case, port spelling, default-port elision, trailing dot.
+    - **The read-site audit marked the session-opening POST "clean" for the same reason the
+      implementer did**: its `Location` is vetted afterwards. Both true, both missing that the
+      *request itself* gets relocated before any `Location` exists. Two independent reviewers
+      agreeing is not corroboration when they share the premise. Codex proved it pre-existing
+      with a `git diff` against the fork base rather than asserting it.
+  - **A fix round can staledate its own reviewers.** Two agents fixed the same seam from opposite
+    sides in one round: the fork replaced `attempt.stop()` with `attempt.error(...)` while the ocx
+    side was documenting `attempt.stop()`. The resulting comment described neither tree. When
+    parallel work packages share a seam, re-read the other side before accepting a comment about
+    it — and sequence the gitlink bump before, not after, the dependent write-up.
+  - **"Not on either branch" does not mean "unlanded".** An auditor reported the hawkeye-7 work
+    lost because its commit was on neither branch; `main` had done the same migration
+    independently and the effect was live. The decisive test is whether the *effect* is present
+    (one `git show` plus one gate line), never commit ancestry alone.
+  - **The best worker output of the run refused the task as briefed.** Told to close a finding,
+    wp1-fork instead proved the defended branch unreachable and fixed the *comment* that claimed
+    otherwise; told to wire `ssrf_guard`, wp2-crates refused with the caller list that would break
+    (56 acceptance files on loopback, every air-gapped registry) and the subsystem rule already
+    documenting it as design. Brief for the outcome, and say that a reasoned refusal with evidence
+    is an acceptable answer — otherwise the agent implements the wrong thing well.
