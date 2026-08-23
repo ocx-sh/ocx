@@ -376,6 +376,33 @@ def test_login_password_value_flag_rejected(ocx: OcxRunner, tmp_path: Path) -> N
     assert result.returncode == 64, f"exit {result.returncode}"
 
 
+def test_login_removed_insecure_flag_rejected(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``--insecure`` no longer exists: the shared
+    ``[registries."<host>"] insecure`` / ``OCX_INSECURE_REGISTRIES`` gate every
+    other command uses is the only way to license plain HTTP now. Passing the
+    removed flag is an unknown-argument usage error, same shape as the
+    ``--password VALUE`` case above.
+
+    ``-u``/``--password-stdin``/stdin are all supplied (unlike the bare
+    positional above) so a build that still parses ``--insecure`` would run
+    the command instead of exiting 64 for the unrelated missing-credential
+    reason — that would make this pass for the wrong reason in both worlds.
+    """
+    docker_config_dir = tmp_path / "docker"
+    docker_config_dir.mkdir()
+    result = _run_login(
+        ocx,
+        "-u",
+        "u",
+        "--password-stdin",
+        "--insecure",
+        "ghcr.io",
+        docker_config_dir=docker_config_dir,
+        stdin="tok\n",
+    )
+    assert result.returncode == 64, f"exit {result.returncode}: {result.stderr}"
+
+
 # ---------------------------------------------------------------------------
 # Scenario 4: credentials rejected (Ping-then-Put invariant)
 # ---------------------------------------------------------------------------
@@ -420,6 +447,56 @@ def test_login_rejects_credentials_with_loginrejected(
     # Critical invariant: store must NOT have received the credential.
     assert not sidecar.exists(), (
         "Ping-then-Put invariant violated: bad credential reached the helper store"
+    )
+
+
+def test_login_against_plain_http_registry_is_tempfail_not_rejected_credentials(
+    ocx: OcxRunner, tmp_path: Path, registry: str
+) -> None:
+    """The default ``--verify`` path (no ``--no-verify``) pings the registry
+    with the real ``OciClientPing`` before it will store anything. Against a
+    registry that only speaks plain HTTP, with its host deliberately NOT in
+    ``OCX_INSECURE_REGISTRIES`` (the ``ocx`` fixture licenses it by default,
+    so this is the one call site that overrides it back out), the TLS
+    handshake never completes — the credential is never judged, so this must
+    NOT be ``AuthError::LoginRejected`` (exit 80, "rejected credentials"). It
+    classifies through the same ``ClientError`` taxonomy every other command
+    uses (``RegistryTransient``, exit 75), and the remediation names both ways
+    to license plain HTTP.
+    """
+    docker_config_dir = tmp_path / "docker"
+    docker_config_dir.mkdir()
+    env = dict(ocx.env)
+    env["DOCKER_CONFIG"] = str(docker_config_dir)
+    env["OCX_INSECURE_REGISTRIES"] = ""
+
+    result = subprocess.run(
+        [str(ocx.binary), "login", "-u", "u", "--password-stdin", registry],
+        capture_output=True,
+        text=True,
+        env=env,
+        input="tok\n",
+        timeout=40.0,
+    )
+
+    assert result.returncode == 75, (
+        "a failed HTTPS connect must be TempFail (75), not LoginRejected (80): "
+        f"exit {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert "rejected credentials" not in result.stderr, (
+        f"must not misreport a connect failure as rejected credentials: {result.stderr}"
+    )
+    assert "insecure = true" in result.stderr, (
+        f"remediation must name the config spelling: {result.stderr}"
+    )
+    assert f'[registries."{registry}"]' in result.stderr, (
+        f"remediation must quote the exact TOML key, port included: {result.stderr}"
+    )
+    assert "OCX_INSECURE_REGISTRIES" in result.stderr, (
+        f"remediation must also name the env spelling: {result.stderr}"
+    )
+    assert not (docker_config_dir / "config.json").exists(), (
+        "Ping-then-Put invariant: a failed probe must not reach the store"
     )
 
 

@@ -309,7 +309,7 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 | 0 | Success | — | Successful completion | — |
 | 1 | Failure | — | Generic failure — only when no specific code applies | Inspect stderr |
 | 64 | UsageError | EX_USAGE | Bad CLI invocation: unknown flag, wrong argument count, invalid syntax; `package verify` given only one of `--certificate-identity` / `--certificate-oidc-issuer`, or given neither with no matching [`[[trust.policy]]`][config-trust] scope | Check the command syntax |
-| 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest, tampered Sigstore bundle; also a manifest fetch that got back something other than a manifest — an HTML page from a misconfigured [mirror][config-mirrors], for instance — refused by its content type before digest verification ever runs; also registry-served content whose digest does not match the descriptor; also a platform feature mismatch — the package ships for the host os/arch but no candidate's `os.features` are a subset of the host's (e.g. glibc vs musl), see [`--platform`](#package-install); also an ambiguous selection — a dual-libc host matched two equally-specific candidates (see [libc differentiation][authoring-libc]) | Validate identifiers and file contents; for a mirror serving a non-manifest response, check the mirror's own health and its `[mirrors]` routing; for a feature mismatch or ambiguous selection, override with `--platform` |
+| 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest, tampered Sigstore bundle; also a manifest fetch that got back something other than a manifest — an HTML page from a misconfigured [mirror][config-mirrors], for instance — refused by its content type before digest verification ever runs; also registry-served content whose digest does not match the descriptor; also a platform feature mismatch — the package ships for the host os/arch but no candidate's `os.features` are a subset of the host's (e.g. glibc vs musl), see [`--platform`](#package-install); also an ambiguous selection — a dual-libc host matched two equally-specific candidates (see [libc differentiation][authoring-libc]); also a registry-controlled redirect or auth realm that OCX refuses to follow during push or pull — a session URL or redirect naming a different registry host, a plaintext credential realm, a redirect that would drop TLS, or a redirect on an upload request at all (see [Redirect Refusals][authoring-building-pushing-redirect-refusals]) | Validate identifiers and file contents; for a mirror serving a non-manifest response, check the mirror's own health and its `[mirrors]` routing; for a feature mismatch or ambiguous selection, override with `--platform`; for a refused redirect or realm, see [Redirect Refusals][authoring-building-pushing-redirect-refusals] — it is a registry-side problem or a missing `insecure` entry, never one a rerun fixes |
 | 69 | Unavailable | EX_UNAVAILABLE | The registry answered, but not usefully — and a rerun will not change that. Also a local resource that cannot be reached | Inspect stderr; fix the registry or the URL before retrying |
 | 74 | IoError | EX_IOERR | I/O error: filesystem permission denied, disk full, read/write failure | Check filesystem permissions and free space |
 | 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: registry connect failure or timeout, 429, 502, 503, 504, rate limit, transient network, or a layer blob that arrived short of its manifest-declared size | Retry with backoff |
@@ -1537,7 +1537,7 @@ ocx login [OPTIONS] [REGISTRY]
 
 :::details Reserved flags
 
-`--auth-type <TYPE>` is reserved for a future v2 OIDC / browser-OAuth flow. Passing it today emits a usage error (exit 64). Plain HTTP registries are enabled via `OCX_INSECURE_REGISTRIES` environment variable rather than a login flag.
+`--auth-type <TYPE>` is reserved for a future v2 OIDC / browser-OAuth flow. Passing it today emits a usage error (exit 64). Plain HTTP is not a login flag: `ocx login` probes the registry over whatever scheme the rest of the binary would use, which is HTTPS unless the host is named by [`[registries.<name>] insecure`][config-registries-insecure] or [`OCX_INSECURE_REGISTRIES`][env-insecure-registries].
 
 :::
 
@@ -5070,7 +5070,10 @@ wins over the machine's own.
 
 Past parsing, the merged result is run through the same gates every ocx invocation applies to
 its own config: an invalid `[mirrors."<host>"]` entry — an unparseable URL, or a plain-HTTP
-scheme not covered by an insecure-registries allowlist — fails the command (any forwarded
+scheme whose host the candidate does not declare plaintext-eligible (its own
+[`[registries.<name>] insecure`][config-registries-insecure], or
+[`OCX_INSECURE_REGISTRIES`][env-insecure-registries] on the testing machine) — fails the
+command (any forwarded
 [`OCX_MIRRORS`][env-ocx-mirrors] entries are folded in first, same as ordinary resolution),
 and so does an empty `[patches] registry = ""`. A payload that parses cleanly can still be one
 no machine could actually start under; catching that is the point of previewing. `[patches]`
@@ -5098,11 +5101,18 @@ ocx config test <CONFIG>
 | `CONFIG` | Path to the candidate config file to check. Required. |
 
 **Output** — plain: a `Field`/`Value` table; rows with no payload for this candidate (no
-`[patches]`, no configured `[managed]` tier, no unknown keys) are omitted. JSON: a fixed
-shape (`candidate`, `valid`, `registry_default`, `registries`, `mirrors`, `patches`,
-`managed`, `unknown_keys`) — every field is always present, with `null`/`[]` where a tier is
-unconfigured, so a consumer can key on `.valid`/`.unknown_keys` without probing for the
-field first.
+`[registries.<name>]`, no `[mirrors]`, no plain-HTTP host, no `[patches]`, no configured
+`[managed]` tier, no unknown keys) are omitted; a `Plain HTTP` row appears once per plain-HTTP
+host. JSON: a fixed shape (`candidate`, `valid`, `registry_default`, `registries`, `mirrors`,
+`plain_http`, `patches`, `managed`, `unknown_keys`) — every field is always present, with
+`null`/`[]` where a tier is unconfigured, so a consumer can key on `.valid`/`.unknown_keys`
+without probing for the field first. `plain_http` is the resolved union this candidate would
+actually get: its own `[registries.<name>] insecure = true` entries plus this machine's
+`OCX_INSECURE_REGISTRIES`, minus anything a system-tier explicit `insecure = false` subtracts,
+sorted. It's the answer to "did my `insecure` entry take effect?" — each host appears exactly
+as written, which is what the transport compares against, so a mis-spelled
+`[registries.<name>]` key is visible as itself (`private` where you meant
+`private.corp:5000`) rather than silently granting nothing.
 
 **Exit codes**
 
@@ -5467,9 +5477,14 @@ or a registry error) — the report then degrades to a local-state-only summary
 [authoring-libc]: ../authoring/multi-platform.md#libc
 [authoring-multi-platform]: ../authoring/multi-platform.md
 [authoring-building-pushing-dependency-pins]: ../authoring/building-pushing.md#dependency-pins
+[authoring-building-pushing-redirect-refusals]: ../authoring/building-pushing.md#redirect-refusals
 
 <!-- faq -->
 [faq-gcompat]: ../faq.md#linux-gcompat
+
+<!-- commands (login) -->
+[config-registries-insecure]: ./configuration.md#keys-registries-insecure
+[env-insecure-registries]: ./environment.md#ocx-insecure-registries
 
 <!-- commands (package announce) -->
 [cmd-package-announce]: #package-announce

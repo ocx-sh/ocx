@@ -58,6 +58,16 @@ pub struct ConfigTestData {
     pub(crate) registries: Vec<String>,
     /// Effective `[mirrors."<host>"]` keys, sorted.
     pub(crate) mirrors: Vec<String>,
+    /// Hosts this machine would contact over plain HTTP once the candidate is
+    /// adopted, sorted — the candidate's own `[registries.<name>] insecure`
+    /// entries unioned with this machine's `OCX_INSECURE_REGISTRIES`, less
+    /// anything the system scope locked shut.
+    ///
+    /// The gate already computes this set to validate the payload's mirrors;
+    /// reporting it is what makes "did my entry take effect?" a one-command
+    /// question. A key that is not an exact `host[:port]` grants nothing and
+    /// simply will not appear here.
+    pub(crate) plain_http: Vec<String>,
     /// Effective `[patches]` tier, defaults applied.
     ///
     /// Same precedence every ocx invocation uses: the merged config tier when
@@ -85,6 +95,7 @@ impl ConfigTestData {
         preview: ManagedConfigPreview,
         patches: Option<ocx_lib::ResolvedPatchConfig>,
         managed: Option<&ocx_lib::ResolvedManagedConfig>,
+        plain_http: Vec<String>,
     ) -> Self {
         let effective = preview.effective;
         Self {
@@ -93,6 +104,7 @@ impl ConfigTestData {
             registry_default: effective.resolved_default_registry().map(str::to_owned),
             registries: sorted_keys(effective.registries.as_ref()),
             mirrors: sorted_keys(effective.mirrors.as_ref()),
+            plain_http: sorted(plain_http),
             patches: patches.map(|patches| PatchesView {
                 registry: patches.registry,
                 path_template: patches.path_template,
@@ -105,6 +117,12 @@ impl ConfigTestData {
             unknown_keys: preview.unknown_keys,
         }
     }
+}
+
+/// A report never inherits the order its input happened to arrive in.
+fn sorted(mut values: Vec<String>) -> Vec<String> {
+    values.sort_unstable();
+    values
 }
 
 /// Sorted keys of an optional config table — the order a `HashMap` yields is
@@ -139,6 +157,9 @@ impl Printable for ConfigTestData {
         for host in &self.mirrors {
             row("Mirrors".into(), host.clone());
         }
+        for host in &self.plain_http {
+            row("Plain HTTP".into(), host.clone());
+        }
         if let Some(patches) = &self.patches {
             row("Patch registry".into(), patches.registry.clone());
             row("Patch path".into(), patches.path_template.clone());
@@ -153,5 +174,83 @@ impl Printable for ConfigTestData {
         }
 
         printer.print_table(&["Field".into(), "Value".into()], &[fields, values]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn preview_of(payload: &str) -> ManagedConfigPreview {
+        ocx_lib::managed_config::preview_managed_config(
+            payload.as_bytes(),
+            ocx_lib::Config::default(),
+            &ocx_lib::Config::default(),
+        )
+        .expect("a well-formed candidate previews")
+    }
+
+    fn report(payload: &str, env_insecure: &[String]) -> ConfigTestData {
+        let preview = preview_of(payload);
+        let plain_http = ocx_lib::insecure_hosts(&preview.effective, env_insecure);
+        ConfigTestData::new(
+            std::path::Path::new("/tmp/candidate.toml"),
+            preview,
+            None,
+            None,
+            plain_http,
+        )
+    }
+
+    /// The candidate's OWN `[registries]` half must reach the plain-HTTP set —
+    /// that is the whole point of previewing a payload before a fleet adopts
+    /// it, and both existing acceptance cases drive the env half only.
+    ///
+    /// Asserted against the same payload minus the entry, with the environment
+    /// empty in both: without the pair, an inherited `OCX_INSECURE_REGISTRIES`
+    /// would make the green indistinguishable from the entry doing nothing.
+    #[test]
+    fn the_candidates_own_insecure_entry_reaches_the_reported_plain_http_set() {
+        let declared = report("[registries.\"mirror.corp:5000\"]\ninsecure = true\n", &[]);
+        assert_eq!(declared.plain_http, vec!["mirror.corp:5000".to_string()]);
+
+        let undeclared = report("[registries.\"mirror.corp:5000\"]\n", &[]);
+        assert!(
+            undeclared.plain_http.is_empty(),
+            "an entry that never states `insecure` licenses nothing"
+        );
+    }
+
+    /// A key that is not an exact `host[:port]` grants nothing at the transport,
+    /// and the report is where that becomes visible before it surfaces as an
+    /// opaque TLS error mid-install. Both rows list it verbatim — it IS a config
+    /// entry, and the set is exactly what the transport will compare against — so
+    /// the signal is seeing `private` where `private.corp:5000` was meant, not the
+    /// two rows disagreeing.
+    #[test]
+    fn a_wrongly_spelled_key_is_reported_verbatim_so_the_operator_can_see_it() {
+        let data = report("[registries.private]\ninsecure = true\n", &[]);
+
+        assert_eq!(data.registries, vec!["private".to_string()]);
+        assert_eq!(
+            data.plain_http,
+            vec!["private".to_string()],
+            "the set is the key verbatim — the report shows exactly what the transport will compare"
+        );
+    }
+
+    /// The machine's environment composes with the candidate, and the report
+    /// is sorted rather than inheriting the order the two sources arrived in.
+    #[test]
+    fn the_reported_set_unions_the_environment_and_is_sorted() {
+        let data = report(
+            "[registries.\"zeta.corp:5000\"]\ninsecure = true\n",
+            &["alpha.corp".to_string()],
+        );
+
+        assert_eq!(
+            data.plain_http,
+            vec!["alpha.corp".to_string(), "zeta.corp:5000".to_string()]
+        );
     }
 }

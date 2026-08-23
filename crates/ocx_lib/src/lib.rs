@@ -9,6 +9,7 @@ mod media_type;
 /// `config` module path. Used by `ocx_cli`'s `ProjectContextError::Config`
 /// variant.
 pub use config::error::Error as ConfigError;
+pub use config::insecure::{allows_plain_http, insecure_hosts};
 pub use config::loader::{ConfigInputs, ConfigLoader};
 pub use config::managed::{
     ManagedConfig, ManagedConfigError, ManagedSnapshotState, RefreshPolicy, ResolvedManagedConfig,

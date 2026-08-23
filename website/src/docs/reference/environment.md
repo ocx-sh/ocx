@@ -342,13 +342,19 @@ A comma-separated list of registry hostnames (with optional port) that should be
 export OCX_INSECURE_REGISTRIES="localhost:5000,registry.local:8080"
 ```
 
-The same list gates a second case: a plain-`http://` [`[mirrors]`][config-mirrors] target. A
+The variable is one half of a **union** with the [`[registries.<name>] insecure`][config-registries-insecure] config key: a host named in either source is plaintext-eligible. Only one thing narrows that set: an `insecure = false` entry declared at the [system config scope](./configuration.md#keys-registries-system-lock) subtracts its host from this variable's contribution too. Every other `insecure` value — including an explicit `false` below the system scope — only ever adds to the union, never removes from it. Prefer the config key for a host your machine always talks to over plain HTTP; the variable is the ambient, per-invocation half, and it is what a subprocess inherits.
+
+Names are matched exactly, `host[:port]` together — the same comparison the transport makes. `registry.corp` does not cover `registry.corp:5001`.
+
+The same set gates a second case: a plain-`http://` [`[mirrors]`][config-mirrors] target. A
 mirror value — for either the `registry` role or the `index` role — that starts with `http://` is
-refused unless the mirror's own host appears here; `https://` mirror targets never need this
-variable, regardless of which role they cover.
+refused unless the mirror's own host is in the set; `https://` mirror targets never need it,
+regardless of which role they cover.
 
 ::: warning
-This variable disables TLS for the listed registries. Only use it for local development registries that do not support HTTPS.
+This disables TLS for the listed registries, so credentials travel the wire in the clear. Only use it for local development registries that do not support HTTPS.
+
+It covers transport and nothing else: an HTTPS registry that names a plaintext token-service realm is still refused, an HTTPS request redirected to `http://` is refused rather than followed, and listing one host never licenses cleartext for another. See [Redirect Refusals][authoring-redirect-refusals] for what these refusals look like from the command line and why widening this list does not change them.
 :::
 
 ### `OCX_MIRRORS` {#ocx-mirrors}
@@ -380,7 +386,7 @@ A malformed `OCX_MIRRORS` value is a **hard startup error**. OCX aborts with an 
 
 - The value is not valid JSON
 - A per-host value is neither a string URL nor an object with only `registry`/`index` string fields
-- A mirror value starts with `http://` but the mirror host is not listed in [`OCX_INSECURE_REGISTRIES`][env-insecure-registries-ref]
+- A mirror value starts with `http://` but the mirror host is not plaintext-eligible — neither [`OCX_INSECURE_REGISTRIES`][env-insecure-registries-ref] nor an `insecure = true` entry in [`[registries.<name>]`][config-registries-insecure] names it
 
 OCX never silently continues with an empty mirror map when `OCX_MIRRORS` is set — falling back to no mirrors would silently route reads to the firewall-blocked origin, which is the exact failure replace semantics are designed to prevent.
 :::
@@ -844,6 +850,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [config-ref]: ./configuration.md
 [config-home-tier]: ../in-depth/configuration.md#tier-ocx-home
 [config-mirrors]: ./configuration.md#keys-mirrors
+[config-registries-insecure]: ./configuration.md#keys-registries-insecure
 [config-patches]: ./configuration.md#keys-patches
 [config-managed]: ./configuration.md#keys-managed
 [config-managed-refresh]: ./configuration.md#keys-managed-refresh
@@ -869,3 +876,4 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 
 <!-- authoring -->
 [authoring-testing-scripted]: ../authoring/testing.md#scripted-tests
+[authoring-redirect-refusals]: ../authoring/building-pushing.md#redirect-refusals

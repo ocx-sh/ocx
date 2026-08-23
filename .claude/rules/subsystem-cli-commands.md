@@ -179,7 +179,7 @@ All `ConfigGroup` variants are exempt from the required-snapshot gate; `config s
 
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
-| `login [REGISTRY]` | Authenticate to a registry (verifies credentials against the registry before storing; `--no-verify` opts out) | `-u/--username`, `--password-stdin`, `--verify`/`--no-verify`, `--insecure` |
+| `login [REGISTRY]` | Authenticate to a registry (verifies credentials against the registry before storing; `--no-verify` opts out) | `-u/--username`, `--password-stdin`, `--verify`/`--no-verify`, `--allow-insecure-store` |
 | `logout [REGISTRY]` | Remove stored credentials | — |
 | `clean` | GC unreferenced objects | `--dry-run`, `--force` |
 | `shell completion` | Generate shell completions | `--shell` |

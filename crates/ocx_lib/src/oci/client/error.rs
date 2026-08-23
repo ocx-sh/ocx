@@ -111,6 +111,53 @@ pub enum ClientError {
     /// A registry operation failed.
     #[error("registry operation failed: {0}")]
     Registry(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// The registry named a destination the transport refuses to contact.
+    ///
+    /// Exactly the two typed request-time guards, both of which name a
+    /// destination and both of which refuse it: an upload-session `Location`
+    /// off the registry's own origin (the credential and the blob body would go
+    /// to a host the caller never named — CWE-918) and a plaintext
+    /// authentication realm named by an HTTPS registry (the credential would
+    /// cross in the clear — CWE-319).
+    ///
+    /// A redirect the transport did not follow is [`Self::UnfollowedRedirect`],
+    /// not this — the two shapes share an exit code and nothing else, and half
+    /// of that set refuses nothing.
+    ///
+    /// Exit 65, alongside [`ClientError::DigestMismatch`] and
+    /// [`ClientError::NotAManifest`], for the same reason those two are there:
+    /// the registry served something wrong and a rerun reaches the same
+    /// answer. 69 would tell a CI retry wrapper to re-issue the push against
+    /// the same hostile `Location` until its budget runs out — the one thing
+    /// the guard exists to prevent — and would make a registry outage
+    /// indistinguishable from a credential-exfiltration attempt. 78 would be
+    /// wrong for a different reason: no config change fixes a `Location`
+    /// header, so it would send the operator to a file with nothing to edit.
+    #[error("registry named a destination the transport refuses: {0}")]
+    UnsafeDestination(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// The registry answered with a redirect the transport did not follow.
+    ///
+    /// Four causes, and the transport cannot tell them apart once the error
+    /// reaches this layer — two are refusals, two are not:
+    ///
+    /// - the redirect policy declining an `https` -> `http` hop;
+    /// - the upload path declining a mid-session handoff (its session-URL
+    ///   requests run on a no-redirect client precisely so the blob body is not
+    ///   replayed to a registry-chosen host);
+    /// - the hop chain exceeding the fork's limit;
+    /// - a redirect no client could act on at all — a missing or unparseable
+    ///   `Location`, or a body that cannot be replayed — which `tower-http`
+    ///   hands back as the 3xx itself on any client, whatever its policy.
+    ///
+    /// Split from [`Self::UnsafeDestination`] for the last two: they name no
+    /// destination and refuse nothing, so reporting them as a refused unsafe
+    /// destination sends an operator hunting for an attacker over a registry
+    /// that emitted a malformed `302`.
+    ///
+    /// Exit 65 for all four, the same as its sibling and for the same reason —
+    /// a rerun walks the same chain to the same answer.
+    #[error("registry answered with a redirect the transport did not follow: {0}")]
+    UnfollowedRedirect(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// A registry operation failed for a reason that may not repeat: the
     /// connect never completed, a request timed out, or the registry answered
     /// 429 / 502 / 503 / 504.
@@ -300,6 +347,8 @@ impl ClassifyExitCode for ClientError {
             // a data fault either, so it carries its own code.
             Self::ReferrersUnsupported { .. } => ExitCode::ReferrersUnsupported,
             Self::DigestMismatch { .. }
+            | Self::UnsafeDestination(_)
+            | Self::UnfollowedRedirect(_)
             | Self::DecompressionCapExceeded { .. }
             | Self::UnexpectedManifestType
             | Self::InvalidManifest(_)

@@ -69,6 +69,7 @@ Recurring attack surfaces in OCX codebase. Use as STRIDE scoping checklist for a
 - Auth chain: `OCX_AUTH_<REGISTRY>_*` env vars → Docker credentials (`~/.docker/config.json`)
 - Credentials never logged or in error messages
 - `OCX_INSECURE_REGISTRIES` (HTTP-only) only for localhost/test registries
+- `[registries.<name>] insecure` config key — unions with `OCX_INSECURE_REGISTRIES`; only an explicit system-scope `insecure = false` subtracts from that union. Distributable via the `[managed]` tier: check `system_locked` enforcement and managed-tier propagation when auditing this surface
 
 ### Registry Communication
 - TLS verification for all registry connections (except insecure registries)

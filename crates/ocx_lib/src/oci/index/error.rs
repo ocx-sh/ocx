@@ -267,14 +267,15 @@ pub enum Error {
 
     /// An index-role traffic target (the `[registries."<namespace>"] index`
     /// base, or its `[mirrors."<host>"] index` role override) uses plain
-    /// `http://` but the target host is not in `OCX_INSECURE_REGISTRIES`. The
+    /// `http://` but the target host is in neither half of the insecure-host union
+    /// (`[registries."<host>"] insecure`, `OCX_INSECURE_REGISTRIES`). The
     /// root document is the index path's trust anchor (nothing pins it from
     /// above), so an on-path attacker on a plaintext index owns every
     /// downstream resolution — refuse loud rather than silently downgrade
     /// (CWE-319, same doctrine as the registry role).
     #[error(
-        "index traffic to '{host}' for registry '{namespace}' uses http:// but is not in OCX_INSECURE_REGISTRIES; \
-         add it to allow plain-HTTP transport"
+        "index traffic to '{host}' for registry '{namespace}' uses http:// but that host is not allowed plain HTTP; \
+         set insecure = true under [registries.\"{host}\"] or add the host to OCX_INSECURE_REGISTRIES"
     )]
     PlainHttpIndexNotAllowed { namespace: String, host: String },
 
@@ -479,5 +480,24 @@ mod tests {
     fn singleflight_timeout_classifies_as_temp_fail() {
         let error = Error::SingleflightFailed(crate::utility::singleflight::Error::Timeout);
         assert_eq!(crate::cli::classify_error(&error), ExitCode::TempFail);
+    }
+
+    /// The refusal has to name the config key, quoted with its port, or the
+    /// operator is told only half the fix. Every other test of this variant
+    /// matches on its shape, which the old env-var-only wording satisfied too.
+    #[test]
+    fn the_plain_http_index_refusal_names_both_ways_to_allow_it() {
+        let rendered = Error::PlainHttpIndexNotAllowed {
+            namespace: "ocx.sh".to_string(),
+            host: "index.corp:8080".to_string(),
+        }
+        .to_string();
+
+        assert!(rendered.contains("index.corp:8080"), "{rendered}");
+        assert!(
+            rendered.contains("set insecure = true under [registries.\"index.corp:8080\"]"),
+            "the exact TOML key, port included, is what an operator can paste: {rendered}"
+        );
+        assert!(rendered.contains("OCX_INSECURE_REGISTRIES"), "{rendered}");
     }
 }

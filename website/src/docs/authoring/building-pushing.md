@@ -22,6 +22,27 @@ ocx package push mytool-1.0.0.tar.xz
 Before pushing, verify the package works locally with [`ocx package test`][authoring-testing]. It runs the same install pipeline — dep resolution, extraction, env composition — in a temp directory with no registry round-trip. Exit code is forwarded from the command you run, so CI can gate on it. See [Testing locally][authoring-testing] for the full workflow.
 :::
 
+## Redirect Refusals {#redirect-refusals}
+
+An upload session in the [OCI Distribution Specification][oci-dist-spec] hands control to the registry mid-request: `push` opens a session, and the registry answers with a `Location` header naming where the next chunk or the commit request goes. That header is registry-supplied, not something OCX chose — a compromised or misconfigured registry, or an on-path party editing the header in flight, can point it anywhere.
+
+OCX refuses to follow it blindly. Four specific handoffs are checked before the next request goes out, and a failed check aborts the push rather than completing it silently over a route you didn't intend. All four exit [65 (DataError)][exit-codes] — the registry served something OCX will not act on, and a rerun reaches the same answer:
+
+- **A different registry.** The upload session's `Location` names a host other than the one you are pushing to. Following it would send that host your registry credentials and the blob body ([CWE-918][cwe-918]) — an internal address included, since nothing about the header requires it to be a public one.
+- **A plaintext credential realm.** OCX sends Basic or Bearer credentials to a `WWW-Authenticate` realm only when the realm is `https://`, its host matches the registry's own, or that realm host is itself declared plaintext-eligible. Anything else is refused, naming the realm URL ([CWE-319][cwe-319]) — most commonly an HTTPS registry naming a plaintext realm, but also a plain-HTTP registry whose token service sits on a different, undeclared host or port.
+- **A downgraded redirect.** Any request — not only the upload session — gets redirected from `https://` to `http://` mid-flight. OCX follows redirects (registries commonly hand blob downloads off to a CDN this way), but never one that drops TLS.
+- **A redirected upload request.** The requests that upload each chunk and commit the session never follow a redirect at all, not even a same-host one. (Opening the session is an ordinary request and still follows redirects; it carries no blob body, and the `Location` it comes back with is vetted before anything is sent to it.) If a registry answers one of them with a `3xx` after the session was already vetted as same-host, that status comes back as a refusal instead of being followed — closing the gap a one-time host check alone leaves open. This applies to uploads only; blob *pulls* still follow redirects, since that's how registries hand blobs off to a CDN. No registry redirects an upload write — it computes the blob's digest as the bytes stream past, which it can't do for a write it handed off elsewhere — so this refusal is not expected to fire against a correctly behaving registry.
+
+The first and last cases are specific to `push`'s upload-session flow. The middle two can surface on any authenticated request — `pull`, `install`, and `login` included — since they are checked at the transport layer, not the push path specifically.
+
+One more case lands in the same exit code without being a refusal at all: a redirect no client could act on — a missing or unparseable `Location`, or a body it can't replay — reaches any request, `pull` included. A registry emitting a malformed redirect looks identical to the fourth case from here; it isn't evidence of an attack, just a broken response.
+
+The cross-host, redirected-upload, and downgraded-redirect refusals are not something a plain-HTTP allowance opens back up: [`insecure = true`][config-registries-insecure] (or [`OCX_INSECURE_REGISTRIES`][env-insecure-registries]) only changes which registries OCX is willing to *dial* over HTTP, not which host an upload session may redirect to, whether it may redirect at all, or which host a TLS connection may downgrade to. The realm check is the exception — it does consult the allowance, for the realm's own host. See [`insecure`][config-registries-insecure] for what to declare when a plain-HTTP registry's token service lives on a separate host or port.
+
+:::info Reporting it
+The cross-host session, the redirected upload request, and the downgraded redirect are registry-side problems, not something to route around client-side — a same-registry upload session should never redirect at all, and nothing should ever downgrade to plain HTTP; if you hit any of the three, the registry (or a mirror/proxy in front of it) is misconfigured or compromised. A refused realm on an already-plain-HTTP registry is different: it's your own config missing an entry for the realm's host, fixed the same way as any other undeclared host — see the [`insecure`][config-registries-insecure] field.
+:::
+
 ## Bring Your Own Archives {#byo-archives}
 
 [`ocx package push`][cmd-package-push] does not bundle a directory for you. Every file layer must be a pre-built `.tar.gz` / `.tar.xz` / `.tar.zst` archive (the aliases `.tgz`, `.txz`, `.tzst`, and `.tar.zstd` are also accepted) — and that asymmetry is deliberate. Re-bundling the same content yields a non-deterministic digest (timestamps, compression entropy), and the registry treats every distinct digest as a fresh layer. Bundle once with [`ocx package create`][cmd-package-create] (see [Bundle Anatomy][authoring-bundle-anatomy]), then reference that archive across every subsequent push.
@@ -143,12 +164,15 @@ For command flags, token-source precedence, and exit codes see the
 <!-- external -->
 [oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
 [oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
+[oci-dist-spec]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md
 [ghcr-repo-link]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [mirror-pipeline]: https://github.com/ocx-sh/ocx/tree/main/crates/ocx_mirror
 [oci-referrers-spec]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers
 [sigstore]: https://www.sigstore.dev/
 [rekor]: https://github.com/sigstore/rekor
+[cwe-918]: https://cwe.mitre.org/data/definitions/918.html
+[cwe-319]: https://cwe.mitre.org/data/definitions/319.html
 
 <!-- commands -->
 [cmd-package-create]: ../reference/command-line.md#package-create
@@ -163,6 +187,9 @@ For command flags, token-source precedence, and exit codes see the
 
 <!-- reference -->
 [reference-manifest-pins]: ../reference/metadata.md#dependencies-manifest-pins
+[config-registries-insecure]: ../reference/configuration.md#keys-registries-insecure
+[env-insecure-registries]: ../reference/environment.md#ocx-insecure-registries
+[exit-codes]: ../reference/command-line.md#exit-codes
 
 <!-- in-depth -->
 [in-depth-storage-layers]: ../in-depth/storage.md#layers

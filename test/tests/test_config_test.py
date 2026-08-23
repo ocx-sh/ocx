@@ -311,6 +311,30 @@ def test_config_test_allowed_plain_http_mirror_passes(ocx: OcxRunner, tmp_path: 
     assert "ghcr.io" in report["mirrors"]
 
 
+def test_config_test_plain_http_mirror_allowed_by_candidate_registries_entry(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """The candidate's own ``[registries."<host>"] insecure = true`` entry
+    licenses its plain-HTTP mirror on its own, with ``OCX_INSECURE_REGISTRIES``
+    explicitly emptied so the config half cannot hide behind an inherited env
+    grant. The pair above drives only the env half of the union
+    (``OCX_INSECURE_REGISTRIES: ""`` vs. ``"mirror.corp"``) — this is the
+    config half, exercised end to end including the ``plain_http`` report
+    field."""
+    candidate = _write_candidate(
+        tmp_path,
+        '[mirrors."ghcr.io"]\nregistry = "http://mirror.corp"\n'
+        '[registries."mirror.corp"]\ninsecure = true\n',
+    )
+
+    report = ocx.json(
+        "config", "test", str(candidate), env_overrides={"OCX_INSECURE_REGISTRIES": ""}
+    )
+
+    assert "ghcr.io" in report["mirrors"]
+    assert report["plain_http"] == ["mirror.corp"]
+
+
 def test_config_test_rejects_empty_patch_registry_exit_78(ocx: OcxRunner, tmp_path: Path) -> None:
     """An empty `[patches] registry` is a no-op tier that would silently skip
     every companion — refused at resolve time, and the command's help promises

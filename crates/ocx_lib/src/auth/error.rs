@@ -34,6 +34,25 @@ pub enum AuthError {
     /// Registry returned 401 for the supplied credentials during login-time verification.
     #[error("registry '{registry}' rejected credentials")]
     LoginRejected { registry: String },
+    /// The login-time probe never completed, so the credential was never judged.
+    ///
+    /// Split from [`Self::LoginRejected`] because a TLS handshake against a
+    /// plain-HTTP registry, a DNS failure and a genuine 401 demand three
+    /// different actions. Reporting all three as "rejected credentials" at
+    /// exit 80 routes a CI script into the refresh-credentials branch, whose
+    /// retry then fails identically forever — and tells a human to rotate a
+    /// secret that never left the machine.
+    ///
+    /// The exit code is delegated to the wrapped
+    /// [`ClientError`](crate::oci::client::error::ClientError), so the probe
+    /// classifies the same way the rest of the binary classifies the same wire
+    /// failure.
+    #[error("could not verify credentials against registry '{registry}'")]
+    ProbeFailed {
+        registry: String,
+        #[source]
+        source: Box<crate::oci::client::error::ClientError>,
+    },
 }
 
 impl ClassifyExitCode for AuthError {
@@ -51,6 +70,10 @@ impl ClassifyExitCode for AuthError {
             },
             Self::NoCredentialStoreAvailable => ExitCode::ConfigError,
             Self::LoginRejected { .. } => ExitCode::AuthError,
+            // Provenance only: the probe adds context, the wire failure keeps
+            // its own code. Anything else would put a second taxonomy for the
+            // same failures beside the one every other command uses.
+            Self::ProbeFailed { source, .. } => return source.classify(),
         })
     }
 }
@@ -125,6 +148,42 @@ mod tests {
             registry: "ghcr.io".into(),
         };
         assert_eq!(ec(e), Some(ExitCode::AuthError));
+    }
+
+    /// A probe that never completed must NOT read as 80. Asserting two
+    /// different wrapped failures is what pins the delegation — a single case
+    /// passes just as well against a hardcoded constant — and asserting
+    /// `!= AuthError` is what pins the split from `LoginRejected`, which is the
+    /// bug: exit 80 routes a CI script into "refresh credentials", and the
+    /// retry with a fresh credential fails identically forever.
+    #[test]
+    fn a_failed_probe_delegates_its_exit_code_and_never_reads_as_rejected_credentials() {
+        use crate::oci::client::error::ClientError;
+
+        let probe = |source: ClientError| AuthError::ProbeFailed {
+            registry: "localhost:5000".into(),
+            source: Box::new(source),
+        };
+
+        assert_eq!(
+            ec(probe(ClientError::RegistryTransient(Box::new(std::io::Error::other(
+                "connect refused"
+            ))))),
+            Some(ExitCode::TempFail),
+        );
+        assert_eq!(
+            ec(probe(ClientError::UnsafeDestination(Box::new(std::io::Error::other(
+                "plaintext realm"
+            ))))),
+            Some(ExitCode::DataError),
+        );
+        assert_ne!(
+            ec(probe(ClientError::RegistryTransient(Box::new(std::io::Error::other(
+                "connect refused"
+            ))))),
+            Some(ExitCode::AuthError),
+            "the credential was never judged, so this must not classify as an auth failure"
+        );
     }
 
     #[test]

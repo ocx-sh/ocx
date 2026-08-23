@@ -843,6 +843,11 @@ fn classify(client: &ClientError) -> ClientFailure {
         ClientError::InvalidManifest(_)
         | ClientError::NotAManifest(_)
         | ClientError::InvalidImageIndex(_)
+        // A registry-named destination the transport refused is terminal by
+        // construction: retrying re-issues the request against the same
+        // hostile value.
+        | ClientError::UnsafeDestination(_)
+        | ClientError::UnfollowedRedirect(_)
         | ClientError::DigestMismatch { .. }
         | ClientError::DecompressionCapExceeded { .. }
         | ClientError::UnexpectedManifestType
@@ -951,6 +956,30 @@ mod classify_tests {
         let pinned =
             PinnedIdentifier::try_from(id.clone_with_digest(Digest::Sha256("a".repeat(64)))).expect("valid pinned");
         assert_not_found(ClientError::BlobNotFound(pinned));
+    }
+
+    /// A destination the transport refused must never enter the retry budget.
+    /// This layer is the one place in the workspace that would actually re-issue
+    /// it: `ClientFailure::Transient` feeds `retry_fetch`'s sleep-and-retry loop,
+    /// so classifying a `CrossHostRefused` there would re-send the push to the
+    /// registry-named hostile `Location` until the budget ran out — the single
+    /// behaviour the guard exists to prevent.
+    ///
+    /// Its sibling `UnfollowedRedirect` is here for the same reason from the
+    /// other direction: a chain that ended in a refusal, a limit, or an
+    /// unusable `Location` walks to the same answer on every rerun, so a retry
+    /// buys nothing and a scheme-downgrade refusal would be re-issued.
+    ///
+    /// The exhaustive `match` in `classify` catches a *forgotten* variant, not a
+    /// variant *moved* between arms, which compiles clean.
+    #[test]
+    fn a_refused_destination_and_an_unfollowed_redirect_are_both_other() {
+        assert_other(ClientError::UnsafeDestination(Box::new(std::io::Error::other(
+            "cross-host upload session URL",
+        ))));
+        assert_other(ClientError::UnfollowedRedirect(Box::new(std::io::Error::other(
+            "too many redirects (limit 10)",
+        ))));
     }
 
     /// A mirror answering with a login portal must not be retried: the

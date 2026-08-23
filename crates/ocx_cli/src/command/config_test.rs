@@ -34,11 +34,15 @@ impl ConfigTestArgs {
         // the effective merge — a payload that parses can still be one no
         // machine can start under (a plain-HTTP mirror, an empty patch
         // registry). Catching that here is the point of previewing.
-        ocx_lib::resolve_mirror_map(
-            &preview.effective,
-            ocx_lib::env::mirrors()?,
-            &ocx_lib::env::insecure_registries(),
-        )?;
+        // The plain-HTTP set comes from the CANDIDATE's own `[registries]`
+        // entries unioned with this machine's env — a payload that declares
+        // `insecure = true` for its own mirror host must pass its own gate.
+        let insecure_hosts = ocx_lib::insecure_hosts(&preview.effective, &ocx_lib::env::insecure_registries());
+        ocx_lib::resolve_mirror_map(&preview.effective, ocx_lib::env::mirrors()?, &insecure_hosts)?;
+        // Reported, not just consumed: a `[registries.<name>]` key that is not
+        // an exact `host[:port]` grants nothing and fails much later as an
+        // opaque TLS error, so the one command whose job is previewing a
+        // config has to answer "did my entry take effect?".
         // Same config-tier-then-env precedence `Context::try_init` uses, so the
         // report matches what the machine actually resolves.
         let patches = match ocx_lib::resolve_patch_config(&preview.effective)? {
@@ -49,9 +53,13 @@ impl ConfigTestArgs {
         // `[managed]` was already refused above.
         let managed = ocx_lib::resolve_managed_target(context.config(), context.managed_config_env_override())?;
 
-        context
-            .api()
-            .report(&ConfigTestData::new(&self.config, preview, patches, managed.as_ref()))?;
+        context.api().report(&ConfigTestData::new(
+            &self.config,
+            preview,
+            patches,
+            managed.as_ref(),
+            insecure_hosts,
+        ))?;
 
         Ok(ExitCode::SUCCESS)
     }

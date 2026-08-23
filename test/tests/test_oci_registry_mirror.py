@@ -166,7 +166,8 @@ def test_mirror_install_routes_to_configured_mirror(
 
     # Install using the upstream identifier — OCX must route to the mirror.
     # The mirror is a plain-HTTP endpoint, so its host must be listed in
-    # OCX_INSECURE_REGISTRIES (ADR F2: the mirror host is what gets contacted).
+    # OCX_INSECURE_REGISTRIES (adr_oci_registry_mirror.md, Implementation Plan
+    # step 3 "Auth + insecure": the mirror host is what gets contacted).
     fq = f"{registry}/{unique_repo}:1.0.0"
     run_with_env(
         ocx,
@@ -230,7 +231,8 @@ def test_mirror_push_targets_canonical_registry_not_mirror(
     )
 
     # Configure the mirror so we prove push ignores it. The plain-HTTP mirror
-    # host must be listed in OCX_INSECURE_REGISTRIES (ADR F2) so the cascade
+    # host must be listed in OCX_INSECURE_REGISTRIES (adr_oci_registry_mirror.md,
+    # Implementation Plan step 3 "Auth + insecure") so the cascade
     # tag-listing read can reach it; the push itself stays canonical (ADR Q5).
     write_home_config(
         ocx,
@@ -321,8 +323,9 @@ def test_mirror_ocx_lock_records_canonical_host_and_digest(
         ocx,
         f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n',
     )
-    # Plain-HTTP mirror host must be in OCX_INSECURE_REGISTRIES (ADR F2) so the
-    # lock resolution read can reach it.
+    # Plain-HTTP mirror host must be in OCX_INSECURE_REGISTRIES
+    # (adr_oci_registry_mirror.md, Implementation Plan step 3 "Auth + insecure")
+    # so the lock resolution read can reach it.
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{registry},{mirror_registry}"
 
     # Create a project and lock it.
@@ -399,7 +402,8 @@ def test_mirror_library_prefix_repo_routes_verbatim(
     )
 
     # Install with the library/ prefix in the identifier. The plain-HTTP mirror
-    # host must be listed in OCX_INSECURE_REGISTRIES (ADR F2).
+    # host must be listed in OCX_INSECURE_REGISTRIES (adr_oci_registry_mirror.md,
+    # Implementation Plan step 3 "Auth + insecure").
     fq = f"{registry}/{library_repo}:1.0.0"
     run_with_env(
         ocx,
@@ -437,7 +441,8 @@ def test_plain_http_mirror_with_insecure_flag_succeeds(
     succeeds.
 
     Traces: plan scenario 6 — "plain-HTTP mirror with host in
-    OCX_INSECURE_REGISTRIES → install succeeds"; ADR F2 footgun mitigation.
+    OCX_INSECURE_REGISTRIES → install succeeds"; adr_oci_registry_mirror.md,
+    Implementation Plan step 3 "Auth + insecure" footgun mitigation.
     """
     # Push to the mirror (plain-HTTP registry) only.
     mirror_ocx = OcxRunner(ocx.binary, ocx.ocx_home, mirror_registry)
@@ -460,6 +465,61 @@ def test_plain_http_mirror_with_insecure_flag_succeeds(
         "install",
         fq,
         extra_env={"OCX_INSECURE_REGISTRIES": f"{registry},{mirror_registry}"},
+    )
+
+    home = Path(ocx.env["OCX_HOME"])
+    from src.assertions import assert_symlink_exists  # noqa: PLC0415
+    assert_symlink_exists(
+        home
+        / "symlinks"
+        / _registry_slug(registry)
+        / unique_repo
+        / "candidates"
+        / "1.0.0"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scenario 6c — plain-HTTP mirror allowed by config alone, no env var
+# ---------------------------------------------------------------------------
+
+
+def test_plain_http_mirror_with_config_insecure_entry_succeeds(
+    ocx: OcxRunner,
+    registry: str,
+    mirror_registry: str,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """``[registries."<host>"] insecure = true`` alone licenses the plain-HTTP
+    mirror — with ``OCX_INSECURE_REGISTRIES`` explicitly emptied.
+
+    The env half of the union is what scenario 6a exercises; this is the
+    config half on its own. Emptying the variable is the whole point: the
+    runner sets it per instance, so leaving it inherited would make the
+    config entry unobservable and the green indistinguishable from 6a.
+    """
+    mirror_ocx = OcxRunner(ocx.binary, ocx.ocx_home, mirror_registry)
+    make_package(mirror_ocx, unique_repo, "1.0.0", tmp_path)
+
+    assert head_manifest(registry, unique_repo, "1.0.0") == 404, (
+        "upstream must be empty"
+    )
+
+    write_home_config(
+        ocx,
+        f'[mirrors]\n"{registry}" = "http://{mirror_registry}"\n'
+        f'[registries."{registry}"]\ninsecure = true\n'
+        f'[registries."{mirror_registry}"]\ninsecure = true\n',
+    )
+
+    fq = f"{registry}/{unique_repo}:1.0.0"
+    run_with_env(
+        ocx,
+        "package",
+        "install",
+        fq,
+        extra_env={"OCX_INSECURE_REGISTRIES": ""},
     )
 
     home = Path(ocx.env["OCX_HOME"])
@@ -536,6 +596,16 @@ def test_plain_http_mirror_without_insecure_flag_gives_actionable_error(
     )
     assert mirror_registry in combined, (
         "error message must name the offending mirror host, got:\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    # Both spellings are named because either one fixes it — the old wording
+    # named only OCX_INSECURE_REGISTRIES, telling an operator half the fix.
+    assert "insecure = true" in combined, (
+        "error message must name the config spelling too, got:\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert f'[registries."{mirror_registry}"]' in combined, (
+        "error message must quote the exact TOML key, port included, got:\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
@@ -721,7 +791,8 @@ def test_mirror_install_clean_reachability_is_mirror_agnostic(
     # host against OCX_INSECURE_REGISTRIES) at command startup, before any
     # network work — so every subsequent command in this test, even purely
     # local ones like `clean`, needs the mirror host listed here as long as
-    # the [mirrors] config stays on disk (ADR F2 fail-loud gate).
+    # the [mirrors] config stays on disk (adr_oci_registry_mirror.md,
+    # Implementation Plan step 3 "Auth + insecure" fail-loud gate).
     ocx.env["OCX_INSECURE_REGISTRIES"] = f"{registry},{mirror_registry}"
 
     fq = f"{registry}/{unique_repo}:1.0.0"

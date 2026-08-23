@@ -85,6 +85,11 @@ pub struct Context {
     /// consumer (the required-gate below, `config update`, the refresh hook)
     /// agrees on the same value.
     managed_config_env_override: Option<String>,
+    /// Every host that may be contacted over plain HTTP: the union of
+    /// `[registries."<name>"].insecure` and `OCX_INSECURE_REGISTRIES`, resolved
+    /// once so the registry protocol, the mirror-role gate, the index base URL
+    /// and `ocx login`'s probe cannot disagree about a host.
+    insecure_hosts: Vec<String>,
     /// The on-disk managed-config snapshot, read once at `try_init` and
     /// **identity-gated** there (W2): `Some` only when it matches the
     /// effective source via the shared `snapshot_matches_source` predicate.
@@ -95,7 +100,8 @@ pub struct Context {
 /// The two `[managed]` tier gates `Context::try_init` needs, wrapped in a named
 /// struct so the two adjacent `bool`s can never be transposed at the call site.
 pub struct ManagedConfigGate {
-    /// Gates the `[managed]` tier's required-snapshot check (ADR Decision E,
+    /// Gates the `[managed]` tier's required-snapshot check
+    /// (`adr_managed_config_tier.md` Decision E,
     /// criterion 6): `true` for ordinary commands (fails closed with
     /// `SnapshotRequired`, exit 78, when `required = true` and no matching
     /// snapshot exists); `false` for `ocx config update` and the `self`/static
@@ -186,6 +192,19 @@ impl Context {
         // AND payload parse, as observed by the tier that did the folding.
         let managed_snapshot_state = loaded_config.managed_snapshot_state;
 
+        // Which hosts may be reached over plain HTTP, resolved ONCE: the union
+        // of the `[registries."<name>"].insecure` entries and the inherited
+        // `OCX_INSECURE_REGISTRIES`, less anything the system scope locked shut.
+        // Every gate below is handed this same set — the OCI client's protocol
+        // choice, the mirror-role gate, each index base URL, and `ocx login`'s
+        // probe — so one resolution answers for all of them.
+        //
+        // They compare it against their own resolved host string, and those
+        // strings are not all the same: see `insecure_hosts`' doc for the one
+        // name (Docker Hub) where they diverge, and why that divergence is
+        // closed in the safe direction.
+        let insecure_hosts = ocx_lib::insecure_hosts(&config, &env::insecure_registries());
+
         // Resolve the per-host mirror map once via the lib resolver
         // (`ocx_lib::resolve_mirror_map`): `[mirrors]` config merged with the
         // inherited `OCX_MIRRORS` env (env wins per-host key), every entry parsed
@@ -196,8 +215,8 @@ impl Context {
         // and a forwarded child re-parses + re-validates it the same way a
         // `[mirrors]` TOML entry would. The lib `thiserror` error is re-wrapped
         // into `anyhow` at this CLI boundary.
-        let resolved_mirrors = ocx_lib::resolve_mirror_map(&config, env::mirrors()?, &env::insecure_registries())
-            .map_err(anyhow::Error::new)?;
+        let resolved_mirrors =
+            ocx_lib::resolve_mirror_map(&config, env::mirrors()?, &insecure_hosts).map_err(anyhow::Error::new)?;
         let mirror_map = oci::MirrorMap::new(resolved_mirrors.registry.clone());
 
         let printer = Printer::new(color_config.stdout, color_config.stderr);
@@ -210,12 +229,14 @@ impl Context {
         // divergence).
         let api = options.build_api(color_config);
 
-        // Explicit builder (not `from_env_with_progress`) so the config-derived
+        // Explicit builder so the config-derived
         // `MirrorMap` is threaded in; `OCX_MIRRORS` env precedence is already
         // folded into `mirror_map` by `resolve_mirrors`. A plain-HTTP mirror
-        // requires its host in `OCX_INSECURE_REGISTRIES` (the mirror host is
-        // what gets contacted) — composition with the existing plain-HTTP set,
-        // no implicit scheme-driven opt-out (ADR F2).
+        // requires its host declared insecure (the mirror host is what gets
+        // contacted) — either `[registries."<host>"] insecure = true` or
+        // `OCX_INSECURE_REGISTRIES`, unioned; composition with the existing
+        // plain-HTTP set, no implicit scheme-driven opt-out
+        // (`adr_oci_registry_mirror.md`, Implementation Plan step 3 "Auth + insecure").
         //
         // `verify` reads the artifact + signature from the registry in every
         // mode (its `--offline` scopes to Sigstore trust services, not the
@@ -229,7 +250,7 @@ impl Context {
             (None, None)
         } else {
             let client = registry_client_cell
-                .get_or_init(|| build_registry_client(&mirror_map, &progress))
+                .get_or_init(|| build_registry_client(&mirror_map, &progress, &insecure_hosts))
                 .clone();
             (
                 Some(client.clone()),
@@ -279,7 +300,7 @@ impl Context {
             local_only_config.mirrors.as_ref(),
             &resolved_mirrors.index,
             &mirror_map,
-            &env::insecure_registries(),
+            &insecure_hosts,
             &progress,
         )?;
         let (mode, sources) = Self::chain_mode_and_sources(oci_index.as_ref(), &index_sources, online_mode);
@@ -382,22 +403,18 @@ impl Context {
         let managed_config_client = if options.offline || !needs_managed_config_client {
             None
         } else {
-            let local_resolved_mirrors =
-                ocx_lib::resolve_mirror_map(&local_only_config, env::mirrors()?, &env::insecure_registries())
-                    .map_err(anyhow::Error::new)?;
-            let local_mirror_map = oci::MirrorMap::new(local_resolved_mirrors.registry);
-            Some(
-                oci::ClientBuilder::new()
-                    .plain_http_registries(env::insecure_registries())
-                    .mirrors(local_mirror_map)
-                    .progress(progress.clone())
-                    .build(),
-            )
+            Some(build_managed_config_client(
+                &local_only_config,
+                env::mirrors()?,
+                &env::insecure_registries(),
+                &progress,
+            )?)
         };
 
-        // ADR Decision E: the `[managed]` target is resolved ONCE in the loader
-        // (from the local-only view — the payload can never redirect the tier
-        // that fetched it) and threaded here. Reuse it. The loader swallows a
+        // `adr_managed_config_tier.md` Decision A (identity-gated merge): the
+        // `[managed]` target is resolved ONCE in the loader, from the local-only
+        // view — the payload can never redirect the tier that fetched it — and
+        // threaded here. Reuse it. The loader swallows a
         // resolution ERROR for its best-effort fold, so a configured-but-
         // unresolvable seed re-resolves HERE only to surface the authoritative
         // typed error (malformed seed/env ref, bad interval → exit 78); the
@@ -474,7 +491,7 @@ impl Context {
             None
         } else {
             let client = registry_client_cell
-                .get_or_init(|| build_registry_client(&mirror_map, &progress))
+                .get_or_init(|| build_registry_client(&mirror_map, &progress, &insecure_hosts))
                 .clone();
             build_auto_verify(
                 operator_policies,
@@ -554,6 +571,7 @@ impl Context {
             config_overlay,
             local_mirrors: local_only_config.mirrors.clone(),
             managed_config_env_override,
+            insecure_hosts,
             managed_config_snapshot,
         })
     }
@@ -841,6 +859,14 @@ impl Context {
         self.config_trust.sigstore.as_ref()
     }
 
+    /// Hosts this invocation may contact over plain HTTP — the resolved union
+    /// of `[registries."<name>"].insecure` and `OCX_INSECURE_REGISTRIES`.
+    /// Commands that build their own registry connection take this rather than
+    /// re-deriving it, so every path agrees on the same set.
+    pub fn insecure_hosts(&self) -> &[String] {
+        &self.insecure_hosts
+    }
+
     pub fn file_structure(&self) -> &file_structure::FileStructure {
         &self.file_structure
     }
@@ -930,7 +956,7 @@ impl Context {
     /// trust-services network and require cached/supplied trust material.
     pub fn verify_client(&self) -> &oci::Client {
         self.registry_client_cell
-            .get_or_init(|| build_registry_client(&self.mirror_map, &self.progress))
+            .get_or_init(|| build_registry_client(&self.mirror_map, &self.progress, &self.insecure_hosts))
     }
 }
 
@@ -968,12 +994,48 @@ fn trusted_hosts_by_namespace(config: &ocx_lib::Config) -> std::collections::Has
 fn build_registry_client(
     mirror_map: &oci::MirrorMap,
     progress: &ocx_lib::cli::progress::ProgressManager,
+    insecure_hosts: &[String],
 ) -> oci::Client {
     oci::ClientBuilder::new()
-        .plain_http_registries(env::insecure_registries())
+        .plain_http_registries(insecure_hosts.to_vec())
         .mirrors(mirror_map.clone())
         .progress(progress.clone())
         .build()
+}
+
+/// Builds the client that FETCHES the managed-config payload.
+///
+/// Every input is the LOCAL-ONLY view or the raw environment — the merged
+/// config, and the process-wide `insecure_hosts` derived from it, are
+/// deliberately out of scope here rather than merely unused.
+/// `adr_managed_config_tier.md`, "Mirror posture (AMENDED)": the managed
+/// fetch's route derives from local tiers only, so the payload can never
+/// influence its own refresh route — and dropping TLS *is* a redirection on
+/// the transport axis. A managed snapshot declaring
+/// `[registries."<its own host>"] insecure = true` would otherwise downgrade
+/// the fetch of the NEXT snapshot to plaintext, which is exactly the
+/// self-authorization the mirror half of this client was already written to
+/// prevent.
+///
+/// # Errors
+///
+/// Propagates [`ocx_lib::MirrorConfigError`] when the
+/// local-only `[mirrors]` plus the forwarded `OCX_MIRRORS` do not resolve —
+/// including an `http://` mirror this view licenses nothing for.
+fn build_managed_config_client(
+    local_only_config: &ocx_lib::Config,
+    env_mirrors: Vec<(String, ocx_lib::MirrorConfig)>,
+    env_insecure_registries: &[String],
+    progress: &ocx_lib::cli::progress::ProgressManager,
+) -> anyhow::Result<oci::Client> {
+    let insecure_hosts = ocx_lib::insecure_hosts(local_only_config, env_insecure_registries);
+    let mirrors =
+        ocx_lib::resolve_mirror_map(local_only_config, env_mirrors, &insecure_hosts).map_err(anyhow::Error::new)?;
+    Ok(oci::ClientBuilder::new()
+        .plain_http_registries(insecure_hosts)
+        .mirrors(oci::MirrorMap::new(mirrors.registry))
+        .progress(progress.clone())
+        .build())
 }
 
 /// Build the shared policy-gated auto-verify inputs, or `None` when no operator
@@ -1939,6 +2001,53 @@ mod tests {
             mode,
             index::ChainMode::Offline,
             "offline (oci_index=None) must produce ChainMode::Offline even when frozen=true"
+        );
+    }
+
+    /// The managed-config FETCH client must not take its plain-HTTP allowance
+    /// from the payload it is about to fetch.
+    ///
+    /// Asserted as a pair, because a one-sided refusal would also hold if the
+    /// mirror gate were simply broken: the SAME mirror, the SAME env, refused
+    /// against the local-only view and allowed against the merged one. That is
+    /// what makes the refusal a property of *which config was consulted* — and
+    /// the merged view is exactly what the process-wide `insecure_hosts` is
+    /// built from, so it is the mistake this guards against, spelled out.
+    #[test]
+    fn the_managed_fetch_client_ignores_a_plain_http_allowance_the_payload_declared() {
+        let host = "mirror.corp:5000";
+        let mirrors = || {
+            vec![(
+                "ghcr.io".to_string(),
+                ocx_lib::MirrorConfig {
+                    registry: Some(format!("http://{host}")),
+                    ..Default::default()
+                },
+            )]
+        };
+        let with_allowance = |granted: bool| {
+            let entry = ocx_lib::RegistryConfig {
+                insecure: granted.then_some(true),
+                ..Default::default()
+            };
+            ocx_lib::Config {
+                registries: Some(std::collections::HashMap::from([(host.to_string(), entry)])),
+                ..Default::default()
+            }
+        };
+        let progress = ocx_lib::cli::progress::ProgressManager::disabled();
+
+        let refused = build_managed_config_client(&with_allowance(false), mirrors(), &[], &progress);
+        assert!(
+            refused.is_err(),
+            "the payload's own allowance is not in scope for the tier that fetches it"
+        );
+
+        let allowed = build_managed_config_client(&with_allowance(true), mirrors(), &[], &progress);
+        assert!(
+            allowed.is_ok(),
+            "the same mirror IS allowed once the view actually handed to the builder grants it: {:?}",
+            allowed.err()
         );
     }
 }

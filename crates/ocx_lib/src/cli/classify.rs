@@ -391,6 +391,25 @@ mod tests {
         assert_eq!(classify(err), ExitCode::TempFail);
     }
 
+    /// A destination the transport refused is terminal, and the two codes it
+    /// must NOT be are asserted with it: 69 would tell a retry wrapper to
+    /// re-issue the push against the same hostile `Location` until its budget
+    /// runs out, and 75 would tell it the same and promise success.
+    ///
+    /// `UnfollowedRedirect` shares the code and the argument: a rerun walks the
+    /// same chain to the same answer, whether it ended in a refusal, the hop
+    /// limit, or a `Location` no client could act on.
+    #[test]
+    fn a_refused_destination_and_an_unfollowed_redirect_map_to_65_and_are_not_retryable() {
+        let refusal = || ClientError::UnsafeDestination(Box::new(std::io::Error::other("cross-host session URL")));
+        let redirect = || ClientError::UnfollowedRedirect(Box::new(std::io::Error::other("https -> http hop")));
+        for build in [&refusal as &dyn Fn() -> ClientError, &redirect] {
+            assert_eq!(classify(build()), ExitCode::DataError);
+            assert_ne!(classify(build()), ExitCode::Unavailable);
+            assert_ne!(classify(build()), ExitCode::TempFail);
+        }
+    }
+
     #[test]
     fn client_io_maps_to_io_error() {
         // Plan taxonomy: ClientError::Io → IoError (74)

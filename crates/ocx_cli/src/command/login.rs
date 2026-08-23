@@ -29,14 +29,12 @@ pub struct Login {
     #[clap(long = "password-stdin")]
     password_stdin: bool,
 
-    /// Allow plain HTTP for the registry (overrides default HTTPS).
-    /// Reserved for the future `--verify` Ping path - currently no-op in v1.
-    #[clap(long = "insecure", hide = true)]
-    #[allow(dead_code)]
-    insecure: bool,
-
     /// Allow plaintext fallback to `~/.docker/config.json` `auths` when no native helper
     /// is configured. Default: refuse, exit `ConfigError(78)` with install hint.
+    ///
+    /// Governs credential STORAGE, not transport. It does not enable plain HTTP; to
+    /// reach a registry over HTTP, set `insecure = true` under `[registries."<host>"]`
+    /// or add the host to `OCX_INSECURE_REGISTRIES`.
     #[clap(long = "allow-insecure-store")]
     allow_insecure_store: bool,
 
@@ -147,8 +145,12 @@ impl Login {
         // `--no-verify` swaps in the no-op Ping to store without a round-trip.
         // Either way the security invariant ("Ping failure ⇒ no put") holds,
         // proven by `MockPing` unit tests in `auth/login.rs`.
+        // The probe must reach the registry over the same scheme every other
+        // command would, so it takes the resolved plain-HTTP set rather than
+        // deciding for itself.
+        let verifying_ping = OciClientPing::new(context.insecure_hosts().to_vec());
         let ping: &dyn RegistryPing = if self.verify.enabled() {
-            &OciClientPing
+            &verifying_ping
         } else {
             &NoopPing
         };
@@ -239,6 +241,46 @@ mod tests {
         );
     }
 
+    /// `--insecure` was removed: it was hidden, had no effect, and let one
+    /// command disagree with every other about a host's scheme. Nothing else
+    /// asserts the removal at either layer — the flag was deleted from
+    /// `login_clap_accepts_full_invocation` with no negative twin, so without
+    /// this a reintroduction is silent.
+    #[test]
+    fn login_clap_rejects_the_removed_insecure_flag() {
+        assert!(
+            Login::try_parse_from(["login", "--insecure", "ghcr.io"]).is_err(),
+            "--insecure was removed; it must be an unknown-argument usage error (exit 64)"
+        );
+    }
+
+    /// The confusable that survives. `--allow-insecure-store` is what clap's
+    /// edit distance suggests when `--insecure` is rejected, and following that
+    /// tip weakens credential storage without granting plain HTTP — so its help
+    /// has to say what it is not.
+    #[test]
+    fn allow_insecure_store_help_disclaims_transport() {
+        let cmd = Login::command();
+        let arg = cmd
+            .get_arguments()
+            .find(|a| a.get_id() == "allow_insecure_store")
+            .expect("allow_insecure_store arg present");
+        let help = arg
+            .get_long_help()
+            .or_else(|| arg.get_help())
+            .expect("the flag must carry help")
+            .to_string();
+
+        assert!(
+            help.contains("not transport"),
+            "the help must disclaim transport, since clap suggests this flag for the removed --insecure: {help}"
+        );
+        assert!(
+            help.contains("OCX_INSECURE_REGISTRIES"),
+            "the help must point at what DOES enable plain HTTP: {help}"
+        );
+    }
+
     #[test]
     fn login_clap_accepts_minimal_invocation() {
         Login::try_parse_from(["login", "ghcr.io"]).expect("bare positional must parse");
@@ -251,7 +293,6 @@ mod tests {
             "-u",
             "user",
             "--password-stdin",
-            "--insecure",
             "--allow-insecure-store",
             "--no-verify",
             "ghcr.io",

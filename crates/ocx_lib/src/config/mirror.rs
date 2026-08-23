@@ -244,13 +244,15 @@ pub enum MirrorConfigError {
         /// Human-readable type name of the offending value (e.g. `"integer"`).
         found: String,
     },
-    /// A mirror endpoint uses plain HTTP but its host is not listed in
+    /// A mirror endpoint uses plain HTTP but its host is in neither half of the
+    /// insecure-host union — `[registries."<host>"] insecure` and
     /// `OCX_INSECURE_REGISTRIES`. Replace semantics forbid silently downgrading
     /// to HTTP, so this fails loud at resolve time with an actionable hint
-    /// (CWE-319) rather than as an opaque TLS error mid-transport.
+    /// (CWE-319) rather than as an opaque TLS error mid-transport. Both
+    /// spellings are named because either one fixes it.
     #[error(
-        "mirror for '{upstream}' uses http:// but mirror host '{mirror_host}' is not in \
-         OCX_INSECURE_REGISTRIES; add it to allow plain-HTTP transport"
+        "mirror for '{upstream}' uses http:// but mirror host '{mirror_host}' is not allowed plain HTTP; \
+         set insecure = true under [registries.\"{mirror_host}\"] or add the host to OCX_INSECURE_REGISTRIES"
     )]
     PlainHttpMirrorNotAllowed {
         /// The upstream host key whose mirror uses plain HTTP.
@@ -514,7 +516,7 @@ pub struct ResolvedMirrors {
 /// entry, splitting the result by traffic role.
 ///
 /// This is the single Config→mirror-map transform shared by the CLI
-/// (`Context::try_init`) and the OCI client (`ClientBuilder::from_env*`). It
+/// (`Context::try_init`) and `ocx config test`'s preview of a candidate. It
 /// owns the one-way-door precedence rule and the plain-HTTP security gate so
 /// they cannot drift between layers:
 ///
@@ -527,7 +529,7 @@ pub struct ResolvedMirrors {
 ///   no-op mirror silently egresses to the blocked upstream host); an entry
 ///   with no role at all is [`MirrorConfigError::EmptyEntry`].
 /// - **Plain-HTTP gate (CWE-319)** — an `http://` mirror whose host is not in
-///   `insecure_hosts` is a hard error naming `OCX_INSECURE_REGISTRIES`, so the
+///   `insecure_hosts` is a hard error naming both ways to allow it, so the
 ///   failure surfaces loud at resolve time rather than as an opaque TLS error
 ///   mid-transport.
 /// - **Role-only filtering** — an index-only entry never appears in
@@ -594,7 +596,7 @@ fn resolve_mirror_role(
         upstream: upstream.to_string(),
         source: Box::new(source),
     })?;
-    if parsed.protocol == "http" && !insecure_hosts.contains(&parsed.host) {
+    if parsed.protocol == "http" && !crate::allows_plain_http(insecure_hosts, &parsed.host) {
         return Err(MirrorConfigError::PlainHttpMirrorNotAllowed {
             upstream: upstream.to_string(),
             mirror_host: parsed.host,
@@ -606,6 +608,26 @@ fn resolve_mirror_role(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The refusal has to name the config key, quoted with its port, or the
+    /// operator is told only half the fix. Asserting the rendered text is the
+    /// only thing that pins it — every variant-shape test passed against the
+    /// old env-var-only wording too.
+    #[test]
+    fn the_plain_http_mirror_refusal_names_both_ways_to_allow_it() {
+        let rendered = MirrorConfigError::PlainHttpMirrorNotAllowed {
+            upstream: "ghcr.io".to_string(),
+            mirror_host: "mirror.corp:5000".to_string(),
+        }
+        .to_string();
+
+        assert!(rendered.contains("mirror.corp:5000"), "{rendered}");
+        assert!(
+            rendered.contains("set insecure = true under [registries.\"mirror.corp:5000\"]"),
+            "the exact TOML key, port included, pre-empts the whole wrong-spelling failure class: {rendered}"
+        );
+        assert!(rendered.contains("OCX_INSECURE_REGISTRIES"), "{rendered}");
+    }
 
     #[test]
     fn mirror_config_merge_none_in_higher_does_not_clobber_lower_url() {

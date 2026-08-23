@@ -245,6 +245,58 @@ def test_two_hop_resolve_snapshots_offline_and_hits_only_the_fixture(
     assert not (clean_home / "blobs").exists()
 
 
+def test_two_hop_resolve_licensed_by_config_registries_entry_alone(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """The plain-HTTP index gate accepts the config half of the union on its
+    own: ``[registries."<index host>"] insecure = true``, with
+    ``OCX_INSECURE_REGISTRIES`` licensing only the physical registry and never
+    the index host. Every other plain-HTTP-index case in this file
+    (``configure_index_source``) drives the gate through the env var alone —
+    this is the config half, exercised end to end through a real two-hop
+    resolve.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    os_name, arch_name = pkg.platform.split("/")
+
+    registry_host = ocx.registry.split(":", 1)[0]
+    config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    config_path.write_text(
+        f'[registries."ocx.sh"]\nindex = "{index_server.base_url}"\ntrusted_hosts = ["{registry_host}"]\n'
+        f'[registries."{index_server.host}"]\ninsecure = true\n'
+    )
+    # Deliberately NOT the index host: only the physical registry goes
+    # through the env half, so the index host's allowance can only have come
+    # from the config entry above.
+    ocx.env["OCX_INSECURE_REGISTRIES"] = ocx.registry
+
+    static_index.write_config(index_server.root)
+    repository = f"{unique_repo}/pkg"
+    entry = static_index.write_package(
+        index_server.root,
+        repository=repository,
+        tag="1.0.0",
+        physical_repository=f"oci://{ocx.registry}/{pkg.repo}",
+        platform_digest=leaf_digest,
+        os=os_name,
+        architecture=arch_name,
+    )
+
+    index_dir = tmp_path / "index_dir"
+    index_dir.mkdir()
+    ocx.plain("--index", str(index_dir), "index", "update", entry.logical_id)
+
+    requested_paths = [record.path for record in index_server.requests]
+    assert any(path.endswith("/config.json") for path in requested_paths), (
+        "the config-licensed index host must have been reached at all"
+    )
+    assert _root_document_path(index_dir, repository).is_file()
+
+
 def test_two_hop_resolve_under_a_non_ocx_sh_namespace(
     ocx: OcxRunner,
     unique_repo: str,

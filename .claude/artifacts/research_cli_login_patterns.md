@@ -155,6 +155,16 @@ or on not-logged-in no-op:
 
 ## Recommended `ocx login` UX Spec
 
+> **Superseded (2026-08-23, ocx#272).** The `--insecure` flag below was never shipped as a
+> per-invocation flag. Plain-HTTP eligibility is decided once, for the whole binary, through
+> `[registries.<name>].insecure` (config) unioned with `OCX_INSECURE_REGISTRIES` (env), resolved
+> through one shared predicate every registry-accessing command consults — `ocx login` included.
+> A hidden `--insecure` flag existed on `ocx login` as a no-op prior to `31f57854` and was removed
+> in that commit. See `website/src/docs/reference/configuration.md#keys-registries-insecure`.
+> The survey rows below (flag table, exit table, comparative table) are left as recorded — they
+> describe what the surveyed tools do and what was proposed at research time, not current OCX
+> behavior.
+
 ### Synopsis
 
 ```

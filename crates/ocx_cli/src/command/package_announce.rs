@@ -253,7 +253,7 @@ impl PackageAnnounce {
 /// runs. Mirrors and reuses the same mirror-map / plain-HTTP resolution the
 /// CLI's own remote client goes through.
 fn announce_client(context: &crate::app::Context, trusted_hosts: Vec<String>) -> anyhow::Result<oci::Client> {
-    let insecure_hosts = ocx_lib::env::insecure_registries();
+    let insecure_hosts = context.insecure_hosts().to_vec();
     let resolved_mirrors = ocx_lib::resolve_mirror_map(context.config(), ocx_lib::env::mirrors()?, &insecure_hosts)?;
     let mirrors = oci::MirrorMap::new(resolved_mirrors.registry);
     Ok(oci::ClientBuilder::new()
