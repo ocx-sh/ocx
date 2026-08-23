@@ -21,30 +21,80 @@ use crate::oci;
 #[async_trait::async_trait]
 pub trait RegistryPing: Send + Sync {
     /// Probe the registry with `cred` applied. Returns `Ok(())` on a
-    /// successful authenticated response (2xx) and `Err` for any failure
-    /// (401, 403, network error, DNS failure, etc.) so the caller can map
-    /// to `AuthError::LoginRejected`.
+    /// successful authenticated response (2xx).
+    ///
+    /// The two failure shapes are kept apart on purpose:
+    /// [`AuthError::LoginRejected`] means the registry judged the credential
+    /// and said no, [`AuthError::ProbeFailed`] means it was never judged
+    /// because the request did not complete. Collapsing them tells a CI
+    /// wrapper to rotate a credential that was never sent, and the retry with
+    /// a fresh one fails identically, forever.
     async fn ping(&self, registry: &str, cred: &Credential) -> Result<(), AuthError>;
 }
 
 /// Adapter that talks to a real OCI registry via the patched `oci-client`
 /// crate. Constructs a fresh client per call so cached auth state does not
 /// pollute the probe.
-pub struct OciClientPing;
+///
+/// Carries the caller's plain-HTTP host set rather than reading the
+/// environment itself: `ocx login` must reach the registry over exactly the
+/// scheme the rest of the binary would, and that answer is the union of
+/// `[registries.<name>].insecure` and `OCX_INSECURE_REGISTRIES`
+/// ([`crate::insecure_hosts`]) — a set a library adapter cannot assemble on
+/// its own.
+pub struct OciClientPing {
+    insecure_hosts: Vec<String>,
+}
+
+impl OciClientPing {
+    /// Probes registries over HTTPS, except the hosts named here.
+    pub fn new(insecure_hosts: Vec<String>) -> Self {
+        Self { insecure_hosts }
+    }
+
+    /// The scheme this probe will use for `registry`.
+    ///
+    /// Membership is byte-exact, the same comparison
+    /// [`crate::insecure_hosts`] documents and the transport makes, so an
+    /// unlisted, differently-cased or differently-ported name falls to
+    /// [`ClientProtocol::Https`] — the probe fails closed.
+    ///
+    /// The subject is the *canonicalized* registry, because [`login`]
+    /// canonicalizes before calling [`RegistryPing::ping`]. For `host[:port]`
+    /// names canonicalization is the identity, so this agrees with every other
+    /// gate. Docker Hub is the exception and deliberately unreachable: it
+    /// canonicalizes to `https://index.docker.io/v1/`, which no allowance
+    /// spelling matches.
+    ///
+    /// # Never the blanket [`ClientProtocol::Http`]
+    ///
+    /// Returning `Http` for a listed host would pick the right scheme for the
+    /// probe and destroy the transport's auth-realm guard on the way. `Http`
+    /// ignores its argument (`ClientProtocol::scheme_for`), so *every* host
+    /// reads as plaintext-eligible — and `require_secure_realm` accepts a
+    /// plaintext realm on any host that is plaintext-eligible. A registry
+    /// declared insecure could then name
+    /// `realm="http://collector.example/token"` and this probe would send the
+    /// raw Basic password there in the clear (CWE-319/CWE-522). `ocx login` is
+    /// the one command in the binary holding a password, so it is the worst
+    /// place to widen that set.
+    ///
+    /// `HttpsExcept` picks the identical scheme for the probe — `"http"` for
+    /// exactly the declared hosts, `"https"` for everything else — while
+    /// leaving the realm guard scoped to the hosts the operator actually named.
+    fn protocol_for(&self, _registry: &str) -> oci_client::client::ClientProtocol {
+        oci_client::client::ClientProtocol::HttpsExcept(self.insecure_hosts.clone())
+    }
+}
 
 #[async_trait::async_trait]
 impl RegistryPing for OciClientPing {
     async fn ping(&self, registry: &str, cred: &Credential) -> Result<(), AuthError> {
         use oci_client::Reference;
-        use oci_client::client::{Client as RawClient, ClientConfig, ClientProtocol};
+        use oci_client::client::{Client as RawClient, ClientConfig};
 
-        let protocol = if is_insecure(registry) {
-            ClientProtocol::Http
-        } else {
-            ClientProtocol::Https
-        };
         let raw = RawClient::new(ClientConfig {
-            protocol,
+            protocol: self.protocol_for(registry),
             // Same per-read idle bound as the main client: a registry that
             // accepts the connection and then goes quiet must not hang `ocx
             // login` forever.
@@ -57,30 +107,29 @@ impl RegistryPing for OciClientPing {
         let reference = Reference::with_tag(registry.to_string(), "library/_".into(), "latest".into());
         raw.auth(&reference, &auth, oci::RegistryOperation::Pull)
             .await
-            .map_err(|_| AuthError::LoginRejected {
-                registry: registry.to_string(),
-            })?;
+            .map_err(|source| probe_error(registry, source))?;
         Ok(())
     }
 }
 
-fn is_insecure(registry: &str) -> bool {
-    // Heuristic: respect OCX_INSECURE_REGISTRIES env var.
-    // Note: `ocx login --insecure` is currently hidden / no-op in v1.
-    // Callers that need HTTP must export `OCX_INSECURE_REGISTRIES` directly.
-    // When the future `--verify` flag wires real registry Ping, the flag will
-    // propagate through `apply_ocx_config` to this env var.
-    // `crate::env::var` is used instead of `std::env::var` for test-injectability
-    // via the env-lock mechanism used across this crate's unit tests.
-    if let Some(list) = crate::env::var("OCX_INSECURE_REGISTRIES") {
-        for entry in list.split(',') {
-            let entry = entry.trim();
-            if !entry.is_empty() && entry == registry {
-                return true;
-            }
-        }
+/// Splits a failed probe into "the registry said no" and "the registry never
+/// answered", reusing the transport's own taxonomy rather than a second one.
+///
+/// [`oci::client::native_transport::registry_error`] is the single place that
+/// classifies an `OciDistributionError`, and it is where the plain-HTTP
+/// remediation is attached to a failed HTTPS connect — so routing through it
+/// is what makes `ocx login` against a plaintext registry say what to do
+/// instead of blaming the password.
+fn probe_error(registry: &str, source: oci_client::errors::OciDistributionError) -> AuthError {
+    match oci::client::native_transport::registry_error(source) {
+        crate::oci::client::error::ClientError::Authentication(_) => AuthError::LoginRejected {
+            registry: registry.to_string(),
+        },
+        other => AuthError::ProbeFailed {
+            registry: registry.to_string(),
+            source: Box::new(other),
+        },
     }
-    false
 }
 
 fn to_registry_auth(cred: &Credential) -> oci_client::secrets::RegistryAuth {
@@ -99,7 +148,9 @@ fn to_registry_auth(cred: &Credential) -> oci_client::secrets::RegistryAuth {
 /// 1. Canonicalize `registry` via `auth::registry_url::canonicalize_registry`.
 /// 2. `GET /v2/` with the credential applied — `Ping`.
 /// 3. On Ping success, `store.put(canonical, &cred)`.
-/// 4. On Ping failure, return `AuthError::LoginRejected { registry }` WITHOUT calling `put`.
+/// 4. On Ping failure, return the `Ping`'s error — `AuthError::LoginRejected`
+///    when the registry judged the credential, `AuthError::ProbeFailed` when it
+///    never did — WITHOUT calling `put`.
 ///
 /// Bad credentials never reach the store. Single most load-bearing security invariant.
 pub async fn login(
@@ -260,5 +311,116 @@ mod tests {
             &["ghcr.io".to_string()],
             "ping must see the canonical registry, not the raw scheme/version form",
         );
+    }
+
+    // ─── `OciClientPing`'s protocol choice ───
+
+    fn ping_allowing(hosts: &[&str]) -> OciClientPing {
+        OciClientPing::new(hosts.iter().map(|host| (*host).to_string()).collect())
+    }
+
+    /// Mirrors what `ClientProtocol::scheme_for` does with the value this gate
+    /// returns. Spelled out here rather than called, because `scheme_for` is
+    /// private to the fork — so the assertion states the transport rule instead
+    /// of borrowing it, and reds if this gate ever returns a variant that
+    /// resolves differently.
+    fn is_http(ping: &OciClientPing, registry: &str) -> bool {
+        use oci_client::client::ClientProtocol;
+        match ping.protocol_for(registry) {
+            ClientProtocol::Http => true,
+            ClientProtocol::Https => false,
+            ClientProtocol::HttpsExcept(hosts) => hosts.iter().any(|host| host == registry),
+        }
+    }
+
+    /// The blanket [`ClientProtocol::Http`] must never be what this gate
+    /// returns: it ignores its argument, so every host on earth reads as
+    /// plaintext-eligible and the transport's auth-realm guard degenerates to
+    /// "accept anything" — sending `ocx login`'s raw Basic password to whatever
+    /// host a declared-insecure registry names in its `WWW-Authenticate` realm.
+    /// Asserted on the variant, not the scheme, because the scheme is identical
+    /// either way and only the variant carries the defect.
+    #[test]
+    fn the_probe_never_widens_plaintext_eligibility_beyond_the_declared_hosts() {
+        let ping = ping_allowing(&["registry.corp:5000"]);
+
+        for registry in ["registry.corp:5000", "ghcr.io"] {
+            match ping.protocol_for(registry) {
+                oci_client::client::ClientProtocol::HttpsExcept(hosts) => assert_eq!(
+                    hosts,
+                    vec!["registry.corp:5000".to_string()],
+                    "plaintext eligibility must be exactly the declared set — an undeclared \
+                     third host is the realm the password would be sent to",
+                ),
+                other => panic!(
+                    "probing {registry} must not widen plaintext eligibility beyond the \
+                     declared hosts; got {other:?}",
+                ),
+            }
+        }
+    }
+
+    /// The one decision the login gate makes, asserted directly: the six gates
+    /// the commit says share a predicate include this one, and before this test
+    /// nothing at any layer observed it (every acceptance `ocx login` passes
+    /// `--no-verify`, so the `RegistryPing` branch is never taken).
+    #[test]
+    fn a_listed_host_probes_over_http_and_an_unlisted_one_over_https() {
+        let ping = ping_allowing(&["registry.corp:5000"]);
+
+        assert!(
+            is_http(&ping, "registry.corp:5000"),
+            "a listed host must probe over HTTP"
+        );
+        assert!(
+            !is_http(&ping, "ghcr.io"),
+            "an unlisted host must probe over HTTPS — the probe fails closed"
+        );
+    }
+
+    /// Byte-exact, the same rule `insecure_hosts` documents: a near miss is a
+    /// miss, in both directions, and case is not folded. Without this the probe
+    /// could diverge from the transport on exactly the spellings an operator
+    /// gets wrong.
+    #[test]
+    fn a_near_miss_of_the_allowed_name_probes_over_https() {
+        assert!(
+            !is_http(&ping_allowing(&["registry.corp"]), "registry.corp:5000"),
+            "a bare-host allowance must not cover the same host on a port"
+        );
+        assert!(
+            !is_http(&ping_allowing(&["registry.corp:5000"]), "registry.corp"),
+            "a ported allowance must not cover the bare host"
+        );
+        assert!(
+            !is_http(&ping_allowing(&["Registry.Corp:5000"]), "registry.corp:5000"),
+            "the comparison is byte-exact, so case matters"
+        );
+    }
+
+    /// Docker Hub is the one name where this gate's subject differs from the
+    /// transport's, and the divergence is closed in the safe direction: neither
+    /// host name an operator would write reaches the canonicalized subject
+    /// `login()` actually passes in, so no plaintext probe of Docker Hub can be
+    /// granted by accident.
+    ///
+    /// Recorded as a decision, not a gap. Docker Hub is not served over plain
+    /// HTTP, and the alternative — normalizing the login subject back to a host
+    /// — would make `ocx login` the one gate that rewrites a name before
+    /// comparing it.
+    #[test]
+    fn a_docker_hub_host_name_cannot_license_a_plaintext_probe() {
+        let subject = canonicalize_registry("docker.io");
+        assert_eq!(
+            subject, "https://index.docker.io/v1/",
+            "the canonical form login passes in"
+        );
+
+        for spelling in ["docker.io", "index.docker.io"] {
+            assert!(
+                !is_http(&ping_allowing(&[spelling]), &subject),
+                "`{spelling}` must not license a plaintext probe of the canonicalized `{subject}`"
+            );
+        }
     }
 }

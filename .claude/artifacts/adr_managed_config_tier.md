@@ -331,6 +331,62 @@ The payload cap is unchanged. `MAX_MANAGED_CONFIG_BYTES` is 64 KiB and a
 trusted root measures ~2 KB (`test/sigstore/trusted_root.json`), leaving ~60 KiB
 of headroom — the raise the plan proposed was unnecessary and was not made.
 
+## Amendment (2026-08-23) — `[registries.<name>].insecure` makes the managed tier a transport authority
+
+Closes the gap `[registries.<name>].insecure` (`fix/oci-cross-host-upload-auth-272`) opened in
+Decision I's coverage claim. Where this conflicts with earlier text, this amendment governs.
+
+**What changed.** Decision I says every section outside `[managed]` "merge[s] normally; loosening
+structurally blocked by G." Decision G's enumeration (`[patches]`, `[managed]`, `RegistryDefaults`,
+`MirrorConfig`) never included `[registries.<name>]` — that table carries its own per-entry
+`system_locked`, not one of G's four whole-table locks, and a per-entry lock only fires for a name
+the system tier has already written. `insecure` (`crates/ocx_lib/src/config/registry.rs`) is the
+first field on that table where the *absence* of a system-tier entry is itself the loosening: a
+managed payload can declare `[registries."<any-host>"] insecure = true` for a host the system tier
+never named, and there is no entry yet for a lock to attach to. Decision I's clause held for every
+table G actually covers; it was never true for `[registries.<name>]`, and `insecure` is what turns
+that gap from theoretical into exploitable — managed-tier publish access now reaches index, mirror,
+and ordinary registry transport for any host, fleet-wide, on the next `ocx config update`.
+
+**Decision: keep the union; do not carve the managed tier out of `insecure`.**
+
+- *Considered and rejected* — deny `[registries.<name>].insecure` from the managed tier
+  specifically. `system_locked` is the only tier-restriction primitive this config tree has, and it
+  restricts a lower tier *against a value the higher tier already set*, never *a specific key
+  regardless of whether the higher tier said anything*. Building the latter is new config-system
+  surface for one field. It also costs the tier's own target user: an air-gapped fleet whose
+  registry is genuinely plain HTTP is exactly who `[managed]` exists to serve, and forcing that
+  fleet to provision `OCX_INSECURE_REGISTRIES` on every host to route around a restriction the tier
+  itself would impose defeats the point of centralizing the config.
+- *Chosen* — keep `insecure` in the union domain, and give the system tier a subtractive lever.
+  The property worth keeping is the one `insecure_hosts`'s own module doc already states: no
+  source can take a host back out of the set, so there is no four-way truth table
+  (unset/true/false × env-present/absent) for a reader to resolve. Widening that from zero
+  exceptions to exactly one — an explicit system-scope `insecure = false`, which also subtracts
+  from `OCX_INSECURE_REGISTRIES` — preserves order-independence (a lock means "this source is
+  final," not "last tier wins") while giving the platform engineer the only lever
+  `[registries.<name>]` needs: pre-declare the hosts that must never go plaintext.
+
+**Residual exposure — recorded, not softened.** The lever protects only a host the system tier
+thought to name. A managed-config publisher — compromised or malicious — can still self-authorize
+plaintext transport for any host the system tier has not already locked to `insecure = false`, and
+that authorization reaches index, mirror, and ordinary registry traffic identically
+(`crates/ocx_lib/src/config/insecure.rs`). This is a deliberate acceptance, not an oversight:
+`[managed]` is sold on fleet-wide policy distribution (`product-context.md` differentiator #11),
+and denying it this key outright would cost every legitimately-plaintext fleet the provisioning
+step this tier exists to remove. An operator who wants the hard guarantee enumerates the hosts and
+locks them at system scope; an operator who does not is trusting the managed-config registry the
+same way they already trust it for `[mirrors]`/`[patches]`/`[registry]`.
+
+**Scope note — the fetch client is a separate decision.** Whether a managed payload's own
+`insecure` entries may license plaintext for *fetching the next managed-config snapshot* is
+governed by the mirror-posture decision — `build_managed_config_client` in
+`crates/ocx_cli/src/app/context.rs`, cited in code as `adr_managed_config_tier.md`, "Mirror
+posture (AMENDED)" — and its C6 driver — the payload must never be able to redirect the tier
+that fetched it, one-hop. That invariant is unchanged by this amendment: the managed-config
+fetch client's transport allowance must still derive from the local-only view, never the
+merged view `insecure` now travels on for everything else.
+
 ## Links
 
 - Plan: `.claude/state/plans/plan_managed_config.md`

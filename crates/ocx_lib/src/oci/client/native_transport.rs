@@ -101,19 +101,72 @@ impl NativeTransport {
 /// says exactly that, and says a rerun cannot fix it. Exit 69 says the opposite
 /// -- it invites a retry wrapper to fetch the same wrong bytes again, and it
 /// reports a mis-routed mirror as an unavailable registry.
-fn registry_error(e: oci_client::errors::OciDistributionError) -> ClientError {
+///
+/// # Why there is no `_` arm
+///
+/// The fork's `OciDistributionError` is not `#[non_exhaustive]` and is
+/// path-vendored, so ocx controls the version. A catch-all here would ship
+/// every future guard the fork grows silently mis-classified -- which is
+/// exactly how `CrossHostRefused` and `InsecureAuthRealm` first landed on
+/// "registry unreachable, retry with backoff". An exhaustive match turns that
+/// into a compile error at the next submodule bump, which is the only
+/// compile-time guarantee available.
+pub(crate) fn registry_error(e: oci_client::errors::OciDistributionError) -> ClientError {
     use oci_client::errors::DigestError as WireDigestError;
     use oci_client::errors::OciDistributionError::{
-        AuthenticationFailure, DigestError, RegistryError, RequestError, ServerError, UnauthorizedError,
-        UnexpectedContentType,
+        AuthenticationFailure, ConfigConversionError, CrossHostRefused, DigestError, GenericError, HeaderValueError,
+        ImageIndexParsingNoPlatformResolverError, ImageManifestNotFoundError, IncompatibleLayerMediaTypeError,
+        InsecureAuthRealm, IoError, JsonError, ManifestEncodingError, ManifestParsingError, PullNoLayersError,
+        PushLayerNoDataError, PushNoDataError, RegistryError, RegistryNoDigestError, RegistryNoLocationError,
+        RegistryTokenDecodeError, RequestError, ResponseTooLargeError, ServerError, SpecViolationError,
+        UnauthorizedError, UnexpectedContentType, UnsupportedMediaTypeError, UnsupportedSchemaVersionError,
+        UrlParseError, VersionedParsingError,
     };
     use oci_client::errors::OciErrorCode;
     match &e {
-        RequestError(request) if request.is_timeout() || request.is_connect() => {
-            ClientError::RegistryTransient(Box::new(e))
-        }
+        // A connect that never completed against an `https://` URL is the shape
+        // a plain-HTTP registry produces, and the scheme is itself the proof
+        // that the host is NOT in the plain-HTTP allowance -- a host that were
+        // would have been contacted over `http`. So the remediation can be
+        // named without knowing the allowance set here. It stays TempFail: a
+        // refused connection and a DNS failure are the common causes and both
+        // are retryable, and mis-labelling those as terminal would also stop
+        // `push_blob`'s transient-only retry.
+        RequestError(request) if request.is_connect() => match https_allowance_name(request.url()) {
+            Some(host) => ClientError::RegistryTransient(Box::new(PlainHttpAllowanceHint { host, source: e })),
+            None => ClientError::RegistryTransient(Box::new(e)),
+        },
+        RequestError(request) if request.is_timeout() => ClientError::RegistryTransient(Box::new(e)),
+        // The two typed guards -- the only two shapes that name a destination and
+        // refuse it. See `ClientError::UnsafeDestination` for why 65.
+        CrossHostRefused { .. } | InsecureAuthRealm { .. } => ClientError::UnsafeDestination(Box::new(e)),
+        // The fork's redirect policy ending a chain with `attempt.error(..)`:
+        // either an `https` -> `http` hop, or the hop count exceeding
+        // `MAX_REDIRECTS`. A closure inside reqwest, so a reqwest error rather
+        // than a typed variant.
+        //
+        // The limit branch reaches here only because it errors rather than
+        // stopping: `attempt.stop()` hands the 3xx back as an `Ok` response,
+        // which `error_for_status_ref` reads as success -- a blob behind an
+        // over-long chain then answered "exists" to a HEAD and its layer was
+        // never uploaded.
+        RequestError(request) if request.is_redirect() => ClientError::UnfollowedRedirect(Box::new(e)),
         AuthenticationFailure(_) | UnauthorizedError { .. } => ClientError::Authentication(Box::new(e)),
         ServerError { code: 401 | 403, .. } => ClientError::Authentication(Box::new(e)),
+        // A 3xx that reached ocx as a *status* is a redirect no client acted on,
+        // from either of two paths:
+        //
+        // - the upload path, which issues its registry-supplied session URLs on a
+        //   `Policy::none()` client precisely so a mid-session handoff surfaces
+        //   instead of replaying the blob body to a foreign host (CWE-918);
+        // - a redirect `tower-http` could not follow at all -- a missing or
+        //   unparseable `Location`, or a body it cannot clone -- which it hands
+        //   back as the 3xx itself on ANY client, whatever the policy.
+        //
+        // The two are indistinguishable here: both arrive as `ServerError`, and
+        // the second is a malformed answer, not a refusal. Both are terminal --
+        // a rerun walks the same chain to the same answer.
+        ServerError { code: 301..=308, .. } => ClientError::UnfollowedRedirect(Box::new(e)),
         ServerError {
             code: 429 | 502 | 503 | 504,
             ..
@@ -140,8 +193,87 @@ fn registry_error(e: oci_client::errors::OciDistributionError) -> ClientError {
             expected: expected.clone(),
             actual: actual.clone(),
         },
-        _ => ClientError::Registry(Box::new(e)),
+        // Everything the registry answered that ocx cannot use, enumerated so
+        // the next fork variant is a compile error rather than a silent 69.
+        ConfigConversionError(_)
+        | DigestError(_)
+        | GenericError(_)
+        | HeaderValueError(_)
+        | ImageManifestNotFoundError(_)
+        | ImageIndexParsingNoPlatformResolverError
+        | IncompatibleLayerMediaTypeError(_)
+        | IoError(_)
+        | JsonError(_)
+        | ManifestEncodingError(_)
+        | ManifestParsingError(_)
+        | PushNoDataError
+        | PushLayerNoDataError
+        | PullNoLayersError
+        | RegistryNoDigestError
+        | RegistryNoLocationError
+        | RegistryTokenDecodeError(_)
+        | RequestError(_)
+        | ServerError { .. }
+        | ResponseTooLargeError { .. }
+        | SpecViolationError(_)
+        | UrlParseError(_)
+        | UnsupportedMediaTypeError(_)
+        | UnsupportedSchemaVersionError(_)
+        | VersionedParsingError(_) => ClientError::Registry(Box::new(e)),
     }
+}
+
+/// The `[registries."<name>"]` key that would have licensed plain HTTP for the
+/// host this failed request was addressed to, when the request used `https`.
+///
+/// `None` for any other scheme or a URL with no host: the hint is only correct
+/// when TLS is what was attempted.
+///
+/// # One case where the hint under-quotes
+///
+/// This is the only one of the four plain-HTTP messages that DERIVES the name
+/// instead of quoting the configured string, and the two sides normalise
+/// differently. The `url` crate drops a scheme-default port at parse time, so
+/// `https://mirror.corp:443/` yields `mirror.corp` -- but `config::mirror`'s
+/// `parse_url` keeps the authority verbatim, and `resolve_registry()` passes it
+/// through unchanged, so a name configured as `mirror.corp:443` is what the gate
+/// actually compares. For that one redundant spelling the hint names a key that
+/// would grant nothing. `registry_error` holds only the post-parse `Url` and
+/// cannot recover the configured form, so this is stated rather than fixed.
+///
+/// Twin on the other side of the submodule boundary: the fork's `url_authority`
+/// derives the same `host[:port]` and decides whether a plaintext realm is
+/// ADMITTED, where this one tells the operator what to write to admit one. A
+/// crate boundary rules out sharing the function, so a change to either wants a
+/// look at the other.
+fn https_allowance_name(url: Option<&reqwest::Url>) -> Option<String> {
+    let url = url.filter(|url| url.scheme() == "https")?;
+    let host = url.host_str()?;
+    Some(match url.port() {
+        // `Url::port` is `None` on the scheme's default port, which is exactly
+        // when the allowance is written as the bare host.
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    })
+}
+
+/// Carries the plain-HTTP remediation on a failed HTTPS connect.
+///
+/// A registry that speaks plain HTTP answers a TLS `ClientHello` with an HTTP
+/// response, which rustls reports as "received corrupt message of type
+/// InvalidContentType" -- legible only to someone who has met it before, and
+/// naming neither of the two ways to allow plaintext. Wrapping rather than
+/// adding a `ClientError` variant keeps the transient bucket, and with it
+/// `push_blob`'s retry and `via_mirror`'s annotation, exactly as they were.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "could not connect to '{host}' over https; if it serves plain HTTP, set insecure = true \
+     under [registries.\"{host}\"] or add the host to OCX_INSECURE_REGISTRIES"
+)]
+struct PlainHttpAllowanceHint {
+    host: String,
+    #[source]
+    source: oci_client::errors::OciDistributionError,
 }
 
 /// Maps OCI distribution errors to [`ClientError::ManifestNotFound`] when the
@@ -907,6 +1039,187 @@ mod tests {
             url: "https://registry.test/v2/mirror/cmake/tags/list".to_string(),
             message: String::new(),
         }
+    }
+
+    /// Bind a loopback listener that answers exactly one connection with `raw`,
+    /// returning the port and the task handle so the caller can abort it.
+    async fn one_shot_http(raw: &'static [u8]) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt as _;
+                let _ = socket.write_all(raw).await;
+                let _ = socket.flush().await;
+            }
+        });
+        (port, server)
+    }
+
+    /// The two typed guards are terminal refusals, not availability faults.
+    /// Before this they fell through the `_` arm to `Registry` (exit 69), which
+    /// tells a CI retry wrapper to re-issue the push against the same hostile
+    /// `Location` — the one thing the guard exists to prevent. Asserting they
+    /// are NOT `Registry` is what pins the arm; `UnsafeDestination` alone would
+    /// also hold if the whole taxonomy collapsed.
+    #[test]
+    fn the_forks_local_refusals_are_unsafe_destinations_not_registry_faults() {
+        let cross_host = OciDistributionError::CrossHostRefused {
+            url: "https://evil.example/v2/x/blobs/uploads/1".to_string(),
+            registry: "registry.test".to_string(),
+        };
+        let plaintext_realm = OciDistributionError::InsecureAuthRealm {
+            realm: "http://collector.example/token".to_string(),
+        };
+
+        for wire in [cross_host, plaintext_realm] {
+            let label = format!("{wire:?}");
+            let mapped = registry_error(wire);
+            assert!(
+                matches!(mapped, ClientError::UnsafeDestination(_)),
+                "{label} must map to UnsafeDestination, got {mapped:?}"
+            );
+        }
+    }
+
+    /// A declined hop reaches ocx as a reqwest *error*, not a typed fork
+    /// variant, because the policy is a closure inside reqwest. Driven through
+    /// a real client so the `is_redirect()` predicate is exercised against the
+    /// error reqwest actually builds, not an assumption about it.
+    ///
+    /// Loopback only — one accept, one hand-written `302`, no TLS needed: the
+    /// policy under test here is ocx's classification of the refusal, and the
+    /// fork owns the downgrade decision itself.
+    #[tokio::test]
+    async fn a_declined_redirect_hop_is_an_unfollowed_redirect_not_a_registry_fault() {
+        let (port, server) =
+            one_shot_http(b"HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: 0\r\n\r\n").await;
+
+        let wire = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                attempt.error(std::io::Error::other("refusing this hop"))
+            }))
+            .build()
+            .expect("client")
+            .get(format!("http://127.0.0.1:{port}/v2/"))
+            .send()
+            .await
+            .expect_err("a refused redirect must fail the request");
+        server.abort();
+
+        assert!(wire.is_redirect(), "precondition: reqwest must report a redirect error");
+
+        let mapped = registry_error(wire.into());
+        assert!(
+            matches!(mapped, ClientError::UnfollowedRedirect(_)),
+            "a declined hop must not read as an unavailable registry, got {mapped:?}"
+        );
+    }
+
+    /// A `Location`-less 3xx is handed back as the 3xx itself, by a client whose
+    /// policy would gladly have followed it — the shape that made the old
+    /// `UnsafeDestination` name a lie, since nothing was named and nothing was
+    /// refused. The precondition assertion is the load-bearing half: it proves
+    /// the arm is reachable on the ordinary follow-redirects client, so the
+    /// classification below is not a statement about the upload path alone.
+    #[tokio::test]
+    async fn a_location_less_redirect_is_an_unfollowed_redirect_on_a_following_client() {
+        let (port, server) = one_shot_http(b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n").await;
+
+        let response = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .expect("client")
+            .get(format!("http://127.0.0.1:{port}/v2/"))
+            .send()
+            .await
+            .expect("a Location-less 3xx is handed back as a successful response, not an error");
+        server.abort();
+
+        assert_eq!(
+            response.status().as_u16(),
+            302,
+            "precondition: a following client cannot act on a Location-less redirect, so it \
+             surfaces the 3xx as the response"
+        );
+
+        // The fork's status handler turns any unhandled status into `ServerError`,
+        // carrying nothing that distinguishes this from the upload path's refusal.
+        let mapped = registry_error(server_error(response.status().as_u16()));
+        assert!(
+            matches!(mapped, ClientError::UnfollowedRedirect(_)),
+            "a malformed redirect must not read as a refused unsafe destination, got {mapped:?}"
+        );
+    }
+
+    /// The `host[:port]` the plain-HTTP allowance would be written as, derived
+    /// from the URL the failed request carried. `Url::port` is `None` on the
+    /// scheme default, which is exactly when the allowance is the bare host.
+    #[test]
+    fn the_allowance_name_is_derived_only_from_an_https_url() {
+        let name = |raw: &str| {
+            let url = reqwest::Url::parse(raw).expect("valid url");
+            https_allowance_name(Some(&url))
+        };
+
+        assert_eq!(
+            name("https://registry.corp:5000/v2/"),
+            Some("registry.corp:5000".into())
+        );
+        assert_eq!(name("https://registry.corp/v2/"), Some("registry.corp".into()));
+        assert_eq!(
+            name("https://registry.corp:443/v2/"),
+            Some("registry.corp".into()),
+            "the default port is not part of the name the allowance is written as"
+        );
+        assert_eq!(
+            name("http://registry.corp:5000/v2/"),
+            None,
+            "the hint is only correct when TLS is what was attempted"
+        );
+        assert_eq!(https_allowance_name(None), None);
+    }
+
+    /// End to end on a real `reqwest` connect failure: the refusal an operator
+    /// actually sees must name the config key and the env var. Loopback only —
+    /// the port is one the OS just told us is free, so the connect is refused
+    /// locally with no network and no DNS.
+    #[tokio::test]
+    async fn a_failed_https_connect_names_both_ways_to_allow_plain_http() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind a free port")
+            .local_addr()
+            .expect("local addr")
+            .port();
+
+        let wire = reqwest::Client::builder()
+            .build()
+            .expect("client")
+            .get(format!("https://127.0.0.1:{port}/v2/"))
+            .send()
+            .await
+            .expect_err("a connect to a closed port must fail");
+        assert!(wire.is_connect(), "precondition: this must be a connect failure");
+
+        let mapped = registry_error(wire.into());
+        let rendered = mapped.to_string();
+
+        assert!(
+            matches!(mapped, ClientError::RegistryTransient(_)),
+            "the bucket must not move — a refused connect is still retryable, got {mapped:?}"
+        );
+        assert!(
+            rendered.contains(&format!("[registries.\"127.0.0.1:{port}\"]")),
+            "the refusal must quote the exact config key that would grant it: {rendered}"
+        );
+        assert!(
+            rendered.contains("insecure = true"),
+            "the refusal must name the config spelling: {rendered}"
+        );
+        assert!(
+            rendered.contains("OCX_INSECURE_REGISTRIES"),
+            "the refusal must name the env spelling too: {rendered}"
+        );
     }
 
     /// Regression tests for issue #157 — `list_tags` errors must distinguish

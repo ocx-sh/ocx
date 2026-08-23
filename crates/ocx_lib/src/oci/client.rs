@@ -319,6 +319,8 @@ impl Client {
             error,
             ClientError::Registry(_)
                 | ClientError::RegistryTransient(_)
+                | ClientError::UnsafeDestination(_)
+                | ClientError::UnfollowedRedirect(_)
                 | ClientError::Authentication(_)
                 | ClientError::NotAManifest(_)
                 | ClientError::UnexpectedManifestType

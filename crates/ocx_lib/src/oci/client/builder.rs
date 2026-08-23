@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use crate::config::mirror::MirrorConfigError;
 use crate::{auth, oci};
 
 use super::Client;
@@ -113,58 +112,6 @@ impl ClientBuilder {
         }
     }
 
-    /// Creates a client configured from standard environment variables.
-    ///
-    /// Reads `OCX_INSECURE_REGISTRIES` to configure plain-HTTP registries and
-    /// `OCX_MIRRORS` to configure per-host registry mirrors. Progress rendering
-    /// is disabled; the CLI uses
-    /// [`from_env_with_progress`](Self::from_env_with_progress) to inject
-    /// its shared [`ProgressManager`](crate::cli::progress::ProgressManager).
-    ///
-    /// `from_env*` is the seam through which a forwarded `OCX_MIRRORS` reaches a
-    /// child `ocx`. Audit of call sites (2026-06-02): `from_env` is called only
-    /// by `crates/ocx_mirror/src/command/sync.rs::sync` (the mirror tool's
-    /// publisher client); `from_env_with_progress` is called only by
-    /// `crates/ocx_cli/src/app/context.rs::Context::try_init`. The CLI also
-    /// passes a `Config`-derived `MirrorMap` through the explicit
-    /// [`mirrors`](Self::mirrors) builder; reading `env::mirrors()` here makes
-    /// the same map available on the `from_env*` path so a forwarded
-    /// `OCX_MIRRORS` reaches a child even when it has no parsed `Config`.
-    ///
-    /// # Errors
-    ///
-    /// Returns the [`MirrorConfigError`] from [`resolve_mirror_map`] when the
-    /// forwarded `OCX_MIRRORS` is malformed, carries a non-string value, or
-    /// names an `http://` mirror whose host is not in `OCX_INSECURE_REGISTRIES`.
-    /// A failure aborts client construction rather than degrading to an identity
-    /// map — a silent degrade would route reads to the firewall-blocked origin,
-    /// the exact anti-goal replace semantics exist to prevent.
-    ///
-    /// [`resolve_mirror_map`]: crate::config::mirror::resolve_mirror_map
-    pub fn from_env() -> Result<Client, MirrorConfigError> {
-        Ok(ClientBuilder::new()
-            .plain_http_registries(crate::env::insecure_registries())
-            .mirrors(mirrors_from_env()?)
-            .build())
-    }
-
-    /// Like [`from_env`](Self::from_env) but renders transfer progress
-    /// through the supplied shared manager.
-    ///
-    /// # Errors
-    ///
-    /// Same as [`from_env`](Self::from_env): propagates the [`MirrorConfigError`]
-    /// from a malformed or insecure forwarded `OCX_MIRRORS`.
-    pub fn from_env_with_progress(
-        progress: crate::cli::progress::ProgressManager,
-    ) -> Result<Client, MirrorConfigError> {
-        Ok(ClientBuilder::new()
-            .plain_http_registries(crate::env::insecure_registries())
-            .mirrors(mirrors_from_env()?)
-            .progress(progress)
-            .build())
-    }
-
     /// Sets the shared progress manager used for download/upload bars.
     pub fn progress(mut self, progress: crate::cli::progress::ProgressManager) -> Self {
         self.progress = progress;
@@ -260,37 +207,6 @@ impl ClientBuilder {
     }
 }
 
-/// Builds a [`MirrorMap`] from the forwarded `OCX_MIRRORS` env var.
-///
-/// Delegates to the single lib resolver
-/// [`crate::config::mirror::resolve_mirror_map`] with an empty [`Config`] (the
-/// `from_env*` path has no parsed config — the mirror map comes entirely from
-/// the inherited `OCX_MIRRORS`) and the inherited
-/// [`crate::env::insecure_registries`]. Using the same resolver as
-/// `Context::try_init` means there is ONE Config→mirror-map transform with one
-/// precedence rule and one plain-HTTP gate, not two with divergent handling.
-///
-/// # Errors
-///
-/// A resolution failure here (a malformed or non-string forwarded env, or an
-/// http mirror whose host the parent did not also forward into
-/// `OCX_INSECURE_REGISTRIES`) is a HARD error: it aborts client construction on
-/// the child the same way the parent (`Context::try_init`) aborts. Degrading to
-/// an empty identity map would route reads to the firewall-blocked origin — the
-/// exact anti-goal replace semantics exist to prevent. A well-formed forwarded
-/// `OCX_MIRRORS` reaches the child unchanged.
-///
-/// [`Config`]: crate::config::Config
-fn mirrors_from_env() -> Result<MirrorMap, MirrorConfigError> {
-    let resolved = crate::config::mirror::resolve_mirror_map(
-        &crate::config::Config::default(),
-        crate::env::mirrors()?,
-        &crate::env::insecure_registries(),
-    )?;
-    // Registry role only — an index-only mirror must never rewrite OCI traffic.
-    Ok(MirrorMap::new(resolved.registry))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,57 +250,6 @@ mod tests {
         // proves they are valid DER. A wrong encoding tag (PEM over DER bytes)
         // would fail conversion and trip the very `Client::new` panic under test.
         let _client = builder.build();
-    }
-
-    // ── Step 3.1 specification tests ─────────────────────────────────────────
-
-    /// `from_env_with_progress` with `OCX_MIRRORS` set produces a `Client`
-    /// whose `mirrors` map is non-empty.
-    ///
-    /// This forces the `from_env*` wiring — not just the explicit-builder path.
-    /// Traces: plan Testing Strategy — "`from_env_with_progress` with
-    /// `OCX_MIRRORS` set → built `Client.mirrors` is non-empty"; ADR review
-    /// A5a/F4.
-    #[test]
-    fn from_env_with_progress_reads_ocx_mirrors_env() {
-        // Use the test env-lock so we do not mutate std::env and so the test
-        // serialises with other env-touching tests (no flaky parallel env race).
-        let env = crate::test::env::lock();
-        // A valid single-entry JSON object for OCX_MIRRORS.
-        env.set(
-            crate::env::keys::OCX_MIRRORS,
-            r#"{"ghcr.io":"https://mirror.corp/ghcr-remote"}"#,
-        );
-
-        let client = ClientBuilder::from_env_with_progress(crate::cli::progress::ProgressManager::disabled())
-            .expect("well-formed OCX_MIRRORS must build a client");
-
-        assert!(
-            !client.mirrors.is_empty(),
-            "from_env_with_progress with OCX_MIRRORS set must produce a non-empty MirrorMap"
-        );
-    }
-
-    /// A malformed forwarded `OCX_MIRRORS` aborts the child `from_env*` path —
-    /// the SAME hard-error contract as the parent (`Context::try_init`).
-    ///
-    /// The child must never silently degrade to an identity map: a forwarded
-    /// map that fails to resolve could otherwise route reads to the
-    /// firewall-blocked origin, the exact anti-goal replace semantics prevent.
-    ///
-    /// Traces: review Cluster-1 fail-loud — child path aborts like the parent.
-    #[test]
-    fn from_env_with_progress_aborts_on_malformed_ocx_mirrors() {
-        let env = crate::test::env::lock();
-        env.set(crate::env::keys::OCX_MIRRORS, "this is not valid json {{{");
-
-        let error = ClientBuilder::from_env_with_progress(crate::cli::progress::ProgressManager::disabled())
-            .err()
-            .expect("a malformed forwarded OCX_MIRRORS must abort the child");
-        assert!(
-            matches!(error, MirrorConfigError::MalformedEnvJson { .. }),
-            "expected MalformedEnvJson, got: {error:?}"
-        );
     }
 
     /// `http://` mirror host flows to `plain_http_registries`.
@@ -433,62 +298,6 @@ mod tests {
         assert!(
             client.mirrors.get("ghcr.io").is_some(),
             "ghcr.io mirror entry must be present on the built client"
-        );
-    }
-
-    // ── T-arch-G2: index-only OCX_MIRRORS entry excluded from Client.mirrors ──
-    //
-    // Traces: mirror-invariant audit 2026-07-19, gap G2.
-    //
-    // `mirrors_from_env` takes only `resolved.registry` — the F5b union value
-    // lets a host declare an `index`-role-only endpoint
-    // (`{"index": "..."}`), which must never reach `Client.mirrors` (that map
-    // feeds the OCI-distribution read path only). The sibling test above
-    // (`from_env_with_progress_reads_ocx_mirrors_env`) only exercises the
-    // bare-string (both-roles) form; these two close the index-only and mixed
-    // gaps using the same env-injection + inspector mechanics.
-
-    /// An `OCX_MIRRORS` entry that declares ONLY the `index` role must leave
-    /// the built client's `mirrors` map empty — the registry (OCI
-    /// distribution) read path must never be rewritten by an index-only
-    /// mirror declaration.
-    #[test]
-    fn from_env_with_progress_index_only_entry_yields_empty_client_mirrors() {
-        let env = crate::test::env::lock();
-        env.set(
-            crate::env::keys::OCX_MIRRORS,
-            r#"{"ghcr.io":{"index":"https://mirror.corp/idx"}}"#,
-        );
-
-        let client = ClientBuilder::from_env_with_progress(crate::cli::progress::ProgressManager::disabled())
-            .expect("an index-role-only OCX_MIRRORS entry must still build a client");
-
-        assert!(
-            client.mirrors.is_empty(),
-            "an index-only mirror entry must never populate Client.mirrors — the registry role is empty"
-        );
-    }
-
-    /// One index-only entry alongside one registry-bearing entry: the built
-    /// client's `mirrors` map must contain ONLY the registry-bearing host.
-    #[test]
-    fn from_env_with_progress_mixed_entries_keep_only_registry_bearing_host() {
-        let env = crate::test::env::lock();
-        env.set(
-            crate::env::keys::OCX_MIRRORS,
-            r#"{"ghcr.io":{"index":"https://mirror.corp/idx"},"quay.io":"https://mirror.corp/quay-remote"}"#,
-        );
-
-        let client = ClientBuilder::from_env_with_progress(crate::cli::progress::ProgressManager::disabled())
-            .expect("a mix of index-only and registry-bearing OCX_MIRRORS entries must still build a client");
-
-        assert!(
-            client.mirrors.get("ghcr.io").is_none(),
-            "the index-only ghcr.io entry must not appear in Client.mirrors"
-        );
-        assert!(
-            client.mirrors.get("quay.io").is_some(),
-            "the registry-bearing quay.io entry must appear in Client.mirrors"
         );
     }
 }

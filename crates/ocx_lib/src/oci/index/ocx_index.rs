@@ -853,7 +853,7 @@ impl OcxIndex {
     /// | Scheme | Target |
     /// |---|---|
     /// | absent / `https` | [`ReqwestIndexTransport`] |
-    /// | `http` | [`ReqwestIndexTransport`], only when the final host is in `insecure_hosts` (`OCX_INSECURE_REGISTRIES`) — the root document is the index path's trust anchor, so a plaintext index is an on-path takeover (CWE-319), gated exactly like the registry role |
+    /// | `http` | [`ReqwestIndexTransport`], only when the final host is in `insecure_hosts` (the union of `[registries."<host>"] insecure` and `OCX_INSECURE_REGISTRIES`) — the root document is the index path's trust anchor, so a plaintext index is an on-path takeover (CWE-319), gated exactly like the registry role |
     /// | `file` | [`FileIndexTransport`](super::FileIndexTransport), as a **configured base only** — empty authority, absolute path, and no `[mirrors]` override (which is host-keyed, and a `file` base has no host) |
     /// | anything else | refused |
     ///
@@ -924,7 +924,7 @@ impl OcxIndex {
         // injected through `OCX_MIRRORS` — bypasses a base-only check (C-020).
         match target.protocol.as_str() {
             "https" => {}
-            "http" if insecure_hosts.iter().any(|host| host == &target.host) => {}
+            "http" if crate::allows_plain_http(insecure_hosts, &target.host) => {}
             "http" => {
                 return Err(super::error::Error::PlainHttpIndexNotAllowed {
                     namespace: namespace.to_string(),
@@ -2368,7 +2368,7 @@ mod tests {
                 .unwrap()
                 .url,
             "http://mirror.corp/ocx-index",
-            "an http base is allowed when its host is in OCX_INSECURE_REGISTRIES"
+            "an http base is allowed when its host is in the resolved plain-HTTP set"
         );
 
         // The default https base URL is never gated.
@@ -2378,6 +2378,41 @@ mod tests {
                 .url,
             DEFAULT_INDEX_BASE_URL,
             "https must pass the gate untouched"
+        );
+    }
+
+    /// The index gate is fed by the SHARED predicate, so a `[registries.<host>]
+    /// insecure = true` entry licenses a plain-HTTP index base with the
+    /// environment empty. Every other test of this gate hands it a literal
+    /// vector, which is equally satisfied by an env-only build of the set.
+    ///
+    /// The env is explicitly `&[]` in both halves — an inherited
+    /// `OCX_INSECURE_REGISTRIES` would make the green indistinguishable from
+    /// the config entry doing nothing.
+    #[test]
+    fn resolve_base_url_accepts_an_http_base_licensed_by_the_config_half_alone() {
+        let config: crate::config::Config = toml::from_str(
+            "[registries.\"ocx.sh\"]\nindex = \"http://index.corp:8080/ocx-index\"\n\
+             [registries.\"index.corp:8080\"]\ninsecure = true\n",
+        )
+        .unwrap();
+
+        let licensed = crate::insecure_hosts(&config, &[]);
+        assert_eq!(
+            licensed,
+            vec!["index.corp:8080".to_string()],
+            "precondition: the allowance comes from the config, not the environment"
+        );
+
+        assert_eq!(
+            OcxIndex::resolve_base_url(&config, "ocx.sh", &no_mirrors(), &licensed)
+                .expect("a config-licensed plain-HTTP index base must resolve")
+                .url,
+            "http://index.corp:8080/ocx-index",
+        );
+        assert!(
+            OcxIndex::resolve_base_url(&config, "ocx.sh", &no_mirrors(), &[]).is_err(),
+            "and it must still be refused when nothing licenses it"
         );
     }
 

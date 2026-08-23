@@ -8,8 +8,8 @@
 //! resolution protocol for this namespace. Every `[registries.<name>]` key is
 //! an identifier prefix, always — `[registry] default` takes a literal prefix
 //! only, never a hostname alias (§6 ratified simplification). Future
-//! per-registry fields (`insecure`, `location` rewrite, `timeout`, auth) land
-//! here too, without forcing migration of existing configs.
+//! per-registry fields (`location` rewrite, `timeout`, auth) land here too,
+//! without forcing migration of existing configs.
 
 use serde::Deserialize;
 
@@ -43,6 +43,40 @@ pub struct RegistryConfig {
     /// per-entry and managed-tier distributable, so `system_locked` applies —
     /// there is no CLI flag to widen a locked trust set.
     pub trusted_hosts: Option<Vec<String>>,
+
+    /// Contact this registry over plain HTTP instead of HTTPS.
+    ///
+    /// The per-registry spelling of what `OCX_INSECURE_REGISTRIES` says as a
+    /// flat list; the two are a **union** in the permissive direction —
+    /// declaring a host in either source adds it, so there is no "config says
+    /// secure, env says insecure" conflict to resolve. One source can subtract:
+    /// a SYSTEM-scope entry stating `insecure = false` locks that host shut
+    /// against the env list too. See
+    /// [`insecure_hosts`](crate::insecure_hosts) for the resolution rule.
+    ///
+    /// Matching is exact on the registry name as written, `host[:port]`
+    /// together: an entry for `registry.corp` does not cover
+    /// `registry.corp:5001`. The name must be the one references actually
+    /// carry, because that is the string the transport compares against.
+    ///
+    /// # What it reaches, stated in full
+    ///
+    /// Dropping TLS is a security decision, so the entry is managed-tier
+    /// distributable and `system_locked` applies.
+    ///
+    /// Beyond the registry's own traffic it reaches exactly one thing: which
+    /// **authentication realm** that registry may name. The transport accepts a
+    /// realm only when it is `https`, or shares the registry's own authority, or
+    /// sits on a host that itself carries a plain-HTTP allowance. So a cleartext
+    /// credential can only ever go somewhere the operator already declared
+    /// plaintext — an `insecure` entry for one host never licenses cleartext to a
+    /// host nobody named, for a realm or for registry traffic (CWE-319/CWE-522).
+    ///
+    /// The operator-visible consequence: a plain-HTTP registry whose **token
+    /// service sits on a different host or port** needs that host declared plain
+    /// HTTP too, or the probe is refused. Declaring the registry alone is enough
+    /// only when the realm is on the registry's own authority.
+    pub insecure: Option<bool>,
 
     /// Runtime provenance marker: this entry was declared at the SYSTEM config
     /// scope (`/etc/ocx/config.toml`), so it is NON-OVERRIDABLE by any lower
@@ -111,6 +145,9 @@ impl RegistryConfig {
         }
         if other.trusted_hosts.is_some() {
             self.trusted_hosts = other.trusted_hosts;
+        }
+        if other.insecure.is_some() {
+            self.insecure = other.insecure;
         }
     }
 }
@@ -339,6 +376,51 @@ mod tests {
             system.trusted_hosts.as_deref(),
             Some(["10.0.0.0/8".to_string()].as_slice()),
             "a locked entry's trust set must not be widened by a lower tier"
+        );
+    }
+
+    // ── `insecure` plain-HTTP opt-in ─────────────────────────────────────────
+
+    /// `insecure = true` parses into the field; an entry that never states it
+    /// stays `None`, which is what distinguishes "not stated" from an explicit
+    /// `false` during the merge.
+    #[test]
+    fn registries_table_parses_insecure_field() {
+        let config: crate::config::Config =
+            toml::from_str("[registries.\"registry.corp:5000\"]\ninsecure = true\n[registries.ghcr]\n").unwrap();
+        let registries = config.registries.expect("registries table must be present");
+        assert_eq!(
+            registries
+                .get("registry.corp:5000")
+                .expect("the declaring entry must exist")
+                .insecure,
+            Some(true)
+        );
+        assert_eq!(
+            registries.get("ghcr").expect("ghcr entry must exist").insecure,
+            None,
+            "an entry that never states `insecure` must stay unstated, not default to false"
+        );
+    }
+
+    /// A typo of `insecure` is ignored — and, security-relevant, must not turn
+    /// plain HTTP on. Ignoring fails safe; absorbing would drop TLS on a typo.
+    #[test]
+    fn registries_table_ignores_typo_of_insecure_field() {
+        let config: crate::config::Config = toml::from_str("[registries.\"registry.corp\"]\ninsecre = true\n")
+            .expect("a typo'd field must parse as an ignored unknown key");
+        let registries = config.registries.as_ref().expect("registries table must be present");
+        let entry = registries.get("registry.corp").expect("entry must exist");
+        assert!(
+            entry.insecure.is_none(),
+            "a typo'd key must not deserialize as `insecure`"
+        );
+        // The parse outcome is one call short of the security property. The
+        // licensing decision is `insecure_hosts`'s `unwrap_or(false)`, so assert
+        // it there or the test's own message is a claim it never checked.
+        assert!(
+            crate::insecure_hosts(&config, &[]).is_empty(),
+            "a typo'd key must never license plaintext transport"
         );
     }
 

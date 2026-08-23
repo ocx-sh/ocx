@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 pub mod error;
+pub mod insecure;
 pub mod loader;
 pub mod managed;
 pub mod mirror;
@@ -49,9 +50,8 @@ pub struct Config {
     ///
     /// Every key is an identifier prefix, always — `[registry] default`
     /// never dereferences through this table (§6 ratified simplification).
-    /// Future extensions (per-registry insecure flag, location rewrite,
-    /// timeout, auth) drop into the same entry struct without breaking
-    /// existing configs.
+    /// Future extensions (location rewrite, timeout, auth) drop into the same
+    /// entry struct without breaking existing configs.
     pub registries: Option<HashMap<String, RegistryConfig>>,
 
     /// Per-traffic-host mirrors (`[mirrors."<host>"]`).
@@ -374,7 +374,7 @@ mod tests {
              timeout = 30\n\
              [registries.\"corp.example.com\"]\n\
              index = \"https://index.corp.example.com\"\n\
-             insecure = true\n\
+             location = \"corp.example.com/rewritten\"\n\
              [mirrors.\"ghcr.io\"]\n\
              registry = \"https://mirror.corp/ghcr\"\n\
              attest = \"https://mirror.corp/attest\"\n\
@@ -716,6 +716,20 @@ mod tests {
                     ..Default::default()
                 });
                 system.system_locked && system.index.as_deref() == Some("https://system-index.corp")
+            }),
+            // The same entry's security-relevant field: a lower tier must not be
+            // able to declare a system-locked registry reachable over plain HTTP.
+            ("[registries.<name>] insecure", || {
+                let mut system = RegistryConfig {
+                    insecure: Some(false),
+                    ..Default::default()
+                };
+                system.lock_as_system();
+                system.merge(RegistryConfig {
+                    insecure: Some(true),
+                    ..Default::default()
+                });
+                system.system_locked && system.insecure == Some(false)
             }),
             ("[mirrors.\"<host>\"]", || {
                 let mut system = MirrorConfig {

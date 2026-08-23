@@ -103,12 +103,12 @@ When `[registry]` is declared at the system scope (`/etc/ocx/config.toml`), it i
 
 ### `[registries.<name>]` {#keys-registries}
 
-Per-registry settings, keyed by a friendly name. Each entry configures one registry; [`[registry] default`](#keys-registry-default) can then reference it by name rather than by hostname.
+Per-registry settings, keyed by the registry's identifier prefix — the same `host[:port]` string your package identifiers carry, matched exactly (`ocx.sh`, `ghcr.io`, `registry.corp:5000`). This is not a free-form alias: a key that matches no registry name configures nothing.
 
 The plural form (`registries`, not `registry`) is deliberate: it mirrors [Cargo's convention][cargo-registries] and avoids a TOML collision with the singular [`[registry]`](#keys-registry) global-settings section.
 
 ::: info v1 scope
-`index` and `trusted_hosts` are defined in v1. The `[registries.<name>]` table is reserved for per-registry settings — future fields (`insecure`, `location` rewrite, `timeout`, auth) will slot into the same entry without breaking existing configs. Unknown fields inside an entry are ignored, like unknown keys and sections everywhere else in the file — see [Unknown keys and sections](#unknown-keys).
+`index`, `trusted_hosts`, and `insecure` are defined in v1. The `[registries.<name>]` table is reserved for per-registry settings — future fields (`location` rewrite, `timeout`, auth) will slot into the same entry without breaking existing configs. Unknown fields inside an entry are ignored, like unknown keys and sections everywhere else in the file — see [Unknown keys and sections](#unknown-keys).
 :::
 
 #### `index` {#keys-registries-index}
@@ -172,7 +172,7 @@ The named index is the sole authority for its namespace — a yanked tag, a tamp
 :::
 
 ::: info Why the resolved physical pointer uses `oci://`, never `http(s)`
-A [derived index's][in-depth-indices-dispatch] local root document — the file `ocx index update` writes under `$OCX_HOME/index/<source>/p/<ns>/<pkg>.json` — records the package's resolved physical location as `oci://<host>/<repository>`, not `http://` or `https://`. That scheme marks the reference *kind* — "an OCI registry repository" — not a transport to dial. Transport is a host-side decision: it comes from a [`[mirrors]`](#keys-mirrors) entry's own scheme for that host, or the plain-HTTP allowance in [`OCX_INSECURE_REGISTRIES`][env-insecure-registries]. If the pointer itself carried `http://` or `https://` instead, a publisher able to write that shared identity data could force every consumer resolving it down to plaintext — a scheme belongs to the operator who configures the host, never to data that travels with a package's identity.
+A [derived index's][in-depth-indices-dispatch] local root document — the file `ocx index update` writes under `$OCX_HOME/index/<source>/p/<ns>/<pkg>.json` — records the package's resolved physical location as `oci://<host>/<repository>`, not `http://` or `https://`. That scheme marks the reference *kind* — "an OCI registry repository" — not a transport to dial. Transport is a host-side decision: it comes from a [`[mirrors]`](#keys-mirrors) entry's own scheme for that host, or the plain-HTTP allowance the host carries — [`insecure = true`](#keys-registries-insecure) on its `[registries.<name>]` entry, or [`OCX_INSECURE_REGISTRIES`][env-insecure-registries]. If the pointer itself carried `http://` or `https://` instead, a publisher able to write that shared identity data could force every consumer resolving it down to plaintext — a scheme belongs to the operator who configures the host, never to data that travels with a package's identity.
 :::
 
 ##### `file://` bases {#keys-registries-index-file}
@@ -233,9 +233,31 @@ trusted_hosts = ["10.0.0.0/8", "registry.corp"]
 
 The guard is default-on and needs no configuration for public registries. There is no command-line flag to widen the trust set — the exemption lives only on the config entry, so a [system-locked](#keys-registries-system-lock) entry's `trusted_hosts` cannot be broadened by a lower tier or a CLI override. A refused host exits with a configuration error that names the host and points back to `trusted_hosts`.
 
+#### `insecure` {#keys-registries-insecure}
+
+**Type**: boolean  
+**Default**: `false` (HTTPS)
+
+Contact this registry over plain HTTP. This is the per-registry spelling of what [`OCX_INSECURE_REGISTRIES`][env-insecure-registries] says as a flat list, and the two are a **union** — a host named in either is plaintext-eligible:
+
+```toml
+[registries."registry.corp:5000"]
+insecure = true
+```
+
+Neither source can take a host back out of the set on its own — `insecure = false` at the user or [`$OCX_HOME`][env-ocx-home] tier states the default explicitly, it does not revoke a host the environment granted. The one exception is the system tier: an `insecure = false` entry declared at system scope is [locked](#keys-registries-system-lock) and subtracts that host from the union, [`OCX_INSECURE_REGISTRIES`][env-insecure-registries] included — the platform engineer's lever for forbidding plaintext to a host outright. A system tier that says nothing about `insecure` for a host locks nothing and subtracts nothing; only an explicit `false` at that scope does.
+
+The name is matched **exactly, `host[:port]` together** — the same comparison the transport makes. An entry for `registry.corp` does not cover `registry.corp:5001`, and case matters. Write the resolved registry host — the one exception is `docker.io`, which resolves to `index.docker.io` and is never served over plain HTTP, so no spelling of it is accepted here.
+
+The allowance covers transport and nothing else. An HTTPS registry that answers with a plaintext token-service realm is still refused, an `insecure` entry for one host never licenses cleartext for another, and an HTTPS request that is redirected to `http://` is refused rather than followed. Plain HTTP sends registry credentials in the clear on the wire — the entry exists for a lab or an isolated corporate network, not for reaching a registry across the public internet.
+
+A plaintext realm is allowed only when its host matches the registry's own, or that realm host is itself declared plaintext-eligible. If your plain-HTTP registry's authentication realm lives on a different host or port — a separate token service, for instance — declare that host too: one `[registries.<name>] insecure = true` entry per host, or both hosts listed in [`OCX_INSECURE_REGISTRIES`][env-insecure-registries]. An entry for the registry alone does not cover it, and `registry.corp:5000` / `registry.corp:5001` are different hosts here, same as everywhere else in this feature.
+
 #### System-locked {#keys-registries-system-lock}
 
-Each `[registries.<name>]` entry declared at the system scope is locked the same way as [`[registry]`](#keys-registry-system-lock) — unconditionally, per entry, covering both `index` and `trusted_hosts`. A lower tier cannot flip a locked entry's resolution protocol or widen its SSRF trust set.
+Each `[registries.<name>]` entry declared at the system scope is locked the same way as [`[registry]`](#keys-registry-system-lock) — unconditionally, per entry, covering `index`, `trusted_hosts`, and `insecure`. For `index` and `trusted_hosts` the lock is absolute: a lower tier cannot flip a locked entry's resolution protocol or widen its SSRF trust set, and neither field has an environment-variable counterpart to work around it.
+
+`insecure` is the one field with such a counterpart — [`OCX_INSECURE_REGISTRIES`][env-insecure-registries] normally unions with every config tier rather than being bound by them. The system tier is where that changes: a system-scope `insecure = false` entry additionally subtracts its host from the environment variable's contribution, the one case where a config tier can narrow the union instead of only widening it. A system tier that is silent about `insecure` for a host — no entry, or an entry that never mentions the field — locks nothing and subtracts nothing; only an explicit `false` at that scope does.
 
 ### `[mirrors]` {#keys-mirrors}
 
@@ -299,7 +321,7 @@ Older Nexus deployments expose each repository on a per-repository port. Those u
 
 **Scheme default.** When a role's value has no `scheme://` prefix (e.g., `"nexus.corp/docker-proxy"`), OCX defaults to `https`. Explicit `https://` is recommended for clarity.
 
-**Plain-HTTP mirrors.** A role value starting with `http://` requires the mirror host to be listed in [`OCX_INSECURE_REGISTRIES`][env-insecure-registries] — the same gate applies to both the registry and index roles. If the mirror host is absent, OCX exits at startup with an actionable error naming the variable and the mirror host — it does not silently downgrade TLS. The check runs before any network activity.
+**Plain-HTTP mirrors.** A role value starting with `http://` requires the mirror host to be plaintext-eligible — either [`insecure = true`](#keys-registries-insecure) on its own `[registries.<name>]` entry or a listing in [`OCX_INSECURE_REGISTRIES`][env-insecure-registries]. The same gate applies to both the registry and index roles. If the mirror host is in neither, OCX exits at startup with an actionable error naming the mirror host and both ways to allow it — it does not silently downgrade TLS. The check runs before any network activity.
 
 ::: info Malformed values
 `[mirrors]` values parse against a named shape — a string, or an object with only `registry`/`index` fields — with per-field errors rather than an opaque "did not match any variant" message. A role with a non-string value (`{ registry = 5 }`) is a parse error naming the offending host and field.
@@ -969,7 +991,7 @@ This table shows which OCX environment variables map to config file fields. Vari
 | [`OCX_OFFLINE`][env-offline] | None | Per-invocation mode, not a persistent setting |
 | [`OCX_REMOTE`][env-remote] | None | Per-invocation debugging mode, not a persistent setting |
 | [`OCX_BINARY_PIN`][env-ocx-binary-pin] | None | Subprocess-only: set automatically by ocx on every spawn so child ocx invocations pin to the same binary |
-| [`OCX_INSECURE_REGISTRIES`][env-insecure-registries] | None (deferred) | Will move to a per-entry `insecure` field under [`[registries.<name>]`](#keys-registries) once the flag is implemented; the env var remains the source of truth today |
+| [`OCX_INSECURE_REGISTRIES`][env-insecure-registries] | [`[registries.<name>] insecure`](#keys-registries-insecure) | **Union**, not an override: a host named in either source is plaintext-eligible, and neither can take one back out |
 | [`OCX_NO_UPDATE_CHECK`][env-no-update-check] | None | CI-only concern; env var is sufficient |
 | [`OCX_NO_MODIFY_PATH`][env-no-modify-path] | None | Install-time concern; env var is sufficient |
 
@@ -1129,15 +1151,14 @@ OCX publishes JSON Schemas for every config, project, and patch file at stable U
 
 These sections are documented here so the format design is stable before they land. They do not exist in the current release.
 
-### Per-registry fields beyond `index` and `trusted_hosts` {#future-registries-fields}
+### Per-registry fields beyond `index`, `trusted_hosts`, and `insecure` {#future-registries-fields}
 
-The [`[registries.<name>]`](#keys-registries) table is live in v1 with [`index`](#keys-registries-index) and [`trusted_hosts`](#keys-registries-trusted-hosts). Future per-registry fields will slot in without breaking existing configs:
+The [`[registries.<name>]`](#keys-registries) table is live in v1 with [`index`](#keys-registries-index), [`trusted_hosts`](#keys-registries-trusted-hosts), and [`insecure`](#keys-registries-insecure). Future per-registry fields will slot in without breaking existing configs:
 
 ```toml
-# Future shape (not in v1 — only index and trusted_hosts are implemented today):
-[registries.private]
+# Future shape (not in v1):
+[registries."registry.company.example"]
 index = "https://index.company.example"
-insecure = false                 # per-registry TLS opt-out
 location = "mirror.company.example"  # URL rewrite / mirror
 ```
 
