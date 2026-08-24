@@ -115,9 +115,9 @@ The plural form (`registries`, not `registry`) is deliberate: it mirrors [Cargo'
 
 **Type**: string
 
-Selects the resolution protocol for this namespace. An entry that sets `index` resolves through the [ocx-index protocol][in-depth-indices-public] (root document → OCI image index → platform selection) against that base URL; an entry without `index` — or no entry at all — resolves as a plain OCI registry. There is exactly one resolution protocol per namespace: for every name the index serves, OCX never falls back from the index protocol to plain OCI tags, or the reverse — an index that has no root for such a name fails the resolve, it does not quietly try the registry.
+Selects the resolution protocol for this namespace. An entry that sets `index` resolves through the [ocx-index protocol][in-depth-indices-public] (root document → OCI image index → platform selection) against that base URL; an entry without `index` — or no entry at all — resolves as a plain OCI registry.
 
-An index may **decline** a name outright, which is not a fallback. Its [`config.json`][in-depth-indices-declared-names] can publish a `name_segments` count declaring the shape of names it is able to hold at all; `index.ocx.sh` publishes `2`, because its root schema pins a package name to `<namespace>/<package>`. For a name of a different shape OCX still asks for the root, but reads its absence as "never claimed" rather than "not found here": that name resolves as plain OCI. An index that *does* serve a root for such a name keeps full authority over it — the served root always outranks the declaration. An index that publishes no `name_segments` declares no constraint and stays authoritative for every name in its namespace.
+There is exactly one resolution protocol per namespace, and the index is [authoritative for the whole registry][in-depth-indices-declared-names]: OCX never falls back from the index protocol to plain OCI tags, or the reverse. A name the index has no root for fails the resolve with an error naming that index — it does not quietly try the registry underneath. Setting `index = ""` (below) is the only way to take a namespace off the index.
 
 The [compiled-defaults tier](#precedence) ships exactly this entry, so `ocx.sh` is index-bearing out of the box:
 

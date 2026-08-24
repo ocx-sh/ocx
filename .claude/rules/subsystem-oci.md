@@ -333,60 +333,63 @@ zero network. Whether a resolve *should* re-consult the source for a yank publis
 is an open semantics question (it trades against the silence principle and against invariant 2) —
 this paragraph describes what happens today and decides nothing.
 
-**Index-declared jurisdiction (`Jurisdiction`, `oci/index.rs`).** Whether a source is asked at all is
-a *three*-valued question, asked before any fetch — never an `Ok(None)` read after one:
+**Jurisdiction (`Jurisdiction`, `oci/index.rs`) — a configured index owns its WHOLE registry
+(ocx#251).** Whether a source is asked at all is a *three*-valued question, asked before any fetch —
+never an `Ok(None)` read after one:
 
 | Verdict | Meaning |
 |---|---|
 | `Authoritative` | Ask it; its miss or refusal is terminal (the stop above). |
-| `FallThrough` | Ask it; its miss tries the next source (the `OciIndex` catch-all). |
-| `Outside` | It **declared** it cannot express this name — never asked, silence decides nothing. |
+| `FallThrough` | Ask it; its miss tries the next source (the `OciIndex` catch-all default). |
+| `Outside` | The name is in another registry — never asked, silence decides nothing. |
 
-`OcxIndex::jurisdiction` (async, inherent `pub`, trait impl forwards) decides on **evidence**; the
-published declaration (`name_segments` — `index.ocx.sh` serves `2`, restating its root schema's
-`^ocx\.sh/<ns>/<pkg>$`) only ever interprets a *miss*:
+`OcxIndex::jurisdiction` (async, inherent `pub`, trait impl forwards) is
+`serves_registry(id.registry())` and nothing else — `Authoritative` for its own registry, `Outside`
+for any other, **no I/O either way**. A name it holds no root for is a hard miss, never a hand-off to
+the plain OCI registry the index points at; that hand-off is what let a flat `ocx.sh/<tool>` resolve
+past the index and so past the yank gate. `FallThrough` survives only as the trait default for a plain
+registry, which claims nothing; no `OcxIndex` ever returns it.
 
-| Case | Verdict |
-|---|---|
-| Foreign registry | `Outside`, **no I/O** (runs first) |
-| No declaration, or a name it satisfies | `Authoritative`, no root fetch |
-| Declared inexpressible, root **found** | `Authoritative` — the root overrules the declaration |
-| Declared inexpressible, root **404** | `Outside` — any single-segment `ocx.sh/<tool>`, now that the fleet and this repo's own toolchain are two-segment |
-| Declared inexpressible, root fetch **errors** | `Authoritative`, fail-closed |
+The published `name_segments` declaration is no longer read for jurisdiction. Its only job there was
+to interpret a missing root as "fall through"; with the fall-through gone it bought a `config.json`
+fetch plus a 404 per declined name and decided nothing. `IndexFormatConfig` still carries the field —
+serde still parses it, and OCX's own writer omits it rather than guessing a value, so a full mirror
+copy of a site's `config.json` stays byte-identical — but no client-side branch consults it to route a
+resolve; the live site's `name_segments` key is now an unmodelled sibling this client tolerates and
+ignores (`live_index_wire.rs` pins that forward-compat against captured production bytes).
 
-The declaration must never stop the client *asking*: it is an unsigned, CDN-cacheable integer on the
-same channel as the roots, so a template bug, a stale edge or a compromise scoped to that one file
-would otherwise narrow a namespace and skip the yank gate on a name the index does hold a root for.
-Because the root decides whenever it exists, a wrong `name_segments` can bypass nothing. Absent
-`name_segments` = serves every name = historical behaviour verbatim, so a private index is never
-narrowed by the client. **Fail-closed** throughout: a 404, malformed, unsupported or unreachable
-`config.json`, or a root fetch that errors, keeps the source `Authoritative` (an index outage must
-never downgrade a namespace to plain OCI). Infallible, not error-swallowing — nothing is cached on
-failure, so the immediately-following `resolve_root` re-fetches and raises the real error.
+**Fail-closed, and the two arms must stay apart.** No config state — absent, malformed, unsupported,
+unreachable — can move the verdict, because the verdict no longer reads the config; the
+`resolve_root` that follows raises the real `UnsupportedIndexFormat` / transport error instead. In
+`ChainedIndex::fetch_and_persist_chain` that lands on two **separate** authoritative arms:
+`Ok(None)` = "the index answered, and it does not hold this name" → `Error::NotInIndex`; `Err(e)` =
+"the index could not be read" → the transport error verbatim. Merging them would turn an index outage
+into a confident wrong answer telling the user to announce a package that is already there. Guarded by
+`an_index_outage_is_never_reported_as_a_missing_package`.
 
-Only a **confirmed 404** may settle a declined name as `Outside`. `resolve_root` sends the root `GET`
-unconditionally, so a `304` answering it is a misbehaving edge, not an absence — it raises
-`IndexHttpFailed`, and an errored root keeps the source `Authoritative` like any other fetch failure.
+`Error::NotInIndex { identifier, namespace, base_url }` classifies to `ExitCode::NotFound` (79) — the
+same code the silent miss produced, so `case $?` contracts are untouched; the message is what changed.
+It is raised only when the authoritative source can name itself via `IndexImpl::index_base_url`
+(`Some(base_url)` for `OcxIndex`, `None` for a plain registry / test fake, which keeps the plain
+terminal `Ok(None)` rather than a degraded message). Naming the base URL, not just the namespace, is
+deliberate: the effective base is merged across the compiled-in default, the managed tier,
+`[registries."<ns>"] index` and the `[mirrors."<host>"] index` role, so the namespace alone would
+leave the reader guessing which endpoint answered.
 
-Cost: a declined name adds exactly one root `GET` that 404s. `SourceCacheInner.roots` memoizes the
-miss (`Option<Arc<IndexRoot>>`) alongside the hit, so it is one request per name per process however
-many times the chain consults jurisdiction — eight flat tools in a project = eight cached 404s on a
-cold run. The `Outside` verdict logs at **`debug!`**: it is the steady state for the shipped namespace
-(41 of 44 `ocx.sh` repositories are flat names), and the memo suppresses the request, not the log line
-— `jurisdiction` is re-entered from every `candidate_sources` call, so at `warn!` one cold `ocx lock`
-emits tens of identical lines.
+`resolve_root` still refuses a `304` answering its unconditional `GET` (`IndexHttpFailed`) — reading
+it as a miss would memoize "not in the index" for the process off one misbehaving edge.
 
 `ChainedIndex::candidate_sources(id) -> Vec<(&Index, bool)>` is the one place the question is asked;
-the paired bool drives every terminal-stop arm. No client-side name rule exists anywhere — the
-declaration is the index operator's, and `name_segments` is **not** a security control (an older
-client ignores it; the yank gate, dispatch-object digest verify and terminal stop delegate nothing to it).
+the paired bool drives every terminal-stop arm. No client-side name rule exists anywhere — a name
+shape is the index operator's constraint, enforced at announce time, not a rule the client applies,
+and never a security control: the yank gate, the dispatch-object digest verify, and the terminal
+stop above delegate nothing to it.
 
-**Provenance is per REGISTRY, jurisdiction per NAME.** `IndexImpl::serves_registry(&str)` (sync,
-no I/O) is the ownership primitive behind `ChainedIndex::kind_for_registry`; `kind_for(id)` delegates
-with `id.registry()`. Local subtree layout (`c/index.json` catalog vs `p/` enumeration) is per-source,
-never per-name, so every name under a published registry reports `Published` regardless of grammar.
-Deriving provenance from a per-name predicate would flip a declined name to `Derived` and silently
-drop the published root's catalog cross-check. There is no placeholder identifier anywhere.
+**Provenance is per REGISTRY, and so is jurisdiction.** `IndexImpl::serves_registry(&str)` (sync,
+no I/O) is the ownership primitive behind both `ChainedIndex::kind_for_registry` (`kind_for(id)`
+delegates with `id.registry()`) and `OcxIndex::jurisdiction`. Local subtree layout (`c/index.json`
+catalog vs `p/` enumeration) is per-source, never per-name, so every name under a published registry
+reports `Published`. There is no placeholder identifier anywhere.
 
 **There is no *implicit* catalog sync.** `ocx index update <pkg>...` fetches the named packages'
 roots and nothing else. `ocx index sync <REGISTRY>...` reads each source's catalog **to choose the
@@ -419,9 +422,10 @@ no-op leaves the tree byte- and mtime-identical, and it opportunistically delete
 `c/index.json.etag` left by an older ocx.
 
 `LocalIndex::refresh_tags` stays jurisdiction-unaware: the shared refresh loop
-(`command/index_common.rs`, behind both `ocx index update` and `ocx index sync`) picks the source
-that will answer for each package before calling it, and reroutes a name the index declines to the
-registry.
+(`command/index_common.rs`, behind both `ocx index update` and `ocx index sync`) walks a package's
+index sources and selects the one whose `jurisdiction` is not `Outside` before calling it — the same
+verdict a resolve routes by. A name that source declines now fails the refresh instead of silently
+deriving a root from the registry underneath.
 
 **Write path.** Raw response bytes are kept verbatim — no `serde_json::to_vec_pretty`
 re-serialization. The digest is recomputed from those bytes and verified against the
