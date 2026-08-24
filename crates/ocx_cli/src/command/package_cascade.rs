@@ -158,7 +158,7 @@ async fn audit_one(
     // under its own name, and a plain registry package can have a locally
     // derived root pointing at itself; only a source that claims the name has
     // a committed root worth comparing against.
-    let index = index_source(context, &package).await;
+    let index = index_source(context, &package);
 
     // Authoritative-stop: a logical name whose root will not resolve is an
     // error here, never a silent fall-through to a registry repository that
@@ -190,16 +190,13 @@ async fn audit_one(
 ///
 /// Asks each source's own jurisdiction rather than comparing namespaces, the
 /// same way `ocx index update` routes a package: a source answers `Outside`
-/// both for a foreign registry (with no I/O at all) and for a name its
-/// published grammar cannot express, which is exactly when there is no root to
-/// read.
-async fn index_source<'a>(context: &'a crate::app::Context, package: &oci::Identifier) -> Option<&'a OcxIndex> {
-    for source in context.index_sources() {
-        if source.jurisdiction(package).await != Jurisdiction::Outside {
-            return Some(source);
-        }
-    }
-    None
+/// for a registry it does not serve, and `Authoritative` for every name in the
+/// one it does. The verdict is a registry comparison, so it costs no I/O.
+fn index_source<'a>(context: &'a crate::app::Context, package: &oci::Identifier) -> Option<&'a OcxIndex> {
+    context
+        .index_sources()
+        .iter()
+        .find(|source| source.jurisdiction(package) != Jurisdiction::Outside)
 }
 
 #[cfg(test)]

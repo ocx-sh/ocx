@@ -56,10 +56,13 @@ pub enum Jurisdiction {
     Authoritative,
     /// Ask it; its miss falls through to the next source (the OCI catch-all).
     FallThrough,
-    /// It has **declared** it cannot express this name — never ask it, and its
-    /// silence decides nothing. Either the name is in another registry
-    /// altogether, or the index's published `config.json` says its name grammar
-    /// has no place to put this name.
+    /// The name is in another registry altogether — never ask it, and its
+    /// silence decides nothing.
+    ///
+    /// This is the verdict's **only** remaining meaning (ocx#251). A configured
+    /// index used to be able to decline an individual name it declared its
+    /// grammar could not express, handing it to the plain registry; it no longer
+    /// can, so no source ever declines a name inside a registry it serves.
     Outside,
 }
 
@@ -414,8 +417,8 @@ impl Index {
     /// `oci::index`-internal (no `pub`), like [`Self::source_kind`] — the chain
     /// is the only consumer, and `OcxIndex`'s inherent `pub` method serves the
     /// one caller outside this module.
-    async fn jurisdiction(&self, identifier: &oci::Identifier) -> Jurisdiction {
-        self.inner.jurisdiction(identifier).await
+    fn jurisdiction(&self, identifier: &oci::Identifier) -> Jurisdiction {
+        self.inner.jurisdiction(identifier)
     }
 
     /// Whether a source in this index is the configured owner of `registry` —
@@ -429,6 +432,13 @@ impl Index {
     /// [`Self::serves_registry`] — the chain is the only consumer.
     fn trusted_hosts(&self) -> &[String] {
         self.inner.trusted_hosts()
+    }
+
+    /// The static-file base URL this source resolves against, or `None` when it
+    /// is not a configured ocx-index. See
+    /// [`index_impl::IndexImpl::index_base_url`].
+    fn index_base_url(&self) -> Option<&str> {
+        self.inner.index_base_url()
     }
 
     /// This source's provenance (`adr_index_indirection.md` A2/H) — `Published`

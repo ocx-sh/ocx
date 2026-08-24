@@ -74,9 +74,13 @@ fn a_bare_package_map_is_not_a_catalog_document() {
 
 #[test]
 fn live_config_bytes_pin_the_supported_version_and_tolerate_unknown_siblings() {
-    // The live config.json carries a `name_segments` sibling the client does not
-    // model. Forward-compat (no `deny_unknown_fields`) is what keeps an older
-    // binary reading a newer deploy, so it is a contract, not an accident.
+    // The live config.json carries a `name_segments` sibling the client no
+    // longer models (ocx#251 — it existed only to interpret a missing root as a
+    // fall-through to the registry, and that fall-through is gone). Deleting the
+    // field is exactly the case forward-compat (no `deny_unknown_fields`) has to
+    // survive: this binary reads a deploy that publishes a key it has never
+    // heard of, and must not choke. That makes the sibling more valuable as a
+    // fixture now, not less — it is the only unknown key we have live bytes for.
     let bytes = fixture("config.json");
     let text = String::from_utf8(bytes.clone()).expect("config.json is UTF-8");
     assert!(
@@ -90,4 +94,11 @@ fn live_config_bytes_pin_the_supported_version_and_tolerate_unknown_siblings() {
         Some(SUPPORTED_FORMAT_VERSION),
         "the live site pins the version this client supports"
     );
+
+    // Asserted through the real reader, not just `serde_json::Value`: the point
+    // is that `IndexFormatConfig` — the type `check_format_version` parses into
+    // — accepts the unknown sibling rather than failing the whole source closed.
+    let parsed: ocx_lib::oci::index::IndexFormatConfig =
+        serde_json::from_slice(&bytes).expect("the live config must parse into the shipped reader");
+    assert_eq!(parsed.format_version, SUPPORTED_FORMAT_VERSION);
 }

@@ -347,7 +347,7 @@ impl ChainedIndex {
     async fn candidate_sources(&self, identifier: &oci::Identifier) -> Vec<(&Index, bool)> {
         let mut candidates = Vec::with_capacity(self.sources.len());
         for source in &self.sources {
-            match source.jurisdiction(identifier).await {
+            match source.jurisdiction(identifier) {
                 Jurisdiction::Authoritative => candidates.push((source, true)),
                 Jurisdiction::FallThrough => candidates.push((source, false)),
                 Jurisdiction::Outside => {}
@@ -833,7 +833,27 @@ impl ChainedIndex {
                     // the `Err` arm's authoritative-stop just below; a
                     // non-authoritative source's miss keeps the fall-through
                     // behaviour so foreign-namespace routing is unaffected.
+                    //
+                    // Kept as a SEPARATE arm from `Err` below, and it must stay
+                    // that way: this arm is "the index answered, and it does not
+                    // hold this name"; that one is "the index could not be read
+                    // at all". Folding them would turn an index outage into a
+                    // confident wrong answer instead of a loud failure.
                     if authoritative {
+                        // A configured index names itself, so the user learns
+                        // WHICH index refused rather than reading a bare "not
+                        // found" (ocx#251 — the error is the deliverable). A
+                        // source with no base URL to name is not a configured
+                        // index (a fake, a nested chain); it keeps the plain
+                        // terminal `None` so no message has to be degraded.
+                        if let Some(base_url) = source.index_base_url() {
+                            return Err(super::error::Error::NotInIndex {
+                                identifier: identifier.to_string(),
+                                namespace: identifier.registry().to_string(),
+                                base_url: base_url.to_string(),
+                            }
+                            .into());
+                        }
                         log::debug!("Authoritative source has no '{}' — stopping.", identifier);
                         return Ok(None);
                     }
@@ -1426,7 +1446,7 @@ impl index_impl::IndexImpl for ChainedIndex {
         last_error.map_or(Ok(None), Err)
     }
 
-    async fn jurisdiction(&self, identifier: &oci::Identifier) -> Jurisdiction {
+    fn jurisdiction(&self, identifier: &oci::Identifier) -> Jurisdiction {
         // Fold the chain: one authoritative source makes the whole chain
         // authoritative; otherwise any source that would still be asked makes it
         // a fall-through. `Outside` needs EVERY source to have declined — in
@@ -1434,7 +1454,7 @@ impl index_impl::IndexImpl for ChainedIndex {
         // declines nothing, so a chain is never `Outside`.
         let mut jurisdiction = Jurisdiction::Outside;
         for source in &self.sources {
-            match source.jurisdiction(identifier).await {
+            match source.jurisdiction(identifier) {
                 Jurisdiction::Authoritative => return Jurisdiction::Authoritative,
                 Jurisdiction::FallThrough => jurisdiction = Jurisdiction::FallThrough,
                 Jurisdiction::Outside => {}
@@ -3157,7 +3177,7 @@ mod chain_refs_tests {
             *self.fetch_root_document_calls.lock().unwrap() += 1;
             Ok(None)
         }
-        async fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
+        fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
             if identifier.registry() == REGISTRY {
                 Jurisdiction::Authoritative
             } else {
@@ -3968,7 +3988,7 @@ mod chain_refs_tests {
             let root = serde_json::from_slice(&bytes).unwrap();
             Ok(Some((bytes, root)))
         }
-        async fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
+        fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
             if identifier.registry() == REGISTRY {
                 Jurisdiction::Authoritative
             } else {
@@ -4082,7 +4102,7 @@ mod chain_refs_tests {
         async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
-        async fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
+        fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
             if identifier.registry() == REGISTRY {
                 Jurisdiction::Authoritative
             } else {
@@ -4173,7 +4193,7 @@ mod chain_refs_tests {
         async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
             Ok(None)
         }
-        async fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
+        fn jurisdiction(&self, identifier: &Identifier) -> Jurisdiction {
             if identifier.registry() == REGISTRY {
                 Jurisdiction::Authoritative
             } else {
@@ -4395,7 +4415,7 @@ mod chain_refs_tests {
             }
             Ok(Some(physical))
         }
-        async fn jurisdiction(&self, _: &Identifier) -> Jurisdiction {
+        fn jurisdiction(&self, _: &Identifier) -> Jurisdiction {
             *self.calls.lock().unwrap() += 1;
             Jurisdiction::FallThrough
         }

@@ -186,10 +186,10 @@ impl LocalIndex {
     /// A tagged identifier (`cmake:3.28`) refreshes only that tag; a bare
     /// identifier (`cmake`) first enumerates the source's tags.
     ///
-    /// Jurisdiction-unaware by design: whether `source` can express
-    /// `identifier` at all is the **caller's** call. `ocx index update` picks
-    /// the source that will answer for each package before calling here, and
-    /// reroutes a name the index declines to the registry.
+    /// Jurisdiction-unaware by design: which source answers for `identifier` is
+    /// the **caller's** call — `ocx index sync` refreshes against the source that
+    /// published the catalog row, while `ocx index update` picks the source that
+    /// serves the identifier's registry.
     pub async fn refresh_tags(&self, identifier: &oci::Identifier, source: &super::Index) -> Result<()> {
         // One info line per identifier; per-tag detail is debug-only so an index
         // update over a many-tagged package does not flood info logs.

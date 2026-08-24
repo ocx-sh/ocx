@@ -2149,34 +2149,139 @@ def test_published_absent_dispatch_recovers_from_the_physical_registry_and_self_
 
 
 # ---------------------------------------------------------------------------
-# Jurisdiction — the INDEX declares what a MISS means; the root always decides.
+# Jurisdiction — a configured index is authoritative for its WHOLE registry.
 #
-# `config.json`'s `name_segments` is the index operator's own published
-# statement about its name grammar. `index.ocx.sh` serves 2, restating its root
-# schema's `^ocx\.sh/<ns>/<pkg>$`. For a name of another shape the client still
-# asks for the root: a served root keeps the source authoritative (so a wrong
-# declaration can bypass nothing), and only a genuine 404 falls through to the
-# registry. Absence of the field means "serves every name" — today's behaviour
-# verbatim, including the terminal stop.
+# ocx#251: if an index is set for a namespace, only what that index holds is
+# discoverable through it. A name it has no root for is a hard miss, never a
+# silent hand-off to the plain OCI registry — the hand-off is what let a flat
+# `ocx.sh/<tool>` name resolve past the index, and so past its yank gate.
+#
+# The escape hatch is not a second opt-out: `[registries."<ns>"] index = ""`
+# takes the namespace off the index entirely and it resolves as plain OCI.
 # ---------------------------------------------------------------------------
 
 
-def test_flat_name_falls_through_to_the_registry_when_the_index_declares_a_namespace_segment(
+def _assert_refusal_names_the_index(
+    stderr: str, identifier: str, index_base_url: str, namespace: str
+) -> None:
+    """The whole user-visible surface of ocx#251 is this message.
+
+    Someone who hits it has no other diagnosis available: they must learn from
+    this string alone that the name is absent from a specific index, which index
+    that was, and both ways forward.
+    """
+    for expected in (
+        identifier,
+        "is not in the index at",
+        index_base_url,
+        "authoritative for every name in registry",
+        namespace,
+        "ocx package announce",
+        'index = ""',
+    ):
+        assert expected in stderr, (
+            f"the refusal must carry {expected!r} — it is the only diagnosis a "
+            f"user gets:\n{stderr}"
+        )
+
+
+def test_flat_name_absent_from_the_index_is_refused_and_names_the_index(
     ocx: OcxRunner,
     unique_repo: str,
     tmp_path: Path,
     index_server: static_index.StaticIndexServer,
 ) -> None:
-    """The measured bug: with an index configured for the namespace, a flat
-    identifier resolved only when NO index was configured. The index now
-    declares `name_segments: 2`, so the one root request for the flat name
-    404s and the install falls through to the plain-OCI registry.
+    """The inversion. This package IS in the registry and used to install: the
+    index declared it could not express a one-segment name, so its 404 handed
+    the name to plain OCI. It is now a terminal miss, and the message is the
+    deliverable — it must name the index and both ways out.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     assert "/" not in unique_repo, "the fixture repository must be flat for this test"
 
     configure_index_source(ocx, index_server, namespace=ocx.registry)
-    static_index.write_config(index_server.root, name_segments=2)
+    static_index.write_config(index_server.root)
+
+    refused = ocx.plain("package", "install", pkg.fq, check=False)
+    assert refused.returncode == 79, (
+        f"expected NotFound(79), got rc={refused.returncode}\n{refused.stderr}"
+    )
+    _assert_refusal_names_the_index(
+        refused.stderr, pkg.fq, index_server.base_url, ocx.registry
+    )
+    candidate = (
+        Path(ocx.env["OCX_HOME"])
+        / "symlinks"
+        / registry_dir(ocx.registry)
+        / unique_repo
+        / "candidates"
+        / "1.0.0"
+    )
+    assert_not_exists(candidate)
+    assert any(
+        record.path == f"/p/{unique_repo}.json" for record in index_server.requests
+    ), (
+        "the index must have been asked — it owns every name in its registry: "
+        f"{[record.path for record in index_server.requests]}"
+    )
+
+
+def test_namespaced_name_still_fails_closed_when_the_index_has_no_root(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """The terminal stop already held for a namespaced name; what ocx#251 adds
+    is that the refusal now says which index answered instead of a bare
+    not-found. This is the property the yank gate rests on.
+    """
+    namespaced_repo = f"{unique_repo}/tool"
+    pkg = make_package(ocx, namespaced_repo, "1.0.0", tmp_path)
+
+    configure_index_source(ocx, index_server, namespace=ocx.registry)
+    static_index.write_config(index_server.root)
+
+    refused = ocx.plain("package", "install", pkg.fq, check=False)
+    assert refused.returncode == 79, (
+        "a name absent from the index must not resolve through the registry "
+        f"behind the index's back: rc={refused.returncode}\n{refused.stderr}"
+    )
+    _assert_refusal_names_the_index(
+        refused.stderr, pkg.fq, index_server.base_url, ocx.registry
+    )
+    assert any(
+        record.path == f"/p/{namespaced_repo}.json" for record in index_server.requests
+    ), (
+        "the index must have been asked — it is authoritative for this name: "
+        f"{[record.path for record in index_server.requests]}"
+    )
+
+
+def test_taking_the_namespace_off_the_index_restores_plain_oci_resolution(
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+    index_server: static_index.StaticIndexServer,
+) -> None:
+    """The documented escape hatch, and the reason ocx#251 needs no second
+    opt-out flag: `index = ""` is not a kind marker, so the namespace resolves
+    as plain OCI and the very package the test above refuses installs.
+
+    The two tests are deliberately the same fixture — the only difference is the
+    config line, so a green here plus a red there isolates the hatch itself.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
+    assert "/" not in unique_repo, "the fixture repository must be flat for this test"
+
+    configure_index_source(ocx, index_server, namespace=ocx.registry)
+    static_index.write_config(index_server.root)
+    # The kill switch: an empty base URL is not a protocol-kind marker.
+    config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    registry_host = ocx.registry.split(":", 1)[0]
+    config_path.write_text(
+        f'[registries."{ocx.registry}"]\nindex = ""\ntrusted_hosts = ["{registry_host}"]\n'
+    )
 
     ocx.plain("package", "install", pkg.fq)
 
@@ -2189,57 +2294,21 @@ def test_flat_name_falls_through_to_the_registry_when_the_index_declares_a_names
         / "1.0.0"
     )
     assert_symlink_exists(candidate)
-    probes = [
-        record.path
-        for record in index_server.requests
-        if record.path.startswith(f"/p/{unique_repo}")
-    ]
-    assert probes == [f"/p/{unique_repo}.json"], (
-        "a declined name costs exactly one memoized root probe that 404s, and is "
-        f"never dereferenced further: {[record.path for record in index_server.requests]}"
-    )
-
-
-def test_namespaced_name_still_fails_closed_when_the_index_has_no_root(
-    ocx: OcxRunner,
-    unique_repo: str,
-    tmp_path: Path,
-    index_server: static_index.StaticIndexServer,
-) -> None:
-    """Fail-closed survives for every name the index CAN express: a namespaced
-    identifier with no root is a terminal stop, never a fall-through the
-    registry could shadow. This is the property the yank gate rests on.
-    """
-    # Published to the registry under a NAMESPACED repository the index declares
-    # it can hold — but the index has no root for it.
-    namespaced_repo = f"{unique_repo}/tool"
-    pkg = make_package(ocx, namespaced_repo, "1.0.0", tmp_path)
-
-    configure_index_source(ocx, index_server, namespace=ocx.registry)
-    static_index.write_config(index_server.root, name_segments=2)
-
-    refused = ocx.plain("package", "install", pkg.fq, check=False)
-    assert refused.returncode != 0, (
-        "an expressible name absent from the index must not resolve through the "
-        f"registry behind the index's back:\n{refused.stdout}\n{refused.stderr}"
-    )
-    assert any(
-        record.path == f"/p/{namespaced_repo}.json" for record in index_server.requests
-    ), (
-        "the index must have been asked — it is authoritative for this name: "
+    assert index_server.requests == [], (
+        "a namespace taken off the index must never dial it: "
         f"{[record.path for record in index_server.requests]}"
     )
 
 
-def test_yank_gate_holds_for_an_index_that_declares_no_grammar(
+def test_flat_name_the_index_does_hold_resolves_and_keeps_its_yank_gate(
     ocx: OcxRunner,
     unique_repo: str,
     tmp_path: Path,
     index_server: static_index.StaticIndexServer,
 ) -> None:
-    """A private index that declares no `name_segments` keeps full authority
-    over every name in its namespace — including a FLAT one — so its yank
-    refusal is never bypassed by the plain-OCI catch-all.
+    """The other half of "authoritative for the whole registry": a flat name is
+    not refused for its shape. An index that holds a root for it owns it — and
+    its yank refusal is never bypassed by the plain-OCI catch-all.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
     assert "/" not in unique_repo, "the fixture repository must be flat for this test"
@@ -2247,7 +2316,7 @@ def test_yank_gate_holds_for_an_index_that_declares_no_grammar(
     os_name, arch_name = pkg.platform.split("/")
 
     configure_index_source(ocx, index_server, namespace=ocx.registry)
-    static_index.write_config(index_server.root)  # no name_segments declared
+    static_index.write_config(index_server.root)
     static_index.write_package(
         index_server.root,
         repository=unique_repo,
@@ -2264,6 +2333,10 @@ def test_yank_gate_holds_for_an_index_that_declares_no_grammar(
         f"expected DataError(65), got rc={refused.returncode}\n{refused.stderr}"
     )
     assert "yanked" in refused.stderr
+    assert "is not in the index at" not in refused.stderr, (
+        "a root the index DOES hold must produce the yank refusal, not a miss: "
+        f"{refused.stderr}"
+    )
     candidate = (
         Path(ocx.env["OCX_HOME"])
         / "symlinks"
@@ -2275,36 +2348,38 @@ def test_yank_gate_holds_for_an_index_that_declares_no_grammar(
     assert_not_exists(candidate)
 
 
-def test_index_update_reroutes_a_flat_name_to_the_registry(
+def test_index_update_of_a_name_the_index_does_not_hold_fails_loudly(
     ocx: OcxRunner,
     unique_repo: str,
     tmp_path: Path,
     index_server: static_index.StaticIndexServer,
 ) -> None:
-    """`ocx index update` on a declined name refreshes against the registry
-    instead of dying in the index source's derived-refresh path.
+    """`ocx index update` used to reroute a declined name to the registry and
+    write a registry-derived root. With the decline gone it asks the index that
+    owns the namespace, gets a miss, and fails — no root is written, so a later
+    resolve cannot read a locally-derived answer the index never gave.
     """
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
     assert "/" not in unique_repo, "the fixture repository must be flat for this test"
 
     configure_index_source(ocx, index_server, namespace=ocx.registry)
-    static_index.write_config(index_server.root, name_segments=2)
+    static_index.write_config(index_server.root)
 
     index_dir = tmp_path / "index_dir"
     index_dir.mkdir()
-    ocx.plain("--index", str(index_dir), "index", "update", pkg.fq)
-
-    assert _root_document_path(
-        index_dir, unique_repo, namespace=registry_dir(ocx.registry)
-    ).is_file(), (
-        "the registry-derived root must be written for a name the index declined"
+    refreshed = ocx.plain(
+        "--index", str(index_dir), "index", "update", pkg.fq, check=False
     )
-    probes = [
-        record.path
-        for record in index_server.requests
-        if record.path.startswith(f"/p/{unique_repo}")
-    ]
-    assert probes == [f"/p/{unique_repo}.json"], (
-        "the declined name costs the one jurisdiction probe and is never refreshed "
-        f"from the index: {[record.path for record in index_server.requests]}"
+    assert refreshed.returncode != 0, (
+        "refreshing a name the authoritative index does not hold must not "
+        f"silently derive one from the registry:\n{refreshed.stderr}"
+    )
+    assert not _root_document_path(
+        index_dir, unique_repo, namespace=registry_dir(ocx.registry)
+    ).exists(), "no registry-derived root may be written behind the index's back"
+    assert any(
+        record.path == f"/p/{unique_repo}.json" for record in index_server.requests
+    ), (
+        "the index owning the namespace must have been asked: "
+        f"{[record.path for record in index_server.requests]}"
     )

@@ -193,6 +193,28 @@ pub enum Error {
     #[error("'{identifier}' is yanked; resolve it by digest or set OCX_ALLOW_YANKED=1 to override")]
     YankedRefused { identifier: String },
 
+    /// A resolve reached the index configured for the identifier's registry and
+    /// that index holds no entry for it. Terminal by construction (ocx#251): a
+    /// configured index is authoritative for its whole registry, so its miss is
+    /// never handed off to the plain OCI registry underneath — the hand-off is
+    /// what let a name resolve past the index and past its yank gate.
+    ///
+    /// Distinct from every failure arm around it. Reaching this variant means
+    /// the index answered and answered "no": an unreachable, malformed or
+    /// version-unsupported index raises its own error from
+    /// [`OcxIndex::resolve_root`](super::OcxIndex) before a miss can be
+    /// observed, so an outage can never present as an absent package.
+    #[error(
+        "'{identifier}' is not in the index at {base_url}, which is authoritative for every name in \
+         registry '{namespace}'; announce it there with `ocx package announce`, or take the namespace \
+         off the index with `[registries.\"{namespace}\"] index = \"\"`"
+    )]
+    NotInIndex {
+        identifier: String,
+        namespace: String,
+        base_url: String,
+    },
+
     /// A root's `repository` pointer was not a well-formed physical reference.
     /// The index-side `oci://` scheme is a strict wire contract
     /// (`adr_index_indirection.md` C3): a missing or unknown scheme is a hard
@@ -345,7 +367,11 @@ impl ClassifyExitCode for Error {
             // Both mean "nothing here to install" to a wrapper: no tags at all,
             // or no tag that could carry a version. An exit code is a coarse
             // contract — the message is what disambiguates the two.
-            Self::RemoteManifestNotFound(_) | Self::NoIndexableTag(_) => ExitCode::NotFound,
+            // Same verdict, same code: the package is not installable. Keeping
+            // 79 here means the `case $?` contract is untouched by ocx#251 —
+            // what changed is the message, which now names the index that was
+            // consulted instead of leaving a bare "not found".
+            Self::RemoteManifestNotFound(_) | Self::NoIndexableTag(_) | Self::NotInIndex { .. } => ExitCode::NotFound,
             Self::NestedImageIndex { .. } => ExitCode::DataError,
             // Delegate to the full chain walker on the wrapped typed error,
             // not just a single-hop `classify()` on the inner `Error`. Mirrors

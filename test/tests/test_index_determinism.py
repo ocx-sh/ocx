@@ -196,35 +196,6 @@ def test_updating_one_package_leaves_every_other_root_untouched(
     )
 
 
-def test_a_flat_name_the_index_cannot_express_refreshes_via_the_registry(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path, index_server: static_index.StaticIndexServer
-):
-    """An index declaring `name_segments: 2` 404s a flat name's root, which is
-    exactly how the client reads the declaration. The refresh must ask which
-    source answers for the package rather than assuming the configured index
-    does, or it hands the package to the one source guaranteed to fail it.
-
-    The index is attached to the TEST registry's own namespace here, so the
-    fallback has a real registry to reach — the shape a fleet has, an index in
-    front of a registry that also serves the flat names directly.
-    """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
-    namespace = ocx.registry
-    Path(ocx.env["OCX_HOME"], "config.toml").write_text(
-        f'[registries."{namespace}"]\nindex = "{index_server.base_url}"\n'
-        f'trusted_hosts = ["{namespace.split(":", 1)[0]}"]\n'
-    )
-    ocx.env["OCX_INSECURE_REGISTRIES"] = f"{ocx.registry},{index_server.host}"
-    static_index.write_config(index_server.root, name_segments=2)
-
-    result = ocx.plain("index", "update", pkg.repo, check=False)
-    assert result.returncode == 0, (
-        f"a flat name the index declines must refresh via the registry, got {result.returncode}: {result.stderr}"
-    )
-    root = ocx.ocx_home / "index" / registry_dir(namespace) / "p" / f"{pkg.repo}.json"
-    assert root.is_file(), "the registry fallback must have written a derived root"
-
-
 def test_index_update_requires_a_package(ocx: OcxRunner):
     """There is no whole-index sync, so a bare invocation has nothing to mean —
     a usage error (64), never a silent guess at "everything"."""
