@@ -476,6 +476,11 @@ mod tests {
     fn index_root_tolerates_unknown_fields_for_fleet_forward_compat() {
         // No `deny_unknown_fields` — a newer index server may add fields an
         // older client must still parse (fleet forward-compat, `arch-principles.md`).
+        //
+        // `owners` below is the wrong shape — a real entry is an object
+        // (`login`/`id`, plus the derived pre-0.5.0 `github`/`github_id`).
+        // `IndexRoot` models no `owners` field at all, so nothing here parses
+        // it, which is precisely the tolerance under test.
         let json = r#"{
             "repository": "oci://ghcr.io/kitware/cmake",
             "tags": {},
