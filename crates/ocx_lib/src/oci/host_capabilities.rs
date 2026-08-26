@@ -1897,8 +1897,6 @@ mod tests {
         tokio::fs::write(path, contents).await.expect("write fake loader");
     }
 
-    /// A written record reads back with the same libc set.
-    #[cfg(target_os = "linux")]
     /// The record lands where this module's header documents it.
     ///
     /// The path belongs to `StateStore` — it is the state root's layout — but
@@ -1918,6 +1916,12 @@ mod tests {
         );
     }
 
+    /// A written record reads back with the same libc set.
+    ///
+    /// Linux-only like every helper it calls: `record_for`, `write_fake_loader`,
+    /// `write_record` and `read_record` are all `cfg(target_os = "linux")`,
+    /// because the record only exists where libc detection does.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn record_round_trips_through_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
