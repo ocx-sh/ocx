@@ -286,14 +286,13 @@ DELTA_BUDGET_MS = 2.0
 #: feature stays an order of magnitude ahead of the status quo at the amended
 #: number. Optimising the reconcile back under 2 ms is a separate hat and stays open.
 #:
-#: **What the move costs, recorded because it is a real weakening.** The 3 ms fault
-#: injection no longer exceeds this budget on its own (3.0 is not > 3.0), so the
-#: red now leans on the ~2 ms the reconcile genuinely costs rather than standing
-#: without it — `test/taskfile.yml` states that sizing rule and is corrected there.
-#: The red survives on every sample: 13 injected runs measured Δ 4.689-5.657 ms,
-#: all red, worst margin/scatter headroom **1.33x**. Raising the injection to 4 ms
-#: would restore the property for both gates at once; it is not taken here because
-#: the budget was the sanctioned change and the injection is a separate knob.
+#: **The fault injection was resized with it.** At 3 ms against this 3 ms budget the
+#: injected red rested on the ~2 ms of real work underneath — a detection that would
+#: have gone green on a faster machine — so `test/taskfile.yml` injects **4 ms**,
+#: which exceeds both budgets on its own and reds at any baseline including zero.
+#: `main` enforces that relationship against the live environment and this run's own
+#: gates rather than a copy of either, so the next budget move cannot quietly
+#: reproduce the 3-vs-3 collision.
 #:
 #: The amendment was wrong about its own cause. The ~16 ms it was fitted to was
 #: not the reconciler: it was `HostCapabilities::detect_and_cache` walking the
@@ -2254,6 +2253,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 1
         if args.expect_fail_gate:
+            # The demanded red must not depend on the thing being measured. An
+            # injection no larger than the budget it is aimed at reds only because
+            # the measured work sits underneath it — so the same fault goes green
+            # on a faster machine, and the step certifies a detection it never
+            # made. This is read off THIS run's own gates and the live environment,
+            # never a copy of either, so a budget that moves cannot leave the check
+            # behind: that is exactly how it was lost when the reconcile budget
+            # went 2 -> 3 ms and met the 3 ms injection.
+            inject = artifact["injected_delay_ms"]
+            weak = [
+                f"{gate.name!r} (budget {gate.budget:.3f} ms)"
+                for gate in report.gates
+                if gate.unit == "ms"
+                and any(needle in gate.name for needle in args.expect_fail_gate)
+                and inject <= gate.budget
+            ]
+            if weak:
+                print(
+                    f"\n::error::--expect-fail-gate: {INJECT_ENV}={inject} does not exceed the budget of "
+                    f"{', '.join(weak)} on its own, so that gate's red rests on the cost it is measuring "
+                    "and would go green on a faster machine. Raise the injection above every budget it is "
+                    "pointed at",
+                    file=sys.stderr,
+                )
+                return 1
             unmatched = unmatched_gate_needles(args.expect_fail_gate, report.gates)
             if unmatched:
                 reds = [gate.name for gate in report.gates if not gate.passed]
