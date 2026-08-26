@@ -5,6 +5,7 @@
 
 pub mod compose;
 pub mod config;
+pub mod consent;
 mod document;
 pub mod env;
 pub mod error;

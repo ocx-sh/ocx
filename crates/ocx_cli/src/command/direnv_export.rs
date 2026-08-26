@@ -21,9 +21,9 @@ use crate::options;
 /// Reads the nearest project `ocx.toml` (project tier only — no home-tier
 /// fallback in this phase), loads the matching `ocx.lock`, looks up each
 /// selected tool in the local object store, and prints bash export
-/// lines for the resolved environment. The command is stateless: it does
-/// not consult or update `_OCX_APPLIED`, making it suitable for use from
-/// `direnv`'s `.envrc` via `eval "$(ocx direnv export)"`.
+/// lines for the resolved environment. The command is stateless, which is
+/// what makes it usable from `direnv`'s `.envrc` via
+/// `eval "$(ocx direnv export)"`.
 ///
 /// `ocx direnv init` writes an `.envrc` that calls this command with no
 /// arguments, which selects the default group. Edit that line to widen the

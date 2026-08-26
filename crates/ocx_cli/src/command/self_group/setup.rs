@@ -8,7 +8,9 @@ use std::str::FromStr;
 use clap::Parser;
 use ocx_lib::cli::ExitCode as OcxExitCode;
 use ocx_lib::env;
+use ocx_lib::setup::shell_config::{self, ShellFlag};
 use ocx_lib::setup::{self, SetupOptions, SetupOutcome, VersionSpec};
+use ocx_lib::{ConfigTier, ShellConfig};
 
 // The `--managed-config` precedence seam (`resolve_managed_config_arg`) is
 // shared with `ocx config setup` and lives in `command/config_setup.rs`.
@@ -33,6 +35,14 @@ use crate::command::config_setup::resolve_managed_config_arg;
 /// `OCX_NO_MODIFY_PATH` to a truthy value) to write the shims without touching
 /// any profile (the opt-out is not remembered, so repeat it each run).
 ///
+/// Pass `--hook` / `--no-hook` or `--completion` / `--no-completion` to record
+/// that preference as `[shell] hook` / `[shell] completions` in
+/// `$OCX_HOME/config.toml`. The edit sets exactly that one key and leaves the
+/// rest of the file — comments included — untouched; it is not a managed
+/// block, so it is never reported dirty. Omit a pair to leave the file alone.
+/// A tier above `$OCX_HOME` (a managed config, or `--config` / `OCX_CONFIG`)
+/// still wins, and setup says so.
+///
 /// On Windows, a `Restricted` execution policy makes the profile block inert;
 /// setup prints how to relax it but never changes the policy itself.
 ///
@@ -49,7 +59,7 @@ use crate::command::config_setup::resolve_managed_config_arg;
 /// | bad VERSION syntax | 64 |
 /// | tag@digest mismatch (immutability assertion failed) | 65 |
 /// | registry unreachable | 69 |
-/// | writing env shims or profile failed | 74 |
+/// | writing env shims, a profile, or the `[shell]` toggle failed | 74 |
 /// | invalid `--managed-config` seed or source | 78 |
 /// | package not found in registry | 79 |
 /// | authentication failed while fetching the managed-config snapshot | 80 |
@@ -63,6 +73,26 @@ use crate::command::config_setup::resolve_managed_config_arg;
 /// exit 0; a failure writing the refreshed snapshot to disk still errors (74).
 #[derive(Parser)]
 pub struct SelfSetup {
+    /// Turn the per-prompt shell hook on: writes `[shell] hook = true`.
+    ///
+    /// Omit both this and `--no-hook` to leave `config.toml` untouched.
+    #[arg(long = "hook", overrides_with = "no_hook")]
+    hook: bool,
+
+    /// Turn the per-prompt shell hook off: writes `[shell] hook = false`.
+    #[arg(long = "no-hook", overrides_with = "hook")]
+    no_hook: bool,
+
+    /// Turn shell completions on: writes `[shell] completions = true`.
+    ///
+    /// Omit both this and `--no-completion` to leave `config.toml` untouched.
+    #[arg(long = "completion", overrides_with = "no_completion")]
+    completion: bool,
+
+    /// Turn shell completions off: writes `[shell] completions = false`.
+    #[arg(long = "no-completion", overrides_with = "completion")]
+    no_completion: bool,
+
     /// Version to install: tag, `sha256:<hex>`, or `tag@sha256:<hex>`.
     ///
     /// Omit to install the latest published release. A tag installs that exact
@@ -123,6 +153,12 @@ pub struct SelfSetup {
 
 impl SelfSetup {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        // Before the bootstrap, not after: the `[shell]` write is a local,
+        // deterministic edit that does not depend on the install succeeding,
+        // and running it first means a registry failure cannot silently drop
+        // the toggle the user asked for.
+        self.apply_shell_flags(&context)?;
+
         let managed_config = resolve_managed_config_arg(
             self.managed_config.as_deref(),
             context.config(),
@@ -150,6 +186,97 @@ impl SelfSetup {
         context.api().report(&SelfSetupData::from_outcome(&outcome))?;
         Ok(exit)
     }
+
+    /// Write the `[shell]` toggles this invocation asked for into the home tier
+    /// (C-040), and say which tier will still decide when a higher one already
+    /// sets the key (C-034).
+    ///
+    /// The target is `$OCX_HOME/config.toml` — `--config` / `OCX_CONFIG` name a
+    /// **read** override and never redirect this write. The write is not
+    /// fenced, so a failure is 74 `IoError`, never 82 `DirtyRcBlock`.
+    fn apply_shell_flags(&self, context: &crate::app::Context) -> anyhow::Result<()> {
+        let writes = shell_writes(self);
+        if writes.is_empty() {
+            return Ok(());
+        }
+        let config_path = context.file_structure().root().join("config.toml");
+
+        for (flag, value) in writes {
+            if self.dry_run {
+                context.ui().status(
+                    "Setup",
+                    format!(
+                        "would set [shell] {key} = {value} in {path}",
+                        key = flag.key(),
+                        path = config_path.display()
+                    ),
+                );
+            } else {
+                shell_config::set_flag(&config_path, flag, value)?;
+            }
+
+            // Above the dry-run guard on purpose: which tier decides is a
+            // property of the setting, not of the byte-write, and `--dry-run`
+            // is the mode a user runs specifically to find out whether the
+            // toggle will take effect. The context's config was merged before
+            // this write, so it still names whichever tier set the key going
+            // in — exactly the tier that keeps deciding once the home tier
+            // says otherwise.
+            if let Some(tier) = overriding_tier(context.config().shell.as_ref(), flag) {
+                context.ui().warn(format!(
+                    "[shell] {key} is also set by {tier}, which wins over {path} - the value {written} will not take effect",
+                    key = flag.key(),
+                    path = config_path.display(),
+                    written = if self.dry_run { "this would write" } else { "just written" },
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The `[shell]` writes this invocation asked for, in `hook`-then-`completions`
+/// order (C-040).
+///
+/// **A pair with neither flag contributes nothing** — that is what makes
+/// `ocx self setup` with no new flag leave `config.toml` byte-identical.
+fn shell_writes(setup: &SelfSetup) -> Vec<(ShellFlag, bool)> {
+    [
+        (ShellFlag::Hook, requested(setup.hook, setup.no_hook)),
+        (ShellFlag::Completions, requested(setup.completion, setup.no_completion)),
+    ]
+    .into_iter()
+    .filter_map(|(flag, value)| Some((flag, value?)))
+    .collect()
+}
+
+/// Collapse one `--X` / `--no-X` pair into the value it requests, or `None`
+/// when neither flag was given.
+///
+/// `overrides_with` already makes clap last-wins, so both-set is unreachable
+/// from a command line; the off-wins tie-break is pinned anyway because the
+/// struct is constructible, and it matches `options::Hook`'s.
+fn requested(on: bool, off: bool) -> Option<bool> {
+    match (on, off) {
+        (_, true) => Some(false),
+        (true, false) => Some(true),
+        (false, false) => None,
+    }
+}
+
+/// The tier that will still decide `flag` after the home-tier write lands, or
+/// `None` when the write itself decides (C-034 / A-32).
+fn overriding_tier(shell: Option<&ShellConfig>, flag: ShellFlag) -> Option<ConfigTier> {
+    let shell = shell?;
+    let tier = match flag {
+        ShellFlag::Hook => shell.hook_tier,
+        ShellFlag::Completions => shell.completions_tier,
+    }?;
+    // `ConfigTier` is ordered System < User < Home < Managed < Explicit, which
+    // is also the fold order, so "still decides after a home-tier write" is
+    // exactly "ranks above Home". The tier is reported by name (A-32) rather
+    // than assumed to be the managed one.
+    (tier > ConfigTier::Home).then_some(tier)
 }
 
 /// Print the non-fatal advisories to stderr: the Windows exec-policy hint, a
@@ -193,9 +320,212 @@ fn exit_code_for(outcome: &SetupOutcome, force: bool, dry_run: bool) -> ExitCode
 mod tests {
     use std::path::PathBuf;
 
+    use clap::Parser as _;
     use ocx_lib::setup::{BootstrapOutcome, BootstrapStatus, ManagedConfigSetupOutcome, ProfileOutcome, SetupOutcome};
 
-    use super::exit_code_for;
+    use super::*;
+
+    fn parse(args: &[&str]) -> SelfSetup {
+        SelfSetup::try_parse_from(std::iter::once("setup").chain(args.iter().copied())).expect("valid grammar")
+    }
+
+    fn stamped(flag: ShellFlag, tier: ConfigTier) -> ShellConfig {
+        let mut shell = ShellConfig::default();
+        match flag {
+            ShellFlag::Hook => {
+                shell.hook = Some(true);
+                shell.hook_tier = Some(tier);
+            }
+            ShellFlag::Completions => {
+                shell.completions = Some(true);
+                shell.completions_tier = Some(tier);
+            }
+        }
+        shell
+    }
+
+    /// C-040 / S-016 — the load-bearing negative: `ocx self setup` with neither
+    /// flag of a pair requests no write at all, so `config.toml` is left
+    /// byte-identical.
+    #[test]
+    fn neither_flag_requests_no_write() {
+        assert!(shell_writes(&parse(&[])).is_empty());
+        assert!(
+            shell_writes(&parse(&["1.2.3", "--dry-run"])).is_empty(),
+            "an unrelated flag or the positional must not conjure a [shell] write"
+        );
+    }
+
+    /// C-040: each pair writes its own key, in both directions.
+    #[test]
+    fn each_pair_writes_its_own_key_in_both_directions() {
+        for (args, expected) in [
+            (vec!["--hook"], vec![(ShellFlag::Hook, true)]),
+            (vec!["--no-hook"], vec![(ShellFlag::Hook, false)]),
+            (vec!["--completion"], vec![(ShellFlag::Completions, true)]),
+            (vec!["--no-completion"], vec![(ShellFlag::Completions, false)]),
+            (
+                vec!["--no-hook", "--completion"],
+                vec![(ShellFlag::Hook, false), (ShellFlag::Completions, true)],
+            ),
+        ] {
+            assert_eq!(shell_writes(&parse(&args)), expected, "for {args:?}");
+        }
+    }
+
+    /// C-040: the pairs are POSIX last-wins, so passing both is not an error —
+    /// `overrides_with` clears the loser, and the survivor decides.
+    #[test]
+    fn a_repeated_pair_is_last_wins_not_an_error() {
+        assert_eq!(
+            shell_writes(&parse(&["--hook", "--no-hook"])),
+            vec![(ShellFlag::Hook, false)]
+        );
+        assert_eq!(
+            shell_writes(&parse(&["--no-hook", "--hook"])),
+            vec![(ShellFlag::Hook, true)]
+        );
+        assert_eq!(
+            shell_writes(&parse(&["--completion", "--no-completion"])),
+            vec![(ShellFlag::Completions, false)]
+        );
+        assert_eq!(
+            shell_writes(&parse(&["--no-completion", "--completion"])),
+            vec![(ShellFlag::Completions, true)]
+        );
+    }
+
+    /// C-040: the flags sit before the positional and are booleans, so VERSION
+    /// is never swallowed by one of them.
+    #[test]
+    fn the_positional_survives_a_preceding_flag() {
+        let parsed = parse(&["--hook", "1.2.3"]);
+        assert_eq!(
+            parsed.version.as_ref().map(ToString::to_string),
+            Some("1.2.3".to_owned())
+        );
+        assert_eq!(shell_writes(&parsed), vec![(ShellFlag::Hook, true)]);
+    }
+
+    /// C-034 / S-016(b): a tier above home still decides after the write, and
+    /// it is named by the tier that actually set the key — never a hard-coded
+    /// "managed".
+    #[test]
+    fn a_higher_tier_is_reported_by_name() {
+        for tier in [ConfigTier::Managed, ConfigTier::Explicit] {
+            assert_eq!(
+                overriding_tier(Some(&stamped(ShellFlag::Hook, tier)), ShellFlag::Hook),
+                Some(tier)
+            );
+            assert_eq!(
+                overriding_tier(Some(&stamped(ShellFlag::Completions, tier)), ShellFlag::Completions),
+                Some(tier)
+            );
+        }
+    }
+
+    /// C-034: a tier at or below home loses to the home-tier write, so there is
+    /// nothing to report — and neither does a key no tier set.
+    #[test]
+    fn home_and_below_are_not_reported() {
+        for tier in [ConfigTier::System, ConfigTier::User, ConfigTier::Home] {
+            assert_eq!(
+                overriding_tier(Some(&stamped(ShellFlag::Hook, tier)), ShellFlag::Hook),
+                None
+            );
+        }
+        assert_eq!(overriding_tier(None, ShellFlag::Hook), None);
+        assert_eq!(
+            overriding_tier(Some(&ShellConfig::default()), ShellFlag::Hook),
+            None,
+            "an unset key has no deciding tier"
+        );
+    }
+
+    /// C-040 drift guard: the four long flags `self setup` declares are the
+    /// same four `options::Hook` / `options::Completion` declare.
+    ///
+    /// `self setup` re-declares them instead of flattening the shared types,
+    /// because it only **records** a preference and never resolves the ladder —
+    /// `Hook::enabled` wants an interactivity signal and a `configured` value
+    /// this command has neither of. The cost of that is a second declaration
+    /// that can drift, so both sides are read back out of clap rather than
+    /// spelled out here: rename a flag on either side, or add a fifth to the
+    /// shared types, and this reds.
+    #[test]
+    fn the_shell_toggles_declare_the_shared_flag_names() {
+        use std::collections::BTreeSet;
+
+        use clap::{Args as _, Command, CommandFactory as _};
+
+        fn long_flags(command: &Command) -> BTreeSet<&str> {
+            command.get_arguments().filter_map(clap::Arg::get_long).collect()
+        }
+
+        let shared =
+            crate::options::Completion::augment_args(crate::options::hook::Hook::augment_args(Command::new("shared")));
+        let ours = SelfSetup::command();
+
+        let shared_flags = long_flags(&shared);
+        assert_eq!(shared_flags.len(), 4, "the shared types declare two pairs");
+        assert!(
+            shared_flags.is_subset(&long_flags(&ours)),
+            "`self setup` must declare every `[shell]` toggle the shared option types do; \
+             shared = {shared_flags:?}"
+        );
+    }
+
+    /// C-040 drift guard, second half: `requested`'s tie-break is a hand copy
+    /// of the one `options::Hook` uses for rungs 1 and 2, so it is compared
+    /// against the original rather than trusted to have stayed equal.
+    #[test]
+    fn the_flag_tie_break_matches_the_shared_ladder() {
+        use clap::Parser as _;
+
+        use crate::options::hook::Rung;
+
+        #[derive(clap::Parser)]
+        struct Shared {
+            #[clap(flatten)]
+            hook: crate::options::hook::Hook,
+        }
+
+        for args in [
+            vec![],
+            vec!["--hook"],
+            vec!["--no-hook"],
+            vec!["--hook", "--no-hook"],
+            vec!["--no-hook", "--hook"],
+        ] {
+            let shared = Shared::try_parse_from(std::iter::once("x").chain(args.iter().copied()))
+                .expect("valid grammar")
+                .hook;
+            // Rungs 1 and 2 are the flag rungs; anything below them means the
+            // flag was absent. `configured: None` keeps rung 4 out of the way.
+            let shared_flag = match shared.rung(false, None) {
+                Rung::FlagOff => Some(false),
+                Rung::FlagOn => Some(true),
+                _ => None,
+            };
+            assert_eq!(
+                shell_writes(&parse(&args)).first().map(|(_, value)| *value),
+                shared_flag,
+                "for {args:?}"
+            );
+        }
+    }
+
+    /// C-034: the provenance is per key — a managed `hook` says nothing about
+    /// who decides `completions`.
+    #[test]
+    fn the_report_is_per_key() {
+        let shell = stamped(ShellFlag::Hook, ConfigTier::Managed);
+        assert_eq!(
+            overriding_tier(Some(&shell), ShellFlag::Hook),
+            Some(ConfigTier::Managed)
+        );
+        assert_eq!(overriding_tier(Some(&shell), ShellFlag::Completions), None);
+    }
 
     // The `resolve_managed_config_arg` precedence tests live with the shared
     // seam in `command/config_setup.rs`.

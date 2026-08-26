@@ -8,6 +8,86 @@ threshold versus the committed baseline.
 Not part of the pytest acceptance suite — the harness is standalone script-driven.
 See [Smoke validation](#smoke-validation) for the lightweight pytest integration.
 
+## Second, unrelated gate: `shell_latency.py` {#shell-latency}
+
+`bench/shell_latency.py` shares this directory and nothing else — no Docker, no
+toxiproxy, no hyperfine, no baseline file. It is the NFR gate for the per-prompt
+environment reconciler (C-044): the no-op prompt path must cost **zero execs**, and
+shell startup must land within `exec_floor + 2 ms` with the floor measured in the same
+run. Entry point:
+
+```bash
+task test:shell-latency
+```
+
+That one command runs two things in order — the pure evaluator's self-check, then the
+live gate with fault injection folded into the same invocation
+(`__OCX_TESTING_LATENCY_INJECT_MS=3.0`, run under `--expect-fail
+--expect-fail-gate 'shell startup <=' --expect-fail-gate 'per-prompt reconcile'`). Both
+named gates must go red for the step to pass, so a green from an unrelated gate cannot
+stand in for either budget's own red state. 3 ms is an **edge** value, not a
+sledgehammer: it exceeds the 2 ms budget on its own, so the red does not depend on
+whatever the baseline happened to measure, but it does not overshoot it either — at 3 ms
+the observed deltas are 3.795 ms (startup) and 4.364 ms (reconcile), so the same run
+would *not* red a 4.5 ms budget. It is testing the number, not just the presence of an
+assert. Results land in `bench/results/shell-latency*.json` and are uploaded as a CI
+artifact.
+
+**The injected delay is consumed inside the binary, at two separate seams** — one per
+asserted budget. `ocx_lib::shell::hook::registration`, reached only by a hook emission,
+carries the startup delay; `ocx_lib::shell::hook::checkpoint`, reached only by
+`--reconcile`, carries the reconcile delay. Both are gated on the `__testing` feature and
+neither is slept off in the harness. The split is what lets one run red both gates: each
+measured command is a separate process with its own copy of the environment variable, so
+the startup process pays at registration and the reconcile process pays at checkpoint,
+while the floor — which never receives the variable — pays at neither. A gate aimed at a
+command that emits neither seam records no delay, and `--expect-fail` fails instead of
+certifying a measurement of the wrong thing. It also means the gate must run against a
+binary built with `--features ocx/__testing`; `task test:shell-latency` builds one.
+
+**Every measured command is copied from its shipped call site or derived at run time.**
+The startup command is the POSIX env shim's own invocation (`setup/shims.rs`) plus the
+`--hook` an interactive shell resolves to; the reconcile command is parsed out of the
+hook body the binary just emitted, so the bench cannot disagree with the hook about what
+a prompt runs. Both are structurally checked before anything is timed — the startup
+command's stdout must carry the prompt hook and the floor's must not — and a mismatch
+raises rather than reporting a number, so `--expect-fail` cannot absorb it.
+
+The per-prompt no-op `--reconcile` delta is a **hard gate**, asserted against the
+restored 2 ms budget C-044 has always named. A brief amendment loosened it to 25 ms
+against an observed ~16-22 ms, but that cost was never the reconciler — it was
+`HostCapabilities::detect_and_cache` walking the loader directories on every process,
+~7,800 per-entry `tokio::fs::file_type().await` hops whose answer changes no byte of the
+emitted stream. Moving that walk to one `spawn_blocking` over `std::fs`, deduping the
+scan roots, and persisting the answer at `$OCX_HOME/state/host/capabilities.json` (1-hour
+TTL) brought the reconcile delta down to ~1.0–1.3 ms, inside the original 2 ms budget —
+so the budget stands as written and the gate is an assert, not a `::warning`.
+
+The gate measures the **warm** record path — a real prompt reads the persisted
+capability record within its TTL hour — and separately records a **cold** delta (record
+deleted before the spawn) at Δ 3.150 ms, over budget. Warm-only is safe specifically
+*because* cold is over budget: a regression that stopped the record persisting would make
+every prompt cold, and that cannot hide behind a warm-only gate — it reds it. The cold
+number is recorded, not asserted, since nothing about it is meant to pass; it exists so
+the once-per-hour cost is trend-checkable rather than invisible.
+
+One number is recorded but deliberately not asserted: `eval.ms_per_apply`, the **shell's
+own** cost of applying the reconcile stream's `PATH` string surgery, timed in a real bash
+session over `EVAL_ITERATIONS` applies. Every other number here times ocx's own process;
+this one times work the shell does with ocx's output, which no spawn measurement can see.
+It scales with both stream size and `PATH` length — measured at ~0.222 ms at a 7-segment
+`PATH`, ~0.28 ms at 46 segments, ~0.363 ms at 120 segments — which is why it is recorded
+next to `stream_bytes` and `path_segments` rather than compared against a fixed budget.
+
+The reconciler now reaches a fixed point (ocx-sh/ocx#342): a steady-state prompt, with
+nothing changed, emits **no** apply lines at all. The harness captures two streams from
+one shell session to make that assertable rather than assumed — the first fire, which
+must apply the project's path entries, and the steady-state fire right after it, which
+must apply none. Gating only the second would pass vacuously for an arena that never
+composed anything in the first place; requiring the first fire to apply is what makes
+"converged" and "inert" distinguishable. `eval.ms_per_apply` is timed over the *applying*
+(first) stream, since the steady one has no surgery left to time.
+
 ## Prerequisites {#prerequisites}
 
 - **Docker** — registry:2 and toxiproxy run as compose services

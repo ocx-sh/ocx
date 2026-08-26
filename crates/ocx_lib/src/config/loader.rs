@@ -91,6 +91,16 @@ pub struct LoadedConfig {
     /// [`PayloadUnusable`](crate::config::managed::ManagedSnapshotState::PayloadUnusable):
     /// it is on disk, and none of it is in `merged`.
     pub managed_snapshot_state: crate::config::managed::ManagedSnapshotState,
+
+    /// Every `config.toml` path this pass could have read, in fold order and
+    /// **including ones that do not exist** (A-13).
+    ///
+    /// A consent grant can be added to any of them, so the per-prompt watch set
+    /// stats this recorded list — presence, mtime and size — instead of
+    /// re-deriving it or, worse, re-parsing config every prompt. A tier file
+    /// that did not exist becoming present is a change, which is why absent
+    /// candidates are recorded too.
+    pub config_tier_paths: Vec<PathBuf>,
 }
 
 /// Configuration loader. Stateless namespace for the discovery and loading
@@ -181,6 +191,19 @@ impl ConfigLoader {
             Self::fold_managed_tier(base.clone(), &local_only).await?;
         merged.merge(overlay.clone());
 
+        // A-13: the candidate list, not the surviving one — `discover_paths`
+        // filtered out every tier file that does not exist, and a grant added
+        // to one of those is exactly the change the watch set must notice.
+        let mut config_tier_paths: Vec<PathBuf> = if no_config {
+            Vec::new()
+        } else {
+            [Some(Self::system_path()), Self::user_path(), Self::home_path()]
+                .into_iter()
+                .flatten()
+                .collect()
+        };
+        config_tier_paths.extend(explicit_paths);
+
         Ok(LoadedConfig {
             merged,
             local_only,
@@ -189,6 +212,7 @@ impl ConfigLoader {
             managed_config_snapshot,
             resolved_managed_config,
             managed_snapshot_state,
+            config_tier_paths,
         })
     }
 
@@ -366,13 +390,15 @@ impl ConfigLoader {
             ));
         }
 
-        let mut parsed: Config = match toml::from_str(&snapshot.config) {
+        let mut parsed: Config = match Self::parse_config_stripping_refused_consent(&snapshot.config, &resolved.source)
+        {
             Ok(parsed) => parsed,
             Err(source) => {
                 // NOT the benign-absent case: a snapshot for THIS source is on
                 // disk and none of it can be applied. Every unknown section and
-                // key is tolerated (see `Config`), so reaching here means the
-                // payload is genuinely broken — worth a WARN even when
+                // key is tolerated (see `Config`), and a refused `[shell.consent]`
+                // table is dropped on its own by the call above, so reaching here
+                // means the payload is genuinely broken — worth a WARN even when
                 // `required = false`, where nothing else would report it.
                 log::warn!(
                     "managed-config snapshot for '{}' is not a usable config and was not applied; re-sync with \
@@ -398,6 +424,8 @@ impl ConfigLoader {
         }
 
         Self::guard_managed_sigstore_trust(&mut parsed, &resolved.source);
+        Self::guard_managed_shell_consent(&mut parsed, &resolved.source);
+        Self::stamp_shell_tier(&mut parsed, crate::config::ConfigTier::Managed);
 
         let mut accumulator = accumulator;
         accumulator.merge(parsed);
@@ -803,10 +831,13 @@ impl ConfigLoader {
                 }
                 .into());
             }
-            let mut parsed: Config = toml::from_str(&contents).map_err(|source| Error::Parse {
-                path: path.to_path_buf(),
-                source,
-            })?;
+            let mut parsed: Config =
+                Self::parse_config_stripping_refused_consent(&contents, path.display()).map_err(|source| {
+                    Error::Parse {
+                        path: path.to_path_buf(),
+                        source,
+                    }
+                })?;
             // C7 enforcement — see [`Self::apply_system_locks`] for the full
             // per-section rationale. Only the system file is locked; it folds
             // in first, so locked sections ignore all lower-tier overrides.
@@ -814,6 +845,7 @@ impl ConfigLoader {
                 Self::apply_system_locks(&mut parsed);
             }
             Self::anchor_relative_paths(&mut parsed, path);
+            Self::stamp_shell_tier(&mut parsed, Self::tier_for_path(path));
             config.merge(parsed);
         }
         Ok(config)
@@ -863,6 +895,359 @@ impl ConfigLoader {
         if let Some(trust) = parsed.trust.as_mut() {
             trust.lock_as_system();
         }
+    }
+
+    /// Which tier `path` belongs to (C-032).
+    ///
+    /// The three discovered candidates are compared against the accessors that
+    /// produced them; anything else reached `load_and_merge` through
+    /// `explicit_paths`, which is the only other caller.
+    fn tier_for_path(path: &Path) -> crate::config::ConfigTier {
+        use crate::config::ConfigTier;
+
+        if path == Self::system_path().as_path() {
+            return ConfigTier::System;
+        }
+        if Self::user_path().is_some_and(|user| path == user.as_path()) {
+            return ConfigTier::User;
+        }
+        if Self::home_path().is_some_and(|home| path == home.as_path()) {
+            return ConfigTier::Home;
+        }
+        ConfigTier::Explicit
+    }
+
+    /// Record which tier set `[shell] hook` / `completions` before this file
+    /// merges into the accumulator (C-032).
+    ///
+    /// Runtime provenance, following the shipped `RegistryDefaults::system_locked`
+    /// precedent: `#[serde(skip)]` fields the loader sets after parsing, never
+    /// read from disk. Stamped only where the file actually set the scalar, so
+    /// `ShellConfig::merge` — which carries the tier alongside the value — never
+    /// attributes a decision to a tier that stayed silent.
+    fn stamp_shell_tier(parsed: &mut Config, tier: crate::config::ConfigTier) {
+        let Some(shell) = parsed.shell.as_mut() else {
+            return;
+        };
+        if shell.hook.is_some() {
+            shell.hook_tier = Some(tier);
+        }
+        if shell.completions.is_some() {
+            shell.completions_tier = Some(tier);
+        }
+    }
+
+    /// Parse one `config.toml` payload, dropping a **refused**
+    /// `[shell.consent]` table rather than failing the whole file with it.
+    ///
+    /// The two rules this reconciles both hold, and only together:
+    ///
+    /// - `arch-principles.md`'s fleet forward-compat row — a payload written
+    ///   for a newer ocx "must degrade to its known parts, never fail the whole
+    ///   file". One `config.toml` is fleet-wide state, so a refusal that takes
+    ///   the file down takes `[registries]`, `[mirrors]` and `[[trust.policy]]`
+    ///   with it. On a `required = false` managed tier that silently drops the
+    ///   operator's trust pins and falls back to the default registry — a
+    ///   commit whose subject is a *narrowing* would widen the effective
+    ///   posture on every host at once.
+    /// - That row's consent-bearing-table carve-out — dropping an unknown
+    ///   *narrowing* key widens trust, so `ShellConsent` refuses instead. The
+    ///   carve-out is about the direction of the change, not about which file
+    ///   dies: dropping the **whole grant** is the narrowest possible outcome
+    ///   **only for a table that grants and does not withdraw**. `exclude` is
+    ///   the one thing a `[shell.consent]` table says that TAKES a grant away,
+    ///   and it accumulates across tiers ([`ShellConsent::merge`]) against a
+    ///   predicate of `covered && !excluded` — so dropping it leaves another
+    ///   tier's `include` standing and **widens**, which is the one direction
+    ///   the carve-out forbids. A table carrying a non-empty
+    ///   `namespaces.exclude` therefore keeps the hard failure.
+    ///
+    /// [`ShellConsent::merge`]: crate::config::shell::ShellConsent::merge
+    ///
+    /// So the consent half is stripped structurally and the file survives,
+    /// exactly as [`Self::guard_managed_shell_consent`] does for an unpinned
+    /// source — same shape, same recorded reason, one tier wider. **Every**
+    /// tier, not just the managed one: a discovered tier's refusal is a hard
+    /// error on every `ocx` invocation on that host, which is the same
+    /// fail-the-file outcome with a smaller blast radius, and the carve-out's
+    /// reasoning is tier-independent. The signal is not lost — the reason is
+    /// logged AND recorded on the payload, where `ocx about` surfaces it and
+    /// the reconciler emits it through the eval'd script (A-21), and the
+    /// published JSON schema is where typo detection belongs (same row).
+    ///
+    /// Only the `[shell.consent]` table may be dropped, and only when removing
+    /// it is what makes the file parse, the table withdraws nothing, and the
+    /// table is one this ocx **refused** rather than one the operator
+    /// mistyped ([`Self::consent_table_shape_is_readable`]): anything else
+    /// keeps the original error, spans and all.
+    ///
+    /// # Errors
+    ///
+    /// The original `toml` error when the payload is unparseable for any reason
+    /// other than a refused `[shell.consent]`; when the refused table carries a
+    /// non-empty `namespaces.exclude` — dropping a withdrawal widens, so that
+    /// file keeps failing; and when the table is merely ill-typed
+    /// (`namespaces = 123`), which is the operator's own typo and owes them the
+    /// error rather than a warning.
+    fn parse_config_stripping_refused_consent(
+        text: &str,
+        origin: impl std::fmt::Display,
+    ) -> std::result::Result<Config, toml::de::Error> {
+        let refusal = match toml::from_str::<Config>(text) {
+            Ok(parsed) => return Ok(parsed),
+            Err(refusal) => refusal,
+        };
+        // Re-parse through `toml::Value` rather than editing the text: the
+        // table is the library's own model of the file, so removing one key
+        // cannot mangle a neighbouring section the way string surgery can.
+        let Ok(mut table) = toml::from_str::<toml::Table>(text) else {
+            return Err(refusal);
+        };
+        // Dropping a grant narrows; dropping a WITHDRAWAL widens. `exclude` is
+        // the only key that takes a grant away, and it accumulates across
+        // tiers, so stripping a table that carries one leaves whatever
+        // `include` another tier contributed standing unopposed. That is the
+        // one direction the carve-out forbids, so such a file keeps the hard
+        // failure it had before the strip existed.
+        if Self::consent_table_withdraws(&table) {
+            return Err(refusal);
+        }
+        // A refusal is a judgement about consent; a type error is a typo. Only
+        // the first earns the strip, and "removing the table fixed the parse"
+        // cannot tell them apart — `namespaces = 123` passes that test too.
+        if !Self::consent_table_shape_is_readable(&table) {
+            return Err(refusal);
+        }
+        let removed = table
+            .get_mut("shell")
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|shell| shell.remove("consent"))
+            .is_some();
+        if !removed {
+            return Err(refusal);
+        }
+        let Ok(mut parsed) = toml::Value::Table(table).try_into::<Config>() else {
+            return Err(refusal);
+        };
+        let reason = format!(
+            "[shell.consent] in {origin} was refused and dropped; every other section of that file still applies \
+             ({refusal}) — a consent grant fails closed, so nothing activates through it until the table is fixed"
+        );
+        log::warn!("{reason}");
+        parsed
+            .shell
+            .get_or_insert_with(crate::config::ShellConfig::default)
+            .consent_strip_reason = Some(reason);
+        Ok(parsed)
+    }
+
+    /// Whether the raw `[shell.consent]` table in `table` **withdraws** a
+    /// grant — i.e. carries a non-empty `namespaces.exclude`.
+    ///
+    /// Read off the raw [`toml::Table`] rather than a parsed [`ShellConsent`],
+    /// because the only tables this question is ever asked of are the ones
+    /// that failed to parse. One lookup covers every spelling the config
+    /// accepts: an inline `namespaces = { include = [...], exclude = [...] }`,
+    /// a `[shell.consent.namespaces]` section header, and the dotted-key form
+    /// all normalize to the same nested table. The string form
+    /// (`namespaces = "ocx.sh/acme"`) carries no `exclude` and is not a table,
+    /// so it answers `false` here.
+    ///
+    /// An `exclude = []` withdraws nothing and does not block the strip.
+    /// Anything else present under that key — a populated list, or a value
+    /// shape this ocx cannot read at all — counts as a withdrawal: the
+    /// unreadable case is precisely a narrowing written by a newer ocx, which
+    /// is what the carve-out exists for.
+    ///
+    /// [`ShellConsent`]: crate::config::shell::ShellConsent
+    fn consent_table_withdraws(table: &toml::Table) -> bool {
+        let Some(exclude) = table
+            .get("shell")
+            .and_then(toml::Value::as_table)
+            .and_then(|shell| shell.get("consent"))
+            .and_then(toml::Value::as_table)
+            .and_then(|consent| consent.get("namespaces"))
+            .and_then(toml::Value::as_table)
+            .and_then(|namespaces| namespaces.get("exclude"))
+        else {
+            return false;
+        };
+        exclude.as_array().is_none_or(|patterns| !patterns.is_empty())
+    }
+
+    /// Whether the raw `[shell.consent]` table in `table` has the TOML *shape*
+    /// [`ShellConsent`] expects — the test that separates a **refusal** from a
+    /// plain **type error**.
+    ///
+    /// Without it the strip's only question is structural — "did removing this
+    /// table make the file parse?" — and `namespaces = 123` answers it exactly
+    /// as `namespaces = "ocx.sh/*"` does. The first is the operator's own typo
+    /// and owes them exit 78; the second is a judgement this ocx made about a
+    /// grant, and is what the carve-out exists to survive. Swallowing the typo
+    /// hides a `config.toml` mistake behind a warning on a stderr the shims
+    /// discard.
+    ///
+    /// **Shape, never policy.** This deliberately does not re-run
+    /// [`validate_consent_pattern`] or re-check `include`'s emptiness or an
+    /// unknown key: a second copy of the validator would drift from the real
+    /// one, and every one of those refusals is precisely what still *should*
+    /// strip. It asks only what serde would answer with `invalid type` — is
+    /// `consent` a table, `paths` a list of strings, `namespaces` a string or a
+    /// table, and its `include`/`exclude` lists of strings.
+    ///
+    /// The typed error is unreachable here: the deserializer hands every
+    /// refusal to `serde::de::Error::custom`, which erases
+    /// [`ConsentPatternError`] into an opaque [`toml::de::Error`] message, and
+    /// `ShellConsent`'s `deny_unknown_fields` refusal is serde's own text that
+    /// no marker could reach without hand-writing that derive. Reading the
+    /// `toml::Value` variants keeps the discriminator type-level anyway, and
+    /// out of the error's prose.
+    ///
+    /// A key added to `ShellConsent` later and not mirrored here reads as
+    /// "shape fine" and strips — the fail-closed direction, and the same
+    /// outcome `deny_unknown_fields` already gives it.
+    ///
+    /// [`ShellConsent`]: crate::config::shell::ShellConsent
+    /// [`ConsentPatternError`]: crate::config::shell::ConsentPatternError
+    /// [`validate_consent_pattern`]: crate::config::shell::validate_consent_pattern
+    fn consent_table_shape_is_readable(table: &toml::Table) -> bool {
+        let Some(consent) = table
+            .get("shell")
+            .and_then(toml::Value::as_table)
+            .and_then(|shell| shell.get("consent"))
+            .and_then(toml::Value::as_table)
+        else {
+            return false;
+        };
+        let is_string_list = |value: &toml::Value| {
+            value
+                .as_array()
+                .is_some_and(|items| items.iter().all(toml::Value::is_str))
+        };
+        if consent.get("paths").is_some_and(|paths| !is_string_list(paths)) {
+            return false;
+        }
+        match consent.get("namespaces") {
+            None => true,
+            Some(toml::Value::String(_)) => true,
+            // The table form, in every spelling — inline, section header and
+            // dotted key all normalize to this one.
+            Some(toml::Value::Table(spec)) => ["include", "exclude"]
+                .iter()
+                .all(|key| spec.get(*key).is_none_or(is_string_list)),
+            Some(_) => false,
+        }
+    }
+
+    /// Strip `[shell.consent]` from a managed payload whose `[managed] source`
+    /// is not digest-pinned (C-034).
+    ///
+    /// `[shell] hook` and `completions` are left alone deliberately: they merge
+    /// unconditionally in both directions, which is safe only because consent
+    /// still gates every project independently. `[shell.consent]` is the half
+    /// that grants, so it is honoured only behind a pin — otherwise the consent
+    /// material arrives over the very channel it exists to authorise, and
+    /// whoever can move the tag can swap it. Same rule, same reason, as
+    /// [`Self::guard_managed_sigstore_trust`]'s `trusted_root_json`.
+    ///
+    /// The reason is recorded on the payload as well as logged: `log::warn!`
+    /// goes to a stderr the shell shims discard, so the strip would otherwise
+    /// be invisible exactly where it matters. `ocx about` surfaces the recorded
+    /// reason, and the reconciler emits it through the eval'd script (A-21).
+    ///
+    /// The gate is managed-tier-only. A file named by `--config` / `OCX_CONFIG`
+    /// is a third consent-bearing channel of the same already-out-of-scope
+    /// threat class, and has no `[managed] source` for the pin question to be
+    /// asked of at all (A-33).
+    ///
+    /// **Only the grant is stripped.** `paths` and `namespaces.include` grant;
+    /// `namespaces.exclude` **withdraws**, and it accumulates across tiers
+    /// ([`ConsentScopeSpec::accumulate`]), so dropping one leaves whatever
+    /// `include` another tier — or `OCX_CONSENT_NAMESPACES` — contributed
+    /// standing unopposed. That is the one direction this gate exists to
+    /// forbid, so the carve-outs survive the strip: honouring them needs no
+    /// pin, because whoever moved the tag can only ever take a grant *away*
+    /// with them.
+    ///
+    /// [`Self::parse_config_stripping_refused_consent`] answers the same
+    /// asymmetry by refusing the file instead, and the two are not in conflict:
+    /// there the table failed to *parse*, so there are no trustworthy patterns
+    /// left to keep, and a local `config.toml` can fail closed (exit 78)
+    /// without consequence for anyone else. Failing this payload closed would
+    /// hand whoever can move the tag a fleet-wide denial of service — the
+    /// adversary C-034 models, holding every host's `ocx` hostage — which is
+    /// why the managed tier degrades instead of refusing.
+    ///
+    /// [`ConsentScopeSpec::accumulate`]: crate::config::shell::ConsentScopeSpec::accumulate
+    fn guard_managed_shell_consent(parsed: &mut Config, source: &crate::oci::Identifier) {
+        use crate::config::shell::{ConsentScopeSpec, ShellConsent};
+        use crate::trust::ScopeSpec;
+
+        if source.digest().is_some() {
+            return;
+        }
+        let Some(shell) = parsed.shell.as_mut() else {
+            return;
+        };
+        let Some(consent) = shell.consent.take() else {
+            return;
+        };
+        let carve_outs = consent
+            .namespaces
+            .as_ref()
+            .map(|namespaces| namespaces.exclude().to_vec())
+            .unwrap_or_default();
+        let kept = if carve_outs.is_empty() {
+            String::new()
+        } else {
+            let clause = format!(
+                "; its namespaces exclude list ({}) was kept, since a withdrawal can only ever narrow",
+                carve_outs.join(", ")
+            );
+            // `ScopeSpec::Set` reads an **empty** `include` as a catch-all, so
+            // an exclude-only spec would grant every source it does not carve
+            // out — a far wider hole than the one being closed. Seeding
+            // `include` with the carve-outs themselves makes the two lists
+            // identical, so `covered && !excluded` is false for every source
+            // whatever the patterns are, and the spec grants nothing on its
+            // own; `accumulate` only ever adds, so that stays true while the
+            // `exclude` still opposes another tier's `include`.
+            shell.consent = Some(ShellConsent {
+                paths: Vec::new(),
+                namespaces: Some(ConsentScopeSpec(ScopeSpec::Set {
+                    include: carve_outs.clone(),
+                    exclude: carve_outs,
+                })),
+            });
+            clause
+        };
+        let reason = format!(
+            "managed-config payload for '{source}' carries [shell.consent] but the [managed] source is not \
+             digest-pinned; the grant was ignored{kept} (pin the source to a digest so an activation grant cannot be \
+             added by whoever can move the tag)"
+        );
+        log::warn!("{reason}");
+        shell.consent_strip_reason = Some(reason);
+    }
+
+    /// Fold a project-tier contribution into `accumulator`, without its
+    /// `[shell]` section (C-033).
+    ///
+    /// **The single entry point for any project-tier fold.** `[shell]` carries
+    /// consent, and consent read from a repository's own `ocx.toml` would let a
+    /// clone consent to itself — so the section is stripped here, structurally,
+    /// rather than relied upon to be unparseable one file over. `ProjectConfig`
+    /// refuses a `[shell]` block today only through its `deny_unknown_fields`,
+    /// whose own docstring calls it a typo detector; a security property must
+    /// not rest on a typo detector nobody records the coupling of.
+    pub fn fold_project_tier(accumulator: &mut Config, mut project_contribution: Config) {
+        if project_contribution.shell.take().is_some() {
+            log::warn!(
+                "a project-tier config declared [shell]; stripped before merge (shell integration and its activation \
+                 consent are configured in config.toml, never in a project file)"
+            );
+        }
+        accumulator.merge(project_contribution);
     }
 
     /// Resolve every path a config file declares relative to *that file's*
@@ -2102,6 +2487,9 @@ mod tests {
     /// directory under `worktrees/<name>/`, not a directory. The walk must
     /// still treat the worktree root as a repository boundary — matching
     /// git's own `git-check-ref-format` rule of "any `.git` entry counts".
+    ///
+    /// EC-FS-010, half one of two: the linkfile. The symlink half is
+    /// [`project_path_walk_stops_at_a_symlinked_git_entry`].
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_walk_stops_at_git_worktree_linkfile() {
@@ -2127,6 +2515,71 @@ mod tests {
         assert_eq!(
             resolved, None,
             ".git file (worktree linkfile) must also act as a repo boundary"
+        );
+    }
+
+    /// EC-FS-010, half two of two: a **symlinked** `.git` counts exactly like a
+    /// real directory and a worktree linkfile (D3:166 — "any `.git` entry
+    /// counts").
+    ///
+    /// Both spellings are asserted in one walk each, and both are
+    /// discriminating under a different mutation of [`ConfigLoader::has_git_dir`]:
+    ///
+    /// - the link **to a real `.git`** reds when the probe narrows to
+    ///   directories (`Ok(meta) if meta.is_dir()`), because a symlink's own
+    ///   `symlink_metadata` is never `is_dir()`;
+    /// - the **dangling** link reds when the probe stops being
+    ///   `symlink_metadata` and starts following (`tokio::fs::metadata`),
+    ///   because a link to a removed target then reports `NotFound` and the
+    ///   walk climbs past the repository root it should have stopped at.
+    ///
+    /// A dangling `.git` is not a contrivance: `git worktree`'s administrative
+    /// directory is pruned out from under a checkout routinely, and the outcome
+    /// of guessing "no repository here" is that a *parent* repository's
+    /// `ocx.toml` silently becomes this checkout's project.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_walk_stops_at_a_symlinked_git_entry() {
+        use std::os::unix::fs::symlink;
+
+        let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT");
+        let dir = TempDir::new().unwrap();
+        // The decoy the walk must never reach: without a boundary at the
+        // checkout root, the ascent finds this and adopts it.
+        write_file(&dir.path().join("ocx.toml"), "");
+        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+
+        // (a) `.git` is a symlink to a real git directory living elsewhere.
+        let real_git = dir.path().join("elsewhere").join(".git");
+        std::fs::create_dir_all(&real_git).unwrap();
+        let linked = dir.path().join("linked");
+        std::fs::create_dir(&linked).unwrap();
+        symlink(&real_git, linked.join(".git")).unwrap();
+        let nested = linked.join("src");
+        std::fs::create_dir(&nested).unwrap();
+        let resolved = ConfigLoader::project_path(Some(&nested), None)
+            .await
+            .expect("a symlinked .git boundary must resolve, not error");
+        assert_eq!(
+            resolved, None,
+            "a `.git` symlink pointing at a real git directory must bound the walk"
+        );
+
+        // (b) the same link, dangling — the target was pruned after checkout.
+        let dangling = dir.path().join("dangling");
+        std::fs::create_dir(&dangling).unwrap();
+        symlink(dir.path().join("no-such-git-dir"), dangling.join(".git")).unwrap();
+        let nested = dangling.join("src");
+        std::fs::create_dir(&nested).unwrap();
+        let resolved = ConfigLoader::project_path(Some(&nested), None)
+            .await
+            .expect("a dangling .git symlink must resolve, not error");
+        assert_eq!(
+            resolved, None,
+            "a dangling `.git` symlink is still a `.git` entry and must bound the walk"
         );
     }
 
@@ -2235,6 +2688,15 @@ mod tests {
     /// Plan line 40 ("Does NOT stop at filesystem root if .git/ is absent")
     /// requires the walk to continue past the common stopping conditions;
     /// this test guards against an infinite loop.
+    ///
+    /// EC-FS-013 — this **is** the filesystem-root termination case, and A-11
+    /// closes the row by asserting it rather than adding code: with no boundary
+    /// and no ceiling the ascent runs out of ancestors, and
+    /// [`ConfigLoader::walk_for_project_file`]'s `current.parent()` arm returns
+    /// `None` on its own. The bounded timeout is the assertion that matters —
+    /// an off-by-one on that arm (re-visiting the root, or ascending into a
+    /// path that never shortens) hangs rather than failing, and a hang inside a
+    /// per-prompt hook is the shipped bug this guards.
     #[tokio::test]
     async fn project_path_walk_without_git_or_ceiling_returns_none() {
         let env = crate::test::env::lock();
@@ -2258,10 +2720,45 @@ mod tests {
         assert_eq!(resolved, None);
     }
 
+    /// EC-FS-013 — starting the walk **at** the filesystem root exercises the
+    /// `current.parent() == None` arm on the very first iteration, with no
+    /// dependence on what happens to sit between a temp directory and `/`.
+    ///
+    /// The sibling test above reaches the same arm by ascending, but only on a
+    /// host where no ancestor of `TMPDIR` carries a `.git` or an `ocx.toml`;
+    /// this one cannot be short-circuited by either. Together they pin A-11's
+    /// "the walk's termination at the filesystem root needs no special case —
+    /// assert it, do not add code".
+    ///
+    /// The ceiling is passed as `None` deliberately: a ceiling would end the
+    /// walk one branch earlier and the root arm would never run.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_walk_terminates_at_the_filesystem_root() {
+        let root = Path::new("/");
+        assert_eq!(root.parent(), None, "the fixture must start where there is no ancestor");
+        let resolved = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ConfigLoader::walk_for_project_file(root, None),
+        )
+        .await
+        .expect("a walk starting at the filesystem root must terminate, not loop");
+        assert_eq!(
+            resolved, None,
+            "no ocx.toml at `/` and no ancestor to ascend to must yield None"
+        );
+    }
+
     /// Max-tier edge case: `OCX_CEILING_PATH` set above the `ocx.toml` → returns `None`.
     ///
     /// Amendment F — ceiling is the paired bound for the walk. When the
     /// ceiling sits between cwd and the `ocx.toml`, discovery must stop.
+    ///
+    /// EC-FS-012 half one of two: the ceiling bounds the ascent the same way a
+    /// `.git` entry does. The other half — an `ocx.toml` sitting **at** the
+    /// ceiling still resolves, because the candidate probe runs before the
+    /// ceiling gate — is
+    /// [`project_path_walk_finds_ocx_toml_at_the_ceiling_itself`].
     #[cfg(unix)]
     #[tokio::test]
     async fn project_path_walk_stops_at_ceiling() {
@@ -2286,6 +2783,113 @@ mod tests {
         assert_eq!(
             resolved, None,
             "OCX_CEILING_PATH must bound the walk before reaching outer ocx.toml"
+        );
+    }
+
+    /// EC-FS-012 half two of two: an `ocx.toml` **at** the ceiling still
+    /// resolves.
+    ///
+    /// D3:166 pins the order — the candidate probe runs first and the ceiling
+    /// gate only prevents ascending *above* the ceiling, so pointing
+    /// `OCX_CEILING_PATH` exactly at a workspace root is a supported way to
+    /// pin discovery to it rather than a way to disable it. Move the gate above
+    /// the probe and this reds while the sibling
+    /// [`project_path_walk_stops_at_ceiling`] stays green — which is why the
+    /// pair is needed to describe the contract at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_walk_finds_ocx_toml_at_the_ceiling_itself() {
+        let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT");
+        let dir = TempDir::new().unwrap();
+        let ceiling = dir.path().join("workspace");
+        std::fs::create_dir(&ceiling).unwrap();
+        let project = ceiling.join("ocx.toml");
+        write_file(&project, "");
+        env.set("OCX_CEILING_PATH", ceiling.to_str().unwrap());
+        let cwd = ceiling.join("crates").join("inner");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let resolved = ConfigLoader::project_path(Some(&cwd), None)
+            .await
+            .expect("a walk bounded at the workspace root should resolve, not error");
+        assert_eq!(
+            resolved,
+            Some(project),
+            "the candidate probe runs before the ceiling gate, so an ocx.toml AT the ceiling resolves"
+        );
+    }
+
+    /// EC-FS-014 — a directory chain at the OS path limit degrades to
+    /// "boundary reached", never a raw `ENAMETOOLONG` on the per-prompt path.
+    ///
+    /// A-11 overrules the register's framing here: this is a test-and-document
+    /// gap, not an implementation gap. [`ConfigLoader::has_git_dir`] already
+    /// fails closed on any non-`NotFound` I/O error, and an over-limit
+    /// `<dir>/.git` probe is exactly that — so the ascent stops at the level
+    /// where paths stopped being expressible and the caller gets `Ok(None)`.
+    /// The decoy `ocx.toml` above the chain is what makes the assertion
+    /// discriminating: flip `has_git_dir`'s non-`NotFound` arm to `false` and
+    /// the walk climbs out and adopts it.
+    ///
+    /// The limit is **discovered, not assumed** — `PATH_MAX` is 4096 on Linux
+    /// and 1024 on macOS, and a filesystem may impose its own. The chain grows
+    /// until the OS refuses one more single-character level, so a probe for a
+    /// five-byte `/.git` child of the deepest directory necessarily exceeds
+    /// whatever the real limit turned out to be. The precondition is then
+    /// asserted rather than assumed, because a fixture that quietly stopped
+    /// producing the error would leave this test green for the wrong reason.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_walk_over_the_os_path_limit_stops_without_erroring() {
+        let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT");
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("r");
+        std::fs::create_dir(&root).unwrap();
+        // The decoy: reachable only if the over-limit level fails to stop the
+        // ascent.
+        let decoy = root.join("ocx.toml");
+        write_file(&decoy, "");
+        env.set("OCX_CEILING_PATH", dir.path().to_str().unwrap());
+
+        // Grow in 200-byte strides while they fit, then in single bytes, so the
+        // deepest directory sits within one byte of the real limit.
+        let mut deep = root.clone();
+        for stride in [200_usize, 1] {
+            loop {
+                let next = deep.join("d".repeat(stride));
+                match std::fs::create_dir(&next) {
+                    Ok(()) => deep = next,
+                    Err(_) => break,
+                }
+            }
+        }
+        let probe = std::fs::symlink_metadata(deep.join(".git")).expect_err(
+            "the fixture must actually exceed the OS path limit; a `.git` probe under the deepest \
+             creatable directory has to fail, or this test proves nothing",
+        );
+        assert_ne!(
+            probe.kind(),
+            std::io::ErrorKind::NotFound,
+            "the over-limit probe must be an I/O error, not a plain miss: {probe:?}"
+        );
+
+        let resolved = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ConfigLoader::project_path(Some(&deep), None),
+        )
+        .await
+        .expect("an over-limit walk must terminate")
+        .expect("an over-limit probe must degrade to a boundary, never surface as Err");
+        assert_eq!(
+            resolved, None,
+            "a path at the OS limit fails closed to `boundary reached`, so the ancestor ocx.toml \
+             is not adopted"
         );
     }
 
@@ -3173,6 +3777,908 @@ mod tests {
             sigstore.trusted_root_json.as_deref(),
             Some("{}"),
             "a digest-pinned seed breaks the circularity, so the payload is honoured"
+        );
+    }
+
+    // ── C-033 — the project tier can never contribute `[shell]` ─────────────
+
+    /// S-035(b), C-033, EC-CFG-002: a project-tier contribution carrying
+    /// `[shell.consent]` contributes **nothing** — no project-sourced
+    /// `shell` key. Deliberately not routed through `ProjectConfig`: this
+    /// asserts the explicit strip, not the typo detector one file over.
+    ///
+    /// Red state: delete the `take()` in
+    /// [`ConfigLoader::fold_project_tier`] and `merged.shell` becomes `Some`,
+    /// carrying a grant a clone wrote for itself.
+    #[test]
+    fn c033_a_project_tier_fold_cannot_contribute_shell_consent() {
+        let mut merged: Config = toml::from_str("[registry]\ndefault = \"ghcr.io\"\n").expect("base parses");
+        let project: Config = toml::from_str(
+            "[shell.consent]\npaths = [\"/home/u/clone\"]\nnamespaces = \"ocx.sh/acme\"\n\n[registry]\ndefault = \
+             \"ocx.sh\"\n",
+        )
+        .expect("a project-tier contribution parses as a Config");
+        assert!(
+            project.shell.is_some(),
+            "the fixture must actually carry [shell], or the strip is untested"
+        );
+
+        ConfigLoader::fold_project_tier(&mut merged, project);
+
+        assert!(
+            merged.shell.is_none(),
+            "a project tier must never contribute [shell] — consent read from a repo's own file lets a clone consent \
+             to itself"
+        );
+        assert_eq!(
+            merged.resolved_default_registry(),
+            Some("ocx.sh"),
+            "everything a project tier IS allowed to set must still merge"
+        );
+    }
+
+    /// S-035(a), C-033, EC-CFG-001: `[shell]` written into an `ocx.toml` is a
+    /// hard parse error, so the section can never reach `Config` through the
+    /// project file at all — this pins the `deny_unknown_fields` door on
+    /// `ProjectConfig`; `project::config`'s own
+    /// `shell_section_in_ocx_toml_is_refused_by_name` pins the named-refusal
+    /// door on the two-pass load path.
+    ///
+    /// This records the coupling C-033 flags as unrecorded: `ProjectConfig`'s
+    /// `#[serde(deny_unknown_fields)]` is documented as a typo detector, and a
+    /// security property in a different file rests on it. The strip above is
+    /// what makes the property structural; this pins the second door shut.
+    #[test]
+    fn c033_shell_in_a_project_file_is_refused() {
+        use crate::cli::ClassifyExitCode;
+
+        let refused = toml::from_str::<crate::project::ProjectConfig>("[shell]\nhook = true\n");
+        assert!(
+            refused.is_err(),
+            "[shell] in an ocx.toml must be refused; shell integration is configured in config.toml"
+        );
+        assert_eq!(
+            crate::config::error::Error::Parse {
+                path: PathBuf::from("ocx.toml"),
+                source: refused.expect_err("refused"),
+            }
+            .classify(),
+            Some(crate::cli::ExitCode::ConfigError),
+            "a refused project file is a config error (78), the code scripts already case on"
+        );
+    }
+
+    // ── C-034 / A-32 / A-33 — the managed tier's `[shell]` ──────────────────
+
+    fn managed_shell_after_guard(payload: &str, source: &str) -> Option<crate::config::ShellConfig> {
+        let mut parsed: Config = toml::from_str(payload).expect("payload parses");
+        let source: crate::oci::Identifier = source.parse().expect("identifier parses");
+        ConfigLoader::guard_managed_shell_consent(&mut parsed, &source);
+        parsed.shell
+    }
+
+    const PINNED_SOURCE: &str =
+        "ghcr.io/acme/config@sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+    /// C-034, S-036, EC-CFG-003(a) — the red half: an unpinned `[managed]
+    /// source` cannot ship an activation grant. This is the only thing between
+    /// an unpinned managed payload and a PATH-front activation on every host in
+    /// a fleet.
+    ///
+    /// Red state: remove the `source.digest().is_some()` early return in
+    /// [`ConfigLoader::guard_managed_shell_consent`] and `consent` survives.
+    #[test]
+    fn c034_managed_shell_consent_is_stripped_behind_an_unpinned_source() {
+        let shell = managed_shell_after_guard(
+            "[shell]\nhook = true\n\n[shell.consent]\nnamespaces = \"ocx.sh/acme\"\n",
+            "ghcr.io/acme/config:v1",
+        )
+        .expect("[shell] survives — only the consent half is gated");
+
+        assert!(
+            shell.consent.is_none(),
+            "an unpinned managed payload must not carry an activation grant"
+        );
+        assert_eq!(
+            shell.hook,
+            Some(true),
+            "hook merges unconditionally in both directions — it grants nothing, and consent still gates every project"
+        );
+        let reason = shell
+            .consent_strip_reason
+            .expect("the reason must be recorded, not only logged to a stderr the shims discard");
+        assert!(
+            reason.contains("digest-pinned"),
+            "the recorded reason must name the cause so a rerun is actionable, got: {reason}"
+        );
+    }
+
+    /// C-034, S-036, EC-CFG-003(b) — the green half: a digest-pinned source
+    /// breaks the circularity, so the same payload is honoured — and nothing is
+    /// reported as stripped.
+    #[test]
+    fn c034_managed_shell_consent_is_honoured_behind_a_digest_pin() {
+        let shell = managed_shell_after_guard("[shell.consent]\nnamespaces = \"ocx.sh/acme\"\n", PINNED_SOURCE)
+            .expect("[shell] present");
+        let consent = shell.consent.expect("a pinned payload keeps its consent table");
+        assert!(consent.namespaces.expect("namespaces").matches("ocx.sh/acme"));
+        assert!(
+            shell.consent_strip_reason.is_none(),
+            "nothing was stripped, so nothing may be reported as stripped"
+        );
+    }
+
+    /// C-034 + C-032 — the polarity the two tests above cannot see, because
+    /// both carry a pure **grant**. `exclude` is the only key that takes a
+    /// grant away and it accumulates across tiers, so stripping it leaves an
+    /// `include` contributed by another tier (here `OCX_CONSENT_NAMESPACES`,
+    /// via the same `ShellConsent::merge` `effective_consent` performs)
+    /// standing unopposed — a **widening**, which is the one direction the
+    /// C-034 strip exists to forbid. The honest operator who wrote the
+    /// carve-out must get it.
+    ///
+    /// Red state, both halves: (a) `take()` the whole table in
+    /// [`ConfigLoader::guard_managed_shell_consent`] and the carve-out is gone,
+    /// so `ocx.sh/bad` activates; (b) keep the `exclude` under an **empty**
+    /// `include` and `ScopeSpec::Set` reads it as a catch-all, so the
+    /// standalone assertions below red on a source nobody ever granted.
+    #[test]
+    fn c034_an_unpinned_managed_payload_keeps_its_namespaces_carve_out() {
+        let shell = managed_shell_after_guard(
+            concat!(
+                "[shell.consent]\n",
+                "paths = [\"/srv/fleet\"]\n",
+                "namespaces = { include = [\"ocx.sh/acme\"], exclude = [\"ocx.sh/bad\"] }\n",
+            ),
+            "ghcr.io/acme/config:v1",
+        )
+        .expect("[shell] survives — only the grant half is gated");
+
+        let consent = shell.consent.clone().expect("the withdrawal survives the strip");
+        assert!(
+            consent.paths.is_empty(),
+            "`paths` grants unconditionally and must not survive an unpinned source"
+        );
+        let namespaces = consent.namespaces.as_ref().expect("the carve-out survives as a spec");
+        assert_eq!(
+            namespaces.exclude(),
+            ["ocx.sh/bad"],
+            "the carve-out must survive verbatim — it is the only key that can take a grant away"
+        );
+        assert!(
+            !namespaces.matches("ocx.sh/acme"),
+            "the payload's own `include` is a grant and must not survive the strip"
+        );
+        assert!(
+            !namespaces.matches("ocx.sh/nobody-granted-this"),
+            "what survives must grant NOTHING on its own — `ScopeSpec::Set` reads an empty `include` as a catch-all"
+        );
+
+        // The reachable attack shape: an include contributed by another channel
+        // after the config tiers, exactly as `effective_consent` folds it.
+        let mut effective = consent;
+        effective.merge(crate::config::shell::env_channel(None, Some("ocx.sh/acme,ocx.sh/bad")));
+        let namespaces = effective.namespaces.expect("the env channel contributes a spec");
+        assert!(
+            !namespaces.matches("ocx.sh/bad"),
+            "an exclude beats an include contributed by another tier — dropping it would widen"
+        );
+        assert!(
+            namespaces.matches("ocx.sh/acme"),
+            "positive control: the other tier's grant still stands, so the assertion above is not passing vacuously"
+        );
+
+        let reason = shell
+            .consent_strip_reason
+            .expect("the reason must be recorded, not only logged to a stderr the shims discard");
+        assert!(
+            reason.contains("digest-pinned"),
+            "the recorded reason must name the cause so a rerun is actionable, got: {reason}"
+        );
+        assert!(
+            reason.contains("ocx.sh/bad"),
+            "`ocx about` and the reconciler print this reason; it must say WHAT was kept, got: {reason}"
+        );
+    }
+
+    // ── ocx-sh/ocx#344 — a refused consent table is dropped, not fatal ──────
+
+    /// The payload every test below shares: a refused `[shell.consent]` grant
+    /// sitting beside the three sections a fleet actually depends on.
+    const REFUSED_CONSENT_PAYLOAD: &str = concat!(
+        "[registries.\"ocx.sh\"]\nindex = \"https://index.corp.example\"\n",
+        "[mirrors]\n\"ghcr.io\" = \"https://mirror.corp.example\"\n",
+        "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n",
+        "[trust.policy.keyless]\nidentity = \"ci@acme.example\"\noidc_issuer = \"https://iss.example\"\n",
+        "[shell]\nhook = true\n",
+        "[shell.consent]\nnamespaces = \"ocx.sh/*\"\n",
+    );
+
+    /// The refusal `REFUSED_CONSENT_PAYLOAD` must be reported by — derived from
+    /// the variant, so rewording the message cannot silently weaken the test.
+    fn whole_registry_refusal() -> String {
+        crate::config::shell::ConsentPatternError::WholeRegistry("ocx.sh/*".to_string()).to_string()
+    }
+
+    /// Every assertion the strip owes, in one place: no consent, the reason
+    /// recorded and naming the class, and every sibling section intact.
+    fn assert_consent_stripped_and_siblings_survive(config: &Config) {
+        let shell = config
+            .shell
+            .as_ref()
+            .expect("[shell] survives — only the consent half is dropped");
+        assert!(
+            shell.consent.is_none(),
+            "a refused consent table must grant NOTHING; the strip fails closed"
+        );
+        let reason = shell
+            .consent_strip_reason
+            .as_deref()
+            .expect("the reason must be recorded, not only logged to a stderr the shims discard");
+        assert!(
+            reason.contains(&whole_registry_refusal()),
+            "the recorded reason must name the refusal that caused it, got: {reason}"
+        );
+        assert_eq!(
+            shell.hook,
+            Some(true),
+            "only the `consent` key is removed — the rest of [shell] is untouched"
+        );
+        assert_eq!(
+            config
+                .registries
+                .as_ref()
+                .and_then(|registries| registries.get("ocx.sh"))
+                .and_then(|entry| entry.index.as_deref()),
+            Some("https://index.corp.example"),
+            "[registries] must survive a refused consent table"
+        );
+        assert!(
+            config
+                .mirrors
+                .as_ref()
+                .is_some_and(|mirrors| mirrors.contains_key("ghcr.io")),
+            "[mirrors] must survive a refused consent table"
+        );
+        assert_eq!(
+            config.trust.as_ref().map(|trust| trust.policy.len()),
+            Some(1),
+            "[[trust.policy]] must survive a refused consent table — dropping an operator's trust pins is the \
+             widening this whole strip exists to prevent"
+        );
+    }
+
+    /// ocx-sh/ocx#344, `arch-principles.md` fleet forward-compat: a refused
+    /// `[shell.consent]` grant in a DISCOVERED tier drops the grant and nothing
+    /// else. Before the strip this was `Error::Parse`, so every `ocx`
+    /// invocation on the host exited on a file that is otherwise fine.
+    ///
+    /// Red state: replace the body of
+    /// [`ConfigLoader::parse_config_stripping_refused_consent`] with
+    /// `toml::from_str::<Config>(text)` and `load_and_merge` returns
+    /// `Error::Parse` instead — `expect` below fails.
+    #[tokio::test]
+    async fn c344_a_refused_consent_table_is_dropped_and_the_discovered_tier_still_loads() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(&dir, "config.toml", REFUSED_CONSENT_PAYLOAD);
+
+        let config = ConfigLoader::load_and_merge(std::slice::from_ref(&path))
+            .await
+            .expect("a refused consent grant must not take the whole tier down with it");
+
+        assert_consent_stripped_and_siblings_survive(&config);
+    }
+
+    /// The discriminator: the strip is narrow. A payload broken for any reason
+    /// OTHER than its consent table still fails the file, even when a refused
+    /// consent table is sitting right next to the real error — so "drop the
+    /// consent half" can never decay into "swallow anything".
+    ///
+    /// Red state: return the second-pass result unconditionally in
+    /// [`ConfigLoader::parse_config_stripping_refused_consent`] instead of
+    /// falling back to `refusal`, and this stops erroring.
+    #[tokio::test]
+    async fn c344_the_strip_does_not_rescue_a_file_broken_anywhere_else() {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(
+            &dir,
+            "config.toml",
+            "[registry]\ndefault = 12\n[shell.consent]\nnamespaces = \"ocx.sh/*\"\n",
+        );
+
+        let error = ConfigLoader::load_and_merge(std::slice::from_ref(&path))
+            .await
+            .expect_err("a type error outside [shell.consent] must still fail the file");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("config.toml"),
+            "the surviving error must be the ORIGINAL one, path and all, got: {rendered}"
+        );
+    }
+
+    /// One fixture, one variable: `exclude_line` is the ONLY difference
+    /// between the payloads below, so nothing but the withdrawal can explain a
+    /// difference in outcome.
+    ///
+    /// The refusal is an unknown key **inside** the namespaces table, which is
+    /// the case `arch-principles.md`'s consent carve-out was written for — an
+    /// operator publishes a narrowing an older fleet host cannot read.
+    fn refused_narrowing_payload(exclude_line: &str) -> String {
+        format!(
+            "[registries.\"ocx.sh\"]\nindex = \"https://index.corp.example\"\n\
+             [shell]\nhook = true\n\
+             [shell.consent.namespaces]\n\
+             include = [\"ocx.sh/acme\", \"ocx.sh/tools\"]\n\
+             {exclude_line}\
+             require_signed = [\"x\"]\n"
+        )
+    }
+
+    async fn load_one_config(payload: &str) -> Result<Config> {
+        let dir = TempDir::new().unwrap();
+        let path = write_config(&dir, "config.toml", payload);
+        ConfigLoader::load_and_merge(std::slice::from_ref(&path)).await
+    }
+
+    /// ocx-sh/ocx#344, `arch-principles.md`'s consent carve-out: the strip
+    /// drops a **grant**, never a **withdrawal**.
+    ///
+    /// `exclude` is the only thing a `[shell.consent]` table says that TAKES a
+    /// grant away, and [`ShellConsent::merge`](crate::config::shell::ShellConsent::merge)
+    /// accumulates it across tiers against a `covered && !excluded` predicate.
+    /// So stripping a table that carries one leaves whatever `include` another
+    /// tier contributed standing unopposed: an operator's fleet-wide narrowing
+    /// ("withdraw the compromised org") would become a *grant* on every host
+    /// too old to read it, and the attacker is whoever holds the **withdrawn**
+    /// org's credential. That is widening, the one direction the carve-out
+    /// forbids, so such a file keeps the hard failure it had before the strip
+    /// existed.
+    ///
+    /// Both polarities, because either alone is half a proof: the granting
+    /// payloads are the positive control that stops the fix from degenerating
+    /// into "never strip".
+    ///
+    /// Red state: delete the `Self::consent_table_withdraws` early return in
+    /// [`ConfigLoader::parse_config_stripping_refused_consent`] and the
+    /// withdrawing payload starts loading with its `exclude` silently gone.
+    #[tokio::test]
+    async fn c344_the_strip_drops_a_grant_but_never_a_withdrawal() {
+        let error = load_one_config(&refused_narrowing_payload("exclude = [\"ocx.sh/tools\"]\n"))
+            .await
+            .expect_err(
+                "a refused table carrying a withdrawal must keep failing the file; dropping it would leave another \
+                 tier's include standing unopposed",
+            );
+        // The whole `source()` chain, the way the CLI renders it with `{err:#}`:
+        // the outer variant names only the path, and asserting on that alone
+        // would be satisfied by a typo in this fixture's inline TOML.
+        let mut rendered = error.to_string();
+        let mut cause = std::error::Error::source(&error);
+        while let Some(current) = cause {
+            rendered.push_str(&format!(": {current}"));
+            cause = current.source();
+        }
+        assert!(
+            rendered.contains("require_signed"),
+            "the surviving error must be the ORIGINAL refusal, not some other parse failure in this fixture, got: \
+             {rendered}"
+        );
+
+        for (label, exclude_line) in [
+            ("no exclude at all", ""),
+            ("an empty exclude, which withdraws nothing", "exclude = []\n"),
+        ] {
+            let config = match load_one_config(&refused_narrowing_payload(exclude_line)).await {
+                Ok(config) => config,
+                Err(error) => {
+                    panic!("a refused table with {label} must still be stripped so the file survives: {error}")
+                }
+            };
+            let shell = config
+                .shell
+                .as_ref()
+                .expect("[shell] survives — only the consent half is dropped");
+            assert!(
+                shell.consent.is_none(),
+                "a refused consent table with {label} must grant NOTHING; the strip fails closed"
+            );
+            assert!(
+                shell.consent_strip_reason.is_some(),
+                "the strip must record its reason for {label}, not only log it to a stderr the shims discard"
+            );
+            assert_eq!(
+                shell.hook,
+                Some(true),
+                "only the `consent` key is removed — the rest of [shell] is untouched ({label})"
+            );
+            assert!(
+                config
+                    .registries
+                    .as_ref()
+                    .is_some_and(|registries| registries.contains_key("ocx.sh")),
+                "[registries] must survive the strip ({label}) — rescuing the sibling sections is the point of it"
+            );
+        }
+    }
+
+    /// One fixture, one variable: the `namespaces = …` line is the ONLY
+    /// difference between the three arms below, so nothing but that value can
+    /// explain a difference in outcome.
+    fn consent_namespaces_payload(namespaces_line: &str) -> String {
+        format!(
+            "[registries.\"ocx.sh\"]\nindex = \"https://index.corp.example\"\n\
+             [shell]\nhook = true\n\
+             [shell.consent]\n{namespaces_line}\n"
+        )
+    }
+
+    /// Arm 1, the positive control: a genuine **refusal** — the whole-registry
+    /// spelling — still strips. Without it the fix below could degenerate into
+    /// "never strip" and every arm would pass.
+    ///
+    /// Red state: make [`ConfigLoader::consent_table_shape_is_readable`] return
+    /// `false` unconditionally and this stops loading.
+    #[tokio::test]
+    async fn c344_a_refused_pattern_still_strips() {
+        let config = load_one_config(&consent_namespaces_payload("namespaces = \"ocx.sh/*\""))
+            .await
+            .expect("a refused pattern is a judgement about consent, not a broken file");
+        let shell = config.shell.as_ref().expect("[shell] survives the strip");
+        assert!(
+            shell.consent.is_none(),
+            "the refused grant must be gone — the strip fails closed"
+        );
+        assert!(
+            shell
+                .consent_strip_reason
+                .as_ref()
+                .is_some_and(|reason| reason.contains(&whole_registry_refusal())),
+            "the recorded reason must name the refusal class, got: {:?}",
+            shell.consent_strip_reason
+        );
+    }
+
+    /// Arm 2, ocx-sh/ocx#344: an ordinary **type error** inside
+    /// `[shell.consent]` is the operator's own typo and keeps exit 78. Removing
+    /// the table makes this file parse exactly as it does for arm 1, so the
+    /// structural test alone cannot tell the two apart and swallowed this one
+    /// behind a warning on a stderr the shims discard.
+    ///
+    /// Red state: delete the `Self::consent_table_shape_is_readable` early
+    /// return in [`ConfigLoader::parse_config_stripping_refused_consent`] and
+    /// this payload starts loading successfully.
+    #[tokio::test]
+    async fn c344_a_plain_type_error_in_the_consent_table_is_not_stripped() {
+        let error = load_one_config(&consent_namespaces_payload("namespaces = 123"))
+            .await
+            .expect_err("an ill-typed consent value is a config error, not a refused grant");
+        let mut rendered = error.to_string();
+        let mut cause = std::error::Error::source(&error);
+        while let Some(current) = cause {
+            rendered.push_str(&format!(": {current}"));
+            cause = current.source();
+        }
+        assert!(
+            rendered.contains("invalid type"),
+            "the surviving error must be the ORIGINAL type error, spans and all, got: {rendered}"
+        );
+    }
+
+    /// Arm 3, the regression check on the guard that landed before this one:
+    /// a refused table carrying a **withdrawal** still fails the file, in the
+    /// inline spelling too — dotted, sectioned and inline all normalize to the
+    /// same nested table, so `consent_table_withdraws` must catch all three.
+    ///
+    /// Red state: delete the `Self::consent_table_withdraws` early return in
+    /// [`ConfigLoader::parse_config_stripping_refused_consent`] and this
+    /// payload starts loading with its `exclude` silently gone.
+    #[tokio::test]
+    async fn c344_a_withdrawing_inline_table_is_still_not_stripped() {
+        let error = load_one_config(&consent_namespaces_payload(
+            "namespaces = { include = [\"ocx.sh/acme\"], exclude = [\"ocx.sh/tools\"], require_signed = [\"x\"] }",
+        ))
+        .await
+        .expect_err("dropping a withdrawal widens; such a file keeps the hard failure");
+        let mut rendered = error.to_string();
+        let mut cause = std::error::Error::source(&error);
+        while let Some(current) = cause {
+            rendered.push_str(&format!(": {current}"));
+            cause = current.source();
+        }
+        assert!(
+            rendered.contains("require_signed"),
+            "the surviving error must be the ORIGINAL refusal, not some other failure in this fixture, got: {rendered}"
+        );
+    }
+
+    /// The fleet half, end to end: an identity-matching managed payload whose
+    /// only fault is a refused consent grant folds everything else and reports
+    /// [`ManagedSnapshotState::Applied`](crate::config::managed::ManagedSnapshotState::Applied).
+    ///
+    /// This is the block-tier case. Before the strip the payload became
+    /// `PayloadUnusable`, so with `required = false` an operator's `[mirrors]`
+    /// and `[[trust.policy]]` vanished fleet-wide — resolution silently falling
+    /// back to the default registry with no trust pins — and with
+    /// `required = true` every command on every host failed.
+    ///
+    /// Red state: same mutation as the discovered-tier test; the fold then
+    /// reports `PayloadUnusable` and folds nothing.
+    #[tokio::test]
+    async fn c344_a_refused_consent_table_in_a_managed_payload_folds_everything_else() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        // Digest-pinned, so `guard_managed_shell_consent` is not what removes
+        // the table — the refusal strip is.
+        let source = format!("corp.example.com/ocx-config@sha256:{}", "a".repeat(64));
+        write_managed_snapshot(dir.path(), &source, REFUSED_CONSENT_PAYLOAD);
+
+        let accumulator = crate::config::Config {
+            managed: Some(crate::config::managed::ManagedConfig {
+                source: Some(source),
+                ..Default::default()
+            }),
+            ..crate::config::Config::default()
+        };
+        let local_only = accumulator.clone();
+
+        let (folded, _snapshot, _resolved, state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+            .await
+            .expect("fold must succeed");
+
+        assert_eq!(
+            state,
+            crate::config::managed::ManagedSnapshotState::Applied,
+            "a payload whose only fault is a refused consent grant is usable; PayloadUnusable means BROKEN"
+        );
+        assert_consent_stripped_and_siblings_survive(&folded);
+    }
+
+    /// A-33: the digest gate is managed-tier-only. An explicit `--config` /
+    /// `OCX_CONFIG` file has no `[managed] source` for the pin question to be
+    /// asked of, and is a third consent-bearing channel of the same
+    /// already-out-of-scope threat class.
+    ///
+    /// Red state: call the gate on the overlay and this grant disappears.
+    #[test]
+    fn a33_the_digest_gate_does_not_apply_to_the_explicit_tier() {
+        let mut merged: Config = Config::default();
+        let overlay: Config =
+            toml::from_str("[shell.consent]\npaths = [\"/home/u/project\"]\n").expect("overlay parses");
+        merged.merge(overlay);
+        assert_eq!(
+            merged
+                .shell
+                .expect("shell")
+                .consent
+                .expect("consent")
+                .paths
+                .first()
+                .map(PathBuf::as_path),
+            Some(Path::new("/home/u/project")),
+            "an explicit-tier grant is never gated on a [managed] pin"
+        );
+    }
+
+    /// A-32, EC-CFG-006: `--config` / `OCX_CONFIG` outranks the managed tier —
+    /// including a digest-pinned one — because the loader folds the managed
+    /// tier first and the overlay on top of it.
+    ///
+    /// Red state: fold the overlay above the managed tier in
+    /// [`ConfigLoader::load_with_local_view`] and both assertions flip.
+    #[test]
+    fn a32_the_explicit_tier_outranks_the_managed_tier_and_records_that() {
+        use crate::config::ConfigTier;
+
+        // The shipped order, reproduced: base (discovered) -> managed -> overlay.
+        let mut base: Config = toml::from_str("[shell]\nhook = false\n").expect("base parses");
+        ConfigLoader::stamp_shell_tier(&mut base, ConfigTier::Home);
+
+        let mut managed: Config = toml::from_str("[shell]\nhook = true\n").expect("managed parses");
+        ConfigLoader::guard_managed_shell_consent(
+            &mut managed,
+            &PINNED_SOURCE.parse::<crate::oci::Identifier>().expect("identifier"),
+        );
+        ConfigLoader::stamp_shell_tier(&mut managed, ConfigTier::Managed);
+        base.merge(managed);
+        assert_eq!(
+            base.shell.as_ref().and_then(|shell| shell.hook),
+            Some(true),
+            "a pinned managed tier beats every DISCOVERED tier"
+        );
+
+        let mut overlay: Config = toml::from_str("[shell]\nhook = false\n").expect("overlay parses");
+        ConfigLoader::stamp_shell_tier(&mut overlay, ConfigTier::Explicit);
+        base.merge(overlay);
+
+        let shell = base.shell.expect("shell");
+        assert_eq!(
+            shell.hook,
+            Some(false),
+            "the explicit tier still merges on top and wins"
+        );
+        assert_eq!(
+            shell.hook_tier,
+            Some(ConfigTier::Explicit),
+            "the recorded provenance names the tier that ACTUALLY decided, never a hard-coded 'managed'"
+        );
+    }
+
+    /// The consent a full load actually grants: the `config.toml` tiers as the
+    /// loader folded them, plus the `OCX_CONSENT_*` env channel.
+    async fn consent_after_load() -> crate::config::shell::ShellConsent {
+        let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load must succeed");
+        crate::config::shell::effective_consent(loaded.merged.shell.as_ref())
+    }
+
+    /// C-034, EC-CFG-005: a managed `[shell] hook = true` beats the home tier's
+    /// own explicit `false` — asserted through the **shipped fold**, not a
+    /// hand-rolled merge order. `hook` grants nothing, so it merges
+    /// unconditionally in both directions; that is only safe because
+    /// `[shell.consent]` still gates every project independently.
+    ///
+    /// EC-CFG-006 rides along, because only a full load can carry it: the
+    /// sibling unit test hand-rolls the tier order, so its stated red state —
+    /// folding the overlay above the managed tier in
+    /// [`ConfigLoader::load_with_local_view`] — is unreachable there and the
+    /// green is indistinguishable from never having exercised the loader.
+    ///
+    /// Red state: fold the payload underneath in
+    /// [`ConfigLoader::fold_managed_tier`] (`parsed.merge(accumulator)` in place
+    /// of `accumulator.merge(parsed)`) and the managed assertions drop to the
+    /// home tier's `false`; drop the post-fold `merged.merge(overlay)` and the
+    /// `OCX_CONFIG` assertions keep reporting the managed tier.
+    #[tokio::test]
+    async fn c034_ec_cfg_005_a_managed_hook_beats_the_home_tiers_own_false() {
+        use crate::config::ConfigTier;
+
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+
+        // Pinned to the digest `write_managed_snapshot` stamps, so
+        // `snapshot_matches_source`'s digest clause is satisfied and the
+        // *pinned* half of the managed `[shell]` contract is what runs.
+        let source = format!("registry.test/managed-config@sha256:{}", "a".repeat(64));
+        std::fs::write(
+            dir.path().join("config.toml"),
+            format!("[shell]\nhook = false\n\n[managed]\nsource = \"{source}\"\nrequired = false\n"),
+        )
+        .unwrap();
+        write_managed_snapshot(dir.path(), &source, "[shell]\nhook = true\n");
+
+        let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load must succeed");
+
+        assert_eq!(
+            loaded.local_only.shell.as_ref().and_then(|shell| shell.hook),
+            Some(false),
+            "the fixture must actually carry the home tier's `false`, or the precedence below is untested"
+        );
+        let shell = loaded.merged.shell.expect("the managed payload contributes [shell]");
+        assert_eq!(
+            shell.hook,
+            Some(true),
+            "the managed tier beats a user's own explicit `hook = false` — the direction the fleet-off rationale does \
+             not cover"
+        );
+        assert_eq!(
+            shell.hook_tier,
+            Some(ConfigTier::Managed),
+            "the recorded provenance must name the tier that actually decided the rung"
+        );
+
+        // EC-CFG-006: the one tier the managed fold does NOT beat, through the
+        // same load — `OCX_CONFIG` merges after it, and the user chose the file.
+        let explicit_dir = TempDir::new().unwrap();
+        let explicit = write_config(&explicit_dir, "chosen.toml", "[shell]\nhook = false\n");
+        env.set("OCX_CONFIG", explicit.to_str().unwrap());
+        let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load must succeed");
+        let shell = loaded.merged.shell.expect("shell");
+        assert_eq!(
+            shell.hook,
+            Some(false),
+            "OCX_CONFIG merges above the managed fold, so `:326`'s \"beats every file a user can edit\" is false for \
+             the explicit tiers"
+        );
+        assert_eq!(
+            shell.hook_tier,
+            Some(ConfigTier::Explicit),
+            "`ocx shell state` must name the deciding tier, never assert \"managed\""
+        );
+    }
+
+    /// A-33, EC-CFG-007: `OCX_CONFIG` is a third consent-bearing channel, and
+    /// the managed tier's digest gate never reaches it. One load proves both
+    /// halves: the unpinned managed payload's grant is stripped, the
+    /// `OCX_CONFIG` grant of the same shape is honoured.
+    ///
+    /// The recorded strip reason is the premise check — without it, an
+    /// explicit-only `paths` set is indistinguishable from a managed snapshot
+    /// that never loaded at all.
+    ///
+    /// Red state: call [`ConfigLoader::guard_managed_shell_consent`] on the
+    /// overlay too and the explicit grant disappears; delete the gate and
+    /// `/managed/grant` joins the set.
+    #[tokio::test]
+    async fn a33_ec_cfg_007_ocx_config_grants_consent_the_digest_gate_never_reaches() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+        env.remove(crate::config::shell::OCX_CONSENT_PATHS);
+        env.remove(crate::config::shell::OCX_CONSENT_NAMESPACES);
+
+        // A tag, not a digest: whoever can move it can swap the grant.
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[managed]\nsource = \"registry.test/managed-config:v1\"\nrequired = false\n",
+        )
+        .unwrap();
+        write_managed_snapshot(
+            dir.path(),
+            "registry.test/managed-config:v1",
+            "[shell.consent]\npaths = [\"/managed/grant\"]\n",
+        );
+
+        let explicit_dir = TempDir::new().unwrap();
+        let explicit = write_config(
+            &explicit_dir,
+            "chosen.toml",
+            "[shell.consent]\npaths = [\"/explicit/grant\"]\n",
+        );
+        env.set("OCX_CONFIG", explicit.to_str().unwrap());
+
+        let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load must succeed");
+        let shell = loaded.merged.shell.as_ref().expect("both tiers contribute [shell]");
+        let reason = shell
+            .consent_strip_reason
+            .as_deref()
+            .expect("the managed payload must have reached the fold and been stripped there");
+        assert!(
+            reason.contains("digest-pinned"),
+            "the recorded reason must name the cause, got: {reason}"
+        );
+
+        let consent = crate::config::shell::effective_consent(Some(shell));
+        assert_eq!(
+            consent.paths,
+            vec![PathBuf::from("/explicit/grant")],
+            "the OCX_CONFIG grant activates and the unpinned managed grant does not — the gate is managed-tier-only, \
+             and an explicit file names a local path the user chose"
+        );
+    }
+
+    /// A-33, EC-CFG-008: `OCX_NO_CONFIG=1` prunes every config-tier grant and
+    /// leaves the `OCX_CONSENT_*` channel intact. The asymmetry is the point,
+    /// so all three states are asserted — including the flag-off premise,
+    /// without which "no grant" would be indistinguishable from a fixture that
+    /// never granted anything.
+    ///
+    /// Red state: drop the `no_config` guard on `discovered` in
+    /// [`ConfigLoader::load_with_local_view`] and the middle assertion sees the
+    /// home tier's grant; prune the env channel alongside it and the last one
+    /// goes empty.
+    #[tokio::test]
+    async fn a33_ec_cfg_008_no_config_prunes_config_tier_grants_but_not_the_env_channel() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+        env.remove(crate::config::shell::OCX_CONSENT_PATHS);
+        env.remove(crate::config::shell::OCX_CONSENT_NAMESPACES);
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[shell.consent]\npaths = [\"/home/grant\"]\n",
+        )
+        .unwrap();
+
+        env.remove("OCX_NO_CONFIG");
+        assert_eq!(
+            consent_after_load().await.paths,
+            vec![PathBuf::from("/home/grant")],
+            "premise: without the flag the home tier's entry really is a grant"
+        );
+
+        env.set("OCX_NO_CONFIG", "1");
+        assert!(
+            consent_after_load().await.paths.is_empty(),
+            "OCX_NO_CONFIG=1 prunes the discovered chain, so every config-tier grant goes with it"
+        );
+
+        env.set(crate::config::shell::OCX_CONSENT_PATHS, "/env/grant");
+        assert_eq!(
+            consent_after_load().await.paths,
+            vec![PathBuf::from("/env/grant")],
+            "OCX_NO_CONFIG touches neither the explicit tiers nor OCX_CONSENT_*; only OCX_NO_HOOK makes a shell wholly \
+             inert"
+        );
+    }
+
+    /// C-032: the loader stamps the tier a file belongs to, and only where that
+    /// file set the scalar.
+    #[tokio::test]
+    async fn c032_the_loader_stamps_the_tier_that_set_each_scalar() {
+        use crate::config::ConfigTier;
+
+        let dir = TempDir::new().expect("tempdir");
+        let path = write_config(&dir, "config.toml", "[shell]\nhook = true\n");
+        let config = ConfigLoader::load_and_merge(&[path]).await.expect("load");
+
+        let shell = config.shell.expect("shell");
+        assert_eq!(
+            shell.hook_tier,
+            Some(ConfigTier::Explicit),
+            "a path that is none of the three discovered candidates reached the loader as an explicit tier"
+        );
+        assert_eq!(
+            shell.completions_tier, None,
+            "a tier that did not set `completions` must not claim to have decided it"
+        );
+    }
+
+    // ── A-13 — the recorded config-tier paths ───────────────────────────────
+
+    /// A-13: the watch set stats a list the loader recorded, and it must
+    /// include tier files that do NOT exist — a grant added by creating one is
+    /// exactly the change an `inert` cache has to expire on.
+    #[tokio::test]
+    async fn a13_records_every_config_tier_candidate_including_absent_ones() {
+        let dir = TempDir::new().expect("tempdir");
+        let explicit = write_config(&dir, "explicit.toml", "[shell]\nhook = true\n");
+
+        let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
+            explicit_path: Some(explicit.as_path()),
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load");
+
+        assert!(
+            loaded.config_tier_paths.contains(&ConfigLoader::system_path()),
+            "the system tier is recorded whether or not it exists today"
+        );
+        assert!(
+            loaded.config_tier_paths.contains(&explicit),
+            "the --config override is recorded — it is a consent-bearing channel of its own"
+        );
+        assert_eq!(
+            loaded.config_tier_paths.last(),
+            Some(&explicit),
+            "the list is in fold order, so the highest-precedence tier is last"
         );
     }
 }

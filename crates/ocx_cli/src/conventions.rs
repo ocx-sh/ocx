@@ -206,6 +206,15 @@ pub fn resolved_lazy_mode(cli: Option<LazyMode>, self_view: bool) -> Result<Lazy
 /// naming the actual reason, so the caller is informed without aborting the
 /// full output.
 ///
+/// **The reserved-`OCX_*` gate is deliberately not here.** This function's
+/// output is `eval`d, so a package-declared `OCX_CONSENT_NAMESPACES` reaching it
+/// is a consent bypass — but the refusal belongs at
+/// `PackageManager::resolve_env_with_attribution`, the one seam this function
+/// and `Env::apply_entries` both read from. A second copy of the check here
+/// would silently absorb a regression in that one, and would leave `ocx run` —
+/// which never comes through here — exposed anyway. `is_valid_env_key` below is
+/// the *grammar* gate and is not a substitute for it.
+///
 /// `Shell::Bash` is the fixed shell for `direnv export` (direnv always evals
 /// `.envrc` in a bash sub-shell — no `--shell` flag on that command). For
 /// `ocx env` / `ocx package env` the caller passes the user-selected shell.
@@ -215,6 +224,20 @@ pub fn resolved_lazy_mode(cli: Option<LazyMode>, self_view: bool) -> Result<Lazy
 /// This function is infallible — `None` from `export_path` / `export_constant`
 /// is handled by a stderr note.
 pub fn emit_lines(shell: Shell, entries: &[Entry]) {
+    for entry in entries {
+        match emit_line(shell, entry) {
+            Ok(line) => println!("{line}"),
+            Err(note) => eprintln!("# ocx: {note}"),
+        }
+    }
+}
+
+/// The per-entry half of [`emit_lines`]: the statement to print on stdout, or
+/// the reason to note on stderr.
+///
+/// Split out so the admission rules are testable — `emit_lines` itself only
+/// decides which of the two streams the result goes to.
+fn emit_line(shell: Shell, entry: &Entry) -> Result<String, String> {
     use ocx_lib::package::metadata::env::list::DEFAULT_SEPARATOR;
     use ocx_lib::package::metadata::env::modifier::ModifierKind;
 
@@ -227,32 +250,33 @@ pub fn emit_lines(shell: Shell, entries: &[Entry]) {
             .map_or_else(|| shell.to_string(), |value| value.get_name().to_string())
     }
 
-    for entry in entries {
-        let line = match entry.kind {
-            ModifierKind::Path => shell.export_path(&entry.key, &entry.value),
-            ModifierKind::Constant => shell.export_constant(&entry.key, &entry.value),
-            // A surviving `None` separator has already been through compose-time
-            // reconciliation, so nothing established one for this key.
-            ModifierKind::List => shell.export_list(
-                &entry.key,
-                &entry.value,
-                entry.separator.as_deref().unwrap_or(DEFAULT_SEPARATOR),
-            ),
-        };
-        match line {
-            Some(line) => println!("{line}"),
-            None if !ocx_lib::env::is_valid_env_key(&entry.key) => {
-                eprintln!("# ocx: skipping invalid env-var key {:?}", entry.key);
-            }
-            // The `--shell=` spelling, not the Rust variant name: this is the
-            // word the reader typed and would type again.
-            None => eprintln!(
-                "# ocx: skipping list env var {:?} — {} has no case-sensitive unique append",
-                entry.key,
-                shell_argument_name(shell)
-            ),
-        }
-    }
+    // One admission rule, shared with the reconciler's planner: an entry no arm
+    // can emit *or* revert must not be emitted here either. Without it a
+    // `type = "path"` value embedding the platform separator reached ksh, dash
+    // and pwsh, whose split-based folds see it as two segments, match neither,
+    // and prepend another copy on every re-source.
+    ocx_lib::shell::is_emittable(entry).map_err(|reason| format!("skipping env var {:?} — {reason}", entry.key))?;
+
+    let line = match entry.kind {
+        ModifierKind::Path => shell.export_path(&entry.key, &entry.value),
+        ModifierKind::Constant => shell.export_constant(&entry.key, &entry.value),
+        // A surviving `None` separator has already been through compose-time
+        // reconciliation, so nothing established one for this key.
+        ModifierKind::List => shell.export_list(
+            &entry.key,
+            &entry.value,
+            entry.separator.as_deref().unwrap_or(DEFAULT_SEPARATOR),
+        ),
+    };
+    // The `--shell=` spelling, not the Rust variant name: this is the word the
+    // reader typed and would type again.
+    line.ok_or_else(|| {
+        format!(
+            "skipping list env var {:?} — {} has no case-sensitive unique append",
+            entry.key,
+            shell_argument_name(shell)
+        )
+    })
 }
 
 /// Resolve a `--shell` clap argument to an explicit [`Shell`], or `None`
@@ -475,8 +499,8 @@ pub fn manager_with_verify_flag(
 #[cfg(test)]
 mod tests {
     use super::{
-        export_ci, infer_metadata_file, infer_receipt_file, merge_tags_file, parse_tags_file, resolve_ci_arg,
-        resolve_receipt_path, resolve_shell_arg, resolved_lazy_mode,
+        emit_line, export_ci, infer_metadata_file, infer_receipt_file, merge_tags_file, parse_tags_file,
+        resolve_ci_arg, resolve_receipt_path, resolve_shell_arg, resolved_lazy_mode,
     };
     use ocx_lib::ci::CiFlavor;
     use ocx_lib::cli::UsageError;
@@ -940,5 +964,54 @@ mod tests {
                 ExitCode::Success
             );
         }
+    }
+
+    // ── one admission rule across both emit sites ─────────────────────────
+    //
+    // `emit_lines` is the shared path for `ocx env --shell`, `ocx package env
+    // --shell` and `ocx direnv export`. It used to refuse only an invalid key
+    // and a `list` under cmd, while the reconciler's planner additionally
+    // refused three shapes no arm can emit *or* revert — so the same entry was
+    // dropped on the prompt path and emitted on the export path.
+
+    fn path_entry(key: &str, value: &str) -> Entry {
+        Entry {
+            key: key.to_string(),
+            value: value.to_string(),
+            kind: ModifierKind::Path,
+            separator: None,
+        }
+    }
+
+    #[test]
+    fn a_path_value_embedding_the_separator_is_refused() {
+        // Executed on ksh, dash and pwsh: their split-based folds see `/n/a:b`
+        // as two segments, match neither against the whole operand, and prepend
+        // another copy on every re-source — PATH grows without bound.
+        let separator = ocx_lib::env::PATH_SEPARATOR;
+        let entry = path_entry("OCXP", &format!("/n/a{separator}b"));
+        let note = emit_line(Shell::Bash, &entry).expect_err("must be refused, not emitted");
+        assert!(note.contains("path separator"), "{note}");
+    }
+
+    #[test]
+    fn an_empty_or_line_broken_element_is_refused() {
+        for value in ["", "/n/a\nb", "/n/a\rb"] {
+            let entry = path_entry("OCXP", value);
+            assert!(
+                emit_line(Shell::Bash, &entry).is_err(),
+                "value {value:?} can be emitted but never removed, so it must not be emitted"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_entry_still_emits() {
+        // The negative rows above only mean something against a positive one:
+        // without this, a helper that refused everything would pass them all.
+        let line = emit_line(Shell::Bash, &path_entry("OCXP", "/opt/bin")).expect("a plain directory emits");
+        assert!(line.contains("/opt/bin"), "{line}");
+        let invalid = emit_line(Shell::Bash, &path_entry("2FOO", "/opt/bin"));
+        assert!(invalid.is_err(), "an invalid key is still refused");
     }
 }

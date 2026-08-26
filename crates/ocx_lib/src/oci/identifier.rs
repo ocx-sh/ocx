@@ -183,6 +183,25 @@ impl Identifier {
         self.repository.rsplit('/').next().unwrap_or(&self.repository)
     }
 
+    /// Returns the **first** segment of the repository path — the org.
+    ///
+    /// For `"acme/tools/cmake"` this returns `"acme"`; for a single-segment
+    /// repository like `"python"` it returns `"python"`. The mirror image of
+    /// [`name`](Self::name), which returns the last segment.
+    ///
+    /// The unit of shell-activation consent (C-026): `<registry>/<first path
+    /// segment>` is the org — the unit an operator controls and the unit an
+    /// attacker must register. Registry granularity alone would be nearly
+    /// vacuous (consent to one GHCR org would consent to all of GHCR); full
+    /// repository granularity would re-prompt on every ordinary tool addition.
+    ///
+    /// Lives on the coordinate rather than in `project::consent` because it is
+    /// a property of the coordinate, and `ocx shell state`'s diagnostics are
+    /// already a second consumer.
+    pub fn first_path_segment(&self) -> &str {
+        self.repository.split('/').next().unwrap_or(&self.repository)
+    }
+
     /// Returns the tag if one was explicitly provided, or `None` otherwise.
     ///
     /// Unlike `oci_spec::Reference`, this does **not** inject `"latest"` when
@@ -617,6 +636,30 @@ impl schemars::JsonSchema for Identifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Path segments ────────────────────────────────────────────────────
+
+    /// C-026: the first repository segment is the org — the mirror image of
+    /// [`Identifier::name`], and the half of a consent source that is not the
+    /// registry.
+    #[test]
+    fn first_path_segment_is_the_org() {
+        let nested: Identifier = "ghcr.io/acme/tools/cmake:3.28".parse().unwrap();
+        assert_eq!(nested.first_path_segment(), "acme");
+        assert_eq!(nested.name(), "cmake", "the last segment is unchanged");
+
+        let flat: Identifier = "ocx.sh/python".parse().unwrap();
+        assert_eq!(
+            flat.first_path_segment(),
+            "python",
+            "a single-segment repository is its own first and last segment"
+        );
+        assert_eq!(flat.name(), "python");
+
+        let two: Identifier = "ghcr.io/acme/cmake".parse().unwrap();
+        assert_eq!(two.first_path_segment(), "acme");
+        assert_eq!(two.name(), "cmake");
+    }
 
     // ── Basic parsing ────────────────────────────────────────────────────
 

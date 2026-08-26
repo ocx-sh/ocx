@@ -6,13 +6,22 @@ name: Shell Activation (Deep)
 # minutes are far more expensive than Linux (see subsystem-ci.md "Cost Factors").
 #
 # - macOS: reuses the self-contained `test/tests/test_shell_activation.py` matrix
-#   (POSIX-family + the ocx-packaged shells nushell/elvish/pwsh installed via ocx).
-# - Windows: runs the `test/manual/test-windows-activation.ps1` env.ps1 gate under
+#   AND the per-prompt reconciler matrix `test/tests/test_shell_reconcile.py`
+#   (POSIX-family + the ocx-packaged shells nushell/elvish/pwsh installed via ocx),
+#   plus the per-platform NFR latency gate (C-044).
+# - Windows: runs the `test/manual/test-windows-activation.ps1` gate under
 #   the built-in Windows PowerShell 5.1, the built-in PowerShell 7, AND the
-#   ocx-installed PowerShell 7 ("Core") — the user-facing dogfood path.
+#   ocx-installed PowerShell 7 ("Core") — the user-facing dogfood path. That gate
+#   now also drives one non-interactive apply/revert reconcile cycle (S-045).
 #
 # cmd/batch PATH idempotency is covered separately by the `live_batch_*` unit test
 # on the windows-latest `nextest --workspace` leg of `verify-deep.yml`.
+#
+# STATED RESIDUAL — the Windows leg proves activation-time and reconcile-time
+# behaviour, NOT prompt *firing*. A real interactive ConPTY session under Windows
+# PowerShell 5.1 needs a bespoke harness (oh-my-posh's `go-pty` pattern is the only
+# working precedent found, and it skips 5.1). S-045's interactive half is therefore
+# uncovered, and is named here rather than implied to be covered.
 
 on:
   workflow_dispatch:
@@ -53,6 +62,18 @@ jobs:
         uses: ./.github/actions/build-rust
         with:
           target: aarch64-apple-darwin
+      # Same split as `shell-activation.yml`: the activation matrix runs the
+      # release-clean binary because its claim is about what ships, while C-044's
+      # fault injection lives in `shell::hook::registration` behind
+      # `ocx/__testing` and is absent from a release-clean build — a gate pointed
+      # at that one has an `--expect-fail` step that cannot go red. Same target,
+      # so this recompiles `ocx_lib` and `ocx` only.
+      - name: Build ocx (aarch64-apple-darwin, __testing)
+        uses: ./.github/actions/build-rust
+        with:
+          target: aarch64-apple-darwin
+          features: ocx/__testing
+          artifact_suffix: "-testing"
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Install ocx-packaged shells and run the activation matrix
@@ -70,15 +91,43 @@ jobs:
           echo "resolved shells:"
           for s in nu elvish pwsh; do command -v "$s" || echo "  ($s absent)"; done
 
-          # Run the self-contained matrix in isolation from test/conftest.py
+          # Run the self-contained matrices in isolation from test/conftest.py
           # (its session fixtures start a Docker registry, unavailable on macOS).
+          # `shell_matrix.py` is copied flat because test_shell_reconcile.py
+          # imports it as a top-level module — the same shape the shell-zoo
+          # container mounts, so the two legs cannot drift on import path.
           work="$RUNNER_TEMP/matrix"
           mkdir -p "$work"
           cp test/tests/test_shell_activation.py "$work/"
+          cp test/tests/test_shell_reconcile.py "$work/"
+          cp test/src/shell_matrix.py "$work/"
           cd "$work"
           OCX_ACTIVATION_BINARY="$ocx" \
             uv run --no-project --with pytest -- \
-            python -m pytest test_shell_activation.py -v -p no:cacheprovider
+            python -m pytest test_shell_activation.py test_shell_reconcile.py \
+            -v -p no:cacheprovider
+
+      - name: Setup Task
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      # C-044 is a PER-PLATFORM assert with the floor measured in the same job.
+      # A Linux number imported onto macOS would be exactly the "another tool's
+      # benchmark as a budget" mistake the ADR calls out, so macOS measures its
+      # own floor here. The fault-injected red runs inside the same task, which
+      # is why this points at the `-testing` binary and not the shipped one.
+      - name: NFR latency gate (C-044)
+        shell: bash
+        run: |
+          set -euo pipefail
+          task test:shell-latency \
+            SKIP_BUILD=true \
+            LATENCY_OCX_BINARY="$PWD/ocx-aarch64-apple-darwin-testing"
+      - name: Upload latency measurement
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: shell-latency-macos
+          path: test/bench/results/shell-latency*.json
+          retention-days: 7
 
   windows:
     name: Activation (Windows x64)

@@ -11,6 +11,13 @@ permissions:
   checks: write
   pull-requests: write
 
+# subsystem-ci.md section 6. This workflow is neither reused via `workflow_call`
+# nor composed into `release-readiness.yml`, so the plain convention applies —
+# no literal-prefix carve-out is needed here.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   conventional-commits:
     name: Conventional Commits
@@ -98,7 +105,33 @@ jobs:
           path: target/release/ocx
           compression-level: 0
           retention-days: 1
+      # The C-021 parity matrix drives all nine hook shells, but no runner image
+      # carries elvish or nushell — and an arm that never runs is a green
+      # indistinguishable from an absent test (#349). ocx packages both, so they
+      # come from the same place a user's would, and this is also the only leg
+      # where the emitted elvish/nushell statements meet a real parser.
+      - name: Setup OCX
+        uses: ./.github/actions/setup-ocx
+        with:
+          version: '0.5.2'
+      - name: Put the elvish and nushell parity arms on PATH
+        run: |
+          set -euo pipefail
+          eval "$(ocx --remote package env nushell elvish --shell=bash)"
+          for interpreter in nu elvish; do
+            # Assigned first, so `set -e` sees the lookup's exit status: a
+            # failed `command -v` inside an argument would otherwise append
+            # `dirname ""` = `.` to the PATH and read as success.
+            resolved="$(command -v "$interpreter")"
+            dirname "$resolved" >> "$GITHUB_PATH"
+          done
       - name: Test
+        # Names exactly the two interpreters the step above installs: with them
+        # on PATH a skip is a defect, so neither arm can drop out of the matrix
+        # while this leg stays green. The other seven skip where absent, which
+        # `assert_every_present_interpreter_ran` reports with an observed cause.
+        env:
+          __OCX_TESTING_REQUIRE_LIVE_SHELLS: nu,elvish
         run: task rust:test:unit -- --profile ci
       - name: Generate Schema
         run: task schema:generate

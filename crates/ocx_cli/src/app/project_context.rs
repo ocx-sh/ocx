@@ -323,6 +323,68 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
     })
 }
 
+/// Load the project exactly as [`load_project_with_lock`] does, then record
+/// shell-activation consent for it (C-024).
+///
+/// The opt-in half of the write seam. `ocx run` and `ocx pull` call this;
+/// `ocx inspect`, `ocx patch freeze`, `ocx env` and `ocx lock --check` call
+/// the plain loader and stamp nothing.
+///
+/// # Errors
+///
+/// Exactly [`load_project_with_lock`]'s. Recording is best-effort and never
+/// converts a working command into a failing one.
+pub async fn load_project_with_lock_consenting(
+    context: &crate::app::Context,
+) -> Result<ProjectContext, ProjectContextError> {
+    let project = load_project_with_lock(context).await?;
+    record_activation_consent(&project.config_path, &project.lock).await;
+    Ok(project)
+}
+
+/// Record shell-activation consent for the project at `config_path` over the
+/// source set `lock` resolves from (C-024, C-026, A-29).
+///
+/// **The write seam is a closed allowlist of six commands** — `add`, `remove`,
+/// `lock`, `update`, `pull`, `run` — and it is **per-caller opt-in, never a
+/// hook in a shared loader**. `load_project_with_lock` has six call sites and
+/// only two are members: `inspect`, `patch freeze`, `ocx env` and
+/// `ocx lock --check` reach it too, so stamping inside it would auto-grant
+/// consent on read-only commands, silently widening a security control past
+/// its stated set (A-29). `load_project_for_mutate`'s four call sites are all
+/// members, but the four mutators call this **after** `commit`, so the stamp
+/// records the post-mutation source set rather than the one the mutation
+/// replaced.
+///
+/// Nothing on the *activation* path calls this: a `paths` or `namespaces`
+/// grant activates directly and writes no stamp (A-26).
+///
+/// Best-effort, like the project ledger's `register_project_dir_best_effort`
+/// beside it: a failure to stamp is logged at WARN and swallowed, because the
+/// worst it costs is one inert prompt until the next explicit command — the
+/// fail-safe direction — while aborting `ocx add` over it is not.
+pub async fn record_activation_consent(config_path: &Path, lock: &ocx_lib::project::ProjectLock) {
+    let config_path = config_path.to_path_buf();
+    let sources = ocx_lib::project::consent::lock_sources(lock);
+
+    // Two filesystem resolutions plus an atomic write — all blocking, so the
+    // whole seam runs on a blocking thread rather than stalling the runtime.
+    let joined = tokio::task::spawn_blocking(move || {
+        let project_dir = ocx_lib::project::consent::canonical_project_dir(&config_path)
+            .map_err(|e| format!("canonicalize of config path '{}' failed: {e}", config_path.display()))?;
+        ocx_lib::project::consent::record(&project_dir, &sources).map_err(|e| e.to_string())
+    })
+    .await;
+
+    let outcome = match joined {
+        Ok(outcome) => outcome,
+        Err(e) => Err(format!("the consent-stamp task panicked or was cancelled: {e}")),
+    };
+    if let Err(reason) = outcome {
+        ocx_lib::log::warn!("Shell-activation consent was not recorded (non-fatal): {reason}");
+    }
+}
+
 /// Materialize all bindings from `lock` into the object store via
 /// `PackageManager::pull_all`. Pure object-store warming: pulls blobs and
 /// assembles package content, never touches the `symlinks/` namespace.
@@ -680,6 +742,119 @@ mod tests {
     use ocx_lib::project::ToolSource;
 
     use super::*;
+
+    // ── A-29 — the write seam is a closed allowlist of six commands ─────────
+
+    /// The seam call every consent writer routes through. A caller that stamps
+    /// names one of these two; a caller that does not, names neither.
+    const SEAM_CALLS: [&str; 2] = ["record_activation_consent(", "load_project_with_lock_consenting("];
+
+    /// Strip `//`-prefixed lines so a guard never matches the comments that
+    /// document the very shape it polices.
+    fn code_only(source: &str) -> String {
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Whether `source` calls the consent seam at all.
+    fn stamps(source: &str) -> bool {
+        let code = code_only(source);
+        SEAM_CALLS.iter().any(|call| code.contains(call))
+    }
+
+    /// The body of the top-level `fn` named `name`, from its signature to the
+    /// first line that is a bare `}` at column zero.
+    fn function_body(source: &str, name: &str) -> String {
+        let needle = format!("fn {name}(");
+        let start = source
+            .find(&needle)
+            .unwrap_or_else(|| panic!("`fn {name}` must exist in project_context.rs"));
+        let rest = &source[start..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("`fn {name}` must end with a `}}` at column zero"));
+        rest[..end].to_string()
+    }
+
+    /// A-29/C-024: exactly the six explicit project-scoped commands stamp, and
+    /// no other command file does.
+    ///
+    /// Both halves are asserted. The positive half is what keeps this from
+    /// passing vacuously if the seam is ever renamed out from under
+    /// [`SEAM_CALLS`]; the negative half is the security contract — a stamp
+    /// written from `ocx inspect` or `ocx env` would consent to a project the
+    /// user only asked to look at.
+    #[test]
+    fn a029_exactly_six_commands_write_a_consent_stamp() {
+        let members: [(&str, &str); 6] = [
+            ("add", include_str!("../command/add.rs")),
+            ("remove", include_str!("../command/remove.rs")),
+            ("lock", include_str!("../command/lock.rs")),
+            ("update", include_str!("../command/update.rs")),
+            ("pull", include_str!("../command/pull.rs")),
+            ("run", include_str!("../command/run.rs")),
+        ];
+        // The commands that reach a project loader but must never consent —
+        // `inspect`, `patch freeze` and `ocx env` share `load_project_with_lock`
+        // with `run`/`pull`; `status`, `direnv export` and `shell state` are the
+        // read-only surfaces A-29 names explicitly.
+        let non_members: [(&str, &str); 6] = [
+            ("inspect", include_str!("../command/inspect.rs")),
+            ("patch freeze", include_str!("../command/patch_freeze.rs")),
+            ("env", include_str!("../command/toolchain_env.rs")),
+            ("status", include_str!("../command/status.rs")),
+            ("direnv export", include_str!("../command/direnv_export.rs")),
+            ("shell state", include_str!("../command/shell_state.rs")),
+        ];
+
+        for (name, source) in members {
+            assert!(
+                stamps(source),
+                "`ocx {name}` is a consent writer and must call the seam"
+            );
+        }
+        for (name, source) in non_members {
+            assert!(
+                !stamps(source),
+                "`ocx {name}` must not write a consent stamp; it calls the seam"
+            );
+        }
+    }
+
+    /// A-29/C-024, the structural half the file-set guard cannot see: the
+    /// **shared** loader stamps nothing.
+    ///
+    /// `lock --check` calls `load_project_with_lock` from inside `lock.rs`,
+    /// which the file-set guard above counts as a member. Only this assertion
+    /// catches a stamp moved into the shared loader, where it would fire for
+    /// `lock --check`, `inspect`, `patch freeze` and `ocx env` alike.
+    #[test]
+    fn a029_the_shared_loaders_never_stamp() {
+        let source = include_str!("project_context.rs");
+
+        for name in ["load_project_with_lock", "load_project_for_mutate"] {
+            let body = code_only(&function_body(source, name));
+            assert!(
+                body.contains("ProjectConfig::resolve"),
+                "`fn {name}`'s body did not extract — the guard is watching nothing"
+            );
+            for call in SEAM_CALLS {
+                assert!(
+                    !body.contains(call),
+                    "`fn {name}` is shared with non-consenting callers and must not call `{call}`"
+                );
+            }
+        }
+
+        let opt_in = code_only(&function_body(source, "load_project_with_lock_consenting"));
+        assert!(
+            opt_in.contains("record_activation_consent("),
+            "the opt-in loader must be the one that stamps, or the guard above is vacuous"
+        );
+    }
 
     // ── helpers ──────────────────────────────────────────────────────────────
 

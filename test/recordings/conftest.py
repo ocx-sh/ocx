@@ -183,11 +183,17 @@ def cast_dir(request: pytest.FixtureRequest) -> Path:
 
 
 @pytest.fixture()
-def recorder(ocx: OcxRunner) -> CastRecorder:
+def recorder(ocx: OcxRunner, script: dict) -> CastRecorder:
+    """Open a ``CastRecorder`` for the script's own ``# shell:`` (WP-16b).
+
+    Depends on the ``script`` fixture (not just ``ocx``) so the shell to
+    spawn is read from the parsed header rather than hardcoded — the same
+    ``DocScriptMeta.shell`` field the verify-path parser now populates.
+    """
     env = ocx.env.copy()
     env.setdefault("TERM", "xterm-256color")
     rec = CastRecorder(env=env)
-    rec.open()
+    rec.open(shell=script["meta"].shell)
     yield rec  # type: ignore[misc]
     rec.close()
 

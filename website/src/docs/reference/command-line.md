@@ -564,6 +564,10 @@ A blank `Held By` cell means the entry is unreferenced and will be collected. A 
 
 Non-dry-run output is always 2-column (`Type | Path`): held entries are never collected and therefore never appear.
 
+**Consent-stamp sweep.** Every `ocx clean` run also removes the [per-project consent stamp][in-depth-shell-integration-consent] for any project whose directory no longer exists on disk — the one exception to `state/` otherwise being outside `clean`'s reach. A stamp is swept only when its own recorded `project_dir` is confirmed absent (a dangling symlink where the directory used to be still counts as present, and is retained); an unreadable, malformed, or unrecognised-version stamp is retained too. This runs on every invocation, `--dry-run` and `--force` included, and is independent of `--force`'s effect on the object-store scan — the sweep never consults the `$OCX_HOME/projects/` ledger `--force` bypasses. The one case that skips it is a run whose object-store liveness picture is already untrustworthy, which retains everything including consent stamps and defers to the next healthy run.
+
+Swept stamps are not currently reported: neither the JSON array (which carries no `consent`-kind entry) nor the plain-table output nor any diagnostic line names what was removed. A moved or temporarily unreachable project directory can therefore lose its consent silently — re-running one of the [consent-writing commands][in-depth-shell-integration-consent] against it re-stamps.
+
 ### `deps` (package-tier — `ocx package deps`) {#deps}
 
 Shows the dependency tree for one or more installed packages. Operates on locally-present packages
@@ -2032,9 +2036,9 @@ The second gate is **at consumption time**, invoked whenever `ocx env` or `ocx p
 
 #### `hook` {#shell-hook}
 
-> **REMOVED** — exits 64. The per-prompt hook model has been replaced by the `$OCX_HOME/env.sh` activation model. See [handshake_toolchain_cli.md §4] for the current activation contract. The `_OCX_APPLIED` fingerprint variable and the per-prompt hook are both gone.
+> **REMOVED** — exits 64. The `ocx shell hook` command itself is gone, along with the stateful `_OCX_APPLIED` fingerprint variable it kept.
 >
-> Use [`ocx direnv`](#direnv) for project-toolchain activation, or `eval "$(ocx --global env --shell=sh)"` for global toolchain activation.
+> The per-prompt hook it managed is not gone — it moved. [`ocx self setup`](#self-setup) wires it into your shell profile, [`ocx self activate`](#self-activate) emits it on every prompt, and [`ocx shell state`](#shell-state) reports whether it is active. See [Shell Integration][in-depth-shell-integration] for the full mechanism.
 
 #### `env` {#shell-env}
 
@@ -2082,11 +2086,54 @@ ocx shell completion --shell powershell | Out-String | Invoke-Expression
 
 :::
 
+#### `state` {#shell-state}
+
+Report why the per-prompt [shell integration][in-depth-shell-integration] hook is — or is not — active in the current shell.
+
+`self activate --reconcile` runs at every prompt, but it never explains itself: an inert shell and an active one produce the same silence. `state` is the read-only diagnostic that fills that gap — it decodes the same `__OCX_ENV_STATE` carrier the hook writes, re-derives the same fingerprint, resolves the same project, and prints the one enumerated reason the shell is inert (or confirms it is active), without writing anything.
+
+**Usage**
+
+```shell
+ocx shell state
+```
+
+**Options**
+
+This command takes no flags of its own; the root [`--format`][arg-format] flag set to `json` switches the output from human-readable text to structured JSON with the same top-level shape (`ocx_home`, `ledger`, `fingerprint_current`, `project_dir`, `project_key`, `project_stamped`, `hook`, `yielded_to`, `inert_reason`, `notes`).
+
+**Never eval-able.** Every line of the text form starts with a fixed label — a section heading, or two leading spaces then a label or a `- ` list marker — and every interpolated value (a ledger key, a project directory, a source name) is quoted with Rust's own `{:?}` escaping, never shell-escaped. No line of `ocx shell state` output is valid `export`/`set`/`$env.` syntax in any of the ten supported shell dialects, for every enumerated inertness reason, so pasting a diagnostic into a live shell can never execute it — the deliberate opposite of [`ocx self activate`](#self-activate), whose entire output *is* meant to be `eval`'d.
+
+**Exit codes**
+
+| Condition | Exit code |
+|---|---|
+| Any reportable state — active, inert (for any of the enumerated reasons below), a corrupt or over-cap ledger, yielded to another tool | 0 |
+| `$OCX_HOME` exists but cannot be read | 74 |
+
+An inert shell is a finding, not a failure: the reason is the payload. The only failure path is an unreadable `$OCX_HOME` — a genuinely absent one is the ordinary state of a fresh install and still reports normally.
+
+**Inertness reasons**
+
+`state` enumerates why the hook has not activated the current project, in the same precedence the hook itself applies:
+
+| Reason | Meaning |
+|---|---|
+| Hook disabled | `--hook`/`--no-hook`, [`OCX_NO_HOOK`][env-ocx-no-hook], or `[shell] hook` decided against running the hook at all; the report names the deciding rung and tier |
+| Yielded to another tool | A live [direnv][direnv] or [mise][mise] sentinel was observed and ocx stepped back rather than compete for the prompt |
+| No consent stamp, no matching grant | The project has neither a stamp from one of the six [consent-writing commands][in-depth-shell-integration-consent] nor a path grant covering it |
+| Source-set drift | The lock's source set is no longer a subset of what the stamp last saw; the report names the new sources |
+| Ledger over cap | A scope's applied-variable count exceeds the carrier's size budget |
+| Ledger absent or corrupt | `__OCX_ENV_STATE` is unset (first prompt in this shell) or failed to decode |
+| `ocx.lock` unavailable | `ocx.lock` is absent, unreadable, or unparseable, so the source-set predicate driving the consent stamp check has nothing to quantify over |
+
+When none of these apply and a project is consented but not yet reflected in the carrier, `state` reports `active: not yet` — the scope is consented and will apply on the shell's next prompt, distinct from both `active: yes` and every inert reason above.
+
 #### `init` {#shell-init}
 
-> **REMOVED** — exits 64. The `ocx shell init` command has been removed along with the per-prompt hook model.
+> **REMOVED** — exits 64. The `ocx shell init` command has been removed.
 >
-> Global toolchain activation is now handled by `$OCX_HOME/env.sh`, written by the in-repo installer with a block-marker idempotent `.`-source line in the login profile. The file runs `eval "$(ocx --global env --shell=sh)"`. For project toolchain activation, use [`ocx direnv`](#direnv).
+> Global toolchain activation at shell start is handled by `$OCX_HOME/env.sh`, written by the in-repo installer with a block-marker idempotent `.`-source line in the login profile; the file runs `eval "$(ocx --global env --shell=sh)"`. In bash, zsh, fish, PowerShell, and elvish (whose guard checks only the carrier and the working directory, not a watch-set stat), the same install also wires a per-prompt hook that keeps both the global toolchain and a consented project's tools converged after that — see [Shell Integration][in-depth-shell-integration]. nushell's directory-change hook keeps the global toolchain live the same way, without a full per-prompt reconcile. For the strict-POSIX shells (`ash`, `dash`, `ksh`) and Windows Batch, which have no append-safe hook point at all, use [`ocx direnv`](#direnv) for project toolchain activation.
 
 ### `self` {#self}
 
@@ -2127,7 +2174,13 @@ ocx self setup [VERSION] [--no-modify-path] [--profile PATH]... [--dry-run] [--f
 | `--dry-run` | — | Report what would change and write nothing. Resolves the version and reports `WouldPull` with the resolved digest, but writes nothing. Never returns exit 82. | off |
 | `--force` | — | Overwrite a managed block that carries user edits (the dirty state). | off |
 | `--managed-config REF` | — | Adopt (or clear) the corporate [managed-config][config-managed] tier. `REF` is resolved as an OCI reference, synchronously fetched and persisted, then the `[managed]` seed fence in `config.toml` is written only on success — a fetch failure leaves no partial state. Pass `--managed-config ""` to clear an existing seed and delete the snapshot. Omitting the flag does not skip resolution: it falls back to [`OCX_MANAGED_CONFIG`][env-ocx-managed-config], then the existing seed. Every run reconciles whichever source resolves — a wiped or mismatched snapshot self-heals (hard-fail on a fetch error, same as first adoption), and an already-adopted seed is re-synced to whatever the registry serves now, so a newer published config is picked up without a separate [`ocx config update`](#config-update). That re-sync is best-effort once a matching snapshot already exists on disk: a fetch failure warns on stderr and keeps the existing snapshot (exit 0) instead of failing the run. | *(resolved: env, then existing seed)* |
+| `--hook` | — | Persist the per-prompt [shell integration][in-depth-shell-integration] hook: writes `[shell] hook = true` to `config.toml`. Last of `--hook`/`--no-hook` wins. | *(untouched)* |
+| `--no-hook` | — | Persist the per-prompt hook off: writes `[shell] hook = false`. | *(untouched)* |
+| `--completion` | — | Persist shell completions on: writes `[shell] completions = true`. | *(untouched)* |
+| `--no-completion` | — | Persist shell completions off: writes `[shell] completions = false`. | *(untouched)* |
 | `-h`, `--help` | | Print help information. | — |
+
+Omitting a flag from either pair leaves the corresponding `config.toml` key untouched — `self setup` only ever writes the keys you name. This is the persistent counterpart to [`self activate --hook`/`--no-hook`][in-depth-shell-integration-commands], which decides the same ladder rung for one session only and never touches disk.
 
 **Version grammar**
 
@@ -2294,8 +2347,8 @@ Emit eval-safe shell activation lines for the current OCX installation.
 Running `ocx self activate` prints three blocks of shell code to stdout:
 
 1. A `PATH` prepend with the resolved absolute path to `<OCX_HOME>/symlinks/ocx.sh/ocx/cli/current/content/bin`. The path is resolved at runtime from the binary's own `OCX_HOME` — no shell variable reference is emitted.
-2. A completion script for the detected shell — emitted inline into the activation stream, only when completions are enabled (skipped silently when `OCX_NO_COMPLETIONS=1` is set, when `--no-completion` is passed, when the session is non-interactive, or when the shell has no [`clap_complete`][clap-complete] backend). The completion block is emitted **first** so that, for PowerShell, its `using namespace` directives lead the stream — `Invoke-Expression` accepts them only as the first statement. The installer's `env.sh`/`env.ps1` shim decides interactivity itself and passes the explicit `--completion`/`--no-completion` flag; a direct `ocx self activate` with neither flag falls back to whether stderr is a terminal.
-3. A global env eval line: `if command -v ocx >/dev/null 2>&1; then eval "$(ocx --global env --shell=NAME)"; fi` (POSIX form shown). Per-shell variants use the target shell's native idiom — `fish` uses `command -v ocx >/dev/null 2>&1; and ocx --global env --shell=fish | source`; `powershell`/`pwsh` use `if (Get-Command ocx -ErrorAction SilentlyContinue) { (ocx --global env --shell=pwsh) | Out-String | Invoke-Expression }`; `elvish` and `nushell` use their respective eval-from-string idioms.
+2. A completion script for the detected shell — emitted inline into the activation stream, only when completions are enabled (skipped silently when `OCX_NO_COMPLETIONS=1` is set, when `--no-completion` is passed, when the session is non-interactive, or when the shell has no [`clap_complete`][clap-complete] backend). The completion block is emitted **first** so that, for PowerShell, its `using namespace` directives lead the stream — `Invoke-Expression` accepts them only as the first statement. Every shim states its own interactivity explicitly through a hidden `--interactive`/`--no-interactive` flag pair, using the test its own shell language provides (`$-` on POSIX, `status is-interactive` on fish, `[Console]::IsInputRedirected` on pwsh, a `test -t 0` probe on elvish), and that answer feeds the completion gate; a direct `ocx self activate` with neither flag falls back to whether stdin **or** stderr is a terminal.
+3. A global env eval line, guarded by a **path test against the resolved absolute binary** — never a `$PATH` name lookup, which a shell function or an earlier `$PATH` entry could shadow. POSIX form shown, with `<ocx>` standing for that absolute path: `if [ -x '<ocx>' ]; then eval "$('<ocx>' --global env --shell=bash)"; fi`. Per-shell variants use the target shell's native idiom — `fish` uses `if test -x '<ocx>'; '<ocx>' --global env --shell=fish | source; end`; `powershell`/`pwsh` use `Test-Path -LiteralPath … -PathType Leaf` and `Invoke-Expression`; `elvish` uses `if ?(test -x '<ocx>') { eval ('<ocx>' --global env --shell=elvish | slurp) }`. `nushell` is the one arm that still probes by name (`which ocx`), because it applies the global env as JSON data rather than evaluating a string; that gap is pinned as a strict xfail.
 
 The `OCX_HOME` assignment-with-fallback lives in `env.sh` itself — written once by the installer, not emitted by `ocx self activate`. See the [environment reference][env-ocx-home] for details.
 
@@ -2324,7 +2377,13 @@ ocx self activate [--shell[=NAME]] [--completion | --no-completion]
 | `--shell[=NAME]` | — | Target shell dialect. Must use the `=` form (`--shell=bash`). Bare `--shell` (no value) and absent `--shell` both trigger autodetect from `$SHELL` or the parent process. Exit 64 if undetectable. `--shell=sh` ≡ `--shell=dash` (POSIX strict alias). | *(autodetect)* |
 | `--completion` | — | Force completion injection on, regardless of session interactivity. | *(auto)* |
 | `--no-completion` | — | Force completion injection off. Last of `--completion`/`--no-completion` wins. | *(auto)* |
+| `--hook` | — | Force the per-prompt [shell integration][in-depth-shell-integration] hook on for this session, regardless of interactivity or `[shell] hook`. | *(auto)* |
+| `--no-hook` | — | Force the per-prompt hook off for this session. Last of `--hook`/`--no-hook` wins (POSIX last-wins, same idiom as `--completion`/`--no-completion`). | *(auto)* |
 | `-h`, `--help` | | Print help information. | — |
+
+`--hook`/`--no-hook` decide *this session only* — the flag pair, the shell it launches, and nothing written to disk. Neither flag is remembered for the next shell: that's `--no-hook` at rung 1/2 of the five-rung ladder, below `OCX_NO_HOOK` (rung 3) and `[shell] hook` (rung 4), above the interactivity auto-probe (rung 5). See [Shell Integration → Commands][in-depth-shell-integration-commands] for the full ladder and how it interacts with `self setup --hook`/`--no-hook` writing the persistent `[shell] hook` key.
+
+A hidden `--interactive`/`--no-interactive` pair also exists, carrying no row in the table above: it is machine surface emitted only by OCX's own `env.*` shims (see above) to state a session's interactivity explicitly, and is never meant to be typed by hand. It feeds rung 5 of both the hook and completion ladders — it is not itself a rung, and is not spelled as `--hook`, since a shim declaring interactivity at rung 2 would outrank `OCX_NO_HOOK` and `[shell] hook` for every session it starts.
 
 **Supported shells**
 
@@ -2345,7 +2404,7 @@ ocx self activate [--shell[=NAME]] [--completion | --no-completion]
 ::: tip Shell completion coverage
 Completion injection wraps [`clap_complete`][clap-complete]. Not every shell supported by `ocx self activate` has a `clap_complete` backend. Unsupported shells silently skip the completion block — PATH prepend and global env eval still run. Set `OCX_NO_COMPLETIONS=1` to suppress completion injection entirely.
 
-Completions load only for **interactive** sessions. The installer's `env.sh`/`env.ps1` shim decides interactivity itself (`$-`, `status is-interactive`, `[Environment]::UserInteractive`) and passes the explicit `--completion`/`--no-completion` flag, so the gate never depends on the binary probing a stderr the shim has redirected. Non-interactive sources — scripts, `ssh host cmd` — get the PATH prepend and global env eval but skip the completion block entirely. A direct `ocx self activate` with neither flag falls back to whether stderr is a terminal.
+Completions load only for **interactive** sessions. Every shim states its own interactivity explicitly through a hidden `--interactive`/`--no-interactive` flag pair (`$-` on POSIX, `status is-interactive` on fish, `[Console]::IsInputRedirected` on pwsh, a `test -t 0` probe on elvish), rather than leaving the binary to guess: every shim runs the activation with stderr redirected, so a stderr probe would read `false` in every real shell, and `ssh -t host 'bash -lc …'` hands a terminal to stdin for a shell that never renders a prompt — neither descriptor answers the question alone. Non-interactive sources — scripts, `ssh host cmd` — get the PATH prepend and global env eval but skip the completion block entirely. A direct `ocx self activate` with neither flag falls back to whether stdin **or** stderr is a terminal.
 :::
 
 **Environment variables**
@@ -5288,6 +5347,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 <!-- external -->
 [releases]: https://github.com/ocx-sh/ocx/releases/latest
 [cargo]: https://doc.rust-lang.org/cargo/
+[direnv]: https://direnv.net
+[mise]: https://mise.jdx.dev
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
 [github-actions-workflow-commands]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions
 [gitlab-ci-export-docs]: https://docs.gitlab.com/ee/ci/variables/#pass-an-environment-variable-to-another-job
@@ -5335,6 +5396,9 @@ or a registry error) — the report then degrades to a local-state-only summary
 [signing-deferred]: ../in-depth/signing.md#deferred-future-work
 [signing-cosign-interop]: ../in-depth/signing.md#cosign-interop
 [in-depth-self-hosted-sigstore]: ../in-depth/self-hosted-sigstore.md
+[in-depth-shell-integration]: ../in-depth/shell-integration.md
+[in-depth-shell-integration-commands]: ../in-depth/shell-integration.md#commands
+[in-depth-shell-integration-consent]: ../in-depth/shell-integration.md#consent
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global
@@ -5383,6 +5447,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [config-schemas]: ./configuration.md#schemas
 [in-depth-versioning-cascades]: ../in-depth/versioning.md#cascades
 [env-ocx-managed-config]: ./environment.md#ocx-managed-config
+[env-ocx-no-hook]: ./environment.md#ocx-no-hook
 [user-guide-managed-config]: ../user-guide.md#managed-config
 [env-composition-project-env]: ./env-composition.md#project-env
 [env-composition-list]: ./env-composition.md#composition-order-list

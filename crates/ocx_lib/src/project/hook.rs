@@ -1,21 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Read-only project-tier helper for the prompt-hook commands
-//! (`shell-hook`, `shell-direnv`) and the future `generate direnv` writer.
+//! Read-only project-tier helper for `ocx direnv export`.
 //!
 //! [`load_project_state`] resolves the project tier, loads the matching
 //! `ocx.toml` + `ocx.lock`, and reports whether the lock is stale. The
 //! function is I/O-only — it emits no messages of its own; the caller
 //! decides how to surface stale-lock warnings and the no-project case.
 //!
-//! The companion `collect_applied` resolver — which walks the locked
-//! default group through a [`PackageManager`] — lives at
-//! [`crate::package_manager::collect_applied`] so this module stays a
-//! pure project-tier leaf with no upward dependency on
-//! `package_manager`.
-//!
-//! [`PackageManager`]: crate::package_manager::PackageManager
+//! A pure project-tier leaf with no upward dependency on `package_manager`.
 
 use std::path::{Path, PathBuf};
 

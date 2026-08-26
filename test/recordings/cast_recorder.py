@@ -344,10 +344,21 @@ class CastRecorder:
         self._clock: float = 0.0
         self._shell: pexpect.spawn | None = None
 
-    def open(self) -> None:
-        """Start a persistent interactive bash shell for recording."""
+    def open(self, *, shell: str = "bash") -> None:
+        """Start a persistent interactive shell for recording.
+
+        ``shell`` is the login-shell binary to spawn, resolved via ``PATH``
+        (WP-16b, ``# shell:`` doc-script header key, default ``"bash"``).
+        Only the bash arm is exercised today — every shipped ``cast: true``
+        script uses the default — but the parameter lets a future non-bash
+        cast select an interpreter without a second recorder pipeline
+        (``design_spec_doc_command_scripts.md`` §6i: one tree, one
+        discovery path). The ``--norc``/``--noprofile``/PS1-sentinel dance
+        below is bash-specific; a non-bash shell would need its own
+        no-rcfile flags and sentinel-prompt incantation here.
+        """
         self._shell = pexpect.spawn(
-            "/bin/bash",
+            shell,
             ["--norc", "--noprofile"],
             env=self.env,
             dimensions=(self.height, self.width),
@@ -447,6 +458,15 @@ class CastRecorder:
         """Type and execute a command in the persistent shell.
 
         Returns the captured output.  Raises AssertionError on non-zero exit.
+
+        A ``PROMPT_COMMAND``/``precmd`` hook registered inside the recorded
+        script (e.g. ``eval "$(ocx self activate --shell=bash)"`` inside a
+        ``# region cast`` block) fires **twice** per call: once when the
+        sentinel prompt reappears after *actual_cmd* returns, and a second
+        time for the silent ``echo $?`` exit-code probe below. Harmless for
+        an idempotent hook (WP-16b) — the per-prompt reconciler is exactly
+        that, a no-op re-apply when nothing changed — but worth knowing
+        before debugging an unexpectedly-doubled side effect in a cast.
         """
         assert self._shell is not None, "call open() before run_command()"
 

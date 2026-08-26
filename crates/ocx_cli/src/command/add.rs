@@ -11,7 +11,9 @@ use clap::Parser;
 use ocx_lib::project::{ResolveLockOptions, add_binding_in_memory, resolve_lock, resolve_lock_touched};
 
 use crate::api::data::lock::{LockEntry, LockReport};
-use crate::app::project_context::{ensure_global_project_initialized, load_project_for_mutate, materialize_lock};
+use crate::app::project_context::{
+    ensure_global_project_initialized, load_project_for_mutate, materialize_lock, record_activation_consent,
+};
 use crate::conventions;
 use crate::options;
 
@@ -175,7 +177,12 @@ impl Add {
 
         // Commit: lock-first, manifest-second, both atomic.
         let commit = guard.commit(staged, new_lock.clone()).await?;
-        let _ = commit;
+
+        // Consent write seam (C-024, A-29) — one of the six commands allowed to
+        // stamp, opting in explicitly. AFTER the commit, so the stamp records
+        // the source set the user just asked for rather than the one it
+        // replaced. Best-effort; never fails the mutation.
+        record_activation_consent(&commit.config_path, &new_lock).await;
 
         // Best-effort pull AFTER the commit lands. A failure here does
         // not roll back the manifest/lock — the binding is declaratively

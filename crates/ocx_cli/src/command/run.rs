@@ -36,7 +36,7 @@ use ocx_lib::project::{
 };
 use ocx_lib::utility::child_process;
 
-use crate::app::project_context::{filter_by_names, load_project_with_lock};
+use crate::app::project_context::{filter_by_names, load_project_with_lock_consenting};
 use crate::options;
 
 /// Run a command with the composed environment from the project toolchain.
@@ -159,7 +159,10 @@ impl Run {
         // Errors propagate to the `main.rs` boundary: logged once and
         // classified by `app::classify_error` from `ProjectContextError`'s
         // `ClassifyExitCode` impl (NoProject→64, LockMissing→78, StaleLock→65).
-        let ctx = load_project_with_lock(&context).await?;
+        // Consent write seam (C-024, A-29): `run` is one of the six commands
+        // that opt in. `load_project_with_lock`, which four read-only callers
+        // share, stamps nothing.
+        let ctx = load_project_with_lock_consenting(&context).await?;
 
         // Phase B.3: validate `-g` groups against the loaded config.
         // `default` and `all` are always valid (all is expanded later).

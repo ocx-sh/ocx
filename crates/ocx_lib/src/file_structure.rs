@@ -17,7 +17,7 @@ pub use blob_store::{BlobDir, BlobStore};
 pub use cas_path::{CasTier, DIGEST_FILENAME, cas_ref_name, cas_shard_path, read_digest_file, write_digest_file};
 pub use index_store::{CatalogEntryStatus, CatalogTransaction, IndexStore, RootReadResult, SOURCE_LOCK_TIMEOUT};
 pub use layer_store::{LayerDir, LayerStore};
-pub use package_store::{PackageDir, PackageStore};
+pub use package_store::{PackageDir, PackageStore, record_origin};
 pub use shim_bin_store::ShimBinStore;
 pub use shim_store::{ShimDir, ShimStore};
 pub use state_store::StateStore;

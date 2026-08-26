@@ -68,6 +68,7 @@ pub mod select;
 pub mod self_group;
 pub mod shell;
 pub mod shell_completion;
+pub mod shell_state;
 pub mod status;
 pub mod toolchain_env;
 pub mod uninstall;

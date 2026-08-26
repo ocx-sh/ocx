@@ -72,7 +72,12 @@ impl<'de> Deserialize<'de> for Modifier {
 // description, so it stays a user sentence. Rationale belongs here: the
 // `JsonSchema` derive exists so schemas `$ref` one vocabulary instead of
 // hand-spelling the type names beside it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
+// `Deserialize` rides here for the reconciler's `LedgerEntry` (C-001), whose
+// wire field is `type` and whose payload is read back out of
+// `__OCX_ENV_STATE` every prompt. An unknown `type` value fails the whole
+// `Ledger::decode` — deliberately, so a ledger degrades to absent rather than
+// to a partial record (C-003).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ModifierKind {
     Path,
