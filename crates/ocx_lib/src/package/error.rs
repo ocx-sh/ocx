@@ -55,6 +55,15 @@ pub enum Error {
     #[error("env var '{key}' omits `separator`, which is required for list entries")]
     MissingListSeparator { key: String },
 
+    /// An env var claims a key in the `OCX_*` / `__OCX_*` namespace ocx reserves
+    /// for its own configuration. Publish-time only — a package that already
+    /// carries one keeps reading, and the resolver skips the key.
+    #[error(
+        "env var '{key}' is in the reserved OCX_* / __OCX_* namespace, which ocx keeps for its own \
+         configuration; rename the variable"
+    )]
+    ReservedEnvKey { key: String },
+
     /// A `list` env var's separator cannot be folded with — see
     /// [`separator_is_valid`](super::metadata::env::list::separator_is_valid).
     // `{:?}` on the separator: it is refused precisely for carrying something
@@ -118,6 +127,7 @@ impl ClassifyExitCode for Error {
             | Self::EmptyPushSet
             | Self::UnknownEnvModifier { .. }
             | Self::MissingListSeparator { .. }
+            | Self::ReservedEnvKey { .. }
             | Self::InvalidListSeparator { .. }
             | Self::SeparatorEdgedListValue { .. }
             | Self::IntegrationNamespaceInvalid { .. }

@@ -569,6 +569,11 @@ impl Env {
     /// This is the bridge from [`entry::Entry`](crate::package::metadata::env::entry::Entry)
     /// (the canonical resolved env var) to the process environment used by `exec`.
     ///
+    /// Entries reach here already filtered of the reserved `OCX_*` / `__OCX_*`
+    /// namespace: the gate is at the `resolve_env*` seam that produced them,
+    /// not here, because `conventions::emit_lines` builds an eval'd shell
+    /// stream from the same vector without ever calling this method.
+    ///
     /// Every `PATH` directory a composed entry contributes is additionally
     /// recorded in the private `package_path`, so [`Self::resolve_test_command`]
     /// can tell a directory the package under test shipped from one the host
@@ -1126,14 +1131,20 @@ pub fn is_valid_env_key(key: &str) -> bool {
 /// Returns `true` when `key` falls in the `OCX_*` / `__OCX_*` namespace ocx
 /// reserves for its own resolution-affecting configuration.
 ///
-/// The single gate behind the rule that user-declarable env surfaces — project
-/// `[env]`, `[group.<name>.env]`, `ocx run --env`, and the forwarded
-/// [`keys::OCX_ENV`] payload — cannot set an `OCX_*` key. Without it a
-/// checked-in file could set `OCX_DEFAULT_REGISTRY`, `OCX_INDEX`, `OCX_MIRRORS`,
-/// `OCX_PATCHES`, `OCX_OFFLINE` or `OCX_ALLOW_YANKED` and reconfigure how ocx
-/// itself resolves — and [`Env::apply_ocx_config`] would forward the result to
-/// every child. Config governing its own governance is a materialized
-/// vulnerability class, not a theoretical one.
+/// The single gate behind the rule that no env surface — project `[env]`,
+/// `[group.<name>.env]`, `ocx run --env`, the forwarded [`keys::OCX_ENV`]
+/// payload, **package metadata**, and `ocx package create` — can set an `OCX_*`
+/// key. Without it a checked-in file could set `OCX_DEFAULT_REGISTRY`,
+/// `OCX_INDEX`, `OCX_MIRRORS`, `OCX_PATCHES`, `OCX_OFFLINE` or
+/// `OCX_ALLOW_YANKED` and reconfigure how ocx itself resolves — and
+/// [`Env::apply_ocx_config`] would forward the result to every child. Config
+/// governing its own governance is a materialized vulnerability class, not a
+/// theoretical one.
+///
+/// The surfaces split on **how** they refuse. The four user-authored ones and
+/// `ocx package create` reject outright; package metadata is only *skipped*, in
+/// `PackageManager::resolve_env_with_attribution`, because an already-published
+/// artifact must keep resolving.
 ///
 /// Matched case-insensitively: Windows environment names are case-insensitive,
 /// so a lowercase `ocx_offline` would land in the same slot as `OCX_OFFLINE`.
