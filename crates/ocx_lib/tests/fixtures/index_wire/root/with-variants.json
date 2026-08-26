@@ -3,6 +3,8 @@
   "repository": "oci://ghcr.io/ocx-contrib/python-build-standalone",
   "owners": [
     {
+      "login": "ocx-bot",
+      "id": 309019509,
       "github": "ocx-bot",
       "github_id": 309019509
     }

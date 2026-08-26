@@ -3,10 +3,14 @@
   "repository": "oci://ghcr.io/ocx-contrib/widget",
   "owners": [
     {
+      "login": "alice",
+      "id": 1,
       "github": "alice",
       "github_id": 1
     },
     {
+      "login": "bob",
+      "id": 2,
       "github": "bob",
       "github_id": 2
     }

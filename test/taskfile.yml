@@ -399,7 +399,7 @@ tasks:
 
   index-conformance-drift:
     desc: >-
-      Fail if the vendored ocx-sh/index conformance fixtures
+      Fail if the vendored ocx-sh/indexbot conformance fixtures
       (crates/ocx_lib/tests/fixtures/index_wire/) differ from that repo's current
       main. Network-bound and NOT wired into `task verify` — the vendored copy
       exists to keep the test suite offline. Runs on verify-deep.yml's weekly
