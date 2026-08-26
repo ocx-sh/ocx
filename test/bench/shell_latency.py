@@ -727,6 +727,16 @@ def evaluate(
     # The positive control's statistic, and not the one the budgets use. See
     # STARTUP_WORK_FLOOR_MS for the measurements that separate the two.
     startup_work = statistics.median(startup_samples) - statistics.median(floor_samples)
+    # The reconcile's counterpart. Recorded, never gated, and its whole content is
+    # the identity `work - delta`: that difference is the measured series'
+    # median-to-min gap minus the floor's, i.e. how much MORE than the floor the
+    # timed command itself scattered. It is the one number that separates a runner
+    # that got noisier from one that got uniformly slower, and the startup half was
+    # only ever recoverable by subtracting two printed gate rows by hand. The
+    # reconcile half was not recorded at all, so answering that question for
+    # ocx-sh/ocx#340's CI flap cost a fourteen-run dev-box study. It is one
+    # subtraction.
+    reconcile_work = statistics.median(reconcile_samples) - statistics.median(floor_samples)
     # Admissibility, computed from the floor alone and shared by both budgets:
     # the same runner produced both deltas, so one scatter figure decides for
     # both. See `_budget_gate` for what it does and cannot do.
@@ -817,6 +827,7 @@ def evaluate(
         "startup_ms": startup,
         "startup_delta_ms": startup_delta,
         "startup_work_ms": startup_work,
+        "reconcile_work_ms": reconcile_work,
         "reconcile": {
             "total_ms": reconcile,
             "delta_ms": reconcile_delta,
@@ -858,6 +869,11 @@ def format_report(report: LatencyReport) -> str:
         (
             f"  per-prompt applying reconcile delta   {cold['delta_ms']:>9.3f} ms  "
             f"(C-044 budget {cold['contract_budget_ms']:.1f} ms, met={cold['contract_met']})"
+        ),
+        (
+            f"  ... same, median-based                {rec['reconcile_work_ms']:>9.3f} ms  "
+            f"(minus the min-based delta above = {rec['reconcile_work_ms'] - cold['delta_ms']:+.3f} ms, "
+            f"the scatter the timed command carried and the floor did not)"
         ),
         (
             f"  ... same, cold capability record      {cold['cold_delta_ms']:>9.3f} ms  "
@@ -1794,6 +1810,19 @@ def self_check() -> None:
 
     green = case(expect_pass=True, why="the baseline inputs must pass every gate")
     assert green.records["reconcile"]["contract_met"]
+    # `reconcile_work_ms` is recorded, so no gate reds when it is wired to the
+    # wrong sample list — it would just print a plausible number forever. Its
+    # whole content is the identity below, so that is what gets pinned: the
+    # excess of the median-based figure over the min-based one is the reconcile
+    # series' median-to-min gap minus the floor's.
+    excess = green.records["reconcile_work_ms"] - green.records["reconcile"]["delta_ms"]
+    want = (statistics.median(_GREEN["reconcile_samples"]) - min(_GREEN["reconcile_samples"])) - (
+        statistics.median(_GREEN["floor_samples"]) - min(_GREEN["floor_samples"])
+    )
+    assert abs(excess - want) < 1e-9, (
+        f"reconcile_work_ms must encode the reconcile series' median-gap excess over the floor's: "
+        f"got {excess:.6f} ms, want {want:.6f} ms"
+    )
 
     # The overshoot has to clear `_GREEN`'s own 0.2 ms floor scatter, or the
     # case abstains and never reaches the red it is asserting. It read +0.001
