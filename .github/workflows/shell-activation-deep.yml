@@ -87,7 +87,10 @@ jobs:
           # matrix's shutil.which discovers them. `package env` auto-installs.
           # fish is Linux-only on ocx.sh, so it is simply skipped by the matrix.
           export OCX_HOME="$RUNNER_TEMP/ocx-shells"
-          eval "$("$ocx" --remote package env nushell elvish pwsh --shell=bash)"
+          # Assign first: `eval "$(...)"` exits 0 even when the substitution dies,
+          # so a resolution failure would degrade to "shells absent" silently.
+          activate="$("$ocx" --remote package env nushell/nushell elvish/elvish powershell/powershell --shell=bash)"
+          eval "$activate"
           echo "resolved shells:"
           for s in nu elvish pwsh; do command -v "$s" || echo "  ($s absent)"; done
 
@@ -156,7 +159,7 @@ jobs:
           $env:OCX_HOME = "$env:RUNNER_TEMP\ocx-shells"
           # Put the ocx-packaged pwsh first on PATH (move-to-front), then run the
           # same gate under it — proves the dogfood "install pwsh via ocx" path.
-          & $ocx --remote package env pwsh --shell=powershell | Out-String | Invoke-Expression
+          & $ocx --remote package env powershell/powershell --shell=powershell | Out-String | Invoke-Expression
           $pwshCmd = (Get-Command pwsh).Source
           Write-Host "ocx-resolved pwsh: $pwshCmd"
           & $pwshCmd -NoProfile -File .\test\manual\test-windows-activation.ps1 -OcxBin $ocx
