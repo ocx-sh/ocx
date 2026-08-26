@@ -786,7 +786,7 @@ fn reconcile_lines(
     let next = next_ledger(previous, fingerprint, outcome, current);
     let mut lines = plan_lines(shell, plan);
     lines.extend(ledger_lines(shell, previous, &next));
-    lines.extend(message_lines(shell, outcome, plan));
+    lines.extend(message_lines(shell, outcome, plan, previous, &next));
     lines
 }
 
@@ -995,25 +995,14 @@ fn ledger_lines(shell: Shell, previous: &Ledger, next: &Ledger) -> Vec<String> {
 /// argument, never the format string** — `Shell::emit_message` is the primitive
 /// that guarantees both. `Batch` hosts no hook and returns `None` for all of
 /// them.
-fn message_lines(shell: Shell, outcome: &Outcome, plan: &Plan) -> Vec<String> {
+fn message_lines(shell: Shell, outcome: &Outcome, plan: &Plan, previous: &Ledger, next: &Ledger) -> Vec<String> {
     outcome
         .messages
         .iter()
         .cloned()
-        .chain(summary_line(plan))
+        .chain(reconcile::summary(plan, previous, next))
         .filter_map(|message| shell.emit_message(message))
         .collect()
-}
-
-/// The change summary, or `None` when this prompt changed nothing.
-fn summary_line(plan: &Plan) -> Option<String> {
-    if plan.sets.is_empty() && plan.removes.is_empty() && plan.restores.is_empty() {
-        return None;
-    }
-    let mut parts: Vec<String> = plan.sets.iter().map(|entry| format!("+{}", entry.key)).collect();
-    parts.extend(plan.removes.iter().map(|(key, ..)| format!("~{key}")));
-    parts.extend(plan.restores.iter().map(|(key, _)| format!("-{key}")));
-    Some(format!("ocx: {}", parts.join(" ")))
 }
 
 /// Print one optional emitted line.

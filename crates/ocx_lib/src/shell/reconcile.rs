@@ -520,6 +520,77 @@ pub fn plan(desired: &[Entry], current: &Env, ledger: &Ledger, owned_prefixes: &
     plan
 }
 
+/// The human-facing change summary for one prompt, or `None` when nothing
+/// changed.
+///
+/// A **delta against the ledger**, not a transcript of what was applied. The
+/// ledger is the record of the previously-applied state, so the two sides of
+/// the comparison are `previous` and `next`, and each variable the plan touches
+/// gets exactly one token:
+///
+/// - `+KEY` — no previous ledger recorded it; this prompt starts setting it.
+/// - `~KEY` — both ledgers record it; what ocx sets for it changed.
+/// - `-KEY` — the previous ledger recorded it and the next one does not; this
+///   prompt stops setting it.
+///
+/// **Folded per variable, never per statement.** A `PATH` seven scopes
+/// contribute to is one token — the reader is being told which variables moved,
+/// and repeating `+PATH` once per contribution tells them only how many
+/// statements the emitter wrote.
+///
+/// **Sorted by key** (case-folded on Windows, as [`key_norm`] already folds
+/// them). Emission order would be equally deterministic, but a variable both
+/// scopes contribute to *has* no single position in it, and a per-key sort is
+/// the ordering a reader can predict.
+///
+/// Variables the plan does not touch never appear: a key whose composed value
+/// is already live is dropped by [`apply_set`] before it reaches [`Plan`], so a
+/// settled prompt produces an empty plan and no line at all.
+pub fn summary(plan: &Plan, previous: &Ledger, next: &Ledger) -> Option<String> {
+    let before = applied_keys(previous);
+    let after = applied_keys(next);
+
+    // `BTreeMap` for the sort; the value keeps the key **as the plan spells
+    // it**, so the line shows the user's own casing rather than the folded
+    // form. The mark is a function of the normalized key alone, so every
+    // occurrence of one variable agrees and first-seen wins without ambiguity.
+    let mut marks: BTreeMap<String, String> = BTreeMap::new();
+    let touched = plan
+        .sets
+        .iter()
+        .map(|entry| entry.key.as_str())
+        .chain(plan.removes.iter().map(|(key, ..)| key.as_str()))
+        .chain(plan.restores.iter().map(|(key, _)| key.as_str()));
+    for key in touched {
+        let norm = key_norm(key);
+        let mark = match (before.contains(&norm), after.contains(&norm)) {
+            (false, true) => '+',
+            (true, true) => '~',
+            // `(false, false)` is the degraded repair (C-006): the ledger was
+            // lost, so an owned segment is being retired from a variable no
+            // ledger ever recorded. It is still a retirement.
+            (true, false) | (false, false) => '-',
+        };
+        marks.entry(norm).or_insert_with(|| format!("{mark}{key}"));
+    }
+
+    if marks.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "ocx: {}",
+        marks.into_values().collect::<Vec<String>>().join(" ")
+    ))
+}
+
+/// Every variable a ledger records as applied, folded by [`key_norm`].
+fn applied_keys(ledger: &Ledger) -> HashSet<String> {
+    ledger
+        .applied_in_emission_order()
+        .map(|entry| key_norm(&entry.key))
+        .collect()
+}
+
 /// Capture the pre-apply values a later revert restores (C-015 rules 3–4, A-05).
 ///
 /// `applied` is the scope's own record and `current` the environment **this
@@ -3324,5 +3395,190 @@ mod watch_path_tests {
         let stamp = file_structure.state.consent_stamp_file("a1b2c3d4e5f60718");
         assert!(with.contains(&stamp), "the consent stamp is a watch-set member (A-13)");
         assert!(!without.contains(&stamp), "no project key, no stamp member");
+    }
+}
+
+/// The per-prompt change summary: folded per variable, computed as a delta
+/// against the ledger.
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    fn path_entry(key: &str, value: &str) -> Entry {
+        Entry {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            kind: ModifierKind::Path,
+            separator: None,
+        }
+    }
+
+    fn constant(key: &str, value: &str) -> Entry {
+        Entry {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            kind: ModifierKind::Constant,
+            separator: None,
+        }
+    }
+
+    /// A ledger recording `applied` under the project scope.
+    fn recording(applied: &[Entry]) -> Ledger {
+        Ledger {
+            scopes: Scopes {
+                global: None,
+                global_priors: Priors::new(),
+                project: Some(ProjectScope {
+                    key: "acme-1a2b".to_owned(),
+                    dir: PathBuf::from("/p1"),
+                    applied: applied.iter().map(LedgerEntry::from).collect(),
+                    priors: Priors::new(),
+                }),
+            },
+            ..Ledger::empty()
+        }
+    }
+
+    /// A ledger recording `global` under the global scope only.
+    fn recording_global(global: &[Entry]) -> Ledger {
+        Ledger {
+            scopes: Scopes {
+                global: Some(global.iter().map(LedgerEntry::from).collect()),
+                global_priors: Priors::new(),
+                project: None,
+            },
+            ..Ledger::empty()
+        }
+    }
+
+    fn owned() -> Vec<&'static Path> {
+        vec![Path::new("/home/u/.ocx")]
+    }
+
+    fn env_with(pairs: &[(&str, &str)]) -> Env {
+        let mut env = Env::clean();
+        for (key, value) in pairs {
+            env.set(*key, *value);
+        }
+        env
+    }
+
+    /// The defect the owner reported: seven contributions to one `PATH` printed
+    /// `+PATH` seven times, because the line had one token per emitted
+    /// statement. One variable is one token however many statements touch it.
+    #[test]
+    fn a_variable_many_scopes_contribute_to_gets_exactly_one_token() {
+        let desired: Vec<Entry> = (0..7)
+            .map(|index| path_entry("PATH", &format!("/opt/t{index}/bin")))
+            .collect();
+        let planned = plan(&desired, &Env::clean(), &Ledger::empty(), &owned());
+        assert_eq!(
+            planned.sets.len(),
+            7,
+            "the fixture must emit seven statements, or folding proves nothing"
+        );
+
+        assert_eq!(
+            summary(&planned, &Ledger::empty(), &recording(&desired)).as_deref(),
+            Some("ocx: +PATH"),
+            "seven contributions to one variable fold to one token"
+        );
+    }
+
+    /// `+` — a variable no previous ledger recorded.
+    #[test]
+    fn a_variable_no_previous_ledger_recorded_is_marked_added() {
+        let desired = vec![constant("JAVA_HOME", "/opt/jdk")];
+        let planned = plan(&desired, &Env::clean(), &Ledger::empty(), &owned());
+
+        assert_eq!(
+            summary(&planned, &Ledger::empty(), &recording(&desired)).as_deref(),
+            Some("ocx: +JAVA_HOME")
+        );
+    }
+
+    /// `~` — both ledgers record it and what ocx sets changed. The old line
+    /// printed `+JAVA_HOME` here: it read the applied set, not the delta.
+    #[test]
+    fn a_variable_both_ledgers_record_is_marked_changed() {
+        let before = vec![constant("JAVA_HOME", "/opt/jdk17")];
+        let after = vec![constant("JAVA_HOME", "/opt/jdk21")];
+        let previous = recording(&before);
+        let planned = plan(&after, &env_with(&[("JAVA_HOME", "/opt/jdk17")]), &previous, &owned());
+        assert!(!planned.sets.is_empty(), "the fixture must re-set the constant");
+
+        assert_eq!(
+            summary(&planned, &previous, &recording(&after)).as_deref(),
+            Some("ocx: ~JAVA_HOME")
+        );
+    }
+
+    /// `-` — the previous ledger recorded it and the next one does not. The old
+    /// line called a retired path element `~PATH`, which is the mark a *change*
+    /// carries.
+    #[test]
+    fn a_variable_the_next_ledger_stops_recording_is_marked_retired() {
+        let before = vec![path_entry("PATH", "/opt/gone/bin")];
+        let previous = recording(&before);
+        let planned = plan(&[], &env_with(&[("PATH", "/opt/gone/bin")]), &previous, &owned());
+        assert!(!planned.removes.is_empty(), "the fixture must retire the element");
+
+        assert_eq!(
+            summary(&planned, &previous, &Ledger::empty()).as_deref(),
+            Some("ocx: -PATH")
+        );
+    }
+
+    /// The case that makes the *next* ledger load-bearing rather than
+    /// decorative: leaving a project retires its `PATH` contribution while the
+    /// global tier keeps setting `PATH`. The variable changed; it did not go
+    /// away, and `-PATH` would tell the reader it did.
+    #[test]
+    fn a_variable_one_scope_retires_but_another_still_sets_is_changed_not_retired() {
+        let global = vec![path_entry("PATH", "/home/u/.ocx/bin")];
+        let mut before = global.clone();
+        before.push(path_entry("PATH", "/p1/bin"));
+        let previous = recording(&before);
+        let current = env_with(&[("PATH", "/home/u/.ocx/bin:/p1/bin")]);
+        let planned = plan(&global, &current, &previous, &owned());
+        assert!(
+            !planned.removes.is_empty(),
+            "the fixture must retire the project element"
+        );
+
+        assert_eq!(
+            summary(&planned, &previous, &recording_global(&global)).as_deref(),
+            Some("ocx: ~PATH"),
+            "a variable another scope still sets changed; it was not retired"
+        );
+    }
+
+    /// Tokens are sorted by key, so the line is the same on every prompt that
+    /// makes the same change — never the order the emitter happened to walk.
+    #[test]
+    fn tokens_are_sorted_by_key() {
+        let desired = vec![constant("ZULU", "z"), constant("ALPHA", "a"), constant("MIKE", "m")];
+        let planned = plan(&desired, &Env::clean(), &Ledger::empty(), &owned());
+
+        assert_eq!(
+            summary(&planned, &Ledger::empty(), &recording(&desired)).as_deref(),
+            Some("ocx: +ALPHA +MIKE +ZULU")
+        );
+    }
+
+    /// A prompt that changes nothing says nothing — decision 3's fixed point
+    /// reaches the summary too, not only the emitted statements.
+    #[test]
+    fn a_settled_prompt_produces_no_line() {
+        let desired = vec![path_entry("PATH", "/p1/bin"), constant("JAVA_HOME", "/opt/jdk")];
+        let previous = recording(&desired);
+        let current = env_with(&[("PATH", "/p1/bin"), ("JAVA_HOME", "/opt/jdk")]);
+        let planned = plan(&desired, &current, &previous, &owned());
+        assert!(
+            planned.sets.is_empty() && planned.removes.is_empty() && planned.restores.is_empty(),
+            "the fixture must settle, or the silence proves nothing: {planned:?}"
+        );
+
+        assert_eq!(summary(&planned, &previous, &recording(&desired)), None);
     }
 }
