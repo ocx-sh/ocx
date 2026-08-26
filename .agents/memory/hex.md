@@ -54,6 +54,98 @@ research-axes:
   (CLAUDE.md model policy; matches models.md Rule 4).
 
 ## Memory
+- **The cross-model gate earned its keep a SIXTH time, and this run makes the pattern
+  unambiguous.** Eight Claude reviewers on the shell-env branch (spec, test-coverage,
+  security, escaping, performance, docs, architect, SOTA) produced 6 Block findings between
+  them. Codex then found two more that every one of them had missed, both in the revert
+  planner and both requiring the same setup nobody had constructed: *two scopes declaring the
+  same key, retiring in the same prompt*. Its stated mechanism was wrong on one of them
+  (it blamed restore ordering; the real cause was that the global scope carries no priors at
+  all), which is the point — **a cross-model finding is a lead, not a verdict.** Opening
+  `reconcile.rs` is what turned a wrong explanation into the right fix. Never treat the
+  adversary as the optional last layer, and never relay its diagnosis unopened.
+- **File-disjoint decomposition is what made a 26-finding fix round parallelisable, and the
+  refusals were the most valuable worker output.** Six workers, one worktree each, disjoint
+  file sets. Three of them correctly REFUSED items that crossed their boundary rather than
+  reaching into another worker's file: W2 refused R1 with a compile-level argument (every
+  carrier shape that could hold a global prior is built by exhaustive struct literal in
+  `activate.rs`, so Rust has no partial-literal escape), W3 refused P2 because `Verdict`
+  lives in W2's file, and W5 refused three register rows needing Rust tests. Each refusal
+  came with the exact patch the next worker should apply. A seventh "cross-file follow-up"
+  worker then landed all of them in one commit series. **Brief for the outcome and say a
+  reasoned refusal with evidence is an acceptable answer** — otherwise the agent reaches
+  across the boundary and the merge conflicts.
+- **A worker can die on an API error and report nothing.** W5 (the vacuous-check pass) came
+  back as `Agent terminated early due to an API error: 403 Unable to verify organization
+  membership` having done zero work. That is a *third* failure mode alongside "idle without
+  reporting" and "delivered": **terminated without starting**. The tell is that the result is
+  an error string rather than a report or silence. Re-spawn it; do not assume the work
+  happened. Its worktree was still at the base commit, which is the cheap check.
+- **`task --force` skips `preconditions:` on go-task 3.52** (found by the re-spawned W5 while
+  writing a guard against a silent degrade). Any guard that must survive the `--force` this
+  repo's own conventions recommend belongs in `cmds:`, never `preconditions:`. A guard that
+  evaporates under the flag everyone passes is the same class as an unreachable red state.
+- **`task verify` exceeds the 10-minute foreground bash cap on this repo.** Backgrounding it
+  from a subagent gets it killed at the turn boundary (the exit-143 lesson above). What works
+  from an orchestrator: `nohup … > log 2>&1 &` with `disown`, then a `Monitor` until-loop on
+  the PID. Full run here: ~25 min wall (5959 unit + 2664 acceptance), exit 0.
+- **A red CI leg can be fixed by a change aimed at something else — check before investigating.**
+  `test_a_real_pwsh_prompt_hook_applies_on_cd` was red on the PR before this round. The fix
+  round never targeted it; W4's unrelated refactor of `power_shell_registration` (extracting
+  `function global:__ocxReconcile` so the wrapper and the prompt share one guarded entry
+  point) made it pass. Re-run the failing leg against the new tip before opening an
+  investigation into it.
+
+- **Design record (hex-architect, 2026-08-24/25):**
+  `.claude/artifacts/adr_shell_env_overhaul.md` — tier high, Status `Proposed`,
+  supersedes `adr_live_env_reload.md`. Replaces direnv with a native per-prompt
+  reconciler; consent model, `[shell.trust]` whitelist, `__OCX_ENV_STATE` carrier,
+  one project key + one per-project state root, `--[no-]hook` symmetric with
+  completions. Scope brief `.claude/artifacts/brief_env_overhaul.md` (authoritative);
+  Discover map `discover_shell_env_map.md`; research
+  `research_{project_state_layout,trust_whitelist_grammar,shell_integration_rollout,private_env_state_vars}.md`;
+  panel findings `review_adr_env_{spec,security,quality,sota}.md`.
+  Converged in 3 rounds: opus panel (spec/quality/security) + SOTA → 9 Block fixed →
+  Codex cross-model gate → 3 net-new (2 Block) fixed.
+  **Key reversal from the predecessor**: the phase-1/phase-2 dependency on
+  `adr_project_toolchain_links.md` ([#189](https://github.com/ocx-sh/ocx/issues/189))
+  is NOT real — the reconciler works against digest paths, links are an optimization
+  plus the frozen-process class. The two are independent tracks.
+  **Owner gates**: 3 open questions (whitelist key shape, default-on blast radius,
+  WinPS 5.1 fidelity) and the flip to `Accepted`.
+  Research axes worth keeping as `hex.md › Preferences` hints: per-project state
+  layout; trust/whitelist config grammar; generated-shell-integration rollout lag.
+
+- **Active plan (hex-plan high, 2026-08-25):**
+  `.claude/artifacts/plan_shell_env_overhaul.md` — the shell env overhaul, State
+  `plan-approved`, 19 file-disjoint work packages in six waves. Spine
+  `.claude/artifacts/design_spec_shell_env_overhaul.md` (C-001..C-052, S-001..S-045).
+  Research `research_{shell_hook_cast_recording,prompt_hook_ci_testing,shell_env_sota_gap_check}.md`.
+  Next: `/hex-review .claude/artifacts/plan_shell_env_overhaul.md` — waves 0-5 all
+  merged except WP-12b (spike-gated nushell leaf, nothing depends on it).
+  **Execution lesson, waves 4-5:** every defect this run found came from running the
+  suite somewhere the author could not, never from reading the code. The host has no
+  nushell or elvish, so those arms skipped silently and shipped broken; a uid-0
+  container ignores the `chmod` three tests staged their premise with, so they were
+  green without checking anything; and `coexistence::detect` passed CI for a whole
+  wave against a `DIRENV_DIR` spelling real direnv never emits. **Run the fixture
+  against the real thing before believing a green.**
+  **Plan lives in `.claude/artifacts/`, not `.claude/state/plans/`** — the latter is
+  gitignored (`.gitignore:39`) and the plan had to be committable.
+  **Review lesson, third dataset:** the panel's single highest-value finding was a
+  *false* claim in its own input — the architect worker asserted `project/hook.rs` had
+  zero call sites and scheduled it for deletion in the sequential commit gating all 18
+  other packages; it is live (`direnv_export.rs:11,94,96,102`). Two other Block-tier
+  findings were the same shape: a gate homed at a seam that does not reach the surface
+  it defends (`emit_lines` never routes through `Env::apply_entries`), and a security
+  property asserted against a shipped mechanism that implements the opposite
+  (`ScopeSpec`'s deserializer *drops* unknown keys). **A "zero call sites" or
+  "X already does Y" claim is not evidence until you grep excluding the defining file.**
+  **Cross-model gate caveat:** `codex:rescue` ran but `--model gpt-5.3-codex` (the
+  `terra` mapping) was rejected — *"not supported when using Codex with a ChatGPT
+  account"* — so the run used Codex's account-default model. It still found two real
+  Blocks the opus panel missed (the `resolve_env*` seam is `tasks/resolve.rs:724`, not
+  `composer.rs`; WP-14's DAG was missing two edges). Fix the `terra` model string.
 
 - **Active plan (hex-plan, 2026-08-09):**
   `.claude/state/plans/plan_interpolation_token_grammar.md` — ocx#303, tier high,
@@ -343,3 +435,51 @@ research-axes:
     (56 acceptance files on loopback, every air-gapped registry) and the subsystem rule already
     documenting it as design. Brief for the outcome, and say that a reasoned refusal with evidence
     is an acceptable answer — otherwise the agent implements the wrong thing well.
+
+- **Shell-env overhaul, waves 2-3 execution (2026-08-25, branch `feat/shell-env-overhaul`,
+  tip `5089ccdf`, `task verify` exit 0 / 2285 acceptance).** WP-10, WP-12a, WP-13, WP-11
+  merged. Both plan open questions closed by spike, not reasoning: nushell `hide-env
+  --ignore-errors` DOES reach the caller from inside an `env_change.PWD` hook (full
+  parity, WP-12b ungated; re-runnable harness `test/manual/nushell-hide-env-spike.sh`),
+  and the C-047 dispatcher ceilings are measured per family with an
+  `INLINED_LOGIC_FLOOR = 500` assertion so the constants cannot go vacuous by drift.
+  - **One Docker registry serves every worktree.** All `.agents/worktrees/*` share compose
+    project `test_default` on `localhost:5000`, and `test_patches.py` holds a
+    registry-wide, non-UUID-scoped slot — so three concurrent `task verify` runs produced
+    three different failures, none of them real. Per-WP gates must be `task rust:verify`;
+    exactly one serialized `task verify` on the integration branch, after
+    `docker compose down -v` and after pre-building the release binary so the suite run
+    cannot be killed mid-module (a kill mid-`test_patches.py` poisons the slot).
+  - **`${PIPESTATUS[0]}` expands EMPTY under zsh** (it is `$pipestatus`), so a piped gate
+    yields no exit code at all while its output still scrolls past looking green. Never
+    pipe `task verify`; redirect to a log and capture `$?` on the next line. Compounding
+    trap: a background wrapper that *echoes* the exit code exits 0 itself, so the task
+    notification says "completed (exit code 0)" for a red gate — read the logged
+    `VERIFY_EXIT=`, never the notification.
+  - **Four worker checks were vacuous, and all four were caught only by insisting on a
+    red.** A shim-body denylist whose needle was a literal in the file it scanned; a
+    `$PWD` grep mis-escaped so it matched identically in both states; a fake-binary
+    fixture that emitted no carrier, so the empty-carrier term fired every prompt and the
+    named term was never reached; a headline test whose precondition fired before its
+    assertion. A worker reporting "red demonstrated" is a claim, not evidence — ask for
+    the `grep -c` of the mutated token and the two exit codes.
+  - **Rust privacy is module-scoped, so a unit proof-struct proves nothing.** C-028 was
+    made compile-time by a `ConsentProof` the consent gate alone can mint — but the first
+    attempt used a *unit* struct and the hoist it was meant to forbid still compiled. A
+    private `()` field fixed it. The injection caught it; review had not.
+  - **Merging a sibling's stale SHA costs a content conflict.** A worker amended after I
+    merged; the amended tip then conflicted with my own merge of its predecessor.
+    `--theirs` is only defensible because both sides were the same author's drafts, and
+    only after proving the result byte-identical to the amended tip
+    (`git diff --stat <amended> -- <files>` empty). Re-read a worker's tip immediately
+    before merging.
+  - **A pty driver named after the stdlib module it imports shadows it.** The nushell
+    spike wrote its driver to `${workdir}/pty.py`, so `import pty` found itself,
+    `pty.fork` did not exist, no output was produced — and the harness concluded
+    "hide-env did not propagate", the opposite of the truth. A harness that can only
+    report one outcome is the failure mode; gate on the mutation being present.
+  - **The headline use case was broken on 4 of 5 shells and invisible.** The prompt
+    guard had no `$PWD` term and the watch set is fixed at shell start, so `cd` alone
+    never re-reconciled — nushell was unaffected, which is exactly why nothing caught it.
+    `shell/hook.rs` was unowned by any work package. **Assign every file the feature's
+    headline scenario traverses**, not only the files the contracts name.

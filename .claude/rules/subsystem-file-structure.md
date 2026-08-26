@@ -96,11 +96,12 @@ deleted" above.
 
 | Path | Purpose |
 |------|---------|
-| `projects/` | Project GC ledger — flat directory of one symlink per registered project. Name = first 16 hex chars of `SHA-256(canonical_abs_project_dir)`; target = the project directory. Updated by `ProjectRegistry::register` after every `ocx lock` save. Read by `ocx clean` via `ProjectRegistry::live_projects()` to retain cross-project packages. ADR: `adr_project_gc_symlink_ledger.md`. |
+| `projects/` | Project GC ledger — flat directory of one symlink per registered project. Name = first 16 hex chars of `SHA-256(canonical_abs_project_dir)`; target = the project directory. Updated by `ProjectRegistry::register` after every `ocx lock` save. Read by `ocx clean` via `ProjectRegistry::live_projects()` to retain cross-project packages. ADR: `adr_project_gc_symlink_ledger.md`. **Two directories share the name `projects` — not to be confused with `state/projects/<key>/` below.** This one is the GC ledger: symlinks, lifetime tied to installs, read by `ocx clean` through `live_projects()`. `state/projects/<key>/` is the per-project shell-consent stamp root: deletable at any time, read only by its own sweep. Both key off the same `name_for_path(canonical_project_dir)` derivation but have opposite lifetimes and opposite failure modes (`adr_shell_env_overhaul.md` Decision 2). |
 | `state/` | Persistent runtime state. Distinct from `cache/` (regenerable bulk). Subdirectory entries are small files whose existence or mtime IS the data — no content structure required. Never regenerated; persisted across sessions. |
 | `state/update-check/<slug>` | Update-check throttle state file. `<slug>` = `to_slug(identifier)` — strict no-dot slug, for example `ocx_sh_ocx_cli` for `ocx.sh/ocx/cli`. File is always zero-byte; mtime is the only datum (time of last registry probe). Touched after every registry probe (success or error); NOT touched on throttle short-circuit. Parent directory created lazily on first touch. Written atomically via PID-suffixed temp file + `std::fs::rename`. |
 | `state/patch-descriptors/<registry-slug>/<repo>.json` | Patch-descriptor discovery record — the three-state `__ocx.patch` key in a `BTreeMap<String,String>` tag→digest map (`FileStructure::patch_descriptor_path`). |
 | `state/patch-companions/<registry-slug>/<repo>.json` | **Patch-tier companion pins** — the same tag→digest map shape, one ordinary tag key per pinned companion tag, holding the TOP (image-index) manifest digest (`FileStructure::patch_companion_path`). A companion is a package the user never named, so its binding lives here and NEVER in the local index (`subsystem-oci`: a pin moves only when named). Written by `install_companion` after the pinned pull succeeds; advanced only by `ocx patch sync`. Both patch state paths are keyed off the `FileStructure` root and never carry `--index` / `OCX_INDEX` redirection — `ocx patch test` therefore pins into its scratch root, which is where its compose reads back from. |
+| `state/projects/<key>/consent.json` | **Per-project shell-activation consent stamp** (`adr_shell_env_overhaul.md` Decision 2). `<key>` = the same `name_for_path(dunce::canonicalize(canonicalize(<project file>).parent()))` derivation the `projects/` ledger uses. `StateStore::project_state_dir(key)` / `consent_stamp_file(key)` / `project_state_root()`. Written by exactly six call sites — the toolchain-tier mutation commands (`add`/`remove`/`lock`/`update`/`run`/`pull`) — never by `ocx shell state` or `ocx self activate`, which are read-only. Replaced atomically via `write_bytes_atomic`, never edited in place. **GC is the one exception to "`state/` is not walked by `ocx clean`" below**: swept iff the stamp deserializes at an understood `v` AND a pre-removal re-probe proves its own recorded `project_dir` is definitively absent — never derived from the `projects/` ledger, which the stamp does not consult. See `arch-principles.md`'s **State** glossary entry for the one-exception framing. |
 
 `$OCX_HOME/projects.json` and `$OCX_HOME/.projects.lock` from the prior JSON ledger are obsolete — safe to delete. `ocx clean` removes them opportunistically with a single debug log if encountered.
 
@@ -132,7 +133,7 @@ Layout: `{root}/packages/{registry_slug}/{algorithm}/{2hex}/{30hex}/`
 
 **Repository NOT in path.** Only registry + digest set location → cross-repo dedup.
 
-Each package dir contain: `content/`, `metadata.json`, `manifest.json`, `resolve.json`, `install.json`, `digest`, `refs/symlinks/`, `refs/deps/`, `refs/layers/`, `refs/blobs/`.
+Each package dir contain: `content/`, `metadata.json`, `manifest.json`, `resolve.json`, `install.json`, `digest`, `refs/symlinks/`, `refs/deps/`, `refs/layers/`, `refs/blobs/`, `refs/origins/`.
 
 Key store methods: `path(pinned_id)`, `content(pinned_id)`, `metadata(pinned_id)`, `manifest(pinned_id)`, `resolve(pinned_id)`, `install_status(pinned_id)`, `digest_file(pinned_id)`, `metadata_for_content(content_path)`, `refs_symlinks_dir_for_content(content_path)`, `refs_deps_dir_for_content(content_path)`, `refs_layers_dir_for_content(content_path)`, `refs_blobs_dir_for_content(content_path)`, `resolve_for_content(content_path)`, `list_all() → Vec<PackageDir>`.
 
@@ -223,7 +224,9 @@ Key methods: `candidate(identifier)`, `current(identifier)`, `candidates(identif
 Layout: `{root}/state/` — see "Root-level state files under `$OCX_HOME`" above for the fixed
 root-level entries (`state/update-check/<slug>` etc.); per-subsystem caches follow the general
 shape `state/{subsystem}/{key}.json` (e.g. `state/referrers/<registry-slug>.json`,
-`state/trust_root/<rekor-authority-slug>.json`).
+`state/trust_root/<rekor-authority-slug>.json`, `state/host/capabilities.json` — the Linux-only
+host libc-detection cache, one flat file with no per-key sharding since it is keyed on the local
+machine rather than a registry).
 
 Key methods: `root()`, `update_check_dir()`, `update_check_file(identifier)`; signing/trust caches: `referrers_capability_file(registry)` (`state/referrers/<registry-slug>.json`) and `trust_root_file(rekor_authority)` (`state/trust_root/<rekor-authority-slug>.json`) — both slug via `to_relaxed_slug` (dots preserved) and are the layout owners for the OCI referrer capability + offline-verify trust-root caches; managed-config tier: `managed_config_dir()`, `managed_config_snapshot_file()` (metadata JSON) + `managed_config_toml_file()` (readable `config.toml` payload sibling) — the snapshot persists as **two** files (payload written first, metadata last, each its own atomic temp+rename; metadata absent ⟹ whole snapshot reads absent), `managed_config_refresh_marker()` (zero-byte throttle marker), `managed_config_pause_file()` (content-bearing `pause.json` written by `ocx config update --pause`), plus the pure associated `managed_config_snapshot_path(ocx_home)` and `managed_config_toml_path_for_snapshot(snapshot_path)` (sibling derivation) shared with the config loader. Generic throttle primitives (promoted from `package_manager/tasks/update_check.rs`): `is_throttled(path, interval) -> bool` (sync, blocking I/O) and `touch(path) -> impl Future` (async, atomic write via temp+rename, logs failure at debug — never propagates). Callers own the state-file path (e.g. via `update_check_file`); these two methods are path-agnostic.
 
@@ -233,7 +236,7 @@ Referrers capability cache and the offline-verify trust-root cache, both introdu
 
 - **Purpose:** ephemeral, non-content-addressed, registry-scoped or subsystem-scoped runtime state. NOT for content (use `blobs/`), extracted files (`layers/`), assembled packages (`packages/`), persistent metadata mirror (`tags/`), or install pointers (`symlinks/`).
 - **Lifetime:** TTL-bound per subsystem (the Referrers capability cache uses a flat 6h TTL, ADR Amendment 6). Stale entries are safe to delete at any time without integrity loss.
-- **GC:** **not walked** by `ocx clean`. The garbage collector traverses `refs/{symlinks,deps,layers,blobs}/` for reachability; `state/` has no refs, no digest, no GC role. v2 may add `ocx clean --state` to truncate.
+- **GC:** **not walked** by `ocx clean`, with exactly **one exception**: `state/projects/<key>/` (the shell-activation consent stamp, see "Root-level state files" above) is swept on the stamp's own recorded `project_dir` liveness, one call site in `clean.rs` — never on `refs/` reachability and never on the `projects/` ledger, which this sweep does not consult (`adr_shell_env_overhaul.md` Decision 2). Every other `state/{subsystem}/...` entry has no refs, no digest, no GC role. v2 may add `ocx clean --state` to truncate the rest.
 - **Atomicity:** writes via `tempfile::NamedTempFile` + `std::fs::rename` (Windows-safe across existing targets). The `tempfile::persist` shortcut does **not** replace-existing on Windows.
 - **Concurrency:** advisory file lock optional per subsystem. Capability cache reads tolerate fail-open ("file missing → unknown, reprobe").
 - **Schema:** each subsystem owns its JSON schema. No registry-wide invariants beyond filename layout.
@@ -289,6 +292,8 @@ Dependency forward-ref: `packages/.../refs/deps/{algorithm}_{32_hex}` → depend
 Layer forward-ref: created by `pull` directly (not via `ReferenceManager`). Symlink in `refs/layers/` target `layers/.../content/`. GC recover layer entry dir via `.parent()` on target.
 
 Blob forward-ref: created by `pull` directly. Symlink in `refs/blobs/` target `blobs/.../data`. GC recover blob entry dir via `.parent()` on target.
+
+Origin marker: `packages/.../refs/origins/{name_for_path(origin)}` — a **regular file** (not a symlink), content = the canonical `<registry>/<repository-path>` origin string, written by `record_origin()` on a genuine fetch only. Records provenance (which repository this host resolved this digest under — logical, not transport), not liveness — deliberately outside the GC reachability graph below, so `refs/origins/` is never walked for roots or edges. Read side: `PackageDir::recorded_origins()`. Consumed by `project::consent::verified_sources` (the shell-activation namespace-grant predicate).
 
 `broken_refs()` check only `refs/symlinks/` — not `refs/deps/`, `refs/layers/`, `refs/blobs/`.
 

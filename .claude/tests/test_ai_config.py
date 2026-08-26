@@ -2023,6 +2023,7 @@ class TestSubsystemCliCommandsTableCoverage:
         "direnv_init": "direnv init",
         "direnv_export": "direnv export",
         "shell_completion": "shell completion",
+        "shell_state": "shell state",
     }
 
     # Commands intentionally absent from the public table (internal /
