@@ -2095,8 +2095,9 @@ Report why the per-prompt [shell integration][in-depth-shell-integration] hook i
 **Usage**
 
 ```shell
-ocx shell state             # the answer
-ocx shell state --verbose   # the answer, plus the evidence behind it
+ocx shell state                 # the answer
+ocx shell state --verbose       # the answer, plus the evidence behind it
+ocx --format json shell state   # the complete structured report
 ```
 
 **Options**
@@ -2111,7 +2112,7 @@ The default text output is the answer and nothing else — where `$OCX_HOME` is,
 
 Output is coloured when stdout is a terminal and colour is enabled (see [`--color`][arg-color]): the verdict, the reason, and the fix are highlighted so they can be found at a glance. Redirected to a file or a pipe, the text is byte-identical minus the escapes.
 
-**Never eval-able.** Every line of the text form starts with a fixed label — a section heading, or two leading spaces then a label or a `- ` list marker — and every interpolated value (a ledger key, a project directory, a source name) is quoted with Rust's own `{:?}` escaping, never shell-escaped. No line of `ocx shell state` output is valid `export`/`set`/`$env.` syntax in any of the ten supported shell dialects, for every enumerated inertness reason, at either detail tier, coloured or not, so pasting a diagnostic into a live shell can never execute it — the deliberate opposite of [`ocx self activate`](#self-activate), whose entire output *is* meant to be `eval`'d.
+**Never eval-able.** Every line of the text form starts with a fixed label this command owns — a heading in the first column, or an indented label, or an indented `- ` list marker — and every interpolated value (a ledger key, a project directory, a source name) is quoted with Rust's own `{:?}` escaping, never shell-escaped. No line of `ocx shell state` output is valid `export`/`set`/`$env.` syntax in any of the ten supported shell dialects, for every enumerated inertness reason, at either detail tier, coloured or not, so pasting a diagnostic into a live shell can never execute it — the deliberate opposite of [`ocx self activate`](#self-activate), whose entire output *is* meant to be `eval`'d.
 
 **Exit codes**
 

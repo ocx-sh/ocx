@@ -326,7 +326,7 @@ def project_key(ocx: Path, project_dir: Path, env: dict[str, str]) -> str:
 
 
 def shell_state(ocx: Path, cwd: Path, env: dict[str, str]) -> dict:
-    """``ocx shell state --format json``, parsed.
+    """``ocx --format json shell state``, parsed.
 
     The registry-free observation point for the whole consent set: the reason
     ladder in ``command/shell_state.rs`` renders every enumerated inertness

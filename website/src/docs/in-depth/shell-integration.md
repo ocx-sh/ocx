@@ -137,7 +137,7 @@ ocx shell state --verbose
 `--verbose` is a rendering tier, not a payload. The structured form carries every field at every verbosity:
 
 ```sh
-ocx shell state --format json   # complete, with or without --verbose
+ocx --format json shell state   # complete, with or without --verbose
 ```
 
 Its output is never `eval`-able — no line is valid shell-assignment syntax in any supported shell, at either detail tier, coloured or not — on purpose. `ocx self activate` emits text meant to be evaluated; `ocx shell state` emits text meant to be read, and a surface where those two are interchangeable is one copy-paste away from evaluating a diagnostic dump into your live shell.

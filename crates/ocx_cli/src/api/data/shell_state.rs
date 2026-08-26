@@ -17,8 +17,8 @@
 //! Two rules, both checkable by reading [`ShellStateReport::lines`]:
 //!
 //! 1. **Every line begins with a label from a fixed vocabulary this module
-//!    owns** — a section heading, or two spaces then a label, or two spaces
-//!    then the list marker `- `. No caller-, carrier- or filesystem-supplied
+//!    owns** — a heading in the first column, or an indented label, or an
+//!    indented `- ` list marker. No caller-, carrier- or filesystem-supplied
 //!    byte is ever the first token of a line, so no line can *start* an
 //!    assignment.
 //! 2. **Every interpolated dynamic string passes through [`quoted`]**, which is
