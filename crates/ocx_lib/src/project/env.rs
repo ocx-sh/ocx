@@ -146,6 +146,8 @@ impl ProjectEnv {
     /// - [`ProjectErrorKind::EnvInvalidSeparator`] /
     ///   [`ProjectErrorKind::EnvSeparatorEdgedValue`] — a separator the fold
     ///   cannot use, or one the value's own flank fuses with.
+    /// - [`ProjectErrorKind::EnvPathSeparatorInValue`] — a `path` value naming
+    ///   more than one directory.
     /// - [`ProjectErrorKind::EnvUnknownValueField`] — any other field.
     /// - [`ProjectErrorKind::EnvInvalidValue`] — a value that is neither a
     ///   string nor a well-formed `{ type, value }` table.
@@ -224,6 +226,8 @@ impl ProjectEnv {
 /// [`ProjectErrorKind::EnvInvalidSeparator`] and
 /// [`ProjectErrorKind::EnvSeparatorEdgedValue`] for a `separator` in the wrong
 /// company, unusable, or fused with the value's own flank;
+/// [`ProjectErrorKind::EnvPathSeparatorInValue`] for a `path` value embedding the
+/// platform path separator;
 /// [`ProjectErrorKind::EnvUnknownValueField`] for any other field;
 /// [`ProjectErrorKind::EnvInvalidValue`] for any other shape, carrying the
 /// TOML type name of the offending value.
@@ -292,6 +296,23 @@ fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvVal
             scope: scope.to_string(),
             key: key.to_string(),
             field: unknown.clone(),
+        });
+    }
+
+    // A-10, second half. A path entry names ONE directory: every split-based
+    // emitter reads an embedded separator as two segments and matches neither
+    // against the whole operand, so the apply's dedup never fires and each
+    // re-source prepends another copy — and `remove_segment` cannot take it out
+    // again. The reconciler drops such an entry, but `ocx run` / `ocx exec`
+    // composition and the `--shell` / `direnv export` emitters never reach the
+    // reconciler, so the refusal has to exist here too — independently, which is
+    // the word the addendum uses. Here the author gets a scope/key message at
+    // exit 65 instead of a warn line the prompt hook discards.
+    if kind == ModifierKind::Path && literal.contains(crate::env::PATH_SEPARATOR) {
+        return Err(ProjectErrorKind::EnvPathSeparatorInValue {
+            scope: scope.to_string(),
+            key: key.to_string(),
+            value: literal.to_string(),
         });
     }
 
@@ -612,6 +633,47 @@ mod tests {
             assert_eq!(key, "GODEBUG");
             assert_eq!(separator, ",");
             assert_eq!(rejected, value);
+        }
+    }
+
+    /// A-10, second half: the reconciler drops a path value embedding the
+    /// platform separator, but `ocx run` / `ocx exec` composition and
+    /// `ocx env --shell` / `ocx direnv export` are untouched by that drop — so
+    /// the value has to be refused at the parse boundary too, where the author
+    /// gets a scope/key message instead of a warn line the prompt hook discards.
+    #[test]
+    fn path_value_embedding_the_platform_separator_rejected() {
+        let separator = crate::env::PATH_SEPARATOR;
+        for value in [
+            format!("a{separator}b"),
+            format!("{separator}bin"),
+            format!("bin{separator}"),
+        ] {
+            let source = format!(r#"PATH = {{ type = "path", value = {value:?} }}"#);
+            let table: toml::Table = toml::from_str(&source).expect("fixture TOML must parse");
+            let err = ProjectEnv::from_table(DEFAULT_ENV_SCOPE, &table)
+                .expect_err("a path value embedding the platform separator must be rejected");
+            let ProjectErrorKind::EnvPathSeparatorInValue {
+                scope,
+                key,
+                value: rejected,
+            } = &err
+            else {
+                panic!("expected EnvPathSeparatorInValue for {source}, got {err:?}");
+            };
+            assert_eq!(scope, DEFAULT_ENV_SCOPE);
+            assert_eq!(key, "PATH");
+            assert_eq!(rejected, &value);
+        }
+        // The refusal is path-kind only: a constant may hold anything, and a
+        // list folds on its own declared separator.
+        for source in [
+            r#"CLASSPATH = "a:b""#,
+            r#"OPTS = { type = "list", separator = " ", value = "-Da:b" }"#,
+        ] {
+            let table: toml::Table = toml::from_str(source).expect("fixture TOML must parse");
+            ProjectEnv::from_table(DEFAULT_ENV_SCOPE, &table)
+                .unwrap_or_else(|error| panic!("{source} must still parse, got {error:?}"));
         }
     }
 
