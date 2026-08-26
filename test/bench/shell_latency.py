@@ -1208,7 +1208,21 @@ def measure_exec_counts(
                 # A watch-set path newer than the stamp must break the
                 # short-circuit. `touch` alone can land inside the stamp's
                 # mtime granularity, so push it forward.
-                f"touch -d '+1 hour' {_sh_quote(str(watched))} 2>/dev/null || touch {_sh_quote(str(watched))}",
+                #
+                # `-t CCYYMMDDhhmm.SS`, not `-d '+1 hour'`: the relative form is
+                # a GNU extension, and BSD `touch -d` wants an ISO-8601 instant,
+                # so on macOS the old spelling failed into a bare `touch` —
+                # mtime = now, landing in the stamp's own second. That is the
+                # same-tick ceiling EC-FP-001/EC-FP-002 accept by design and
+                # forbid an acceptance test from assuming away, and macOS
+                # /bin/bash is 3.2, whose `-nt` compares whole seconds. The arm
+                # therefore measured the ceiling instead of the change and read
+                # 0 execs. `-t` is POSIX and identical on both.
+                #
+                # No fallback: a touch that cannot push the mtime forward must
+                # fail the session loudly rather than quietly weaken the gate.
+                f"touch -t {time.strftime('%Y%m%d%H%M.%S', time.localtime(time.time() + 3600))} "
+                f"{_sh_quote(str(watched))} || exit 1",
                 "__ocx_prompt_hook",
                 f"wc -c < {_sh_quote(str(counter))} | tr -d ' \\n' > {_sh_quote(str(root / 'touched'))}",
             ]
