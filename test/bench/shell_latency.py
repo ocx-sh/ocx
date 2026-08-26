@@ -465,24 +465,46 @@ def floor_spread_ms(floor_samples: Sequence[float]) -> float:
     return ordered[int(0.9 * (len(ordered) - 1))] - ordered[0]
 
 
-def _budget_gate(*, name: str, observed: float, budget: float, spread: float, breach: str) -> Gate:
-    """One ``exec_floor + Δ`` gate, decided against an **admissible** measurement.
+def _budget_gate(
+    *, name: str, observed: float, budget: float, spread: float, breach: str, bound: str = "upper"
+) -> Gate:
+    """One budget gate, decided against an **admissible** measurement.
 
     PURE. Three outcomes, and which one applies is settled in this order:
 
-    1. ``observed <= budget`` → **PASS**, whatever the machine was doing.
+    1. the budget is **met** → **PASS**, whatever the machine was doing.
        Contention inflates a min-of-N and can never deflate one, so a Δ that fits
-       the budget on a loaded runner fits it on a quiet one a fortiori. There is
-       no contention question to ask on the green side, which is why this branch
-       comes first.
-    2. over budget, and the floor scattered by **less** than the **margin**
-       ``observed - budget`` → **FAIL**. The machine resolved a difference this
-       small, and the difference is over budget: that is a regression.
-    3. over budget, and the floor scattered by **more** than the margin →
-       **INCONCLUSIVE**. No verdict: the runner could not resolve an overshoot
-       this small during this run, so the number is a measurement of the runner.
+       an upper budget on a loaded runner fits it on a quiet one a fortiori. There
+       is no contention question to ask on the green side, which is why this
+       branch comes first.
+    2. missed, and the floor scattered by **less** than the **margin**
+       ``|observed - budget|`` → **FAIL**. The machine resolved a difference this
+       small, and the difference is on the wrong side of the budget: that is a
+       regression.
+    3. missed, and the floor scattered by **more** than the margin →
+       **INCONCLUSIVE**. No verdict: the runner could not resolve a miss this
+       small during this run, so the number is a measurement of the runner.
        Reported, annotated, and recorded; never a red, and never silently a
        green either.
+
+    ``bound`` picks which side misses. ``"upper"`` is the ``exec_floor + Δ`` form
+    both C-044 budgets take. ``"lower"`` is the shell-startup anti-vacuity floor,
+    which asserts the measured command does **at least** ``budget`` more work than
+    the bare floor; it shipped without this classifier until 2026-08-26, when a
+    macOS arm64 runner scattering 4.806 ms measured startup **1.341 ms faster
+    than the floor** and the gate called that a confident FAIL. A negative
+    observation there is not a slow startup — it is proof the two series are
+    incomparable, and the run said so itself while its own admissibility line
+    still read ``True`` because no gate on it could ever abstain.
+
+    **A negative observation is deliberately NOT a special case.** It falls out
+    of the general margin rule, which abstained the macOS run outright (1.591 ms
+    missed against 4.806 ms of scatter). Abstaining on sign alone would instead
+    delete this gate's whole purpose: it is the numeric backstop for *a floor
+    command that quietly grew expensive*, and that state looks exactly like a
+    negative observation — on a quiet machine, where the margin rule still reds
+    it. Sign says which way the pair is ordered; only the scatter says whether
+    the ordering was measurable.
 
     **The margin is the resolvable quantity, not the budget.** An earlier
     revision compared the scatter against ``budget``, which asks whether the
@@ -504,25 +526,26 @@ def _budget_gate(*, name: str, observed: float, budget: float, spread: float, br
     started abstaining on resolvable overshoots, the injected run would abstain
     too, no gate would go red, and that step fails.
     """
-    over = observed > budget
+    missed = observed < budget if bound == "lower" else observed > budget
+    side = "under" if bound == "lower" else "over"
     margin = abs(observed - budget)
-    inconclusive = over and spread > margin
+    inconclusive = missed and spread > margin
     return Gate(
         name=name,
         observed=observed,
         budget=budget,
-        passed=not over or inconclusive,
+        passed=not missed or inconclusive,
         unit="ms",
         inconclusive=inconclusive,
         note=""
-        if not over
+        if not missed
         else (
-            f"no verdict: the observed {observed:.3f} ms is over budget by {margin:.3f} ms, but the bare-exec "
-            f"floor itself scattered {spread:.3f} ms across this run — the overshoot is below this runner's "
-            "resolution, so it measures the runner and not the reconciler — re-run on a quiet machine"
+            f"no verdict: the observed {observed:.3f} ms is {side} budget by {margin:.3f} ms, but the bare-exec "
+            f"floor itself scattered {spread:.3f} ms across this run — the miss is below this runner's "
+            "resolution, so it measures the runner and not the code — re-run on a quiet machine"
         )
         if inconclusive
-        else f"{breach} (over by {margin:.3f} ms against {spread:.3f} ms of floor scatter, so the machine "
+        else f"{breach} ({side} by {margin:.3f} ms against {spread:.3f} ms of floor scatter, so the machine "
         "could resolve this)",
     )
 
@@ -783,15 +806,13 @@ def evaluate(
         # pair (`_activation_stream` + `measure_wall_clock`) is the primary
         # guard and *raises*; this is the numeric backstop for the case those
         # cannot see, a floor command that quietly grew expensive.
-        Gate(
+        _budget_gate(
             name="shell startup does measurably more work than the bare floor",
             observed=startup_work,
             budget=STARTUP_WORK_FLOOR_MS,
-            passed=startup_work >= STARTUP_WORK_FLOOR_MS,
-            unit="ms",
-            note=""
-            if startup_work >= STARTUP_WORK_FLOOR_MS
-            else (
+            spread=spread,
+            bound="lower",
+            breach=(
                 f"startup's median is {startup_work:.3f} ms above the floor's, under the "
                 f"{STARTUP_WORK_FLOOR_MS:.3f} ms a real ConfigLoader pass costs — the two commands "
                 "are measuring the same work"
@@ -890,7 +911,7 @@ def format_report(report: LatencyReport) -> str:
         ),
         (
             f"  bare-exec floor scatter (p90-min)    {rec['floor_spread_ms']:>9.3f} ms  "
-            f"(below every breach margin, so each wall-clock verdict is admissible: "
+            f"(below every missed-budget margin, so each wall-clock verdict is admissible: "
             f"{rec['measurement_admissible']})"
         ),
         "",
@@ -1766,6 +1787,13 @@ _GREEN = {
 #: code change at all.
 _CONTENDED_FLOOR = [3.0, 5.5, 9.0]
 
+#: A floor with essentially no scatter (p90-min 0.010 ms). Every case that must
+#: reach a **red** on the anti-vacuity control needs one: that control is a lower
+#: bound missed by fractions of its 0.250 ms budget, so on `_GREEN`'s own 0.200 ms
+#: floor the margin rule would abstain and the case would never reach the red it
+#: asserts. Same defect, and same fix, as the note above the budget cases.
+_QUIET_FLOOR = [3.00, 3.02, 3.01]
+
 #: The startup series that goes with it. Shifted by the same contention, so the
 #: same-work control (`median(startup) - median(floor)`) still clears its floor:
 #: without this, every contended case would red on the control instead of
@@ -1871,7 +1899,8 @@ def self_check() -> None:
         expect_pass=False,
         why="a startup measured at the bare floor must fail: it is not the measured path",
         red_gate=control,
-        startup_samples=_GREEN["floor_samples"],
+        floor_samples=_QUIET_FLOOR,
+        startup_samples=[3.01, 3.00, 3.02],
     )
     # The case the old `> 0` threshold could not red: a delta that is positive
     # but inside the same-work noise band measured for this pair (<= 0.143 ms).
@@ -1879,7 +1908,51 @@ def self_check() -> None:
         expect_pass=False,
         why="a startup only noise above the floor must fail: the control has a measured floor, not zero",
         red_gate=control,
-        startup_samples=[value + STARTUP_WORK_FLOOR_MS / 2 for value in _GREEN["floor_samples"]],  # type: ignore[operator]
+        floor_samples=_QUIET_FLOOR,
+        startup_samples=[value + STARTUP_WORK_FLOOR_MS / 2 for value in _QUIET_FLOOR],
+    )
+    # The control's own contention pair (ocx-sh/ocx#340 follow-up). It is a lower
+    # bound, so it is missed *downwards*, and until 2026-08-26 it was the one
+    # wall-clock gate the classifier did not cover: a macOS arm64 runner
+    # scattering 4.806 ms measured startup 1.341 ms FASTER than the bare floor
+    # and the gate reported a confident FAIL, on a run whose own admissibility
+    # line read `True` because nothing on it could abstain.
+    case(
+        expect_pass=True,
+        why="a startup measured faster than the floor, on a floor that scattered wider, must reach no verdict",
+        abstains=control,
+        floor_samples=_CONTENDED_FLOOR,
+        startup_samples=[3.0, 4.0, 5.0],  # median 4.0 - floor median 5.5 = -1.5 ms, missed by 1.75
+    )
+    # And the red that keeps the line above from being an amnesty: the SAME
+    # negative shape on a quiet floor stays a red. This is the state the control
+    # exists for — a floor command that quietly grew expensive — so a rule that
+    # abstained on the sign alone would delete the gate rather than protect it.
+    case(
+        expect_pass=False,
+        why="a startup faster than the floor on a QUIET floor must still fail: that is the vacuous pair",
+        red_gate=control,
+        floor_samples=_QUIET_FLOOR,
+        startup_samples=[2.90, 2.92, 2.91],  # median 2.91 - 3.01 = -0.100 ms, missed by 0.350
+    )
+    # Injection safety, asserted rather than argued: the 3 ms fault is added to
+    # every startup sample and to none of the floor's, so it can only RAISE this
+    # gate's median gap. It is therefore unreachable as a red by the injected run
+    # — which is why extending abstention to it cannot cost `--expect-fail` its
+    # demonstrated red state, and why the taskfile never names it as a needle.
+    base = next(gate for gate in green.gates if gate.name == control)
+    lifted = next(
+        gate
+        for gate in evaluate(**{**_GREEN, "startup_samples": [v + 3.0 for v in _GREEN["startup_samples"]]}).gates  # type: ignore[arg-type,operator]
+        if gate.name == control
+    )
+    assert lifted.observed > base.observed and lifted.passed and not lifted.inconclusive, (
+        f"the injected delay must only ever raise the anti-vacuity control: {base.observed:.3f} -> "
+        f"{lifted.observed:.3f} ms, passed={lifted.passed}, inconclusive={lifted.inconclusive}"
+    )
+    assert STARTUP_GATE_NEEDLE not in control and RECONCILE_GATE_NEEDLE not in control, (
+        f"{control!r} must match no --expect-fail-gate needle: the injection cannot red it, so a needle "
+        "that reached it would demand a red state no run can demonstrate"
     )
 
     # ocx-sh/ocx#342's pair. A steady-state fire that still applies is the
@@ -2088,7 +2161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"\n::warning::no wall-clock verdict on {names}: the bare-exec floor scattered "
             f"{artifact['floor_spread_ms']:.3f} ms across this run, wider than the amount by which the budget "
-            "was overshot, so nothing that small is measurable here. The deterministic gates (exec counts, reconciler "
+            "was missed, so nothing that small is measurable here. The deterministic gates (exec counts, reconciler "
             "fixed point) still decided and are reported above. Re-run on a quiet machine for a wall-clock "
             "answer",
             file=sys.stderr,
