@@ -37,7 +37,7 @@ use ocx_lib::shell::coexistence;
 use ocx_lib::shell::reconcile::{self, CARRIER_KEY, Ledger};
 use ocx_lib::{ShellConsent, effective_consent, normalize_consent_path};
 
-use crate::api::data::shell_state::{HookStatus, Note, ShellStateReport, WatchMember};
+use crate::api::data::shell_state::{HookStatus, Note, ShellStateReport, VerboseShellState, WatchMember};
 use crate::app::project_context::{self, ProjectContextError};
 use crate::options::hook::{Hook, Rung};
 
@@ -66,12 +66,28 @@ const PROJECT_FILE: &str = "ocx.toml";
 /// Exits 0 in every reportable state, including an inert shell: the reason is
 /// the payload, not a failure. Exits 74 only when `$OCX_HOME` cannot be read.
 #[derive(Parser)]
-pub struct ShellState {}
+pub struct ShellState {
+    /// Add the diagnostics behind the answer - the decoded ledger, the
+    /// fingerprint watch set and the hook ladder.
+    ///
+    /// Affects the plain rendering only. The structured report
+    /// (`ocx --format json shell state`) carries every field either way.
+    #[arg(short, long)]
+    verbose: bool,
+}
 
 impl ShellState {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let report = derive(&context).await?;
-        context.api().report(&report)?;
+        // Two report calls, one report: `--verbose` picks a plain rendering,
+        // never a different payload. `VerboseShellState` serializes as its
+        // inner `ShellStateReport`, so `--format json` is byte-identical with
+        // and without the flag.
+        if self.verbose {
+            context.api().report(&VerboseShellState(report))?;
+        } else {
+            context.api().report(&report)?;
+        }
         // C-051 — 0 in every reportable state. An inert shell, a corrupt
         // carrier, an over-cap ledger and a yielded project are all findings,
         // never failures; the only non-zero path is the unreadable `$OCX_HOME`

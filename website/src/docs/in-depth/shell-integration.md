@@ -95,19 +95,52 @@ Disabling the hook entirely, for a single shell or every shell, is [`OCX_NO_HOOK
 
 Everything documented so far is deliberately quiet: the hook logs at debug, an absent ledger is the ordinary first-prompt case, an inert project prints one hint line at most, and a yielded scope prints one info line. That is right for a path that runs on every keystroke's worth of prompts and wrong the moment you are staring at a missing tool wondering why.
 
-[`ocx shell state`][cmd-shell-state] is the read-only answer. It never mutates anything — no stamp, no ledger repair, no plan — and it exits `0` in every state it reports, including every flavor of "not active." It prints:
+[`ocx shell state`][cmd-shell-state] is the read-only answer. It never mutates anything — no stamp, no ledger repair, no plan — and it exits `0` in every state it reports, including every flavor of "not active."
 
-- the decoded ledger, as fields rather than base64 — what is currently applied, per scope;
-- fingerprint status: the watch set OCX is comparing against, and whether it still matches what is recorded;
-- whether the priors needed to restore a constant on scope exit are still intact;
-- and, when a project is not active, *why* — a consent stamp missing, a stamp present but the lock outgrowing it, the hook disabled and which config tier decided that, a [yield to direnv or mise](#coexistence) naming the live signal it saw, or a ledger reduced to a marker because it went over the size cap.
+By default it answers the question you actually asked, in a handful of lines: where `$OCX_HOME` is, which project is in effect, whether the integration is active, and — when it is not — *why*, plus the one line that says what to do about it. The reason is one of an enumerated set: a consent stamp missing, a stamp present but the lock outgrowing it, the hook disabled and which config tier decided that, a [yield to direnv or mise](#coexistence) naming the live signal it saw, a ledger reduced to a marker because it went over the size cap, or a `ocx.lock` that will not parse.
 
 ```sh
-ocx shell state                 # human-readable
-ocx shell state --format json   # same content, machine-readable
+ocx shell state
 ```
 
-Its output is never `eval`-able — no line is valid shell-assignment syntax in any supported shell — on purpose. `ocx self activate` emits text meant to be evaluated; `ocx shell state` emits text meant to be read, and a surface where those two are interchangeable is one copy-paste away from evaluating a diagnostic dump into your live shell.
+```
+ocx home: "/home/you/.ocx"
+project: "/work/acme/api"
+
+active: no
+reason: no consent stamp, and no matching grant
+  derived sources:
+    - "ocx.sh/acme"
+  paths tested:
+    - "/work/other"
+  namespaces tested:
+    - "ocx.sh/other"
+fix: run `ocx pull` here once, or add this directory to [shell.consent] paths
+```
+
+The verdict, the reason and the fix are highlighted when stdout is a terminal; redirected to a file or a pipe the same text arrives without the escapes.
+
+**`--verbose` adds the evidence behind the answer** — the material for a support conversation rather than for a "is it working" question:
+
+- the decoded ledger, as fields rather than base64 — what is currently applied, per scope, and how many of the carrier's 16 KiB it takes;
+- fingerprint status: the watch set OCX is comparing against, each member's size and mtime, and whether the fold still matches what is recorded;
+- whether the priors needed to restore a constant on scope exit are still intact;
+- the project's state key and whether a consent stamp exists for it;
+- which rung of the [`[shell] hook` ladder](#commands) decided the hook's enablement, and in which config tier.
+
+```sh
+ocx shell state --verbose
+```
+
+**The carrier's byte count is ocx's own budget, not the shell's.** `bytes: N of 16384` measures what OCX contributes through `__OCX_ENV_STATE` and nothing else. The real ceiling on a process environment is the operating system's combined `argv` + `envp` limit, which OCX does not account for and cannot: a shell whose environment is already near that limit fails at `execve` with `E2BIG`, which surfaces through the ordinary spawn-failure path rather than as anything this report can predict.
+
+`--verbose` is a rendering tier, not a payload. The structured form carries every field at every verbosity:
+
+```sh
+ocx shell state --format json   # complete, with or without --verbose
+```
+
+Its output is never `eval`-able — no line is valid shell-assignment syntax in any supported shell, at either detail tier, coloured or not — on purpose. `ocx self activate` emits text meant to be evaluated; `ocx shell state` emits text meant to be read, and a surface where those two are interchangeable is one copy-paste away from evaluating a diagnostic dump into your live shell.
 
 Exit code `0` covers every reportable state. The only non-zero exit is `74`, and only when `$OCX_HOME` itself cannot be read.
 

@@ -20,6 +20,8 @@ pub(super) fn theme(color: bool) -> Theme {
         vis_sealed: s(console::Style::new().italic().dim().color256(245)), // muted gray
         label: s(console::Style::new().bold()),
         aside: s(console::Style::new().dim()),
+        alert: s(console::Style::new().color256(203)), // soft red
+        ok: s(console::Style::new().color256(114)),    // soft green
         header: s(console::Style::new().bold().underlined()),
         chrome: s(console::Style::new().dim()),
         hint: s(console::Style::new().dim().italic().underlined()),

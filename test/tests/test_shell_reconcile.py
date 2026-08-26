@@ -2256,26 +2256,97 @@ def test_clean_retains_an_env_only_projects_stamp_and_collects_a_dead_one(arena:
 # ---------------------------------------------------------------------------
 
 
+#: Strips SGR sequences from a captured stream. Under ``--color always`` the
+#: theme puts its own escape in front of every heading, so a ``startswith``
+#: over the raw bytes would answer about ``\x1b[`` instead of about the text
+#: and pass on an injected ``export`` line forever.
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
 @pytest.mark.parametrize("shell", ("sh", "bash", "zsh", "fish"))
-def test_shell_state_output_is_never_eval_able(shell: str, arena: Arena) -> None:
-    """C-050 — no line of `ocx shell state` may be valid export/set syntax in any arm."""
+@pytest.mark.parametrize(
+    ("root", "sub"),
+    (
+        ((), ()),
+        ((), ("--verbose",)),
+        (("--color", "always"), ()),
+        (("--color", "always"), ("--verbose",)),
+    ),
+    ids=("default", "verbose", "colour", "colour-verbose"),
+)
+def test_shell_state_output_is_never_eval_able(
+    shell: str, root: tuple[str, ...], sub: tuple[str, ...], arena: Arena
+) -> None:
+    """C-050 — no line of `ocx shell state` may be valid export/set syntax, at either detail tier, coloured or not.
+
+    ``--color always`` is a distinct arm rather than a stylistic variant: the
+    property is about the bytes a user can put on a clipboard, and colour
+    changes those bytes. The escapes are stripped before the check, and the
+    colour arms are paired with a positive control below so "stripped" cannot
+    quietly mean "emptied".
+    """
     shell_abs = _require(shell)
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
+    # `--color` is a root flag and precedes the subcommand; `--verbose` is the
+    # subcommand's own and follows it.
+    argv = [str(arena.ocx), "--offline", *root, "shell", "state", *sub]
     plain = subprocess.run(
-        [str(arena.ocx), "--offline", "shell", "state"],
+        argv,
         cwd=str(project),
         capture_output=True,
         check=False,
         text=True,
         env=arena.env(shell_abs),
     )
-    assert plain.returncode == 0
+    assert plain.returncode == 0, f"argv={argv}\nstderr:\n{plain.stderr}"
+    assert plain.stdout.strip(), f"argv={argv}: the diagnostic printed nothing at all"
+    if root:
+        assert _ANSI.search(plain.stdout), (
+            f"argv={argv}: `--color always` emitted no escape sequence, so the stripped-then-checked "
+            "arms below are indistinguishable from the uncoloured ones"
+        )
     for line in plain.stdout.splitlines():
-        stripped = line.strip()
+        stripped = _ANSI.sub("", line).strip()
         assert not stripped.startswith(("export ", "set -gx ", "set -x ", "$env:", "$env.", "set E:")), (
             f"`ocx shell state` emitted an eval-able line: {line!r}"
         )
-    assert "WP14_CONST=" not in plain.stdout.replace(" ", "")
+    assert "WP14_CONST=" not in _ANSI.sub("", plain.stdout).replace(" ", "")
+
+
+def test_shell_state_verbose_is_a_rendering_tier_not_a_payload(arena: Arena) -> None:
+    """`--verbose` trims the human default only; the structured report is complete either way.
+
+    Both halves are asserted: the JSON documents are byte-equal with and
+    without the flag, **and** the human default genuinely omits what the
+    verbose tier carries — without the second half a rendering that trimmed
+    nothing would satisfy the first.
+    """
+    project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
+    env = arena.env()
+
+    def run(*extra: str) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            [str(arena.ocx), "--offline", *extra],
+            cwd=str(project),
+            capture_output=True,
+            check=False,
+            text=True,
+            env=env,
+        )
+        assert result.returncode == 0, f"{extra}: exited {result.returncode}\nstderr:\n{result.stderr}"
+        return result
+
+    bare_json = json.loads(run("--format", "json", "shell", "state").stdout)
+    verbose_json = json.loads(run("--format", "json", "shell", "state", "--verbose").stdout)
+    assert bare_json == verbose_json, "`--verbose` must not change the structured payload"
+    for key in ("ledger", "watch_set", "carrier_bytes", "priors", "hook", "project_key"):
+        assert key in bare_json, f"the structured report must carry {key!r}: {sorted(bare_json)}"
+
+    default_text = run("shell", "state").stdout
+    verbose_text = run("shell", "state", "--verbose").stdout
+    for section in ("watch set:", "carrier:", "ledger:"):
+        assert section in verbose_text, f"`--verbose` must carry {section!r}:\n{verbose_text}"
+        assert section not in default_text, f"the default rendering must not carry {section!r}:\n{default_text}"
 
 
 def test_shell_state_runs_no_background_update_check(arena: Arena) -> None:

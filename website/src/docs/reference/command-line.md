@@ -2095,14 +2095,23 @@ Report why the per-prompt [shell integration][in-depth-shell-integration] hook i
 **Usage**
 
 ```shell
-ocx shell state
+ocx shell state             # the answer
+ocx shell state --verbose   # the answer, plus the evidence behind it
 ```
 
 **Options**
 
-This command takes no flags of its own; the root [`--format`][arg-format] flag set to `json` switches the output from human-readable text to structured JSON with the same top-level shape (`ocx_home`, `ledger`, `fingerprint_current`, `project_dir`, `project_key`, `project_stamped`, `hook`, `yielded_to`, `inert_reason`, `notes`).
+| Flag | Meaning |
+|---|---|
+| `-v`, `--verbose` | Add the diagnostics behind the answer: the decoded ledger with its carrier accounting, the fingerprint watch set with each member's size and mtime, the project's state key and stamp, and the hook ladder. Plain text only. |
 
-**Never eval-able.** Every line of the text form starts with a fixed label — a section heading, or two leading spaces then a label or a `- ` list marker — and every interpolated value (a ledger key, a project directory, a source name) is quoted with Rust's own `{:?}` escaping, never shell-escaped. No line of `ocx shell state` output is valid `export`/`set`/`$env.` syntax in any of the ten supported shell dialects, for every enumerated inertness reason, so pasting a diagnostic into a live shell can never execute it — the deliberate opposite of [`ocx self activate`](#self-activate), whose entire output *is* meant to be `eval`'d.
+The default text output is the answer and nothing else — where `$OCX_HOME` is, which project is in effect, whether the integration is active, and, when it is not, the enumerated reason and the one line that says what to do about it. Everything `--verbose` adds is diagnostic detail for a support conversation, not an answer to *"is it working"*.
+
+`--verbose` is a **rendering tier, not a payload**. The root [`--format`][arg-format] flag set to `json` emits the complete structured report — `ocx_home`, `carrier_present`, `carrier_bytes`, `ledger`, `fingerprint_current`, `watch_set`, `project_dir`, `project_key`, `project_stamped`, `priors`, `hook`, `yielded_to`, `inert_reason`, `notes` — and that document is identical with and without `--verbose`. A machine consumer never sees less because a human flag was absent.
+
+Output is coloured when stdout is a terminal and colour is enabled (see [`--color`][arg-color]): the verdict, the reason, and the fix are highlighted so they can be found at a glance. Redirected to a file or a pipe, the text is byte-identical minus the escapes.
+
+**Never eval-able.** Every line of the text form starts with a fixed label — a section heading, or two leading spaces then a label or a `- ` list marker — and every interpolated value (a ledger key, a project directory, a source name) is quoted with Rust's own `{:?}` escaping, never shell-escaped. No line of `ocx shell state` output is valid `export`/`set`/`$env.` syntax in any of the ten supported shell dialects, for every enumerated inertness reason, at either detail tier, coloured or not, so pasting a diagnostic into a live shell can never execute it — the deliberate opposite of [`ocx self activate`](#self-activate), whose entire output *is* meant to be `eval`'d.
 
 **Exit codes**
 
@@ -5487,6 +5496,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [arg-offline]: #arg-offline
 [arg-remote]: #arg-remote
 [arg-format]: #arg-format
+[arg-color]: #arg-color
 
 <!-- commands (package group) -->
 [cmd-package-install]: #package-install

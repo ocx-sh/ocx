@@ -33,10 +33,18 @@
 //! forbidden prefixes from the shipped [`Shell`](ocx_lib::shell::Shell)
 //! emitters rather than hard-coding them, so a new arm or a changed emitter
 //! cannot silently widen what counts as "not shell source".
+//!
+//! **Colour does not exempt either rule.** A theme puts its own SGR introducer
+//! in front of a heading, so the first byte of a *rendered* line is an escape
+//! in every arm — and a `starts_with("export ")` over those bytes would answer
+//! about the escape rather than about the text, passing unconditionally. The
+//! assertions strip ANSI first, and pair that with a parity check
+//! (stripped-coloured equals uncoloured) so the stripping cannot hide a
+//! divergence of its own.
 
 use std::path::{Path, PathBuf};
 
-use ocx_lib::cli::DataInterface;
+use ocx_lib::cli::{DataInterface, Theme};
 use ocx_lib::project::consent::Reason;
 use ocx_lib::shell::coexistence::{Observation, Tool};
 use ocx_lib::shell::reconcile::{CARRIER_KEY, Ledger, LedgerEntry, MAX_CARRIER_BYTES, Prior, ScopeId, Verdict};
@@ -156,6 +164,23 @@ pub enum Note {
     },
 }
 
+/// How much of the report the human rendering carries.
+///
+/// A tier of the **plain** rendering only: the structured report serializes
+/// the whole [`ShellStateReport`] either way, so nothing a human flag hides is
+/// hidden from `--format json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    /// The answer, and nothing else: where OCX is, which project is in effect,
+    /// whether the integration is active, and — when it is not — the
+    /// enumerated reason and the fix.
+    Answer,
+    /// The answer, plus the evidence behind it: the decoded ledger with its
+    /// carrier accounting, the fingerprint watch set, the project's state key
+    /// and stamp, and the hook ladder.
+    Diagnostics,
+}
+
 /// What `ocx shell state` reports — all derived, none of it mutating.
 ///
 /// Read-only, absolutely: it never writes a stamp, never repairs a ledger,
@@ -266,43 +291,87 @@ impl ShellStateReport {
             .collect()
     }
 
-    /// The whole report as the lines [`Printable::print_plain`] prints.
+    /// The report as the lines [`Printable::print_plain`] prints, at `detail`.
     ///
     /// Separated from the printing so the never-eval-able assertions can run
-    /// over the exact bytes a user sees without capturing stdout.
+    /// over the exact bytes a user sees without capturing stdout — and so they
+    /// can run over the **coloured** bytes too, which is where a label's own
+    /// escape sequence would otherwise sit in front of a line's real first
+    /// token and make the assertion answer about the escape instead.
+    ///
+    /// The answer leads at both tiers: where OCX is, which project is in
+    /// effect, whether the integration is active, and — when it is not — the
+    /// enumerated reason and the fix. [`Detail::Diagnostics`] appends the
+    /// evidence behind that answer; nothing is dropped from the structured
+    /// report at either tier.
     #[must_use]
-    pub fn lines(&self) -> Vec<String> {
+    pub fn lines(&self, theme: &Theme, detail: Detail) -> Vec<String> {
         let mut out = Vec::new();
-        out.push(format!("ocx home: {}", quoted_path(&self.ocx_home)));
-        out.push(format!(
-            "  exists: {}",
-            if self.ocx_home_present { "yes" } else { "no" }
-        ));
-        out.push(String::new());
-
-        self.ledger_lines(&mut out);
-        self.fingerprint_lines(&mut out);
-        self.project_lines(&mut out);
-        self.hook_lines(&mut out);
-        self.activation_lines(&mut out);
+        self.summary_lines(theme, detail, &mut out);
+        self.activation_lines(theme, &mut out);
+        if detail == Detail::Diagnostics {
+            out.push(String::new());
+            self.ledger_lines(theme, &mut out);
+            self.fingerprint_lines(theme, &mut out);
+            self.hook_lines(theme, &mut out);
+        }
+        // Each diagnostics section closes with its own blank separator, so the
+        // last one would otherwise leave the report ending on an empty line.
+        while out.last().is_some_and(String::is_empty) {
+            out.pop();
+        }
         out
     }
 
+    /// Where OCX lives and which project is in effect — the two facts every
+    /// other line is relative to.
+    ///
+    /// The state key and the stamp's presence are diagnostics: a lookup index
+    /// and a file that exists or does not, neither of which is the answer to
+    /// *"is it working"*. They join the block under [`Detail::Diagnostics`].
+    fn summary_lines(&self, theme: &Theme, detail: Detail, out: &mut Vec<String>) {
+        let home = if self.ocx_home_present {
+            quoted_path(&self.ocx_home)
+        } else {
+            format!("{} {}", quoted_path(&self.ocx_home), theme.alert("(absent)"))
+        };
+        out.push(format!("{} {home}", theme.label("ocx home:")));
+
+        match self.project_dir.as_ref() {
+            Some(dir) => {
+                out.push(format!("{} {}", theme.label("project:"), quoted_path(dir)));
+                if detail == Detail::Diagnostics {
+                    out.push(format!(
+                        "  key: {}",
+                        self.project_key.as_deref().map_or_else(|| "none".to_owned(), quoted)
+                    ));
+                    out.push(format!(
+                        "  consent stamp: {}",
+                        if self.project_stamped { "present" } else { "absent" }
+                    ));
+                }
+            }
+            None => out.push(format!(
+                "{} none reachable from this directory",
+                theme.label("project:")
+            )),
+        }
+        out.push(String::new());
+    }
+
     /// The decoded ledger, as fields — never as the base64 the carrier holds.
-    fn ledger_lines(&self, out: &mut Vec<String>) {
-        out.push("ledger:".to_owned());
+    fn ledger_lines(&self, theme: &Theme, out: &mut Vec<String>) {
+        out.push(theme.label("ledger:"));
         out.push(format!("  carrier: {}", quoted(CARRIER_KEY)));
         out.push(format!(
             "  present: {}",
             if self.carrier_present { "yes" } else { "no" }
         ));
-        // A-38 — the cap bounds ocx's own contribution only. The combined
-        // argv+envp size is an OS boundary: an E2BIG on execve degrades through
-        // the ordinary spawn-failure path (74), with no ocx-side accounting.
-        out.push(format!(
-            "  bytes: {} of {} (ocx cap; total env-block size is an OS limit, not accounted here)",
-            self.carrier_bytes, MAX_CARRIER_BYTES
-        ));
+        // A-38 — the cap bounds ocx's own contribution only; the combined
+        // argv+envp size is an OS boundary ocx does not account for. That
+        // distinction is documentation, and it lives on the docs page rather
+        // than in a parenthesis on a status line.
+        out.push(format!("  bytes: {} of {}", self.carrier_bytes, MAX_CARRIER_BYTES));
 
         let Some(ledger) = self.ledger.as_ref() else {
             out.push(format!(
@@ -335,7 +404,7 @@ impl ShellStateReport {
             if ledger.over_cap.is_empty() {
                 "none".to_owned()
             } else {
-                ledger.over_cap.iter().map(scope_name).collect::<Vec<_>>().join(", ")
+                theme.alert(ledger.over_cap.iter().map(scope_name).collect::<Vec<_>>().join(", "))
             }
         ));
 
@@ -369,7 +438,11 @@ impl ShellStateReport {
                     out.push(format!(
                         "      - {} {} ({recorded})",
                         quoted(&prior.key),
-                        if prior.intact { "intact" } else { "MISSING" }
+                        if prior.intact {
+                            "intact".to_owned()
+                        } else {
+                            theme.alert("MISSING")
+                        }
                     ));
                 }
             }
@@ -378,14 +451,14 @@ impl ShellStateReport {
         out.push(String::new());
     }
 
-    fn fingerprint_lines(&self, out: &mut Vec<String>) {
-        out.push("fingerprint:".to_owned());
+    fn fingerprint_lines(&self, theme: &Theme, out: &mut Vec<String>) {
+        out.push(theme.label("fingerprint:"));
         out.push(format!(
             "  matches watch set: {}",
             match self.fingerprint_current {
-                Some(true) => "yes",
-                Some(false) => "no",
-                None => "not compared",
+                Some(true) => "yes".to_owned(),
+                Some(false) => theme.alert("no"),
+                None => "not compared".to_owned(),
             }
         ));
         out.push("  watch set:".to_owned());
@@ -404,33 +477,14 @@ impl ShellStateReport {
         out.push(String::new());
     }
 
-    fn project_lines(&self, out: &mut Vec<String>) {
-        out.push("project:".to_owned());
-        match self.project_dir.as_ref() {
-            Some(dir) => {
-                out.push(format!("  dir: {}", quoted_path(dir)));
-                out.push(format!(
-                    "  key: {}",
-                    self.project_key.as_deref().map_or_else(|| "none".to_owned(), quoted)
-                ));
-                out.push(format!(
-                    "  consent stamp: {}",
-                    if self.project_stamped { "present" } else { "absent" }
-                ));
-            }
-            None => out.push("  dir: none reachable from this directory".to_owned()),
-        }
-        out.push(String::new());
-    }
-
-    fn hook_lines(&self, out: &mut Vec<String>) {
-        out.push("hook:".to_owned());
+    fn hook_lines(&self, theme: &Theme, out: &mut Vec<String>) {
+        out.push(theme.label("hook:"));
         out.push(format!(
             "  enabled: {}",
             match self.hook.enabled {
-                Some(true) => "yes",
-                Some(false) => "no",
-                None => "auto (decided per shell at startup)",
+                Some(true) => "yes".to_owned(),
+                Some(false) => theme.alert("no"),
+                None => "auto (decided per shell at startup)".to_owned(),
             }
         ));
         out.push(format!("  deciding rung: {}", quoted(&self.hook.rung)));
@@ -452,14 +506,13 @@ impl ShellStateReport {
         self.project_dir.is_some() && ledger.scopes.project.is_none() && !ledger.over_cap.contains(&ScopeId::Project)
     }
 
-    /// The enumerated inertness reason — the command's reason to exist — plus
-    /// the notes that explain an answer without being a verdict.
-    fn activation_lines(&self, out: &mut Vec<String>) {
-        out.push("activation:".to_owned());
+    /// The verdict, the enumerated inertness reason behind it, its fix, and the
+    /// notes that explain an answer without being a verdict.
+    fn activation_lines(&self, theme: &Theme, out: &mut Vec<String>) {
         match self.inert_reason.as_ref() {
             Some(reason) => {
-                out.push("  active: no".to_owned());
-                self.reason_lines(reason, out);
+                out.push(format!("{} {}", theme.label("active:"), theme.alert("no")));
+                self.reason_lines(theme, reason, out);
             }
             // A project resolved, consent did not refuse, and the ledger
             // decoded but holds no project-scope record: the scope simply has
@@ -468,48 +521,59 @@ impl ShellStateReport {
             // enumerates exactly two carrier situations, so this third state
             // gets its own sentence rather than borrowing one of theirs.
             None if self.project_scope_pending() => {
-                out.push("  active: not yet".to_owned());
-                out.push("    the project scope is consented and not yet applied".to_owned());
-                out.push("    the next prompt applies it; the carrier is intact".to_owned());
+                out.push(format!("{} not yet", theme.label("active:")));
+                out.push("  the project scope is consented and not yet applied".to_owned());
+                out.push("  the next prompt applies it; the carrier is intact".to_owned());
             }
-            None => out.push("  active: yes".to_owned()),
+            None => out.push(format!("{} {}", theme.label("active:"), theme.ok("yes"))),
         }
         for note in &self.notes {
             match note {
                 Note::SymlinkedCandidateSkipped { candidate, ancestor } => {
-                    out.push("  note: a symlinked ocx.toml candidate was skipped by the CWD walk".to_owned());
-                    out.push(format!("    candidate: {}", quoted_path(candidate)));
-                    out.push(format!("    activated instead: {}", quoted_path(ancestor)));
-                    out.push("    opt in with: --project, or the OCX_PROJECT variable".to_owned());
+                    out.push(format!(
+                        "{} a symlinked ocx.toml candidate was skipped by the CWD walk",
+                        theme.label("note:")
+                    ));
+                    out.push(format!("  candidate: {}", quoted_path(candidate)));
+                    out.push(format!("  activated instead: {}", quoted_path(ancestor)));
+                    out.push("  opt in with: --project, or the OCX_PROJECT variable".to_owned());
                 }
                 Note::ActiveViaPathsGrant { entry } => {
-                    out.push("  note: active via a paths grant".to_owned());
-                    out.push(format!("    entry: {}", quoted_path(entry)));
-                    out.push("    source-set drift is not tracked for path grants".to_owned());
+                    out.push(format!("{} active via a paths grant", theme.label("note:")));
+                    out.push(format!("  entry: {}", quoted_path(entry)));
+                    out.push("  source-set drift is not tracked for path grants".to_owned());
                 }
                 Note::ProjectUnresolved { detail } => {
-                    out.push("  note: a project file is reachable but could not be resolved".to_owned());
-                    out.push(format!("    detail: {}", quoted(detail)));
+                    out.push(format!(
+                        "{} a project file is reachable but could not be resolved",
+                        theme.label("note:")
+                    ));
+                    out.push(format!("  detail: {}", quoted(detail)));
                 }
                 Note::PathsNearMiss { entry, canonical } => {
-                    out.push("  note: a paths entry differs only by ASCII case".to_owned());
-                    out.push(format!("    entry: {}", quoted_path(entry)));
-                    out.push(format!("    canonical dir: {}", quoted_path(canonical)));
-                    out.push("    entries are compared as literal bytes, so this does not grant".to_owned());
+                    out.push(format!(
+                        "{} a paths entry differs only by ASCII case",
+                        theme.label("note:")
+                    ));
+                    out.push(format!("  entry: {}", quoted_path(entry)));
+                    out.push(format!("  canonical dir: {}", quoted_path(canonical)));
+                    out.push("  entries are compared as literal bytes, so this does not grant".to_owned());
                 }
             }
         }
     }
 
-    /// One arm per enumerated reason (C-050), each naming its own evidence.
-    fn reason_lines(&self, reason: &Reason, out: &mut Vec<String>) {
+    /// One arm per enumerated reason (C-050), each naming its own evidence and
+    /// closing with the one line that says what to do about it.
+    fn reason_lines(&self, theme: &Theme, reason: &Reason, out: &mut Vec<String>) {
+        let headline = |out: &mut Vec<String>, text: &str| out.push(format!("{} {text}", theme.alert("reason:")));
         match reason {
             Reason::NoStampNoGrant {
                 derived_sources,
                 paths_tested,
                 namespaces_tested,
             } => {
-                out.push("  reason: no consent stamp, and no matching grant".to_owned());
+                headline(out, "no consent stamp, and no matching grant");
                 push_list(out, "derived sources", derived_sources.iter().map(String::as_str));
                 push_list(
                     out,
@@ -517,38 +581,50 @@ impl ShellStateReport {
                     paths_tested.iter().map(|path| path.display().to_string()),
                 );
                 push_list(out, "namespaces tested", namespaces_tested.iter().map(String::as_str));
+                push_fix(
+                    theme,
+                    out,
+                    "run `ocx pull` here once, or add this directory to [shell.consent] paths",
+                );
             }
             Reason::SourceSetDrift { new_sources } => {
-                out.push("  reason: the lock's source set is not a subset of the stamp".to_owned());
+                headline(out, "the lock's source set is not a subset of the stamp");
                 push_list(out, "new sources", new_sources.iter().map(String::as_str));
+                push_fix(theme, out, "run `ocx pull` here once to re-stamp the new source set");
             }
             Reason::UncorroboratedNamespace {
                 claimed_sources,
                 verified_sources,
             } => {
-                out.push("  reason: the namespace grant matches the lock's claim, not the store's record".to_owned());
+                headline(
+                    out,
+                    "the namespace grant matches the lock's claim, not the store's record",
+                );
                 push_list(out, "claimed sources", claimed_sources.iter().map(String::as_str));
                 match verified_sources {
                     // A `Some` that disagrees is the security-relevant half: a
                     // locked digest in the store came from a repository outside
                     // the granted namespace, and the lock renamed it.
                     Some(verified) => push_list(out, "verified sources", verified.iter().map(String::as_str)),
-                    None => {
-                        out.push("    verified sources: none recorded for this lock".to_owned());
-                        out.push("    run `ocx pull` here once to record where each tool came from".to_owned());
-                    }
+                    None => out.push("  verified sources: none recorded for this lock".to_owned()),
                 }
+                push_fix(
+                    theme,
+                    out,
+                    "run `ocx pull` here once to record where each tool came from, which also stamps consent",
+                );
             }
             Reason::HookDisabled { rung, tier } => {
-                out.push("  reason: the per-prompt hook is disabled".to_owned());
-                out.push(format!("    deciding rung: {}", quoted(rung)));
+                headline(out, "the per-prompt hook is disabled");
+                out.push(format!("  deciding rung: {}", quoted(rung)));
                 out.push(format!(
-                    "    deciding tier: {}",
+                    "  deciding tier: {}",
                     tier.as_deref().map_or_else(|| "not a config tier".to_owned(), quoted)
                 ));
+                push_fix(theme, out, "re-enable the hook at that rung, then start a new shell");
             }
             Reason::YieldedTo(first) => {
-                out.push("  reason: yielded to another live per-prompt hook".to_owned());
+                headline(out, "yielded to another live per-prompt hook");
                 // A-37 — both sentinels fire independently, so this is one line
                 // per observed tool, never an `elif` chain that suppresses the
                 // second. `Reason::YieldedTo` carries only the first.
@@ -559,30 +635,46 @@ impl ShellStateReport {
                 };
                 for observation in observed {
                     out.push(format!(
-                        "    live: {} (signal {})",
+                        "  live: {} (signal {})",
                         tool_name(observation.tool),
                         quoted(&observation.signal)
                     ));
                 }
+                push_fix(
+                    theme,
+                    out,
+                    "none needed here - OCX yields for as long as that tool is live in this shell",
+                );
             }
             Reason::LedgerOverCap { scope } => {
-                out.push("  reason: the ledger exceeded its cap and a scope was abandoned".to_owned());
-                out.push(format!("    abandoned scope: {}", scope_name(scope)));
-                out.push("    read from the over_cap marker the carrier still holds".to_owned());
+                headline(out, "the ledger exceeded its cap and a scope was abandoned");
+                out.push(format!("  abandoned scope: {}", scope_name(scope)));
+                out.push("  read from the over_cap marker the carrier still holds".to_owned());
+                push_fix(
+                    theme,
+                    out,
+                    "declare less environment in this scope; its ledger payload does not fit the cap",
+                );
             }
             Reason::LedgerUnreadable { first_prompt } => {
                 if *first_prompt {
-                    out.push("  reason: nothing has been applied in this shell yet".to_owned());
-                    out.push("    the carrier is unset: this is the first prompt, not a fault".to_owned());
+                    headline(out, "nothing has been applied in this shell yet");
+                    out.push("  the carrier is unset: this is the first prompt, not a fault".to_owned());
+                    push_fix(theme, out, "none needed - the next prompt applies it");
                 } else {
-                    out.push("  reason: the carrier is present but unreadable".to_owned());
-                    out.push("    a scope was applied and its record is gone".to_owned());
-                    out.push("    repair with: a new shell, or unset the carrier (which loses the priors)".to_owned());
+                    headline(out, "the carrier is present but unreadable");
+                    out.push("  a scope was applied and its record is gone".to_owned());
+                    push_fix(
+                        theme,
+                        out,
+                        "start a new shell, or unset the carrier (which loses the priors)",
+                    );
                 }
             }
             Reason::LockUnavailable => {
-                out.push("  reason: ocx.lock is absent, unreadable or unparseable".to_owned());
-                out.push("    the source-set predicate has nothing to quantify over".to_owned());
+                headline(out, "ocx.lock is absent, unreadable or unparseable");
+                out.push("  the source-set predicate has nothing to quantify over".to_owned());
+                push_fix(theme, out, "run `ocx lock` here");
             }
         }
     }
@@ -606,15 +698,25 @@ fn push_entries(out: &mut Vec<String>, applied: &[LedgerEntry]) {
 }
 
 fn push_list(out: &mut Vec<String>, label: &str, items: impl IntoIterator<Item = impl AsRef<str>>) {
-    out.push(format!("    {label}:"));
+    out.push(format!("  {label}:"));
     let mut empty = true;
     for item in items {
         empty = false;
-        out.push(format!("      - {}", quoted(item.as_ref())));
+        out.push(format!("    - {}", quoted(item.as_ref())));
     }
     if empty {
-        out.push("      - none".to_owned());
+        out.push("    - none".to_owned());
     }
+}
+
+/// The one line that says what to do about the reason above it.
+///
+/// Every arm has one, including the two whose remedy is *none* — a shell that
+/// converges by itself is an answer, and leaving it unsaid reads as an
+/// omission. The label is styled so a reader scanning for what to type finds
+/// it without reading the evidence.
+fn push_fix(theme: &Theme, out: &mut Vec<String>, fix: &str) {
+    out.push(format!("{} {fix}", theme.label("fix:")));
 }
 
 fn scope_name(scope: &ScopeId) -> &'static str {
@@ -632,12 +734,39 @@ fn tool_name(tool: Tool) -> &'static str {
 }
 
 impl Printable for ShellStateReport {
-    /// Human-readable, never-eval-able rendering of every enumerated reason
-    /// (C-050).
-    fn print_plain(&self, _data: &DataInterface) {
-        for line in self.lines() {
+    /// The answer: where OCX is, which project is in effect, whether the
+    /// integration is active, and — when it is not — the enumerated reason and
+    /// the fix. Never eval-able (C-050), coloured or not.
+    fn print_plain(&self, data: &DataInterface) {
+        for line in self.lines(&data.theme(), Detail::Answer) {
             println!("{line}");
         }
+    }
+}
+
+/// [`ShellStateReport`] rendered with the diagnostics behind the answer —
+/// `ocx shell state --verbose`.
+///
+/// Plain format: the same leading answer, then the decoded ledger, the
+/// fingerprint watch set and the hook ladder.
+///
+/// JSON format: delegates to the inner [`ShellStateReport`] — **identical wire
+/// shape whether verbose or not**, the same contract `VerboseVersionData`
+/// keeps. `--verbose` is a human flag; a `--format json` consumer never sees
+/// less for its absence.
+pub struct VerboseShellState(pub ShellStateReport);
+
+impl Printable for VerboseShellState {
+    fn print_plain(&self, data: &DataInterface) {
+        for line in self.0.lines(&data.theme(), Detail::Diagnostics) {
+            println!("{line}");
+        }
+    }
+}
+
+impl Serialize for VerboseShellState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
     }
 }
 
@@ -645,6 +774,7 @@ impl Printable for ShellStateReport {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use ocx_lib::cli::Theme;
     use ocx_lib::package::metadata::env::modifier::ModifierKind;
     use ocx_lib::shell::Shell;
     use ocx_lib::shell::reconcile::{ProjectScope, Scopes};
@@ -782,7 +912,11 @@ mod tests {
         // Iterating elements would make this assertion blind to the only
         // failure mode it exists to catch — a dropped `quoted()` letting a
         // forged carrier's newline start a line of its own. Split first.
-        for line in lines.iter().flat_map(|line| line.split(['\n', '\r'])) {
+        for raw in lines.iter().flat_map(|line| line.split(['\n', '\r'])) {
+            // Strip first: under colour the line opens with the theme's SGR
+            // introducer, and every `starts_with` below would then be asked
+            // about `\x1b[` instead of about the text.
+            let line = console::strip_ansi_codes(raw);
             let trimmed = line.trim_start();
             for prefix in &prefixes {
                 assert!(
@@ -797,8 +931,36 @@ mod tests {
         }
     }
 
+    /// Colour-off and colour-on, at both detail tiers. Four renderings per
+    /// arm, because each one is bytes a user can actually see and any of them
+    /// could carry the injection the others do not.
     fn assert_never_eval_able(arm: &str, report: &ShellStateReport) {
-        assert_lines_never_eval_able(arm, &report.lines());
+        for theme in [plain_theme(), colour_theme()] {
+            for detail in [Detail::Answer, Detail::Diagnostics] {
+                let label = format!("{arm} (colour={}, {detail:?})", theme.color());
+                assert_lines_never_eval_able(&label, &report.lines(&theme, detail));
+            }
+        }
+    }
+
+    /// The uncoloured theme — what a pipe, a file, or `--color never` gets.
+    fn plain_theme() -> Theme {
+        Theme::new(false)
+    }
+
+    /// The coloured theme — what an interactive terminal gets.
+    fn colour_theme() -> Theme {
+        Theme::new(true)
+    }
+
+    /// The default rendering: the answer, uncoloured.
+    fn answer(report: &ShellStateReport) -> String {
+        report.lines(&plain_theme(), Detail::Answer).join("\n")
+    }
+
+    /// The `--verbose` rendering: the answer plus its evidence, uncoloured.
+    fn diagnostics(report: &ShellStateReport) -> String {
+        report.lines(&plain_theme(), Detail::Diagnostics).join("\n")
     }
 
     /// The second half of the hard contract: the two commands' outputs are
@@ -830,7 +992,11 @@ mod tests {
             );
         }
 
-        for line in report.lines().iter().flat_map(|line| line.split(['\n', '\r'])) {
+        for line in report
+            .lines(&plain_theme(), Detail::Diagnostics)
+            .iter()
+            .flat_map(|line| line.split(['\n', '\r']))
+        {
             assert!(
                 !emitted.contains(line.trim()),
                 "arm `{arm}`: report line is byte-identical to emitted shell source: {line:?}"
@@ -1253,7 +1419,7 @@ mod tests {
             paths_tested: vec![PathBuf::from("/work/other")],
             namespaces_tested: vec!["ocx.sh/other".to_owned()],
         }));
-        let text = report.lines().join("\n");
+        let text = answer(&report);
         assert!(text.contains("no consent stamp, and no matching grant"), "{text}");
         assert!(text.contains("ocx.sh/acme"), "{text}");
         assert!(text.contains("/work/other"), "{text}");
@@ -1266,7 +1432,7 @@ mod tests {
         let report = base(Some(Reason::SourceSetDrift {
             new_sources: BTreeSet::from(["ghcr.io/evil".to_owned()]),
         }));
-        let text = report.lines().join("\n");
+        let text = answer(&report);
         assert!(text.contains("not a subset of the stamp"), "{text}");
         assert!(text.contains("ghcr.io/evil"), "{text}");
     }
@@ -1285,7 +1451,7 @@ mod tests {
                 rung: rung.to_owned(),
                 tier: tier.map(str::to_owned),
             }));
-            let text = report.lines().join("\n");
+            let text = answer(&report);
             assert!(text.contains("the per-prompt hook is disabled"), "{text}");
             assert!(text.contains(rung), "{text}");
             assert!(text.contains(expected_tier), "{text}");
@@ -1306,7 +1472,7 @@ mod tests {
         };
         let mut report = base(Some(Reason::YieldedTo(direnv.clone())));
         report.yielded_to = vec![direnv, mise];
-        let lines = report.lines();
+        let lines = report.lines(&plain_theme(), Detail::Answer);
         assert_eq!(
             lines.iter().filter(|line| line.contains("live: direnv")).count(),
             1,
@@ -1334,7 +1500,7 @@ mod tests {
             ledger.scopes.project = None;
         }
         report.priors = ShellStateReport::priors_for(report.ledger.as_ref());
-        let text = report.lines().join("\n");
+        let text = diagnostics(&report);
         assert!(text.contains("over cap: project"), "{text}");
         assert!(text.contains("abandoned scope: project"), "{text}");
         // The carrier is still decodable — that is the whole point of A-01.
@@ -1349,12 +1515,12 @@ mod tests {
         absent.carrier_present = false;
         absent.ledger = None;
         absent.priors = Vec::new();
-        let absent_text = absent.lines().join("\n");
+        let absent_text = diagnostics(&absent);
 
         let mut corrupt = base(Some(Reason::LedgerUnreadable { first_prompt: false }));
         corrupt.ledger = None;
         corrupt.priors = Vec::new();
-        let corrupt_text = corrupt.lines().join("\n");
+        let corrupt_text = diagnostics(&corrupt);
 
         assert!(
             absent_text.contains("this is the first prompt, not a fault"),
@@ -1382,7 +1548,7 @@ mod tests {
             candidate: PathBuf::from("/work/proj/ocx.toml"),
             ancestor: PathBuf::from("/work"),
         }];
-        let text = report.lines().join("\n");
+        let text = answer(&report);
         assert!(text.contains("/work/proj/ocx.toml"), "{text}");
         assert!(text.contains("activated instead"), "{text}");
         assert!(text.contains("--project"), "{text}");
@@ -1397,7 +1563,7 @@ mod tests {
         report.notes = vec![Note::ActiveViaPathsGrant {
             entry: PathBuf::from("/work/proj"),
         }];
-        let text = report.lines().join("\n");
+        let text = answer(&report);
         assert!(text.contains("active via a paths grant"), "{text}");
         assert!(
             text.contains("source-set drift is not tracked for path grants"),
@@ -1418,7 +1584,7 @@ mod tests {
             entry: PathBuf::from("/Users/u/Repo"),
             canonical: PathBuf::from("/Users/u/repo"),
         }];
-        let text = report.lines().join("\n");
+        let text = answer(&report);
         assert!(text.contains("/Users/u/Repo"), "{text}");
         assert!(text.contains("/Users/u/repo"), "{text}");
         assert!(text.contains("does not grant"), "{text}");
@@ -1428,9 +1594,16 @@ mod tests {
     /// the 16 KiB cap bounds ocx's own contribution and nothing else.
     #[test]
     fn a038_the_env_block_boundary_is_reported_as_the_os_limit() {
-        let text = base(None).lines().join("\n");
+        let text = diagnostics(&base(None));
         assert!(text.contains(&format!("of {MAX_CARRIER_BYTES}")), "{text}");
-        assert!(text.contains("is an OS limit, not accounted here"), "{text}");
+        // The cap is reported; the *explanation* of what it does and does not
+        // bound is documentation and lives on the docs page. A status line
+        // that carries a paragraph is the thing this rendering removed, so the
+        // assertion that used to require the paragraph now forbids it.
+        assert!(
+            !text.contains("OS limit"),
+            "the env-block explanation belongs in the docs, not in a parenthesis on a status line: {text}"
+        );
     }
 
     /// C-050 — the ledger renders as **fields**, never as the base64 the
@@ -1440,7 +1613,7 @@ mod tests {
         let ledger = ledger_with_project();
         let encoded = ledger.encode().expect("the fixture ledger encodes");
         let report = base(None);
-        let text = report.lines().join("\n");
+        let text = diagnostics(&report);
 
         assert!(!text.contains(&encoded), "the report must not carry the base64 carrier");
         assert!(text.contains("schema v: 1"), "{text}");
@@ -1471,7 +1644,7 @@ mod tests {
             ],
             "a path-kind entry owns no prior and must not appear"
         );
-        let text = report.lines().join("\n");
+        let text = diagnostics(&report);
         assert!(text.contains("\"JAVA_HOME\" intact (was unset)"), "{text}");
         assert!(text.contains("\"MAVEN_OPTS\" MISSING"), "{text}");
     }
@@ -1481,7 +1654,7 @@ mod tests {
     /// is itself the change).
     #[test]
     fn c050_a013_watch_set_reports_absent_members_too() {
-        let text = base(None).lines().join("\n");
+        let text = diagnostics(&base(None));
         assert!(text.contains("\"/etc/ocx/config.toml\" (absent)"), "{text}");
         assert!(
             text.contains("\"/home/u/.ocx/config.toml\" (present, 1290 bytes, mtime 1756000000)"),
@@ -1501,7 +1674,7 @@ mod tests {
         pending.priors = ShellStateReport::priors_for(pending.ledger.as_ref());
         assert!(pending.project_scope_pending());
 
-        let text = pending.lines().join("\n");
+        let text = diagnostics(&pending);
         assert!(text.contains("present: yes"), "{text}");
         assert!(text.contains("decoded: yes"), "{text}");
         assert!(text.contains("active: not yet"), "{text}");
@@ -1532,7 +1705,7 @@ mod tests {
         report.notes = vec![Note::ProjectUnresolved {
             detail: "invalid TOML in '/work/proj/ocx.toml'".to_owned(),
         }];
-        let text = report.lines().join("\n");
+        let text = answer(&report);
         assert!(
             text.contains("a project file is reachable but could not be resolved"),
             "{text}"
@@ -1553,10 +1726,174 @@ mod tests {
         ] {
             let mut report = base(None);
             report.fingerprint_current = value;
-            let lines = report.lines();
+            let lines = report.lines(&plain_theme(), Detail::Diagnostics);
             assert!(
                 lines.iter().any(|line| line == expected),
                 "fingerprint_current={value:?} must render {expected:?}; got {lines:#?}"
+            );
+        }
+    }
+
+    // -- The two rendering tiers, and what each one owes the reader ---------
+
+    /// The default rendering answers the question and stops: where OCX is,
+    /// which project is in effect, whether it is active, and - when it is not -
+    /// the reason and the fix.
+    ///
+    /// Two-sided on purpose. Asserting only that the evidence is absent would
+    /// pass just as well on a rendering that printed nothing at all, so each
+    /// omitted section is asserted **present** at the other tier in the same
+    /// breath, and the answer is asserted to lead at both.
+    #[test]
+    fn the_default_rendering_leads_with_the_answer_and_omits_the_evidence() {
+        let report = base(Some(Reason::NoStampNoGrant {
+            derived_sources: BTreeSet::from(["ocx.sh/acme".to_owned()]),
+            paths_tested: vec![PathBuf::from("/work/other")],
+            namespaces_tested: vec!["ocx.sh/other".to_owned()],
+        }));
+        let default = report.lines(&plain_theme(), Detail::Answer);
+        let verbose = report.lines(&plain_theme(), Detail::Diagnostics);
+
+        assert!(default[0].starts_with("ocx home:"), "{default:#?}");
+        assert!(default[1].starts_with("project:"), "{default:#?}");
+        for lead in ["active: no", "reason: ", "fix: "] {
+            assert!(
+                default.iter().any(|line| line.starts_with(lead)),
+                "the default rendering must carry {lead:?}: {default:#?}"
+            );
+        }
+        assert!(
+            default.len() <= 12,
+            "the default rendering is the answer, not the state dump; got {} lines: {default:#?}",
+            default.len()
+        );
+
+        // Each section the default drops, and the evidence rows inside them.
+        for section in [
+            "ledger:",
+            "fingerprint:",
+            "hook:",
+            "  watch set:",
+            "  carrier:",
+            "  bytes:",
+        ] {
+            assert!(
+                verbose.iter().any(|line| line.starts_with(section)),
+                "--verbose must still carry {section:?}: {verbose:#?}"
+            );
+            assert!(
+                !default.iter().any(|line| line.starts_with(section)),
+                "the default rendering must not carry {section:?}: {default:#?}"
+            );
+        }
+
+        // And the answer leads at the verbose tier too - the reason is what
+        // the reader came for, whichever tier they asked for.
+        let reason_at = verbose
+            .iter()
+            .position(|line| line.starts_with("reason: "))
+            .expect("the verbose rendering carries the reason");
+        let ledger_at = verbose
+            .iter()
+            .position(|line| line == "ledger:")
+            .expect("the verbose rendering carries the ledger");
+        assert!(
+            reason_at < ledger_at,
+            "the answer must lead at both tiers: {verbose:#?}"
+        );
+    }
+
+    /// Every enumerated reason ends with the one line that says what to do,
+    /// and nothing that is not a refusal grows one.
+    #[test]
+    fn every_inert_arm_names_a_fix_and_no_other_arm_does() {
+        for (arm, report) in every_arm() {
+            let lines = report.lines(&plain_theme(), Detail::Answer);
+            let fixes = lines.iter().filter(|line| line.starts_with("fix: ")).count();
+            assert_eq!(
+                usize::from(report.inert_reason.is_some()),
+                fixes,
+                "arm `{arm}`: a reason without a fix is a dead end, and a fix without a reason has nothing to fix: {lines:#?}"
+            );
+        }
+    }
+
+    /// Colour adds escapes and changes nothing else - which is what makes the
+    /// redirected-to-a-file rendering and the terminal one the same report.
+    ///
+    /// The positive control matters: without it, a theme that painted nothing
+    /// would satisfy the parity assertion on every arm, and this test would be
+    /// green in exactly the state it exists to rule out.
+    #[test]
+    fn colour_changes_only_the_escapes_never_the_text() {
+        let mut painted = 0_usize;
+        for (arm, report) in every_arm() {
+            for detail in [Detail::Answer, Detail::Diagnostics] {
+                let plain = report.lines(&plain_theme(), detail);
+                let coloured = report.lines(&colour_theme(), detail);
+                assert_eq!(
+                    plain.len(),
+                    coloured.len(),
+                    "arm `{arm}`: colour changed the line count"
+                );
+                for (bare, inked) in plain.iter().zip(coloured.iter()) {
+                    if inked.contains('\u{1b}') {
+                        painted += 1;
+                    }
+                    assert_eq!(
+                        bare.as_str(),
+                        &*console::strip_ansi_codes(inked),
+                        "arm `{arm}`: colour changed the text, not just the escapes"
+                    );
+                }
+            }
+        }
+        assert!(
+            painted > 0,
+            "no arm emitted a single escape sequence; the parity assertion above would pass over an unpainted report"
+        );
+    }
+
+    /// **The machine contract.** `--verbose` is a plain-rendering tier, and the
+    /// structured report is complete at both - a `--format json` consumer never
+    /// sees less because a human flag was absent.
+    #[test]
+    fn the_structured_report_is_complete_at_both_tiers() {
+        let bare = serde_json::to_value(base(Some(Reason::LockUnavailable))).expect("the report serializes");
+        let verbose = serde_json::to_value(VerboseShellState(base(Some(Reason::LockUnavailable))))
+            .expect("the verbose wrapper serializes");
+        assert_eq!(bare, verbose, "`--verbose` must not change the structured payload");
+
+        // Every field the default *rendering* drops is still in the document.
+        for key in [
+            "ledger",
+            "watch_set",
+            "carrier_present",
+            "carrier_bytes",
+            "priors",
+            "hook",
+            "project_key",
+            "project_stamped",
+            "fingerprint_current",
+        ] {
+            assert!(
+                bare.get(key).is_some(),
+                "the structured report must carry `{key}`: {bare}"
+            );
+        }
+        assert!(!bare["ledger"].is_null(), "the ledger must be a payload, not a null");
+        assert!(
+            bare["watch_set"].as_array().is_some_and(|set| !set.is_empty()),
+            "the watch set must survive into the structured report: {bare}"
+        );
+
+        // The other half, so the assertion pair discriminates: those same facts
+        // are genuinely gone from the human default.
+        let default = answer(&base(Some(Reason::LockUnavailable)));
+        for needle in ["watch set", "carrier:", "bytes:", "0123456789abcdef", "mtime"] {
+            assert!(
+                !default.contains(needle),
+                "the default rendering must not carry {needle:?}: {default}"
             );
         }
     }
@@ -1567,7 +1904,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "is valid shell source")]
     fn the_never_eval_able_assertion_can_go_red() {
-        let mut lines = base(None).lines();
+        let mut lines = base(None).lines(&plain_theme(), Detail::Answer);
         lines.push("  export OCX_INJECTED=1".to_owned());
         assert_lines_never_eval_able("injected", &lines);
     }
@@ -1578,16 +1915,29 @@ mod tests {
     #[test]
     #[should_panic(expected = "is valid shell source")]
     fn the_never_eval_able_assertion_sees_an_embedded_newline() {
-        let mut lines = base(None).lines();
+        let mut lines = base(None).lines(&plain_theme(), Detail::Answer);
         lines.push("    dir: /work\nexport OCX_EVIL=2".to_owned());
         assert_lines_never_eval_able("embedded_newline", &lines);
+    }
+
+    /// The same red state **under colour**, which is where it could quietly
+    /// stop being reachable: the theme's escape sits in front of the keyword,
+    /// so an assertion reading the raw bytes would answer about `\x1b[` and
+    /// pass on an injected `export` line forever.
+    #[test]
+    #[should_panic(expected = "is valid shell source")]
+    fn the_never_eval_able_assertion_can_go_red_under_colour() {
+        let theme = colour_theme();
+        let mut lines = base(None).lines(&theme, Detail::Answer);
+        lines.push(format!("  {}OCX_INJECTED=1", theme.label("export ")));
+        assert_lines_never_eval_able("injected_under_colour", &lines);
     }
 
     /// And the bare-assignment half of it, which no emitter prefix covers.
     #[test]
     #[should_panic(expected = "is a bare shell assignment")]
     fn the_bare_assignment_assertion_can_go_red() {
-        let mut lines = base(None).lines();
+        let mut lines = base(None).lines(&plain_theme(), Detail::Answer);
         lines.push("  OCX_INJECTED=1".to_owned());
         assert_lines_never_eval_able("injected", &lines);
     }

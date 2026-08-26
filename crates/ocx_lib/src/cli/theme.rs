@@ -70,6 +70,13 @@ pub struct Theme {
     /// next to a name). Plain dim, matching [`Self::note`] in weight but
     /// separate so the two roles can diverge later without a rename.
     aside: Style,
+    /// A verdict the reader has to act on - a refusal, a lost datum, a
+    /// diagnostic that is the point of the command. Distinct from
+    /// [`Self::label`]: a label is structure, this is the answer.
+    alert: Style,
+    /// [`Self::alert`]'s healthy counterpart - a verdict that needs no action,
+    /// so it reads as settled rather than as something to scan for.
+    ok: Style,
 
     // Table / tree chrome.
     header: Style,
@@ -180,6 +187,17 @@ impl Theme {
     /// breaking callers.
     pub fn aside(&self, text: impl AsRef<str>) -> String {
         self.paint(&self.aside, text)
+    }
+
+    /// Style a verdict that needs acting on (an inert shell, a lost prior).
+    /// The reader scans for this; use it for the answer, never for chrome.
+    pub fn alert(&self, text: impl AsRef<str>) -> String {
+        self.paint(&self.alert, text)
+    }
+
+    /// Style a verdict that needs no action - [`Self::alert`]'s counterpart.
+    pub fn ok(&self, text: impl AsRef<str>) -> String {
+        self.paint(&self.ok, text)
     }
 
     /// Colour a visibility tag by value (same mapping everywhere).
@@ -297,6 +315,37 @@ mod tests {
         assert_eq!(theme.note("12 bytes"), "12 bytes");
         assert_eq!(theme.label("Version"), "Version");
         assert_eq!(theme.aside("(2026-05-28)"), "(2026-05-28)");
+        assert_eq!(theme.alert("no"), "no");
+        assert_eq!(theme.ok("yes"), "yes");
+    }
+
+    /// A verdict must be visually separable from its healthy counterpart in
+    /// every shipped theme, or "highlighting carries meaning" is a claim the
+    /// palette does not back. Both must also stay pure text under colour-off,
+    /// which `paint_is_noop_without_color` above pins.
+    #[test]
+    fn alert_and_ok_are_distinguishable_in_both_themes() {
+        for theme in [colorful::theme(true), mono::theme(true)] {
+            let alert = theme.alert("no");
+            let ok = theme.ok("yes");
+            assert!(
+                alert.contains("\x1b["),
+                "{}: expected SGR on alert: {alert:?}",
+                theme.name()
+            );
+            assert!(ok.contains("\x1b["), "{}: expected SGR on ok: {ok:?}", theme.name());
+            assert_ne!(
+                console::strip_ansi_codes(&theme.alert("x")),
+                "",
+                "alert must keep its text"
+            );
+            assert_ne!(
+                theme.alert("x"),
+                theme.ok("x"),
+                "{}: alert and ok must not render identically",
+                theme.name()
+            );
+        }
     }
 
     #[test]

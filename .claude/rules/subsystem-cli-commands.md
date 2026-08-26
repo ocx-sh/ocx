@@ -183,7 +183,7 @@ All `ConfigGroup` variants are exempt from the required-snapshot gate; `config s
 | `logout [REGISTRY]` | Remove stored credentials | — |
 | `clean` | GC unreferenced objects | `--dry-run`, `--force` |
 | `shell completion` | Generate shell completions | `--shell` |
-| `shell state` | Read-only, never-eval-able diagnostics for the per-prompt reconciler: decoded ledger, per-scope applied state, fingerprint status, enumerated inertness reason. Output via root `--format` (default plain; `--format json` for machine-readable). Never installs, never mutates, never stamps consent (`adr_shell_env_overhaul.md` Decision 10, C-050) | — |
+| `shell state` | Read-only, never-eval-able diagnostics for the per-prompt reconciler. Default text = the answer only (`$OCX_HOME`, project, active/inert verdict, enumerated reason, one-line `fix:`); `-v/--verbose` adds the evidence (decoded ledger + carrier bytes, fingerprint watch set, project key + stamp, hook ladder). `--verbose` is a rendering tier only — root `--format json` emits the complete report at either verbosity. Never installs, never mutates, never stamps consent (`adr_shell_env_overhaul.md` Decision 10, C-050) | `-v/--verbose` |
 | `direnv init` | Write `.envrc` wiring `ocx direnv export` | `--force` |
 | `direnv export` | Stateless bash export generator for direnv `.envrc`; installs on miss by default (best-effort — never fails the prompt), `--no-pull` stays strictly offline. `-g` selects groups (hand-edit the generated `.envrc` line); an unknown group or malformed `--env` exits 64 — argv faults fail loudly, toolchain-state faults do not | `-g/--group`, `--env`, `--pull/--no-pull` |
 | `index catalog` | List known repositories | `--tags` |
