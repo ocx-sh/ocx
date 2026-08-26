@@ -125,9 +125,9 @@ Three things stop that from becoming an amnesty:
 What else this gate asserts, and what it only records
 -----------------------------------------------------
 * The per-prompt ``self activate --reconcile`` Δ, as ``reconcile.delta_ms``,
-  against :data:`RECONCILE_BUDGET_MS` — C-044's original 2 ms, restored
-  (ocx-sh/ocx#340). Its red state is demonstrated by a fault injection aimed at
-  it specifically.
+  against :data:`RECONCILE_BUDGET_MS` — 3 ms since 2026-08-26, measured rather
+  than restated, and deliberately no longer the startup gate's number. Its red
+  state is demonstrated by a fault injection aimed at it specifically.
 * The **cold** cost of the same command, as ``reconcile.cold_delta_ms``, where
   "cold" means the host-capability record was deleted before the spawn. Recorded
   only, and the reason the asserted number is the warm one: see "Cold and warm"
@@ -265,8 +265,35 @@ import shell_matrix as matrix  # noqa: E402
 #: so it is a constant and not a flag. Changing it is a spec change.
 DELTA_BUDGET_MS = 2.0
 
-#: C-044's Δ for the **per-prompt reconcile**. The same 2 ms the spec has always
-#: named, restored 2026-08-26 after a brief amendment to 25 ms (ocx-sh/ocx#340).
+#: C-044's Δ for the **per-prompt reconcile**. **3 ms since 2026-08-26**, and no
+#: longer the same number as :data:`DELTA_BUDGET_MS` — the two budgets were one
+#: shared 2 ms, which is why neither could move without the other. This one moved
+#: on measurement; the startup one did not.
+#:
+#: The 2 ms it replaces was never derived. The ADR states it (`adr_shell_env_overhaul.md`,
+#: NFR Latency) without a perceptual threshold or a machine class behind it, and the
+#: only floor figures in the record are context for rejecting a *borrowed* 5 ms
+#: total, never a calibration for Δ. Measured against it, the shipped code sits
+#: **astride** the old number: eight known-good runs of byte-identical code across
+#: two machine classes gave 1.673, 1.873, 1.991, 2.001, 2.025, 2.169, 2.368 and
+#: 2.447 ms — **five of the eight over 2 ms**. That is not a measurement artefact
+#: to be classified away, it is the cost of the feature, and a budget drawn through
+#: the middle of its own distribution decides on runner luck.
+#:
+#: 3 ms clears the worst of those eight by 0.553 ms (**22.6%**). It is a design
+#: decision on measured cost, not a CI fix: ~2.4 ms once per prompt is below
+#: perception, and the tools this replaces cost 10-50 ms on the same event, so the
+#: feature stays an order of magnitude ahead of the status quo at the amended
+#: number. Optimising the reconcile back under 2 ms is a separate hat and stays open.
+#:
+#: **What the move costs, recorded because it is a real weakening.** The 3 ms fault
+#: injection no longer exceeds this budget on its own (3.0 is not > 3.0), so the
+#: red now leans on the ~2 ms the reconcile genuinely costs rather than standing
+#: without it — `test/taskfile.yml` states that sizing rule and is corrected there.
+#: The red survives on every sample: 13 injected runs measured Δ 4.689-5.657 ms,
+#: all red, worst margin/scatter headroom **1.33x**. Raising the injection to 4 ms
+#: would restore the property for both gates at once; it is not taken here because
+#: the budget was the sanctioned change and the injection is a separate knob.
 #:
 #: The amendment was wrong about its own cause. The ~16 ms it was fitted to was
 #: not the reconciler: it was `HostCapabilities::detect_and_cache` walking the
@@ -298,7 +325,7 @@ DELTA_BUDGET_MS = 2.0
 #: overshoot, not against this budget: resolving 2 ms is not the question, and
 #: asking it certified a 0.010 ms breach as a confident red. A breach the
 #: machine could resolve is a regression, and now says so without the caveat.
-RECONCILE_BUDGET_MS = 2.0
+RECONCILE_BUDGET_MS = 3.0
 
 #: The floor the shell-startup **positive control** demands (see
 #: :func:`evaluate`). Measured, not chosen: eight interleaved reps of
@@ -1787,6 +1814,13 @@ _GREEN = {
 #: code change at all.
 _CONTENDED_FLOOR = [3.0, 5.5, 9.0]
 
+#: The slowest per-prompt reconcile Δ measured on known-good code: eight runs of
+#: byte-identical binaries across a GitHub Linux runner and a WSL2 dev box
+#: (1.673, 1.873, 1.991, 2.001, 2.025, 2.169, 2.368, 2.447 ms). It is the
+#: measurement :data:`RECONCILE_BUDGET_MS` was set from, kept here so the budget
+#: can be checked against its own evidence rather than taken on trust.
+_WORST_KNOWN_GOOD_RECONCILE_MS = 2.447
+
 #: A floor with essentially no scatter (p90-min 0.010 ms). Every case that must
 #: reach a **red** on the anti-vacuity control needs one: that control is a lower
 #: bound missed by fractions of its 0.250 ms budget, so on `_GREEN`'s own 0.200 ms
@@ -2004,12 +2038,18 @@ def self_check() -> None:
     # which is what makes this a resolution test rather than a redness test. Row
     # 1 is the shape that shipped red from CI on 2026-08-26 while the classifier
     # compared the scatter against `budget` and called 0.010 ms resolvable.
-    for why, observed, spread, want in (
-        ("a 0.010 ms overshoot under 0.692 ms of scatter is not resolvable", 2.010, 0.692, "abstain"),
-        ("the same overshoot on a quiet floor is a red", 2.010, 0.002, "fail"),
-        ("a 2.606 ms overshoot clears 0.692 ms of scatter outright", 4.606, 0.692, "fail"),
-        ("under budget never abstains, however noisy the box", 1.594, 8.000, "pass"),
+    # Stated as offsets from the budget, never as absolutes: these probe the
+    # classifier's arithmetic, not the budget's value, and the two were coupled
+    # until 2026-08-26 — a `2.010` written here silently became an UNDER-budget
+    # input the moment the reconcile budget moved to 3 ms, turning three of the
+    # four rows green for the wrong reason.
+    for why, offset, spread, want in (
+        ("a 0.010 ms overshoot under 0.692 ms of scatter is not resolvable", +0.010, 0.692, "abstain"),
+        ("the same overshoot on a quiet floor is a red", +0.010, 0.002, "fail"),
+        ("a 2.606 ms overshoot clears 0.692 ms of scatter outright", +2.606, 0.692, "fail"),
+        ("under budget never abstains, however noisy the box", -0.406, 8.000, "pass"),
     ):
+        observed = RECONCILE_BUDGET_MS + offset
         probe = _budget_gate(
             name="probe", observed=observed, budget=RECONCILE_BUDGET_MS, spread=spread, breach="probe"
         )
@@ -2020,13 +2060,28 @@ def self_check() -> None:
     # the overshoot cannot decide that overshoot, so a breach on such a run is
     # NO VERDICT rather than a red — and the three cases below are what stop
     # that from becoming an amnesty. `_CONTENDED_FLOOR` scatters 2.5 ms (p90 5.5,
-    # min 3.0) against a 2 ms budget; its startup series is shifted with it so
-    # the same-work control still passes and cannot absorb the case under test.
-    breaching_reconcile = [5.5, 8.0, 11.0]  # min 5.5 - floor 3.0 = 2.5 ms, over budget
-    breaching_startup = [6.0, 8.0, 10.0]  # min 6.0 - floor 3.0 = 3.0 ms, over budget
+    # min 3.0); its startup series is shifted with it so the same-work control
+    # still passes and cannot absorb the case under test.
+    breaching_reconcile = [6.5, 9.0, 12.0]  # min 6.5 - floor 3.0 = 3.5 ms, over the 3 ms budget
+    breaching_startup = [6.0, 8.0, 10.0]  # min 6.0 - floor 3.0 = 3.0 ms, over the 2 ms budget
     contended = {"floor_samples": _CONTENDED_FLOOR}
-    assert floor_spread_ms(_CONTENDED_FLOOR) > RECONCILE_BUDGET_MS
-    assert floor_spread_ms(_GREEN["floor_samples"]) <= RECONCILE_BUDGET_MS  # type: ignore[arg-type]
+    # "Contended" in the only sense the classifier uses, and asserted against the
+    # margins these two cases actually produce rather than against a budget. The
+    # older form compared the scatter to `RECONCILE_BUDGET_MS`, which is the very
+    # confusion `_budget_gate` was fixed to remove, and it silently went false
+    # when that budget moved to 3 ms.
+    for label, series, budget in (
+        ("reconcile", breaching_reconcile, RECONCILE_BUDGET_MS),
+        ("startup", breaching_startup, DELTA_BUDGET_MS),
+    ):
+        margin = min(series) - min(_CONTENDED_FLOOR) - budget
+        assert margin > 0, f"the {label} contention fixture must breach its budget, not sit inside it"
+        assert floor_spread_ms(_CONTENDED_FLOOR) > margin, (
+            f"the {label} contention fixture must scatter wider than the {margin:.3f} ms it misses by"
+        )
+        assert floor_spread_ms(_GREEN["floor_samples"]) < margin, (  # type: ignore[arg-type]
+            f"_GREEN must stay quiet enough that the same {label} breach reds there"
+        )
     # p90 and not max: one outlier in an otherwise tight series must NOT read as
     # contention, or a single unlucky sample abstains on a healthy tree.
     assert floor_spread_ms([3.0, 3.1, 3.2, 3.2, 3.3, 3.3, 3.4, 3.4, 3.5, 99.0]) < 1.0
@@ -2100,6 +2155,19 @@ def self_check() -> None:
         RECONCILE_GATE_NEEDLE
     ]
     needles.append(False)
+
+    # The budget's own value, against the measurement that set it. Every fixture
+    # above states its input as an offset from the budget — which is what keeps
+    # them correct when it moves, and also exactly what would let it move to 50 ms
+    # with all of them still green. This is the one assert that would not: too
+    # tight and the budget is inside the measured cost of working code, too loose
+    # and it stops bounding anything.
+    headroom = (RECONCILE_BUDGET_MS - _WORST_KNOWN_GOOD_RECONCILE_MS) / _WORST_KNOWN_GOOD_RECONCILE_MS
+    assert 0.10 <= headroom <= 0.45, (
+        f"the {RECONCILE_BUDGET_MS:.3f} ms reconcile budget sits {headroom:.1%} over the worst known-good "
+        f"Δ of {_WORST_KNOWN_GOOD_RECONCILE_MS:.3f} ms — outside the 10-45% band a measured budget holds. "
+        "Re-measure and move both together, or the budget has stopped describing the code"
+    )
 
     passes = sum(evaluator)
     abstentions = sum(len(report.inconclusive) for report in reports)

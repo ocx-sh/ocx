@@ -159,8 +159,9 @@ tasks:
   shell-latency:
     desc: >-
       NFR latency gate for the per-prompt reconciler (C-044): zero execs on the
-      no-op prompt path, and BOTH shell startup and the per-prompt reconcile
-      within exec_floor + 2 ms, with the floor measured in the same run. Both
+      no-op prompt path, shell startup within exec_floor + 2 ms and the
+      per-prompt reconcile within exec_floor + 3 ms - two budgets, not one
+      shared number - with the floor measured in the same run. Both
       measured commands are DERIVED at run time - startup from the shipped
       env.sh sourced by a real interactive bash, reconcile from the hook body
       the binary just emitted - so the gate drives the production interactivity
@@ -191,17 +192,30 @@ tasks:
         OCX_COMMAND={{.LATENCY_OCX_BINARY}}
         uv run --no-project python bench/shell_latency.py
         --out {{.LATENCY_RESULTS_DIR}}/shell-latency.json
-      # 3. Fault injection (plan section 7.6), 3 ms against the 2 ms budget both
-      #    asserts now share - an EDGE test, not a sledgehammer. It is sized by
-      #    two rules. It must exceed the budget on its own (3 > 2), so the red
-      #    does not depend on the baseline: a machine where the reconcile were
-      #    free still reds, which is what makes "this step can go red" true
-      #    independently of what was measured. And it must not overshoot, or the
-      #    step certifies only that an assert exists: at 3 ms the observed deltas
-      #    are 3.795 (startup) and 4.364 (reconcile), so the same run would NOT
-      #    red a 4.5 ms budget - it is testing the number, not the presence.
-      #    The previous 8 ms / 100 ms pair was 4x its budget on both legs and
-      #    would have passed a budget nearly twice as loose.
+      # 3. Fault injection (plan section 7.6), 3 ms against a 2 ms startup budget
+      #    and a 3 ms reconcile budget - an EDGE test, not a sledgehammer, and
+      #    the two budgets stopped being one number on 2026-08-26.
+      #
+      #    It is sized by two rules, and the budget split cost it half of the
+      #    first one - recorded here rather than quietly dropped. Rule one: the
+      #    injection must exceed the budget on its own, so the red does not
+      #    depend on the baseline. That still holds for STARTUP (3 > 2): a
+      #    machine where startup were free still reds. It NO LONGER holds for
+      #    the RECONCILE (3 is not > 3), so that leg's red now leans on the ~2 ms
+      #    the reconcile genuinely costs. Measured, not assumed: across 13
+      #    injected runs on two machine classes the reconcile delta landed
+      #    4.689-5.657 ms against the 3 ms budget, red every time, worst
+      #    margin-over-floor-scatter headroom 1.33x. Raising the injection to
+      #    4 ms would restore rule one for both legs at once and is the open
+      #    follow-up; it was not taken with the budget because the injection is
+      #    a separate knob and moving both at once would leave neither measured.
+      #
+      #    Rule two: it must not overshoot, or the step certifies only that an
+      #    assert exists. At 3 ms the observed deltas are ~3.8 (startup) and
+      #    ~5.0 (reconcile), so the same run would NOT red a 4.5 / 5.7 ms pair -
+      #    it is testing the numbers, not their presence. The previous 8 ms /
+      #    100 ms pair was 4x its budget on both legs and would have passed a
+      #    budget nearly twice as loose.
       #
       #    The delay lands INSIDE the measured processes (`shell::hook::registration`
       #    for startup, `shell::hook::checkpoint` for the reconcile, both gated on

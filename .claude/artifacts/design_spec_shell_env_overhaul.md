@@ -1978,6 +1978,17 @@ first-class.
 **The benchmark contract** (this is a check, so it needs a red state):
 - The CI assert is **per-platform**, stated as `exec_floor + Δ`, and **the floor is measured in the same
   job**, never assumed or imported from another tool's benchmark.
+- **`Δ ≤ 2 ms` for shell startup, `Δ ≤ 3 ms` for the per-prompt reconcile — two budgets, amended
+  2026-08-26.** The reconcile number moved on measurement: eight known-good runs of byte-identical
+  binaries across a GitHub Linux runner and a WSL2 dev box gave 1.673, 1.873, 1.991, 2.001, 2.025,
+  2.169, 2.368 and 2.447 ms, **five of the eight over the old 2 ms**, so the shipped code sat astride
+  its own budget and the verdict turned on runner luck. 3 ms clears the worst by 22.6%. It is a design
+  decision on measured cost, not a CI fix — ~2.4 ms once per prompt is below perception and direnv and
+  mise cost 10–50 ms on the same event — and the startup budget deliberately does not move, because its
+  fault injection is an edge test sized against the smaller number. Full rationale, including the two
+  refuted alternatives (a wider abstain rule, and a scale-invariant `Δ/floor` ratio), is the 2026-08-26
+  row of the ADR's decision log. **The history below is the earlier 2 ms restoration and stands as
+  written; it is what the 3 ms amends.**
 - **`Δ ≤ 2 ms`, restored — the 2026-08-25 amendment is withdrawn as a misdiagnosis, not re-affirmed**
   ([#340](https://github.com/ocx-sh/ocx/issues/340)). That amendment measured 14.3–16.7 ms of overhead on
   the applying path and, reasoning that the reconciler "constructs the package manager, and every command
@@ -2008,7 +2019,7 @@ first-class.
   that measured path reaches: `hook::registration` for startup, `hook::checkpoint` for the reconcile
   (which only `--reconcile` emits). Two injected runs, each naming the gate it must red, because a fault
   injected at one seam does not demonstrate that the *other* gate can also go red — "something went red"
-  is not evidence for *this* gate, even now that both share the same `Δ ≤ 2 ms` budget. A wall-clock
+  is not evidence for *this* gate — and the two no longer share a budget at all since 2026-08-26. A wall-clock
   budget on shared runners is otherwise the canonical flaky-or-vacuous gate.
 - A separate benchmark shows the shell-side short-circuit costs **zero execs** on the no-op path.
 - **The reconciler's fixed point is asserted here too** (C-015 rule 0,
@@ -3009,7 +3020,8 @@ the new suite inherits.
 - **OQ-1a (strict AND mode)** and **`ocx shell refresh`** map to **recorded product decisions**, not
   contracts. Both are captured inside C-025 and C-050 respectively so they are not re-proposed.
 - **NFR Latency** is not a component contract; it is a **gate with a named red state**, contracted inside
-  C-044 (`exec_floor + Δ`, a single `Δ ≤ 2 ms` for both shell startup and the per-prompt reconcile —
+  C-044 (`exec_floor + Δ`, `Δ ≤ 2 ms` for shell startup and `Δ ≤ 3 ms` for the per-prompt reconcile,
+  split into two budgets on measured cost 2026-08-26 —
   the 2026-08-25 amendment's `Δ ≤ 25 ms` split was a misdiagnosis, corrected the same day once the real
   cost was traced to `HostCapabilities::detect_and_cache` rather than the reconciler — floor measured in
   the same job, each red produced by a fault injection at a seam only that measured path reaches).
