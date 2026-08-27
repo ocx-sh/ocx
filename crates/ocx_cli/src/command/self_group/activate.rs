@@ -2815,7 +2815,7 @@ mod reconcile_tests {
 /// the reconcile run's env-setting lines — and eval that as the global env.
 #[cfg(test)]
 mod bare_ocx_tests {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     use clap::ValueEnum as _;
     use ocx_lib::shell::Shell;
@@ -2967,7 +2967,7 @@ mod bare_ocx_tests {
                 String::from_utf8_lossy(&output.stderr)
             );
             assert!(
-                !Path::new(&marker).exists(),
+                !marker.exists(),
                 "{argv:?}: the emitted stream executed the user's `ocx` function (C-045). \
                  A bare invocation would also capture the wrapper's output into the env stream."
             );
