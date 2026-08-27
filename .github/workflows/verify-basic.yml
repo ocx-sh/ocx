@@ -191,7 +191,7 @@ jobs:
       # compile and run the test targets on Windows, which is the only thing
       # Linux and macOS cannot do for it.
       - name: Test
-        run: cargo nextest run --workspace --locked
+        run: cargo nextest run --workspace --locked --profile ci
 
   acceptance-tests:
     name: Acceptance Tests
