@@ -104,18 +104,152 @@ tasks:
       SHELLS_IMAGE: '{{.SHELLS_IMAGE | default "ocx-shells-debian"}}'
       SHELLS_DOCKERFILE: '{{.SHELLS_DOCKERFILE | default "docker/shells.Dockerfile"}}'
       SHELLS_OCX_BINARY: '{{.SHELLS_OCX_BINARY | default .OCX_BINARY}}'
+      # Which interpreters an absent installation is FATAL for, derived from the
+      # image rather than restated per CI leg. The Debian zoo installs pwsh,
+      # nushell and elvish from pinned upstream tarballs; the Alpine one
+      # deliberately ships none of the three, so its list stays the apk set.
+      # nushell answers to both spellings (`missing_arm_is_fatal` matches the arm
+      # name or its binary), and both are listed so the Rust seam of the same
+      # name — which only ever sees `nu` — agrees with the Python one.
+      SHELLS_REQUIRE_LIVE: >-
+        {{if hasSuffix "shells.alpine.Dockerfile" .SHELLS_DOCKERFILE}}sh,dash,ash,bash,zsh,fish{{else}}sh,dash,ash,bash,zsh,fish,pwsh,nushell,nu,elvish{{end}}
     cmds:
+      # `docker run -v` on a missing source path silently creates a DIRECTORY at
+      # the destination, which pytest collects as an empty package: a moved or
+      # renamed module makes this leg run three modules' worth of mounts but two
+      # modules' worth of tests, and still exit 0 — nothing in the job output
+      # tells the two states apart. Refuse instead. This is a `cmds:` entry and
+      # not a `preconditions:` one on purpose: `task --force` skips preconditions
+      # (verified on go-task 3.52), and a guard against a silent degrade must not
+      # itself be silently skippable.
+      - >-
+        missing='';
+        for f in tests/test_shell_activation.py tests/test_shell_reconcile.py
+        tests/test_shell_reconcile_edge_cases.py src/shell_matrix.py; do
+        [ -f "{{.TASKFILE_DIR}}/$f" ] || missing="$missing $f";
+        done;
+        [ -z "$missing" ] || { echo "missing shell-zoo mount source(s):$missing" >&2; exit 1; }
       - task: build
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
       - docker build -f {{.TASKFILE_DIR}}/{{.SHELLS_DOCKERFILE}} -t {{.SHELLS_IMAGE}} {{.TASKFILE_DIR}}/docker
+      # `__OCX_TESTING_REQUIRE_LIVE_SHELLS` turns "interpreter absent → skip"
+      # into a failure, because a skip and a pass carry the same evidence. It is
+      # set once for the whole run and honoured by all three modules — the two
+      # reconciler ones through `shell_matrix.missing_arm_is_fatal`, and
+      # `test_shell_activation.py` through its own `_require`, which routes
+      # every interpreter and tool lookup in that module through the same seam.
+      # The list is per image (SHELLS_REQUIRE_LIVE above), not the intersection
+      # of the two: pwsh, nushell and elvish exist on the Debian leg, so a skip
+      # there is a defect rather than an environment fact.
       - >-
         docker run --rm
         -v "{{.SHELLS_OCX_BINARY}}:/work/ocx:ro"
         -v "{{.TASKFILE_DIR}}/tests/test_shell_activation.py:/work/test_shell_activation.py:ro"
+        -v "{{.TASKFILE_DIR}}/tests/test_shell_reconcile.py:/work/test_shell_reconcile.py:ro"
+        -v "{{.TASKFILE_DIR}}/tests/test_shell_reconcile_edge_cases.py:/work/test_shell_reconcile_edge_cases.py:ro"
+        -v "{{.TASKFILE_DIR}}/src/shell_matrix.py:/work/shell_matrix.py:ro"
         -e OCX_ACTIVATION_BINARY=/work/ocx
+        -e __OCX_TESTING_REQUIRE_LIVE_SHELLS={{.SHELLS_REQUIRE_LIVE}}
         {{.SHELLS_IMAGE}}
-        python3 -m pytest -v -p no:cacheprovider /work/test_shell_activation.py
+        python3 -m pytest -v -p no:cacheprovider
+        /work/test_shell_activation.py /work/test_shell_reconcile.py
+        /work/test_shell_reconcile_edge_cases.py
+
+  shell-latency:
+    desc: >-
+      NFR latency gate for the per-prompt reconciler (C-044): zero execs on the
+      no-op prompt path, shell startup within exec_floor + 2 ms and the
+      per-prompt reconcile within exec_floor + 3 ms - two budgets, not one
+      shared number - with the floor measured in the same run. Both
+      measured commands are DERIVED at run time - startup from the shipped
+      env.sh sourced by a real interactive bash, reconcile from the hook body
+      the binary just emitted - so the gate drives the production interactivity
+      decision (rung 5) rather than a --hook override no shell passes. The two
+      wall-clock asserts have a third outcome, INCONCLUSIVE, when the bare-exec
+      floor itself scattered wider than the 2 ms under test; the deterministic
+      gates decide on every runner regardless. Writes
+      bench/results/shell-latency.json. The fault-injected red state runs in the
+      SAME invocation, so a green here cannot be produced by the gate not
+      running.
+    dir: '{{.TASKFILE_DIR}}'
+    vars:
+      LATENCY_OCX_BINARY: '{{.LATENCY_OCX_BINARY | default .OCX_BINARY}}'
+      LATENCY_RESULTS_DIR: '{{.LATENCY_RESULTS_DIR | default "bench/results"}}'
+    cmds:
+      - task: build
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+      # 1. The pure functions, on inputs nobody has to schedule - the evaluator's
+      #    gates and the `--expect-fail-gate` matcher, each in both colours.
+      #    Cheap, deterministic, and it fails before a single process is spawned
+      #    if the arithmetic or a gate name drifts. It prints its own tally; this
+      #    comment deliberately does not restate the counts, because the last one
+      #    written here went stale the moment cases were added.
+      - uv run --no-project python bench/shell_latency.py --self-check
+      # 2. The live gate. Exit 1 on any failed assert - no tolerated range.
+      - >-
+        OCX_COMMAND={{.LATENCY_OCX_BINARY}}
+        uv run --no-project python bench/shell_latency.py
+        --out {{.LATENCY_RESULTS_DIR}}/shell-latency.json
+      # 3. Fault injection (plan section 7.6), 7 ms against a 2 ms startup budget
+      #    and a 6.1 ms reconcile budget - an EDGE test, not a sledgehammer.
+      #
+      #    It is sized by two rules, and both hold for both legs again. Rule one:
+      #    the injection must exceed the budget ON ITS OWN, so the red does not
+      #    depend on the baseline - a machine where the measured work were free
+      #    still reds. 7 > 6.1 and 7 > 2. It was 3 ms until 2026-08-26 and briefly
+      #    failed this rule for the reconcile when that budget moved 2 -> 3 ms:
+      #    the leg still went red, but only because ~2 ms of real reconcile sat
+      #    underneath, which is a detection one faster machine away from silently
+      #    passing. `bench/shell_latency.py` now REFUSES an --expect-fail-gate run
+      #    whose injection does not clear every budget it is pointed at, checked
+      #    against the live value and this run`s own gates, so the collision
+      #    cannot come back unnoticed the next time a budget moves.
+      #
+      #    Rule two: it must not overshoot, or the step certifies only that an
+      #    assert exists. At 7 ms the observed deltas are ~7.5 (startup) and
+      #    ~11.8 (reconcile), so the same run would NOT red a 8 / 12 ms pair -
+      #    it is testing the numbers, not their presence. The previous 8 ms /
+      #    100 ms pair was 4x its budget on both legs and would have passed a
+      #    budget nearly twice as loose.
+      #
+      #    It went 4 -> 7 ms when the reconcile budget went 3 -> 6.1, which is
+      #    rule one doing its job: `shell_latency.py` refuses the run outright
+      #    when the injection stops clearing a budget it is pointed at, so this
+      #    value cannot be left behind by a budget move.
+      #
+      #    The delay lands INSIDE the measured processes (`shell::hook::registration`
+      #    for startup, `shell::hook::checkpoint` for the reconcile, both gated on
+      #    the `__testing` feature), never around them, so a gate pointed at a
+      #    command that emits neither records no delay and this step fails - which
+      #    is the whole point of running it. One run covers both seams because
+      #    each measured command is its own process with its own copy of the
+      #    variable; the floor never receives it. `--expect-fail` inverts the exit
+      #    code, so this step fails if the gate PASSES, and `--expect-fail-gate`
+      #    is repeatable with EVERY named gate required to be red - so a red on
+      #    one budget cannot stand in for the other's, which is what a single
+      #    unnamed `--expect-fail` would have allowed. Running this on every
+      #    invocation is what makes step 2's green mean something.
+      #
+      #    It is also the live control on the contention classifier that gives
+      #    those two asserts their INCONCLUSIVE outcome. The injected delay lands
+      #    in the measured processes and never in the floor, so on any runner
+      #    quiet enough to measure at all the floor stays tight, the classifier
+      #    reaches its red branch, and both gates go red - measured here at a
+      #    0.503 ms floor scatter against 3.758 / 4.512 ms deltas. A classifier
+      #    that started abstaining everywhere would leave this step with no red
+      #    to name. On a genuinely contended runner this step abstains too and
+      #    exits 0 with a `::warning`, which is the same honest answer step 2
+      #    gives: neither an assertion nor its demonstration can be made on a
+      #    measurement of the runner.
+      - >-
+        OCX_COMMAND={{.LATENCY_OCX_BINARY}}
+        __OCX_TESTING_LATENCY_INJECT_MS=7.0
+        uv run --no-project python bench/shell_latency.py --expect-fail
+        --expect-fail-gate 'shell startup <='
+        --expect-fail-gate 'per-prompt reconcile'
+        --out {{.LATENCY_RESULTS_DIR}}/shell-latency-injected.json
 
   # ---------------------------------------------------------------------------
   # Benchmark targets (bench: namespace)
@@ -270,7 +404,7 @@ tasks:
 
   index-conformance-drift:
     desc: >-
-      Fail if the vendored ocx-sh/index conformance fixtures
+      Fail if the vendored ocx-sh/indexbot conformance fixtures
       (crates/ocx_lib/tests/fixtures/index_wire/) differ from that repo's current
       main. Network-bound and NOT wired into `task verify` — the vendored copy
       exists to keep the test suite offline. Runs on verify-deep.yml's weekly

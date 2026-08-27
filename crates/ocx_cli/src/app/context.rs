@@ -144,10 +144,18 @@ impl Context {
         log::debug!("Creating context with options: {:?}", options);
 
         // Detect the host libc once and populate the process-wide cache that
-        // `Platform::current()` reads during index resolution. One-shot CLI
-        // assumption (see `host_capabilities` module doc). Detection failure is
-        // not fatal — an undetected libc caches as `None`, a valid state that
+        // `Platform::current()` reads during index resolution. Detection failure
+        // is not fatal — an undetected libc caches as `None`, a valid state that
         // restricts matching to entries with empty `os.features`.
+        //
+        // Cheap on all but the first invocation per host per TTL: the answer is
+        // recorded at `$OCX_HOME/state/host/capabilities.json` and re-read from
+        // there, so the loader-discovery walk no longer runs per process. Left
+        // ahead of the `options.offline` branch deliberately — detection reads
+        // only the local filesystem and spawns only local loaders, so it is not
+        // network work and offline has nothing to say about it. See the
+        // `host_capabilities` module's "Cache lifecycle" note for what
+        // invalidates the record.
         oci::HostCapabilities::detect_and_cache().await;
 
         if options.offline && options.remote {

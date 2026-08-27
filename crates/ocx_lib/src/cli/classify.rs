@@ -102,6 +102,7 @@ pub fn classify_error(err: &(dyn std::error::Error + 'static)) -> ExitCode {
 /// gains a `ClassifyExitCode` impl. Each downcast is O(1) (`TypeId` check), so
 /// the ladder is cheap even when it grows.
 fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
+    use crate::activation::SessionError;
     use crate::announce::AnnounceError;
     use crate::archive::Error as ArchiveError;
     use crate::auth::error::AuthError;
@@ -161,6 +162,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(SameFilesystemError);
     try_downcast!(EmptyOrAbsentError);
     try_downcast!(crate::Error);
+    try_downcast!(SessionError);
     try_downcast!(ConfigError);
     try_downcast!(ForwardedEnvError);
     try_downcast!(ListSeparatorError);

@@ -13,6 +13,14 @@ inputs:
     description: Space/comma-separated cargo features (e.g. `ocx/__testing` for acceptance binaries). Empty = release-clean.
     required: false
     default: ""
+  artifact_suffix:
+    description: >-
+      Suffix appended to both the emitted filename and the uploaded artifact name.
+      Needed only when one workflow builds the SAME target twice (a release-clean
+      binary plus an `ocx/__testing` one) — artifact names are unique per run, and
+      two same-named uploads collide. Empty = the historical `ocx-<target>` name.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -57,17 +65,22 @@ runs:
         FEATURES: ${{ inputs.features }}
       run: cargo zigbuild --release --target="$TARGET" --locked ${FEATURES:+--features "$FEATURES"}
     - name: Prepare Binaries
+      # The suffix lands in the FILENAME too, not just the artifact name: a job
+      # that builds one target twice would otherwise have both binaries land on
+      # the same path, and which one a later step ran would be decided by step
+      # order rather than by what the step asked for.
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
+        SUFFIX: ${{ inputs.artifact_suffix }}
       run: |
         ext=""
         [[ "$TARGET" == *windows* ]] && ext=".exe"
-        cp "target/${TARGET}/release/ocx${ext}" "ocx-${TARGET}${ext}"
+        cp "target/${TARGET}/release/ocx${ext}" "ocx-${TARGET}${SUFFIX}${ext}"
     - name: Upload ocx Binary
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
-        name: ocx-${{ inputs.target }}
-        path: ocx-${{ inputs.target }}${{ contains(inputs.target, 'windows') && '.exe' || '' }}
+        name: ocx-${{ inputs.target }}${{ inputs.artifact_suffix }}
+        path: ocx-${{ inputs.target }}${{ inputs.artifact_suffix }}${{ contains(inputs.target, 'windows') && '.exe' || '' }}
         compression-level: 0
         retention-days: 7

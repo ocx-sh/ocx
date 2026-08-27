@@ -160,8 +160,12 @@ impl App {
         // `should_check_for_update` call below re-borrows from the re-bound name.
         match cli.command {
             Some(command::Command::Version(ref v)) => return v.execute(&cli.context, color_config).await,
-            Some(command::Command::Shell(command::shell::Shell::Completion(ref c))) => return c.execute().await,
-            Some(command::Command::Self_(command::self_group::SelfGroup::Activate(ref a))) => return a.execute().await,
+            Some(command::Command::Shell(command::shell::Shell::Completion(ref c))) => {
+                return c.execute(&cli.context).await;
+            }
+            Some(command::Command::Self_(command::self_group::SelfGroup::Activate(ref a))) => {
+                return a.execute(&cli.context, color_config).await;
+            }
             Some(command::Command::External(argv)) => {
                 return plugin_dispatch::dispatch(argv, &cli.context).await;
             }
@@ -305,7 +309,10 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
         Command::Remove(_) => "remove",
         Command::Run(_) => "run",
         Command::Shell(sub) => match sub {
+            ShellCmd::Allow(_) => "shell allow",
             ShellCmd::Completion(_) => "shell completion",
+            ShellCmd::Revoke(_) => "shell revoke",
+            ShellCmd::State(_) => "shell state",
         },
         Command::Self_(sub) => match sub {
             SelfGroup::Activate(_) => "self activate",
@@ -321,13 +328,25 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
 /// `ocx config` group — fleet tooling whose members carry their own network
 /// contract (`config test` promises no network and no state writes at all),
 /// matching [`should_check_managed_config_refresh`]'s exclusion.
+///
+/// `shell state` is skipped alongside `shell completion`: it is a diagnostic
+/// (C-050), and a diagnostic that fails — or merely stalls — because the thing
+/// it is diagnosing is broken is useless. The `Shell` variants are listed one
+/// by one rather than wildcarded so a new subcommand is not skipped by
+/// default; `should_check_for_update_skips_all_shell_variants_canary` makes
+/// that decision a compile error.
 fn should_check_for_update(command: &Option<command::Command>) -> bool {
     !matches!(
         command,
         Some(
             command::Command::Version(_)
                 | command::Command::About(_)
-                | command::Command::Shell(command::shell::Shell::Completion(_))
+                | command::Command::Shell(
+                    command::shell::Shell::Allow(_)
+                        | command::shell::Shell::Completion(_)
+                        | command::shell::Shell::Revoke(_)
+                        | command::shell::Shell::State(_)
+                )
                 | command::Command::Self_(_)
                 | command::Command::Config(_)
         )
@@ -339,13 +358,25 @@ fn should_check_for_update(command: &Option<command::Command>) -> bool {
 /// `config update` already performs the full (non-throttled) refresh, and
 /// `config push` is the operator-side publish command that never consults
 /// the local tier.
+///
+/// `shell state` is skipped here too, which also exempts it from
+/// [`should_enforce_managed_config_required`] below. That exemption is
+/// load-bearing: with `[managed] required = true` and no
+/// matching snapshot — the ordinary broken state a confused user is told to
+/// diagnose — the gate would exit 78 before the command ran, against C-051's
+/// "0 in every reportable state, 74 the only non-zero path".
 fn should_check_managed_config_refresh(command: &Option<command::Command>) -> bool {
     !matches!(
         command,
         Some(
             command::Command::Version(_)
                 | command::Command::About(_)
-                | command::Command::Shell(command::shell::Shell::Completion(_))
+                | command::Command::Shell(
+                    command::shell::Shell::Allow(_)
+                        | command::shell::Shell::Completion(_)
+                        | command::shell::Shell::Revoke(_)
+                        | command::shell::Shell::State(_)
+                )
                 | command::Command::Self_(_)
                 | command::Command::Config(_)
         )
@@ -389,8 +420,50 @@ pub async fn run() -> anyhow::Result<ExitCode> {
 
 #[cfg(test)]
 mod tests {
-    use super::should_check_for_update;
+    use super::{should_check_for_update, should_check_managed_config_refresh, should_enforce_managed_config_required};
     use crate::command::{self, self_group, version};
+
+    // ── Exit-code classification ─────────────────────────────────────────────
+
+    /// [#343](https://github.com/ocx-sh/ocx/issues/343) — moving the two
+    /// project-tier refusals out of `ProjectContextError` and into
+    /// `ocx_lib`'s `SessionError` must not move their exit codes.
+    ///
+    /// The refusals travel as `anyhow` from `self activate --reconcile`, so
+    /// they reach [`classify_error`] as a bare cause: this function's own
+    /// downcast ladder does not know `SessionError`, and the code comes from
+    /// `ocx_lib::cli::classify_error`'s registry instead. A `SessionError`
+    /// added there without a `try_downcast!` entry silently degrades 78/65 to
+    /// the generic failure code, which no other test would notice.
+    ///
+    /// Red state: delete `try_downcast!(SessionError)` from
+    /// `crates/ocx_lib/src/cli/classify.rs` and both assertions report
+    /// `Failure`.
+    #[test]
+    fn c343_the_session_refusals_keep_their_exit_codes_through_anyhow() {
+        use std::path::PathBuf;
+
+        use ocx_lib::activation::SessionError;
+        use ocx_lib::project::LockCurrency;
+
+        let missing = anyhow::Error::from(SessionError::from(LockCurrency::Missing {
+            path: PathBuf::from("/work/proj/ocx.lock"),
+        }));
+        assert_eq!(
+            super::classify_error(missing.as_ref()),
+            ocx_lib::cli::ExitCode::ConfigError,
+            "an absent lock is a configuration gap (78), the same as from `ocx pull`"
+        );
+
+        let stale = anyhow::Error::from(SessionError::from(LockCurrency::Stale {
+            lock_path: PathBuf::from("/work/proj/ocx.lock"),
+        }));
+        assert_eq!(
+            super::classify_error(stale.as_ref()),
+            ocx_lib::cli::ExitCode::DataError,
+            "a stale lock is stale on-disk data (65), the same as from `ocx pull`"
+        );
+    }
 
     // ── CLI definition validity ──────────────────────────────────────────────
 
@@ -730,6 +803,78 @@ mod tests {
                 !should_check_for_update(&cmd),
                 "every Self_ variant must be in the skip list (canary against shell-startup recursive update-check fan-out); \
                  variant idx={idx} ({label}) returned true from should_check_for_update"
+            );
+        }
+    }
+
+    /// Exhaustive canary — every `Shell` variant must be in **all three** skip
+    /// lists (C-050, C-051).
+    ///
+    /// `ocx shell state` is the command a confused user is told to run when the
+    /// shell integration misbehaves, and `ocx shell allow` is what that user is
+    /// then told to type. Both are needed in exactly the state a broken
+    /// managed tier produces, so both are exempt for one reason. Left out of
+    /// these lists they pay the
+    /// background update check and the managed-config refresh probe, and —
+    /// decisively — `Context::try_init`'s `[managed] required = true` snapshot
+    /// gate applies, so with `required = true` and no matching snapshot on disk
+    /// it exits **78 before the command body runs**. That contradicts C-051's
+    /// normative row: 0 in every reportable state, 74 the only non-zero path.
+    ///
+    /// The `match` below has no wildcard, so adding a `Shell` variant is a
+    /// compile error here — the contributor is forced to decide whether the new
+    /// subcommand belongs in the skip lists, and `should_check_for_update`'s
+    /// own arm lists the variants one by one so the answer is never "skipped by
+    /// default".
+    #[test]
+    fn should_check_for_update_skips_all_shell_variants_canary() {
+        use clap::Parser as _;
+
+        // Constructor table: one entry per `Shell` variant. A new variant needs
+        // a row here AND an arm in the exhaustive match below.
+        let all_variants: Vec<command::shell::Shell> = vec![
+            command::shell::Shell::Allow(command::shell_allow::ShellAllow::parse_from(["shell-allow"])),
+            command::shell::Shell::Completion(command::shell_completion::ShellCompletion::parse_from([
+                "shell-completion",
+            ])),
+            command::shell::Shell::Revoke(command::shell_revoke::ShellRevoke::parse_from(["shell-revoke"])),
+            command::shell::Shell::State(command::shell_state::ShellState::parse_from(["shell-state"])),
+        ];
+
+        for variant in &all_variants {
+            // Exhaustiveness guard: no wildcard, so a new variant breaks the
+            // build until its skip-list membership is decided.
+            match variant {
+                command::shell::Shell::Allow(_)
+                | command::shell::Shell::Completion(_)
+                | command::shell::Shell::Revoke(_)
+                | command::shell::Shell::State(_) => {}
+            }
+        }
+
+        for (idx, variant) in all_variants.into_iter().enumerate() {
+            let label = match &variant {
+                command::shell::Shell::Allow(_) => "Shell::Allow",
+                command::shell::Shell::Completion(_) => "Shell::Completion",
+                command::shell::Shell::Revoke(_) => "Shell::Revoke",
+                command::shell::Shell::State(_) => "Shell::State",
+            };
+            let cmd = Some(command::Command::Shell(variant));
+            assert!(
+                !should_check_for_update(&cmd),
+                "every Shell variant must be in the update-check skip list; \
+                 variant idx={idx} ({label}) returned true from should_check_for_update"
+            );
+            assert!(
+                !should_check_managed_config_refresh(&cmd),
+                "every Shell variant must be in the managed-config refresh skip list; \
+                 variant idx={idx} ({label}) returned true from should_check_managed_config_refresh"
+            );
+            assert!(
+                !should_enforce_managed_config_required(&cmd),
+                "every Shell variant must be exempt from the [managed] required-snapshot gate — \
+                 otherwise `ocx shell state` exits 78 in exactly the broken state it exists to diagnose; \
+                 variant idx={idx} ({label}) returned true from should_enforce_managed_config_required"
             );
         }
     }

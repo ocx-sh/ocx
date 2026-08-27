@@ -7,10 +7,26 @@ name: Shell Activation
 # activation path in a "shell zoo" container per shell. Enforcement is PR (paths)
 # + push-to-main; it is intentionally NOT part of the release pipeline.
 #
-# The binary is built ONCE as a static musl artifact — that is what the OCI
-# release publishes and what `ocx self setup` actually pulls, and a static musl
-# binary runs on any Linux base regardless of glibc, so the same artifact drives
-# both the Debian and Alpine shell-zoo legs.
+# The shell-zoo binary is a RELEASE-CLEAN static musl artifact — that is what the
+# OCI release publishes and what `ocx self setup` actually pulls, and a static
+# musl binary runs on any Linux base regardless of glibc, so the one artifact
+# drives both the Debian and Alpine legs. Release-clean is the point: the zoo's
+# claim is "the shipped binary activates in every shell", which a binary carrying
+# compile-gated test seams cannot make.
+#
+# A SECOND artifact of the same target is built with `--features ocx/__testing`
+# and is consumed by NOTHING but the C-044 latency gate. That gate proves itself
+# by injecting a delay inside `shell::hook::registration`, which is compiled out
+# of a release-clean binary — so pointing the gate at the zoo artifact leaves its
+# `--expect-fail` step unable to go red, i.e. unable to prove anything. The two
+# artifacts are not interchangeable in either direction; do not collapse them.
+# Both builds share one job and one target dir, so the second recompiles only
+# `ocx_lib` and `ocx` (the feature reaches no third-party crate).
+#
+# The Debian leg carries the NFR latency gate (C-044): it needs no Docker and the
+# binaries are already on the runner, so it rides an existing job rather than
+# adding one. macOS and Windows legs live in `shell-activation-deep.yml` — their
+# runner minutes are 10x and 1.7x Linux.
 
 on:
   pull_request:
@@ -19,12 +35,22 @@ on:
       - crates/ocx_lib/src/setup/**
       - crates/ocx_lib/src/shim.rs
       - crates/ocx_lib/src/shell.rs
+      - crates/ocx_lib/src/shell/**
       - crates/ocx_cli/src/command/self_group/**
+      - crates/ocx_cli/src/command/shell_state.rs
       - test/tests/test_shell_activation.py
       - test/tests/test_self_activate.py
+      - test/tests/test_shell_reconcile.py
+      - test/tests/test_shell_reconcile_edge_cases.py
+      - test/src/shell_matrix.py
+      - test/bench/shell_latency.py
       - test/docker/**
       - test/taskfile.yml
       - .github/workflows/shell-activation.yml
+      # The composite action decides which binary carries `ocx/__testing`, and
+      # C-044 is only a real gate while it does — so a change there has to run
+      # this workflow.
+      - .github/actions/build-rust/action.yml
   push:
     branches: [main]
 
@@ -50,6 +76,17 @@ jobs:
         with:
           target: x86_64-unknown-linux-musl
           use_zigbuild: "true"
+      # C-044's fault injection is consumed in `shell::hook::registration` behind
+      # `ocx/__testing`; the release-clean artifact above physically lacks it and
+      # would make the gate's `--expect-fail` step un-reddable. Do NOT point the
+      # shell-zoo matrix at this one.
+      - name: Build ocx (x86_64-unknown-linux-musl, __testing)
+        uses: ./.github/actions/build-rust
+        with:
+          target: x86_64-unknown-linux-musl
+          use_zigbuild: "true"
+          features: ocx/__testing
+          artifact_suffix: "-testing"
 
   activation:
     name: ${{ matrix.image }}
@@ -68,13 +105,22 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - name: Download ocx binary
+      - name: Download ocx binary (release-clean — the shell zoo's subject)
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ocx-x86_64-unknown-linux-musl
           path: ocx-bin
-      - name: Make binary executable
-        run: chmod +x ocx-bin/ocx-x86_64-unknown-linux-musl
+      # Downloaded only where it is used, so the zoo legs cannot reach for it by
+      # accident — the whole defect this replaces was a gate pointed at a binary
+      # that could not carry the fault it was asked to detect.
+      - name: Download ocx binary (__testing — C-044 only)
+        if: matrix.image == 'debian-shells'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ocx-x86_64-unknown-linux-musl-testing
+          path: ocx-bin
+      - name: Make binaries executable
+        run: chmod +x ocx-bin/*
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
       - name: Run all-shell activation matrix
@@ -84,3 +130,26 @@ jobs:
             SHELLS_IMAGE=${{ matrix.image }} \
             SHELLS_DOCKERFILE=${{ matrix.dockerfile }} \
             SHELLS_OCX_BINARY="${{ github.workspace }}/ocx-bin/ocx-x86_64-unknown-linux-musl"
+      # Debian leg only: one measurement per platform is the contract, and both
+      # legs are the same x86_64 runner running the same musl build of the same
+      # commit, so a second run would buy noise rather than coverage.
+      - name: Install uv
+        if: matrix.image == 'debian-shells'
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: NFR latency gate (C-044)
+        if: matrix.image == 'debian-shells'
+        run: |
+          task test:shell-latency \
+            SKIP_BUILD=true \
+            LATENCY_OCX_BINARY="${{ github.workspace }}/ocx-bin/ocx-x86_64-unknown-linux-musl-testing"
+      # The gate asserts; the artifact is what makes a future regression
+      # diagnosable. Without a recorded floor/total/delta, a red six months from
+      # now has nothing to be compared against and a threshold silently going
+      # vacuous has nothing to be noticed in.
+      - name: Upload latency measurement
+        if: ${{ matrix.image == 'debian-shells' && !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: shell-latency-linux
+          path: test/bench/results/shell-latency*.json
+          retention-days: 7

@@ -10,7 +10,7 @@
 //! sequence of writes — `ocx.toml` first, then resolve, then save the
 //! lock — leaves `ocx.toml` ahead of the lock if resolution fails: the
 //! manifest declares a tool that has no pinned digest, the staleness
-//! gate (`ProjectContextError::StaleLock`) fires on every subsequent
+//! gate ([`LockCurrency::Stale`](crate::project::LockCurrency)) fires on every subsequent
 //! read, and the user must hand-edit `ocx.toml` back to a consistent
 //! state. This is the half-committed-mutation laundering bug surfaced
 //! by Codex H2.

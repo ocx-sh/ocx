@@ -351,9 +351,11 @@ Both flags pick a project file. Passing them together exits with code 64 (`Usage
 
 ### Shell activation for global tools {#global-toolchain-shell}
 
-The OCX installer writes a thin shim file — `$OCX_HOME/env.sh` — and a single idempotent source line in the login profile. The shim calls [`ocx self activate`][cmd-self-activate] at runtime, so its content is byte-identical across users and survives `OCX_HOME` changes without re-running the installer.
+Adding a tool to the global toolchain with [`ocx --global add`][user-guide-global-add] puts it on `PATH` in every shell you have open, not just new ones. The OCX installer writes a thin shim file — `$OCX_HOME/env.sh` — and a single idempotent source line in the login profile. The shim calls [`ocx self activate`][cmd-self-activate] at runtime, so its content is byte-identical across users and survives `OCX_HOME` changes without re-running the installer.
 
-`ocx self activate` emits `PATH` prepend, shell completions (unless [`OCX_NO_COMPLETIONS=1`][env-ocx-no-completions]), and an `eval "$(ocx --global env --shell=sh)"` call for the global toolchain. Every new login shell runs this block, placing the currently-selected OCX and its installed global tools on `PATH`.
+At **shell start**, `ocx self activate` emits a `PATH` prepend, shell completions (unless [`OCX_NO_COMPLETIONS=1`][env-ocx-no-completions]), and an `eval "$(ocx --global env --shell=sh)"` call for the global toolchain. In bash, zsh, fish, PowerShell, and elvish (whose guard checks only the carrier and the working directory, not a watch-set stat), it also registers a per-prompt hook that re-checks a small watch set — the global `ocx.toml`, the selected binary — and only re-runs when something has actually changed, so an unchanged prompt costs a stat comparison, not a re-resolve: `ocx --global add ripgrep` followed by `rg --version` in the same terminal works at the very next prompt. `nushell`'s directory-change hook keeps the global toolchain live the same way; the strict-POSIX shells (`ash`, `dash`, `ksh`) and Windows Batch have no append-safe hook point in their prompt machinery and only refresh at shell start. See [Shell Integration][in-depth-shell-integration] for the full per-shell coverage table and the mechanism underneath it.
+
+Disable the per-prompt hook entirely — for one shell, or every shell — with [`OCX_NO_HOOK`][env-ocx-no-hook] or `ocx self setup --no-hook`. `PATH`, completions, and the global-toolchain `eval` at shell start are unaffected either way; only the per-prompt re-check turns off.
 
 The installer appends a block-marker source line to the login profile so re-running it is idempotent:
 
@@ -500,17 +502,19 @@ ocx env --env PATH:path=node_modules/.bin --shell=bash     # print the same thin
 
 Both compose identically, which is what makes the second useful for debugging the first. The same pairing holds one tier down, between [`ocx package env`][cmd-package-env] and [`ocx package exec`][cmd-package-exec] — those read no `ocx.toml`, so `--env` is the only thing a caller contributes there. [`ocx run`][cmd-run] documents the full precedence order and the [environment reference][env-composition-project-env] documents the value grammar, including why keys starting `OCX_` or `__OCX_` are rejected everywhere `[env]` can appear.
 
-### Shell activation
+### Shell activation {#project-shell}
 
-Project tools should land on `PATH` whenever you `cd` into the project — without `eval`-ing on every shell startup. Two entry points, each suited to a different workflow:
+Project tools should land on `PATH` the moment you `cd` into the project, and leave again when you `cd` back out — without a separate `eval` step and without leaking into whatever else that shell does afterward.
 
-- [`ocx direnv export`][cmd-direnv-export] — stateless [direnv][direnv] backend; [`ocx direnv init`][cmd-direnv-init] drops a ready `.envrc` that re-evaluates on each directory entry.
-- [`ocx run`][cmd-run] — no hook at all, for CI and scripts: runs a command directly in the locked project env.
+In bash, zsh, fish, PowerShell, and elvish, this rides the same per-prompt hook the [global toolchain](#global-toolchain-shell) uses: `cd` into a project OCX has been given consent to activate, and its locked tools land on `PATH` at the very next prompt — no `.envrc`, no `direnv allow`, no separate `eval`. `cd` back out and they revert. The same [`OCX_NO_HOOK`][env-ocx-no-hook] / `ocx self setup --no-hook` switch turns it off.
 
-The direnv backend exports only — it never installs missing tools or contacts the registry. Run [`ocx pull`][cmd-pull] first.
+**A fresh clone stays inert until consented.** Unlike the global toolchain — always trusted, since `$OCX_HOME/ocx.toml` is your own file — a project's `ocx.toml` can name any OCI registry, so OCX will not put its tools on `PATH` just because you `cd`'d in. The first `ocx add`, `ocx lock`, `ocx update`, `ocx pull`, or `ocx run` you run against a project records consent automatically; an operator can also pre-authorize a checkout path or a whole namespace of registries in advance, which is how a devcontainer or a fleet skips the per-project prompt entirely. See [Shell Integration → Consent grants][in-depth-shell-integration-consent] for the full predicate and where each kind of grant can live.
+
+nushell and the strict-POSIX shells (`ash`, `dash`, `ksh`) and Windows Batch have no append-safe per-prompt hook point, so a project scope on those shells needs one of two explicit entry points instead: [`ocx direnv export`][cmd-direnv-export] — stateless, exports only, never installs missing tools or contacts the registry, so run [`ocx pull`][cmd-pull] first; [`ocx direnv init`][cmd-direnv-init] drops a ready `.envrc` that re-evaluates on each directory entry — or [`ocx run`][cmd-run] for CI and scripts, which needs no hook at all.
 
 ::: tip Learn more
 [Project Toolchain In Depth][in-depth-project] — schema details, declaration-hash canonicalization (RFC 8785 JCS), in-place flock concurrency, per-group binding semantics, multi-project GC retention, SLSA roadmap.
+[Shell Integration][in-depth-shell-integration] — the full per-shell coverage table, the consent grants, `ocx shell state`'s diagnostic role, and how OCX yields to a live direnv or mise session.
 :::
 
 ## Run tools from your project {#run}
@@ -1134,6 +1138,8 @@ Under [`--offline`][arg-offline] a policy-covered install needs its trust materi
 
 When multiple projects share the same `OCX_HOME`, `ocx clean` retains every package referenced by *any* registered project's `ocx.lock` — not just the active one. A project is registered automatically whenever `ocx lock`, `ocx add`, or `ocx remove` writes its lockfile. Deleting a project's directory makes its packages collectable at the next clean (silently — no warning). Browse `$OCX_HOME/projects/` to see which projects are currently registered. Pass `--force` to bypass the project registry; live install symlinks are always honoured.
 
+`ocx clean` also garbage-collects [consent][in-depth-shell-integration-consent]: a project's stamp is removed once its directory is confirmed gone, the same way its packages become collectable. A project you move or delete loses both its held packages and its consent silently in the same pass — moving a checkout back re-consents it the same way a fresh clone would, via the next [`ocx add`][cmd-add], [`ocx lock`][cmd-lock], [`ocx pull`][cmd-pull], or [`ocx run`][cmd-run].
+
 ::: tip Learn more
 [Storage In Depth → Garbage Collection][in-depth-storage-gc] — full reachability walk across `refs/symlinks/`, `refs/deps/`, `refs/layers/`, `refs/blobs/`.
 [Dependencies In Depth → Garbage Collection][in-depth-dependencies-gc] — why dependencies are protected by dependents, not by back-references.
@@ -1328,6 +1334,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 <!-- environment -->
 [env-sigstore-trusted-root]: ./reference/environment.md#ocx-sigstore-trusted-root
 [env-ocx-no-completions]: ./reference/environment.md#ocx-no-completions
+[env-ocx-no-hook]: ./reference/environment.md#ocx-no-hook
 [env-ocx-binary-pin]: ./reference/environment.md#ocx-binary-pin
 [env-ocx-home]: ./reference/environment.md#ocx-home
 [env-identity-token]: ./reference/environment.md#ocx-identity-token
@@ -1397,6 +1404,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [in-depth-environments-visibility]: ./in-depth/environments.md#visibility-views
 [in-depth-environments-composition-order]: ./in-depth/environments.md#composition-order
 [in-depth-environments-last-wins]: ./in-depth/environments.md#last-wins
+[in-depth-shell-integration]: ./in-depth/shell-integration.md
+[in-depth-shell-integration-consent]: ./in-depth/shell-integration.md#consent
 [in-depth-entry-points]: ./in-depth/entry-points.md
 [in-depth-configuration]: ./in-depth/configuration.md
 [in-depth-project]: ./in-depth/project.md

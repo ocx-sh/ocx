@@ -301,6 +301,17 @@ struct RawProjectConfig {
     /// [`Identifier`]).
     #[serde(default)]
     trust: Option<crate::trust::TrustConfig>,
+
+    /// `[shell]`, declared only to be refused by name.
+    ///
+    /// Held as an untyped [`toml::Table`] so the refusal fires on the section's
+    /// presence rather than on its contents — a `[shell]` block that happens to
+    /// be well-formed for `config.toml` is no more acceptable here than a
+    /// malformed one. Without this field the section would still be rejected,
+    /// but by `deny_unknown_fields`, whose message reads as "unknown key" and
+    /// names no remedy.
+    #[serde(default)]
+    shell: Option<toml::Table>,
 }
 
 impl ProjectConfig {
@@ -586,6 +597,14 @@ impl ProjectConfig {
         // the key.
         let raw: RawProjectConfig =
             toml::from_str(s).map_err(|e| ProjectError::new(path.clone(), ProjectErrorKind::TomlParse(e)))?;
+
+        // Schema-level: `[shell]` is a `config.toml` section and is refused
+        // here by name (C-033). The whitelist it carries is what gates project
+        // activation, so reading it from the project tier would let a
+        // checked-in file consent to itself.
+        if raw.shell.is_some() {
+            return Err(ProjectError::new(path, ProjectErrorKind::ShellSectionInProject).into());
+        }
 
         // Schema-level: `[group.default]` is reserved for the implicit
         // top-level `[tools]` table. Reject before identifier validation
@@ -963,6 +982,45 @@ cmake = "ocx.sh/cmake:3.28"
         assert_eq!(cached, standalone, "cached must equal the free-function output");
         // Second call returns the same cached value (cheap path).
         assert_eq!(cached, config.declaration_hash_cached());
+    }
+
+    /// C-033: `[shell]` in an `ocx.toml` is refused by its own named arm at
+    /// exit 78, with a message that says where the section belongs.
+    ///
+    /// Asserting the **variant**, not the exit code, is what makes this test
+    /// discriminating: delete the explicit arm and `deny_unknown_fields` still
+    /// refuses the file at the same 78 — but as `TomlParse`, whose message
+    /// reads "unknown field `shell`" and names no remedy.
+    #[test]
+    fn shell_section_in_ocx_toml_is_refused_by_name() {
+        let err = ProjectConfig::from_toml_str(
+            r#"[tools]
+cmake = "ocx.sh/cmake:3.28"
+
+[shell]
+hook = true
+
+[shell.consent]
+paths = ["/anything"]
+"#,
+        )
+        .expect_err("[shell] must not parse in ocx.toml");
+
+        let super::super::Error::Project(pe) = &err;
+        assert!(
+            matches!(pe.kind, ProjectErrorKind::ShellSectionInProject),
+            "expected ShellSectionInProject; got {err:?}"
+        );
+        assert_eq!(
+            crate::cli::ClassifyExitCode::classify(&err),
+            Some(crate::cli::ExitCode::ConfigError),
+            "a [shell] block in a project file exits 78"
+        );
+        let rendered = pe.kind.to_string();
+        assert!(
+            rendered.contains("config.toml"),
+            "the message must name where the section belongs; got {rendered:?}"
+        );
     }
 
     /// `[[trust.policy]]` parses in an `ocx.toml` (the `deny_unknown_fields`

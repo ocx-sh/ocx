@@ -83,14 +83,15 @@ or `$OCX_HOME/ocx.toml` under `--global`.
 | `ocx [--global] run -- cmd` | run a command with the toolchain env |
 | `ocx [--global] env` | **composed env of the in-scope toolchain** |
 
-### `ocx shell` — reduced to one survivor
+### `ocx shell` — carries `{completion, state}`
 
 | Command | Fate |
 |---|---|
 | `ocx shell completion <name>` | **keep** (genuinely shell-scoped, static) |
-| `ocx shell hook` | **delete** — stateful per-prompt `_OCX_APPLIED` diff; redundant with direnv (project) + the login exporter (global). The "BS" byproduct. |
+| `ocx shell hook` | **delete, stays deleted** — the stateful per-prompt `_OCX_APPLIED` diff this row originally named; redundant with direnv (project) + the login exporter (global). The "BS" byproduct. `adr_shell_env_overhaul.md`'s typed, provenance-tagged per-prompt reconciler does **not** resurrect this command — it rides `ocx self activate`'s hidden `--reconcile` arm instead (Decision 3/5). |
 | `ocx shell init` | **delete** — only existed to wire the hook / static render. The OCX installer now owns profile wiring (§4). |
 | `ocx shell env` | **delete** — ambiguous cut. Replaced by `ocx env` (toolchain) and `ocx package env` (per-package). |
+| `ocx shell state` | **add** (`adr_shell_env_overhaul.md` Decision 10, C-050) — read-only, never-eval-able diagnostics for the per-prompt reconciler: decoded ledger, per-scope applied state, fingerprint status, and the enumerated reason a shell is inert. The only new `ocx shell` surface since sign-off. |
 
 ### `ocx direnv …` — untouched
 
@@ -330,6 +331,29 @@ describes the rejected model** — so no adversary can act on stale text:
   installer owning profile modification)
 
 This list is part of the handshake scope, gated in §9.
+
+### 7a-1. Re-amended by `adr_shell_env_overhaul.md` (2026-08-25)
+
+That ADR touches this exact register again, for the same reason: it replaces the project-tier
+`_OCX_APPLIED` diff mechanism (already dead code per §7's Delete list, removed by WP-0) with a typed,
+provenance-tagged per-prompt reconciler carried in `__OCX_ENV_STATE`, and adds one new command,
+`ocx shell state` (§2). **Same discipline, same file list — not a new one:** every file §7a names above
+must again be reconciled (rewrite, or inline-mark `[SUPERSEDED]`) before any review/Codex pass touches
+the new ADR's implementation. Reconciled by **WP-17**, this commit:
+
+- `subsystem-cli.md`, `subsystem-cli-commands.md` — the `ocx shell` table (§2 above and its mirror in
+  `subsystem-cli-commands.md`'s Deleted Commands rows + "shell hook" prose) now shows `state` as a live
+  survivor beside `completion`, `hook`/`init`/`env` tombstones unchanged.
+- `arch-principles.md` — ADR index row (`adr_live_env_reload.md` superseded in full by
+  `adr_shell_env_overhaul.md`) and the Deviation-=-Bug carve-out for `ShellConsent`'s
+  `deny_unknown_fields`.
+- `subsystem-file-structure.md` — `state/projects/<key>/` layout row and the "`state/` not walked by
+  `ocx clean`" exception.
+- `.claude/rules.md` — catalog parity for the above, same commit.
+- `adr_shell_env_overhaul.md` itself — three external citation corrections, one Security-NFR sentence.
+- This file's own §2 table, above.
+
+`subsystem-cli-api.md` (checked: its "shell hook / shell env deleted" line stays true — no shell-env-overhaul-specific claim to correct) and `adr_project_toolchain_config.md` / `adr_cli_high_low_layering.md` / the project-memory install-split note need no further change for this ADR; they were already reconciled against the original handshake and this ADR does not reopen them.
 
 ## 8. Mandated test fixture
 

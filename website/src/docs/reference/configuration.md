@@ -972,6 +972,199 @@ The loader enforces the other half on the consuming side:
   `ocx package push --sbom` has no flag to oppose a config value, so an unpinned
   payload could hand a signing identity to a server of its choosing.
 
+### `[shell]` {#keys-shell}
+
+Governs two independent concerns: whether OCX's per-prompt shell integration is
+active at all ([`hook`](#keys-shell-hook), [`completions`](#keys-shell-completions)),
+and which projects that integration is permitted to touch at all
+([`[shell.consent]`](#keys-shell-consent)). See [Shell Integration][in-depth-shell-integration]
+for the full mechanism — the inert-to-active lifecycle, the per-prompt reconciler, and
+diagnosing a stuck shell with [`ocx shell state`][cmd-shell-state].
+
+**`[shell]` is never read from `ocx.toml`.** A `[shell]` block in the project file is a
+parse error, not a silently-dropped section — a project-writable consent grant would let
+a clone consent to itself. `[shell]` is valid in every `config.toml` tier: system, user,
+[`$OCX_HOME`](#file-locations), an explicit [`--config`][arg-config] / [`OCX_CONFIG`][env-config]
+file, and — for `hook` / `completions` — the [`[managed]`](#keys-managed) tier
+unconditionally. [`[shell.consent]`](#keys-shell-consent) arriving through `[managed]` is
+held to a narrower rule; see there.
+
+```toml
+[shell]
+hook        = true
+completions = true
+
+[shell.consent]
+paths      = ["/workspaces/acme-monorepo"]
+namespaces = "ocx.sh/acme-corp"
+```
+
+#### `hook` {#keys-shell-hook}
+
+**Type**: boolean  
+**Default**: unset — falls through to the auto rung below
+
+Whether OCX installs its per-prompt shell reconciler: the mechanism that recomposes
+`PATH` and the rest of a project's `[env]` on `cd`, after a lock change, or after
+`ocx update`, without needing a fresh login shell. See [Shell Integration][in-depth-shell-integration]
+for what the reconciler does once installed.
+
+Resolved by a four-rung ladder, most specific first:
+
+1. `--hook` / `--no-hook` on [`ocx self activate`][cmd-self-activate] — a one-shot
+   override for this shell start only
+2. [`OCX_NO_HOOK`][env-no-hook] — a truthy value forces the hook off
+3. `[shell] hook`
+4. auto — on for an interactive shell, off otherwise; see [`ocx self activate`][cmd-self-activate]
+   for how a shim states its own interactivity
+
+Nothing in that ladder keys off `CI` directly, and that is deliberate. Rung 4 is the
+shell's own interactivity, and an ordinary CI step is already a non-interactive shell, so
+the hook is already off there with no dedicated rung needed. A `CI`-keyed rung would be
+redundant for that case, and it would additionally turn the hook off inside an
+*interactive* debugging shell started inside a CI container — exactly where it is wanted.
+Set `[shell] hook = false`, or export [`OCX_NO_HOOK`][env-no-hook], to force it off
+regardless of interactivity.
+
+The only way to set this key without hand-editing `config.toml` is
+[`ocx self setup`][cmd-self-setup]'s own `--hook` / `--no-hook` pair, which writes
+`[shell] hook` to `$OCX_HOME/config.toml` and leaves the rest of that file — comments
+included — untouched:
+
+```sh
+ocx self setup --hook       # writes [shell] hook = true
+ocx self setup --no-hook    # writes [shell] hook = false
+```
+
+Merges scalar-wins-if-set across tiers: the nearest tier that sets it wins, in either
+direction, including a [`[managed]`](#keys-managed) tier over your own
+`$OCX_HOME/config.toml`.
+
+#### `completions` {#keys-shell-completions}
+
+**Type**: boolean  
+**Default**: unset — falls through to the same auto rung as [`hook`](#keys-shell-hook)
+
+Whether [`ocx self activate`][cmd-self-activate] injects shell-completion definitions at
+shell start. Resolved by the identical four-rung ladder above, evaluated completely
+independently of `hook`: `--completion` / `--no-completion`, then
+[`OCX_NO_COMPLETIONS`][env-no-completions], then `[shell] completions`, then auto.
+[`OCX_NO_HOOK`][env-no-hook] never reaches this ladder, and `OCX_NO_COMPLETIONS` never
+reaches `hook`'s — each rung 2 reads its own environment key and nothing else.
+
+Set the same way as `hook`: [`ocx self setup`][cmd-self-setup]'s `--completion` /
+`--no-completion` pair, or a hand edit to any `config.toml` tier.
+
+#### `[shell.consent]` {#keys-shell-consent}
+
+The activation whitelist: which projects the per-prompt reconciler — and
+[`ocx self activate`][cmd-self-activate]'s login-shell pass — is permitted to compose an
+environment for at all, independent of whether `hook` / `completions` are on. A project
+outside every grant below stays inert, and none of the tools its `ocx.lock` names reach
+`PATH`, until a consent stamp is written for it by an ordinary [`ocx add`][cmd-add] /
+[`ocx lock`][cmd-lock] / [`ocx pull`][cmd-pull] / [`ocx run`][cmd-run] run against it. See
+[Consent grants][in-depth-shell-consent] for the full three-grant model and
+[What consent does not cover][in-depth-shell-residual] for its honest boundary.
+
+::: tip The global toolchain needs no entry here
+`$OCX_HOME/ocx.toml`, its `[env]`, and every package it locks are **always** consented.
+It is your own file, on your own machine — requiring a `[shell.consent]` entry for it
+would be ceremony with no security value, and no entry here can ever withhold it.
+`[shell.consent]` gates projects only; it has no bearing on the global toolchain tier.
+:::
+
+**This is the one table in the whole configuration tree with strict parsing.** Every
+other section in this reference ignores an unknown key (see
+[Unknown keys and sections](#unknown-keys)) — but a key here that an older ocx does not
+recognize could only ever *narrow* a grant, so silently dropping it would *widen* trust
+instead. An unrecognized key inside `[shell.consent]`, or inside a `namespaces` table
+(below), is refused: the whole `[shell.consent]` table from that file is dropped with a
+warning rather than partially applied, while every other section in the same file —
+`[registries]`, `[mirrors]`, `[[trust.policy]]`, `[shell] hook` / `completions` — still
+applies normally.
+
+`[shell.consent]` is valid in the same tiers as `hook` / `completions`, with one
+narrower rule: arriving through the [`[managed]`](#keys-managed) tier, it is honoured
+only when `source` is digest-pinned (`@sha256:<hex>`) — the same rule OCX already applies
+to a [managed Sigstore trust root](#keys-trust-sigstore-publish), because a remote
+payload naming its own consent grant would let whoever moves the tag consent projects to
+itself. An unpinned managed tag has the table stripped with a warning before merge; any
+`namespaces.exclude` carve-out inside it survives the strip, since a withdrawal can only
+ever narrow.
+
+Every tier's contribution **accumulates** rather than overriding:
+
+| Field | Type | Merge across tiers |
+|-------|------|---------------------|
+| [`paths`](#keys-shell-consent-paths) | array of strings | appends, deduplicated |
+| [`namespaces`](#keys-shell-consent-namespaces) | string, or a table | `include` ∪ `include`, `exclude` ∪ `exclude` |
+
+Both fields only grow — no tier can override the union another tier already
+established, and `exclude` beats `include` wherever both match regardless of which tier
+contributed either half. That is what makes a carve-out expressible: a lower tier can
+withdraw one namespace a higher tier granted, without touching the grant itself.
+
+##### `paths` {#keys-shell-consent-paths}
+
+**Type**: array of strings (paths)  
+**Default**: `[]`  
+**Union with**: [`OCX_CONSENT_PATHS`][env-consent-paths]
+
+Exact, canonicalized project directories that activate unconditionally — [git][git-safe-directory]'s
+`safe.directory` semantics: no prefix, no glob. Entries are compared literally after
+separator and trailing-slash normalization; the entry itself is never canonicalized, so a
+grant never silently follows a symlink an attacker controls on the parent. A case-only or
+separator-only mismatch is inert rather than matched, and surfaces as a near-miss in
+[`ocx shell state`][cmd-shell-state].
+
+```toml
+[shell.consent]
+paths = ["/workspaces/acme-monorepo", "/workspaces/acme-tools"]
+```
+
+This grant is deliberately drift-blind: it writes no consent stamp, so revoking it —
+removing the entry — is immediately effective on the next prompt.
+
+##### `namespaces` {#keys-shell-consent-namespaces}
+
+**Type**: string, or a table with an `include` list (required) and an `exclude` list
+(optional)  
+**Default**: unset  
+**Union with**: [`OCX_CONSENT_NAMESPACES`][env-consent-namespaces]
+
+OCI source namespaces (`<host>[:<port>]/<org>`) that activate a project whose whole lock
+resolved inside them. A trailing `/*` is accepted and equivalent — `ocx.sh/acme-corp` and
+`ocx.sh/acme-corp/*` name the identical set.
+
+```toml
+[shell.consent]
+namespaces = "ocx.sh/acme-corp"
+
+# or, with a carve-out:
+namespaces = { include = ["ocx.sh/acme-corp"], exclude = ["ocx.sh/acme-corp/experimental"] }
+```
+
+The match is against the package store's own record of the coordinate each locked digest
+was fetched under **on this machine** — never against `ocx.lock`'s text, which a clone's
+author writes. See [What consent does not cover][in-depth-shell-residual] for why, and
+for what a namespace grant does not authenticate.
+
+Every pattern is validated at parse, and the first violation is reported with a reason
+naming its class:
+
+| Rejected | Because |
+|----------|---------|
+| the empty string, or `*` alone | grants nothing; there is no catch-all spelling |
+| a bare `<host>` or `<host>/*` | **no whole-registry grant exists** — it would drop the organization half of the bound this table enforces, on any host anyone can register on; name the organization instead |
+| any uppercase byte | no source is ever uppercase, so the pattern could never match |
+| `@` anywhere | a consent pattern names a source, never a digest-pinned reference |
+| `*` anywhere but a single trailing `/*` | matching is segment-bounded, not a substring glob |
+| an empty path segment, or three or more segments | a source is exactly two components, `<host>/<org>` |
+
+The table form's `include` is required — an empty one is a parse error, not a catch-all,
+so `namespaces = { exclude = [...] }` alone does not compile. Write the withdrawal
+alongside the grant it narrows, as in the carve-out example above.
+
 ## Environment Variable Override Table {#env-overrides}
 
 This table shows which OCX environment variables map to config file fields. Variables not listed here have no config equivalent.
@@ -1181,6 +1374,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [sigstore]: https://www.sigstore.dev/
 [cosign]: https://github.com/sigstore/cosign
 [github-actions-docs]: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-pre-written-building-blocks-in-your-workflow
+[git-safe-directory]: https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory
 
 <!-- schemas -->
 [schema-config]: https://ocx.sh/schemas/config/v1.json
@@ -1197,12 +1391,17 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [in-depth-indices-servable]: ../in-depth/indices.md#servable
 [in-depth-lazy-loading]: ../in-depth/lazy-loading.md
 [in-depth-lazy-loading-ladder]: ../in-depth/lazy-loading.md#deferred-tools-ladder
+[in-depth-shell-integration]: ../in-depth/shell-integration.md
+[in-depth-shell-consent]: ../in-depth/shell-integration.md#consent
+[in-depth-shell-residual]: ../in-depth/shell-integration.md#residual
 
 <!-- commands -->
 [arg-config]: ./command-line.md#arg-config
 [arg-offline]: ./command-line.md#arg-offline
 [arg-lazy-mode]: ./command-line.md#arg-lazy-mode
+[cmd-add]: ./command-line.md#add
 [cmd-lock]: ./command-line.md#lock
+[cmd-pull]: ./command-line.md#pull
 [cmd-run]: ./command-line.md#run
 [cmd-env-root]: ./command-line.md#env-root
 [cmd-direnv-export]: ./command-line.md#direnv-export
@@ -1212,6 +1411,8 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [cmd-config-test]: ./command-line.md#config-test
 [cmd-self-setup]: ./command-line.md#self-setup
 [cmd-self-update]: ./command-line.md#self-update
+[cmd-self-activate]: ./command-line.md#self-activate
+[cmd-shell-state]: ./command-line.md#shell-state
 [cmd-config-update]: ./command-line.md#config-update
 [cmd-config-push]: ./command-line.md#config-push
 [cmd-package-verify]: ./command-line.md#package-verify
@@ -1234,6 +1435,10 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-ocx-no-config-refresh]: ./environment.md#ocx-no-config-refresh
 [env-ocx-env]: ./environment.md#ocx-env
 [env-ocx-lazy-mode]: ./environment.md#ocx-lazy-mode
+[env-no-hook]: ./environment.md#ocx-no-hook
+[env-no-completions]: ./environment.md#ocx-no-completions
+[env-consent-paths]: ./environment.md#ocx-consent-paths
+[env-consent-namespaces]: ./environment.md#ocx-consent-namespaces
 [env-ocx-lazy-report]: ./environment.md#ocx-lazy-report
 
 <!-- user guide -->

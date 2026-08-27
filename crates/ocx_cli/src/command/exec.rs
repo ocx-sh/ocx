@@ -136,7 +136,11 @@ impl Exec {
         env_overrides: &[EnvEntry],
         config_view: &OcxConfigView,
     ) -> anyhow::Result<ExitCode> {
-        let mut process_env = if self.clean { env::Env::clean() } else { env::Env::new() };
+        let mut process_env = if self.clean {
+            env::Env::clean()
+        } else {
+            env::Env::inherited()
+        };
         // Composed entries + forwarded ocx config + forwarded overrides, in the
         // one order that is correct — see `Env::apply_child_env`. On this tier
         // the `--env` overrides are the whole forwarded slice: there is no

@@ -19,6 +19,20 @@ const MANAGED_CONFIG_SNAPSHOT_FILE: &str = "snapshot.json";
 /// embedded as an escaped string inside the JSON.
 const MANAGED_CONFIG_PAYLOAD_FILE: &str = "config.toml";
 
+/// Filename of a project's shell-activation consent stamp.
+const CONSENT_STAMP_FILE: &str = "consent.json";
+
+// Why the key canonicalizes the project FILE and then takes its parent, rather
+// than canonicalizing the directory: `resolve_explicit_project_path` follows
+// symlinks by design and returns the UN-canonicalized path, so
+// `OCX_PROJECT=/w/fake/ocx.toml` symlinked to `/attacker/ocx.toml` would key —
+// and grant `paths` consent — under `/w/fake`. Canonicalizing the file makes
+// the identity `/attacker`, which is not granted. The two-call order is also
+// load-bearing on Windows: `tokio::fs::canonicalize` on the config file and
+// `dunce::canonicalize` on the directory do not produce the same string, and
+// the ledger's key is the second form. Reuse `register_project_dir_best_effort`
+// as the one shared helper; never add a second, directory-based derivation.
+
 /// Manages persistent runtime state files under `$OCX_HOME/state/`.
 ///
 /// `StateStore` is the typed home for state files whose existence or mtime IS
@@ -30,6 +44,9 @@ const MANAGED_CONFIG_PAYLOAD_FILE: &str = "config.toml";
 /// {root}/
 ///   update-check/
 ///     {slug}          — zero-byte file; mtime = time of last registry probe
+///   projects/
+///     {key}/
+///       consent.json  — per-project shell-activation consent stamp
 /// ```
 #[derive(Debug, Clone)]
 pub struct StateStore {
@@ -131,6 +148,47 @@ impl StateStore {
         self.managed_config_dir().join("pause.json")
     }
 
+    /// Returns the per-project state directory for `key`.
+    ///
+    /// Path: `{root}/projects/<key>/`
+    ///
+    /// `key` is [`ReferenceManager::name_for_path`](crate::reference_manager::ReferenceManager::name_for_path)
+    /// of the project's canonical directory — the first 16 hex of SHA-256, the
+    /// same key `refs/symlinks/` and the project ledger already use. The
+    /// canonical directory is
+    /// `dunce::canonicalize(canonicalize(<resolved project FILE>).parent())`:
+    /// canonicalize the **file**, take its parent, then `dunce`.
+    ///
+    /// Deletable at any time — nothing here is GC truth. Not to be confused
+    /// with `$OCX_HOME/projects/`, the symlink ledger whose lifetime is tied to
+    /// installs.
+    pub fn project_state_dir(&self, key: &str) -> PathBuf {
+        self.project_state_root().join(key)
+    }
+
+    /// Returns the consent-stamp file for the project keyed by `key`.
+    ///
+    /// Path: `{root}/projects/<key>/consent.json`
+    ///
+    /// Read by [`crate::project::consent::load`], written only by
+    /// [`crate::project::consent::record`], and **replaced, never edited in
+    /// place** — so a future multi-writer surface here uses `lock_scoped` into
+    /// `$OCX_HOME/locks`, never a sidecar.
+    pub fn consent_stamp_file(&self, key: &str) -> PathBuf {
+        self.project_state_dir(key).join(CONSENT_STAMP_FILE)
+    }
+
+    /// Returns the sweep root for `ocx clean`'s consent-stamp pass.
+    ///
+    /// Path: `{root}/projects/`
+    ///
+    /// `ocx clean` removes `state/projects/<key>/` iff the stamp's own
+    /// `project_dir` no longer exists on disk — the one exception to
+    /// `state/` not being walked by `ocx clean`.
+    pub fn project_state_root(&self) -> PathBuf {
+        self.root.join("projects")
+    }
+
     /// Returns the OCI Referrers-API capability-cache file for `registry`.
     ///
     /// Path: `{root}/referrers/{registry_slug}.json` where `{registry_slug}` is
@@ -141,6 +199,15 @@ impl StateStore {
         self.root
             .join("referrers")
             .join(format!("{}.json", registry.to_relaxed_slug()))
+    }
+
+    /// Returns the host-capability record.
+    ///
+    /// Path: `{root}/host/capabilities.json`. Keyed by nothing: the record
+    /// describes the machine ocx is running on, of which there is one. Owned by
+    /// [`crate::oci::host_capabilities::HostCapabilities`].
+    pub fn host_capabilities_file(&self) -> PathBuf {
+        self.root.join("host").join("capabilities.json")
     }
 
     /// Returns the offline-verify trust-root-cache file for `rekor_authority`.
@@ -387,6 +454,86 @@ mod tests {
                 assert_eq!(tail.len(), 2, "expected {{subsystem}}/{{slug}}.json, got {file:?}");
             }
         }
+    }
+
+    // ── project-scoped state (C-022) ─────────────────────────────────────────
+
+    /// C-022 — the sweep root `ocx clean` walks is `{root}/projects/`.
+    #[test]
+    fn project_state_root_is_projects_under_the_state_root() {
+        let store = StateStore::new("/ocx/state");
+        assert_eq!(store.project_state_root(), PathBuf::from("/ocx/state/projects"));
+    }
+
+    /// C-022 — a project's state directory is its key nested under the sweep root.
+    #[test]
+    fn project_state_dir_nests_the_key_under_the_sweep_root() {
+        let store = StateStore::new("/ocx/state");
+        assert_eq!(
+            store.project_state_dir("0123456789abcdef"),
+            PathBuf::from("/ocx/state/projects/0123456789abcdef")
+        );
+        assert_eq!(
+            store.project_state_dir("0123456789abcdef").parent(),
+            Some(store.project_state_root().as_path()),
+            "every project state dir must be a direct child of the sweep root"
+        );
+    }
+
+    /// C-022 — the consent stamp is `consent.json` inside the project's state dir.
+    #[test]
+    fn consent_stamp_file_is_consent_json_in_the_project_state_dir() {
+        let store = StateStore::new("/ocx/state");
+        assert_eq!(
+            store.consent_stamp_file("0123456789abcdef"),
+            PathBuf::from("/ocx/state/projects/0123456789abcdef/consent.json")
+        );
+    }
+
+    /// C-022 / A-30 — the key is derived by canonicalizing the resolved project
+    /// **file**, taking its parent, then `dunce`. A symlinked `ocx.toml` must
+    /// therefore land on the real directory's stamp, not on the symlink's own
+    /// parent.
+    ///
+    /// The second assertion is the discriminator: it shows the parent-first
+    /// order (`.parent()` of the *un*-canonicalized path, which is what
+    /// `resolve_explicit_project_path` returns) produces a different key — so a
+    /// green here cannot be mistaken for a test that cannot tell the two orders
+    /// apart. That is the `OCX_PROJECT=/w/fake/ocx.toml → /attacker/ocx.toml`
+    /// case: parent-first keys the stamp to the victim's granted directory.
+    #[cfg(unix)]
+    #[test]
+    fn consent_stamp_file_follows_a_symlinked_project_file_to_the_real_directory() {
+        fn key_file_first(project_file: &Path) -> String {
+            let canonical_file = std::fs::canonicalize(project_file).unwrap();
+            let dir = dunce::canonicalize(canonical_file.parent().unwrap()).unwrap();
+            crate::reference_manager::ReferenceManager::name_for_path(&dir)
+        }
+        fn key_parent_first(project_file: &Path) -> String {
+            crate::reference_manager::ReferenceManager::name_for_path(project_file.parent().unwrap())
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let real_dir = tmp.path().join("real");
+        let fake_dir = tmp.path().join("fake");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::create_dir_all(&fake_dir).unwrap();
+        let real_file = real_dir.join("ocx.toml");
+        std::fs::write(&real_file, b"").unwrap();
+        let fake_file = fake_dir.join("ocx.toml");
+        std::os::unix::fs::symlink(&real_file, &fake_file).unwrap();
+
+        let store = StateStore::new(tmp.path().join("state"));
+        assert_eq!(
+            store.consent_stamp_file(&key_file_first(&fake_file)),
+            store.consent_stamp_file(&key_file_first(&real_file)),
+            "a symlinked project file must key onto the real directory's stamp"
+        );
+        assert_ne!(
+            key_parent_first(&fake_file),
+            key_file_first(&real_file),
+            "parent-first derivation must diverge, or this test cannot tell the two orders apart"
+        );
     }
 
     // ── is_throttled decision table ──────────────────────────────────────────

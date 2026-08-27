@@ -143,9 +143,11 @@ Three commands set up the toolchain:
 
 [`ocx init`][cmd-init] writes a minimal `ocx.toml`. [`ocx add`][cmd-add] appends a binding, resolves the tag to per-platform digests, and writes `ocx.lock`. [`ocx run`][cmd-run] reads `ocx.lock` and spawns the command with the locked toolchain's environment — no manual `export` or PATH manipulation needed.
 
-To put the toolchain on `PATH` automatically when you `cd` into the project, hand activation to [direnv][direnv]. [`ocx direnv init`][cmd-direnv-init] drops a ready-made `.envrc` — run `direnv allow` once to enable it.
+On bash, zsh, fish, PowerShell, and elvish, the toolchain lands on `PATH` automatically when you `cd` into the project — no extra setup beyond [`ocx self setup`][installation], which already wired the per-prompt hook (elvish's guard is narrower than the others' — details below). The `ocx add` above already wrote this project's [consent stamp][in-depth-shell-integration-consent], so it's ready: `cd` in and the locked tools are on `PATH` at the next prompt, `cd` out and they revert.
 
-The generated `.envrc` runs `eval "$(ocx direnv export)"` and re-evaluates whenever the lock changes (`watch_file ocx.toml ocx.lock`), so the toolchain is on `PATH` inside the project and gone when you leave. See [project activation][project-activation] for the full hook and [`ocx direnv export`][cmd-direnv-export] for the export it emits.
+nushell and the shells with no append-safe prompt-hook point — the strict-POSIX family (`ash`, `dash`, `ksh`) and Windows Batch — still need [direnv][direnv]. [`ocx direnv init`][cmd-direnv-init] drops a ready-made `.envrc` — run `direnv allow` once to enable it. The generated `.envrc` runs `eval "$(ocx direnv export)"` and re-evaluates whenever the lock changes (`watch_file ocx.toml ocx.lock`), so the toolchain is on `PATH` inside the project and gone when you leave.
+
+See [Shell Integration][in-depth-shell-integration] for the full per-shell coverage table and the consent model, and [`ocx direnv export`][cmd-direnv-export] for the export the fallback path emits.
 
 ::: tip Editor integration
 The [OCX VSCode extension][vscode-ext] (also on [Open VSX][openvsx-ext]) brings the project toolchain into your editor, so its terminal and tasks resolve the same locked binaries as [`ocx run`][cmd-run].
@@ -198,8 +200,11 @@ Environment variables and CLI flags always override config values. For full deta
 <!-- user guide sections -->
 [user-guide-project]: ./user-guide.md#project
 [user-guide-global-add]: ./user-guide.md#global-toolchain-add
-[project-activation]: ./in-depth/project.md#activation
 [project-global]: ./in-depth/project.md#global-toolchain
+
+<!-- in-depth -->
+[in-depth-shell-integration]: ./in-depth/shell-integration.md
+[in-depth-shell-integration-consent]: ./in-depth/shell-integration.md#consent
 
 <!-- commands -->
 [cmd-init]: ./reference/command-line.md#init

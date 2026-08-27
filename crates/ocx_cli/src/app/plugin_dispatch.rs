@@ -158,6 +158,20 @@ fn build_plugin_command(
     // Forward the running ocx's resolution-affecting config to the plugin so
     // any child `ocx` invocations inside the plugin see the same policy flags
     // (offline, remote, config, index, binary pin).
+    //
+    // `Env::new()` — full ambient — and NOT `Env::inherited()`, which is what
+    // `run`, `exec`, `package test` and `patch test` moved to. Ruled
+    // correct-as-is, so do not "align" it: those four take an explicit env
+    // selection from the user, and honouring what the user declared is the
+    // whole of the principle behind `inherited()`. A plugin invocation
+    // declares nothing — it is an extension of this ocx process, launched from
+    // the user's own shell, and narrowing its environment would break plugins
+    // for a rule that has no declaration to enforce.
+    //
+    // The decision rests on that principle and not on any PATH mechanic:
+    // `apply_ocx_config` (`env.rs`) pins `OCX_BINARY_PIN` to an absolute path,
+    // so a plugin's child `ocx` resolves without needing the reconciled PATH
+    // either way.
     let mut env = Env::new();
     env.apply_ocx_config(&config_view);
 

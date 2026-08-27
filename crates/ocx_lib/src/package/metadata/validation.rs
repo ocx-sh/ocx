@@ -27,6 +27,11 @@
 //!   and that each `${self.env.KEY}` names exactly one var declared strictly
 //!   earlier. An unsupported field never reaches the reference check: the scan
 //!   itself refuses `${deps.NAME.version}`.
+//! - `validate_env_reserved_keys` — refuses an env key in the `OCX_*` /
+//!   `__OCX_*` namespace ocx reserves for its own configuration. Publish-time
+//!   only, deliberately: a package that already carries one must keep resolving
+//!   (the resolver skips the key with a warning), so the gate narrows what can
+//!   be minted without narrowing what can be read.
 //! - `validate_entrypoint_args` — scans every `args` element in every
 //!   entrypoint and refuses the token classes `Usage::EntryPointArgs` does not
 //!   permit.
@@ -105,12 +110,17 @@ impl TryFrom<Metadata> for ValidMetadata {
 ///
 /// # Errors
 ///
-/// Everything [`ValidMetadata::try_from`] returns, plus an unrecognised
-/// `${…}`, a `${deps.*}` token naming an undeclared or ambiguous dependency or
-/// an unsupported field, and a token class an entrypoint `args` element or a
+/// Everything [`ValidMetadata::try_from`] returns, plus an env key in the
+/// reserved `OCX_*` / `__OCX_*` namespace, an unrecognised `${…}`, a
+/// `${deps.*}` token naming an undeclared or ambiguous dependency or an
+/// unsupported field, and a token class an entrypoint `args` element or a
 /// integrations payload may not carry.
 pub fn validate_for_publish(metadata: Metadata) -> Result<ValidMetadata, crate::Error> {
     let valid = ValidMetadata::try_from(metadata)?;
+    // Before the token scan: a reserved key is refused whatever its value says,
+    // so reporting a template fault in the value of a variable that may not
+    // exist at all would send the publisher to fix the wrong line.
+    validate_env_reserved_keys(&valid)?;
     validate_env_tokens(&valid)?;
     validate_entrypoint_args(&valid)?;
     // Last for the same reason `validate_integrations` is last in the
@@ -264,6 +274,44 @@ pub(super) fn validate_env_list_entries(metadata: &Metadata) -> Result<(), crate
                 value: declared.value.clone(),
             }
             .into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Rejects the first env var whose key falls in the `OCX_*` / `__OCX_*`
+/// namespace ocx reserves for its own configuration.
+///
+/// Publish-time only. `ocx package create` and `ocx package push` are where a
+/// publisher is present to rename the variable; every read path keeps accepting
+/// such a key and the resolver drops it with a warning, because already-published
+/// artifacts must keep resolving.
+///
+/// The refusal is a security control, not hygiene. Package metadata composes
+/// into the user's shell and is inherited by every child process, so a package
+/// declaring `OCX_CONSENT_NAMESPACES` would rewrite the whitelist that admitted
+/// it, and `OCX_NO_HOOK` would switch shell integration off for everyone
+/// downstream.
+///
+/// # Errors
+///
+/// [`crate::package::error::Error::ReservedEnvKey`] naming the first offending
+/// key in declaration order.
+pub(super) fn validate_env_reserved_keys(metadata: &Metadata) -> Result<(), crate::Error> {
+    use super::super::error::Error;
+
+    let Some(env) = metadata.env() else {
+        return Ok(());
+    };
+
+    for var in env {
+        // Through `crate::env::is_reserved_ocx_key`, the same predicate that
+        // gates project `[env]`, `ocx run --env`, the forwarded `OCX_ENV`
+        // payload and the resolver: a second spelling of "reserved" here would
+        // let the write path and the read path disagree about which keys exist.
+        if crate::env::is_reserved_ocx_key(&var.key) {
+            return Err(Error::ReservedEnvKey { key: var.key.clone() }.into());
         }
     }
 
@@ -875,6 +923,90 @@ mod tests {
     fn known_env_modifier_types_pass_the_gate() {
         let meta = make_metadata(&dep_json("cmake", None), &constant_env("X", "${installPath}/bin"));
         assert!(ValidMetadata::try_from(meta).is_ok());
+    }
+
+    // ── C-037 / S-038(a): the reserved `OCX_*` / `__OCX_*` namespace ──────────
+
+    /// `ocx package create` refuses metadata declaring an env key ocx reserves
+    /// for its own configuration. Publishing one is how a package inside a
+    /// single consented namespace would rewrite the consent whitelist itself.
+    #[test]
+    fn a_reserved_env_key_is_refused_at_publish_naming_the_key_and_the_namespace() {
+        for reserved in [
+            "OCX_CONSENT_NAMESPACES",
+            "__OCX_ENV_STATE",
+            "OCX_NO_HOOK",
+            "ocx_offline",
+        ] {
+            let meta = make_metadata(&dep_json("cmake", None), &constant_env(reserved, "x"));
+            let message = validate_for_publish(meta)
+                .expect_err("a reserved env key must be refused at publish time")
+                .to_string();
+            assert!(message.contains(reserved), "must name the key: {message}");
+            assert!(
+                message.contains("OCX_*") && message.contains("__OCX_*"),
+                "must name the reserved namespace so the publisher knows the rule: {message}"
+            );
+        }
+    }
+
+    /// C-051: the refusal is `DataError` (65) — the existing code for invalid
+    /// package input. No new exit-code variant.
+    #[test]
+    fn a_reserved_env_key_exits_with_data_error() {
+        use crate::cli::{ClassifyExitCode, ExitCode};
+
+        let meta = make_metadata(
+            &dep_json("cmake", None),
+            &constant_env("OCX_DEFAULT_REGISTRY", "evil.example"),
+        );
+        let error = validate_for_publish(meta).expect_err("a reserved env key must fail");
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+    }
+
+    /// S-038(b) — the read path stays permanently compatible. A package
+    /// published before this gate existed still parses; only `create` / `push`
+    /// refuse it, and the resolver skips the key with a warning (C-036).
+    ///
+    /// This is the repo's one hard backward-compatibility exception, so the
+    /// assertion is on `ValidMetadata::try_from` — the structural gate every
+    /// ingress path runs, including `ocx run` on an installed package.
+    #[test]
+    fn a_published_package_carrying_a_reserved_env_key_still_reads() {
+        let meta = make_metadata(&dep_json("cmake", None), &constant_env("OCX_CONSENT_NAMESPACES", "*/*"));
+        ValidMetadata::try_from(meta).expect("the read path must stay compatible with published artifacts");
+    }
+
+    /// The gate is prefix-anchored, matching `env::is_reserved_ocx_key`: a key
+    /// that merely mentions `OCX` is an ordinary package variable.
+    #[test]
+    fn a_key_that_only_mentions_ocx_still_publishes() {
+        for ordinary in ["MY_OCX_HOME", "OCX", "OCXFLAGS"] {
+            let meta = make_metadata(&dep_json("cmake", None), &constant_env(ordinary, "x"));
+            validate_for_publish(meta).unwrap_or_else(|e| panic!("'{ordinary}' is not reserved: {e}"));
+        }
+    }
+
+    /// Declaration order decides which key is named, so the message is
+    /// reproducible — the same rule the sibling validators follow.
+    #[test]
+    fn the_first_reserved_env_key_in_declaration_order_is_named() {
+        let env = concat!(
+            r#"{"key":"OCX_FIRST","type":"constant","value":"a"},"#,
+            r#"{"key":"OCX_SECOND","type":"constant","value":"b"}"#
+        );
+        let meta = make_metadata(&dep_json("cmake", None), env);
+        let message = validate_for_publish(meta)
+            .expect_err("both keys are reserved")
+            .to_string();
+        assert!(
+            message.contains("OCX_FIRST"),
+            "the first offender must be named: {message}"
+        );
+        assert!(
+            !message.contains("OCX_SECOND"),
+            "only one offender is reported: {message}"
+        );
     }
 
     // ── W-4: the `list` wire contract ─────────────────────────────────────────

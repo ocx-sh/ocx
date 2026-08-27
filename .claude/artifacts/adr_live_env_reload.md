@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- **Status**: Proposed
+- **Status**: Superseded by `adr_shell_env_overhaul.md`
 - **Date**: 2026-08-02
 - **Deciders**: Owner + Principal Architect session
 - **GitHub Issues**: [#170](https://github.com/ocx-sh/ocx/issues/170) (native shell hook), [#26](https://github.com/ocx-sh/ocx/issues/26) (idempotent PATH — **already implemented**: `utility::path::move_to_front` + per-shell `Shell::export_path`, `adr_idempotent_path_move_to_front.md`; issue stale-open, recommend closing), [#265](https://github.com/ocx-sh/ocx/issues/265) (unset directive — enabled, deferred), [#148](https://github.com/ocx-sh/ocx/issues/148) (deferred "live in-session env reload"), [#152](https://github.com/ocx-sh/ocx/issues/152) (shell-activation test coverage)
@@ -10,7 +10,6 @@
 - **Domain Tags**: cli, setup, shell, package-manager, security
 - **Supersedes**: the `OCX_PATH_BACKUP` conda-style stash/restore sketch in `adr_self_setup.md` "Future Work" (this file is the sibling ADR reserved there as `adr_live_env_reload.md`)
 - **Amends**: `handshake_toolchain_cli.md` **§2** (`ocx shell hook` deletion row, line ~86) and **§7/§7a** (reconciliation register); `adr_idempotent_path_move_to_front.md` capture invariant (re-scoped, see Decision 6)
-- **Sibling**: `adr_project_toolchain_links.md` (phase 1 — this ADR consumes its stable-addressing decision)
 
 ## Context
 

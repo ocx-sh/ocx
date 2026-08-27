@@ -201,6 +201,7 @@ mod tests {
             .build_api(ColorModeConfig {
                 stdout: false,
                 stderr: false,
+                relayed: false,
             })
             .is_json()
     }

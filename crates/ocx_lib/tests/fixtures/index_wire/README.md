@@ -1,6 +1,6 @@
 # Vendored index conformance fixtures
 
-Golden vectors **vendored verbatim** from `ocx-sh/index` (`bot/tests/golden/`) —
+Golden vectors **vendored verbatim** from `ocx-sh/indexbot` (`tests/golden/`) —
 never hand-edit. They are this crate's cross-language conformance corpus: the
 same bytes drive the Python bot's tests and this crate's, so two implementations
 of one rule cannot drift silently. A fixture generated from ocx's own code would
@@ -28,7 +28,7 @@ certify whatever ocx does, which is the failure mode the corpus exists to preven
   `oci::Algorithm::ALL` = {sha256, sha384, sha512}, deliberately wider than
   D7:319's sha256-only text — reservation and addressability are different
   questions, and only reservation widens. `why` is documentation, never asserted.
-- `cpython/*` — **not** vendored from `ocx-sh/index`: generated locally from
+- `cpython/*` — **not** vendored from `ocx-sh/indexbot`: generated locally from
   CPython's `json` module, which is itself the §14 byte authority the bot repo
   implements. They exist because the vendored corpus is a sample of real index
   documents, so it certifies only the bytes the index happens to ship today — a
@@ -56,14 +56,14 @@ the digest before it writes, and pinned by that module's unit tests.
 
 Upstream's `dispatch/README.md` records where every byte in that directory came
 from: which registry, which index digest, and the one field deliberately altered.
-It is not vendored — read it at the pinned commit in `ocx-sh/index`.
+It is not vendored — read it at the pinned commit in `ocx-sh/indexbot`.
 
 ## Provenance & re-sync
 
-- `SOURCE_COMMIT` pins the `ocx-sh/index` commit these bytes came from.
+- `SOURCE_COMMIT` pins the `ocx-sh/indexbot` commit these bytes came from.
 - `test/scripts/sync_index_conformance.sh` re-vendors: a bare re-run verifies
   against the pin, `--ref <ref>` vendors and re-pins, `--check` compares the
-  vendored tree against `ocx-sh/index@main` without writing to it. It prints the
+  vendored tree against `ocx-sh/indexbot@main` without writing to it. It prints the
   resulting working-tree changes and **never commits** — review and commit
   yourself.
 - Deliberately **not** wired into `task verify`: a live check at test time would

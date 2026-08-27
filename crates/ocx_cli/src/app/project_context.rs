@@ -33,10 +33,9 @@
 
 use std::path::{Path, PathBuf};
 
-use ocx_lib::package::metadata::env::entry::Entry;
 use ocx_lib::project::{
-    DEFAULT_GROUP, ManifestSnapshot, MutationGuard, Origin, ProjectConfig, ProjectLock, SelectedTool,
-    acquire_project_lock_for_file, lock::lock_path_for,
+    ManifestSnapshot, MutationGuard, Origin, ProjectConfig, ProjectLock, SelectedTool, acquire_project_lock_for_file,
+    lock::lock_path_for,
 };
 
 /// Result of resolving the project tier: owned paths, parsed config, parsed lock.
@@ -64,8 +63,7 @@ pub struct ProjectContext {
 ///
 /// Variant → exit code mapping:
 /// - `NoProject`   → 64 (`UsageError`)
-/// - `LockMissing` → 78 (`ConfigError`)
-/// - `StaleLock`   → 65 (`DataError`)
+/// - `Lock`        → 78 / 65, via [`ocx_lib::project::LockCurrency`]
 /// - `Project`     → propagated via existing `ClassifyExitCode` for `ocx_lib::project::Error`
 /// - `Config`      → propagated via existing `ClassifyExitCode` for `ocx_lib::config::error::Error`
 #[derive(Debug, thiserror::Error)]
@@ -76,17 +74,13 @@ pub enum ProjectContextError {
     #[error("no ocx.toml found in {cwd} or any parent; run `ocx init` to create one")]
     NoProject { cwd: PathBuf },
 
-    /// `ocx.toml` was found but the sibling `ocx.lock` is absent. The user
-    /// must run `ocx lock` to create it before project-tier commands that
-    /// require a lock can proceed.
-    #[error("ocx.lock not found at {path}; run `ocx lock` to create it")]
-    LockMissing { path: PathBuf },
-
-    /// `ocx.lock` exists but its stored `declaration_hash` no longer matches
-    /// the hash of the current `ocx.toml`. The lock is stale and must be
-    /// regenerated with `ocx lock`.
-    #[error("ocx.lock is stale (ocx.toml changed since last `ocx lock`); run `ocx lock`")]
-    StaleLock { lock_path: PathBuf },
+    /// `ocx.toml` was found but its `ocx.lock` is absent, or exists and no
+    /// longer describes it. Both states are the library's
+    /// [`ocx_lib::project::LockCurrency`], wrapped rather than restated:
+    /// `activation::SessionError` reports the same two states from a prompt,
+    /// and the sentence a user reads must not depend on which one they hit.
+    #[error("{0}")]
+    Lock(#[from] ocx_lib::project::LockCurrency),
 
     /// A project-tier library error (parse failure, identifier error, etc.)
     /// propagated from `ocx_lib::project`. Display delegates to the inner
@@ -112,10 +106,9 @@ impl ocx_lib::cli::ClassifyExitCode for ProjectContextError {
             // Misuse: the user pointed a project-tier command at a tree with
             // no `ocx.toml`.
             Self::NoProject { .. } => Some(ExitCode::UsageError),
-            // Project exists but is not locked — a configuration gap.
-            Self::LockMissing { .. } => Some(ExitCode::ConfigError),
-            // Lock exists but disagrees with `ocx.toml` — stale on-disk data.
-            Self::StaleLock { .. } => Some(ExitCode::DataError),
+            // 78 for an absent lock, 65 for a stale one — the mapping lives
+            // with the wording it belongs to.
+            Self::Lock(currency) => currency.classify(),
             // Defer to the wrapped library error's own classification via the
             // `source()` chain (both variants carry `#[source]` through
             // `#[from]`).
@@ -238,25 +231,40 @@ pub async fn ensure_global_project_initialized(context: &crate::app::Context) ->
 /// The lock path is returned whether or not the file exists — the caller
 /// decides what absence means.
 ///
+/// `walk_from` replaces the process CWD as the directory the walk starts at,
+/// for `ocx shell allow` / `ocx shell revoke`, whose positional `PATH` means
+/// *"the project governing this directory"*. It substitutes for the CWD and
+/// nothing more: the rest of the precedence chain
+/// (`--global` ▸ `--project` ▸ `OCX_PROJECT` ▸ walk) is untouched, so a
+/// selector still outranks it exactly as it outranks the real CWD. Reusing the
+/// walk is deliberate — a consent gesture that resolved a project by a rule of
+/// its own would consent to a different project than the prompt activates.
+///
 /// # Errors
 ///
 /// [`ProjectContextError::NoProject`] when no `ocx.toml` is reachable through
 /// the precedence chain, or [`ProjectContextError::Config`] for a resolution
 /// I/O failure.
-pub async fn resolve_project_paths(context: &crate::app::Context) -> Result<(PathBuf, PathBuf), ProjectContextError> {
+pub async fn resolve_project_paths(
+    context: &crate::app::Context,
+    walk_from: Option<&Path>,
+) -> Result<(PathBuf, PathBuf), ProjectContextError> {
     use ocx_lib::env;
     use ocx_lib::project::error::{ProjectError, ProjectErrorKind};
 
-    let cwd = env::current_dir().map_err(|e| {
-        ProjectContextError::Project(ocx_lib::project::Error::Project(ProjectError::new(
-            std::path::PathBuf::new(),
-            ProjectErrorKind::Io(e),
-        )))
-    })?;
+    let start = match walk_from {
+        Some(path) => path.to_path_buf(),
+        None => env::current_dir().map_err(|e| {
+            ProjectContextError::Project(ocx_lib::project::Error::Project(ProjectError::new(
+                std::path::PathBuf::new(),
+                ProjectErrorKind::Io(e),
+            )))
+        })?,
+    };
     let home = context.file_structure().root().to_path_buf();
-    let resolved = ProjectConfig::resolve(Some(&cwd), context.project_path(), Some(&home), context.global()).await?;
+    let resolved = ProjectConfig::resolve(Some(&start), context.project_path(), Some(&home), context.global()).await?;
 
-    resolved.ok_or(ProjectContextError::NoProject { cwd })
+    resolved.ok_or(ProjectContextError::NoProject { cwd: start })
 }
 
 pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<ProjectContext, ProjectContextError> {
@@ -291,7 +299,7 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
     let lock = match ProjectLock::from_path(&lock_path).await? {
         Some(l) => l,
         None => {
-            return Err(ProjectContextError::LockMissing { path: lock_path });
+            return Err(ocx_lib::project::LockCurrency::Missing { path: lock_path }.into());
         }
     };
 
@@ -311,8 +319,8 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
     // paid once per loaded `ProjectConfig`. Hot-path callers (`ocx run`,
     // `ocx pull`) hit this gate on every invocation and previously
     // recomputed the hash from scratch on each call.
-    if lock.metadata.declaration_hash != config.declaration_hash_cached() {
-        return Err(ProjectContextError::StaleLock { lock_path });
+    if ocx_lib::project::lock::is_stale(&lock, &config) {
+        return Err(ocx_lib::project::LockCurrency::Stale { lock_path }.into());
     }
 
     Ok(ProjectContext {
@@ -321,6 +329,68 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
         config,
         lock,
     })
+}
+
+/// Load the project exactly as [`load_project_with_lock`] does, then record
+/// shell-activation consent for it (C-024).
+///
+/// The opt-in half of the write seam. `ocx run` and `ocx pull` call this;
+/// `ocx inspect`, `ocx patch freeze`, `ocx env` and `ocx lock --check` call
+/// the plain loader and stamp nothing.
+///
+/// # Errors
+///
+/// Exactly [`load_project_with_lock`]'s. Recording is best-effort and never
+/// converts a working command into a failing one.
+pub async fn load_project_with_lock_consenting(
+    context: &crate::app::Context,
+) -> Result<ProjectContext, ProjectContextError> {
+    let project = load_project_with_lock(context).await?;
+    record_activation_consent(&project.config_path, &project.lock).await;
+    Ok(project)
+}
+
+/// Record shell-activation consent for the project at `config_path` over the
+/// source set `lock` resolves from (C-024, C-026, A-29).
+///
+/// **The write seam is a closed allowlist of six commands** — `add`, `remove`,
+/// `lock`, `update`, `pull`, `run` — and it is **per-caller opt-in, never a
+/// hook in a shared loader**. `load_project_with_lock` has six call sites and
+/// only two are members: `inspect`, `patch freeze`, `ocx env` and
+/// `ocx lock --check` reach it too, so stamping inside it would auto-grant
+/// consent on read-only commands, silently widening a security control past
+/// its stated set (A-29). `load_project_for_mutate`'s four call sites are all
+/// members, but the four mutators call this **after** `commit`, so the stamp
+/// records the post-mutation source set rather than the one the mutation
+/// replaced.
+///
+/// Nothing on the *activation* path calls this: a `paths` or `namespaces`
+/// grant activates directly and writes no stamp (A-26).
+///
+/// Best-effort, like the project ledger's `register_project_dir_best_effort`
+/// beside it: a failure to stamp is logged at WARN and swallowed, because the
+/// worst it costs is one inert prompt until the next explicit command — the
+/// fail-safe direction — while aborting `ocx add` over it is not.
+pub async fn record_activation_consent(config_path: &Path, lock: &ocx_lib::project::ProjectLock) {
+    let config_path = config_path.to_path_buf();
+    let sources = ocx_lib::project::consent::lock_sources(lock);
+
+    // Two filesystem resolutions plus an atomic write — all blocking, so the
+    // whole seam runs on a blocking thread rather than stalling the runtime.
+    let joined = tokio::task::spawn_blocking(move || {
+        let project_dir = ocx_lib::project::consent::canonical_project_dir(&config_path)
+            .map_err(|e| format!("canonicalize of config path '{}' failed: {e}", config_path.display()))?;
+        ocx_lib::project::consent::record(&project_dir, &sources).map_err(|e| e.to_string())
+    })
+    .await;
+
+    let outcome = match joined {
+        Ok(outcome) => outcome,
+        Err(e) => Err(format!("the consent-stamp task panicked or was cancelled: {e}")),
+    };
+    if let Err(reason) = outcome {
+        ocx_lib::log::warn!("Shell-activation consent was not recorded (non-fatal): {reason}");
+    }
 }
 
 /// Materialize all bindings from `lock` into the object store via
@@ -515,45 +585,6 @@ pub(crate) fn filter_by_names(selected: Vec<SelectedTool>, names: &[String]) -> 
     Ok(out)
 }
 
-/// Materialize the project's declared `[env]` and the selected groups'
-/// `[group.<name>.env]` as resolved [`Entry`] values, in application order.
-///
-/// This is stages 4 and 5 of the composition order — appended to the entry
-/// vector after the package-composed env and the patch overlay, so a constant
-/// declared here replaces a package-declared one and a path entry lands ahead of
-/// package paths. Stage 6 (`ocx run --env`) is the caller's to append after this.
-///
-/// `groups` is the already-expanded selection list (post `all` expansion, with
-/// the empty case promoted to the default group), in `-g` order. A repeated name
-/// keeps only its **last** occurrence so `-g ci -g docs -g ci` really does let
-/// `ci` win — which is what "later group wins" means. [`DEFAULT_GROUP`] is
-/// skipped: the default group's env is the top-level `[env]` already emitted as
-/// stage 4, and there is no `[group.default]` table to read.
-///
-/// Relative `type = "path"` values resolve against the directory holding
-/// `config_path`, never the current directory, so `ocx run` from a subdirectory
-/// composes the same `PATH` as from the project root.
-pub(crate) fn project_env_entries(config: &ProjectConfig, config_path: &Path, groups: &[String]) -> Vec<Entry> {
-    // A resolved `ocx.toml` path always has a parent; `.` keeps a hand-built
-    // relative path from panicking rather than inventing a fallback root.
-    let project_root = config_path.parent().unwrap_or_else(|| Path::new("."));
-
-    let mut entries = config.env.to_entries(project_root);
-
-    for (index, name) in groups.iter().enumerate() {
-        // Later-wins dedup: skip every occurrence but the last.
-        if name == DEFAULT_GROUP || groups[index + 1..].contains(name) {
-            continue;
-        }
-        let Some(group) = config.groups.get(name) else {
-            continue;
-        };
-        entries.extend(group.env.to_entries(project_root));
-    }
-
-    entries
-}
-
 /// Mutation-side counterpart to [`load_project_with_lock`].
 ///
 /// Acquires the project flock, loads the current [`ProjectConfig`]
@@ -680,6 +711,166 @@ mod tests {
     use ocx_lib::project::ToolSource;
 
     use super::*;
+
+    /// Finding 11 — the two lock states are one contract, and this enum must
+    /// *delegate* to it rather than carry a second copy of the mapping.
+    ///
+    /// `ProjectContextError` and `activation::SessionError` used to spell the
+    /// same two `#[error]` strings and the same 78/65 twice over. They now both
+    /// wrap [`ocx_lib::project::LockCurrency`], so one mutation to that type's
+    /// `classify` must red this **and** `app.rs`'s
+    /// `c343_the_session_refusals_keep_their_exit_codes_through_anyhow` — which
+    /// is what proves the two enums share one mapping rather than agreeing by
+    /// coincidence.
+    ///
+    /// Red state: swap the two arms in `LockCurrency::classify`.
+    #[test]
+    fn f011_the_lock_states_classify_through_the_shared_currency_type() {
+        use ocx_lib::cli::{ClassifyExitCode as _, ExitCode};
+        use ocx_lib::project::LockCurrency;
+
+        let missing = ProjectContextError::from(LockCurrency::Missing {
+            path: PathBuf::from("/work/proj/ocx.lock"),
+        });
+        assert_eq!(
+            missing.classify(),
+            Some(ExitCode::ConfigError),
+            "an absent lock is a configuration gap (78)"
+        );
+
+        let stale = ProjectContextError::from(LockCurrency::Stale {
+            lock_path: PathBuf::from("/work/proj/ocx.lock"),
+        });
+        assert_eq!(
+            stale.classify(),
+            Some(ExitCode::DataError),
+            "a stale lock is stale on-disk data (65)"
+        );
+
+        // The wording is the other half of the contract: a user who meets this
+        // from `ocx pull` and from a prompt must read one sentence, not two
+        // that happen to match today.
+        assert_eq!(
+            missing.to_string(),
+            ocx_lib::activation::SessionError::from(LockCurrency::Missing {
+                path: PathBuf::from("/work/proj/ocx.lock"),
+            })
+            .to_string(),
+        );
+    }
+
+    // ── A-29 — the write seam is a closed allowlist of six commands ─────────
+
+    /// The seam call every consent writer routes through. A caller that stamps
+    /// names one of these two; a caller that does not, names neither.
+    const SEAM_CALLS: [&str; 2] = ["record_activation_consent(", "load_project_with_lock_consenting("];
+
+    /// Strip `//`-prefixed lines so a guard never matches the comments that
+    /// document the very shape it polices.
+    fn code_only(source: &str) -> String {
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Whether `source` calls the consent seam at all.
+    fn stamps(source: &str) -> bool {
+        let code = code_only(source);
+        SEAM_CALLS.iter().any(|call| code.contains(call))
+    }
+
+    /// The body of the top-level `fn` named `name`, from its signature to the
+    /// first line that is a bare `}` at column zero.
+    fn function_body(source: &str, name: &str) -> String {
+        let needle = format!("fn {name}(");
+        let start = source
+            .find(&needle)
+            .unwrap_or_else(|| panic!("`fn {name}` must exist in project_context.rs"));
+        let rest = &source[start..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("`fn {name}` must end with a `}}` at column zero"));
+        rest[..end].to_string()
+    }
+
+    /// A-29/C-024: exactly the six explicit project-scoped commands stamp, and
+    /// no other command file does.
+    ///
+    /// Both halves are asserted. The positive half is what keeps this from
+    /// passing vacuously if the seam is ever renamed out from under
+    /// [`SEAM_CALLS`]; the negative half is the security contract — a stamp
+    /// written from `ocx inspect` or `ocx env` would consent to a project the
+    /// user only asked to look at.
+    #[test]
+    fn a029_exactly_six_commands_write_a_consent_stamp() {
+        let members: [(&str, &str); 6] = [
+            ("add", include_str!("../command/add.rs")),
+            ("remove", include_str!("../command/remove.rs")),
+            ("lock", include_str!("../command/lock.rs")),
+            ("update", include_str!("../command/update.rs")),
+            ("pull", include_str!("../command/pull.rs")),
+            ("run", include_str!("../command/run.rs")),
+        ];
+        // The commands that reach a project loader but must never consent —
+        // `inspect`, `patch freeze` and `ocx env` share `load_project_with_lock`
+        // with `run`/`pull`; `status`, `direnv export` and `shell state` are the
+        // read-only surfaces A-29 names explicitly.
+        let non_members: [(&str, &str); 6] = [
+            ("inspect", include_str!("../command/inspect.rs")),
+            ("patch freeze", include_str!("../command/patch_freeze.rs")),
+            ("env", include_str!("../command/toolchain_env.rs")),
+            ("status", include_str!("../command/status.rs")),
+            ("direnv export", include_str!("../command/direnv_export.rs")),
+            ("shell state", include_str!("../command/shell_state.rs")),
+        ];
+
+        for (name, source) in members {
+            assert!(
+                stamps(source),
+                "`ocx {name}` is a consent writer and must call the seam"
+            );
+        }
+        for (name, source) in non_members {
+            assert!(
+                !stamps(source),
+                "`ocx {name}` must not write a consent stamp; it calls the seam"
+            );
+        }
+    }
+
+    /// A-29/C-024, the structural half the file-set guard cannot see: the
+    /// **shared** loader stamps nothing.
+    ///
+    /// `lock --check` calls `load_project_with_lock` from inside `lock.rs`,
+    /// which the file-set guard above counts as a member. Only this assertion
+    /// catches a stamp moved into the shared loader, where it would fire for
+    /// `lock --check`, `inspect`, `patch freeze` and `ocx env` alike.
+    #[test]
+    fn a029_the_shared_loaders_never_stamp() {
+        let source = include_str!("project_context.rs");
+
+        for name in ["load_project_with_lock", "load_project_for_mutate"] {
+            let body = code_only(&function_body(source, name));
+            assert!(
+                body.contains("ProjectConfig::resolve"),
+                "`fn {name}`'s body did not extract — the guard is watching nothing"
+            );
+            for call in SEAM_CALLS {
+                assert!(
+                    !body.contains(call),
+                    "`fn {name}` is shared with non-consenting callers and must not call `{call}`"
+                );
+            }
+        }
+
+        let opt_in = code_only(&function_body(source, "load_project_with_lock_consenting"));
+        assert!(
+            opt_in.contains("record_activation_consent("),
+            "the opt-in loader must be the one that stamps, or the guard above is vacuous"
+        );
+    }
 
     // ── helpers ──────────────────────────────────────────────────────────────
 

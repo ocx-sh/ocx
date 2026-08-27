@@ -11,12 +11,55 @@
 //! Pure composition — no I/O. Lock loading and staleness checks are done by
 //! the CLI layer; this module accepts the loaded data as input.
 
+use std::path::Path;
+
 use crate::oci::identifier::error::IdentifierErrorKind;
 use crate::oci::{Identifier, Platform, Selection};
+use crate::package::metadata::env::entry::Entry;
+use crate::project::DEFAULT_GROUP;
 use crate::project::config::ProjectConfig;
 use crate::project::lock::{LockedTool, ProjectLock, locked_tool_content_equal};
 
 use super::error::{ProjectError, ProjectErrorKind};
+
+/// Materialize the project's declared `[env]` and the selected groups'
+/// `[group.<name>.env]` as resolved [`Entry`] values, in application order.
+///
+/// This is stages 4 and 5 of the composition order — appended to the entry
+/// vector after the package-composed env and the patch overlay, so a constant
+/// declared here replaces a package-declared one and a path entry lands ahead of
+/// package paths. Stage 6 (`ocx run --env`) is the caller's to append after this.
+///
+/// `groups` is the already-expanded selection list (post `all` expansion, with
+/// the empty case promoted to the default group), in `-g` order. A repeated name
+/// keeps only its **last** occurrence so `-g ci -g docs -g ci` really does let
+/// `ci` win — which is what "later group wins" means. [`DEFAULT_GROUP`] is
+/// skipped: the default group's env is the top-level `[env]` already emitted as
+/// stage 4, and there is no `[group.default]` table to read.
+///
+/// Relative `type = "path"` values resolve against the directory holding
+/// `config_path`, never the current directory, so `ocx run` from a subdirectory
+/// composes the same `PATH` as from the project root.
+pub fn project_env_entries(config: &ProjectConfig, config_path: &Path, groups: &[String]) -> Vec<Entry> {
+    // A resolved `ocx.toml` path always has a parent; `.` keeps a hand-built
+    // relative path from panicking rather than inventing a fallback root.
+    let project_root = config_path.parent().unwrap_or_else(|| Path::new("."));
+
+    let mut entries = config.env.to_entries(project_root);
+
+    for (index, name) in groups.iter().enumerate() {
+        // Later-wins dedup: skip every occurrence but the last.
+        if name == DEFAULT_GROUP || groups[index + 1..].contains(name) {
+            continue;
+        }
+        let Some(group) = config.groups.get(name) else {
+            continue;
+        };
+        entries.extend(group.env.to_entries(project_root));
+    }
+
+    entries
+}
 
 /// Provenance of a resolved tool entry — drives error messages and logging.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -154,3 +154,34 @@ def test_install_without_select_preserves_current(
         / "current"
     )
     assert current.resolve() == content_v1.resolve()
+
+
+def test_install_records_the_pulling_origin(
+    ocx: OcxRunner, published_package: PackageInfo
+):
+    """A real pull writes the `refs/origins/` marker shell-consent clause 2 rests on.
+
+    `project::consent::verified_sources` quantifies clause 2 over exactly these
+    markers, and every Rust unit test calls `record_origin` directly — so if the
+    pull pipeline stops writing one, clause 2 goes permanently inert in the field
+    while the whole unit suite stays green. Red state: `refs/origins/` is absent
+    or empty (the shape produced by neutering the `if from_registry` guard in
+    `package_manager/tasks/pull.rs`), or its markers name a repository other than
+    the one the registry served.
+    """
+    pkg = published_package
+    result = ocx.json("package", "install", pkg.short)
+
+    pkg_root = Path(result[pkg.short]["path"])
+    origins = pkg_root / "refs" / "origins"
+    assert_dir_exists(origins)
+
+    markers = sorted(p for p in origins.iterdir() if p.is_file())
+    assert markers, f"pull wrote no origin marker under {origins}"
+
+    recorded = {p.read_text().strip() for p in markers}
+    expected = f"{ocx.registry.lower()}/{pkg.repo}"
+    assert recorded == {expected}, (
+        f"recorded origins {recorded} != the one repository the registry "
+        f"served: {{{expected!r}}}"
+    )

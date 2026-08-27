@@ -327,6 +327,12 @@ async fn setup_owned_impl(
     dest_override: Option<&std::path::Path>,
     provided_metadata: Option<metadata::Metadata>,
 ) -> Result<InstallInfo, PackageErrorKind> {
+    // `provided_metadata` is `Some` on exactly one path — `pull_local`, which
+    // materializes from a local tarball with no registry in the loop. Captured
+    // before the value is moved so the origin-marker gate below can name the
+    // distinction it actually cares about.
+    let from_registry = provided_metadata.is_none();
+
     // Defense layer 2 — skip if already fully installed (cross-process).
     // When dest_override is set the caller wants to materialize to a specific
     // path, not the object-store CAS path — bypass the fast-path so the
@@ -421,6 +427,32 @@ async fn setup_owned_impl(
     // Wrap the temp directory in a PackageDir so all sibling-file accesses
     // use the canonical accessors instead of hardcoded strings.
     let pkg = file_structure::PackageDir::with_root(temp.dir.dir.clone());
+
+    // Record the logical repository this digest was fetched under.
+    //
+    // `pinned`, deliberately — NOT `resolved.transport_pinned`, which is what
+    // the layer fetch below travels over after a `[mirrors]` rewrite or an
+    // index indirection. Consent has one identity and it is the logical one
+    // (`project::consent::source_of`); recording the routed address would pin
+    // consent to routing, the failure `adr_lock_records_physical_address.md`
+    // was rejected for. Both redirects are operator-configured — `config.toml`
+    // tiers only, `ocx.toml` reaches neither — and the content is
+    // digest-verified whichever endpoint serves it. See `record_origin`.
+    //
+    // Security-critical siting, not a convenience: the package path is
+    // (registry, digest) only, so this marker is the store's ONLY record of
+    // provenance, and shell-activation consent clause 2 quantifies over it
+    // (`project::consent::verified_sources`). It is written here — past both
+    // store-hit fast paths, inside the branch that fetches — so a local hit
+    // can never mint one, and it is skipped entirely when `from_registry` is
+    // false (`pull_local`, whose identifier is author-supplied text no
+    // registry vouched for). Writing into the staging dir means the marker is
+    // published by the same atomic temp→store rename as `install.json`.
+    if from_registry {
+        file_structure::record_origin(&pkg, pinned.as_identifier())
+            .await
+            .map_err(PackageErrorKind::Internal)?;
+    }
 
     // Store manifest in temp dir for audit trail — gets moved with the package.
     manifest

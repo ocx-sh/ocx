@@ -21,9 +21,9 @@ use crate::options;
 /// Reads the nearest project `ocx.toml` (project tier only — no home-tier
 /// fallback in this phase), loads the matching `ocx.lock`, looks up each
 /// selected tool in the local object store, and prints bash export
-/// lines for the resolved environment. The command is stateless: it does
-/// not consult or update `_OCX_APPLIED`, making it suitable for use from
-/// `direnv`'s `.envrc` via `eval "$(ocx direnv export)"`.
+/// lines for the resolved environment. The command is stateless, which is
+/// what makes it usable from `direnv`'s `.envrc` via
+/// `eval "$(ocx direnv export)"`.
 ///
 /// `ocx direnv init` writes an `.envrc` that calls this command with no
 /// arguments, which selects the default group. Edit that line to widen the
@@ -229,8 +229,7 @@ impl DirenvExport {
 
         // Stages 4-6, same assembly as `ocx run` and `ocx env`: the project's
         // `[env]`, each selected group's `[env]` in `-g` order, then `--env`.
-        let mut project_env =
-            crate::app::project_context::project_env_entries(&project.config, &project.config_path, &expanded);
+        let mut project_env = ocx_lib::project::project_env_entries(&project.config, &project.config_path, &expanded);
         project_env.extend(env_overrides);
         let scope = ocx_lib::package_manager::EnvScope::Project {
             no_patches: project.config.no_patches_repositories(),

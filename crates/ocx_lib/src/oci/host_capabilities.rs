@@ -87,12 +87,71 @@
 //!
 //! ## Cache lifecycle
 //!
-//! One-shot CLI invocation assumption. Detection runs once at context init
-//! and caches via `OnceLock` for the lifetime of the process. Embedders
-//! using `ocx_lib` as a library or future daemon mode must invalidate or
-//! work around the cache.
+//! Two caches, one in front of the other.
+//!
+//! **Process cache.** Detection runs once at context init and memoizes into an
+//! `OnceLock` for the lifetime of the process. Embedders using `ocx_lib` as a
+//! library, or a future daemon mode, must invalidate or work around it.
+//!
+//! **Persisted record** (`$OCX_HOME/state/host/capabilities.json`, Linux only).
+//! Every `ocx` invocation is a fresh process, so the `OnceLock` alone left every
+//! command re-running the whole discovery pipeline — 15.4 ms of it, measured on
+//! a per-prompt shell reconcile that contains no other libc-dependent work
+//! (ocx-sh/ocx#340). The host's libc set is a per-host constant between package
+//! installs, so the answer is recorded on disk beside the referrers-capability
+//! and trust-root caches and in the same shape: atomic write, TTL-gated
+//! fail-open read, anything unusable treated as a miss.
+//!
+//! Freshness has two independent gates, because the two ways a record can go
+//! wrong are not equally dangerous:
+//!
+//! - **A libc was REMOVED or REPLACED.** The record would name a family the
+//!   host can no longer execute, and OCX would select an artifact that cannot
+//!   launch — a resolution failure, not a slow command. Closed exactly, and not
+//!   by the clock: the record carries every loader that classified positive
+//!   together with the file identity it had at the time (device, inode, size,
+//!   mtime — all off the `stat` the check needs anyway), and is honoured only
+//!   while every one of them is still the same file at the same path.
+//!   Uninstalling a libc removes its loader; reinstalling or swapping one keeps
+//!   the path but changes its identity. Either way the very next invocation
+//!   re-detects. Existence alone would not do: a libc replaced in place is the
+//!   ordinary case (package reinstall, container-layer swap), and the path
+//!   survives it while the executable behind it may now be a different libc.
+//! - **A libc was ADDED.** The record under-reports, so a package shipped only
+//!   for the new family resolves to `FeatureMismatch` (exit 65, which names the
+//!   platforms that *are* available) instead of installing. Recoverable and
+//!   self-diagnosing, so this is the direction the TTL clock bounds.
+//!
+//! The record states its evidence and nothing else. Its `os.features` answer is
+//! **derived** from the loaders it recorded, never stored beside them, so a
+//! record naming a family that no recorded loader classified as is not something
+//! the reader has to reject — it is not expressible. An empty loader list still
+//! parses and claims nothing, but it is never *written*: a pass that classified
+//! nothing is not recorded at all, because the record cannot tell it apart from
+//! a pass that could not look (see [`record_detection`]).
+//!
+//! The `__OCX_TEST_LIBC` seam is neither read from nor written to the record: a
+//! forced libc set can never be persisted onto a real host, and a record can
+//! never override the seam.
 //!
 //! ## Security
+//!
+//! ### The persisted record is not a trust boundary
+//!
+//! The record is a `0o600` file inside the user's own `$OCX_HOME`, written and
+//! read by the same user. Anyone who can write it can already do considerably
+//! worse — replace an installed binary, edit `config.toml`, rewrite a symlink —
+//! so it is not defended as attacker-controlled input and the checks below are
+//! not a mitigation for one. What they *do* enforce is that the reader accepts
+//! only records the writer could have produced: a claim with no evidence behind
+//! it, a stale format version, or a stray field all mean the file did not come
+//! from this code, and the answer to that is to probe, never to guess. Both
+//! `serde(deny_unknown_fields)` and the `RecordVersion` tag exist for that, not
+//! for an adversary. A record that names real, unmodified loaders but lies about
+//! which family each one classified as is still believed — detecting that needs
+//! the probe the record exists to avoid.
+//!
+//! ### Detection inputs
 //!
 //! `PT_INTERP` reads are constrained to a fixed allowlist of system binaries
 //! ([`INTERP_PROBE_BINARIES`], never user-supplied paths); the loader path that
@@ -104,6 +163,9 @@
 
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
+
+#[cfg(target_os = "linux")]
+use serde_repr::{Deserialize_repr, Serialize_repr};
 
 /// A libc family identified for the current host or read off a manifest.
 ///
@@ -253,15 +315,13 @@ impl HostCapabilities {
         // Once the var is set, the seam never falls through to the real probe.
         #[cfg(any(test, feature = "__testing"))]
         {
-            if let Ok(value) = std::env::var("__OCX_TEST_LIBC") {
-                return Self {
-                    libcs: parse_test_libc_set(&value),
-                };
+            if let Some(libcs) = test_libc_override() {
+                return Self { libcs };
             }
         }
 
         Self {
-            libcs: detect_libcs().await,
+            libcs: run_detection().await.libcs(),
         }
     }
 
@@ -289,28 +349,52 @@ impl HostCapabilities {
     /// This is the single entry point CLI context initialization calls at
     /// startup. Detection failure is not an error — an empty set caches as an
     /// empty `Vec`, which is a valid state (subset matching then accepts only
-    /// entries with empty `os_features`). The cache is a one-shot `OnceLock`
-    /// for the process lifetime; see the module-level "Cache lifecycle" note.
+    /// entries with empty `os_features`).
     ///
-    /// Short-circuits to a no-op on any call after the first — the `OnceLock`
-    /// is already set, so re-running the full loader-probe pipeline would be
-    /// wasted work.
+    /// Three tiers, cheapest first: the process `OnceLock` (2nd+ call in the
+    /// same process), the persisted `$OCX_HOME/state/host/capabilities.json`
+    /// record (2nd+ invocation on the same host inside the TTL), then the full
+    /// discovery-then-identify pipeline. See the module-level "Cache lifecycle"
+    /// note for what invalidates the persisted tier — a slow answer is
+    /// acceptable here, a wrong one is not.
     pub async fn detect_and_cache() -> Self {
         // Fast path: cache already populated (2nd+ call in same process).
         // Reconstruct `HostCapabilities` from the cached feature tags instead
         // of re-running the discovery-then-identify pipeline.
         if let Some(cached) = CACHED_OS_FEATURES.get() {
-            let libcs = cached
-                .iter()
-                .filter_map(|tag| LibcFlavor::from_os_feature_tag(tag))
-                .filter(|f| !matches!(f, LibcFlavor::Unknown(_)))
-                .collect();
-            return Self { libcs };
+            return Self {
+                libcs: decode_libc_tags(cached),
+            };
         }
-        let capabilities = Self::detect().await;
+        let capabilities = detect_with_persisted_record().await;
         init_cache(&capabilities);
         capabilities
     }
+}
+
+/// Decode `os.features` tags back into the libc families they name, dropping
+/// anything that is not a recognised `libc.*` tag.
+///
+/// Shared by the two fast paths that reconstruct a [`HostCapabilities`] from
+/// tags — the process `OnceLock` and the persisted record — so they cannot
+/// disagree about what a tag means.
+fn decode_libc_tags<'tags>(tags: impl IntoIterator<Item = &'tags String>) -> BTreeSet<LibcFlavor> {
+    tags.into_iter()
+        .filter_map(|tag| LibcFlavor::from_os_feature_tag(tag))
+        .filter(|flavor| !matches!(flavor, LibcFlavor::Unknown(_)))
+        .collect()
+}
+
+/// The `__OCX_TEST_LIBC` seam value, decoded, when the variable is set.
+///
+/// Extracted so [`HostCapabilities::detect`] and the persisted-record path check
+/// the same condition: an unset variable must fall through to the real probe,
+/// and a set one must never reach (or be reached from) the on-disk record.
+#[cfg(any(test, feature = "__testing"))]
+fn test_libc_override() -> Option<BTreeSet<LibcFlavor>> {
+    std::env::var("__OCX_TEST_LIBC")
+        .ok()
+        .map(|value| parse_test_libc_set(&value))
 }
 
 /// Parse the `__OCX_TEST_LIBC` seam value into a libc set.
@@ -329,16 +413,46 @@ fn parse_test_libc_set(value: &str) -> BTreeSet<LibcFlavor> {
         .collect()
 }
 
+/// What one detection pass found: every loader that classified, paired with the
+/// family it classified as.
+///
+/// The libc set is **derived** from that evidence ([`Detection::libcs`]) rather
+/// than carried beside it, so the two can never disagree — the same property the
+/// persisted record inherits by recording only this list. The loaders are
+/// carried out of the pipeline rather than discarded because the record
+/// re-checks them: a loader uninstalled or replaced since is what invalidates a
+/// record, and no clock can see that. See the module-level "Cache lifecycle"
+/// note.
+#[derive(Debug, Default)]
+struct Detection {
+    /// Every loader that classified positive with the family its `--version`
+    /// banner identified, sorted by path so the persisted record is byte-stable
+    /// across runs.
+    classified: Vec<(std::path::PathBuf, LibcFlavor)>,
+}
+
+impl Detection {
+    /// The families this pass found, derived from the loaders that classified.
+    ///
+    /// A `BTreeSet` makes the answer deterministic and independent of probe
+    /// scheduling, and unions duplicates — a dual-libc host with a glibc and a
+    /// musl loader reports both, a host with two glibc loaders reports one
+    /// family.
+    fn libcs(&self) -> BTreeSet<LibcFlavor> {
+        self.classified.iter().map(|(_, flavor)| flavor.clone()).collect()
+    }
+}
+
 /// Probe the host for every libc family it provides.
 ///
-/// Returns an empty set immediately on non-Linux targets without spawning any
+/// Returns an empty result immediately on non-Linux targets without spawning any
 /// subprocess. On Linux it runs the discovery-then-identify pipeline: discover
 /// candidate loader paths (a system binary's `PT_INTERP` ∪ an arch-filtered
 /// directory scan ∪ the hardcoded allowlist, deduplicated by canonical path),
 /// then classify each by its `--version` banner and union every positive into
 /// the set — no early abort, no first-wins.
 #[cfg(target_os = "linux")]
-async fn detect_libcs() -> BTreeSet<LibcFlavor> {
+async fn run_detection() -> Detection {
     use tokio::task::JoinSet;
 
     let candidate_paths = discover_loader_paths().await;
@@ -347,7 +461,7 @@ async fn detect_libcs() -> BTreeSet<LibcFlavor> {
     // No early abort: a host with both glibc and musl loaders must report
     // {Glibc, Musl}. A probe task panicking must not crash detection — treat a
     // join failure as "found nothing".
-    let mut probes: JoinSet<Option<LibcFlavor>> = JoinSet::new();
+    let mut probes: JoinSet<Option<(std::path::PathBuf, LibcFlavor)>> = JoinSet::new();
     for path in candidate_paths {
         // SECURITY: `path` comes only from `discover_loader_paths` — the
         // `PT_INTERP` of a fixed system-binary allowlist, an arch-filtered scan
@@ -357,18 +471,21 @@ async fn detect_libcs() -> BTreeSet<LibcFlavor> {
         probes.spawn(probe_loader(path));
     }
 
-    let mut libcs = BTreeSet::new();
+    let mut classified = Vec::new();
     while let Some(joined) = probes.join_next().await {
-        if let Ok(Some(flavor)) = joined {
-            libcs.insert(flavor);
+        if let Ok(Some(found)) = joined {
+            classified.push(found);
         }
     }
+    // `join_next` yields in completion order, which is scheduling-dependent.
+    // Sort so the persisted record is byte-stable across runs.
+    classified.sort();
 
     // NixOS / empty result: if nothing matched and `/nix` exists, the host is
     // very likely a NixOS box without a nix-ld FHS shim and with statically
     // linked probe binaries. Note it and degrade to the empty set (Any-only
     // matching; `--platform` override available). Never an error.
-    if libcs.is_empty() && tokio::fs::try_exists("/nix").await.unwrap_or(false) {
+    if classified.is_empty() && tokio::fs::try_exists("/nix").await.unwrap_or(false) {
         tracing::debug!(
             "no libc loader discovered (PT_INTERP, directory scan, and FHS \
              allowlist all empty) but /nix exists; likely NixOS without a \
@@ -376,14 +493,14 @@ async fn detect_libcs() -> BTreeSet<LibcFlavor> {
         );
     }
 
-    libcs
+    Detection { classified }
 }
 
 /// Non-Linux platforms have a single fixed libc family per OS, so OCX does not
-/// probe them. Returns an empty set without spawning any subprocess.
+/// probe them. Returns an empty result without spawning any subprocess.
 #[cfg(not(target_os = "linux"))]
-async fn detect_libcs() -> BTreeSet<LibcFlavor> {
-    BTreeSet::new()
+async fn run_detection() -> Detection {
+    Detection::default()
 }
 
 /// Discover candidate dynamic-loader paths from three sources, deduplicated by
@@ -493,11 +610,35 @@ const LOADER_SCAN_DIRS: &[&str] = &["/lib", "/lib64", "/usr/lib", "/usr/lib64"];
 
 /// Scan [`LOADER_SCAN_DIRS`] for files whose name matches a current-arch loader
 /// fragment. Bounded to one level of subdirectory nesting.
+///
+/// The whole walk runs in **one** `spawn_blocking` over `std::fs`, not as
+/// `tokio::fs` calls per entry. `tokio::fs` `asyncify`s every operation onto the
+/// blocking pool, so the per-entry `file_type()` this scan needs was one
+/// executor round-trip apiece for a `d_type` read that costs no syscall at all —
+/// ~7,800 of them on a usrmerge x86_64 host, measured at 15.2 ms against 2.5 ms
+/// for the identical `std::fs` walk (ocx-sh/ocx#340). That is the "no blocking
+/// I/O in async" rule read the right way round: short, local, uncontended
+/// filesystem work belongs on one blocking thread, not spread across thousands
+/// of hand-offs.
 #[cfg(target_os = "linux")]
 async fn glob_loader_paths() -> Vec<std::path::PathBuf> {
+    match tokio::task::spawn_blocking(scan_loader_dirs).await {
+        Ok(found) => found,
+        Err(join_error) => {
+            // The scan is one of three discovery sources; losing it degrades
+            // discovery rather than failing detection, exactly as an unreadable
+            // directory already does.
+            tracing::debug!("loader directory scan did not complete ({join_error}); continuing without it");
+            Vec::new()
+        }
+    }
+}
+
+/// Blocking body of [`glob_loader_paths`].
+#[cfg(target_os = "linux")]
+fn scan_loader_dirs() -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
-    for dir in LOADER_SCAN_DIRS {
-        let base = std::path::Path::new(dir);
+    for base in dedup_scan_roots(LOADER_SCAN_DIRS) {
         // Single pass over the base dir. `read_dir` follows a symlinked base
         // (`/lib` → `/usr/lib` on usrmerge). Each entry is either a subdirectory
         // (multiarch triplet dir — scanned one level deep, never further) or a
@@ -507,46 +648,68 @@ async fn glob_loader_paths() -> Vec<std::path::PathBuf> {
         // such as /lib/ld-musl-x86_64.so.1) is included and later deduped by
         // canonical path; real multiarch dirs are not symlinks, so bounding the
         // recursion to genuine dirs loses nothing.
-        let Ok(mut entries) = tokio::fs::read_dir(base).await else {
+        let Ok(entries) = std::fs::read_dir(&base) else {
             continue;
         };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let Ok(file_type) = entry.file_type().await else {
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
                 continue;
             };
+            let path = entry.path();
             if file_type.is_dir() {
-                collect_loader_files(&entry.path(), &mut found).await;
-            } else if entry
-                .path()
+                collect_loader_files(&path, &mut found);
+            } else if path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(is_current_arch_loader_name)
             {
-                found.push(entry.path());
+                found.push(path);
             }
         }
     }
     found
 }
 
+/// Reduce `dirs` to the distinct filesystem trees they name, keeping the first
+/// spelling of each.
+///
+/// On every usrmerge distribution `/lib` → `/usr/lib` and `/lib64` →
+/// `/usr/lib64`, so [`LOADER_SCAN_DIRS`]' four entries name two real trees and
+/// the scan walked each of them twice. A path that does not exist, or fails to
+/// canonicalize, keeps its literal form as its own identity — so a
+/// non-usrmerge host still scans all four, and two distinct missing paths do not
+/// collapse into one.
+///
+/// Blocking; runs inside [`glob_loader_paths`]'s `spawn_blocking`.
+#[cfg(target_os = "linux")]
+fn dedup_scan_roots(dirs: &[&str]) -> Vec<std::path::PathBuf> {
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let mut roots = Vec::with_capacity(dirs.len());
+    for dir in dirs {
+        let base = std::path::PathBuf::from(dir);
+        let canonical = std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
+        if seen.insert(canonical) {
+            roots.push(base);
+        }
+    }
+    roots
+}
+
 /// Append every non-directory entry of `dir` whose filename matches a
 /// current-architecture loader fragment to `out`.
+///
+/// Blocking; runs inside [`glob_loader_paths`]'s `spawn_blocking`.
 #[cfg(target_os = "linux")]
-async fn collect_loader_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+fn collect_loader_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    for entry in entries.flatten() {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if is_current_arch_loader_name(name)
-            && entry
-                .file_type()
-                .await
-                .map(|file_type| !file_type.is_dir())
-                .unwrap_or(false)
+        if is_current_arch_loader_name(name) && entry.file_type().map(|file_type| !file_type.is_dir()).unwrap_or(false)
         {
             out.push(path);
         }
@@ -687,11 +850,14 @@ fn loader_name_looks_glibc(loader_name: &str) -> bool {
 /// a `{path} /bin/true` confirmation. Returns `None` when the loader is absent,
 /// fails to execute, times out, or identifies no known family — never panics.
 ///
+/// A positive result hands `path` back with the family, because the persisted
+/// record keys its invalidation on exactly the loaders that classified.
+///
 /// SECURITY: `path` is always a discovery-sourced loader path (never user
 /// input); only `--version` / `/bin/true` are passed, each bounded by the
 /// timeout so a wedged loader cannot stall OCX startup.
 #[cfg(target_os = "linux")]
-async fn probe_loader(path: std::path::PathBuf) -> Option<LibcFlavor> {
+async fn probe_loader(path: std::path::PathBuf) -> Option<(std::path::PathBuf, LibcFlavor)> {
     // Skip the spawn entirely if the loader is not present.
     if tokio::fs::metadata(&path).await.is_err() {
         return None;
@@ -709,9 +875,10 @@ async fn probe_loader(path: std::path::PathBuf) -> Option<LibcFlavor> {
     let mut banner = String::from_utf8_lossy(&output.stdout).into_owned();
     banner.push_str(&String::from_utf8_lossy(&output.stderr));
     let loader_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let class = classify_loader_banner(&banner, loader_name, output.status.code());
 
-    match classify_loader_banner(&banner, loader_name, output.status.code()) {
-        BannerClass::Identified(flavor) => Some(flavor),
+    match class {
+        BannerClass::Identified(flavor) => Some((path, flavor)),
         BannerClass::GlibcNeedsConfirmation => {
             // Confirm the loader is a live glibc loader by running it on
             // `/bin/true`; exit 0 means it can actually launch a glibc program.
@@ -722,7 +889,7 @@ async fn probe_loader(path: std::path::PathBuf) -> Option<LibcFlavor> {
             .await
             .ok()?
             .ok()?;
-            confirm.status.success().then_some(LibcFlavor::Glibc)
+            confirm.status.success().then_some((path, LibcFlavor::Glibc))
         }
         BannerClass::Unrecognized => None,
     }
@@ -786,6 +953,418 @@ const MUSL_LOADER_FRAGMENTS: &[&str] = &["ld-musl-aarch64"];
 const GLIBC_LOADER_FRAGMENTS: &[&str] = &[];
 #[cfg(all(target_os = "linux", not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
 const MUSL_LOADER_FRAGMENTS: &[&str] = &[];
+
+// ── Persisted host-capability record ──────────────────────────────────────
+
+/// Persisted-record TTL: 24 hours.
+///
+/// The clock bounds one direction only — a libc **added** since the record was
+/// written; a libc **removed or replaced** invalidates the record immediately
+/// through [`HostCapabilityRecord::evidence_still_holds`], not through this
+/// constant (module-level "Cache lifecycle" note).
+///
+/// It was one hour until 2026-08-27, on the reasoning that a full re-detect is
+/// "unmeasurable beside the ~3.6 ms an `ocx` process costs to start at all".
+/// That reasoning did not survive the reconciler: the per-prompt reconcile is
+/// budgeted at `exec_floor + 3 ms` (C-044), and `test/bench/shell_latency.py`
+/// measures the **cold** detect — this record deleted before the spawn — at
+/// Δ 3.659–4.732 ms, over that budget on its own. So the first prompt of every
+/// TTL period lands over budget, and at one hour that was once an hour, per
+/// host, on a path whose whole contract is that a user never notices it.
+///
+/// Lengthening the clock is the fix rather than refreshing off the prompt path,
+/// because there is no off-prompt path to refresh on: every `ocx` is a fresh
+/// short-lived process that exits as soon as it has emitted, so a detached
+/// background refresh would be killed before it finished and would buy a
+/// complexity budget for nothing.
+///
+/// What 24 h costs is bounded, and it is the *recoverable* direction by
+/// construction: a libc **added** since the record was written makes the record
+/// under-report, which surfaces as `FeatureMismatch` (exit 65) naming the
+/// platforms that *are* available — self-diagnosing, and cleared by deleting
+/// `$OCX_HOME/state/host/capabilities.json`. The dangerous direction — a libc
+/// removed or replaced, where OCX would select an artifact that cannot launch —
+/// is not on this clock at all and still invalidates on the very next
+/// invocation.
+///
+/// Now the same 24 h as the trust-root cache. The note this replaces argued for
+/// something shorter, on the grounds that a local answer can change under the
+/// user's hands between two prompts while a remote's cannot. True, but it is the
+/// argument for `evidence_still_holds`, which is what actually catches those
+/// changes; the clock only ever covered the one case that check cannot see.
+///
+/// A record already on disk carries its own `ttl_seconds`, and
+/// [`HostCapabilityRecord::is_fresh`] clamps with `min`, so raising this
+/// constant never extends an existing record — the longer lifetime starts with
+/// the next one written.
+#[cfg(target_os = "linux")]
+const TTL_SECS: u64 = 86_400;
+
+/// On-disk format version of the host-capability record.
+///
+/// `serde_repr` refuses an unrecognised integer on deserialise by itself, so a
+/// record written by another ocx is a clean miss with no hand-written check to
+/// forget. Bumping this is the entire migration story: the record is per-host
+/// derived state behind a 1-hour TTL, so invalidating every existing one costs
+/// exactly one re-probe per host.
+///
+/// V1 (never represented here) stored `os_features` and `loaders` as two
+/// independent lists, which let a record claim a libc family no recorded loader
+/// had classified as, and keyed loader validity on path existence alone, which
+/// a replace-in-place survives.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(u8)]
+enum RecordVersion {
+    /// Evidence-only: one entry per classified loader carrying the family it
+    /// identified and the file identity it had when it did.
+    V2 = 2,
+}
+
+/// The identity a loader file had at the moment it classified.
+///
+/// Recorded so the record can tell "the same loader is still there" from
+/// "something else is at that path now". Every field comes off the same `stat`
+/// the presence check already performs, so re-checking all four costs nothing
+/// beyond what checking existence alone cost.
+///
+/// **What it does not catch:** an overwrite that preserves the inode, the byte
+/// length *and* the mtime to the nanosecond — which takes a deliberate
+/// `touch -r` after writing an identically sized file. This is not a content
+/// hash on purpose: hashing each loader on every invocation measured 0.41 ms for
+/// one 960 KB glibc loader with a warm page cache, against the ~2.3 ms the whole
+/// record saves, so the exact answer would spend a fifth of the saving (more on
+/// a dual-libc host, more again on a cold cache) closing a case no package
+/// manager produces. Every ordinary replacement moves at least one field: a
+/// write-new-then-`rename` install moves the inode, an in-place rewrite moves
+/// the mtime, a container-layer or bind-mount swap moves the device — and two
+/// libc loaders are never the same size.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoaderIdentity {
+    /// Device the loader lives on.
+    device: u64,
+    /// Inode number.
+    inode: u64,
+    /// Byte length.
+    size: u64,
+    /// Modification time, whole seconds since the epoch.
+    mtime_seconds: i64,
+    /// Modification time, nanosecond remainder — the axis that catches an
+    /// in-place rewrite of identical length.
+    mtime_nanoseconds: i64,
+}
+
+#[cfg(target_os = "linux")]
+impl LoaderIdentity {
+    /// Read the identity out of a `stat` result.
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.size(),
+            mtime_seconds: metadata.mtime(),
+            mtime_nanoseconds: metadata.mtime_nsec(),
+        }
+    }
+}
+
+/// One loader that classified positive, and the evidence that it did.
+#[cfg(target_os = "linux")]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoaderRecord {
+    /// Absolute path the loader was probed at.
+    path: String,
+    /// The canonical `os.features` tag this loader's `--version` banner
+    /// identified (`libc.glibc` / `libc.musl`). Held as the tag rather than a
+    /// serialized [`LibcFlavor`] so the record routes through the one
+    /// round-tripping mapping ([`LibcFlavor::os_feature_tag`] /
+    /// [`LibcFlavor::from_os_feature_tag`]) instead of minting a second
+    /// encoding that could drift from it.
+    feature: String,
+    /// The loader's file identity when it classified.
+    identity: LoaderIdentity,
+}
+
+/// A detection result recorded on disk at
+/// `$OCX_HOME/state/host/capabilities.json`.
+///
+/// Advisory and fail-open in every direction: missing, unreadable, corrupt,
+/// expired or evidence-invalidated all mean "miss", and a miss simply re-runs
+/// detection. Nothing here can turn a slow command into a failed one.
+///
+/// `deny_unknown_fields` here and on every nested struct is not a defence
+/// against an attacker (see the module-level "The persisted record is not a
+/// trust boundary" note) — it is how the reader refuses a record this writer
+/// could not have produced. A stray key means the file came from somewhere
+/// else, and the only safe reading of somewhere else is "probe now". The
+/// project-wide ban on `deny_unknown_fields` covers the `Config` tree, whose
+/// forward-compatibility matters because one file is fleet-wide state; this is
+/// machine-local derived state with a version tag and a 1-hour TTL, where a
+/// refusal costs one re-probe.
+#[cfg(target_os = "linux")]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostCapabilityRecord {
+    /// On-disk format version; an unrecognised value fails to deserialise,
+    /// which is a miss.
+    version: RecordVersion,
+    /// Every loader that classified positive, sorted by path.
+    ///
+    /// This is the record's **only** statement about the host, and the
+    /// `os.features` answer is derived from it
+    /// ([`HostCapabilityRecord::libcs`]) rather than stored beside it — so a
+    /// record claiming a family no recorded loader produced is not rejected,
+    /// it is unrepresentable. An empty list parses and, being evidence rather
+    /// than assertion, claims nothing — but [`record_detection`] never writes
+    /// one, since no record can distinguish a host on which nothing classified
+    /// from a pass that could not look.
+    loaders: Vec<LoaderRecord>,
+    /// Wall-clock time of the detection this record captures (UTC).
+    detected_at: std::time::SystemTime,
+    /// TTL in seconds, clamped to [`TTL_SECS`] on read.
+    ttl_seconds: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl HostCapabilityRecord {
+    /// Capture a detection pass as a record stamped now, or `None` when a
+    /// classified loader's identity cannot be read.
+    ///
+    /// Re-stats each loader rather than carrying its identity out of the probe:
+    /// this is the write path, which has just run the whole discovery pipeline,
+    /// so one to three extra `stat`s are free, and it keeps the Linux-only
+    /// [`LoaderIdentity`] out of the cross-platform [`Detection`]. A loader that
+    /// vanished between its probe and here means the host changed mid-detection
+    /// — recording a partial answer would then be honoured for an hour, so
+    /// record nothing and let the next invocation re-detect.
+    async fn capture(detection: &Detection) -> Option<Self> {
+        let mut loaders = Vec::with_capacity(detection.classified.len());
+        for (path, flavor) in &detection.classified {
+            let metadata = match tokio::fs::metadata(path).await {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    tracing::debug!(
+                        "{} changed while detection ran ({error}); not recording the host libc set",
+                        path.display()
+                    );
+                    return None;
+                }
+            };
+            loaders.push(LoaderRecord {
+                path: path.to_string_lossy().into_owned(),
+                feature: flavor.os_feature_tag(),
+                identity: LoaderIdentity::of(&metadata),
+            });
+        }
+        Some(Self {
+            version: RecordVersion::V2,
+            loaders,
+            detected_at: std::time::SystemTime::now(),
+            ttl_seconds: TTL_SECS,
+        })
+    }
+
+    /// The libc families this record's own evidence supports.
+    ///
+    /// Every family named here is one a recorded loader classified as, because
+    /// there is nothing else to derive it from. An unrecognised `feature` tag
+    /// decodes to [`LibcFlavor::Unknown`] and is dropped, so a value this
+    /// binary does not understand contributes nothing rather than being
+    /// believed.
+    fn libcs(&self) -> BTreeSet<LibcFlavor> {
+        decode_libc_tags(self.loaders.iter().map(|loader| &loader.feature))
+    }
+
+    /// True while the record is inside its (clamped) TTL.
+    ///
+    /// Both halves of the lifetime come off disk, so neither is trusted: a
+    /// `detected_at` in the future (rewound clock, hand-edited file) reads as
+    /// stale, and `ttl_seconds` is clamped so a record can shorten its own
+    /// lifetime and never extend it.
+    fn is_fresh(&self) -> bool {
+        match std::time::SystemTime::now().duration_since(self.detected_at) {
+            Ok(elapsed) => elapsed < std::time::Duration::from_secs(self.ttl_seconds.min(TTL_SECS)),
+            Err(_) => false,
+        }
+    }
+
+    /// True while every loader that classified for this record is still the
+    /// same file at the same path.
+    ///
+    /// This is the gate that closes the dangerous staleness direction. A record
+    /// naming a libc the host can no longer execute would make OCX select an
+    /// artifact that cannot launch, and no TTL short enough to bound that is
+    /// short enough to be worth caching under — so the change is detected
+    /// directly instead.
+    ///
+    /// Existence is not the check. Uninstalling a libc removes its loader, but
+    /// *replacing* one keeps the path: a package reinstall, an upgrade, a
+    /// container-layer swap all leave a file at the recorded path whose contents
+    /// this record never saw, and the executable there may belong to a different
+    /// libc or not run at all. So the recorded [`LoaderIdentity`] is compared,
+    /// not merely probed for presence — the same one `stat` per classified
+    /// loader (one to three on a real host) an existence check cost, against the
+    /// several thousand a full re-detect walks.
+    async fn evidence_still_holds(&self) -> bool {
+        for loader in &self.loaders {
+            let Ok(metadata) = tokio::fs::metadata(&loader.path).await else {
+                return false;
+            };
+            if LoaderIdentity::of(&metadata) != loader.identity {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// `$OCX_HOME/state/host/capabilities.json`, or `None` when no home resolves.
+///
+/// Derived from [`crate::file_structure::default_ocx_root`] rather than taken as
+/// a parameter because detection also runs on the static-command bypass
+/// (`ocx version --verbose`), which builds no `FileStructure` — the same reason
+/// `FileStructure::new` derives its own root. A `None` here is not an error:
+/// detection just runs uncached.
+#[cfg(target_os = "linux")]
+fn record_path() -> Option<std::path::PathBuf> {
+    let root = crate::file_structure::default_ocx_root()?;
+    let state = crate::file_structure::StateStore::new(root.join("state"));
+    Some(state.host_capabilities_file())
+}
+
+/// Read the record at `path`, or `None` for any reason it cannot be used.
+#[cfg(target_os = "linux")]
+async fn read_record(path: &std::path::Path) -> Option<HostCapabilityRecord> {
+    let bytes = tokio::fs::read(path).await.ok()?;
+    // A record OCX cannot decode is a record from another version, a damaged
+    // one, or one this writer could not have produced (an unknown field, a
+    // `version` outside `RecordVersion`). Every one of those means the answer
+    // has to be probed rather than read — never an error surfaced from a cache.
+    let record: HostCapabilityRecord = match serde_json::from_slice(&bytes) {
+        Ok(record) => record,
+        Err(error) => {
+            tracing::debug!("recorded host libc set is not readable by this ocx ({error}); re-detecting");
+            return None;
+        }
+    };
+    if !record.is_fresh() {
+        return None;
+    }
+    if !record.evidence_still_holds().await {
+        tracing::debug!("a loader the recorded host libc set rests on is gone or replaced; re-detecting");
+        return None;
+    }
+    Some(record)
+}
+
+/// Persist `record` at `path`, best-effort.
+///
+/// Every failure is a debug log and nothing else: the record is an optimization,
+/// so a read-only or full `$OCX_HOME` must cost a slow command, never a failed
+/// one. Written through [`crate::utility::fs::write_bytes_atomic`] (private
+/// tempfile + rename) so a concurrent reader never sees a partial record — the
+/// same write the referrers and trust-root caches use.
+#[cfg(target_os = "linux")]
+async fn write_record(path: std::path::PathBuf, record: &HostCapabilityRecord) {
+    let Some(parent) = path.parent().map(std::path::Path::to_path_buf) else {
+        return;
+    };
+    let bytes = match serde_json::to_vec(record) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::debug!("could not encode the host libc record: {error}");
+            return;
+        }
+    };
+    if let Err(error) = tokio::fs::create_dir_all(&parent).await {
+        tracing::debug!(
+            "could not create {} for the host libc record: {error}",
+            parent.display()
+        );
+        return;
+    }
+    match tokio::task::spawn_blocking(move || crate::utility::fs::write_bytes_atomic(&path, &bytes)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::debug!("could not write the host libc record: {error}"),
+        Err(join_error) => tracing::debug!("host libc record write did not complete: {join_error}"),
+    }
+}
+
+/// Detect, consulting and refreshing the persisted record.
+#[cfg(target_os = "linux")]
+async fn detect_with_persisted_record() -> HostCapabilities {
+    // The test seam is checked before any disk access, so a forced libc set is
+    // never written onto a real host's record and a record can never override
+    // the seam.
+    #[cfg(any(test, feature = "__testing"))]
+    {
+        if let Some(libcs) = test_libc_override() {
+            return HostCapabilities { libcs };
+        }
+    }
+
+    let Some(path) = record_path() else {
+        return HostCapabilities {
+            libcs: run_detection().await.libcs(),
+        };
+    };
+    if let Some(record) = read_record(&path).await {
+        return HostCapabilities { libcs: record.libcs() };
+    }
+    let detection = run_detection().await;
+    record_detection(path, &detection).await;
+    HostCapabilities {
+        libcs: detection.libcs(),
+    }
+}
+
+/// Persist `detection` at `path`, unless it classified nothing.
+///
+/// The writer cannot record "I could not look" — the record has one shape, and
+/// an empty loader list read back through
+/// [`HostCapabilityRecord::evidence_still_holds`] is vacuously valid, so nothing
+/// short of the TTL can dislodge it. A *degraded* pass produces exactly that
+/// empty list: the directory scan losing its `spawn_blocking` join
+/// ([`glob_loader_paths`]), or every probe hitting [`PROBE_TIMEOUT`] on a loaded
+/// runner. Latching one would answer `os.features` with the empty set for an
+/// hour, and a package published only for glibc then fails to resolve
+/// (`FeatureMismatch`, exit 65) on every install until it expires.
+///
+/// So an empty classification is not recorded. It costs one re-detect per
+/// invocation — precisely what every invocation paid before the record existed —
+/// and it keeps "could not look" from being persisted as "looked and found
+/// nothing".
+///
+/// ponytail: a host that genuinely has no libc loader (a static-only image where
+/// `PT_INTERP`, the directory scan, and the FHS allowlist all come up empty)
+/// therefore never caches, paying the ~2.7 ms detection every invocation. Fixing
+/// that needs a second record shape that distinguishes a completed pass from a
+/// degraded one; a real complaint from such a host is what would justify it.
+#[cfg(target_os = "linux")]
+async fn record_detection(path: std::path::PathBuf, detection: &Detection) {
+    if detection.classified.is_empty() {
+        tracing::debug!(
+            "detection classified no libc loader; not recording it — a degraded pass and an \
+             empty host are indistinguishable in the record, so re-detect next invocation"
+        );
+        return;
+    }
+    if let Some(record) = HostCapabilityRecord::capture(detection).await {
+        write_record(path, &record).await;
+    }
+}
+
+/// Non-Linux detection spawns no subprocess and returns the empty set
+/// immediately, so reading a file would cost strictly more than the detection it
+/// would replace. No record is read or written there.
+#[cfg(not(target_os = "linux"))]
+async fn detect_with_persisted_record() -> HostCapabilities {
+    HostCapabilities::detect().await
+}
 
 // Process-wide cache for the detected os_features. Populated once by
 // `HostCapabilities::detect()` during context init, then read by every
@@ -1269,6 +1848,574 @@ mod tests {
                 "discovery returned a duplicate canonical loader path: {resolved:?}"
             );
         }
+    }
+
+    // ── Directory-scan root dedup (usrmerge) ─────────────────────────────
+
+    /// A usrmerge host spells one tree two ways (`/lib` -> `/usr/lib`), and the
+    /// scan must walk it once. Exercised against a tempdir rather than the real
+    /// FHS paths so the assertion holds on a non-usrmerge host too.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dedup_scan_roots_collapses_a_symlinked_duplicate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("usr").join("lib");
+        std::fs::create_dir_all(&real).expect("create real dir");
+        let link = dir.path().join("lib");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        let real_text = real.to_str().expect("utf-8 path");
+        let link_text = link.to_str().expect("utf-8 path");
+        let roots = dedup_scan_roots(&[link_text, real_text]);
+        assert_eq!(
+            roots,
+            vec![link],
+            "a symlink and its target name one tree: only the first spelling is scanned"
+        );
+    }
+
+    /// Two genuinely distinct trees are both kept — the dedup must not turn a
+    /// non-usrmerge host into a half-scanned one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dedup_scan_roots_keeps_distinct_trees() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("lib");
+        let second = dir.path().join("lib64");
+        std::fs::create_dir_all(&first).expect("create first");
+        std::fs::create_dir_all(&second).expect("create second");
+
+        let roots = dedup_scan_roots(&[
+            first.to_str().expect("utf-8 path"),
+            second.to_str().expect("utf-8 path"),
+        ]);
+        assert_eq!(roots, vec![first, second], "distinct trees are both scanned");
+    }
+
+    /// Two paths that do not exist canonicalize to nothing, so they must fall
+    /// back to their literal identity rather than collapsing together.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dedup_scan_roots_keeps_distinct_missing_paths_apart() {
+        let roots = dedup_scan_roots(&["/nonexistent/ocx-scan-a", "/nonexistent/ocx-scan-b"]);
+        assert_eq!(roots.len(), 2, "two missing paths are two identities, not one");
+    }
+
+    // ── Persisted host-capability record ─────────────────────────────────
+
+    /// A glibc record capturing `loaders`, each of which must exist — the
+    /// capture reads their file identities.
+    #[cfg(target_os = "linux")]
+    async fn record_for(loaders: Vec<String>) -> HostCapabilityRecord {
+        HostCapabilityRecord::capture(&Detection {
+            classified: loaders
+                .into_iter()
+                .map(|path| (std::path::PathBuf::from(path), LibcFlavor::Glibc))
+                .collect(),
+        })
+        .await
+        .expect("every loader in the fixture exists, so capture must succeed")
+    }
+
+    /// Create a file that stands in for a dynamic loader.
+    #[cfg(target_os = "linux")]
+    async fn write_fake_loader(path: &std::path::Path, contents: &[u8]) {
+        tokio::fs::write(path, contents).await.expect("write fake loader");
+    }
+
+    /// The record lands where this module's header documents it.
+    ///
+    /// The path belongs to `StateStore` — it is the state root's layout — but
+    /// the contract is stated here, and every test below hand-builds
+    /// `state/host/capabilities.json` rather than asking for it. Without this
+    /// the accessor could be repointed and nothing would notice: the tests
+    /// would keep proving that `read_record` reads whatever path they were
+    /// handed. Pinning it from this module means a change in `state_store.rs`
+    /// reds a test in the module whose documentation it would falsify.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_record_lands_where_this_module_documents_it() {
+        let state = crate::file_structure::StateStore::new(std::path::Path::new("/o").join("state"));
+        assert_eq!(
+            state.host_capabilities_file(),
+            std::path::Path::new("/o/state/host/capabilities.json")
+        );
+    }
+
+    /// A written record reads back with the same libc set.
+    ///
+    /// Linux-only like every helper it calls: `record_for`, `write_fake_loader`,
+    /// `write_record` and `read_record` are all `cfg(target_os = "linux")`,
+    /// because the record only exists where libc detection does.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn record_round_trips_through_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The record's own loader must exist for the read to honour it, so
+        // point it at a file this test controls.
+        let loader = dir.path().join("ld-fake.so");
+        write_fake_loader(&loader, b"not really a loader").await;
+        let path = dir.path().join("state").join("host").join("capabilities.json");
+
+        let record = record_for(vec![loader.to_string_lossy().into_owned()]).await;
+        write_record(path.clone(), &record).await;
+        let loaded = read_record(&path).await.expect("a fresh record must read back");
+        assert_eq!(
+            loaded.libcs(),
+            glibc_only(),
+            "the recorded libc set must survive the round trip"
+        );
+        assert_eq!(
+            loaded
+                .loaders
+                .iter()
+                .map(|entry| entry.feature.as_str())
+                .collect::<Vec<_>>(),
+            vec!["libc.glibc"],
+            "each recorded loader carries the canonical os.features tag it classified as"
+        );
+    }
+
+    /// A degraded pass classifies nothing: the directory scan can lose its
+    /// `spawn_blocking` join, and every probe can hit `PROBE_TIMEOUT` on a
+    /// loaded runner. The record has no shape for "could not look", and an
+    /// empty loader list is vacuously valid on read, so latching one would
+    /// answer `os.features` with the empty set until the TTL expired —
+    /// `FeatureMismatch`, exit 65, on every install for an hour.
+    ///
+    /// Both polarities are pinned. Without the positive control the guard could
+    /// degenerate into "never record" and pass just as well.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_detection_that_classified_nothing_is_not_recorded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state").join("host").join("capabilities.json");
+
+        record_detection(path.clone(), &Detection::default()).await;
+        assert!(
+            !tokio::fs::try_exists(&path).await.expect("stat the record path"),
+            "a pass that classified nothing must leave no record — it is indistinguishable from \
+             a pass that could not look, and reading it back would pin the empty libc set for a \
+             full TTL"
+        );
+
+        let loader = dir.path().join("ld-fake.so");
+        write_fake_loader(&loader, b"the loader that classified as glibc").await;
+        record_detection(
+            path.clone(),
+            &Detection {
+                classified: vec![(loader, LibcFlavor::Glibc)],
+            },
+        )
+        .await;
+        assert_eq!(
+            read_record(&path)
+                .await
+                .expect("a pass that classified a loader must be recorded")
+                .libcs(),
+            glibc_only(),
+            "the guard must refuse the empty answer only, never suppress recording outright"
+        );
+    }
+
+    /// The gate that closes the dangerous staleness direction: a record naming a
+    /// loader that has since been uninstalled must be a miss, so the next
+    /// invocation re-detects instead of selecting an artifact that cannot launch.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn record_naming_a_removed_loader_is_a_miss() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let loader = dir.path().join("ld-fake.so");
+        write_fake_loader(&loader, b"not really a loader").await;
+        let path = dir.path().join("state").join("host").join("capabilities.json");
+        let record = record_for(vec![loader.to_string_lossy().into_owned()]).await;
+        write_record(path.clone(), &record).await;
+
+        // Green while the loader is present...
+        assert!(
+            read_record(&path).await.is_some(),
+            "a record whose loaders all exist must be honoured"
+        );
+
+        // ...and a miss the moment it is gone. Same record, same clock — only
+        // the loader changed, which is exactly what uninstalling a libc does.
+        tokio::fs::remove_file(&loader).await.expect("remove loader");
+        assert!(
+            read_record(&path).await.is_none(),
+            "a record naming a loader that no longer exists must not be honoured"
+        );
+    }
+
+    /// A dual-libc host records both families and decodes both back. The
+    /// record must not be able to collapse `{Glibc, Musl}` into one family —
+    /// that would silently narrow which artifacts resolve on a host that can
+    /// run both.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn record_round_trips_a_dual_libc_host() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let glibc_loader = dir.path().join("ld-linux-fake.so.2");
+        let musl_loader = dir.path().join("ld-musl-fake.so.1");
+        write_fake_loader(&glibc_loader, b"not really a loader").await;
+        // A different length, as two real libc loaders always have.
+        write_fake_loader(&musl_loader, b"not really a loader either, and a different size").await;
+        let path = dir.path().join("state").join("host").join("capabilities.json");
+
+        let detection = Detection {
+            classified: vec![
+                (glibc_loader.clone(), LibcFlavor::Glibc),
+                (musl_loader.clone(), LibcFlavor::Musl),
+            ],
+        };
+        let record = HostCapabilityRecord::capture(&detection)
+            .await
+            .expect("both fixture loaders exist");
+        write_record(path.clone(), &record).await;
+
+        let loaded = read_record(&path)
+            .await
+            .expect("a fresh dual-libc record must read back");
+        assert_eq!(loaded.libcs(), both(), "both families must survive the round trip");
+        assert_eq!(
+            loaded
+                .loaders
+                .iter()
+                .map(|entry| entry.feature.as_str())
+                .collect::<Vec<_>>(),
+            vec!["libc.glibc", "libc.musl"],
+            "a dual-libc record records both loaders, each with the family it classified as"
+        );
+
+        // Losing EITHER loader invalidates the whole record: the surviving
+        // family is still correct, but "which families does this host have" is
+        // no longer a question the record can answer.
+        tokio::fs::remove_file(&musl_loader).await.expect("remove musl loader");
+        assert!(
+            read_record(&path).await.is_none(),
+            "removing one of two loaders must invalidate the record, not silently keep the other"
+        );
+    }
+
+    /// A missing record file is a miss, not an error.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn absent_record_is_a_miss() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(read_record(&dir.path().join("nope.json")).await.is_none());
+    }
+
+    /// A record that cannot be decoded is a miss, not an error — that is how a
+    /// format change refreshes itself.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn corrupt_record_is_a_miss() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capabilities.json");
+        tokio::fs::write(&path, b"{not json").await.expect("write junk");
+        assert!(read_record(&path).await.is_none());
+    }
+
+    /// Both halves of the lifetime come off disk, so neither is trusted: an
+    /// expired record is stale, one claiming a huge TTL is clamped rather than
+    /// pinned forever, and one stamped in the future (rewound clock) is stale.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn record_freshness_is_clamped_in_both_directions() {
+        let mut record = record_for(Vec::new()).await;
+
+        record.detected_at = std::time::SystemTime::now() - std::time::Duration::from_secs(TTL_SECS + 60);
+        assert!(!record.is_fresh(), "a record past its TTL is stale");
+
+        record.ttl_seconds = u64::MAX;
+        assert!(
+            !record.is_fresh(),
+            "a record may shorten its own lifetime, never extend it past TTL_SECS"
+        );
+
+        record.ttl_seconds = TTL_SECS;
+        record.detected_at = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert!(!record.is_fresh(), "a record stamped in the future is stale");
+
+        record.detected_at = std::time::SystemTime::now();
+        assert!(record.is_fresh(), "a just-written record is fresh");
+    }
+
+    /// The 2026-08-27 lengthening, pinned by the one observation that separates
+    /// it from the hour it replaced.
+    ///
+    /// A cold detect is measured **over** the C-044 per-prompt budget
+    /// (`test/bench/shell_latency.py`, Δ 3.659–4.732 ms against 3 ms), so every
+    /// TTL expiry puts one real user prompt over budget. At one hour that was
+    /// hourly, per host. Asserting the constant's value would be a tautology;
+    /// asserting that a record written earlier the same day still answers is
+    /// the property, and it is red at 3600 and green at 86400.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_record_written_hours_ago_is_still_fresh() {
+        let mut record = record_for(Vec::new()).await;
+        record.ttl_seconds = TTL_SECS;
+        record.detected_at = std::time::SystemTime::now() - std::time::Duration::from_secs(6 * 3600);
+        assert!(
+            record.is_fresh(),
+            "a capability record written six hours ago must still answer: re-detecting costs more \
+             than the whole per-prompt budget, and the direction this clock bounds — a libc ADDED \
+             since — is the recoverable one (FeatureMismatch, exit 65, self-diagnosing)"
+        );
+    }
+
+    // ── Evidence binding: a claim needs a loader behind it ───────────────
+
+    /// The vacuous-record defect. A syntactically valid record declaring a libc
+    /// while recording no loader that classified as one passed every check under
+    /// the old two-independent-lists format: an existence check over an empty
+    /// loader list is vacuously true, so `os_features` was believed outright and
+    /// OCX would select glibc artifacts on a host it had never probed.
+    ///
+    /// The fix is structural rather than a new check — the feature set is
+    /// derived from the recorded evidence — so this test pins both halves: the
+    /// old shape is refused, and the current shape cannot express the claim.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_record_claiming_a_libc_it_has_no_evidence_for_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capabilities.json");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("a clock after the epoch")
+            .as_secs();
+
+        // Exactly the record the adversarial gate described: well-formed,
+        // stamped now, inside the TTL, declaring glibc, backed by nothing.
+        let forged = format!(
+            concat!(
+                r#"{{"os_features":["libc.glibc"],"loaders":[],"#,
+                r#""detected_at":{{"secs_since_epoch":{now},"nanos_since_epoch":0}},"#,
+                r#""ttl_seconds":3600}}"#
+            ),
+            now = now
+        );
+        tokio::fs::write(&path, forged.as_bytes())
+            .await
+            .expect("write the forged record");
+        assert!(
+            read_record(&path).await.is_none(),
+            "a record declaring a libc no recorded loader classified as must be a miss, \
+             so the caller probes instead of selecting artifacts for a libc that may not be here"
+        );
+
+        // And in the current format the claim has nowhere to live: an empty
+        // evidence list parses, and asserts nothing.
+        let evidence_free = format!(
+            concat!(
+                r#"{{"version":2,"loaders":[],"#,
+                r#""detected_at":{{"secs_since_epoch":{now},"nanos_since_epoch":0}},"#,
+                r#""ttl_seconds":3600}}"#
+            ),
+            now = now
+        );
+        tokio::fs::write(&path, evidence_free.as_bytes())
+            .await
+            .expect("write the evidence-free record");
+        let loaded = read_record(&path)
+            .await
+            .expect("a host on which nothing classified is a valid recorded answer");
+        assert!(
+            loaded.libcs().is_empty(),
+            "no evidence must mean no claim — never a family the record was not given a loader for"
+        );
+    }
+
+    /// Each guard on "this writer could have produced this file" is proven to
+    /// red on its own, so neither is silently doing the other's work: a stale
+    /// `version` is refused with no stray fields present, and a stray field is
+    /// refused with the correct `version` present.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_record_this_writer_could_not_have_produced_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("capabilities.json");
+        let loader = dir.path().join("ld-fake.so");
+        write_fake_loader(&loader, b"the loader that classified as glibc").await;
+        let record = record_for(vec![loader.to_string_lossy().into_owned()]).await;
+        let bytes = serde_json::to_vec(&record).expect("encode record");
+        let json = String::from_utf8(bytes).expect("record is UTF-8");
+
+        // Control: unmodified, it reads back.
+        tokio::fs::write(&path, json.as_bytes()).await.expect("write record");
+        assert!(
+            read_record(&path).await.is_some(),
+            "the unmodified record must be honoured, or the two mutations below prove nothing"
+        );
+
+        // Version axis alone: same bytes, older format tag.
+        let older = json.replace(r#""version":2"#, r#""version":1"#);
+        assert_ne!(older, json, "the version mutation must land");
+        tokio::fs::write(&path, older.as_bytes())
+            .await
+            .expect("write v1 record");
+        assert!(
+            read_record(&path).await.is_none(),
+            "a record from another format generation must be a miss, not parsed by guesswork"
+        );
+
+        // Unknown-field axis alone: correct version, one key this writer never
+        // emits — including the `os_features` key the old format carried.
+        let stray = json.replace(r#""version":2"#, r#""version":2,"os_features":["libc.glibc"]"#);
+        assert_ne!(stray, json, "the stray-field mutation must land");
+        tokio::fs::write(&path, stray.as_bytes())
+            .await
+            .expect("write stray-field record");
+        assert!(
+            read_record(&path).await.is_none(),
+            "a field this writer never emits means the file came from somewhere else; probe, do not read"
+        );
+    }
+
+    // ── Loader identity: existence is not freshness ──────────────────────
+
+    /// Replacing a libc **in place** keeps the loader's path, so an existence
+    /// check cannot see it — yet the executable there may now belong to a
+    /// different libc. This fixture isolates the mtime axis: same inode, same
+    /// byte length, contents rewritten.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_loader_rewritten_in_place_invalidates_the_record() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let loader = dir.path().join("ld-fake.so");
+        write_fake_loader(&loader, b"the loader that classified as glibc").await;
+        let before = tokio::fs::metadata(&loader).await.expect("stat the loader");
+
+        let path = dir.path().join("state").join("host").join("capabilities.json");
+        let record = record_for(vec![loader.to_string_lossy().into_owned()]).await;
+        write_record(path.clone(), &record).await;
+        assert!(
+            read_record(&path).await.is_some(),
+            "a record whose loader is untouched must be honoured"
+        );
+
+        // Same path, same length, different content — a reinstall that writes
+        // through the existing inode.
+        write_fake_loader(&loader, b"a DIFFERENT libc altogether samelen").await;
+        let after = tokio::fs::metadata(&loader).await.expect("stat the replacement");
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "the fixture must isolate the mtime axis: equal sizes"
+        );
+        assert_eq!(
+            after.ino(),
+            before.ino(),
+            "the fixture must isolate the mtime axis: equal inodes"
+        );
+        assert_ne!(
+            after.modified().expect("mtime"),
+            before.modified().expect("mtime"),
+            "an in-place rewrite must move the mtime, or this test proves nothing"
+        );
+
+        assert!(
+            read_record(&path).await.is_none(),
+            "a loader replaced in place must invalidate the record — the path surviving says nothing \
+             about what now executes there"
+        );
+    }
+
+    /// The shape an ordinary package install takes: write the new file beside
+    /// the old one, then `rename` over it. This fixture restores the original
+    /// length *and* mtime on the replacement, so the inode is the only field
+    /// left to notice the swap.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_loader_replaced_by_rename_invalidates_the_record() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let loader = dir.path().join("ld-fake.so");
+        write_fake_loader(&loader, b"the loader that classified as glibc").await;
+        let before = tokio::fs::metadata(&loader).await.expect("stat the loader");
+
+        let path = dir.path().join("state").join("host").join("capabilities.json");
+        let record = record_for(vec![loader.to_string_lossy().into_owned()]).await;
+        write_record(path.clone(), &record).await;
+        assert!(
+            read_record(&path).await.is_some(),
+            "a record whose loader is untouched must be honoured"
+        );
+
+        let replacement = dir.path().join("ld-fake.so.new");
+        write_fake_loader(&replacement, b"a DIFFERENT libc altogether samelen").await;
+        let times = std::fs::FileTimes::new()
+            .set_accessed(before.accessed().expect("atime"))
+            .set_modified(before.modified().expect("mtime"));
+        let handle = std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .expect("open the replacement");
+        handle.set_times(times).expect("restore the original timestamps");
+        drop(handle);
+        tokio::fs::rename(&replacement, &loader)
+            .await
+            .expect("rename over the loader");
+
+        let after = tokio::fs::metadata(&loader).await.expect("stat the replacement");
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "the fixture must isolate the inode axis: equal sizes"
+        );
+        assert_eq!(
+            after.modified().expect("mtime"),
+            before.modified().expect("mtime"),
+            "the fixture must isolate the inode axis: equal mtimes"
+        );
+        assert_ne!(
+            after.ino(),
+            before.ino(),
+            "a rename-replace must move the inode, or this test proves nothing"
+        );
+
+        assert!(
+            read_record(&path).await.is_none(),
+            "a loader replaced by rename must invalidate the record even when the timestamps are restored"
+        );
+    }
+
+    /// Every real loader path is a symlink (`/lib64/ld-linux-x86-64.so.2` →
+    /// the versioned file), so retargeting one is how a container-layer swap or
+    /// an alternatives switch changes what executes without touching the
+    /// recorded path at all.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_loader_symlink_retargeted_invalidates_the_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let glibc_file = dir.path().join("ld-linux-real.so.2");
+        let other_file = dir.path().join("ld-musl-real.so.1");
+        write_fake_loader(&glibc_file, b"the loader that classified as glibc").await;
+        write_fake_loader(&other_file, b"a DIFFERENT libc altogether samelen").await;
+        let loader = dir.path().join("ld-fake.so");
+        tokio::fs::symlink(&glibc_file, &loader)
+            .await
+            .expect("link the loader path at the glibc file");
+
+        let path = dir.path().join("state").join("host").join("capabilities.json");
+        let record = record_for(vec![loader.to_string_lossy().into_owned()]).await;
+        write_record(path.clone(), &record).await;
+        assert!(
+            read_record(&path).await.is_some(),
+            "a record whose loader symlink still points at the probed file must be honoured"
+        );
+
+        tokio::fs::remove_file(&loader).await.expect("drop the old link");
+        tokio::fs::symlink(&other_file, &loader)
+            .await
+            .expect("retarget the loader path");
+        assert!(
+            read_record(&path).await.is_none(),
+            "retargeting the loader symlink must invalidate the record — the recorded path is \
+             unchanged but a different file executes there now"
+        );
     }
 
     // ── Real-host markers (ignored; un-ignore to run on the named host) ───

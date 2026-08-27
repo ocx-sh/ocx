@@ -46,10 +46,12 @@ impl ColorMode {
             ColorMode::Always => ColorModeConfig {
                 stdout: true,
                 stderr: true,
+                relayed: true,
             },
             ColorMode::Never => ColorModeConfig {
                 stdout: false,
                 stderr: false,
+                relayed: false,
             },
             ColorMode::Auto => ColorModeConfig::from_env(),
         }
@@ -90,6 +92,17 @@ impl From<ColorMode> for clap_builder::ColorChoice {
 pub struct ColorModeConfig {
     pub stdout: bool,
     pub stderr: bool,
+    /// The decision for text this process emits for **another program to
+    /// print** — the per-prompt reconcile stream, whose lines a shell prints on
+    /// its own stderr when it evaluates them.
+    ///
+    /// Every rung above decides this exactly as it decides the two streams.
+    /// What it deliberately does **not** do is fall back to a tty probe: no
+    /// descriptor this process holds is the one the text lands on, so a probe
+    /// here would answer a question nobody asked. The caller states why that
+    /// fallback is wrong rather than merely unhelpful — see
+    /// `self_group::activate`'s reconcile path.
+    pub relayed: bool,
 }
 
 impl ColorModeConfig {
@@ -116,12 +129,16 @@ impl ColorModeConfig {
             return Self {
                 stdout: console::Term::stdout().is_term(),
                 stderr: console::Term::stderr().is_term(),
+                // Nothing in the environment refused, and the relayed channel
+                // has no descriptor of its own to probe.
+                relayed: true,
             };
         };
 
         Self {
             stdout: enabled,
             stderr: enabled,
+            relayed: enabled,
         }
     }
 
@@ -144,6 +161,7 @@ mod tests {
         let config = ColorMode::Always.config();
         assert!(config.stdout);
         assert!(config.stderr);
+        assert!(config.relayed);
     }
 
     #[test]
@@ -151,6 +169,10 @@ mod tests {
         let config = ColorMode::Never.config();
         assert!(!config.stdout);
         assert!(!config.stderr);
+        assert!(
+            !config.relayed,
+            "an explicit refusal must reach the relayed channel too"
+        );
     }
 
     #[test]

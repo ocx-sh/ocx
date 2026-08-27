@@ -19,7 +19,6 @@ pub(crate) mod find;
 pub(crate) mod find_or_install;
 pub(crate) mod find_symlink;
 pub(crate) mod garbage_collection;
-pub(crate) mod hook;
 pub(crate) mod inspect;
 pub(crate) mod install;
 pub(crate) mod layer_staging;

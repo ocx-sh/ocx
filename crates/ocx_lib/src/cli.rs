@@ -27,7 +27,7 @@ pub use classify::{ClassifyErrorKind, ClassifyExitCode, classify_error};
 pub use data_interface::{Annotation, Cell, Column, DataInterface, TreeItem};
 pub use error::{MetadataResolutionError, UsageError};
 pub use exit_code::ExitCode;
-pub use human::human_bytes;
+pub use human::{human_bytes, human_instant, human_time};
 pub use log_level::LogLevel;
 pub use log_settings::LogSettings;
 pub use options::{ColorMode, ColorModeConfig, ProgressMode};

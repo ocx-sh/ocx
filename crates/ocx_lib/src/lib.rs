@@ -23,7 +23,11 @@ pub use config::mirror::{
 pub use config::patch::{
     PatchConfig, PatchConfigError, ResolvedPatchConfig, expand_patch_path, patches_from_env, resolve_patch_config,
 };
-pub use config::{Config, RegistryConfig, RegistryDefaults};
+pub use config::shell::{
+    ConsentPatternError, ConsentScopeSpec, OCX_CONSENT_NAMESPACES, OCX_CONSENT_PATHS, ShellConfig, ShellConsent,
+    effective_consent, env_channel, normalize_consent_path, normalize_consent_pattern, validate_consent_pattern,
+};
+pub use config::{Config, ConfigTier, RegistryConfig, RegistryDefaults};
 
 #[cfg(test)]
 #[path = "../test/mod.rs"]
@@ -31,6 +35,7 @@ pub(crate) mod test;
 
 pub(crate) use media_type::*;
 
+pub mod activation;
 pub mod announce;
 pub mod archive;
 pub mod auth;

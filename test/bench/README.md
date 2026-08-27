@@ -8,6 +8,180 @@ threshold versus the committed baseline.
 Not part of the pytest acceptance suite — the harness is standalone script-driven.
 See [Smoke validation](#smoke-validation) for the lightweight pytest integration.
 
+## Second, unrelated gate: `shell_latency.py` {#shell-latency}
+
+`bench/shell_latency.py` shares this directory and nothing else — no Docker, no
+toxiproxy, no hyperfine, no baseline file. It is the NFR gate for the per-prompt
+environment reconciler (C-044): the no-op prompt path must cost **zero execs**, and
+shell startup must land within `exec_floor + 2 ms` with the floor measured in the same
+run. Entry point:
+
+```bash
+task test:shell-latency
+```
+
+That one command runs two things in order — the pure evaluator's self-check, then the
+live gate with fault injection folded into the same invocation
+(`__OCX_TESTING_LATENCY_INJECT_MS=7.0`, run under `--expect-fail
+--expect-fail-gate 'shell startup <=' --expect-fail-gate 'per-prompt reconcile'`). Both
+named gates must go red for the step to pass, so a green from an unrelated gate cannot
+stand in for either budget's own red state. 7 ms is an **edge** value, not a
+sledgehammer: it exceeds **both** budgets on its own (2 ms startup, 6.1 ms reconcile), so
+the red does not depend on whatever the baseline happened to measure, but it does not
+overshoot far enough to red an arbitrarily wide one. It is testing the number, not just
+the presence of an assert; `shell_latency.py` refuses an `--expect-fail-gate` run whose
+injection does not clear every budget it is pointed at, so a budget move cannot
+silently reduce the injection to a no-op. Results land in
+`bench/results/shell-latency*.json` and are uploaded as a CI artifact.
+
+**The injected delay is consumed inside the binary, at two separate seams** — one per
+asserted budget. `ocx_lib::shell::hook::registration`, reached only by a hook emission,
+carries the startup delay; `ocx_lib::shell::hook::checkpoint`, reached only by
+`--reconcile`, carries the reconcile delay. Both are gated on the `__testing` feature and
+neither is slept off in the harness. The split is what lets one run red both gates: each
+measured command is a separate process with its own copy of the environment variable, so
+the startup process pays at registration and the reconcile process pays at checkpoint,
+while the floor — which never receives the variable — pays at neither. A gate aimed at a
+command that emits neither seam records no delay, and `--expect-fail` fails instead of
+certifying a measurement of the wrong thing. It also means the gate must run against a
+binary built with `--features ocx/__testing`; `task test:shell-latency` builds one.
+
+**Every measured command is copied from its shipped call site or derived at run time.**
+The startup command is the POSIX env shim's own invocation (`setup/shims.rs`) plus the
+`--hook` an interactive shell resolves to; the reconcile command is parsed out of the
+hook body the binary just emitted, so the bench cannot disagree with the hook about what
+a prompt runs. Both are structurally checked before anything is timed — the startup
+command's stdout must carry the prompt hook and the floor's must not — and a mismatch
+raises rather than reporting a number, so `--expect-fail` cannot absorb it.
+
+The per-prompt no-op `--reconcile` delta is a **hard gate**, asserted against 6.1 ms —
+the startup half keeps C-044's original 2 ms, and the two are separate constants
+precisely so neither can move the other. A brief amendment loosened the reconcile to
+25 ms against an observed ~16-22 ms, but that cost was never the reconciler — it was
+`HostCapabilities::detect_and_cache` walking the loader directories on every process,
+~7,800 per-entry `tokio::fs::file_type().await` hops whose answer changes no byte of the
+emitted stream. Moving that walk to one `spawn_blocking` over `std::fs`, deduping the
+scan roots, and persisting the answer at `$OCX_HOME/state/host/capabilities.json`
+brought the delta down to ~1.0–1.3 ms.
+
+**That figure — and the 3 ms budget derived from it — measured an arena that composed
+nothing.** The lock named eight tools, but none of them was materialized in the store,
+so every one took `local_root`'s `NotFound` arm and `composer::compose` ran over an
+empty root set: no metadata read, no `${…}` interpolation, no closure walk, no entry
+build. The reconciler's dominant term was simply absent from the measurement the budget
+had been drawn through. Since 2026-08-27 the fixture writes `content/`, `metadata.json`
+and `resolve.json` for each tool, so the composition a real toolchain pays actually
+runs — and the Δ moved from 1.544 ms to **2.118–2.924 ms** across fifteen runs on a
+WSL2 dev box. A non-zero composed-entry count is itself gated, so an arena that degrades
+back to `refs/origins/`-only reds instead of reporting the flattering number again.
+
+Two per-prompt optimisations then landed on the same wave — `compose_roots`' `LocalOnly`
+arm went from a sequential `for … .await` to `join_all` over the `concurrency` parameter
+it had been accepting and ignoring, and two whole-`Env` clones per prompt were removed
+(`next_ledger`'s replay of every global path entry, and `settled_keys`' second clone for
+a handful-of-keys probe). Re-measured on that tree: **1.923–2.558 ms** over ten runs,
+median 2.195 against the pre-optimisation median of 2.373 — **-12.5% on the worst**.
+
+Eight locked tools is **not** a stress case: this repository's own `ocx.toml` declares
+eight. So that range is the real per-prompt cost of a normal project.
+
+**The budget was therefore re-derived — twice.** First 3 ms → 3.5 ms: not to make a red
+go green (2.924 fits inside 3.000 and the gate was passing) but because the budget's
+*evidence* had been falsified — its 2.447 ms worst-known-good came from the
+non-composing arena. `shell_latency.py`'s own self-check holds a measured budget to
+10–45% headroom over that constant and says "re-measure and move both together"; at 3 ms
+over the corrected worst it reds at 2.6%. 20% over 2.924 is 3.509 ms, rounded **down** to
+3.500 so the rounding could not buy headroom the measurement did not support — 19.7%.
+
+Then 3.5 ms → 3 ms once the optimisations above dropped the worst to 2.558 ms. **Nothing
+forced that one** — 3.5 over 2.558 is 36.8%, inside the band and green — and it is
+recorded as green rather than dressed up as a red: it is a placement decision, since a
+budget that far above the measured cost bounds proportionally less. 20% over 2.558 is
+3.070 ms, rounded down to 3.000 — 17.3%. Landing back on the first move's number is
+arithmetic coincidence, not retraction: 3 ms now sits over evidence that measures
+composition, which was never true of the 3 ms it matches.
+
+The tool count was left at eight throughout: shrinking the arena to fit a budget is the
+same move as widening a budget to fit the arena, pointed the other way.
+
+The series is **WSL2-only**; the GitHub-runner half has not been re-taken on a composing
+arena. A CI run should refresh it, and a worse runner figure re-triggers the same
+re-derivation — as does a further optimisation that drops the figure far enough to red
+the band for being too loose.
+
+**Then a third time, one tier over — and this one the gate was genuinely red for.**
+Both series above measured the *project* tier alone. A prompt also composes the
+**global** tier: `resolve_global_pinned_env` (`toolchain_env.rs`) runs on every
+non-stat-only prompt, unconditionally and with no consent gate (A-44 — ratified, not a
+defect). The arena carried no `$OCX_HOME/ocx.toml`, so both of that path's reads failed
+fast and the entire global per-tool cost sat **outside** every number here. Same defect
+as the two above, same tell: the missing work makes the number *smaller*, so nothing
+reds. Documenting it as a stated limitation was available and was refused — a gate that
+measures half the per-prompt cost is not a gate.
+
+The arena now seeds `$OCX_HOME` with seven locked, materialised tools (seven because
+that is what the `ocx.lock` in a real `$OCX_HOME` on this box carries). That needed one
+thing the project tier does not, and the new gate found it rather than a comment
+predicting it: the project tier reaches a package through `local_root`/`find_plain`,
+which reads the package directory alone, while the global tier goes through
+`manager.find`, which resolves the manifest chain **first** — so a lock plus a
+materialised package resolved zero of seven until the chain was published into the
+arena's blob cache too. A non-zero global-entry count is gated separately from the
+project one, because eight composing project keys are no evidence at all about the other
+call path.
+
+Twenty runs on the seeded arena, two series of ten: **4.190–4.614** (median 4.453) and
+**4.206–5.056** (median 4.710). The second series is the slower one, and the first alone
+would have set the constant to 4.614 — a figure three single runs taken between the
+series already exceed (4.605, 4.724, 5.090). Ten runs is the floor for this derivation,
+not a quota that makes the first ten authoritative; **5.090 is the worst of all 23
+observations** and is the number the budget is drawn through. The global tier's seven
+tools cost **+2.532 ms on the worst**, ~0.36 ms per tool — the same order as the project
+tier's own per-tool cost, which is the check that this is the reconciler's work and not
+the fixture's. So the budget moved a third time, 3 ms → **6.1 ms**: 20% over 5.090 is
+6.108, rounded **down** to 6.100 (19.8%). Unlike the first two moves this one was
+*forced* — 4.7 against 3.0 is a real red, not a falsified-evidence correction. The
+injection went 4 ms → 7 ms with it, which rule one requires and `shell_latency.py`
+enforces against the live value.
+
+What the number now says out loud: a prompt on a 15-tool host costs about **4.7 ms**,
+not about 2.2. The reconciler never got slower — it had been measured over half its
+work, twice over. Whether 5.5 ms is an acceptable *contract* is a product question the
+gate cannot answer; what it can do is stop the contract being written against a fixture
+that skips a tier.
+
+One thing the series makes visible and this harness does not fix: `find` upserts the
+resolution chain into `refs/blobs/` (`package_manager/tasks/find.rs`), so the global tier
+performs a store **write** per tool per prompt. Measured here, not judged here.
+
+The gate measures the **warm** record path — a real prompt reads the persisted
+capability record within its TTL — and separately records a **cold** delta (record
+deleted before the spawn), measured at Δ 3.659–4.732 ms, over budget. Warm-only is safe
+specifically *because* cold is over budget: a regression that stopped the record
+persisting would make every prompt cold, and that cannot hide behind a warm-only gate —
+it reds it. The cold number is recorded, not asserted, since nothing about it is meant
+to pass; it exists so the once-per-TTL cost is trend-checkable rather than invisible.
+The TTL is 24 h (`oci/host_capabilities.rs`), lengthened from 1 h precisely because a
+cold detect lands over budget and an hourly one put a real user's prompt over budget
+once an hour per host.
+
+One number is recorded but deliberately not asserted: `eval.ms_per_apply`, the **shell's
+own** cost of applying the reconcile stream's `PATH` string surgery, timed in a real bash
+session over `EVAL_ITERATIONS` applies. Every other number here times ocx's own process;
+this one times work the shell does with ocx's output, which no spawn measurement can see.
+It scales with both stream size and `PATH` length — measured at ~0.222 ms at a 7-segment
+`PATH`, ~0.28 ms at 46 segments, ~0.363 ms at 120 segments — which is why it is recorded
+next to `stream_bytes` and `path_segments` rather than compared against a fixed budget.
+
+The reconciler now reaches a fixed point (ocx-sh/ocx#342): a steady-state prompt, with
+nothing changed, emits **no** apply lines at all. The harness captures two streams from
+one shell session to make that assertable rather than assumed — the first fire, which
+must apply the project's path entries, and the steady-state fire right after it, which
+must apply none. Gating only the second would pass vacuously for an arena that never
+composed anything in the first place; requiring the first fire to apply is what makes
+"converged" and "inert" distinguishable. `eval.ms_per_apply` is timed over the *applying*
+(first) stream, since the steady one has no surgery left to time.
+
 ## Prerequisites {#prerequisites}
 
 - **Docker** — registry:2 and toxiproxy run as compose services

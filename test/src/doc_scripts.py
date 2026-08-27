@@ -85,7 +85,7 @@ Validated as a hard parse error on violation (§1.1).
 # ---------------------------------------------------------------------------
 
 _RECOGNISED_KEYS: frozenset[str] = frozenset(
-    {"state", "doc", "cast", "title", "description", "expect"}
+    {"state", "doc", "cast", "title", "description", "expect", "shell"}
 )
 
 # ---------------------------------------------------------------------------
@@ -139,6 +139,14 @@ class DocScriptMeta:
         description: Optional human note surfaced in failure output (EX3/DG1).
         expect: Relative path (string) to the golden-output file.  ``None``
             when absent (assertion-only mode, GO1–GO3).
+        shell: Login-shell binary the recorder spawns for a PTY replay
+            (``CastRecorder.open(shell=...)``, WP-16b).  Defaults to
+            ``"bash"`` when the ``# shell:`` header is absent — every doc
+            script shipped today relies on that default; the key exists so a
+            future cast can select a different interpreter without a second
+            recorder pipeline.  Not consulted by the verify-path executor
+            (``run_doc_script``, which always shells out via plain ``bash
+            -c``) or by the publish task — display/publish are shell-agnostic.
         cast_region: Line span ``(start, end)`` of the single
             ``# region cast`` / ``# endregion cast`` block (1-based,
             inclusive), or ``None`` when the file has no region markers
@@ -157,6 +165,7 @@ class DocScriptMeta:
     title: str = ""
     description: str | None = None
     expect: str | None = None
+    shell: str = "bash"
     cast_region: tuple[int, int] | None = None
     path: Path = field(default_factory=Path)
 
@@ -175,8 +184,8 @@ def parse_doc_header(path: Path) -> DocScriptMeta:
     internally).
 
     Recognised keys: ``state``, ``doc``, ``cast``, ``title``, ``description``,
-    ``expect``.  Any other key raises ``DocScriptParseError`` (EX5) so typos
-    like ``# scenrio:`` fail loudly.
+    ``expect``, ``shell``.  Any other key raises ``DocScriptParseError`` (EX5)
+    so typos like ``# scenrio:`` fail loudly.
 
     The ``# doc:`` value is validated against ``SLUG_RE``; violation raises
     ``DocScriptParseError``.
@@ -245,6 +254,8 @@ def parse_doc_header(path: Path) -> DocScriptMeta:
 
     expect: str | None = raw_meta.get("expect", None)
 
+    shell = raw_meta.get("shell", "bash")
+
     # --- cast/display region scan (RG0 + EX9) ---
     # RG0 (LDR 2026-05-17): the `# region cast` block is the *display*
     # selector, independent of `# cast:` (ADR H-3).  Scan for it on every
@@ -299,6 +310,7 @@ def parse_doc_header(path: Path) -> DocScriptMeta:
         title=title,
         description=description,
         expect=expect,
+        shell=shell,
         cast_region=cast_region,
         path=path,
     )

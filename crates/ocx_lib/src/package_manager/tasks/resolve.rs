@@ -281,6 +281,36 @@ impl EnvScope {
 ///
 /// Path entries are excluded because they prepend rather than replace: nothing
 /// is shadowed, both values survive.
+/// Reports whether `entry` must be dropped for naming a key in the reserved
+/// `OCX_*` / `__OCX_*` namespace, warning once per distinct key.
+///
+/// Contract C-036. The gate is unconditional and it is a **skip, never an
+/// error**: an already-published package carrying such a key must keep
+/// resolving. `ocx package create` refuses to mint a new one (C-037), so this
+/// path exists for artifacts published before that gate did.
+///
+/// The threat is a consent bypass, not a wrong diff. The env channel is
+/// deliberately additive, so a publisher inside one already-consented namespace
+/// could ship `OCX_CONSENT_NAMESPACES = "*/*"` — or `OCX_NO_HOOK=1`, or a forged
+/// `__OCX_ENV_STATE` — have it composed into the user's shell at the next
+/// prompt, and inherited by every child process from there.
+fn reserved_key_dropped(entry: &Entry, warned: &mut HashSet<String>) -> bool {
+    if !crate::env::is_reserved_ocx_key(&entry.key) {
+        return false;
+    }
+    // Warn once per key per compose, not once per contributor: two packages
+    // declaring the same reserved key is one publisher mistake to report, and
+    // the reconciler recomposes on every prompt.
+    if warned.insert(entry.key.clone()) {
+        log::warn!(
+            "env var '{}' is in the reserved OCX_*/__OCX_* namespace and was skipped; \
+             ocx's own configuration cannot be set from package metadata",
+            entry.key
+        );
+    }
+    true
+}
+
 fn log_project_env_shadowing(composed: &[Entry], project_env: &[Entry]) {
     use crate::package::metadata::env::modifier::ModifierKind;
 
@@ -816,7 +846,19 @@ impl PackageManager {
             entrypoints: out.admitted_entrypoints,
             integrations: out.admitted_integrations,
         };
+        // C-036: the gate is here rather than in `Env::apply_entries`, because
+        // `conventions::emit_lines` never routes through that function — it
+        // dispatches `Entry` straight to `Shell::export_*` for `ocx env
+        // --shell`, `ocx direnv export` and `ocx package env`, all three of
+        // which the caller `eval`s. This seam is the one both consumers share.
+        //
+        // Filtered per region rather than once over the finished vector: the
+        // caller reads `compose_count` and the overlay's aligned `provenance`
+        // as index ranges into it, and a whole-vector `retain` would silently
+        // shift both.
+        let mut reserved_warned: HashSet<String> = HashSet::new();
         let mut entries = out.entries;
+        entries.retain(|entry| !reserved_key_dropped(entry, &mut reserved_warned));
         let compose_count = entries.len();
         let mut provenance: Vec<PatchProvenance> = Vec::new();
 
@@ -872,6 +914,11 @@ impl PackageManager {
                 // afterwards, so moving entries out eliminates the per-entry String clone.
                 if let Some(overlay) = patch_set.remove(admitted_id) {
                     for (entry, entry_provenance) in overlay.entries {
+                        // Dropping the entry without its aligned provenance row
+                        // would mis-attribute every later `--show-patches` line.
+                        if reserved_key_dropped(&entry, &mut reserved_warned) {
+                            continue;
+                        }
                         entries.push(entry);
                         provenance.push(entry_provenance);
                     }
@@ -902,7 +949,18 @@ impl PackageManager {
         let contributed = scope.contributed_env();
         if !contributed.is_empty() {
             log_project_env_shadowing(&entries, contributed);
-            entries.extend_from_slice(contributed);
+            // The project `[env]` and `ocx run --env` surfaces each refuse a
+            // reserved key at parse time, and do it as a hard error rather than
+            // a skip. Re-filtering here is not that gate a second time: it is
+            // what makes the resolver's own statement unconditional, so a
+            // future contributed source cannot reopen the hole by arriving
+            // without one.
+            entries.extend(
+                contributed
+                    .iter()
+                    .filter(|entry| !reserved_key_dropped(entry, &mut reserved_warned))
+                    .cloned(),
+            );
         }
 
         Ok((entries, compose_count, provenance, attribution))
@@ -7780,5 +7838,269 @@ mod project_config_isolation_gate {
             !CONFIG_SOURCE.contains(module_token),
             "project/config.rs must not import the {module_token} resolver module (ADR AF4)"
         );
+    }
+}
+
+/// C-036 / S-038(b) — the reserved-key gate lives at the `resolve_env*` seam.
+///
+/// Every assertion here reads the **observable product**: the entry vector the
+/// resolver hands out, and the shell text `conventions::emit_lines` builds from
+/// it by dispatching each entry through `Shell::export_*`. Nothing asserts on an
+/// internal flag, because the bypass this gate closes is an eval'd stream.
+#[cfg(test)]
+mod c036_reserved_key_gate {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+
+    use crate::{
+        file_structure::{PackageDir, PackageStore},
+        oci::{Digest, Identifier, PinnedIdentifier},
+        package::{install_info::InstallInfo, metadata, resolved_package::ResolvedPackage},
+        package_manager::PackageManager,
+        shell::Shell,
+    };
+
+    use super::phase4_spec_tests::{seed_companion_pin, seed_global_descriptor, seed_package_with_constant_var};
+    use super::phase5a_spec_tests::make_manager;
+    use super::{Entry, EnvScope, host_platform};
+
+    const REGISTRY: &str = "example.com";
+    const PATCH_REGISTRY: &str = "patches.example.com";
+
+    /// The three keys S-038 names, each a live consent-bypass primitive: the
+    /// whitelist itself, the private ledger carrier, and the denial switch.
+    const RESERVED_KEYS: &[&str] = &["OCX_CONSENT_NAMESPACES", "__OCX_ENV_STATE", "OCX_NO_HOOK"];
+
+    /// A benign sibling declared beside every reserved key, so a test that
+    /// passes by resolving to nothing at all is impossible.
+    const BENIGN: (&str, &str) = ("TOOL_HOME", "/opt/tool");
+
+    fn pinned(repo: &str, registry: &str, hex_char: char) -> PinnedIdentifier {
+        let digest = Digest::Sha256(hex_char.to_string().repeat(64));
+        PinnedIdentifier::try_from(Identifier::new_registry(repo, registry).clone_with_digest(digest)).unwrap()
+    }
+
+    /// Seed an **already-published** package declaring `vars` verbatim and
+    /// return it as an installed root.
+    ///
+    /// Deliberately writes `metadata.json` and re-reads it through serde rather
+    /// than building `Metadata` in memory: that is the read path a published
+    /// artifact actually arrives on, and it is the path that must keep working
+    /// after `ocx package create` starts refusing these keys.
+    fn seed_published_root(store: &PackageStore, vars: &[(&str, &str)]) -> Arc<InstallInfo> {
+        let id = pinned("rootpkg", REGISTRY, 'r');
+        let pkg_path = store.path(&id);
+        std::fs::create_dir_all(pkg_path.join("content")).unwrap();
+        let env: Vec<serde_json::Value> = vars
+            .iter()
+            .map(|(key, value)| {
+                serde_json::json!({ "key": key, "type": "constant", "value": value, "visibility": "interface" })
+            })
+            .collect();
+        let document = serde_json::json!({ "type": "bundle", "version": 1, "env": env }).to_string();
+        std::fs::write(pkg_path.join("metadata.json"), &document).unwrap();
+        std::fs::write(
+            pkg_path.join("resolve.json"),
+            serde_json::to_string(&ResolvedPackage::new()).unwrap(),
+        )
+        .unwrap();
+        Arc::new(InstallInfo::new(
+            id,
+            serde_json::from_str::<metadata::Metadata>(&document).unwrap(),
+            ResolvedPackage::new(),
+            PackageDir { dir: pkg_path },
+        ))
+    }
+
+    fn manager_with_root(dir: &TempDir, vars: &[(&str, &str)]) -> (PackageManager, Arc<InstallInfo>) {
+        let manager = make_manager(dir);
+        let root = seed_published_root(&manager.file_structure().packages.clone(), vars);
+        (manager, root)
+    }
+
+    /// The exact bytes `conventions::emit_lines` would print for `entries` —
+    /// the same `Shell::export_*` dispatch, joined instead of `println!`ed.
+    fn emitted_stream(shell: Shell, entries: &[Entry]) -> String {
+        use crate::package::metadata::env::list::DEFAULT_SEPARATOR;
+        use crate::package::metadata::env::modifier::ModifierKind;
+
+        entries
+            .iter()
+            .filter_map(|entry| match entry.kind {
+                ModifierKind::Path => shell.export_path(&entry.key, &entry.value),
+                ModifierKind::Constant => shell.export_constant(&entry.key, &entry.value),
+                ModifierKind::List => shell.export_list(
+                    &entry.key,
+                    &entry.value,
+                    entry.separator.as_deref().unwrap_or(DEFAULT_SEPARATOR),
+                ),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// S-038(b) — read-path compatibility. A package published before the write
+    /// gate existed still resolves; only the reserved key is dropped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn published_package_with_a_reserved_key_still_resolves_without_that_key() {
+        for reserved in RESERVED_KEYS {
+            let dir = TempDir::new().unwrap();
+            let (manager, root) = manager_with_root(&dir, &[(reserved, "*/*"), BENIGN]);
+
+            let entries = manager
+                .resolve_env(&[root], false, EnvScope::package_tier(), &host_platform())
+                .await
+                .expect("an already-published package carrying a reserved key must keep resolving");
+
+            assert!(
+                !entries.iter().any(|e| e.key == *reserved),
+                "'{reserved}' must be dropped from the resolved env; entries: {entries:?}"
+            );
+            assert!(
+                entries.iter().any(|e| e.key == BENIGN.0 && e.value == BENIGN.1),
+                "the package's other env vars must survive the skip; entries: {entries:?}"
+            );
+        }
+    }
+
+    /// C-036 — the security assertion. A package-declared reserved key must not
+    /// appear in the stream `ocx env --shell=bash`, `ocx direnv export` and
+    /// `ocx package env` hand to `eval`.
+    ///
+    /// This is the assertion that goes red when the gate sits at
+    /// `Env::apply_entries` instead of at the resolver: `emit_lines` never
+    /// routes through `apply_entries`, so the key would be exported verbatim.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reserved_package_key_never_reaches_the_emitted_shell_stream() {
+        for reserved in RESERVED_KEYS {
+            let dir = TempDir::new().unwrap();
+            let (manager, root) = manager_with_root(&dir, &[(reserved, "*/*"), BENIGN]);
+
+            let entries = manager
+                .resolve_env(&[root], false, EnvScope::package_tier(), &host_platform())
+                .await
+                .expect("resolve_env must succeed");
+            let stream = emitted_stream(Shell::Bash, &entries);
+
+            assert!(
+                !stream.contains(reserved),
+                "'{reserved}' reached the eval'd stream — the gate is not at the resolver seam.\n{stream}"
+            );
+            assert!(
+                stream.contains(BENIGN.0),
+                "the benign sibling must still be emitted, or this test proves nothing.\n{stream}"
+            );
+        }
+    }
+
+    /// C-036 — the gate covers the patch-companion overlay too. A companion is
+    /// metadata from a *different* publisher, admitted by a site rule, so it is
+    /// the same bypass with one more hop.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reserved_companion_key_is_dropped_and_the_patch_boundary_stays_aligned() {
+        let dir = TempDir::new().unwrap();
+        let patch_config = crate::config::patch::ResolvedPatchConfig {
+            system_required: false,
+            no_patches: std::collections::BTreeSet::new(),
+            registry: PATCH_REGISTRY.to_string(),
+            path_template: "{registry}/{repository}".to_string(),
+            required: false,
+        };
+        let manager = make_manager(&dir).with_patches(Some(patch_config.clone()));
+        let store = manager.file_structure().packages.clone();
+
+        let companion_digest = Digest::Sha256("c".repeat(64));
+        let companion_tag = Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_tag("latest");
+        let companion_pinned = PinnedIdentifier::try_from(
+            Identifier::new_registry("ca-bundle", PATCH_REGISTRY).clone_with_digest(companion_digest.clone()),
+        )
+        .unwrap();
+        seed_package_with_constant_var(
+            &store,
+            &companion_pinned,
+            &ResolvedPackage::new(),
+            "OCX_CONSENT_NAMESPACES",
+            "*/*",
+            crate::package::metadata::visibility::Visibility::INTERFACE,
+        );
+        seed_companion_pin(manager.file_structure(), &companion_tag, &companion_digest);
+        seed_global_descriptor(&manager, &patch_config, &[&companion_tag]).await;
+
+        let root = seed_published_root(&store, &[BENIGN]);
+        let (entries, patch_start, provenance) = manager
+            .resolve_env_with_patch_boundary(&[root], false, EnvScope::package_tier(), &host_platform())
+            .await
+            .expect("a companion carrying a reserved key must not fail the composition");
+
+        assert!(
+            !entries.iter().any(|e| e.key == "OCX_CONSENT_NAMESPACES"),
+            "a companion-declared reserved key must be dropped; entries: {entries:?}"
+        );
+        assert!(
+            !emitted_stream(Shell::Bash, &entries).contains("OCX_CONSENT_NAMESPACES"),
+            "a companion-declared reserved key must not reach the eval'd stream"
+        );
+        // The overlay region is `[patch_start .. patch_start + provenance.len())`.
+        // Dropping an overlay entry without dropping its provenance row would
+        // mis-attribute every `--show-patches` annotation after it.
+        assert_eq!(
+            provenance.len(),
+            entries.len().saturating_sub(patch_start),
+            "the provenance vector must stay aligned with the surviving overlay region"
+        );
+    }
+
+    /// C-036 — nothing leaves the resolver carrying a reserved key, including
+    /// the caller-contributed tail. The project `[env]` and `ocx run --env`
+    /// surfaces each refuse these keys at parse time (a hard error); this is the
+    /// resolver's own unconditional statement, so a future contributed source
+    /// added without its own gate cannot reopen the hole.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_contributed_reserved_key_is_dropped_too() {
+        let dir = TempDir::new().unwrap();
+        let (manager, root) = manager_with_root(&dir, &[BENIGN]);
+
+        let entries = manager
+            .resolve_env(
+                &[root],
+                false,
+                EnvScope::Package {
+                    env: vec![Entry {
+                        key: "OCX_DEFAULT_REGISTRY".to_string(),
+                        value: "evil.example.com".to_string(),
+                        kind: crate::package::metadata::env::modifier::ModifierKind::Constant,
+                        separator: None,
+                    }],
+                },
+                &host_platform(),
+            )
+            .await
+            .expect("resolve_env must succeed");
+
+        assert!(
+            !entries.iter().any(|e| e.key == "OCX_DEFAULT_REGISTRY"),
+            "a contributed reserved key must be dropped; entries: {entries:?}"
+        );
+    }
+
+    /// C-036 — the skip is narrow. `is_reserved_ocx_key` is prefix-anchored, and
+    /// a key merely *containing* `OCX_` is an ordinary package variable.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_key_that_only_mentions_ocx_is_not_dropped() {
+        let dir = TempDir::new().unwrap();
+        let (manager, root) = manager_with_root(&dir, &[("MY_OCX_HOME", "/opt/ocx"), ("OCX", "1")]);
+
+        let entries = manager
+            .resolve_env(&[root], false, EnvScope::package_tier(), &host_platform())
+            .await
+            .expect("resolve_env must succeed");
+
+        for key in ["MY_OCX_HOME", "OCX"] {
+            assert!(
+                entries.iter().any(|e| e.key == key),
+                "'{key}' is outside the reserved namespace and must survive; entries: {entries:?}"
+            );
+        }
     }
 }

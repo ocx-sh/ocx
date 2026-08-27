@@ -586,6 +586,64 @@ fn tools_content_equal(a: &[LockedTool], b: &[LockedTool]) -> bool {
     })
 }
 
+/// Why the `ocx.lock` beside an `ocx.toml` cannot be used as it stands.
+///
+/// The two states this names were duplicated: `ProjectContextError` (the
+/// `ocx pull` / `ocx run` prologue) and `activation::SessionError` (the
+/// per-prompt reconciler) each carried their own `LockMissing`/`StaleLock`
+/// variant, with byte-identical `#[error]` strings and the same 78/65 mapping
+/// written out twice. A user meeting this state from a command and from a
+/// prompt must read the same sentence, and two copies of a sentence is a
+/// promise that only holds until someone edits one of them.
+///
+/// Both enums now wrap this type, so the wording and the exit codes have one
+/// home. The *control flow* deliberately stays at each site: the reconciler
+/// answers `Missing` before it parses `ocx.toml`, and hoisting the parse ahead
+/// of that check to share one function would turn "no lock, and the config is
+/// also broken" from a lock diagnosis into a parse error.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum LockCurrency {
+    /// `ocx.toml` resolved but its sibling `ocx.lock` is absent.
+    #[error("ocx.lock not found at {path}; run `ocx lock` to create it")]
+    Missing {
+        /// The `ocx.lock` that was looked for.
+        path: PathBuf,
+    },
+
+    /// `ocx.lock` exists but its stored `declaration_hash` no longer matches
+    /// the current `ocx.toml`.
+    #[error("ocx.lock is stale (ocx.toml changed since last `ocx lock`); run `ocx lock`")]
+    Stale {
+        /// The stale lock.
+        lock_path: PathBuf,
+    },
+}
+
+impl crate::cli::ClassifyExitCode for LockCurrency {
+    fn classify(&self) -> Option<crate::cli::ExitCode> {
+        use crate::cli::ExitCode;
+        match self {
+            // Project exists but is not locked — a configuration gap.
+            Self::Missing { .. } => Some(ExitCode::ConfigError),
+            // Lock exists but disagrees with `ocx.toml` — stale on-disk data.
+            Self::Stale { .. } => Some(ExitCode::DataError),
+        }
+    }
+}
+
+/// Whether `lock` still describes `config` — the one staleness gate.
+///
+/// Uses the cached accessor, so the JCS canonicalization and SHA-256 behind
+/// `declaration_hash` are paid once per loaded [`ProjectConfig`]: every caller
+/// here is a hot path that hits this on each invocation.
+///
+/// [`ProjectConfig`]: crate::project::ProjectConfig
+#[must_use]
+pub fn is_stale(lock: &ProjectLock, config: &crate::project::ProjectConfig) -> bool {
+    lock.metadata.declaration_hash != config.declaration_hash_cached()
+}
+
 #[cfg(test)]
 mod tests {
     //! Contract-first tests for [`ProjectLock`] parsing, serialization, and
@@ -710,6 +768,46 @@ repository = "ocx.sh/cmake"
             amd64 = sha256_of('1'),
             arm64 = sha256_of('2'),
         )
+    }
+
+    // --- The staleness gate --------------------------------------------------
+
+    /// Finding 11 — the gate both hot paths route through, which had **no**
+    /// unit coverage before the dedup made that visible.
+    ///
+    /// Inverting the comparison in `is_stale` reds nothing in the unit suite
+    /// without this test: `ocx pull`'s prologue and the per-prompt reconciler
+    /// were each covered only at the acceptance tier, so the one predicate they
+    /// share could have been silently reversed by either of the two edits that
+    /// used to be needed to change it.
+    ///
+    /// Both answers, on a config the test owns, because "stale" and "current"
+    /// are the same call with different data — a test that only ever saw one
+    /// could not tell the predicate from a constant.
+    ///
+    /// Red state: flip `!=` to `==` in [`super::is_stale`].
+    #[tokio::test]
+    async fn f011_the_staleness_gate_answers_both_ways_on_one_config() {
+        use crate::project::ProjectConfig;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_path = temp.path().join("ocx.toml");
+        std::fs::write(&config_path, "[tools]\n").expect("write ocx.toml");
+        let config = ProjectConfig::from_path(&config_path).await.expect("parse ocx.toml");
+
+        let mut lock = ProjectLock::from_toml_str(&v3_lock_toml()).expect("parse lock");
+
+        lock.metadata.declaration_hash = config.declaration_hash_cached().to_owned();
+        assert!(
+            !is_stale(&lock, &config),
+            "a lock whose recorded hash is the config's own is current"
+        );
+
+        lock.metadata.declaration_hash = format!("sha256:{}", sha256_of('e'));
+        assert!(
+            is_stale(&lock, &config),
+            "a lock recording a different hash is stale: `ocx.toml` moved on without it"
+        );
     }
 
     // --- Version rejection ---------------------------------------------------

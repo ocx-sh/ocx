@@ -43,9 +43,12 @@ impl Clean {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let result = context.manager().clean(self.dry_run, self.force).await?;
 
-        context
-            .api()
-            .report(&api::data::clean::Clean::new(result.objects, result.temp, self.dry_run))?;
+        context.api().report(&api::data::clean::Clean::new(
+            result.objects,
+            result.temp,
+            result.consent,
+            self.dry_run,
+        ))?;
 
         Ok(ExitCode::SUCCESS)
     }

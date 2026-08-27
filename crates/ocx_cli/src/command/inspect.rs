@@ -180,7 +180,7 @@ impl Inspect {
         // merged — `ocx env` is what answers "what is the final value", and it
         // materializes to do so because package values are `${installPath}`-
         // templated.
-        let mut env = crate::app::project_context::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
+        let mut env = ocx_lib::project::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
         env.extend(env_overrides);
 
         let report = InspectReport::new(

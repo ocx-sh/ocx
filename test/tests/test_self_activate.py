@@ -15,6 +15,7 @@ output assertions operate on stdout text, not the file-system.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,6 +36,32 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+# The global-env eval invokes the RESOLVED absolute ocx binary, never a bare
+# `ocx`. A bare name resolves through the shell's function table, and the
+# activation stream itself defines an `ocx` wrapper function, so `$(ocx …)`
+# would run the wrapper and capture its output into the env stream. The probe
+# moves with the call for the same reason. Each pattern back-references the
+# captured path, so probe and invocation must name the SAME binary — the
+# assertion goes red if either half regresses to the bare form.
+#
+# Batch and nushell keep the bare `ocx`: neither hosts a wrapper
+# (`shell::hook::wrapper` returns `None`), so no definition can shadow the call.
+# Elvish does host one, so its stream is held to the resolved-path rule too.
+_POSIX_GLOBAL_ENV_EVAL = re.compile(
+    r"""if \[ -x '(?P<bin>/[^']*/ocx)' \]; then eval "\$\('(?P=bin)' """
+    r"""--global env --shell=(?P<shell>\w+)\)"; fi"""
+)
+_FISH_GLOBAL_ENV_EVAL = re.compile(
+    r"""if test -x '(?P<bin>/[^']*/ocx)'; '(?P=bin)' """
+    r"""--global env --shell=(?P<shell>\w+) \| source; end"""
+)
+_PWSH_GLOBAL_ENV_EVAL = re.compile(
+    r"""if \(Test-Path -LiteralPath '(?P<bin>/[^']*/ocx)' -PathType Leaf\) \{ """
+    r"""\$__ocx_global_env = \(& '(?P=bin)' """
+    r"""--global env --shell=(?P<shell>\w+) \| Out-String\);"""
+)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -46,17 +73,26 @@ def _run_activate(
     extra_env: dict[str, str] | None = None,
     check: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    """Run `ocx self activate` and return the raw CompletedProcess."""
+    """Run `ocx self activate` with no terminal on ANY of its three streams.
+
+    `stdin=DEVNULL` is load-bearing, not tidiness: the interactivity probe reads
+    stdin first and stderr second, while `capture_output=True` pipes only stdout
+    and stderr. Without it the child inherits whatever fd 0 the runner had — a
+    developer's own terminal under `pytest -s` — and the "non-interactive" rows
+    below silently take the INTERACTIVE branch. Default pytest capture points
+    fd 0 at /dev/null and CI has no tty at all, so the divergence would be a
+    local-only, capture-mode-dependent one: the worst kind.
+    """
     env = dict(ocx.env)
     if extra_env:
         env.update(extra_env)
     cmd = [str(ocx.binary), "self", "activate", *extra_args]
-    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+    return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env)
 
 
-# `ocx self activate` gates completions on an interactive (TTY) session by
-# probing stderr. subprocess pipes are never TTYs, so the plain `_run_activate`
-# helper above always exercises the NON-interactive path. To exercise the
+# `ocx self activate` gates completions on an interactive (TTY) session, probing
+# stdin and then stderr. `_run_activate` above points all three streams away
+# from a terminal, so it always exercises the NON-interactive path. To exercise the
 # interactive path we attach a pseudo-terminal to the child's stderr. PTYs are
 # POSIX-only, so interactive tests are skipped on Windows.
 requires_pty = pytest.mark.skipif(sys.platform == "win32", reason="PTY (interactive stderr) is POSIX-only")
@@ -357,10 +393,10 @@ def test_activate_emits_global_env_eval_bash(
 ) -> None:
     """stdout must contain the --global env eval line for bash.
 
-    The sh-family form runs `ocx --global env` behind an ocx-existence probe,
-    with NO OCX_ACTIVATED state guard — idempotent env emission makes re-running
-    safe and an exported guard would leak across process boundaries:
-      if command -v ocx >/dev/null 2>&1; then eval "$(ocx --global env --shell=bash)"; fi
+    The sh-family form runs the resolved absolute ocx behind an executability
+    probe, with NO OCX_ACTIVATED state guard — idempotent env emission makes
+    re-running safe and an exported guard would leak across process boundaries:
+      if [ -x '<abs>/ocx' ]; then eval "$('<abs>/ocx' --global env --shell=bash)"; fi
 
     The literal substring "--global env" is the discriminating token.
     """
@@ -371,10 +407,15 @@ def test_activate_emits_global_env_eval_bash(
         "stdout must contain the '--global env' eval line for --shell=bash; "
         f"got (rc={result.returncode}):\n{stdout}\nstderr:\n{result.stderr}"
     )
-    # The eval is gated only by an ocx-existence probe, never a state guard.
-    assert "command -v ocx" in stdout, (
-        "stdout must contain 'command -v ocx' conditional for --shell=bash; "
-        f"got:\n{stdout}"
+    # The eval is gated only by an executability probe, never a state guard —
+    # and probe and call must name the same absolute binary, never a bare `ocx`.
+    match = _POSIX_GLOBAL_ENV_EVAL.search(stdout)
+    assert match is not None, (
+        "stdout must gate the eval on `[ -x '<abs>/ocx' ]` and invoke that same "
+        f"absolute path for --shell=bash; got:\n{stdout}"
+    )
+    assert match.group("shell") == "bash", (
+        f"eval must pass --shell=bash; got --shell={match.group('shell')}"
     )
     assert "OCX_ACTIVATED" not in stdout, (
         "bash activation output must NOT carry an OCX_ACTIVATED guard "
@@ -387,9 +428,9 @@ def test_activate_emits_global_env_eval_fish(
 ) -> None:
     """stdout must contain the --global env eval line for fish.
 
-    Fish form runs `ocx --global env` behind a `type -q ocx` probe, with no
-    OCX_ACTIVATED state guard:
-      if type -q ocx; ocx --global env --shell=fish | source; end
+    Fish form runs the resolved absolute ocx behind an executability probe,
+    with no OCX_ACTIVATED state guard:
+      if test -x '<abs>/ocx'; '<abs>/ocx' --global env --shell=fish | source; end
     """
     result = _run_activate(ocx, "--shell=fish")
     stdout = result.stdout
@@ -398,10 +439,15 @@ def test_activate_emits_global_env_eval_fish(
         "stdout must contain the '--global env' eval line for --shell=fish; "
         f"got (rc={result.returncode}):\n{stdout}\nstderr:\n{result.stderr}"
     )
-    # The eval is gated only by an ocx-existence probe, never a state guard.
-    assert "type -q ocx" in stdout, (
-        "stdout must contain 'type -q ocx' conditional for --shell=fish; "
-        f"got:\n{stdout}"
+    # The eval is gated only by an executability probe, never a state guard —
+    # and probe and call must name the same absolute binary, never a bare `ocx`.
+    match = _FISH_GLOBAL_ENV_EVAL.search(stdout)
+    assert match is not None, (
+        "stdout must gate the eval on `test -x '<abs>/ocx'` and invoke that same "
+        f"absolute path for --shell=fish; got:\n{stdout}"
+    )
+    assert match.group("shell") == "fish", (
+        f"eval must pass --shell=fish; got --shell={match.group('shell')}"
     )
     assert "OCX_ACTIVATED" not in stdout, (
         "fish activation output must NOT carry an OCX_ACTIVATED guard; "
@@ -415,7 +461,7 @@ def test_activate_emits_global_env_eval_pwsh(
     """stdout must contain the --global env eval line for PowerShell.
 
     PowerShell form:
-      if (Get-Command ocx -ErrorAction SilentlyContinue) { Invoke-Expression (...) }
+      if (Test-Path -LiteralPath '<abs>/ocx' -PathType Leaf) { ... & '<abs>/ocx' ... }
     """
     result = _run_activate(ocx, "--shell=pwsh")
     stdout = result.stdout
@@ -424,10 +470,15 @@ def test_activate_emits_global_env_eval_pwsh(
         "stdout must contain the '--global env' eval line for --shell=pwsh; "
         f"got (rc={result.returncode}):\n{stdout}\nstderr:\n{result.stderr}"
     )
-    # Verify the PowerShell-specific conditional form.
-    assert "Get-Command ocx" in stdout, (
-        "stdout must contain 'Get-Command ocx' conditional for --shell=pwsh; "
-        f"got:\n{stdout}"
+    # Verify the PowerShell-specific conditional form — probe and call must
+    # name the same absolute binary, never a bare `ocx`.
+    match = _PWSH_GLOBAL_ENV_EVAL.search(stdout)
+    assert match is not None, (
+        "stdout must gate the eval on `Test-Path -LiteralPath '<abs>/ocx'` and "
+        f"invoke that same absolute path for --shell=pwsh; got:\n{stdout}"
+    )
+    assert match.group("shell") == "pwsh", (
+        f"eval must pass --shell=pwsh; got --shell={match.group('shell')}"
     )
 
 
@@ -659,7 +710,7 @@ def test_activate_global_env_eval_unguarded_bash(
     whose terminals inherit it) and suppresses activation in a shell that needs
     it, while a clean SSH login still works. Idempotent env emission (PATH
     move-to-front, constants absolute) makes the guard unnecessary; the eval is
-    gated only on `command -v ocx`.
+    gated only on `[ -x '<abs>/ocx' ]`.
     """
     result = _run_activate(ocx, "--shell=bash")
     stdout = result.stdout
@@ -668,9 +719,9 @@ def test_activate_global_env_eval_unguarded_bash(
         "bash activation output must NOT guard global-env-eval on OCX_ACTIVATED; "
         f"got:\n{stdout}"
     )
-    assert "ocx --global env --shell=bash" in stdout, (
-        "bash activation output must invoke ocx --global env --shell=bash; "
-        f"got:\n{stdout}"
+    assert _POSIX_GLOBAL_ENV_EVAL.search(stdout) is not None, (
+        "bash activation output must invoke '<abs>/ocx' --global env --shell=bash "
+        f"behind its own `-x` probe; got:\n{stdout}"
     )
 
 
@@ -706,6 +757,10 @@ def test_activate_global_env_eval_runs_despite_inherited_ocx_activated_bash(
     Sources the activation output once in a subshell with `OCX_ACTIVATED=1`
     preset and asserts a stand-in `ocx` shim still ran the `--global env` eval
     (no live registry needed).
+
+    The shim is planted at the ABSOLUTE path the activation stream names, not
+    on `$PATH`: the eval resolves the binary itself precisely so that a shell
+    function or a `$PATH` entry cannot redirect it.
     """
     activation = _run_activate(ocx, "--shell=bash")
     assert activation.returncode == 0, (
@@ -716,11 +771,16 @@ def test_activate_global_env_eval_runs_despite_inherited_ocx_activated_bash(
     script.write_text(activation.stdout)
     counter = tmp_path / "global-env-eval-count"
 
-    # Stand-in `ocx` shim: each invocation appends to a counter and prints a
-    # no-op env line, so we can count `ocx --global env` runs without a registry.
-    shim_dir = tmp_path / "bin"
-    shim_dir.mkdir()
-    shim = shim_dir / "ocx"
+    eval_line = _POSIX_GLOBAL_ENV_EVAL.search(activation.stdout)
+    assert eval_line is not None, (
+        f"activation must carry the global-env eval line; got:\n{activation.stdout}"
+    )
+
+    # Stand-in `ocx` shim at the path the eval names: each invocation appends to
+    # a counter and prints a no-op env line, so we can count `ocx --global env`
+    # runs without a registry. Planting it here also satisfies the `-x` probe.
+    shim = Path(eval_line.group("bin"))
+    shim.parent.mkdir(parents=True, exist_ok=True)
     shim.write_text(
         f"""#!/bin/sh
 echo invoked >> "{counter}"
@@ -730,7 +790,7 @@ echo '# noop'
     shim.chmod(0o755)
 
     # Source once with OCX_ACTIVATED already exported — the leaked-guard case.
-    sh_script = f'export PATH="{shim_dir}:$PATH"\n. "{script}"\n'
+    sh_script = f'. "{script}"\n'
     result = subprocess.run(
         ["/bin/bash", "-c", sh_script],
         capture_output=True,
@@ -846,6 +906,41 @@ def test_real_env_sh_loads_bash_completions_when_interactive(ocx_binary: Path, o
     assert "_ocx" in result.stdout, (
         "interactive bash sourcing the real env.sh must inline + register the ocx completion; "
         f"`complete -p ocx` output:\n{result.stdout!r}\nstderr:\n{result.stderr}"
+    )
+
+
+def test_real_env_sh_honours_completion_opt_out_when_interactive(ocx_binary: Path, ocx_home: Path) -> None:
+    """OCX_NO_COMPLETIONS=1 reaches the completions env.sh injects SEPARATELY.
+
+    The activation stream is not the only place completions load. env.sh passes
+    ``--no-completion`` to ``self activate`` and re-injects completions on every
+    interactive source through a second ``ocx shell completion`` call, so a
+    ``compinit`` that runs later cannot wipe the registration. That second call
+    has to consult the same ladder as the first, or the opt-out -- and
+    ``[shell] completions = false`` with it -- is dead for every shell installed
+    by ``ocx self setup``, which is the only way real users get one.
+
+    The PATH assertion is the discriminator: without it a red could just mean
+    env.sh stopped working, rather than the opt-out being honoured. It uses
+    ``type -P`` rather than ``command -v`` on purpose -- the activation stream
+    also defines an ``ocx`` shell function, and ``command -v`` would report that
+    function's name instead of any path.
+    """
+    env_sh, env = _generate_real_env_sh(ocx_binary, ocx_home)
+    result = subprocess.run(
+        ["bash", "-i", "-c", f'. "{env_sh}"; type -P ocx; complete -p ocx'],
+        capture_output=True,
+        text=True,
+        env={**env, "OCX_NO_COMPLETIONS": "1"},
+    )
+    assert str(ocx_home) in result.stdout, (
+        "env.sh must still prepend the ocx bin dir to PATH under OCX_NO_COMPLETIONS=1; "
+        f"`type -P ocx` output:\n{result.stdout!r}\nstderr:\n{result.stderr}"
+    )
+    assert "_ocx" not in result.stdout, (
+        "OCX_NO_COMPLETIONS=1 must suppress the completions env.sh re-injects through "
+        f"`ocx shell completion`; `complete -p ocx` output:\n{result.stdout!r}\n"
+        f"stderr:\n{result.stderr}"
     )
 
 

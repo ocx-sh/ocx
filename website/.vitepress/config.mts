@@ -101,6 +101,7 @@ export default defineConfig({
             { text: "Project Toolchain", link: "/docs/in-depth/project" },
             { text: "Configuration", link: "/docs/in-depth/configuration" },
             { text: "Environments", link: "/docs/in-depth/environments" },
+            { text: "Shell Integration", link: "/docs/in-depth/shell-integration" },
             { text: "Entry Points", link: "/docs/in-depth/entry-points" },
             { text: "Deferred Tools", link: "/docs/in-depth/lazy-loading" },
             { text: "CI Integration", link: "/docs/in-depth/ci" },

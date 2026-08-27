@@ -8,7 +8,7 @@ use ocx_lib::oci;
 use ocx_lib::project::{expand_all_keyword, lazy_mode_for_tool};
 
 use crate::api;
-use crate::app::project_context::load_project_with_lock;
+use crate::app::project_context::load_project_with_lock_consenting;
 use crate::conventions;
 use crate::options;
 
@@ -74,7 +74,10 @@ impl Pull {
         // Errors propagate to the `main.rs` boundary: logged once via
         // `log::error!` and classified by `app::classify_error` from
         // `ProjectContextError`'s `ClassifyExitCode` impl.
-        let ctx = load_project_with_lock(&context).await?;
+        // Consent write seam (C-024, A-29): `pull` is one of the six commands
+        // that opt in. `load_project_with_lock`, which four read-only callers
+        // share, stamps nothing.
+        let ctx = load_project_with_lock_consenting(&context).await?;
 
         // Validate requested groups against the loaded config (unknown → 64).
         crate::app::project_context::ensure_groups_known(&self.groups, &ctx.config)?;

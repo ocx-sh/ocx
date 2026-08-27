@@ -42,11 +42,18 @@ pub struct CleanedObject {
 /// `objects` lists every package-store entry that was removed (or would be
 /// removed in dry-run mode), each with optional attribution to holding
 /// projects. `temp` lists stale temporary directories cleaned up alongside.
+/// `consent` lists swept per-project consent stamps, so a real `ocx clean`
+/// never revokes consent silently.
 ///
 /// See [`adr_clean_project_backlinks.md`] for the full data-flow contract.
 pub struct CleanResult {
     pub objects: Vec<CleanedObject>,
     pub temp: Vec<PathBuf>,
+    /// `state/projects/<key>/` directories swept because the consent stamp
+    /// inside recorded a project directory that no longer exists (or, in
+    /// dry-run mode, would have been swept). Empty when the run retained
+    /// everything.
+    pub consent: Vec<PathBuf>,
 }
 
 /// Resolve a locked tool's per-platform leaf digests into the set of root
@@ -377,10 +384,15 @@ impl PackageManager {
             match collect_project_roots(&ocx_home, self.file_structure()).await? {
                 CollectedRoots::Roots(roots) => roots,
                 CollectedRoots::RetainAll => {
+                    // Retain-all covers the consent stamps too: the run has
+                    // already decided the store's liveness picture is
+                    // untrustworthy, and over-retention is this sweep's safe
+                    // direction. The next healthy run sweeps them.
                     let temp = clean_temp(self.file_structure(), dry_run).await?;
                     return Ok(CleanResult {
                         objects: Vec::new(),
                         temp,
+                        consent: Vec::new(),
                     });
                 }
             }
@@ -438,7 +450,12 @@ impl PackageManager {
         }
 
         let temp = clean_temp(self.file_structure(), dry_run).await?;
-        Ok(CleanResult { objects, temp })
+        // The one exception to `state/` not being walked by `ocx clean`, and
+        // the one call site that walks it. Runs under `--force` too: `--force`
+        // waives the *project registry*, and this sweep never consults it —
+        // its guards are the stamp's own recorded `project_dir`.
+        let consent = sweep_consent_stamps(&self.file_structure().state, dry_run).await?;
+        Ok(CleanResult { objects, temp, consent })
     }
 }
 
@@ -496,6 +513,296 @@ async fn remove_stale_dir(dir_path: &std::path::Path, dry_run: bool, label: &str
             .map_err(|e| crate::Error::InternalFile(dir_path.to_path_buf(), e))?;
     }
     Ok(())
+}
+
+/// Prefix marking a half-written staging directory under the sweep root.
+const STAGING_PREFIX: &str = ".tmp-";
+
+/// Stamp schema version this binary understands.
+// `ConsentStamp.v` is a bare `u8` owned by `project::consent` (WP-6), so the
+// understood set is stated here rather than shared. The drift direction is
+// safe: a bumped stamp version this sweep does not know about is retained, not
+// collected. If WP-6 ever exports a version constant — or types `v` as a
+// `serde_repr` enum, which moves the gate into the deserializer — this should
+// point at it instead.
+const UNDERSTOOD_STAMP_VERSION: u8 = 1;
+
+/// Three-state outcome of probing a stamp's recorded `project_dir`.
+///
+/// The [`DirProbe::Absent`] / [`DirProbe::Indeterminate`] split is the whole
+/// guard: collapsing a transient `Err` into "gone" makes the sweep delete
+/// consent during a permission flip or an unreachable mount, and a project
+/// whose consent is deleted goes inert (A-31).
+enum DirProbe {
+    /// Something exists at the recorded path — the project is not departed.
+    Present,
+    /// An `Ok` probe proved nothing exists at the recorded path.
+    Absent,
+    /// A non-`NotFound` I/O error. Liveness is unknown; the stamp is retained.
+    Indeterminate,
+}
+
+/// Probes a stamp's recorded `project_dir`.
+///
+/// Uses `symlink_metadata`, not `metadata`: a dangling symlink left where the
+/// project directory used to be is *something*, and retaining is the safe
+/// direction on every ambiguity.
+/// Why a `state/projects/<key>/` directory is a sweep candidate.
+///
+/// The two reasons differ in whether liveness can change the answer, which is
+/// why [`remove_departed_stamps`] cannot treat them alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SweepReason {
+    /// The recorded `project_dir` was definitively absent. Liveness *is* the
+    /// reason, so removal re-probes: the project may have been recreated since
+    /// classification.
+    Departed,
+    /// The stamp records `$OCX_HOME`, which is never a consent subject (A-44).
+    /// Liveness is irrelevant here and a re-probe would be actively wrong: the
+    /// ocx root exists by definition, so re-probing would retain every one of
+    /// these forever. Pre-guard binaries wrote them on any `--global` run of
+    /// the six writers; nothing reads them, because consent never evaluates the
+    /// global tier.
+    OcxHome,
+}
+
+async fn probe_project_dir(project_dir: &Path) -> DirProbe {
+    match tokio::fs::symlink_metadata(project_dir).await {
+        Ok(_) => DirProbe::Present,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DirProbe::Absent,
+        Err(_) => DirProbe::Indeterminate,
+    }
+}
+
+/// Removes every `state/projects/<key>/` whose consent stamp records a
+/// `project_dir` that no longer exists, and returns the swept directories
+/// sorted.
+///
+/// This is the **one** exception to `state/` not being walked by `ocx clean`.
+/// Removal requires *both*: the stamp deserializes at a `v` this binary
+/// understands, and a probe immediately before removal proves its recorded
+/// `project_dir` definitively absent. Unreadable, malformed, unknown-`v`,
+/// symlinked, `.tmp-*`-staged and indeterminate-probe entries are all retained,
+/// one line at debug each.
+///
+/// Honours `dry_run` on the same terms as every other removal path: a dry run
+/// reports what it would sweep and removes nothing.
+///
+/// # Errors
+///
+/// Propagates a removal I/O failure, matching [`remove_stale_dir`]. Failing to
+/// *enumerate* the sweep root is not an error — the tree is deletable at any
+/// time and an unreadable root means "sweep nothing this run".
+async fn sweep_consent_stamps(state: &crate::file_structure::StateStore, dry_run: bool) -> crate::Result<Vec<PathBuf>> {
+    let sweep_root = state.project_state_root();
+    let mut read_dir = match tokio::fs::read_dir(&sweep_root).await {
+        Ok(entries) => entries,
+        // An absent sweep root is the ordinary state of a home that has never
+        // stamped a project — never a warning. Any other enumeration failure
+        // retains everything, which is this sweep's safe direction.
+        Err(e) => {
+            log::debug!(
+                "Consent-stamp sweep: '{}' not enumerable, sweeping nothing this run: {e}",
+                sweep_root.display()
+            );
+            return Ok(Vec::new());
+        }
+    };
+
+    // Deliberately NOT `{ name_for_path(dir) | dir in live_projects() }`: the
+    // ledger re-derives a key it already stores as the entry filename, and its
+    // population rule is strictly narrower than the consent writers' — an
+    // `[env]`-only project is never in the ledger, so a ledger-derived sweep
+    // would revoke its consent on every `ocx clean`, silently, forever.
+    // Derived once: `StateStore`'s root is `$OCX_HOME/state`, so its parent is
+    // the ocx root — the same derivation `consent::record_in`'s write guard
+    // makes, kept identical on purpose.
+    let ocx_home = state.root().parent().unwrap_or_else(|| state.root()).to_path_buf();
+    let mut candidates: Vec<(PathBuf, PathBuf, SweepReason)> = Vec::new();
+    loop {
+        let entry = match read_dir.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(e) => {
+                log::debug!(
+                    "Consent-stamp sweep: stopping enumeration of '{}': {e}",
+                    sweep_root.display()
+                );
+                break;
+            }
+        };
+
+        // A key is 16 hex characters, so a non-UTF-8 entry name is not one —
+        // and routing the two paths through the accessors keeps the layout
+        // (directory name, stamp filename) owned solely by `StateStore`.
+        let Some(key) = entry.file_name().to_str().map(str::to_owned) else {
+            log::debug!(
+                "Consent-stamp sweep: skipping '{}' — entry name is not a project key.",
+                entry.path().display()
+            );
+            continue;
+        };
+        if key.starts_with(STAGING_PREFIX) {
+            log::debug!("Consent-stamp sweep: skipping staging entry '{key}'.");
+            continue;
+        }
+        let state_dir = state.project_state_dir(&key);
+
+        // A symlinked state directory is skipped, never followed: `remove_dir_all`
+        // through a link deletes whatever it points at.
+        match tokio::fs::symlink_metadata(&state_dir).await {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                log::debug!(
+                    "Consent-stamp sweep: skipping '{}' — not a real directory.",
+                    state_dir.display()
+                );
+                continue;
+            }
+            Err(e) => {
+                log::debug!(
+                    "Consent-stamp sweep: retaining '{}', unreadable: {e}",
+                    state_dir.display()
+                );
+                continue;
+            }
+        }
+
+        let Some(project_dir) = read_stamped_project_dir(&state.consent_stamp_file(&key)).await else {
+            continue;
+        };
+        // Before the liveness probe, and outranking it: a stamp recording the
+        // ocx root is meaningless whether or not that directory is live, so
+        // `Present` must not retain it. Identity is device+inode, never path
+        // bytes. `same_dir` is sync, and this is a one-shot GC command rather
+        // than the per-prompt path, so the stat pair runs inline like the rest
+        // of this loop's per-entry work.
+
+        if crate::utility::fs::same_dir(&project_dir, &ocx_home).unwrap_or(false) {
+            candidates.push((state_dir, project_dir, SweepReason::OcxHome));
+            continue;
+        }
+
+        match probe_project_dir(&project_dir).await {
+            DirProbe::Absent => candidates.push((state_dir, project_dir, SweepReason::Departed)),
+            DirProbe::Present => {}
+            DirProbe::Indeterminate => log::debug!(
+                "Consent-stamp sweep: retaining '{}' — liveness of '{}' is indeterminate.",
+                state_dir.display(),
+                project_dir.display()
+            ),
+        }
+    }
+
+    // Deterministic output: readdir order never reaches the caller.
+    candidates.sort();
+
+    remove_departed_stamps(candidates, dry_run).await
+}
+
+/// Removes the classified candidates, re-probing each one immediately before
+/// it is removed, and returns what was swept in the order given.
+///
+/// Split out of [`sweep_consent_stamps`] because the re-probe is the whole
+/// point of this half and it defends against a window that only exists
+/// *between* the two functions: the classification loop proved `project_dir`
+/// absent at some earlier instant, and the project may have been recreated
+/// since (the CODEX-BLOCK-1 TOCTOU pattern, `project/registry.rs:105-133`).
+/// Only a second definitive [`DirProbe::Absent`] is acted on — `Present` and
+/// `Indeterminate` both retain, because deleting consent makes a live project
+/// go inert (A-31) and over-retention is this sweep's safe direction.
+///
+/// Taking the candidate list as a parameter is what makes that window
+/// reachable from a test: no in-process schedule can recreate a directory
+/// between two `await`s inside one function, so a test that has to observe the
+/// second probe has to be able to change the world between the two.
+///
+/// # Errors
+///
+/// Propagates a removal I/O failure, matching [`remove_stale_dir`].
+async fn remove_departed_stamps(
+    candidates: Vec<(PathBuf, PathBuf, SweepReason)>,
+    dry_run: bool,
+) -> crate::Result<Vec<PathBuf>> {
+    let mut swept = Vec::new();
+    for (state_dir, project_dir, reason) in candidates {
+        // Only the liveness-derived candidates re-probe. An `OcxHome` candidate
+        // is invalid by identity rather than by absence, so a probe proving the
+        // ocx root present would retain exactly the stamp this arm exists to
+        // collect.
+        if reason == SweepReason::Departed {
+            match probe_project_dir(&project_dir).await {
+                DirProbe::Absent => {}
+                DirProbe::Present | DirProbe::Indeterminate => {
+                    log::debug!(
+                        "Consent-stamp sweep: retaining '{}' — '{}' is no longer definitively absent.",
+                        state_dir.display(),
+                        project_dir.display()
+                    );
+                    continue;
+                }
+            }
+        }
+
+        log::info!(
+            "{} consent stamp for {} '{}': {}",
+            if dry_run { "Would remove" } else { "Removing" },
+            match reason {
+                SweepReason::Departed => "departed project",
+                SweepReason::OcxHome => "the ocx home, which is never a consent subject",
+            },
+            project_dir.display(),
+            state_dir.display(),
+        );
+        if !dry_run {
+            tokio::fs::remove_dir_all(&state_dir)
+                .await
+                .map_err(|e| crate::Error::InternalFile(state_dir.clone(), e))?;
+        }
+        swept.push(state_dir);
+    }
+
+    Ok(swept)
+}
+
+/// Reads a consent stamp and returns the `project_dir` it records, or `None`
+/// when the stamp is unusable.
+///
+/// An unusable stamp — absent, unreadable, malformed, or at a `v` this binary
+/// does not understand — is retained by the sweep: "I cannot read it" is not
+/// "it is garbage", and an unusable stamp is already inert at `evaluate`, so
+/// collecting it buys nothing while deleting consent a newer or rolled-back
+/// binary wrote costs a working project (A-31).
+async fn read_stamped_project_dir(stamp_path: &Path) -> Option<PathBuf> {
+    let bytes = match tokio::fs::read(stamp_path).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::debug!(
+                "Consent-stamp sweep: retaining '{}' — unreadable: {e}",
+                stamp_path.display()
+            );
+            return None;
+        }
+    };
+    let stamp: crate::project::consent::ConsentStamp = match serde_json::from_slice(&bytes) {
+        Ok(stamp) => stamp,
+        Err(e) => {
+            log::debug!(
+                "Consent-stamp sweep: retaining '{}' — stamp does not deserialize: {e}",
+                stamp_path.display()
+            );
+            return None;
+        }
+    };
+    if stamp.v != UNDERSTOOD_STAMP_VERSION {
+        log::debug!(
+            "Consent-stamp sweep: retaining '{}' — stamp version {} is not understood by this binary.",
+            stamp_path.display(),
+            stamp.v
+        );
+        return None;
+    }
+    Some(stamp.project_dir)
 }
 
 // ── Unit tests ───────────────────────────────────────────────────────────────
@@ -861,5 +1168,398 @@ repository = "localhost:5000/shfmt"
             digest_strs.iter().any(|s| s.contains("sha256:bbbb0000")),
             "shfmt digest must be a GC root; got: {digest_strs:?}"
         );
+    }
+
+    // ── consent-stamp sweep (C-023, S-033, A-31) ─────────────────────────────
+
+    /// Writes a stamp at `state/projects/<key>/consent.json` whose recorded
+    /// `project_dir` is `project_dir`, and returns the state directory.
+    fn write_stamp(state: &crate::file_structure::StateStore, key: &str, version: u8, project_dir: &Path) -> PathBuf {
+        let dir = state.project_state_dir(key);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stamp = format!(
+            r#"{{"v":{version},"project_dir":{dir_json},"sources":["ocx.sh/ocx"],"stamped_at":"2026-01-01T00:00:00Z"}}"#,
+            dir_json = serde_json::to_string(project_dir).unwrap()
+        );
+        std::fs::write(state.consent_stamp_file(key), stamp).unwrap();
+        dir
+    }
+
+    /// C-023 / S-033(b) — a stamp whose `project_dir` is gone is collected, and
+    /// the reported paths are sorted (DATA-DET: filesystem readdir order never
+    /// reaches the caller).
+    /// EC-IDENT-006 — a stamp whose recorded project_dir no longer exists is collected.
+    #[tokio::test]
+    async fn consent_sweep_collects_stamps_whose_project_dir_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::file_structure::StateStore::new(tmp.path().join("state"));
+        let gone = tmp.path().join("departed");
+        let first = write_stamp(&state, "aaaa000000000000", 1, &gone);
+        let second = write_stamp(&state, "bbbb000000000000", 1, &gone);
+
+        let swept = sweep_consent_stamps(&state, false).await.unwrap();
+
+        assert_eq!(
+            swept,
+            vec![first.clone(), second.clone()],
+            "both stamps swept, in sorted order"
+        );
+        assert!(!first.exists(), "a stamp for a departed project must be removed");
+        assert!(!second.exists(), "a stamp for a departed project must be removed");
+    }
+
+    /// C-023 / S-033(a) — the `[env]`-only project: a live `project_dir` with no
+    /// `ocx.lock` and therefore no ledger entry. The sweep reads the stamp's own
+    /// `project_dir`, never the ledger, so this stamp survives.
+    /// EC-IDENT-007 — an `[env]`-only project has no ocx.lock and can never be listed by live_projects; its stamp is retained anyway.
+    #[tokio::test]
+    async fn consent_sweep_retains_a_stamp_whose_project_dir_is_live_without_a_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::file_structure::StateStore::new(tmp.path().join("state"));
+        let live = tmp.path().join("env-only-project");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("ocx.toml"), b"[env]\n").unwrap();
+        assert!(
+            !live.join("ocx.lock").exists(),
+            "fixture must have no lock (no ledger entry)"
+        );
+        let dir = write_stamp(&state, "aaaa000000000000", 1, &live);
+
+        let swept = sweep_consent_stamps(&state, false).await.unwrap();
+
+        assert!(
+            swept.is_empty(),
+            "a live project's stamp must not be swept; got {swept:?}"
+        );
+        assert!(dir.exists(), "a live project's stamp must survive the sweep");
+    }
+
+    /// A-44 — a stamp recording `$OCX_HOME` is collected even though the ocx
+    /// root is live, and a real project's stamp in the same run is not.
+    ///
+    /// Pre-guard binaries wrote this stamp on any `--global` invocation of the
+    /// six consent writers (`ocx --global lock` first; `run` rewrote the same
+    /// key), so it exists on installations that ran before
+    /// `consent::record_in` learned to refuse it. Liveness cannot collect it:
+    /// the ocx root exists by definition, so the ordinary `DirProbe::Absent`
+    /// path retains it forever — measured, before this arm.
+    ///
+    /// Both halves are load-bearing. Without the surviving project, a sweep
+    /// that deleted every stamp would pass; without the ocx-root stamp, the
+    /// arm under test never runs. Red state: drop the `SweepReason::OcxHome`
+    /// classification and the first assertion fails with the stamp still
+    /// present; leave the classification but re-probe `OcxHome` candidates in
+    /// `remove_departed_stamps` and it fails the same way, because the ocx root
+    /// probes `Present`.
+    #[tokio::test]
+    async fn a44_consent_sweep_collects_a_stamp_recording_the_ocx_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `StateStore`'s root is `$OCX_HOME/state`, so the ocx root is `tmp`.
+        let state = crate::file_structure::StateStore::new(tmp.path().join("state"));
+
+        let stale = write_stamp(&state, "aaaa000000000000", 1, tmp.path());
+
+        let live = tmp.path().join("real-project");
+        std::fs::create_dir_all(&live).unwrap();
+        let kept = write_stamp(&state, "bbbb000000000000", 1, &live);
+
+        let swept = sweep_consent_stamps(&state, false).await.unwrap();
+
+        assert_eq!(
+            swept,
+            vec![stale.clone()],
+            "exactly the ocx-home stamp is swept; got {swept:?}"
+        );
+        assert!(
+            !stale.exists(),
+            "a stamp recording the ocx home must be collected even though the ocx root is live"
+        );
+        assert!(
+            kept.exists(),
+            "and a live project's stamp in the same run must survive — otherwise the sweep is deleting everything"
+        );
+    }
+
+    /// C-023 — **the assigned fault-injection guard.** `--dry-run` reports what
+    /// it would remove and removes nothing.
+    ///
+    /// `assert!(dir.exists())` is the assertion a `dry_run`-ignoring sweep flips.
+    #[tokio::test]
+    async fn consent_sweep_dry_run_reports_without_removing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::file_structure::StateStore::new(tmp.path().join("state"));
+        let gone = tmp.path().join("departed");
+        let dir = write_stamp(&state, "aaaa000000000000", 1, &gone);
+
+        let swept = sweep_consent_stamps(&state, true).await.unwrap();
+
+        assert_eq!(
+            swept,
+            vec![dir.clone()],
+            "a dry run still reports the stamp it would sweep"
+        );
+        assert!(dir.exists(), "a dry run must not remove the consent stamp");
+        assert!(
+            state.consent_stamp_file("aaaa000000000000").exists(),
+            "a dry run must not remove the stamp file"
+        );
+    }
+
+    /// A-31 — a stamp that does not deserialize is RETAINED. "I cannot read it"
+    /// is not "it is garbage"; the recorded `project_dir` is gone here, so only
+    /// the parse precondition can save it.
+    #[tokio::test]
+    async fn consent_sweep_retains_a_malformed_stamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::file_structure::StateStore::new(tmp.path().join("state"));
+        let dir = state.project_state_dir("aaaa000000000000");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(state.consent_stamp_file("aaaa000000000000"), b"{not json").unwrap();
+
+        let swept = sweep_consent_stamps(&state, false).await.unwrap();
+
+        assert!(swept.is_empty(), "a malformed stamp must be retained; got {swept:?}");
+        assert!(dir.exists(), "a malformed stamp must be retained");
+    }
+
+    /// A-31 — a stamp at a `v` this binary does not understand is RETAINED even
+    /// though its `project_dir` is definitively gone. Under-retention would
+    /// delete consent a newer or rolled-back binary wrote.
+    #[tokio::test]
+    async fn consent_sweep_retains_an_unknown_version_stamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::file_structure::StateStore::new(tmp.path().join("state"));
+        let gone = tmp.path().join("departed");
+        let dir = write_stamp(&state, "aaaa000000000000", 2, &gone);
+
+        let swept = sweep_consent_stamps(&state, false).await.unwrap();
+
+        assert!(swept.is_empty(), "an unknown-`v` stamp must be retained; got {swept:?}");
+        assert!(dir.exists(), "an unknown-`v` stamp must be retained");
+    }
+
+    /// A-31 — a stamp whose bytes cannot be read is RETAINED (transient
+    /// permission or I/O fault). Skipped when the process can read a `0o000`
+    /// file anyway — an observed cause, not an assumed one.
+    #[cfg(unix)]
+    /// EC-IDENT-011 — an unreadable stamp is retained, not collected: a transient permission flip must not revoke consent.
+    #[tokio::test]
+    async fn consent_sweep_retains_an_unreadable_stamp() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::file_structure::StateStore::new(tmp.path().join("state"));
+        let gone = tmp.path().join("departed");
+        let dir = write_stamp(&state, "aaaa000000000000", 1, &gone);
+        let stamp = state.consent_stamp_file("aaaa000000000000");
+        std::fs::set_permissions(&stamp, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&stamp).is_ok() {
+            eprintln!("skipping: this process reads a 0o000 file (running as root), so the fault cannot be staged");
+            return;
+        }
+
+        let swept = sweep_consent_stamps(&state, false).await.unwrap();
+
+        assert!(swept.is_empty(), "an unreadable stamp must be retained; got {swept:?}");
+        assert!(dir.exists(), "an unreadable stamp must be retained");
+    }
+
+    /// C-023 guard 1 — a symlinked state directory is skipped, never followed
+    /// into `remove_dir_all`.
+    #[cfg(unix)]
+    /// EC-IDENT-008 — a symlinked state directory is skipped, never followed.
+    #[tokio::test]
+    async fn consent_sweep_skips_a_symlinked_state_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::file_structure::StateStore::new(tmp.path().join("state"));
+        let gone = tmp.path().join("departed");
+        // A sweepable stamp, staged outside the sweep root and reachable only
+        // through a symlink named like a key.
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(
+            elsewhere.join("consent.json"),
+            format!(
+                r#"{{"v":1,"project_dir":{d},"sources":[],"stamped_at":"2026-01-01T00:00:00Z"}}"#,
+                d = serde_json::to_string(&gone).unwrap()
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(state.project_state_root()).unwrap();
+        let link = state.project_state_dir("aaaa000000000000");
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+
+        let swept = sweep_consent_stamps(&state, false).await.unwrap();
+
+        assert!(swept.is_empty(), "a symlinked state dir must be skipped; got {swept:?}");
+        assert!(link.exists(), "the symlink itself must survive");
+        assert!(
+            elsewhere.join("consent.json").exists(),
+            "the sweep must never follow a symlink into remove_dir_all"
+        );
+    }
+
+    /// C-023 guard 3 — `.tmp-*` staging names are skipped.
+    #[tokio::test]
+    async fn consent_sweep_skips_tmp_staging_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::file_structure::StateStore::new(tmp.path().join("state"));
+        let gone = tmp.path().join("departed");
+        let staging = write_stamp(&state, ".tmp-aaaa000000000000", 1, &gone);
+
+        let swept = sweep_consent_stamps(&state, false).await.unwrap();
+
+        assert!(swept.is_empty(), "a staging name must be skipped; got {swept:?}");
+        assert!(staging.exists(), "a staging name must be skipped, not swept");
+    }
+
+    /// EC-IDENT-010 — the TOCTOU re-probe: a project recreated **after** the
+    /// walk classified it as departed, but **before** the removal, is retained.
+    ///
+    /// The window is real, not theoretical: `ocx clean` enumerates the whole
+    /// sweep root and stats every recorded `project_dir` before it removes the
+    /// first stamp, so a `git clone` (or a restored mount, or a checkout that
+    /// was mid-`git switch`) landing in that interval would otherwise have its
+    /// consent revoked — and a project whose consent is deleted goes inert
+    /// (A-31), silently, with no error anywhere.
+    ///
+    /// [`remove_departed_stamps`] is called directly because that is the only
+    /// way to *be* in the window: the two probes live in different functions
+    /// precisely so a test can change the world between them, and no in-process
+    /// schedule can recreate a directory between two `await`s inside one.
+    ///
+    /// The classification the shipped walk would have reached is asserted
+    /// first, so the fixture cannot pass by never having been a candidate —
+    /// this test is about what the SECOND probe does, and a stamp that was
+    /// never `Absent` would exercise neither.
+    ///
+    /// Red state: drop the re-probe from [`remove_departed_stamps`] and the
+    /// live project's stamp is swept.
+    #[tokio::test]
+    async fn consent_sweep_retains_a_project_recreated_inside_the_toctou_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::file_structure::StateStore::new(tmp.path().join("state"));
+        let recreated = tmp.path().join("recreated");
+        let stamp_dir = write_stamp(&state, "aaaa000000000000", 1, &recreated);
+
+        // What the classification loop sees: definitively absent, so this stamp
+        // becomes a removal candidate.
+        assert!(
+            matches!(probe_project_dir(&recreated).await, DirProbe::Absent),
+            "the fixture must start as a genuine removal candidate"
+        );
+        let candidates = vec![(stamp_dir.clone(), recreated.clone(), SweepReason::Departed)];
+
+        // The window: the project comes back before the removal loop runs.
+        std::fs::create_dir(&recreated).unwrap();
+
+        let swept = remove_departed_stamps(candidates, false).await.unwrap();
+
+        assert!(
+            swept.is_empty(),
+            "a project recreated inside the TOCTOU window must not be swept; got {swept:?}"
+        );
+        assert!(
+            stamp_dir.exists(),
+            "the recreated project's consent stamp must survive — deleting it makes a live \
+             project go inert"
+        );
+    }
+
+    /// EC-IDENT-010, the other side of the window: a candidate whose recorded
+    /// `project_dir` is *still* absent at the re-probe IS removed.
+    ///
+    /// Without this, the retention test above is satisfied by a
+    /// [`remove_departed_stamps`] that never removes anything at all — a green
+    /// indistinguishable from the function having been gutted.
+    #[tokio::test]
+    async fn consent_sweep_removes_a_candidate_still_absent_at_the_re_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::file_structure::StateStore::new(tmp.path().join("state"));
+        let gone = tmp.path().join("departed");
+        let stamp_dir = write_stamp(&state, "aaaa000000000000", 1, &gone);
+
+        let swept = remove_departed_stamps(vec![(stamp_dir.clone(), gone, SweepReason::Departed)], false)
+            .await
+            .unwrap();
+
+        assert_eq!(swept, vec![stamp_dir.clone()], "a still-departed candidate is swept");
+        assert!(!stamp_dir.exists(), "a still-departed candidate's stamp is removed");
+    }
+
+    /// C-023 guard 4 — an indeterminate probe of `project_dir` retains the
+    /// stamp. The fixture stages `ENAMETOOLONG` (a 300-byte component), which
+    /// is an `Err` that is not `NotFound` for every user including root.
+    #[cfg(unix)]
+    /// EC-IDENT-009 — an indeterminate liveness probe retains; only a determinate miss collects.
+    #[tokio::test]
+    async fn consent_sweep_retains_on_an_indeterminate_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::file_structure::StateStore::new(tmp.path().join("state"));
+        let indeterminate = tmp.path().join("x".repeat(300));
+        let probe = std::fs::symlink_metadata(&indeterminate).unwrap_err();
+        assert_ne!(
+            probe.kind(),
+            std::io::ErrorKind::NotFound,
+            "fixture must stage an indeterminate probe, not an absent one; got {probe:?}"
+        );
+        let dir = write_stamp(&state, "aaaa000000000000", 1, &indeterminate);
+
+        let swept = sweep_consent_stamps(&state, false).await.unwrap();
+
+        assert!(swept.is_empty(), "an indeterminate probe must retain; got {swept:?}");
+        assert!(dir.exists(), "an indeterminate probe must retain the stamp");
+    }
+
+    /// C-023 guard 4, at the **re-probe** — an indeterminate second probe
+    /// retains, exactly as the classification probe does.
+    ///
+    /// [`consent_sweep_retains_on_an_indeterminate_probe`] covers the *first*
+    /// probe only. It reds when [`probe_project_dir`] collapses `Err` into
+    /// `Absent`, but it stays green when [`remove_departed_stamps`] splits its
+    /// `Present | Indeterminate` arm and lets the indeterminate half fall
+    /// through to removal — and that half is the A-31 hazard in its worst
+    /// form: a project that is still there, momentarily unstattable (a
+    /// permission flip, an unreachable mount), loses the consent it already
+    /// gave and goes inert.
+    ///
+    /// Passing the candidate list in is what makes the second probe reachable
+    /// at all — the same reason [`remove_departed_stamps`] takes it as a
+    /// parameter rather than computing it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn consent_sweep_retains_a_candidate_indeterminate_at_the_re_probe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::file_structure::StateStore::new(tmp.path().join("state"));
+        let indeterminate = tmp.path().join("x".repeat(300));
+        let probe = std::fs::symlink_metadata(&indeterminate).unwrap_err();
+        assert_ne!(
+            probe.kind(),
+            std::io::ErrorKind::NotFound,
+            "fixture must stage an indeterminate probe, not an absent one; got {probe:?}"
+        );
+        let stamp_dir = write_stamp(&state, "aaaa000000000000", 1, &indeterminate);
+
+        let swept = remove_departed_stamps(vec![(stamp_dir.clone(), indeterminate, SweepReason::Departed)], false)
+            .await
+            .unwrap();
+
+        assert!(swept.is_empty(), "an indeterminate re-probe must retain; got {swept:?}");
+        assert!(
+            stamp_dir.exists(),
+            "an indeterminate re-probe must not remove the stamp"
+        );
+    }
+
+    /// C-023 — no `state/projects/` yet is the ordinary state of a fresh home:
+    /// an empty sweep, no error, no warning.
+    #[tokio::test]
+    async fn consent_sweep_is_empty_when_the_sweep_root_is_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = crate::file_structure::StateStore::new(tmp.path().join("state"));
+
+        let swept = sweep_consent_stamps(&state, false).await.unwrap();
+
+        assert!(swept.is_empty(), "an absent sweep root yields nothing; got {swept:?}");
     }
 }

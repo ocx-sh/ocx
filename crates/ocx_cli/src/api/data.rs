@@ -35,6 +35,7 @@ pub mod sbom;
 pub mod script_run;
 pub mod self_setup;
 pub mod self_update;
+pub mod shell_state;
 pub mod signature;
 pub mod status;
 pub mod tag;

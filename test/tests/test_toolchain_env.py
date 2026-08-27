@@ -825,21 +825,23 @@ def test_no_entrypoint_global_tool_reachable_via_path_modifier(
 
 
 # ---------------------------------------------------------------------------
-# Security regression tests — escape_value hardening
+# Security regression tests — per-arm escaper hardening
 #
 # These acceptance-level tests verify that env metadata values containing
-# shell metacharacters arrive literally after `ocx env --shell=<x>` sourcing.
+# shell metacharacters arrive **byte-literally** after `ocx env --shell=<x>`
+# sourcing.  Byte-literal is the contract, not "carries a backslash": an
+# over-escape is a silent wrong value, and the reconciler's `C == L.applied`
+# guard compares the sourced value against what `Env::apply_entries` stores.
 #
 # Coverage:
 #   - Bash/zsh history expansion: `!!` and `!<word>` trigger in interactive
-#     shells.  escape_value escapes `!` as `\!`; `\!` is literal `!` inside
-#     bash double-quoted strings.  The test sources the export line in a
-#     non-interactive bash subshell and asserts the env var holds the literal
-#     value (CWE-78 defence).
-#   - Nushell `$env.HOME` injection: `$` interpolates in Nushell `$"..."` PATH
-#     expressions.  escape_value escapes `$` as `\$` in Nushell output so the
-#     raw value is not substituted.  The test asserts the emitted line contains
-#     the escaped form (running Nushell not required in the test environment).
+#     shells.  `export_constant` rides a POSIX **single-quoted** literal, where
+#     no expansion — history included — can fire, and the value survives
+#     byte-exact (CWE-78 defence without corruption).
+#   - Nushell: all four nushell emits use a plain, non-interpolating
+#     double-quoted literal, so `$` is inert there and rides verbatim.  The
+#     test asserts the emitted line carries the raw bytes (running Nushell is
+#     not required in the test environment).
 # ---------------------------------------------------------------------------
 
 
@@ -848,13 +850,16 @@ def test_env_bash_history_expansion_chars_land_literally(
 ) -> None:
     """Bash history-expansion metacharacters in env metadata values land literally.
 
-    Security regression for escape_value `!`-escaping (CWE-78):
+    Security regression (CWE-78) **and** value-fidelity regression:
     - ``!!`` would expand to the previous command in an interactive bash/zsh shell.
     - ``!word`` would expand the most-recent command starting with ``word``.
-    Both must survive the eval-safe channel (``ocx env --shell=bash`` → source)
-    and land as the literal string in the environment variable, not as expanded
-    history.  ``escape_value`` escapes ``!`` as ``\\!``; ``\\!`` is a literal
-    ``!`` inside bash double-quoted strings (non-interactive or interactive).
+
+    ``export_constant`` emits a POSIX single-quoted literal, where no expansion
+    fires at all, so both survive the eval-safe channel
+    (``ocx env --shell=bash`` -> source) as the exact authored bytes.  The
+    earlier double-quoted form escaped ``!`` as ``\\!``, which is *literal*
+    inside double quotes in every measured shell — the variable then held
+    ``version\\!\\!check`` where the in-process apply holds ``version!!check``.
     """
     # Publish a package with a constant env entry whose value contains !! and !word.
     danger_value = "version!!check !uname style"
@@ -885,34 +890,25 @@ def test_env_bash_history_expansion_chars_land_literally(
         f"export line for {var_name} must be present; got:\n{env_result.stdout!r}"
     )
 
-    # Assert the emitted export line contains \! (the escaped form).
-    # escape_value must neutralize `!` as `\!` so interactive bash/zsh (which
-    # have histexpand enabled) do not expand `!!` / `!word` from history.
-    # In non-interactive bash, histexpand is disabled — `!!` would not expand
-    # anyway — but the escaped form is the defence-in-depth for the interactive
-    # profile-sourcing case (e.g. `eval "$(ocx env --shell=bash)"` in .bashrc).
     lines_with_var = [ln for ln in env_result.stdout.splitlines() if var_name in ln]
     assert lines_with_var, f"No export line found for {var_name}"
     var_line = lines_with_var[0]
 
-    # The emitted line must contain `\!` (escaped bang), not bare `!!` or `!uname`.
-    assert r"\!" in var_line, (
-        f"escape_value must escape `!` as `\\!` in bash/zsh output; "
-        f"bare `!` could trigger interactive history expansion (CWE-78).\n"
-        f"export line: {var_line!r}"
+    # The value rides a single-quoted literal — no expansion can fire inside
+    # one — and carries the authored bytes with no backslash added.
+    assert var_line == f"export {var_name}='{danger_value}'", (
+        f"constant must be emitted as a POSIX single-quoted literal carrying the "
+        f"authored bytes; got: {var_line!r}"
     )
-    # The raw `!!` must not appear unescaped in the assignment value.
-    # (Split on first `=` to get only the RHS, avoiding false-positive on var name.)
-    rhs = var_line.split("=", 1)[1] if "=" in var_line else var_line
-    assert "!!" not in rhs, (
-        f"Raw `!!` must not appear unescaped in bash export RHS (history expansion risk); "
-        f"line: {var_line!r}"
+    assert "\\!" not in var_line, (
+        f"the value must not be backslash-escaped — `\\!` is literal inside a shell "
+        f"string and would corrupt the stored value; line: {var_line!r}"
     )
-    # Source the export lines and confirm the command exits cleanly (no crash,
-    # no expansion side-effect that would corrupt the environment).
+
+    # Source the export lines and confirm the variable holds the exact bytes.
     shell_result = run_after_sourcing(
         env_result.stdout,
-        f'[ -n "${{{var_name}}}" ] && echo OK',
+        f'printf "%s" "${{{var_name}}}"',
         cwd=project,
         env=dict(ocx.env),
         shell="bash",
@@ -922,28 +918,26 @@ def test_env_bash_history_expansion_chars_land_literally(
         f"sourcing ocx env --shell=bash output with ! in value must succeed; "
         f"rc={shell_result.returncode}\nstderr:\n{shell_result.stderr}"
     )
-    assert "OK" in shell_result.stdout, (
-        f"var {var_name} must be non-empty after sourcing; "
-        f"stdout:\n{shell_result.stdout!r}"
+    assert shell_result.stdout == danger_value, (
+        f"the sourced value must be byte-identical to the authored one "
+        f"(this is the `C == L.applied` operand); got {shell_result.stdout!r}"
     )
 
 
-def test_env_nushell_dollar_env_home_is_escaped_in_output(
+def test_env_nushell_dollar_env_home_lands_verbatim_in_output(
     ocx: OcxRunner, tmp_path: Path, unique_repo: str
 ) -> None:
-    """``$env.HOME`` in an env metadata value is escaped in Nushell output.
+    """``$env.HOME`` in an env metadata value rides verbatim in Nushell output.
 
-    Security regression for escape_value `$`-escaping in Nushell (CWE-78):
-    Nushell uses ``$"..."`` for PATH interpolation in ``export_path``.  A raw
-    ``$env.HOME`` in a metadata constant value would cause Nushell to substitute
-    the ``$env`` object's ``HOME`` key, overwriting the intended literal value.
-    ``escape_value`` escapes ``$`` as ``\\$`` in Nushell output; ``\\$`` is a
-    literal ``$`` in Nushell double-quoted strings.
+    All four Nushell emits use a **plain**, non-interpolating double-quoted
+    literal (``"..."``, never ``$"..."``), where ``$``, ``(`` and ``)`` carry no
+    meaning.  Escaping them was therefore not a hardening but a corruption
+    risk — it is correct only if Nushell recognises ``\\$`` as an escape in the
+    plain form, an escape table this repository cannot verify.  Emitting no
+    backslash is correct under both readings.
 
-    This test asserts the emitted Nushell export line contains the properly-
-    escaped form (``\\$env.HOME``) rather than the raw ``$env.HOME``.  Running
-    Nushell in the test environment is not required — the assertion is on the
-    bytes emitted by ``ocx env --shell=nushell``.
+    The assertion is on the bytes emitted by ``ocx env --shell=nushell``;
+    running Nushell in the test environment is not required.
     """
     danger_value = "$env.HOME/.config/mytool"
     var_name = f"T_{unique_repo.upper().replace('-', '_')}_SECURITY_B"
@@ -973,24 +967,16 @@ def test_env_nushell_dollar_env_home_is_escaped_in_output(
         f"export line for {var_name} must be present; got:\n{env_result.stdout!r}"
     )
 
-    # The literal `$` must NOT appear unescaped in the emitted assignment value.
-    # escape_value for Nushell produces `\$` for `$`, so `$env.HOME` becomes
-    # `\$env.HOME` in the output.
-    assert r"\$env.HOME" in env_result.stdout, (
-        f"$env.HOME in metadata value must be escaped as \\$env.HOME in Nushell output; "
-        f"got:\n{env_result.stdout!r}\n"
-        f"(raw $ in Nushell $\"...\" strings triggers env interpolation — CWE-78)"
-    )
-    # Bonus: the raw unescaped form must NOT appear as an assignment value
-    # (it is OK for the var_name to contain the literal string, but not the value).
     lines_with_var = [ln for ln in env_result.stdout.splitlines() if var_name in ln]
-    for ln in lines_with_var:
-        # Extract the RHS of the assignment (after the `=`).
-        rhs = ln.split("=", 1)[1] if "=" in ln else ln
-        assert "$env.HOME" not in rhs or r"\$env.HOME" in rhs, (
-            f"Raw $env.HOME must not appear unescaped in Nushell assignment RHS; "
-            f"line: {ln!r}"
-        )
+    assert lines_with_var, f"No assignment line found for {var_name}"
+    assert lines_with_var[0] == f'$env.{var_name} = "{danger_value}"', (
+        f"the plain double-quoted literal must carry the authored bytes; "
+        f"got: {lines_with_var[0]!r}"
+    )
+    assert "\\$" not in env_result.stdout, (
+        f"no backslash escape may be emitted into a plain Nushell string; "
+        f"got:\n{env_result.stdout!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
