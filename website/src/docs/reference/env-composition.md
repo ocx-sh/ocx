@@ -58,6 +58,8 @@ Naming a binding subset (`ocx run cmake -- …`) narrows composition further: on
 
 By default `ocx run` **inherits** the spawning shell's environment and merely **prepends** the composed tool `bin/` directories to `PATH` — ambient parent-shell `PATH` entries remain reachable after the project tools. The default is *not* hermetic. Pass `--clean` for a hermetic environment that drops the inherited environment and exposes only the composed tool set, exactly like `exec --clean`.
 
+One part of the spawning shell's environment is **not** inherited: whatever [shell integration][in-depth-shell-integration] applied to it. An explicit `ocx run` names the environment it wants, so the toolchain the per-prompt reconciler folded into your shell is taken back out first, using the [`__OCX_ENV_STATE`][env-ocx-env-state] ledger as the revert set — the same set the reconciler itself would revert on leaving the directory. Your own variables and your own `PATH` entries are untouched; only what OCX put there is removed, and only where the value is still the one OCX wrote. Without shell integration there is no ledger and nothing is removed. The same applies to `ocx package exec`, `ocx package test` and `ocx patch test`.
+
 ### What "hermetic" means for `ocx package exec` {#strict-isolation-exec}
 
 `ocx package exec` takes one or more OCI identifiers on the command line. It resolves each identifier, composes the declared environment variables from the resolved packages, and spawns the command with that environment. No `ocx.toml` is read — not the project file, not the global file. The entire operation is stateless with respect to project configuration.
@@ -264,7 +266,7 @@ Project and group `[env]` entries materialize as ordinary env entries and are **
 
 | Stage | Source | Notes |
 |---|---|---|
-| 1 (lowest) | Ambient inherited env | Skipped entirely under [`--clean`][cmd-run] |
+| 1 (lowest) | Ambient inherited env | Minus the shell reconciler's own contribution ([above](#strict-isolation-run)); skipped entirely under [`--clean`][cmd-run] |
 | 2 | Package-composed env | [Composition order](#composition-order) above — group-selection order, then alphabetical by binding name |
 | 3 | Patch-companion overlay | [`[patches]`][config-patches] — unaffected by this feature |
 | 4 | Project [`[env]`][config-project-env] | Constants replace; `path` entries prepend; `list` entries append |
@@ -311,6 +313,8 @@ Project and group `[env]` entries have no visibility axis at all — a project i
 [cmd-pull]: ./command-line.md#pull
 [cmd-remove]: ./command-line.md#remove
 [cmd-run]: ./command-line.md#run
+[in-depth-shell-integration]: ../in-depth/shell-integration.md
+[env-ocx-env-state]: ./environment.md#ocx-env-state
 [cmd-update]: ./command-line.md#update
 [cmd-direnv-export]: ./command-line.md#direnv-export
 [cmd-package-exec]: ./command-line.md#package-exec

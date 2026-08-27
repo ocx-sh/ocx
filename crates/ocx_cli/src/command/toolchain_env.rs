@@ -391,8 +391,7 @@ impl ToolchainEnv {
             // equivalence is the reason `--env` belongs here at all — a caller
             // that builds an argv array must be able to export the environment
             // it would otherwise execute in.
-            let mut project_env =
-                crate::app::project_context::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
+            let mut project_env = ocx_lib::project::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
             project_env.extend(env_overrides);
             let scope = ocx_lib::package_manager::EnvScope::Project {
                 no_patches: ctx.config.no_patches_repositories(),
@@ -577,7 +576,7 @@ pub(crate) async fn resolve_global_pinned_env(
             if env_groups.is_empty() {
                 env_groups = vec![DEFAULT_GROUP.to_owned()];
             }
-            let env = crate::app::project_context::project_env_entries(&config, &global_config, &env_groups);
+            let env = ocx_lib::project::project_env_entries(&config, &global_config, &env_groups);
             (config.no_patches_repositories(), env)
         }
         Err(_) => (std::collections::BTreeSet::new(), Vec::new()),

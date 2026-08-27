@@ -9,7 +9,13 @@ mod content_path;
 mod env_override;
 mod format;
 mod group_selection;
+// `pub mod` rather than the sibling `mod` + `pub use` idiom: `Hook` has no
+// consumer until WP-11 flattens it into `self activate`, and a `pub use` with
+// no consumer is an `unused_imports` failure under `warnings = "deny"`. WP-9
+// adds the re-export alongside the first call site.
+pub mod hook;
 mod identifier;
+mod interactive;
 mod lazy_mode;
 mod lazy_report;
 mod platform;
@@ -27,6 +33,7 @@ pub use env_override::EnvOverride;
 pub use format::{Format, FormatMode};
 pub use group_selection::GroupSelection;
 pub use identifier::Identifier;
+pub use interactive::Interactive;
 pub use lazy_mode::LazyMode;
 pub use lazy_report::LazyReport;
 pub use platform::PlatformOption;

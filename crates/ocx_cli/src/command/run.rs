@@ -36,7 +36,7 @@ use ocx_lib::project::{
 };
 use ocx_lib::utility::child_process;
 
-use crate::app::project_context::{filter_by_names, load_project_with_lock};
+use crate::app::project_context::{filter_by_names, load_project_with_lock_consenting};
 use crate::options;
 
 /// Run a command with the composed environment from the project toolchain.
@@ -159,7 +159,10 @@ impl Run {
         // Errors propagate to the `main.rs` boundary: logged once and
         // classified by `app::classify_error` from `ProjectContextError`'s
         // `ClassifyExitCode` impl (NoProject→64, LockMissing→78, StaleLock→65).
-        let ctx = load_project_with_lock(&context).await?;
+        // Consent write seam (C-024, A-29): `run` is one of the six commands
+        // that opt in. `load_project_with_lock`, which four read-only callers
+        // share, stamps nothing.
+        let ctx = load_project_with_lock_consenting(&context).await?;
 
         // Phase B.3: validate `-g` groups against the loaded config.
         // `default` and `all` are always valid (all is expanded later).
@@ -236,8 +239,7 @@ impl Run {
         // — the same vector both feeds the parent's own composition and is
         // forwarded over `OCX_ENV` (Phase G) so a generated launcher's re-entry
         // re-applies it after the package entries instead of reverting to them.
-        let mut project_env =
-            crate::app::project_context::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
+        let mut project_env = ocx_lib::project::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
         project_env.extend(env_overrides);
         let scope = ocx_lib::package_manager::EnvScope::Project {
             no_patches: no_patches.clone(),
@@ -267,7 +269,11 @@ impl Run {
 
         // ── Phase G: spawn child ──────────────────────────────────────────
 
-        let mut process_env = if self.clean { env::Env::clean() } else { env::Env::new() };
+        let mut process_env = if self.clean {
+            env::Env::clean()
+        } else {
+            env::Env::inherited()
+        };
         // Inject the project `no-patches` opt-out into the forwarded patch tier:
         // the base `config_view().patches` carries only the config-file tier
         // (empty `no_patches`). Forwarding the opt-out over `OCX_PATCHES` lets a

@@ -1048,9 +1048,28 @@ mod tests {
         let port = listener.local_addr().expect("addr").port();
         let server = tokio::spawn(async move {
             if let Ok((mut socket, _)) = listener.accept().await {
-                use tokio::io::AsyncWriteExt as _;
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+                // Drain the request before answering, then close the write half
+                // explicitly. Closing a socket that still holds unread inbound
+                // bytes is an ABORTIVE close: Windows sends RST, which discards
+                // the response already queued for send, and the client's
+                // `send()` fails with WSAECONNABORTED (10053) instead of
+                // returning the 3xx these tests exist to classify. Linux only
+                // ever passed on timing — the client usually parsed the response
+                // before the drop landed.
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 512];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match socket.read(&mut chunk).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => request.extend_from_slice(&chunk[..read]),
+                    }
+                }
+
                 let _ = socket.write_all(raw).await;
                 let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
             }
         });
         (port, server)

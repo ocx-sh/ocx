@@ -257,16 +257,18 @@ Without `--group`, an ambiguous remove exits with code 64 and names every group 
 
 ## Activation {#activation}
 
-A project's tools should be on `PATH` whenever you `cd` into the project — without `eval`-ing anything on every shell startup. OCX ships two entry points for project activation.
+A project's tools should be on `PATH` whenever you `cd` into the project — without `eval`-ing anything on every shell startup, and without leaking into whatever else that shell does afterward.
 
-The hooks only export variables — they never install missing tools, never contact the registry, and never mutate the [package store][in-depth-storage-packages]. Run [`ocx pull`][cmd-pull] first to materialize anything `ocx.lock` requires.
+On bash, zsh, fish, PowerShell, and elvish, the per-prompt shell hook does exactly that: once the project is [consented][in-depth-shell-integration-consent], `cd` in and its locked tools land on `PATH` at the next prompt; `cd` back out and they revert. Elvish's guard is narrower than the other four's — see [Shell Integration][in-depth-shell-integration] for the mechanism, the full per-shell coverage table, and the consent model that gates it.
 
-[`ocx direnv export`][cmd-direnv-export] is the [direnv][direnv] entry point. It is stateless — it emits a fresh export block on every invocation. [direnv][direnv] supplies the cache layer (one re-evaluation per `cd`, watched files re-trigger), so the hook stays simple. Run [`ocx direnv init`][cmd-direnv-init] in a project directory to drop a ready-made `.envrc`, then `direnv allow`.
+nushell and the shells with no append-safe prompt-hook point — the strict-POSIX family (`ash`, `dash`, `ksh`) and Windows Batch — need one of two explicit entry points instead. Neither installs missing tools, contacts the registry, or mutates the [package store][in-depth-storage-packages]; run [`ocx pull`][cmd-pull] first to materialize anything `ocx.lock` requires.
 
-For scripted environments and CI, call [`ocx run`][cmd-run] directly — it composes the project toolchain env and spawns the target command without any persistent shell state.
+[`ocx direnv export`][cmd-direnv-export] is the [direnv][direnv] entry point. It is stateless — it emits a fresh export block on every invocation. [direnv][direnv] supplies the cache layer (one re-evaluation per `cd`, watched files re-trigger), so the export stays simple. Run [`ocx direnv init`][cmd-direnv-init] in a project directory to drop a ready-made `.envrc`, then `direnv allow`.
 
-::: tip One entry point per workflow
-[direnv][direnv] users want `ocx direnv`. Scripted environments and CI use `ocx run` or `ocx pull` + `ocx package env`. There is no per-prompt shell hook — global toolchain activation uses `$OCX_HOME/env.sh` (written by the installer), not a prompt hook.
+For scripted environments and CI, call [`ocx run`][cmd-run] directly — it composes the project toolchain env and spawns the target command without any persistent shell state, on every shell including the ones the per-prompt hook already covers.
+
+::: tip Learn more
+[Shell Integration][in-depth-shell-integration] — the per-prompt hook, the consent grants that gate it, and [`ocx shell state`][cmd-shell-state] for diagnosing an inert shell.
 :::
 
 ## Global toolchain {#global-toolchain}
@@ -337,6 +339,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 [cmd-run]: ../reference/command-line.md#run
 [cmd-direnv-export]: ../reference/command-line.md#direnv-export
 [cmd-direnv-init]: ../reference/command-line.md#direnv-init
+[cmd-shell-state]: ../reference/command-line.md#shell-state
 
 <!-- environment -->
 [env-ocx-home]: ../reference/environment.md#ocx-home
@@ -366,4 +369,6 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 [in-depth-indices-bundled]: ./indices.md#bundled
 [in-depth-storage-packages]: ./storage.md#packages
 [in-depth-storage-gc]: ./storage.md#gc
+[in-depth-shell-integration]: ./shell-integration.md
+[in-depth-shell-integration-consent]: ./shell-integration.md#consent
 [in-depth-configuration]: ./configuration.md

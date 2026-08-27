@@ -5,6 +5,7 @@
 
 pub mod compose;
 pub mod config;
+pub mod consent;
 mod document;
 pub mod env;
 pub mod error;
@@ -20,14 +21,15 @@ pub mod resolve;
 
 pub use compose::{
     Origin, PositionalPackage, ResolvedTool, SelectedTool, ToolSource, check_duplicate_selection, compose_tool_set,
-    expand_all_keyword, host_leaf_identifier, parse_positional, resolve_selected_tools, select_tool_set,
+    expand_all_keyword, host_leaf_identifier, parse_positional, project_env_entries, resolve_selected_tools,
+    select_tool_set,
 };
 pub use config::{Group, PackageSettings, ProjectConfig, lazy_mode_for_tool, lazy_mode_ladder_for_tool};
 pub use env::{EnvValue, ProjectEnv};
 pub use error::{Error, ProjectError, ProjectErrorKind};
 pub use hash::{DECLARATION_HASH_VERSION, declaration_hash};
 pub use hook::{MissingState, ProjectState, load_project_state};
-pub use lock::{LockMetadata, LockVersion, LockedTool, ProjectLock, locked_tool_content_equal};
+pub use lock::{LockCurrency, LockMetadata, LockVersion, LockedTool, ProjectLock, locked_tool_content_equal};
 pub use mutate::{
     add_binding, add_binding_in_memory, binding_key, init_project, init_project_at_default, remove_binding,
     remove_binding_in_memory,

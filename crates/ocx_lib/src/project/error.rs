@@ -185,6 +185,19 @@ pub enum ProjectErrorKind {
     )]
     UnknownGroupSection { group: String, key: String },
 
+    /// `ocx.toml` declared a `[shell]` section.
+    ///
+    /// Refused with its own arm rather than left to `ProjectConfig`'s
+    /// `deny_unknown_fields` typo detector, because this is not a typo: the
+    /// section exists, and the message has to say where it belongs. Consent is
+    /// what `[shell]` carries, and a project file is exactly the untrusted
+    /// input consent gates — a checked-in `ocx.toml` that could grant its own
+    /// activation would be self-consent.
+    #[error(
+        "[shell] belongs in a config.toml tier, not in ocx.toml; a project file cannot grant its own shell activation"
+    )]
+    ShellSectionInProject,
+
     /// An `[env]` key matches the reserved `OCX_*` / `__OCX_*` namespace.
     ///
     /// Rejected at parse so a checked-in `ocx.toml` cannot set
@@ -265,6 +278,23 @@ pub enum ProjectErrorKind {
         separator: String,
         value: String,
     },
+
+    /// An `[env]` path value embeds the platform path separator, so it names
+    /// more than one directory.
+    ///
+    /// Every split-based emitter — the POSIX `awk` arm, fish, PowerShell,
+    /// elvish, nushell — reads it as two segments and compares each against the
+    /// whole operand, so the apply's own dedup never matches and each re-source
+    /// prepends another copy. `utility::path::remove_segment` cannot take it out
+    /// again either; both carry "a single directory with no `PATH_SEPARATOR`" as
+    /// a stated precondition. The reconciler drops the entry, but `ocx run`,
+    /// `ocx exec`, `ocx env --shell` and `ocx direnv export` do not go through
+    /// the reconciler, so the value is refused here as well — the boundary where
+    /// the author sees which scope and key are wrong.
+    #[error(
+        "[{scope}] key '{key}': path value {value:?} contains the platform path separator; declare one directory per entry"
+    )]
+    EnvPathSeparatorInValue { scope: String, key: String, value: String },
 
     /// A `--group` CLI argument contained an empty segment (e.g.
     /// `-g ci,,lint`). The CLI layer pre-validates this before calling
@@ -524,6 +554,7 @@ impl ClassifyExitCode for Error {
                 ProjectErrorKind::TomlParse(_)
                 | ProjectErrorKind::TomlSerialize(_)
                 | ProjectErrorKind::ReservedGroupName { .. }
+                | ProjectErrorKind::ShellSectionInProject
                 | ProjectErrorKind::UnsupportedDeclarationHashVersion { .. }
                 | ProjectErrorKind::FileTooLarge { .. }
                 | ProjectErrorKind::ToolValueMissingRegistry { .. }
@@ -547,6 +578,11 @@ impl ClassifyExitCode for Error {
                 // The file on disk is valid TOML by the serde parser's reckoning
                 // but not an editable document — same class, same remedy.
                 | ProjectErrorKind::ManifestEditParse(_) => ExitCode::ConfigError,
+                // 65, not the 78 its `[env]` siblings carry: the file is a valid
+                // ocx.toml and the entry's *shape* is legal — the value itself is
+                // the malformed datum, the same class the wire form already
+                // refuses at 65. A-10 names the code.
+                ProjectErrorKind::EnvPathSeparatorInValue { .. } => ExitCode::DataError,
                 // Not a config fault: the format-preserving writer could not
                 // express the staged mutation. Nothing the user can edit their
                 // way out of, so no sysexits code would tell the truth.
@@ -600,7 +636,7 @@ impl ClassifyExitCode for Error {
                 // Stale predecessor on partial-resolve: the caller's lock
                 // snapshot is out of date with the live config. Same
                 // classification as the read-side staleness gate
-                // (`ProjectContextError::StaleLock` → DataError 65) so
+                // ([`LockCurrency::Stale`](crate::project::LockCurrency) → DataError 65) so
                 // wrappers and scripts get a single signal regardless of
                 // which resolver path detected the mismatch.
                 ProjectErrorKind::StaleLockOnPartial { .. } => ExitCode::DataError,
@@ -831,5 +867,28 @@ mod tests {
             ProjectErrorKind::ManifestEditDiverged,
         ));
         assert_eq!(err.classify(), Some(ExitCode::Failure));
+    }
+
+    /// A-10 names exit 65 for a path value that embeds the platform separator:
+    /// the file's shape is legal and the value itself is the malformed datum,
+    /// which is the class the wire form already refuses at 65. Pinned against
+    /// the `ConfigError` (78) its `[env]` siblings carry, so a later "tidy-up"
+    /// that folds it into that arm has to argue with a test.
+    #[test]
+    fn a_multi_directory_path_value_classifies_as_a_data_error() {
+        let err = crate::project::Error::Project(ProjectError::new(
+            PathBuf::from("/tmp/ocx.toml"),
+            ProjectErrorKind::EnvPathSeparatorInValue {
+                scope: "env".to_string(),
+                key: "PATH".to_string(),
+                value: format!("a{}b", crate::env::PATH_SEPARATOR),
+            },
+        ));
+        assert_eq!(err.classify(), Some(ExitCode::DataError));
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("[env]") && rendered.contains("PATH"),
+            "the message must name the scope and key the author has to fix; got {rendered:?}"
+        );
     }
 }

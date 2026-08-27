@@ -193,27 +193,35 @@ fn unknown_root_or_escalate(entry_path: &Path) -> Result<PathBuf, Error> {
 /// `ocx.toml`/`ocx.lock` mutation is never aborted. The next `ocx lock`
 /// re-registers.
 pub async fn register_project_dir_best_effort(config_path: &Path, ocx_home: &Path) {
-    let canonical_project_dir = match tokio::fs::canonicalize(config_path).await {
-        Ok(canonical_config) => match canonical_config.parent() {
-            Some(dir) => dir.to_path_buf(),
-            None => {
+    // A-30 — one derivation, not two. `consent::canonical_project_dir` is the
+    // single owner of "config path -> canonical project directory"; the ledger
+    // key and the consent stamp are both downstream of it, so a second local
+    // copy here is a place for the two to drift apart. It is blocking (two
+    // filesystem resolutions), hence `spawn_blocking` rather than
+    // `tokio::fs::canonicalize`.
+    let owned_config_path = config_path.to_path_buf();
+    let canonical_project_dir =
+        match tokio::task::spawn_blocking(move || crate::project::consent::canonical_project_dir(&owned_config_path))
+            .await
+        {
+            Ok(Ok(dir)) => dir,
+            Ok(Err(e)) => {
                 crate::log::warn!(
-                    "Project registry: config path '{}' has no parent directory \
-                     (non-fatal, registration skipped)",
-                    canonical_config.display()
+                    "Project registry: canonicalize of config path '{}' failed \
+                 (non-fatal, registration skipped): {e}",
+                    config_path.display()
                 );
                 return;
             }
-        },
-        Err(e) => {
-            crate::log::warn!(
-                "Project registry: canonicalize of config path '{}' failed \
+            Err(e) => {
+                crate::log::warn!(
+                    "Project registry: canonicalize task for config path '{}' panicked \
                  (non-fatal, registration skipped): {e}",
-                config_path.display()
-            );
-            return;
-        }
-    };
+                    config_path.display()
+                );
+                return;
+            }
+        };
     let registry = ProjectRegistry::new(ocx_home);
     if let Err(e) = registry.register(&canonical_project_dir).await {
         crate::log::warn!(
@@ -621,6 +629,40 @@ mod tests {
             canon(&std::fs::read_link(&link).expect("read_link")),
             project,
             "symlink must resolve to the canonical project dir"
+        );
+    }
+
+    /// A-30 — the best-effort entry point keys the ledger off
+    /// `consent::canonical_project_dir`, the one owner of "config path ->
+    /// canonical project directory".
+    ///
+    /// It used to derive the directory itself, which is the drift hazard
+    /// [#352](https://github.com/ocx-sh/ocx/issues/352) names: two copies of
+    /// the derivation, one feeding the ledger key and one the consent stamp.
+    /// This is also the only coverage the function has had.
+    ///
+    /// Red state: pass `config_path` itself instead of its canonical parent —
+    /// the link then lands under the key for `.../ocx.toml` rather than for the
+    /// project directory, and both assertions fail.
+    #[tokio::test]
+    async fn a30_best_effort_registration_keys_off_the_shared_canonicalizer() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let project = make_live_project(home.path(), "proj-a");
+        let config_path = project.join("ocx.toml");
+        std::fs::write(&config_path, b"[env]\n").expect("write ocx.toml");
+
+        register_project_dir_best_effort(&config_path, home.path()).await;
+
+        let expected = crate::project::consent::canonical_project_dir(&config_path).expect("the shared canonicalizer");
+        let link = home.path().join("projects").join(link_name(&expected));
+        assert!(
+            symlink::is_link(&link),
+            "the ledger entry must sit under the key the shared canonicalizer derives"
+        );
+        assert_eq!(
+            canon(&std::fs::read_link(&link).expect("read_link")),
+            project,
+            "and resolve to the project directory, not to the config file"
         );
     }
 

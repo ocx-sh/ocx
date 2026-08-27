@@ -162,6 +162,79 @@ if ($_globalEnvOut -and $_globalEnvOut.Trim() -ne '') {
 Write-Host '[Gap A] PASS - --global env exits 0 with empty output on empty OCX_HOME'
 
 # ---------------------------------------------------------------------------
+# S-045 - one non-interactive apply/revert reconcile cycle on Windows.
+# This is the half of S-045 a script can reach: `self activate --reconcile`
+# emits an evaluable stream and Invoke-Expression applies it to THIS session,
+# which is exactly what the prompt hook does per prompt.
+#
+# RESIDUAL, stated rather than implied: this does NOT prove the prompt hook
+# FIRES. That needs a real interactive ConPTY session under Windows PowerShell
+# 5.1, which has no off-the-shelf harness (oh-my-posh's go-pty is the only
+# working precedent and it skips 5.1). See shell-activation-deep.yml.
+#
+# The revert half is the load-bearing one: an apply-only reconciler passes an
+# apply-only assertion vacuously.
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '[S-045] Non-interactive reconcile apply/revert ...'
+
+$projectRoot = Join-Path $tmpBase "ocx-reconcile-$([System.Guid]::NewGuid().ToString('N').Substring(0, 8))"
+$projectDir = Join-Path $projectRoot 'alpha'
+[System.IO.Directory]::CreateDirectory($projectDir) | Out-Null
+
+Set-Content -LiteralPath (Join-Path $projectDir 'ocx.toml') -Encoding ASCII -Value @(
+    '[env]'
+    'WP18_CONST = "alpha"'
+)
+# An empty tool set keeps this registry-free: consent reads the lock for its
+# SOURCE set only, and composition here is [env]-only.
+Set-Content -LiteralPath (Join-Path $projectDir 'ocx.lock') -Encoding ASCII -Value @(
+    'tool = []'
+    ''
+    '[metadata]'
+    'lock_version = 3'
+    'declaration_hash_version = 1'
+    'declaration_hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"'
+    'generated_by = "ocx acceptance fixture"'
+    'generated_at = "2026-01-01T00:00:00Z"'
+)
+
+# `ocx lock` is on the consent-writer allowlist, so it both normalizes the lock
+# and stamps the project - without the stamp the reconciler is inert by design
+# and every assertion below would pass for the wrong reason.
+Push-Location $projectDir
+try {
+    & $ocxBin --offline lock | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "S-045 FAIL: 'ocx lock' exited $LASTEXITCODE"
+    }
+    (& $ocxBin --offline self activate --reconcile --shell=powershell 2>$null) | Out-String | Invoke-Expression
+    if (-not (Test-Path env:WP18_CONST)) {
+        throw 'S-045 FAIL (apply): $env:WP18_CONST is unset after reconciling inside the project'
+    }
+    if ($env:WP18_CONST -ne 'alpha') {
+        throw "S-045 FAIL (apply): expected 'alpha', got '$($env:WP18_CONST)'"
+    }
+} finally {
+    Pop-Location
+}
+Write-Host '[S-045] apply PASS - $env:WP18_CONST = alpha'
+
+# Leaving the project must REVERT the constant, not merely stop re-applying it.
+# The carrier travels in $env:__OCX_ENV_STATE, which the first stream set in
+# this session, so the second invocation sees what it applied.
+Push-Location $projectRoot
+try {
+    (& $ocxBin --offline self activate --reconcile --shell=powershell 2>$null) | Out-String | Invoke-Expression
+} finally {
+    Pop-Location
+}
+if (Test-Path env:WP18_CONST) {
+    throw "S-045 FAIL (revert): `$env:WP18_CONST still set to '$($env:WP18_CONST)' after leaving the project"
+}
+Write-Host '[S-045] revert PASS - $env:WP18_CONST gone on leaving the project'
+
+# ---------------------------------------------------------------------------
 # Done.
 # ---------------------------------------------------------------------------
 Write-Host ''

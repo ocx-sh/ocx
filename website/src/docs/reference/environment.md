@@ -54,9 +54,34 @@ The `env.*` shims **and** the dedicated fish/nushell files (`~/.config/fish/conf
 
 ### `_OCX_APPLIED` {#ocx-applied}
 
-> **REMOVED** — this variable and the per-prompt shell hook that managed it (`ocx shell hook`) have been removed. Do not set or reference `_OCX_APPLIED` in shell profiles.
+> **REMOVED** — this specific variable (single underscore) is not read or written by current OCX. Do not set or reference `_OCX_APPLIED` in shell profiles.
 >
-> Global toolchain activation is now handled by `$OCX_HOME/env.sh`, sourced from the login profile via a block-marker idempotent line written by the installer. The file runs `eval "$(ocx --global env --shell=sh)"`. Project toolchain activation uses [`ocx direnv`][cmd-direnv].
+> Global toolchain activation is handled by `$OCX_HOME/env.sh`, sourced from the login profile via a block-marker idempotent line written by the installer. The file runs `eval "$(ocx --global env --shell=sh)"`. Project toolchain activation is handled by a **per-prompt reconciler** — a separate mechanism from the one `_OCX_APPLIED` belonged to, carrying its own private state variable, [`__OCX_ENV_STATE`](#ocx-env-state). See [Shell Integration][in-depth-shell-integration] for how it decides what belongs on `PATH` at every prompt. [`ocx direnv export`][cmd-direnv-export] remains available as an alternative, stateless backend for existing [direnv][direnv] users.
+
+### `__OCX_ENV_STATE` {#ocx-env-state}
+
+The private carrier the per-prompt reconciler uses to remember what it last applied to this shell's environment — the ledger that lets it tell *"a value ocx wrote"* apart from *"a value you typed"* when deciding what to change at the next prompt. See [Shell Integration → The state carrier][in-depth-shell-state-carrier] for the full contract (encoding, size cap, degradation on corruption).
+
+You will not normally read or write this variable by hand. Two things about it are useful to know:
+
+- **It is a deliberate exception to the private `__OCX_*` convention.** Every other `__OCX_*` variable is process-internal and never meant to be seen. This one has to cross the process boundary into your interactive shell — a child process cannot mutate its parent's environment any other way — and the moment a documented repair gesture exists for it (below), it is a user-facing contract whether or not the name looks internal.
+- **`unset __OCX_ENV_STATE` is the repair gesture** for a shell whose state has gone stale or whose carrier looks corrupted. See [Shell Integration → Repairing a stuck shell][in-depth-shell-repair] for what it costs — clearing the ledger also clears the memory of what the reconciler is allowed to restore.
+
+`is_reserved_ocx_key` already refuses this name everywhere ordinary env values are accepted — a package cannot declare it, `--env` cannot set it, and `ocx run` strips it from anything it would otherwise forward unchanged.
+
+### `__OCX_ENV_PWD` {#ocx-env-pwd}
+
+The one private variable the **elvish** per-prompt hook keeps in the environment, elvish only. Every other shell holds the equivalent fact in a shell variable; elvish's activation stream reaches the shell through `eval`, whose assignments cannot be relied on to escape the evaluated unit, so this one rides the environment instead.
+
+`__OCX_ENV_PWD` holds **the recording shell's pid, its `$pwd`, and the three direnv/mise yield sentinels, space-joined** (`<pid> <pwd> <DIRENV_DIR> <MISE_SHELL> <__MISE_ORIG_PATH>`, an unset sentinel contributing an empty field) — every input elvish's per-prompt guard can evaluate without spawning a process, folded into one recorded string. The name is narrower than the contents: the value answers *"has anything the guard can see moved?"*, of which the directory is one term.
+
+The pid term matters: a bare `$pwd` would let a **child** elvish process inherit an already-matching value from its parent's environment and read its own first prompt as already reconciled, even though it has never run the hook itself. Folding the pid in makes an inherited value a mismatch by construction, so a child's first prompt reconciles like every other shell's does.
+
+The sentinel tail is there because elvish has no shell-local that a hook's `eval` unit can both write and read — every other shell keeps the equivalent fact in a shell variable — so the sentinels ride the one store elvish does have rather than costing a second exported variable. A [direnv or mise takeover][in-depth-shell-coexistence] therefore changes the recorded value and reconciles at the next prompt, exactly as a `cd` does. Elvish's guard compares the whole recorded string against its own live pid, `$pwd` and sentinel values; the `ocx` wrapper clears it (to the empty string) so the next prompt reconciles unconditionally.
+
+Whether this shell has already registered its hook is decided a different way, and does not use a second environment variable: it is read off the registered `$edit:before-readline` closure's own source, scanned for a sentinel comment. That is why a shell that replaces its own process image with `exec elvish` still registers correctly — the closure list a new process image starts with is always empty, regardless of what the old image's environment held.
+
+`__OCX_ENV_PWD` is not a repair gesture and is not worth setting by hand — [`unset-env __OCX_ENV_STATE`](#ocx-env-state) is the one documented way to reset a stuck shell. It sits inside the reserved `__OCX_*` namespace, so no package can declare it and `--env` cannot set it.
 
 ### `OCX_ALLOW_YANKED` {#ocx-allow-yanked}
 
@@ -169,6 +194,38 @@ If both `OCX_CONFIG` and `--config` are set, both load — `--config` sits at th
 
 **Escape hatch**: setting this to the empty string (`OCX_CONFIG=`) is treated as unset, not as an error. Useful when the variable is exported from a shell profile and you want to disable it for a single invocation without unsetting it.
 
+### `OCX_CONSENT_PATHS` {#ocx-consent-paths}
+
+Grants the per-prompt shell hook permission to activate inside one or more exact project directories, without waiting for a consent stamp from [`ocx shell allow`][cmd-shell-allow] or an explicit [`ocx add`][cmd-add] / [`ocx lock`][cmd-lock] / [`ocx pull`][cmd-pull] run in that checkout. OS `PATH`-separator-delimited (`:` on Unix, `;` on Windows), mirroring [mise][mise]'s `MISE_TRUSTED_CONFIG_PATHS`.
+
+```sh
+export OCX_CONSENT_PATHS=/workspaces/acme-monorepo:/workspaces/acme-tools
+```
+
+Each entry is matched as an **exact canonicalized directory** — no prefix, no glob. This is the same grammar [git][git-safe-directory]'s `safe.directory` ships and for the same reason: a prefix match lets `/workspaces/acme` also cover an attacker-planted `/workspaces/acme-evil` sibling. See [Shell Integration → Consent grants][in-depth-shell-grants] for the full activation predicate, including how this grant interacts with a stamp and with [`OCX_CONSENT_NAMESPACES`](#ocx-consent-namespaces).
+
+This is the primary intended use case for a [devcontainer feature][devcontainer-features] or a CI image: the operator building the image knows the checkout path in advance and can pre-authorize it, even though the sources that checkout's `ocx.lock` will resolve against are not known at image-build time.
+
+Additive only — unioned with any `[shell.consent] paths` entries from `config.toml`, never a replacement and never higher-precedence. An unset or empty value grants nothing; it is never read as "any directory."
+
+**Neither consent variable reaches the global toolchain.** `$OCX_HOME/ocx.toml`, its `[env]`, and every package it locks are always consented — it is your own file, so it needs no grant and no grant can withhold it. It composes on every prompt even while the project you are standing in is inert. Consent gates projects only.
+
+### `OCX_CONSENT_NAMESPACES` {#ocx-consent-namespaces}
+
+Grants the per-prompt shell hook permission to activate for a project whose entire lock *names* sources inside pre-approved OCI namespaces, without a directory grant and without a per-project stamp. Comma-separated (a registry host may itself carry a `:port`, so `:` is not usable as the separator).
+
+```sh
+export OCX_CONSENT_NAMESPACES=ocx.sh/acme-corp,ghcr.io/acme-tools/*
+```
+
+Each token names one **source** — `<registry>/<first-path-segment>`, exactly two components. `ocx.sh/acme-corp` and `ocx.sh/acme-corp/*` name the identical set. **There is no whole-registry token**: `ocx.sh/*` and a bare `ocx.sh` are both rejected, because a grant covering every organization on a host trusts every publisher on it, including anyone who can register there. Grant the organizations one at a time. A pattern with `*` anywhere but that trailing position, an uppercase byte, or an `@` is rejected too — the whole variable's contribution is discarded with one warning rather than partially applied. A trailing or doubled comma is a separator artifact, not a pattern: empty tokens are dropped before matching, never treated as a catch-all.
+
+This answers a different question than `OCX_CONSENT_PATHS` does: *whose binaries may reach my `PATH`*, rather than *which checkout may activate at all*. See [Shell Integration → Consent grants][in-depth-shell-grants] for why both exist and how a project satisfies either one independently. Additive only, same rule as `OCX_CONSENT_PATHS`: unioned with `[shell.consent] namespaces` from `config.toml`, and an unset or empty value grants nothing.
+
+**The match is against the package store's record, not against the lock's text.** `ocx.lock` is project-supplied text, so a clone naming a listed organization proves nothing on its own. What is matched is the store's own record of the coordinate each locked digest was materialized under *on this machine* — so a lock that borrows a listed organization's name for content this machine never pulled under it is refused, and [`ocx shell state`][cmd-shell-state] names the disagreement. Writing that record takes an act of pulling here under that name: on a machine that has not cached the digest the bytes come off the wire under it, and where the layer cache already holds them one `ocx pull` naming the granted organization is enough. A project whose tools this machine has not fetched yet is simply inert until the first [`ocx pull`][cmd-pull], which writes a per-project consent stamp anyway. What the grant still cannot confirm is *who* published the bytes: publishing into a listed organization needs that organization's publish credential and nothing more, and the recorded coordinate is the one you named rather than the endpoint your own `[mirrors]` or index routing dialled. See [Shell Integration → What consent does not cover][in-depth-shell-residual]. List organizations whose publish credentials you actually control, and no others.
+
+**This grant does not extend to a project's own `[env]` table.** It authorizes the tools `ocx.lock` resolved, never the `[env]` entries a project's own `ocx.toml` declares — that table has no publisher at all, so a relative `type = "path"` value works from clone content alone, with no registry served bytes to record. A namespace-granted project that also declares `[env]` still gets its tools; OCX withholds the table and prints a hint naming the fix: run [`ocx pull`][cmd-pull] there once (which also writes a consent stamp), or add the directory to `[shell.consent] paths`. See [Shell Integration → What consent does not cover][in-depth-shell-residual].
+
 ### `OCX_DEFAULT_REGISTRY` {#ocx-default-registry}
 
 The default registry to use when no registry is specified in a package reference on the [command line][cmd-ref].
@@ -187,7 +244,7 @@ export OCX_GLOBAL=1
 
 This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx run` calls — see the same tier selection.
 
-**No implicit fallback**: the earlier implicit `$OCX_HOME/ocx.toml` discovery (home-tier fallback) has been removed. The global toolchain is only active when `--global` is explicitly passed or `OCX_GLOBAL` is set. Absent both, `ocx` does not discover any home-tier project file.
+**No implicit fallback, for these tier-selecting commands only**: the earlier implicit `$OCX_HOME/ocx.toml` discovery (home-tier fallback) has been removed. `add`/`remove`/`lock`/`update`/`pull`/`run`/`env` target the global toolchain only when `--global` is explicitly passed or `OCX_GLOBAL` is set — absent both, they resolve against a discovered project file, never a silent home-tier fallback. This is a statement about which *file a command targets*, not about whether the global toolchain is active: the [per-prompt shell reconciler][in-depth-shell-integration] composes it into the live environment unconditionally, with neither flag set — see [`OCX_CONSENT_PATHS`](#ocx-consent-paths) above.
 
 `OCX_GLOBAL` and [`OCX_PROJECT`](#ocx-project) are mutually exclusive — setting both is a usage error (exit 64).
 
@@ -526,6 +583,20 @@ export OCX_NO_COMPLETIONS=1
 
 This variable has no effect on [`ocx shell completion`][cmd-shell-completion], which always generates the completion script regardless.
 
+### `OCX_NO_HOOK` {#ocx-no-hook}
+
+When set to a [truthy value](#truthy-values), disables the per-prompt shell reconciler entirely. `ocx self activate` still runs at shell start — `PATH` prepend, completions and the global toolchain env eval are unaffected — but it registers no per-prompt hook, so nothing in this shell recomposes on `cd`, on a lock change, or after `ocx update`. See [Shell Integration][in-depth-shell-integration] for what the hook does when it is not disabled.
+
+```sh
+export OCX_NO_HOOK=1
+```
+
+This is a boolean, not a tri-state — there is no `OCX_HOOK=0|1|auto` — mirroring every other `OCX_NO_*` toggle in this reference (`OCX_NO_CONFIG`, `OCX_NO_COMPLETIONS`, `OCX_NO_MODIFY_PATH`, `OCX_NO_PROJECT`, `OCX_NO_VERIFY`). The positive channel is the `--hook` flag on [`ocx self setup`][cmd-self-setup] and [`ocx self activate`][cmd-self-activate], and an unset variable already means "auto" (on, for an interactive shell).
+
+**Read once, at shell start — never on the per-prompt path.** Exporting `OCX_NO_HOOK=1` mid-session takes effect at the *next* shell start, not the next prompt: the per-prompt reconciler's own budget forbids reading configuration or environment toggles on every prompt, so whether the hook runs at all is decided once, when the shell's activation shim sources `ocx self activate`.
+
+**The only gesture that makes a shell wholly inert.** [`OCX_NO_CONFIG`](#ocx-no-config) empties the discovered configuration chain and suppresses the managed tier, but it does not touch an explicit-tier [`--config`](#ocx-config) / [`OCX_CONFIG`](#ocx-config) file or the [`OCX_CONSENT_PATHS`](#ocx-consent-paths) / [`OCX_CONSENT_NAMESPACES`](#ocx-consent-namespaces) grants — any of those can still activate the hook for a consented project even with `OCX_NO_CONFIG=1` set. `OCX_NO_HOOK=1` is the one variable that shuts the whole mechanism off regardless of what else is configured.
+
 ### `OCX_NO_UPDATE_CHECK` {#ocx-no-update-check}
 
 When set to a [truthy value](#truthy-values), OCX will not check the remote registry for newer versions on CLI startup.
@@ -797,11 +868,19 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [fulcio]: https://github.com/sigstore/fulcio
 [rekor]: https://github.com/sigstore/rekor
 [sigstore-tuf]: https://docs.sigstore.dev/certificate_authority/overview/
+[mise]: https://mise.jdx.dev/cli/trust.html
+[git-safe-directory]: https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory
+[direnv]: https://direnv.net/
 
 <!-- commands -->
 [cmd-ref]: command-line.md
 [cmd-direnv]: command-line.md#direnv
 [cmd-direnv-export]: command-line.md#direnv-export
+[cmd-add]: command-line.md#add
+[cmd-lock]: command-line.md#lock
+[cmd-shell-allow]: command-line.md#shell-allow
+[cmd-pull]: command-line.md#pull
+[cmd-shell-state]: command-line.md#shell-state
 [cmd-package-sign]: command-line.md#package-sign
 [cmd-package-attest]: command-line.md#package-attest
 [cmd-package-verify]: command-line.md#package-verify
@@ -845,6 +924,12 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [in-depth-indices-public]: ../in-depth/indices.md#public-index
 [in-depth-lazy-loading]: ../in-depth/lazy-loading.md
 [in-depth-lazy-loading-ladder]: ../in-depth/lazy-loading.md#deferred-tools-ladder
+[in-depth-shell-integration]: ../in-depth/shell-integration.md
+[in-depth-shell-state-carrier]: ../in-depth/shell-integration.md#activation-state-carrier
+[in-depth-shell-grants]: ../in-depth/shell-integration.md#consent
+[in-depth-shell-repair]: ../in-depth/shell-integration.md#repair
+[in-depth-shell-residual]: ../in-depth/shell-integration.md#residual
+[in-depth-shell-coexistence]: ../in-depth/shell-integration.md#coexistence
 
 <!-- reference -->
 [config-ref]: ./configuration.md

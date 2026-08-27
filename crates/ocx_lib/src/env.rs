@@ -418,6 +418,99 @@ impl Env {
         self.vars.remove(&EnvKey::new(key));
     }
 
+    /// The ambient environment an **explicit** ocx invocation starts a child
+    /// from: [`Env::new`] with the per-prompt shell reconciler's own
+    /// contribution taken back out.
+    ///
+    /// `ocx run -- cmd` names the environment it wants. The project toolchain
+    /// the reconciler happened to fold into the calling shell is not part of
+    /// it, and letting it through is exactly the ambient-`PATH` pollution
+    /// clean-env execution exists to prevent — ocx's own shell integration
+    /// would otherwise undercut the guarantee that separates it from the
+    /// shim-and-shell tools.
+    ///
+    /// The user's *own* environment is untouched. Flipping this to
+    /// [`Env::clean`] instead would eat their `EDITOR`, `SSH_AUTH_SOCK` and
+    /// proxy vars — a far bigger break than the leak; `--clean` still means
+    /// what it always meant.
+    ///
+    /// With no `__OCX_ENV_STATE` carrier — no shell integration, a CI runner,
+    /// a plain `ocx run` from an un-hooked shell — this is [`Env::new`],
+    /// variable for variable.
+    pub fn inherited() -> Self {
+        let mut env = Self::new();
+        env.revert_reconciled();
+        env
+    }
+
+    /// Take the reconciler's contribution back out, using the
+    /// `__OCX_ENV_STATE` ledger as the revert set.
+    ///
+    /// The revert set is [`reconcile::plan`] against an **empty** desired set —
+    /// "ocx wants nothing here now", which is precisely what an explicit
+    /// invocation means. Reusing the planner is the point: it already knows
+    /// that a constant only reverts while the live value is still the one ocx
+    /// wrote, and that a key with no recorded prior is left alone. A second
+    /// reverter would be a second thing to drift from the shell arms.
+    ///
+    /// `owned_prefixes` is deliberately empty. The lost-ledger repair (C-006)
+    /// would also strip `$OCX_HOME` segments *this* ledger never claimed —
+    /// `ocx self activate`'s own `bin/` among them, which is how the child
+    /// finds `ocx` at all — and the ledger is present here, so there is
+    /// nothing to guess.
+    ///
+    /// The carrier is untrusted input (C-007): its only effect here is naming
+    /// the revert set. [`Ledger::decode`] answers `None` for every malformed
+    /// value, and this reverts nothing and leaves the carrier alone in that
+    /// case; an entry naming an empty element or an empty separator is skipped
+    /// rather than folded, because either would make the list removal a wipe.
+    ///
+    /// [`reconcile::plan`]: crate::shell::reconcile::plan
+    /// [`Ledger::decode`]: crate::shell::reconcile::Ledger::decode
+    fn revert_reconciled(&mut self) {
+        use crate::shell::reconcile;
+
+        let Some(raw) = self
+            .get(reconcile::CARRIER_KEY)
+            .map(|v| v.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let Some(ledger) = reconcile::Ledger::decode(&raw) else {
+            return;
+        };
+        // The record describes an environment this child no longer has.
+        self.remove(reconcile::CARRIER_KEY);
+
+        let plan = reconcile::plan(&[], self, &ledger, &[]);
+        for (key, element, separator) in &plan.removes {
+            if element.is_empty() {
+                continue;
+            }
+            let Some(existing) = self.get(key) else { continue };
+            let value = match separator {
+                // Path kind: the same segment-exact removal the emitted arms do.
+                None => utility::path::remove_segment(existing, OsStr::new(element)),
+                Some(separator) if !separator.is_empty() => {
+                    // List kind: `append_unique` is the pinned fold, so removal
+                    // is that fold minus its re-append — one algorithm, not a
+                    // second copy of the flank rule.
+                    let appended = utility::list::append_unique(&existing.to_string_lossy(), element, separator);
+                    let tail = format!("{separator}{element}");
+                    OsString::from(appended.strip_suffix(&tail).unwrap_or("").to_owned())
+                }
+                Some(_) => continue,
+            };
+            self.set(key.as_str(), value);
+        }
+        for (key, prior) in &plan.restores {
+            match prior {
+                Some(value) => self.set(key.as_str(), value.as_str()),
+                None => self.remove(key),
+            }
+        }
+    }
+
     /// Materializes resolution-affecting OCX configuration onto this env so a
     /// child ocx process sees the same policy the parent saw.
     ///
@@ -568,6 +661,11 @@ impl Env {
     ///
     /// This is the bridge from [`entry::Entry`](crate::package::metadata::env::entry::Entry)
     /// (the canonical resolved env var) to the process environment used by `exec`.
+    ///
+    /// Entries reach here already filtered of the reserved `OCX_*` / `__OCX_*`
+    /// namespace: the gate is at the `resolve_env*` seam that produced them,
+    /// not here, because `conventions::emit_lines` builds an eval'd shell
+    /// stream from the same vector without ever calling this method.
     ///
     /// Every `PATH` directory a composed entry contributes is additionally
     /// recorded in the private `package_path`, so [`Self::resolve_test_command`]
@@ -1126,14 +1224,20 @@ pub fn is_valid_env_key(key: &str) -> bool {
 /// Returns `true` when `key` falls in the `OCX_*` / `__OCX_*` namespace ocx
 /// reserves for its own resolution-affecting configuration.
 ///
-/// The single gate behind the rule that user-declarable env surfaces — project
-/// `[env]`, `[group.<name>.env]`, `ocx run --env`, and the forwarded
-/// [`keys::OCX_ENV`] payload — cannot set an `OCX_*` key. Without it a
-/// checked-in file could set `OCX_DEFAULT_REGISTRY`, `OCX_INDEX`, `OCX_MIRRORS`,
-/// `OCX_PATCHES`, `OCX_OFFLINE` or `OCX_ALLOW_YANKED` and reconfigure how ocx
-/// itself resolves — and [`Env::apply_ocx_config`] would forward the result to
-/// every child. Config governing its own governance is a materialized
-/// vulnerability class, not a theoretical one.
+/// The single gate behind the rule that no env surface — project `[env]`,
+/// `[group.<name>.env]`, `ocx run --env`, the forwarded [`keys::OCX_ENV`]
+/// payload, **package metadata**, and `ocx package create` — can set an `OCX_*`
+/// key. Without it a checked-in file could set `OCX_DEFAULT_REGISTRY`,
+/// `OCX_INDEX`, `OCX_MIRRORS`, `OCX_PATCHES`, `OCX_OFFLINE` or
+/// `OCX_ALLOW_YANKED` and reconfigure how ocx itself resolves — and
+/// [`Env::apply_ocx_config`] would forward the result to every child. Config
+/// governing its own governance is a materialized vulnerability class, not a
+/// theoretical one.
+///
+/// The surfaces split on **how** they refuse. The four user-authored ones and
+/// `ocx package create` reject outright; package metadata is only *skipped*, in
+/// `PackageManager::resolve_env_with_attribution`, because an already-published
+/// artifact must keep resolving.
 ///
 /// Matched case-insensitively: Windows environment names are case-insensitive,
 /// so a lowercase `ocx_offline` would land in the same slot as `OCX_OFFLINE`.
@@ -1554,6 +1658,229 @@ pub fn mirrors() -> Result<Vec<(String, crate::config::mirror::MirrorConfig)>, c
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Env::inherited / revert_reconciled (ambient reconciler isolation) ──
+
+    use crate::package::metadata::env::modifier::ModifierKind;
+    use crate::shell::reconcile::{
+        self, Applied, LEDGER_VERSION, Ledger, LedgerEntry, Prior, Priors, ProjectScope, Scopes,
+    };
+
+    /// Sorted `(key, value)` pairs — `Env` has no `PartialEq`, and "untouched"
+    /// is a claim about the whole map, not about the keys a test remembers.
+    fn snapshot(env: &Env) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = env
+            .iter()
+            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned()))
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
+    fn recorded(key: &str, value: &str, kind: ModifierKind, separator: Option<&str>) -> LedgerEntry {
+        LedgerEntry {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            kind,
+            separator: separator.map(str::to_owned),
+        }
+    }
+
+    /// A well-formed carrier recording `applied`/`priors` in the project scope.
+    fn carrier(applied: Applied, priors: Priors) -> String {
+        Ledger {
+            v: LEDGER_VERSION,
+            fp: "fp-1".to_owned(),
+            verdict: None,
+            tiers: Vec::new(),
+            // The watch-set fingerprint plays no part in the revert path this
+            // fixture exercises; empty is the field's own neutral value.
+            ws: String::new(),
+            messages_fp: String::new(),
+            over_cap: Vec::new(),
+            scopes: Scopes {
+                global: None,
+                global_priors: Priors::new(),
+                project: Some(ProjectScope {
+                    key: "acme-1a2b".to_owned(),
+                    dir: PathBuf::from("/p"),
+                    applied,
+                    priors,
+                }),
+            },
+        }
+        .encode()
+        .expect("fixture ledger encodes")
+    }
+
+    fn segments(env: &Env, key: &str) -> Vec<String> {
+        std::env::split_paths(env.get(key).unwrap_or_else(|| OsStr::new("")))
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The headline case: `ocx run` must not hand the child the toolchain the
+    /// per-prompt reconciler folded into the calling shell — while the user's
+    /// own `PATH` additions and their own variables ride through untouched.
+    ///
+    /// `/home/u/.ocx/symlinks/bin` is on `PATH` and inside an ocx home, and
+    /// still survives: the ledger did not claim it, and `revert_reconciled`
+    /// passes no owned prefixes precisely so the lost-ledger repair cannot
+    /// take `ocx self activate`'s own directory out from under the child.
+    #[test]
+    fn a_ledger_names_the_revert_set_and_the_user_s_own_environment_survives() {
+        let path = std::env::join_paths(["/opt/tc/bin", "/home/u/.ocx/symlinks/bin", "/home/u/bin", "/usr/bin"])
+            .expect("fixture segments carry no path separator");
+        let mut env = Env::clean();
+        env.set("PATH", &path);
+        env.set("EDITOR", "vim");
+        env.set(
+            reconcile::CARRIER_KEY,
+            carrier(
+                vec![recorded("PATH", "/opt/tc/bin", ModifierKind::Path, None)],
+                Priors::new(),
+            ),
+        );
+
+        env.revert_reconciled();
+
+        assert_eq!(
+            segments(&env, "PATH"),
+            ["/home/u/.ocx/symlinks/bin", "/home/u/bin", "/usr/bin"],
+            "only the segment the ledger claims may be reverted"
+        );
+        assert_eq!(
+            env.get("EDITOR"),
+            Some(OsStr::new("vim")),
+            "the user's own vars are inherited"
+        );
+        assert!(
+            env.get(reconcile::CARRIER_KEY).is_none(),
+            "the carrier describes an environment the child no longer has"
+        );
+    }
+
+    /// Constants revert to their recorded prior — restoring a value, unsetting
+    /// one that did not exist — and a value the user changed after ocx wrote it
+    /// is left exactly as they left it.
+    #[test]
+    fn constants_revert_to_their_prior_and_a_user_override_is_left_alone() {
+        let mut env = Env::clean();
+        env.set("JAVA_HOME", "/opt/tc/jdk");
+        env.set("GOFLAGS", "-mod=mod");
+        env.set("CC", "/usr/bin/clang");
+        env.set(
+            reconcile::CARRIER_KEY,
+            carrier(
+                vec![
+                    recorded("JAVA_HOME", "/opt/tc/jdk", ModifierKind::Constant, None),
+                    recorded("GOFLAGS", "-mod=mod", ModifierKind::Constant, None),
+                    recorded("CC", "/opt/tc/gcc", ModifierKind::Constant, None),
+                ],
+                Priors::from([
+                    ("JAVA_HOME".to_owned(), Prior::Value("/usr/lib/jvm/default".to_owned())),
+                    ("GOFLAGS".to_owned(), Prior::Unset),
+                    ("CC".to_owned(), Prior::Value("/usr/bin/cc".to_owned())),
+                ]),
+            ),
+        );
+
+        env.revert_reconciled();
+
+        assert_eq!(env.get("JAVA_HOME"), Some(OsStr::new("/usr/lib/jvm/default")));
+        assert_eq!(env.get("GOFLAGS"), None, "a prior of Unset removes the variable");
+        assert_eq!(
+            env.get("CC"),
+            Some(OsStr::new("/usr/bin/clang")),
+            "the live value is no longer ocx's, so it is the user's and stays"
+        );
+    }
+
+    /// List-kind contributions revert through the same `append_unique` fold the
+    /// emitted shell arms use, so the in-process answer and the shell answer
+    /// cannot drift.
+    #[test]
+    fn list_contributions_are_removed_element_wise() {
+        let mut env = Env::clean();
+        env.set("JAVA_TOOL_OPTIONS", "-Xmx1g -Dtc=1 -ea");
+        env.set(
+            reconcile::CARRIER_KEY,
+            carrier(
+                vec![recorded("JAVA_TOOL_OPTIONS", "-Dtc=1", ModifierKind::List, Some(" "))],
+                Priors::new(),
+            ),
+        );
+
+        env.revert_reconciled();
+
+        assert_eq!(env.get("JAVA_TOOL_OPTIONS"), Some(OsStr::new("-Xmx1g -ea")));
+    }
+
+    /// No carrier — no shell integration, a CI runner, an un-hooked shell — is
+    /// today's behaviour, variable for variable.
+    #[test]
+    fn no_carrier_leaves_the_environment_untouched() {
+        let mut env = Env::clean();
+        env.set(
+            "PATH",
+            std::env::join_paths(["/opt/tc/bin", "/home/u/.ocx/symlinks/bin", "/usr/bin"]).expect("joinable"),
+        );
+        env.set("EDITOR", "vim");
+        env.set("JAVA_HOME", "/opt/tc/jdk");
+        let before = snapshot(&env);
+
+        env.revert_reconciled();
+
+        assert_eq!(snapshot(&env), before);
+    }
+
+    /// The carrier round-trips through a user-writable env var (C-007). Every
+    /// malformed shape degrades to reverting nothing — never to a panic, never
+    /// to a wrong path — and the value is left where it was, because a carrier
+    /// ocx cannot read is one it has not acted on.
+    #[test]
+    fn a_malformed_carrier_reverts_nothing() {
+        for raw in [
+            "",
+            "not-an-envelope",
+            "9.eyJ2IjoxfQ",       // unknown encoder tag
+            "1.!!!not-base64!!!", // payload outside the base64url alphabet
+            "1.eyJ2Ijo5OTl9",     // decodes, but `{"v":999}` matches no schema
+            "1.",                 // empty payload
+        ] {
+            let mut env = Env::clean();
+            env.set(
+                "PATH",
+                std::env::join_paths(["/opt/tc/bin", "/usr/bin"]).expect("joinable"),
+            );
+            env.set("JAVA_HOME", "/opt/tc/jdk");
+            env.set(reconcile::CARRIER_KEY, raw);
+            let before = snapshot(&env);
+
+            env.revert_reconciled();
+
+            assert_eq!(snapshot(&env), before, "carrier {raw:?} must revert nothing");
+        }
+    }
+
+    /// A forged carrier naming an empty element or an empty separator must not
+    /// wipe the variable: `append_unique`'s flank rule needs a non-empty
+    /// separator, and an empty element matches every gap between elements.
+    #[test]
+    fn a_forged_empty_element_or_separator_never_wipes_the_variable() {
+        for entry in [
+            recorded("CFLAGS", "", ModifierKind::List, Some(" ")),
+            recorded("CFLAGS", "-DX", ModifierKind::List, Some("")),
+        ] {
+            let mut env = Env::clean();
+            env.set("CFLAGS", "-O2 -DX");
+            env.set(reconcile::CARRIER_KEY, carrier(vec![entry.clone()], Priors::new()));
+
+            env.revert_reconciled();
+
+            assert_eq!(env.get("CFLAGS"), Some(OsStr::new("-O2 -DX")), "entry {entry:?}");
+        }
+    }
 
     /// `OCX_NO_MODIFY_PATH` is read through `flag` (the same `BooleanString`
     /// path as `--remote`/`--offline`), so both `=1` and `=true` set it true and

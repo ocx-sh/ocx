@@ -344,10 +344,21 @@ class CastRecorder:
         self._clock: float = 0.0
         self._shell: pexpect.spawn | None = None
 
-    def open(self) -> None:
-        """Start a persistent interactive bash shell for recording."""
+    def open(self, *, shell: str = "bash") -> None:
+        """Start a persistent interactive shell for recording.
+
+        ``shell`` is the login-shell binary to spawn, resolved via ``PATH``
+        (WP-16b, ``# shell:`` doc-script header key, default ``"bash"``).
+        Only the bash arm is exercised today — every shipped ``cast: true``
+        script uses the default — but the parameter lets a future non-bash
+        cast select an interpreter without a second recorder pipeline
+        (``design_spec_doc_command_scripts.md`` §6i: one tree, one
+        discovery path). The ``--norc``/``--noprofile``/PS1-sentinel dance
+        below is bash-specific; a non-bash shell would need its own
+        no-rcfile flags and sentinel-prompt incantation here.
+        """
         self._shell = pexpect.spawn(
-            "/bin/bash",
+            shell,
             ["--norc", "--noprofile"],
             env=self.env,
             dimensions=(self.height, self.width),
@@ -356,7 +367,19 @@ class CastRecorder:
         )
         self._shell.sendline("stty -echo")
         self._shell.sendline("bind 'set enable-bracketed-paste off' 2>/dev/null")
-        self._shell.sendline(f'PS1="{self._SENTINEL}"')
+        # The assignment is split across two adjacent quoted strings — bash
+        # concatenates them, so PS1 still ends up as the sentinel exactly, but
+        # the *line* never contains it.  It has to: these three lines are sent
+        # in one burst, so when the shell is slow enough to start that `stty
+        # -echo` has not run yet, readline echoes the queued lines itself. A
+        # line spelling the sentinel out would then put a sentinel in the
+        # output that is not a prompt, `expect_exact` below would match that
+        # echo, and the real prompt would stay unconsumed — leaving every
+        # later `_read_until_prompt` one command behind for the rest of the
+        # session (the recording then attributes each command's output to its
+        # predecessor).  Load-dependent, so it surfaces as a flaky recording.
+        head, tail = self._SENTINEL[:8], self._SENTINEL[8:]
+        self._shell.sendline(f'PS1="{head}""{tail}"')
         self._shell.expect_exact(self._SENTINEL)
 
     def close(self) -> None:
@@ -447,6 +470,15 @@ class CastRecorder:
         """Type and execute a command in the persistent shell.
 
         Returns the captured output.  Raises AssertionError on non-zero exit.
+
+        A ``PROMPT_COMMAND``/``precmd`` hook registered inside the recorded
+        script (e.g. ``eval "$(ocx self activate --shell=bash)"`` inside a
+        ``# region cast`` block) fires **twice** per call: once when the
+        sentinel prompt reappears after *actual_cmd* returns, and a second
+        time for the silent ``echo $?`` exit-code probe below. Harmless for
+        an idempotent hook (WP-16b) — the per-prompt reconciler is exactly
+        that, a no-op re-apply when nothing changed — but worth knowing
+        before debugging an unexpectedly-doubled side effect in a cast.
         """
         assert self._shell is not None, "call open() before run_command()"
 

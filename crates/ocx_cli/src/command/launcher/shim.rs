@@ -254,7 +254,7 @@ async fn resolves_inside(resolved: std::path::PathBuf, shim_bin: std::path::Path
 /// nothing but whether a progress bar renders, and refusing to run a user's
 /// tool over it would be absurd.
 async fn project_in_scope(context: &crate::app::Context) -> Option<ProjectConfig> {
-    let (config_path, _lock_path) = crate::app::project_context::resolve_project_paths(context)
+    let (config_path, _lock_path) = crate::app::project_context::resolve_project_paths(context, None)
         .await
         .inspect_err(|error| log::debug!("No project in scope for the lazy-report ladder: {error}"))
         .ok()?;

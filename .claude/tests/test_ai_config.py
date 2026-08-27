@@ -2022,7 +2022,10 @@ class TestSubsystemCliCommandsTableCoverage:
         "config_test": "config test",
         "direnv_init": "direnv init",
         "direnv_export": "direnv export",
+        "shell_allow": "shell allow",
         "shell_completion": "shell completion",
+        "shell_revoke": "shell revoke",
+        "shell_state": "shell state",
     }
 
     # Commands intentionally absent from the public table (internal /

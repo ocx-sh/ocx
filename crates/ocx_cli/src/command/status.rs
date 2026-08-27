@@ -41,7 +41,7 @@ pub struct Status {}
 
 impl Status {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let (config_path, lock_path) = crate::app::project_context::resolve_project_paths(&context).await?;
+        let (config_path, lock_path) = crate::app::project_context::resolve_project_paths(&context, None).await?;
 
         let config = ProjectConfig::from_path(&config_path).await?;
 

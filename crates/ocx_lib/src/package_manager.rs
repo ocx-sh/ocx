@@ -284,7 +284,6 @@ pub use tasks::attest::{AttestOptions, AttestReport};
 pub use tasks::auto_verify::{AutoVerify, AutoVerifyInput};
 pub use tasks::clean::{CleanResult, CleanedObject};
 pub use tasks::common::{ClosureEdge, ClosureEnvVar, ClosureNode, WireSelectionOutcome};
-pub use tasks::hook::{AppliedSet, collect_applied};
 pub use tasks::inspect::{
     ClosureConflicts, EntrypointConflict, InspectClosure, InspectOptions, InspectResult, RepositoryConflict, Surface,
 };

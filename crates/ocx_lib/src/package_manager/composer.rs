@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use futures::future::join_all;
 use tokio::task::JoinSet;
 
 use crate::{
@@ -52,7 +53,10 @@ use crate::{
 
 use super::tasks::common;
 use super::tasks::common::ClosureNode;
-use super::{LazyAdvisory, PackageManager, concurrency::Concurrency};
+use super::{
+    LazyAdvisory, PackageManager,
+    concurrency::{Concurrency, acquire_permit},
+};
 
 /// Result type for a single dep-load task spawned during parallel preload.
 ///
@@ -1295,8 +1299,37 @@ impl PackageManager {
                 }
             }
             Materialization::LocalOnly => {
-                for (index, identifier) in &eager {
-                    match self.local_root(identifier, platform).await {
+                // Every shell prompt takes this branch, and one `local_root` is
+                // three `stat`s plus two JSON reads — serialized, that is the
+                // whole root set's worth of round trips on the prompt's
+                // critical path. Concurrent, under the same `concurrency` cap
+                // the `Install` branch honours: `semaphore()` + `acquire_permit`
+                // is the mechanism `find_or_install_all` already uses, so
+                // `--jobs` means one thing across both.
+                //
+                // `join_all` rather than `buffer_unordered`: it yields in
+                // **input order** by construction, which is what keeps
+                // `slots[*index]` and the `omitted` order — both observable —
+                // identical to the sequential loop without an index-keyed
+                // re-sort to get them back.
+                let semaphore = concurrency.semaphore();
+                let probed = join_all(eager.iter().map(|(_, identifier)| {
+                    let semaphore = semaphore.clone();
+                    async move {
+                        let _permit = acquire_permit(&semaphore).await;
+                        self.local_root(identifier, platform).await
+                    }
+                }))
+                .await;
+
+                // Every probe has already run, so a hard failure no longer
+                // short-circuits the ones after it. Consuming in request order
+                // keeps *which* error surfaces the lowest-index one — the
+                // sequential loop's precedence — and the extra probes are
+                // unobservable: their only side effect is `find`'s idempotent
+                // `link_blobs` upsert, on a call that returns `Err` regardless.
+                for ((index, identifier), result) in eager.iter().zip(probed) {
+                    match result {
                         Ok(info) => slots[*index] = Some(Arc::new(info)),
                         Err(kind) if unavailable_locally(&kind) => omitted.push(ComposeOmission {
                             identifier: identifier.clone(),
@@ -5860,6 +5893,121 @@ mod tests {
             out.omitted[0].identifier.to_string(),
             request.identifier.to_string(),
             "the omission names the request the caller made"
+        );
+    }
+
+    /// The eager `LocalOnly` half probes concurrently, so **which result lands
+    /// on which request** is no longer implied by the order the probes finish.
+    /// Three tools with the middle one absent pins all three observable
+    /// consequences at once: `roots` in request order, each root carrying its
+    /// OWN identifier, and the omission naming the tool that was actually
+    /// missing.
+    ///
+    /// The hole is what makes the row discriminate. With every tool present,
+    /// `roots` and the request list are the same length and a misaligned
+    /// implementation still returns the right multiset; the gap desynchronizes
+    /// the two, so any pairing that is not by request index reds here.
+    #[tokio::test]
+    async fn local_only_pairs_every_concurrent_probe_with_its_own_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = offline_manager(dir.path());
+        let store = manager.file_structure().packages.clone();
+
+        let present = [pinned("first", 'a'), pinned("third", 'c')];
+        for id in &present {
+            seed_package_with_metadata(
+                &store,
+                id,
+                &bundle_metadata(Vec::new(), &["app"]),
+                &ResolvedPackage::new(),
+            );
+        }
+        // Seeded by nobody: the hole in the middle of the request list.
+        let absent = pinned("second", 'b');
+
+        let requests: Vec<ComposeRequest> = [&present[0], &absent, &present[1]]
+            .into_iter()
+            .map(|id| ComposeRequest {
+                identifier: id.as_identifier().clone(),
+                mode: LazyMode::Never,
+            })
+            .collect();
+
+        let out = manager
+            .compose_roots(
+                &requests,
+                &Platform::any(),
+                Materialization::LocalOnly,
+                Concurrency::default(),
+            )
+            .await
+            .expect("a locally absent tool is an omission under LocalOnly, never a failure");
+
+        assert_eq!(
+            out.roots
+                .iter()
+                .map(|root| root.identifier().to_string())
+                .collect::<Vec<_>>(),
+            present.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "the surviving roots must come back in request order, each carrying its own identifier"
+        );
+        assert_eq!(
+            out.omitted
+                .iter()
+                .map(|omission| omission.identifier.to_string())
+                .collect::<Vec<_>>(),
+            vec![absent.as_identifier().to_string()],
+            "the omission must name the tool that was actually missing"
+        );
+    }
+
+    /// The eager `LocalOnly` half is the arm the per-prompt reconciler takes and
+    /// it resolves its requests concurrently, so what the caller is warned about
+    /// is whatever finished first unless request order is preserved. The same
+    /// order decides which failure aborts a whole compose, so "same inputs, same
+    /// report" rests on it.
+    ///
+    /// The shipped implementation preserves it *by construction* — `join_all`
+    /// yields in input order — so there is no sort to delete and this test pins
+    /// the contract rather than proving a mechanism. Red state: collect the
+    /// results in completion order instead (or reverse them before the zip) and
+    /// this comes back in the wrong order. Its sibling
+    /// `local_only_pairs_every_concurrent_probe_with_its_own_request` is the one
+    /// that discriminates pairing, using an absent middle tool so the hole
+    /// desynchronizes the lists.
+    #[tokio::test]
+    async fn local_only_reports_omissions_in_request_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = offline_manager(dir.path());
+        let names = ["alpha", "beta", "gamma"];
+        let requests: Vec<ComposeRequest> = names
+            .iter()
+            .map(|name| ComposeRequest {
+                identifier: Identifier::new_registry(*name, REGISTRY),
+                mode: LazyMode::Never,
+            })
+            .collect();
+
+        let out = manager
+            .compose_roots(
+                &requests,
+                &Platform::any(),
+                Materialization::LocalOnly,
+                Concurrency::default(),
+            )
+            .await
+            .expect("--no-pull omits unreachable tools rather than failing the compose");
+
+        assert_eq!(
+            out.omitted
+                .iter()
+                .map(|omission| omission.identifier.to_string())
+                .collect::<Vec<_>>(),
+            requests
+                .iter()
+                .map(|request| request.identifier.to_string())
+                .collect::<Vec<_>>(),
+            "the omission report follows the order the caller asked in"
         );
     }
 

@@ -8,6 +8,7 @@ pub mod managed;
 pub mod mirror;
 pub mod patch;
 pub mod registry;
+pub mod shell;
 
 use std::collections::HashMap;
 
@@ -17,6 +18,44 @@ pub use self::managed::ManagedConfig;
 pub use self::mirror::MirrorConfig;
 pub use self::patch::PatchConfig;
 pub use self::registry::RegistryConfig;
+pub use self::shell::ShellConfig;
+
+/// Which `config.toml` tier a value came from (C-032).
+///
+/// Runtime provenance only — never parsed from a file, never serialized. The
+/// loader stamps it per file; [`ShellConfig::merge`] carries it alongside the
+/// scalar it describes, so a consumer can report the tier that **actually**
+/// decided a setting rather than asserting one (A-32).
+///
+/// Ordered lowest- to highest-precedence, which is also the fold order:
+/// `System` → `User` → `Home` → `Managed` → `Explicit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConfigTier {
+    /// `/etc/ocx/config.toml`.
+    System,
+    /// The per-user config directory's `config.toml`.
+    User,
+    /// `$OCX_HOME/config.toml`.
+    Home,
+    /// The managed-config snapshot's payload.
+    Managed,
+    /// A file named by `--config` or `OCX_CONFIG`.
+    Explicit,
+}
+
+impl std::fmt::Display for ConfigTier {
+    /// Renders the tier as the name a user would recognise it by — the flag or
+    /// the path, never the Rust variant.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::System => "system config.toml",
+            Self::User => "user config.toml",
+            Self::Home => "$OCX_HOME/config.toml",
+            Self::Managed => "managed config",
+            Self::Explicit => "--config / OCX_CONFIG",
+        })
+    }
+}
 
 /// Root configuration struct.
 ///
@@ -106,6 +145,17 @@ pub struct Config {
     /// `ocx.toml` (`crate::trust::resolve_tiered`). Consumed by
     /// `ocx package verify`. See `crate::trust` and `adr_trust_policy.md`.
     pub trust: Option<crate::trust::TrustConfig>,
+
+    /// Shell-integration settings (`[shell]`) — the per-prompt hook and
+    /// completions toggles, plus the activation consent whitelist.
+    ///
+    /// **Never contributed by the project tier.** `ConfigLoader` strips
+    /// `shell` from any project-tier contribution explicitly (C-033), because
+    /// consent material read from a repo's own `ocx.toml` would let a clone
+    /// consent to itself. Consumed by `ocx self activate`, `ocx self setup`
+    /// and `ocx shell state`. See `adr_shell_env_overhaul.md` Decisions 4, 5
+    /// and 7.
+    pub shell: Option<ShellConfig>,
 }
 
 /// Global registry-subsystem settings (`[registry]` section).
@@ -196,6 +246,16 @@ impl Config {
             match self.trust.as_mut() {
                 Some(self_trust) => self_trust.merge(other_trust),
                 None => self.trust = Some(other_trust),
+            }
+        }
+        // `[shell]` is neither a plain scalar-wins section nor a plain append:
+        // `hook`/`completions` are scalars, `consent.paths` appends and
+        // `consent.namespaces` accumulates into one spec. `ShellConfig::merge`
+        // owns that split (C-032); this arm only routes to it.
+        if let Some(other_shell) = other.shell {
+            match self.shell.as_mut() {
+                Some(self_shell) => self_shell.merge(other_shell),
+                None => self.shell = Some(other_shell),
             }
         }
     }

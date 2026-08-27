@@ -70,6 +70,20 @@ impl About {
 
         let info = crate::api::data::about::About::new(version, registry, platforms, libc, current_shell, home);
 
+        // C-034's reader. The strip happens inside the config loader, whose
+        // `log::warn!` lands on a stderr the shell shims discard — so the only
+        // channels that can report it are the reconciler's eval'd script and
+        // this command. Diagnostics, not payload: it rides stderr in both
+        // output modes so `--format json`'s stdout stays one JSON document.
+        if let Some(reason) = context
+            .config()
+            .shell
+            .as_ref()
+            .and_then(|shell| shell.consent_strip_reason.as_deref())
+        {
+            context.ui().warn(reason);
+        }
+
         let data = context.api().data();
         if context.api().is_json() {
             context.api().report(&info)?;

@@ -23,6 +23,7 @@ pub mod bootstrap;
 pub mod error;
 pub mod profiles;
 pub mod rc_block;
+pub mod shell_config;
 pub mod shims;
 pub mod version_spec;
 

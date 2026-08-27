@@ -11,7 +11,7 @@ use clap::Parser;
 use ocx_lib::project::{ResolveLockOptions, remove_binding_in_memory, resolve_lock, resolve_lock_touched};
 
 use crate::api::data::lock::{LockEntry, LockReport};
-use crate::app::project_context::load_project_for_mutate;
+use crate::app::project_context::{load_project_for_mutate, record_activation_consent};
 
 /// Remove one or more tool bindings from `ocx.toml`.
 ///
@@ -162,7 +162,12 @@ impl Remove {
         };
 
         let commit = guard.commit(staged, new_lock.clone()).await?;
-        let _ = commit;
+
+        // Consent write seam (C-024, A-29) — one of the six commands allowed to
+        // stamp, opting in explicitly. AFTER the commit, so the stamp records
+        // the source set the user just asked for rather than the one it
+        // replaced. Best-effort; never fails the mutation.
+        record_activation_consent(&commit.config_path, &new_lock).await;
 
         // Best-effort uninstall after commit. Tools may not be installed
         // (lock-only workflow); errors here do not roll back. One batched

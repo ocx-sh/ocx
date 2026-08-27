@@ -141,12 +141,32 @@ A behaviour assertion belongs in **one** harness, not both. If a pytest case can
 
 ## Shell-Activation Matrix (Docker)
 
-`test/tests/test_shell_activation.py` is a self-contained (stdlib + pytest only) module that proves `ocx self setup` activation survives an **unset `OCX_HOME`** in every login shell — the durable net for a regression class where the managed block sources `env.*` to locate ocx but `env.*` is what sets `OCX_HOME`. It runs the real activation path per shell in a "shell zoo" container and asserts: exit 0, no missing-`env.*` error, the ocx bin dir lands on `PATH`, and (for POSIX/fish/pwsh) a second source does not duplicate it.
+Three self-contained (stdlib + pytest only) modules share one shell zoo:
+`test_shell_activation.py` (login-shell activation), `test_shell_reconcile.py` (the
+per-prompt reconciler, tiers 2 and 3) and `test_shell_reconcile_edge_cases.py` (one named
+test per row of `analysis_shell_env_edge_cases.md`). Their shared helpers live in
+`test/src/shell_matrix.py`, imported top-level as `import shell_matrix` — `test/pyproject.toml`
+puts `src` on `pythonpath`, which is what lets the same import work inside the container.
 
-- **Files:** `test/docker/shells.Dockerfile` (Debian/glibc + nu/elvish/pwsh) and `test/docker/shells.alpine.Dockerfile` (Alpine/musl, busybox `ash`); `.github/workflows/shell-activation.yml` (build a static musl ocx once → run both image legs; triggers also include `shell.rs` and `command/self_group/**` so activation-logic changes run the matrix); the local entrypoint is `task test:shells` (Docker required).
+**Five shells host a per-prompt hook: bash, zsh, fish, PowerShell, and elvish.**
+`crates/ocx_lib/src/shell/hook.rs::registration` returns `Some` for each of those five and `None` only
+for `Ash | Ksh | Dash | Nushell | Batch` — `ash`/`ksh`/`dash` have no append-safe prompt-hook point at
+all, and nushell's hook is a different mechanism (`env_change.PWD`, fires on directory change rather
+than every prompt, inlined in its shim body). Tier 3 (a real pty, the hook firing on its own) drives
+bash, zsh (via the third-party prompt-framework coexistence rows), PowerShell and nushell's own
+directory-change hook; elvish's is verified by hand instead of through the harness — a non-interactive
+`elvish -c` binds no `edit:` namespace, so the emitted wrapper's `edit:add-var` raises before `ocx` is
+ever defined, and the pty rig has no dependency that drives an interactive elvish (see `hook.rs`'s
+`elvish_wrapper` test doc comment). Tier 2 (eval the emitted `self activate --reconcile` stream) reaches
+all nine arms.
+
+`test/tests/test_shell_activation.py` proves `ocx self setup` activation survives an **unset `OCX_HOME`** in every login shell — the durable net for a regression class where the managed block sources `env.*` to locate ocx but `env.*` is what sets `OCX_HOME`. It runs the real activation path per shell in a "shell zoo" container and asserts: exit 0, no missing-`env.*` error, the ocx bin dir lands on `PATH`, and (for POSIX/fish/pwsh) a second source does not duplicate it.
+
+- **Files:** `test/docker/shells.Dockerfile` (Debian/glibc + nu/elvish/pwsh, plus starship / oh-my-zsh / powerlevel10k so the prompt-hook coexistence rows run rather than skip) and `test/docker/shells.alpine.Dockerfile` (Alpine/musl, busybox `ash`); `.github/workflows/shell-activation.yml` (build a static musl ocx once → run both image legs; triggers also include `shell.rs` and `command/self_group/**` so activation-logic changes run the matrix); the local entrypoint is `task test:shells` (Docker required).
 - **Cross-platform (macOS + Windows):** `.github/workflows/shell-activation-deep.yml` — `workflow_dispatch` + weekly `schedule` (NOT per-PR; macOS/Windows minutes are costly). macOS reuses this same self-contained matrix, installing the ocx-packaged shells (nushell/elvish/pwsh) via `ocx package env`; Windows runs `test/manual/test-windows-activation.ps1` under built-in Windows PowerShell 5.1, built-in pwsh 7, and ocx-installed pwsh 7. cmd/batch PATH idempotency is covered by the `live_batch_*` unit test on the `verify-deep.yml` windows-latest `nextest` leg.
 - **Self-contained:** resolves the binary from `$OCX_ACTIVATION_BINARY` / `$OCX_COMMAND` / `test/bin/ocx`, uses `shutil.which` to **skip-if-absent**, so a host `uv run pytest` stays green while the container runs the full matrix. It needs a clean child env (no `OCX_*` leakage such as a stale `OCX_HOME`) so the unset-`OCX_HOME` path is exercised; activation carries no guard variable and the prepend is idempotent move-to-front, so a re-source never duplicates it.
-- **Known gaps (xfail/skip, tracked separately):** nushell `source (expr)` is rejected at parse time — `source` resolves at PARSE time but the activation file is written at RUN time, so file-based sourcing of runtime content cannot work; needs an apply-without-source redesign (`load-env` at runtime), not a syntax fix. The elvish "empty global toolchain" `slurp | eval` arity error is an orthogonal `self activate` template issue.
+- **Pty driving no longer shells out to `script(1)`.** `test/src/shell_matrix.py`'s `pty_session` (plus its `line_editor_is_reading` keystroke-timing helper) drives real ptys with stdlib `pty`/`termios` directly. This removed a macOS/BSD-vs-util-linux `script` argument/stdin-forwarding split and an undeclared transitive dependency neither shell-zoo image ships (Debian moved `script` to `bsdextrautils`). `line_editor_is_reading` reads whether the pty's line discipline is out of canonical mode — the direct signal that a line editor (readline/ZLE/PSReadLine) is at a prompt reading keystrokes — so a line is fed only once the previous one went quiet **and** a line editor owns the pty, never on a wall-clock guess alone.
+- **Known gaps (xfail/skip, tracked separately):** nushell applies the **global** toolchain only — its inlined `env_change.PWD` hook never calls `--reconcile`, so it cannot revert a project scope or advance `__OCX_ENV_STATE` (WP-12b of `adr_shell_env_overhaul.md`). Every nushell project-scope row skips through a helper that greps the shipped `env.nu` and reports the count it observed, so the skip disappears by itself once the arm lands. One `self activate` arm still emits a bare `ocx` rather than the absolute binary — nushell's `which` probe (`ENV_NU`) — pinned as a strict xfail (`test/tests/test_shell_reconcile.py::_BARE_OCX_XFAIL`). The elvish pin was removed: its global-env line now probes `?(test -x '<path>')` and calls the resolved absolute binary, so it had to gain an `ocx` wrapper (`has-external ocx` is a name lookup that finds a function).
 
 ## Benchmark Harness {#bench-harness}
 
@@ -163,6 +183,7 @@ suite. It is not pytest-collected for normal runs.
 | `conftest.py` | Smoke-validation fixtures only (no Docker required) |
 | `dashboard/template.html` | Vue 3 single-file app template for generated HTML report |
 | `dashboard/vendor/vue.global.prod.js` | Vue 3.5.x global prod build (inlined into output) |
+| `shell_latency.py` | Per-prompt reconcile latency gate (C-044): `exec_floor + Δ`, artifact-emitting, `task test:shell-latency` |
 | `test/tests/test_bench_smoke.py` | pytest-collected smoke tests for harness internals |
 
 Task targets: `task test:bench:setup`, `task test:bench`, `task test:bench:baseline`,

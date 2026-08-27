@@ -162,6 +162,15 @@ class TestParseDocHeaderDefaults:
         meta = parse_doc_header(p)
         assert meta.expect is None
 
+    def test_default_shell_is_bash(self, tmp_path: Path) -> None:
+        """Absent # shell: ⇒ shell defaults to 'bash' (WP-16b)."""
+        p = _write_script(tmp_path, "no_shell.sh", """\
+            # state: setup:basic
+            echo hello
+        """)
+        meta = parse_doc_header(p)
+        assert meta.shell == "bash"
+
     def test_default_cast_region_none_when_cast_false(self, tmp_path: Path) -> None:
         """cast_region is None when cast is False (§1.1)."""
         p = _write_script(tmp_path, "no_region.sh", """\
@@ -247,6 +256,16 @@ class TestParseDocHeaderRoundTrip:
         assert meta.state == "setup:basic"
         assert meta.title == "Uppercase Keys"
 
+    def test_shell_key_round_trips(self, tmp_path: Path) -> None:
+        """# shell: value is stored on meta.shell (WP-16b)."""
+        p = _write_script(tmp_path, "with_shell.sh", """\
+            # state: setup:basic
+            # shell: bash
+            echo hello
+        """)
+        meta = parse_doc_header(p)
+        assert meta.shell == "bash"
+
     def test_path_stored_on_meta(self, tmp_path: Path) -> None:
         """DocScriptMeta.path is set to the script path (§1.1)."""
         p = _write_script(tmp_path, "with_path.sh", """\
@@ -279,7 +298,7 @@ class TestParseDocHeaderUnknownKey:
         assert str(p) in msg or p.name in msg
 
     def test_known_keys_do_not_raise(self, tmp_path: Path) -> None:
-        """All recognised keys (state, doc, cast, title, description, expect) are accepted (§1.1)."""
+        """All recognised keys (state, doc, cast, title, description, expect, shell) are accepted (§1.1)."""
         p = _write_script(tmp_path, "all_known.sh", """\
             # state: setup:basic
             # doc: a/b
@@ -287,11 +306,13 @@ class TestParseDocHeaderUnknownKey:
             # title: T
             # description: D
             # expect: out.txt
+            # shell: bash
             echo hello
         """)
         # Must not raise
         meta = parse_doc_header(p)
         assert meta.state == "setup:basic"
+        assert meta.shell == "bash"
 
 
 # ===========================================================================

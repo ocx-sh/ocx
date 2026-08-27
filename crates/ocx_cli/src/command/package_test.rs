@@ -260,7 +260,11 @@ impl PackageTest {
         // see `Env::apply_child_env`. This command materialises packages that
         // may declare entrypoints, so the launcher hop is the ordinary path
         // here, not a corner case.
-        let mut process_env = if self.clean { env::Env::clean() } else { env::Env::new() };
+        let mut process_env = if self.clean {
+            env::Env::clean()
+        } else {
+            env::Env::inherited()
+        };
         process_env.apply_child_env(
             env::ChildEnv {
                 composed: &entries,

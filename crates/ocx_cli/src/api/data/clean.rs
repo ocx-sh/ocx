@@ -17,6 +17,14 @@ use crate::api::Printable;
 pub enum CleanKind {
     Object,
     Temp,
+    /// A `state/projects/<key>/` directory whose consent stamp was swept.
+    ///
+    /// Reported for the same reason the other two are: revoking a project's
+    /// activation consent is the most consequential thing `ocx clean` does —
+    /// the project goes inert at the next prompt — and a `--dry-run` that did
+    /// not name it would be previewing everything except the part a user would
+    /// want to stop.
+    Consent,
 }
 
 impl fmt::Display for CleanKind {
@@ -24,6 +32,7 @@ impl fmt::Display for CleanKind {
         match self {
             CleanKind::Object => write!(f, "object"),
             CleanKind::Temp => write!(f, "temp"),
+            CleanKind::Consent => write!(f, "consent"),
         }
     }
 }
@@ -34,7 +43,7 @@ impl fmt::Display for CleanKind {
 /// `ocx.lock` that pins this package. Non-empty only for `object` kind entries
 /// in dry-run mode when the package would have been collected without the
 /// project registry. Empty in non-dry-run output (held entries are never
-/// collected) and always empty for `temp` entries.
+/// collected) and always empty for `temp` and `consent` entries.
 ///
 /// See [`adr_clean_project_backlinks.md`] "`ocx clean` UX" for the column
 /// layout and JSON shape specification.
@@ -48,8 +57,9 @@ pub struct CleanEntry {
     pub held_by: Vec<PathBuf>,
 }
 
-/// Results of a clean operation: unreferenced objects and stale temp directories
-/// that were removed (or would be removed in a dry run).
+/// Results of a clean operation: unreferenced objects, stale temp directories
+/// and swept consent stamps that were removed (or would be removed in a dry
+/// run).
 ///
 /// Plain format: three-column table `Type | Held By | Path` when any entry
 /// carries non-empty `held_by` attribution (i.e. dry-run with project-registry
@@ -66,11 +76,16 @@ impl Clean {
     ///
     /// `objects` carries the richer [`CleanedObject`] shape so that
     /// `held_by` attribution flows through to the plain and JSON output.
-    /// `temp` entries always have an empty `held_by` — stale temp directories
-    /// are not governed by the project registry (see
-    /// [`adr_clean_project_backlinks.md`] "`ocx clean` UX").
-    pub fn new(objects: Vec<CleanedObject>, temp: Vec<PathBuf>, dry_run: bool) -> Self {
-        let mut entries = Vec::with_capacity(objects.len() + temp.len());
+    /// `temp` and `consent` entries always have an empty `held_by` — neither
+    /// stale temp directories nor consent stamps are governed by the project
+    /// registry (see [`adr_clean_project_backlinks.md`] "`ocx clean` UX").
+    ///
+    /// Every field of [`CleanResult`](ocx_lib::package_manager::CleanResult)
+    /// is consumed here, `consent` included: a swept stamp that reached no row
+    /// would make the sweep silent, which is the one thing its own contract
+    /// says it must never be.
+    pub fn new(objects: Vec<CleanedObject>, temp: Vec<PathBuf>, consent: Vec<PathBuf>, dry_run: bool) -> Self {
+        let mut entries = Vec::with_capacity(objects.len() + temp.len() + consent.len());
         for obj in objects {
             entries.push(CleanEntry {
                 kind: CleanKind::Object,
@@ -82,6 +97,14 @@ impl Clean {
         for path in temp {
             entries.push(CleanEntry {
                 kind: CleanKind::Temp,
+                dry_run,
+                path,
+                held_by: Vec::new(),
+            });
+        }
+        for path in consent {
+            entries.push(CleanEntry {
+                kind: CleanKind::Consent,
                 dry_run,
                 path,
                 held_by: Vec::new(),

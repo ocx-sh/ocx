@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::reference_manager::ReferenceManager;
 use crate::{Error, Result, log, oci};
 
 /// Represents a single content-addressed package directory within the package store.
@@ -18,6 +19,7 @@ use crate::{Error, Result, log, oci};
 /// - `refs/deps/`     -- back-reference symlinks for dependency tracking
 /// - `refs/layers/`   -- back-reference symlinks for layer tracking
 /// - `refs/blobs/`    -- back-reference symlinks for blob tracking
+/// - `refs/origins/`  -- one marker file per logical repository this digest was fetched under
 #[derive(Debug, Clone)]
 pub struct PackageDir {
     /// The root directory of this package (parent of `content/`, `metadata.json`, etc.).
@@ -91,6 +93,72 @@ impl PackageDir {
     /// Path to the blob back-reference directory.
     pub fn refs_blobs_dir(&self) -> PathBuf {
         self.dir.join("refs").join("blobs")
+    }
+
+    /// Path to the pulling-origin marker directory.
+    ///
+    /// Holds one file per distinct **logical** repository this host resolved
+    /// and materialized digest-verified content for — see [`record_origin`]
+    /// for the write contract (including why the coordinate is the logical one)
+    /// and [`PackageDir::recorded_origins`] for the read side. Unlike its four
+    /// `refs/` siblings these are regular files rather than symlinks, and they
+    /// are not part of the GC reachability graph: they record provenance, not
+    /// liveness.
+    pub fn refs_origins_dir(&self) -> PathBuf {
+        self.dir.join("refs").join("origins")
+    }
+
+    /// The logical repositories this host has recorded resolving and
+    /// materializing this package's digest under, as canonical
+    /// `<registry>/<repository-path>` strings.
+    ///
+    /// Empty when nothing was recorded — an absent directory, an unreadable
+    /// one, and a package materialized before origins were tracked are all the
+    /// same answer, because none of them is evidence of a repository. Callers
+    /// that use this as authorization evidence must treat the empty answer as a
+    /// refusal, never as "unconstrained".
+    ///
+    /// A marker whose content does not hash back to its own file name is
+    /// discarded: the file name is [`ReferenceManager::name_for_path`] of the
+    /// content, so a torn or clobbered marker is detectable without a second
+    /// integrity file.
+    ///
+    /// Sorted and deduplicated, so the answer does not depend on directory
+    /// order. Blocking: one `read_dir` plus one small read per entry.
+    #[must_use]
+    pub fn recorded_origins(&self) -> Vec<String> {
+        let dir = self.refs_origins_dir();
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                // Absence is the ordinary state for every package pulled before
+                // this marker existed, and for every off-store `PackageDir`, so
+                // even a genuine read failure stays at debug: the outcome is
+                // identical and a WARN here would fire on the common case.
+                log::debug!("No recorded pull origins at '{}': {e}", dir.display());
+                return Vec::new();
+            }
+        };
+        let mut origins: Vec<String> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                log::debug!("Skipping unreadable origin marker '{}'", path.display());
+                continue;
+            };
+            let origin = content.trim().to_string();
+            if origin_marker_name(&origin) != entry.file_name().to_string_lossy() {
+                log::debug!(
+                    "Skipping origin marker '{}': its content does not hash to its own name",
+                    path.display()
+                );
+                continue;
+            }
+            origins.push(origin);
+        }
+        origins.sort();
+        origins.dedup();
+        origins
     }
 
     /// Path to the generated launchers directory.
@@ -300,6 +368,121 @@ fn package_dir_for_content(path: &Path) -> Result<PathBuf> {
     }
 }
 
+/// The canonical origin string for `identifier`: `<registry>/<repository-path>`,
+/// host lowercased, port preserved, repository path verbatim.
+///
+/// This is the *full* coordinate, not the consent source: truncating to the
+/// org is the consent predicate's normalization
+/// ([`crate::project::consent::source_of`]), and a store that recorded only the
+/// truncated form could never answer a finer question later.
+#[must_use]
+fn origin_of(identifier: &oci::Identifier) -> String {
+    format!(
+        "{}/{}",
+        identifier.registry().to_ascii_lowercase(),
+        identifier.repository()
+    )
+}
+
+/// The marker file name for `origin`.
+///
+/// [`ReferenceManager::name_for_path`] is this codebase's one "name a byte
+/// string by its hash" helper — the install back-refs and the project ledger
+/// both key on it — and `Path` is a zero-cost wrapper over the same bytes, so
+/// this hashes the origin string verbatim rather than introducing a second
+/// scheme.
+///
+/// The name is a 64-bit truncated SHA-256, so a collision is conceivable. It
+/// cannot forge an origin: the marker's *content* is the truth and is written
+/// only by [`record_origin`], so a collision can at worst suppress recording a
+/// second repository for a digest the first one already recorded — and those
+/// two repositories resolve to byte-identical content by construction.
+fn origin_marker_name(origin: &str) -> String {
+    ReferenceManager::name_for_path(Path::new(origin))
+}
+
+/// Record that this host resolved `identifier`'s **logical** repository and
+/// materialized digest-verified content for `pkg` under it.
+///
+/// # This is authorization evidence — call it only from a materializing pull
+///
+/// The package store is addressed by **(registry, digest) only**, so this
+/// directory is the sole place the store records *which repository* content
+/// arrived under. The shell-activation consent predicate quantifies clause 2
+/// over exactly this record
+/// ([`crate::project::consent::verified_sources`]), so what a marker attests
+/// bounds what that clause can grant.
+///
+/// State the bound at the strength the gate actually enforces. A marker is
+/// evidence that **this host** ran a fetching pull — anything but
+/// `pull_local` — which materialized digest-verified content and bound it to
+/// the logical repository the identifier spelled. It is **not** evidence that
+/// a registry vouched for that binding: the call site sits past two store-hit
+/// fast paths that are each conditional on install status, so an absent or
+/// not-OK package directory falls through into the fetching branch, and from
+/// there the layer cache can satisfy every layer with no client and no wire.
+/// A pull naming any logical repository, on a registry whose layers for that
+/// digest are already cached, therefore mints that repository's marker
+/// offline.
+///
+/// So clause 2's floor is *"some local actor pulled under this name"*, not
+/// *"a registry served under this name"*. That is still strictly stronger
+/// than the claim-based spelling it replaced — lock text is written by the
+/// clone's author, whereas a marker takes an act of pulling on this host —
+/// but the stronger wording belongs here only once the write gate observes
+/// wire contact. Tracked as
+/// <https://github.com/ocx-sh/ocx/issues/348>.
+///
+/// # Logical, not transport
+///
+/// `identifier` is the coordinate the caller resolved, **not** the address the
+/// bytes travelled over: an operator's `[mirrors]` entry or an index
+/// indirection can redirect the fetch to a different endpoint or repository,
+/// and the marker still records the logical one. That is deliberate and
+/// matches [`crate::project::consent::source_of`] — consent has one identity,
+/// and pinning it to routing is the failure `adr_lock_records_physical_address.md`
+/// was rejected for. Both redirects are operator-configured (`config.toml`
+/// tiers only; a project's `ocx.toml` reaches neither), and the content is
+/// digest-verified whichever endpoint serves it, so a redirect cannot
+/// substitute different bytes. What the marker consequently does not answer is
+/// *who published* them — that is `[[trust.policy]]` plus signature
+/// verification, the same residual consent carries generally.
+///
+/// It therefore MUST NOT be called from a local-store hit
+/// (`tasks::common::find_in_store`, `find_or_install`) or from `pull_local`
+/// (a local tarball, whose repository is author-supplied text no registry ever
+/// vouched for). Composing a namespace-granted project reaches those paths, so
+/// a marker written there would let a project author self-authorize by naming
+/// a repository and having the name recorded as if it had been served.
+///
+/// Idempotent and race-tolerant: one file per distinct origin, written only
+/// when absent, so concurrent pulls of different repositories at one digest do
+/// not contend. Call it against the staging [`PackageDir`] before the atomic
+/// temp→store move, so the marker is published by that same rename and a
+/// crash mid-write leaves a discarded temp tree rather than a torn marker.
+///
+/// # Errors
+///
+/// Propagates the directory-creation or file-write failure.
+pub async fn record_origin(pkg: &PackageDir, identifier: &oci::Identifier) -> Result<()> {
+    let origin = origin_of(identifier);
+    let dir = pkg.refs_origins_dir();
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| Error::InternalFile(dir.clone(), e))?;
+
+    let marker = dir.join(origin_marker_name(&origin));
+    if tokio::fs::try_exists(&marker)
+        .await
+        .map_err(|e| Error::InternalFile(marker.clone(), e))?
+    {
+        return Ok(());
+    }
+    tokio::fs::write(&marker, origin.as_bytes())
+        .await
+        .map_err(|e| Error::InternalFile(marker, e))
+}
+
 /// Registry directory + CAS shard depth (algorithm/prefix/suffix).
 const MAX_WALK_DEPTH: usize = 1 + super::cas_path::CAS_SHARD_DEPTH;
 
@@ -349,6 +532,92 @@ mod tests {
         let id_b = pinned("example.com", "ninja");
         // Different repos, same digest and registry -> same path
         assert_eq!(store.path(&id_a), store.path(&id_b));
+    }
+
+    /// The store's dedup is exactly what makes the origin markers necessary:
+    /// two repositories serving one digest share **one** package directory, so
+    /// nothing in the path records which of them the bytes arrived from. The
+    /// `refs/origins/` directory is that record, and it keeps the two apart
+    /// inside the shared directory.
+    ///
+    /// This is the property `project::consent::verified_sources` rests on, and
+    /// it sits beside `path_uses_only_registry_and_digest_not_repository`
+    /// deliberately: that test pins the deduplication, this one pins the
+    /// provenance the deduplication erases.
+    ///
+    /// Red state: make `origin_marker_name` a constant, or write the marker
+    /// with `create_dir_all` + a fixed name — the two origins collapse to one
+    /// and the second assertion drops to a single-element vector.
+    #[tokio::test]
+    async fn origins_distinguish_two_repositories_sharing_one_package_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PackageStore::new(dir.path());
+        let cmake = pinned("example.com", "acme/cmake");
+        let ninja = pinned("example.com", "evil/ninja");
+
+        // The precondition, restated locally so this test fails loudly rather
+        // than vacuously if the dedup ever changes.
+        assert_eq!(
+            store.path(&cmake),
+            store.path(&ninja),
+            "the two identifiers must share one package directory for this test to mean anything"
+        );
+
+        let pkg = store.package_dir(&cmake);
+        assert!(
+            pkg.recorded_origins().is_empty(),
+            "a package directory with no markers records no origin - never a permissive default"
+        );
+
+        record_origin(&pkg, cmake.as_identifier()).await.unwrap();
+        record_origin(&pkg, ninja.as_identifier()).await.unwrap();
+        // Idempotent: a re-pull of an already-recorded repository adds nothing.
+        record_origin(&pkg, cmake.as_identifier()).await.unwrap();
+
+        assert_eq!(
+            store.package_dir(&ninja).recorded_origins(),
+            vec![
+                "example.com/acme/cmake".to_string(),
+                "example.com/evil/ninja".to_string()
+            ],
+            "both repositories recorded for this digest are kept, sorted and deduplicated, and \
+             either identifier reads the same shared record"
+        );
+    }
+
+    /// A marker whose content does not hash back to its own name is discarded:
+    /// the name IS the integrity check, so a clobbered or truncated marker
+    /// cannot silently rename an origin.
+    #[tokio::test]
+    async fn a_marker_whose_content_does_not_match_its_name_is_discarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PackageStore::new(dir.path());
+        let id = pinned("example.com", "acme/cmake");
+        let pkg = store.package_dir(&id);
+
+        record_origin(&pkg, id.as_identifier()).await.unwrap();
+        assert_eq!(
+            pkg.recorded_origins(),
+            vec!["example.com/acme/cmake".to_string()],
+            "the positive control: an intact marker reads back"
+        );
+
+        let marker = pkg
+            .refs_origins_dir()
+            .join(origin_marker_name("example.com/acme/cmake"));
+        std::fs::write(&marker, "example.com/granted-org/anything").unwrap();
+        assert!(
+            pkg.recorded_origins().is_empty(),
+            "a marker rewritten to name another repository must not be honoured"
+        );
+    }
+
+    #[test]
+    fn origin_of_lowercases_the_host_and_keeps_the_whole_repository_path() {
+        let id = oci::Identifier::new_registry("Acme/tools/cmake", "GHCR.IO");
+        assert_eq!(origin_of(&id), "ghcr.io/Acme/tools/cmake");
+        let ported = oci::Identifier::new_registry("acme/tool", "localhost:5000");
+        assert_eq!(origin_of(&ported), "localhost:5000/acme/tool", "the port is preserved");
     }
 
     #[test]

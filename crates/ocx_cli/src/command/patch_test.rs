@@ -219,7 +219,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     // order that is correct — see `Env::apply_child_env`. A base that declares
     // entrypoints resolves through its generated launcher here too, so an
     // unforwarded override would be silently reverted at that hop.
-    let mut process_env = env::Env::new();
+    let mut process_env = env::Env::inherited();
     process_env.apply_child_env(
         env::ChildEnv {
             composed: &composition.entries,

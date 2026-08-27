@@ -43,9 +43,9 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
-      - name: Compare vendored fixtures against ocx-sh/index@main
+      - name: Compare vendored fixtures against ocx-sh/indexbot@main
         env:
-          # `gh api` against the public ocx-sh/index; read-only, no elevation.
+          # `gh api` against the public ocx-sh/indexbot; read-only, no elevation.
           GH_TOKEN: ${{ github.token }}
         run: task test:index-conformance-drift
 
