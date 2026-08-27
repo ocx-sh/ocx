@@ -2,7 +2,7 @@ name: Basic Verification
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'ci/winleg-**']
   pull_request:
     branches: [main, 'announce/**']
 
@@ -121,6 +121,45 @@ jobs:
             echo "::error::Lint checks failed (fmt=${{ steps.fmt.outcome }}, clippy=${{ steps.clippy.outcome }})"
             exit 1
           fi
+
+  smoke-windows:
+    name: Smoke (Windows)
+    # `needs: smoke` is the cost policy from subsystem-ci.md §"Cost Factors"
+    # ("Linux default; gate macOS/Windows behind Linux passing"), not a data
+    # dependency: Windows minutes bill at ~1.7x Linux, so this leg is skipped
+    # entirely when Linux is already red.
+    #
+    # A `cargo check --all-targets` leg would be cheaper and would have caught
+    # the `cfg(windows)` compile break that hid behind these checks — but only
+    # that one. The 14 failures it was masking are runtime assertion failures,
+    # which no `check` can see. Hence a test leg.
+    needs: smoke
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          matcher: true
+          # Same reason as the Linux leg: denial lives in [workspace.lints.rust]
+          # so the path-vendored forks stay capped.
+          rustflags: ""
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install nextest
+        uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
+        with:
+          tool: cargo-nextest
+      # No release build, no artifact upload, no schema generation: this leg
+      # exists to compile and run the test targets on Windows, which is the one
+      # thing the Linux and macOS legs cannot do for it.
+      - name: Test
+        run: cargo nextest run --workspace --locked
 
   acceptance-tests:
     name: Acceptance Tests
