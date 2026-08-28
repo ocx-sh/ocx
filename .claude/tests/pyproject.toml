@@ -6,5 +6,13 @@ requires-python = ">=3.10"
 [tool.pytest.ini_options]
 testpaths = ["."]
 
+# Temp-dir retention: pytest keeps the last 3 runs and every test's tmp_path by
+# default, so disk use tracks total tests rather than concurrent failures.
+# "failed" reclaims a passing test's dir at teardown; count=1 drops the
+# cross-run multiplier. Keep a passing dir while debugging with
+# `-o tmp_path_retention_policy=all`.
+tmp_path_retention_count = 1
+tmp_path_retention_policy = "failed"
+
 [dependency-groups]
 dev = ["pytest>=8.0"]

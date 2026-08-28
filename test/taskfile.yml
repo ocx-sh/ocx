@@ -17,6 +17,20 @@ vars:
   # a port another project already holds. Default 5000 keeps CI unchanged.
   REGISTRY_PORT:
     sh: printf '%s' "${OCX_TEST_REGISTRY_PORT:-5000}"
+  # Where pytest puts its per-test arenas. Every installing test materializes a
+  # full three-tier CAS (blobs + layers + packages) under `tmp_path`, and the
+  # default TMPDIR is /tmp, a tmpfs whose declared size (64G) is larger than
+  # RAM+swap — so filling it is an out-of-memory, not a disk limit, and it takes
+  # every other process on the box down with it. Disk-backed instead, outside
+  # any git tree (a tree-local dir leaks into tooling inputs) and outside /tmp
+  # (the reaper deletes a live basetemp mid-run). Override with TEST_TMPDIR=…
+  # for a run that needs to land elsewhere.
+  TEST_TMPDIR:
+    sh: mkdir -p "${TEST_TMPDIR:-$HOME/.cache/ocx-test-tmp}" && printf '%s' "${TEST_TMPDIR:-$HOME/.cache/ocx-test-tmp}"
+
+# Applies to every task in this file, so no pytest leg can miss it.
+env:
+  TMPDIR: "{{.TEST_TMPDIR}}"
 
 tasks:
   build:
