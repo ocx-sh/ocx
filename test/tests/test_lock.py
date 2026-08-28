@@ -1520,9 +1520,9 @@ def test_relock_new_platform_lock_is_noop_update_adds_key(
     appears as an added key on ``ocx update`` — not on a clean ``ocx lock``,
     which carries the existing pin forward verbatim.
 
-    Setup: push platform A (``new=True``) → ``ocx lock --no-pull`` → record the
+    Setup: push platform A → ``ocx lock --no-pull`` → record the
     set of leaf digests → push platform B under the same repo:tag
-    (``new=False``) → re-index → assert a clean ``ocx lock --no-pull`` is a
+    → re-index → assert a clean ``ocx lock --no-pull`` is a
     no-op (still one leaf) → ``ocx update --no-pull`` → assert the lock now
     carries TWO platform keys and ``generated_at`` advanced (content changed).
 
@@ -1566,8 +1566,8 @@ tool = "{ocx.registry}/{repo}:{tag}"
     )
 
     # Push a SECOND, distinct platform under the same repo:tag.  We use
-    # ``linux/arm64`` as a portable non-host alternative; ``new=False`` tells
-    # make_package to merge into the existing index rather than starting fresh.
+    # ``linux/arm64`` as a portable non-host alternative; the push merges
+    # into the existing index rather than starting fresh.
     # A distinct ``tmp_path`` subdirectory is required so that make_package
     # does not try to re-create ``pkg-{repo}-{tag}/bin/`` which already
     # exists from the first call.

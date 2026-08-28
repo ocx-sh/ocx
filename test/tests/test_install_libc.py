@@ -358,8 +358,8 @@ def test_install_errors_ambiguous_when_host_reports_both_libcs(
     musl_build.mkdir()
 
     # Two libc-marked entries under the SAME tag — pushes merge into one
-    # image index (`new=True` then `new=False`, `cascade=False` keeps it
-    # minimal), same fixture shape as
+    # image index (first push creates the tag, second merges into it;
+    # `cascade=False` keeps it minimal), same fixture shape as
     # `test_install_discriminates_glibc_vs_musl_by_explicit_platform`.
     make_package(
         ocx, unique_repo, "1.0.0", glibc_build,
@@ -508,13 +508,13 @@ def test_install_discriminates_glibc_vs_musl_by_explicit_platform(
     glibc_build.mkdir()
     musl_build.mkdir()
 
-    # First entry: glibc-marked. `new=True` creates the tag; `cascade=False`
+    # First entry: glibc-marked. This push creates the tag; `cascade=False`
     # keeps the index minimal so the two pushes merge into one image index.
     glibc_pkg = make_package(
         ocx, unique_repo, "1.0.0", glibc_build,
         platform="linux/amd64+libc.glibc", cascade=False,
     )
-    # Second entry: musl-marked under the SAME tag. `new=False` merges into the
+    # Second entry: musl-marked under the SAME tag. The push merges into the
     # existing image index instead of replacing it.
     musl_pkg = make_package(
         ocx, unique_repo, "1.0.0", musl_build,

@@ -199,7 +199,7 @@ def test_pull_platform_ambiguous_dual_libc_leaf_exits_65(ocx: OcxRunner, unique_
     glibc = "linux/amd64+libc.glibc"
     musl = "linux/amd64+libc.musl"
     # Two libc-marked entries under the SAME tag merge into one image index
-    # (`new=True` then `new=False`, `cascade=False` keeps it minimal) — same
+    # (`cascade=False` keeps it minimal) — same
     # fixture shape as the fresh-resolve ambiguity regression in
     # `test_install_libc.py::test_install_errors_ambiguous_when_host_reports_both_libcs`.
     make_package(ocx, unique_repo, PUSH_VERSION, tmp_path / "glibc", platform=glibc, cascade=False)

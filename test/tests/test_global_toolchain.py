@@ -541,7 +541,7 @@ def test_global_update_takes_effect_without_select(
     Flow:
     1. Push v1 under a rolling tag (``latest``, created by cascade).
        ``add --global`` binds to ``latest`` → lock records v1 digest.
-    2. Push v2 with ``new=False`` (cascade overwrites ``latest`` with v2 digest).
+    2. Push v2 (cascade overwrites ``latest`` with v2 digest).
     3. ``update --global`` re-resolves ``latest`` → new digest → lock re-pinned.
     4. ``pull --global`` materialises the new content into the local blob store.
        (``update`` re-pins the lock but does not download blobs; ``pull`` does.)
@@ -566,7 +566,7 @@ def test_global_update_takes_effect_without_select(
         f"add --global latest must succeed; rc={add_v1.returncode}\nstderr:\n{add_v1.stderr}"
     )
 
-    # Step 2: push v2 with cascade + new=False — overwrites ``latest`` with v2 digest.
+    # Step 2: push v2 with cascade — overwrites ``latest`` with v2 digest.
     v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path, bins=[bin_name])
     assert v1.marker != v2.marker, "precondition: markers differ between versions"
 

@@ -26,7 +26,7 @@ ocx package create build -i mytool:1.0.0 -p linux/amd64 -m metadata.json -o .
 ocx package create build -i mytool:1.0.0 -p linux/arm64 -m metadata.json -o .
 
 ocx package push -c -p linux/amd64 -i acme/mytool:1.0.0 mytool-1.0.0-linux-amd64.tar.xz
-ocx package push    -c -p linux/arm64 -i acme/mytool:1.0.0 mytool-1.0.0-linux-arm64.tar.xz
+ocx package push -c -p linux/arm64 -i acme/mytool:1.0.0 mytool-1.0.0-linux-arm64.tar.xz
 ```
 
 After both pushes, `acme/mytool:1.0.0` resolves to an image index with two platform descriptors, and any rolling aliases (`1.0`, `1`, `latest`) point at the same index digest. A consumer on Linux/arm64 fetches only the Linux/arm64 manifest's layers; an amd64 Linux runner fetches only the amd64 manifest's layers. Add `-p darwin/arm64`, `-p darwin/amd64`, or `-p windows/amd64` the same way for the rest of the matrix.
@@ -119,7 +119,7 @@ Hand-driven publishers (not using the mirror tool) declare the same `os_features
 
 ```sh
 ocx package push -c -p linux/amd64+libc.glibc -i acme/mytool:1.0.0 mytool-1.0.0-linux-amd64-glibc.tar.xz
-ocx package push    -c -p linux/amd64+libc.musl  -i acme/mytool:1.0.0 mytool-1.0.0-linux-amd64-musl.tar.xz
+ocx package push -c -p linux/amd64+libc.musl -i acme/mytool:1.0.0 mytool-1.0.0-linux-amd64-musl.tar.xz
 ```
 
 Both pushes share the same tag and `(os, arch)`, so they merge into the same image index as two entries differing only in `os_features` — the same result the mirror YAML's object form produces.

@@ -311,7 +311,16 @@ class TestRuleGlobs:
         for rule in sorted(CLAUDE_DIR.glob("rules/*.md")):
             if rule.name.startswith(shareable_prefixes):
                 continue
-            if any(line.startswith("repository:") for line in rule.read_text().splitlines()[:25]):
+            # Scoped to the frontmatter block, not the first N lines: a rule
+            # whose *body* happens to open a line with `repository:` would
+            # otherwise exempt itself from dead-glob detection silently.
+            text = rule.read_text()
+            frontmatter, closed, _ = text.partition("\n---")
+            if (
+                text.startswith("---")
+                and closed
+                and any(line.startswith("repository:") for line in frontmatter.splitlines())
+            ):
                 continue
             for pattern in self._extract_paths(rule):
                 matches = glob.glob(str(ROOT / pattern), recursive=True)
