@@ -297,17 +297,21 @@ class TestRuleGlobs:
     def test_all_rule_globs_match_files(self) -> None:
         """Every paths: glob in .claude/rules/*.md must match >= 1 file.
 
-        Shareable `quality-*.md` rules are exempt: they are designed to match
-        file types that may exist in *other* repositories where this rule gets
-        copied, not just OCX. A missing match in OCX doesn't mean the glob is
-        dead — it means that file type isn't used here. Dead-glob detection
-        still applies to OCX-specific rules (subsystem-*.md, architecture-
-        principles.md, product-context.md, etc.).
+        Shareable rules are exempt: they are designed to match file types that
+        may exist in *other* repositories where the rule gets copied, not just
+        OCX. A missing match in OCX doesn't mean the glob is dead — it means
+        that file type isn't used here. Two spellings of "shareable": the
+        `quality-*.md` prefix, and a `repository:` frontmatter field naming the
+        upstream the rule is vendored from (`rust-*.md`). Dead-glob detection
+        still applies to OCX-specific rules (subsystem-*.md, arch-principles.md,
+        product-context.md, etc.).
         """
         shareable_prefixes = ("quality-",)
         dead_globs = []
         for rule in sorted(CLAUDE_DIR.glob("rules/*.md")):
             if rule.name.startswith(shareable_prefixes):
+                continue
+            if any(line.startswith("repository:") for line in rule.read_text().splitlines()[:25]):
                 continue
             for pattern in self._extract_paths(rule):
                 matches = glob.glob(str(ROOT / pattern), recursive=True)
