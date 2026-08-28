@@ -134,11 +134,13 @@ async fn verify_any_pin_provenance(
     dependency_identifier: &oci::Identifier,
     pin: &oci::PinnedIdentifier,
 ) -> Result<(), PublishGateError> {
-    // Mirrored is inherited, not chosen: this read gates a publish, which
-    // Invariant #5 says must be decided on the canonical host. Moving it is a
-    // behaviour change to every publish, so it is a decision of its own.
+    // Canonical, never a mirror: this read gates a publish, and Invariant #5
+    // says a read that decides a write names the same host the write lands on.
+    // A mirror advertising a platform-specific leaf as `any` — stale, or
+    // hostile — would otherwise admit exactly the forged provenance claim this
+    // function exists to refuse, and the mirror never has to fail to do it.
     let (digest, manifest) = client
-        .fetch_manifest_addressed(dependency_identifier, ReadAddressing::Mirrored)
+        .fetch_manifest_addressed(dependency_identifier, ReadAddressing::Canonical)
         .await
         .map_err(|source| PublishGateError::AnyPinProvenanceUnavailable {
             identifier: Box::new(dependency_identifier.clone()),
@@ -349,6 +351,61 @@ mod tests {
         verify_dependency_pins(&client, &metadata, &Platform::any())
             .await
             .expect("a genuinely `any`-offered leaf must pass the provenance check and the gate");
+    }
+
+    /// The provenance read decides whether a publish is allowed, so it must
+    /// read the **canonical** registry — Invariant #5, the same rule the
+    /// cascade prelude and the blocker probe already follow.
+    ///
+    /// The two hosts are seeded with *different* answers, which is what makes
+    /// this discriminate: the mirror advertises the leaf as `any` (the cheap
+    /// half of the attack — a stale or hostile mirror never has to fail), the
+    /// canonical registry advertises it as `linux/amd64` only. A mirrored read
+    /// therefore admits a forged any-provenance claim and the gate passes; a
+    /// canonical read rejects it. Asserting only that the mirror 404s would
+    /// pass for a mirrored implementation too, via the fail-closed arm.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_any_provenance_read_uses_the_canonical_registry_not_a_mirror() {
+        let data = StubTransportData::new();
+        let client = stub_client(data.clone()).with_test_mirror("example.com", "mirror.invalid", "upstream");
+
+        let dependency = "example.com/dep:1.0"
+            .parse::<oci::Identifier>()
+            .expect("identifier parses");
+        let mirror_reference = client.read_reference(&dependency, ReadAddressing::Mirrored).to_string();
+        assert_ne!(
+            mirror_reference, "example.com/dep:1.0",
+            "the fixture only discriminates while the two hosts differ"
+        );
+
+        // The mirror lies: it offers the leaf as `any`. The canonical registry
+        // carries the truth: that leaf is `linux/amd64` only.
+        data.write().manifests.insert(
+            mirror_reference,
+            (
+                image_index_with_entry(&hex('a'), ANY_ENTRY).into_bytes(),
+                format!("sha256:{}", hex('f')),
+            ),
+        );
+        seed_manifest_by_tag(&data, &image_index_with_entry(&hex('a'), LINUX_AMD64_ENTRY));
+
+        // The leaf resolves on BOTH hosts, so the pin-existence check that
+        // follows the provenance check can never be what fails. Without this
+        // the test would go red on a missing mirror leaf and pass for a
+        // mirrored implementation — red for the wrong reason is not a proof.
+        seed_manifest_by_tag_and_digest(&data, &hex('a'), IMAGE_MANIFEST_JSON);
+        data.write().manifests.insert(
+            format!("mirror.invalid/upstream/dep:1.0@sha256:{}", hex('a')),
+            (IMAGE_MANIFEST_JSON.as_bytes().to_vec(), format!("sha256:{}", hex('a'))),
+        );
+
+        let err = verify_dependency_pins(&client, &metadata_with_any_pin(&hex('a')), &Platform::any())
+            .await
+            .expect_err("a mirror-advertised `any` claim must not admit a publish the canonical registry refuses");
+        assert!(
+            matches!(err, PublishGateError::AnyPinNotAdvertisedAsAny { .. }),
+            "got: {err}"
+        );
     }
 
     /// Fail-closed: if the dependency's own tag cannot be fetched at all
