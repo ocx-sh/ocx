@@ -1,6 +1,7 @@
 ---
 paths:
   - "**/Cargo.toml"
+  - "**/clippy.toml"
   - "**/rustfmt.toml"
   - "**/deny.toml"
   - "**/rust-toolchain.toml"

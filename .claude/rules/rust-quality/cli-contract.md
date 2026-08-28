@@ -43,9 +43,7 @@ one `ExitCode` enum per workspace.
 | 80 | `AuthError` | Authentication failure |
 | 81 | `PolicyBlocked` | A deliberate `--offline` / `--frozen` / verify-offline refusal — policy, not fault |
 | 82 | `DirtyRcBlock` | Refused to rewrite a shell-RC block carrying user edits |
-| 83 | `TransparencyLogUnavailable` | Rekor unreachable or its entry unverifiable, retry may succeed |
-| 84 | `ReferrersUnsupported` | Registry lacks the OCI referrers capability the operation needs |
-| 85–99 | *(unassigned)* | Next free slots; allocate upward from 85 (85 is pencilled for the OSV scan's advisory-found, unshipped) |
+| 83–99 | *(unassigned)* | Next free slots; allocate upward from 83 |
 | 128+N | *(not ours)* | Forwarded signal status of a **child** process only |
 
 64–78 mirror BSD `sysexits.h`; 79+ is the private range above `EX__MAX`.
