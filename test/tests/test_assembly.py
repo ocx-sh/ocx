@@ -122,8 +122,6 @@ def _push_bundle(
     metadata_path: Path,
     bundle_path: Path,
     fq: str,
-    *,
-    new: bool = True,
 ) -> None:
     """Bundle the pkg_dir and push it to the registry under fq."""
     ocx.plain(
@@ -148,8 +146,6 @@ def _push_bundle(
         "-m",
         str(resolved_metadata_path(bundle_path)),
     ]
-    if new:
-        push_args.append("-n")
     push_args += ["-i", fq, str(bundle_path)]
     ocx.plain(*push_args)
 
@@ -244,7 +240,6 @@ def _make_two_packages_sharing_layer(
         ocx.plain(
             "package",
             "push",
-            "-n",
             "-p",
             current_platform(),
             "-m",
@@ -606,7 +601,7 @@ def test_strip_applied_at_assemble_registry_path(
         _strip_metadata(meta, strip)
         fq = f"{ocx.registry}/{repo}:{tag}"
         ocx.plain(
-            "package", "push", "-n", "-p", current_platform(), "-m", str(meta), "-i", fq, str(bundle)
+            "package", "push", "-p", current_platform(), "-m", str(meta), "-i", fq, str(bundle)
         )
         ocx.plain("index", "update", f"{repo}:{tag}")
 
@@ -676,7 +671,7 @@ def test_strip_applied_at_assemble_local_path(
     # Push once so the identifier resolves cleanly; the local metadata (-m) is
     # what drives assemble strip, not the pushed config.
     fq = f"{ocx.registry}/{unique_repo}:{tag}"
-    ocx.plain("package", "push", "-n", "-p", current_platform(), "-m", str(base_meta), "-i", fq, str(bundle))
+    ocx.plain("package", "push", "-p", current_platform(), "-m", str(base_meta), "-i", fq, str(bundle))
     ocx.plain("index", "update", f"{unique_repo}:{tag}")
 
     def _materialize(strip: int, out_name: str) -> Path:
@@ -754,7 +749,7 @@ def test_single_package_strip_components_regression(
     )
 
     fq = f"{ocx.registry}/{unique_repo}:{tag}"
-    ocx.plain("package", "push", "-n", "-p", current_platform(), "-m", str(meta), "-i", fq, str(bundle))
+    ocx.plain("package", "push", "-p", current_platform(), "-m", str(meta), "-i", fq, str(bundle))
     ocx.plain("index", "update", f"{unique_repo}:{tag}")
 
     ocx.json("package", "install", f"{unique_repo}:{tag}")

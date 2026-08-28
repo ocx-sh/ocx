@@ -35,7 +35,7 @@ def published_package(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> PackageInfo:
     """Push a single test package (v1.0.0) and return its metadata."""
-    return make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    return make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
 
 @pytest.fixture()
@@ -43,6 +43,6 @@ def published_two_versions(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> tuple[PackageInfo, PackageInfo]:
     """Push two versions of a test package and return ``(v1, v2)``."""
-    v1 = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
-    v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False)
+    v1 = make_package(ocx, unique_repo, "1.0.0", tmp_path)
+    v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path)
     return v1, v2

@@ -22,7 +22,7 @@ EXIT_DATA_ERR = 65  # DataError (sysexits EX_DATAERR); version conflict maps her
 
 def _push_leaf(ocx: OcxRunner, repo: str, tmp_path: Path, **kwargs) -> PackageInfo:
     """Push a leaf package (no dependencies)."""
-    return make_package(ocx, repo, "1.0.0", tmp_path, new=True, **kwargs)
+    return make_package(ocx, repo, "1.0.0", tmp_path, **kwargs)
 
 
 def _push_with_deps(
@@ -32,7 +32,6 @@ def _push_with_deps(
     tmp_path: Path,
     deps: list[dict],
     *,
-    new: bool = True,
     env: list[dict] | None = None,
 ) -> PackageInfo:
     """Push a package with dependency metadata."""
@@ -41,7 +40,6 @@ def _push_with_deps(
         repo,
         tag,
         tmp_path,
-        new=new,
         env=env,
         dependencies=deps,
     )
@@ -695,8 +693,8 @@ def test_deps_flat_conflicting_digests_reports_error(
     b_repo = f"{unique_repo}_b"
 
     # Push two different versions of D to the same repo
-    d_v1 = make_package(ocx, d_repo, "1.0.0", tmp_path, new=True)
-    d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path, new=False)
+    d_v1 = make_package(ocx, d_repo, "1.0.0", tmp_path)
+    d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path)
 
     # A depends on D v1 (exported), B depends on D v2 (exported) — conflicting digests
     a = _push_with_deps(ocx, a_repo, "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v1, visibility="public")])
@@ -783,8 +781,8 @@ def test_deep_conflict_at_depth_two(
 ):
     """A->B->D v1 and A->C->D v2 (all exported): conflict warned at transitive depth 2."""
     d_repo = f"{unique_repo}_d"
-    d_v1 = make_package(ocx, d_repo, "1.0.0", tmp_path, new=True)
-    d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path, new=False)
+    d_v1 = make_package(ocx, d_repo, "1.0.0", tmp_path)
+    d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path)
 
     b = _push_with_deps(
         ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v1, visibility="public")]
@@ -1100,8 +1098,8 @@ def test_sealed_conflicting_deps_coexist(
 ):
     """A depends on D v1 (non-exported), B depends on D v2 (non-exported): env A B succeeds."""
     d_repo = f"{unique_repo}_d"
-    d_v1 = make_package(ocx, d_repo, "1.0.0", tmp_path, new=True)
-    d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path, new=False)
+    d_v1 = make_package(ocx, d_repo, "1.0.0", tmp_path)
+    d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path)
 
     a = _push_with_deps(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
@@ -1137,8 +1135,8 @@ def test_public_conflicting_deps_error(
     with a DataError (65) naming the conflicting repository.
     """
     d_repo = f"{unique_repo}_d"
-    d_v1 = make_package(ocx, d_repo, "1.0.0", tmp_path, new=True)
-    d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path, new=False)
+    d_v1 = make_package(ocx, d_repo, "1.0.0", tmp_path)
+    d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path)
 
     a = _push_with_deps(
         ocx, f"{unique_repo}_a", "1.0.0", tmp_path,
@@ -1175,8 +1173,8 @@ def test_env_diamond_conflict_errors(
     transitive deps resolved into the environment.
     """
     d_repo = f"{unique_repo}_d"
-    d_v1 = make_package(ocx, d_repo, "1.0.0", tmp_path, new=True)
-    d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path, new=False)
+    d_v1 = make_package(ocx, d_repo, "1.0.0", tmp_path)
+    d_v2 = make_package(ocx, d_repo, "2.0.0", tmp_path)
 
     b = _push_with_deps(
         ocx, f"{unique_repo}_b", "1.0.0", tmp_path, deps=[_dep_entry(ocx, d_v1, visibility="public")]
@@ -1212,8 +1210,8 @@ def test_env_conflicting_roots_error(
     DataError (65) naming the repository.
     """
     repo = f"{unique_repo}_tool"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True)  # cascade -> 1.0.0, 1.0, 1, latest
-    make_package(ocx, repo, "2.0.0", tmp_path, new=False)  # cascade -> 2.0.0, 2.0, 2, latest
+    make_package(ocx, repo, "1.0.0", tmp_path)  # cascade -> 1.0.0, 1.0, 1, latest
+    make_package(ocx, repo, "2.0.0", tmp_path)  # cascade -> 2.0.0, 2.0, 2, latest
 
     # `repo:1` and `repo:2` are distinct digests.
     result = ocx.run("package", "env", f"{repo}:1", f"{repo}:2", check=False)
@@ -1238,7 +1236,7 @@ def test_env_same_digest_roots_ok(
     the same version — not a conflict.
     """
     repo = f"{unique_repo}_tool"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True)  # cascade -> 1.0.0, 1.0, 1, latest (same digest)
+    make_package(ocx, repo, "1.0.0", tmp_path)  # cascade -> 1.0.0, 1.0, 1, latest (same digest)
 
     result = ocx.run("package", "env", f"{repo}:1.0.0", f"{repo}:1", check=False)
     assert result.returncode == 0, (

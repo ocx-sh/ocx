@@ -135,7 +135,7 @@ def _published_tool(
     short = uuid4().hex[:8]
     repo = f"t_{short}_run_{label}"
     tag = "1.0.0"
-    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, tag, tmp_path, cascade=False)
     return repo, tag
 
 
@@ -1027,7 +1027,7 @@ def test_run_resolves_host_leaf_from_compose(
     repo = f"t_{short}_run_v3"
     tag = "1.0.0"
     bin_name = "v3tool"
-    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False, bins=[bin_name])
+    make_package(ocx, repo, tag, tmp_path, cascade=False, bins=[bin_name])
 
     project = tmp_path / "proj_run_v3"
     project.mkdir()
@@ -1101,7 +1101,6 @@ def test_run_flat_manifest_image_any_package_resolves_via_any_fallback(
     # Push with platform="any" — platform-agnostic package.
     pkg = make_package(
         ocx, repo, tag, tmp_path,
-        new=True,
         cascade=False,
         platform="any",
         bins=[bin_name],

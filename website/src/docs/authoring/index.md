@@ -50,7 +50,7 @@ Bundle `build/` into a deterministic archive, then push it to any registry you c
 
 ```sh
 ocx package create build -p linux/amd64 -m metadata.json -o mytool-1.0.0.tar.xz
-ocx package push -n -p linux/amd64 -m metadata.json \
+ocx package push -p linux/amd64 -m metadata.json \
   ghcr.io/me/mytool:1.0.0 mytool-1.0.0.tar.xz
 ```
 

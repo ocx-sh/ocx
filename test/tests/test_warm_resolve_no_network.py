@@ -154,7 +154,7 @@ def warm_project(
     cold, and runs every command under test once so the local snapshot is
     complete.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
 
     _write_index_config(ocx, index_server)
     static_index.write_config(index_server.root)

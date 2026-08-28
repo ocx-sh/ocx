@@ -62,7 +62,7 @@ def multi_version(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str,
             ),
             make_package(
                 ocx, f"{prefix}amazon/corretto", "25.0.0", tmp_path,
-                bins=["java", "javac"], env=corretto_env, new=False,
+                bins=["java", "javac"], env=corretto_env,
                 outputs={"java": {"-version": (
                     "openjdk 25.0.2 2026-01-20 LTS\n"
                     "OpenJDK Runtime Environment Corretto-25.0.2.10.1 (build 25.0.2+10-LTS)\n"
@@ -132,7 +132,7 @@ def full_catalog(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, 
             ),
             make_package(
                 ocx, f"{prefix}amazon/corretto", "25.0.0", tmp_path,
-                bins=["java", "javac"], env=corretto_env, new=False,
+                bins=["java", "javac"], env=corretto_env,
                 outputs={"java": {"-version": (
                     "openjdk 25.0.2 2026-01-20 LTS\n"
                     "OpenJDK Runtime Environment Corretto-25.0.2.10.1 (build 25.0.2+10-LTS)\n"
@@ -182,7 +182,7 @@ def variants(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list
             ),
             make_package(
                 ocx, f"{prefix}astral-sh/python-build-standalone", "slim-3.13.14", tmp_path / "slim",
-                bins=["python3"], env=python_env, new=False,
+                bins=["python3"], env=python_env,
                 outputs={"python3": {"--version": "Python 3.13.14"}},
             ),
         ],
@@ -637,8 +637,7 @@ def managed_config_onboard(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> 
     ``--managed-config`` ref matches what an operator actually types.
     """
     self_pkg = make_package(
-        ocx, f"{prefix}ocx/cli", "0.0.1", tmp_path,
-        new=True, cascade=False, bins=["ocx"],
+        ocx, f"{prefix}ocx/cli", "0.0.1", tmp_path, cascade=False, bins=["ocx"],
         outputs={"ocx": {"--format json version": json.dumps({"version": "0.0.1"})}},
     )
 

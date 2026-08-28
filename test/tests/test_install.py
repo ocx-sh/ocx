@@ -111,8 +111,8 @@ def test_install_foreign_platform_writes_no_candidate(
     non-amd64 host and `arm64` is foreign to an amd64 host — the assertion never
     depends on which arch runs it.
     """
-    make_package(ocx, unique_repo, "3.28.0", tmp_path / "amd64", platform=_AMD64, new=True)
-    make_package(ocx, unique_repo, "3.28.0", tmp_path / "arm64", platform=_ARM64, new=False)
+    make_package(ocx, unique_repo, "3.28.0", tmp_path / "amd64", platform=_AMD64)
+    make_package(ocx, unique_repo, "3.28.0", tmp_path / "arm64", platform=_ARM64)
 
     foreign = _AMD64 if current_platform() != _AMD64 else _ARM64
     ref = f"{ocx.registry}/{unique_repo}:3.28"

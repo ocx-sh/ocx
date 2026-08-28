@@ -84,7 +84,7 @@ def _created_app(
 
 
 def _push(ocx: OcxRunner, fq: str, bundle: Path, *args: str, check: bool = True):
-    return ocx.run("package", "push", "-n", *args, "-i", fq, str(bundle), check=check)
+    return ocx.run("package", "push", *args, "-i", fq, str(bundle), check=check)
 
 
 def _assert_no_diagnostics(stderr: str) -> None:
@@ -211,8 +211,8 @@ def test_push_repush_is_idempotent(ocx: OcxRunner, unique_repo: str, tmp_path: P
     )
     app_fq = f"{ocx.registry}/{unique_repo}_app:1.0.0"
 
-    first = ocx.json("package", "push", "-n", "-i", app_fq, str(bundle))
-    second = ocx.json("package", "push", "-n", "-i", app_fq, str(bundle))
+    first = ocx.json("package", "push", "-i", app_fq, str(bundle))
+    second = ocx.json("package", "push", "-i", app_fq, str(bundle))
     assert first["manifest_digest"] == second["manifest_digest"]
 
 
@@ -382,7 +382,7 @@ def test_push_falls_back_to_both_recorded_values(
     app_fq = f"{ocx.registry}/{app_repo}:1.0.0"
     bundle = _created_app(ocx, tmp_path, "recorded", [], plat, identifier=app_fq)
 
-    ocx.run("package", "push", "-n", str(bundle))
+    ocx.run("package", "push", str(bundle))
 
     manifest = fetch_manifest_from_registry(ocx.registry, app_repo, "1.0.0")
     assert plat in index_platforms(manifest), (
@@ -401,7 +401,7 @@ def test_push_with_tagless_identifier_takes_the_recorded_version(
     app_fq = f"{ocx.registry}/{app_repo}:3.1.4"
     bundle = _created_app(ocx, tmp_path, "tagless", [], plat, identifier=app_fq)
 
-    ocx.run("package", "push", "-n", "-i", f"{ocx.registry}/{app_repo}", str(bundle))
+    ocx.run("package", "push", "-i", f"{ocx.registry}/{app_repo}", str(bundle))
 
     manifest = fetch_manifest_from_registry(ocx.registry, app_repo, "3.1.4")
     assert plat in index_platforms(manifest), (
@@ -441,7 +441,7 @@ def test_push_without_receipt_or_identifier_is_usage_error(
     metadata = _write_metadata(tmp_path, "noreceiptnoid", {"type": "bundle", "version": 1})
 
     result = ocx.run(
-        "package", "push", "-n", "-m", str(metadata), "-p", current_platform(),
+        "package", "push", "-m", str(metadata), "-p", current_platform(),
         str(bundle), check=False,
     )
     assert result.returncode == EXIT_USAGE, result.stderr
@@ -475,7 +475,7 @@ def test_rebuild_declaring_nothing_removes_the_stale_receipt(
     )
     metadata = _write_metadata(tmp_path, "restale-push", {"type": "bundle", "version": 1})
     result = ocx.run(
-        "package", "push", "-n", "-m", str(metadata), "-p", current_platform(),
+        "package", "push", "-m", str(metadata), "-p", current_platform(),
         str(bundle), check=False,
     )
     assert result.returncode == EXIT_USAGE, result.stderr

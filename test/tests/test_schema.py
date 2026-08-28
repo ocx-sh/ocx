@@ -259,7 +259,7 @@ def test_old_metadata_without_entrypoints_parses_successfully(
     import sys  # noqa: PLC0415
     from src.helpers import make_package  # noqa: PLC0415
 
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     # install must succeed (backward compat — no entrypoints in old metadata).
     result = ocx.run("package", "install", pkg.short, check=False)
     assert result.returncode == 0, (
@@ -301,7 +301,7 @@ def test_metadata_with_empty_entrypoints_object_installs(
 
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     push_result = ocx.run(
-        "package", "push", "-p", plat, "-m", str(resolved_metadata_path(bundle)), "-n", "-i", fq, str(bundle),
+        "package", "push", "-p", plat, "-m", str(resolved_metadata_path(bundle)), "-i", fq, str(bundle),
         check=False,
     )
     # Empty entrypoints is valid — push must succeed.

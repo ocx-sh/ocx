@@ -119,8 +119,8 @@ def test_kill_mid_add_leaves_recoverable_state(
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_kill_a"
     repo_b = f"t_{short}_kill_b"
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -190,7 +190,7 @@ def test_partial_lock_write_rolled_back(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_partial_write"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()

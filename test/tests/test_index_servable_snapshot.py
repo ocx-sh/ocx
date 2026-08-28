@@ -311,7 +311,7 @@ def test_the_air_gap_pipeline_resolves_the_same_platform_manifest_digest(
     every way to make the copy incomplete either fails the install or trips
     assertion 1, so it could not be the assertion that goes red.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -469,7 +469,7 @@ def test_a_file_url_base_resolves_a_tag_with_no_server_at_all(
     registry instead.
     """
     namespace = "corp.example"
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 

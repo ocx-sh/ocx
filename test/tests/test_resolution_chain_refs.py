@@ -489,8 +489,8 @@ def test_parallel_install_races_preserve_full_chain(
     same $OCX_HOME both complete successfully, neither corrupts blob files,
     both produce full refs/blobs/."
     """
-    v1 = make_package(ocx, unique_repo, "1.0.0", tmp_path / "v1", new=True, cascade=False)
-    v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path / "v2", new=False, cascade=False)
+    v1 = make_package(ocx, unique_repo, "1.0.0", tmp_path / "v1", cascade=False)
+    v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path / "v2", cascade=False)
 
     def run_install(pkg_short: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -639,7 +639,7 @@ def test_resolution_chain_tag_via_image_index(
     image index, so the resolution chain is (image index, platform manifest) —
     two OCI blobs. Installing via the tag must link both into ``refs/blobs/``.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     content = _install_content(ocx, pkg)
     entries = _chain_entries(content)
@@ -688,7 +688,7 @@ def test_resolution_chain_direct_digest_to_image_index(
     produce a two-blob chain: the index itself plus the platform-selected
     child manifest.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     index_digest = fetch_manifest_digest(ocx.registry, unique_repo, pkg.tag)
     # Sanity: make sure the registry actually returned an image index, not
@@ -720,7 +720,7 @@ def test_resolution_chain_direct_digest_to_platform_manifest(
     manifest (no enclosing image index), the chain contains a single blob —
     the platform manifest itself.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     manifest = fetch_manifest_from_registry(ocx.registry, unique_repo, pkg.tag)
     assert "manifests" in manifest, (
@@ -751,7 +751,7 @@ def test_resolution_chain_tag_via_flat_image_manifest(
     under the tag, skipping the image-index layer. The chain then contains
     exactly the one manifest blob.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
 
     content = _install_content(ocx, pkg)
     entries = _chain_entries(content)
@@ -826,8 +826,8 @@ def test_different_package_versions_produce_disjoint_refs(
     manifest, which descriptor-references the version-unique layer), and that
     every entry is a valid symlink into the shared blob store.
     """
-    v1 = make_package(ocx, unique_repo, "1.0.0", tmp_path / "v1", new=True, cascade=False)
-    v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path / "v2", new=False, cascade=False)
+    v1 = make_package(ocx, unique_repo, "1.0.0", tmp_path / "v1", cascade=False)
+    v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path / "v2", cascade=False)
 
     content_v1 = _install_content(ocx, v1)
     content_v2 = _install_content(ocx, v2)
@@ -897,7 +897,7 @@ def test_remote_mode_tag_resolution_bypasses_local_cache(
     """
     v1_dir = tmp_path / "v1"
     v1_dir.mkdir()
-    pkg_v1 = make_package(ocx, unique_repo, "1.0.0", v1_dir, new=True, cascade=False)
+    pkg_v1 = make_package(ocx, unique_repo, "1.0.0", v1_dir, cascade=False)
     ocx.json("package", "install", pkg_v1.short)
 
     # The root document (`adr_index_indirection.md` A2) is the tag → content
@@ -920,7 +920,7 @@ def test_remote_mode_tag_resolution_bypasses_local_cache(
     # Push v2 to the same repo:tag → registry now resolves 1.0.0 to digest_B.
     v2_dir = tmp_path / "v2"
     v2_dir.mkdir()
-    _ = make_package(ocx, unique_repo, "1.0.0", v2_dir, new=False, cascade=False)
+    _ = make_package(ocx, unique_repo, "1.0.0", v2_dir, cascade=False)
     digest_b = fetch_manifest_digest(ocx.registry, unique_repo, "1.0.0")
     assert digest_b != digest_a, (
         "prerequisite: registry digest must differ from cached digest after pushing v2"

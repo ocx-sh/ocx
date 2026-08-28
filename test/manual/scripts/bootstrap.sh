@@ -80,7 +80,7 @@ push_simple() {
         ocx_cd "${PKG_ROOT}/${repo}"
         mkdir -p out
         ocx package create --force "${CREATE_FLAGS[@]}" -p "$PLATFORM" -m metadata.json -o "$bundle" "$src"
-        ocx package push -n -c -p "$PLATFORM" -i "$(id "$repo")" "$bundle"
+        ocx package push -c -p "$PLATFORM" -i "$(id "$repo")" "$bundle"
     )
     CREATE_FLAGS=()
     index_update "$repo"
@@ -117,7 +117,7 @@ push_multi_layer() {
         # Each `create` writes its own sidecar, so push cannot infer one —
         # name the LAST layer's explicitly. That layer ships `bin/`, so its
         # auto-scanned `binaries` claim is the meaningful one.
-        ocx package push -n -c -p "$PLATFORM" -m "$sidecar" -i "$(id "$repo")" "${bundles[@]}"
+        ocx package push -c -p "$PLATFORM" -m "$sidecar" -i "$(id "$repo")" "${bundles[@]}"
     )
     index_update "$repo"
 }

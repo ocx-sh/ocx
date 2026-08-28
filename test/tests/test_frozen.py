@@ -352,7 +352,6 @@ def _make_companion(
         tmp_path,
         bins=[],
         env=[{"key": key, "type": "constant", "value": value, "visibility": "interface"}],
-        new=True,
         cascade=True,
         platform="any",
         index=index,
@@ -404,7 +403,7 @@ def test_frozen_index_update_exits_81(
     The `[patches]` tier is configured so the piggyback sync is in scope too:
     the refusal happens before it, so nothing about it can surface either.
     """
-    base = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     _write_patches_config(ocx, registry, required=False)
 
     result = _run(ocx, "--frozen", "index", "update", base.short)
@@ -436,7 +435,7 @@ def test_frozen_install_composes_a_pinned_companion(
     companion = _make_companion(
         ocx, companion_repo, "1.0.0", tmp_path / "c", "FROZEN_PINNED_CA", "/certs/pinned/ca.pem"
     )
-    base = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor = tmp_path / "pinned_descriptor.json"
     _write_descriptor(descriptor, rules=[{"match": "*", "packages": [companion.fq]}])
     _write_patches_config(ocx, registry, required=False)
@@ -483,7 +482,7 @@ def test_snapshot_install_records_the_pin_it_adopted(
     companion = _make_companion(
         ocx, companion_repo, "1.0.0", tmp_path / "c", "RECORDED_CA", "/certs/recorded/ca.pem"
     )
-    base = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor = tmp_path / "record_descriptor.json"
     _write_descriptor(descriptor, rules=[{"match": "*", "packages": [companion.fq]}])
     _write_patches_config(ocx, registry, required=False)
@@ -567,7 +566,7 @@ def test_frozen_config_setup_installs_floating_patch_companions(
     resolve reaches it. Its binding lands in the patch tier's own pin record —
     never as a local-index root document, which stays the package tier's.
     """
-    base = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     ocx.plain("package", "install", base.short)
 
     companion_repo = _unique_repo("frozen_managed_companion")
@@ -645,7 +644,7 @@ def test_frozen_install_resolves_an_unpinned_companion_live(
         "/certs/live/ca.pem",
         index=False,
     )
-    base = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor = tmp_path / "live_descriptor.json"
     _write_descriptor(
         descriptor, rules=[{"match": "*", "packages": [companion.fq], "required": True}]

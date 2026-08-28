@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# title: package push -n publishes a fresh single-layer package and index lists it
+# title: package push publishes a fresh single-layer package and index lists it
 set -euo pipefail
 
 cd "$SCENARIO_TMP"
@@ -22,7 +22,7 @@ repo="t_$(uuidgen | tr -d '-' | head -c 8)_pushdemo"
 fq="$REGISTRY/$repo:1.0.0"
 
 ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64
-ocx package push -n -i "$fq" mytool-1.0.0.tar.xz
+ocx package push -i "$fq" mytool-1.0.0.tar.xz
 ocx index update "$repo"
 
 out="$(ocx index list "$repo")"

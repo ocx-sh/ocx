@@ -83,7 +83,7 @@ def test_add_appends_to_tools_table(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_add_tools"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -119,7 +119,7 @@ def test_add_to_named_group_via_flag(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_add_ci"
-    pkg = make_package(ocx, repo, "2.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "2.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -159,8 +159,8 @@ def test_add_rejects_existing_binding(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_add_dup"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo, "2.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -189,7 +189,7 @@ def test_add_with_bare_identifier_defaults_to_latest(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_add_bare"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=True)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -225,9 +225,9 @@ def test_add_atomic_full_lockfile_rewrite(
     repo_a = f"t_{short}_atomic_a"
     repo_b = f"t_{short}_atomic_b"
     repo_new = f"t_{short}_atomic_new"
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_new, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_new, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -339,7 +339,7 @@ def test_add_eager_default_warms_object_store_without_symlinks(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_add_eager_guard"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -368,7 +368,7 @@ def test_add_no_pull_skips_install(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_add_nopull"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -406,7 +406,7 @@ def test_add_pull_then_no_pull_last_wins_no_install(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_add_p_np"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -434,7 +434,7 @@ def test_add_no_pull_then_pull_last_wins_installs(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_add_np_p"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -469,7 +469,7 @@ def test_add_writes_v3_lock_shape(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_add_v3shape"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj_v3shape"
     project_dir.mkdir()
@@ -541,8 +541,8 @@ def test_add_preserves_untouched_pin_when_upstream_tag_moved(
     repo_b = f"t_{short}_pres_b"
 
     # A on a moving ``:latest`` tag; B as the tool to add later.
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=True)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -563,7 +563,7 @@ def test_add_preserves_untouched_pin_when_upstream_tag_moved(
     assert initial_a, "tool 'a' must record leaf digests"
 
     # Move A's upstream ``:latest`` to a new digest, refresh the local index.
-    make_package(ocx, repo_a, "2.0.0", tmp_path, new=False, cascade=True)
+    make_package(ocx, repo_a, "2.0.0", tmp_path, cascade=True)
     refresh = subprocess.run(
         [str(ocx.binary), "index", "update", f"{ocx.registry}/{repo_a}"],
         cwd=project_dir,
@@ -601,10 +601,10 @@ def test_add_fails_when_toml_handedited_since_lock(
     repo_a = f"t_{short}_he_a"
     repo_b = f"t_{short}_he_b"
     repo_new = f"t_{short}_he_new"
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_b, "2.0.0", tmp_path, new=False, cascade=False)
-    pkg_new = make_package(ocx, repo_new, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_b, "2.0.0", tmp_path, cascade=False)
+    pkg_new = make_package(ocx, repo_new, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -652,7 +652,7 @@ def test_add_with_no_lock_succeeds(
     ``ocx.lock`` succeeds (direct resolve, never fails closed)."""
     short = uuid4().hex[:8]
     repo = f"t_{short}_nolock"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -673,7 +673,7 @@ def test_add_with_empty_tools_lock_succeeds(
     succeeds — the empty carry set resolves only the new binding."""
     short = uuid4().hex[:8]
     repo = f"t_{short}_emptylock"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -712,8 +712,8 @@ def test_add_multiple_identifiers_in_one_call(
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_multi_a"
     repo_b = f"t_{short}_multi_b"
-    pkg_a = make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    pkg_b = make_package(ocx, repo_b, "2.0.0", tmp_path, new=True, cascade=False)
+    pkg_a = make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    pkg_b = make_package(ocx, repo_b, "2.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -739,7 +739,7 @@ def test_add_batch_atomic_on_duplicate_in_batch(
     in-memory stage catches the duplicate before any disk write."""
     short = uuid4().hex[:8]
     repo = f"t_{short}_multi_dup"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -766,8 +766,8 @@ def test_add_multiple_group_applies_to_all(
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_grp_a"
     repo_b = f"t_{short}_grp_b"
-    pkg_a = make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    pkg_b = make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg_a = make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    pkg_b = make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -792,8 +792,8 @@ def test_add_no_pull_batch_stays_cold(
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_np_a"
     repo_b = f"t_{short}_np_b"
-    pkg_a = make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    pkg_b = make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg_a = make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    pkg_b = make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -829,8 +829,8 @@ def test_add_explicit_name_resolves_basename_collision(
     short = uuid4().hex[:8]
     gitlab_repo = f"gl_{short}/cli"
     github_repo = f"gh_{short}/cli"
-    gitlab_pkg = make_package(ocx, gitlab_repo, "1.0.0", tmp_path, new=True, cascade=False)
-    github_pkg = make_package(ocx, github_repo, "2.0.0", tmp_path, new=True, cascade=False)
+    gitlab_pkg = make_package(ocx, gitlab_repo, "1.0.0", tmp_path, cascade=False)
+    github_pkg = make_package(ocx, github_repo, "2.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()

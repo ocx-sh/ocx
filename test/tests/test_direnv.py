@@ -131,7 +131,7 @@ def _make_locked_unpulled_project(ocx: OcxRunner, tmp_path: Path, label: str) ->
     """Publish a package and create a locked-but-NOT-pulled project dir."""
     short = uuid4().hex[:8]
     repo = f"t_{short}_{label}"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["tool"])
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False, bins=["tool"])
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     project = tmp_path / f"proj_{label}"
@@ -264,7 +264,7 @@ def test_direnv_export_broken_ocx_index_is_a_noop_once_installed(
     break the export."""
     short = uuid4().hex[:8]
     repo = f"t_{short}_export_noop"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["tool"])
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False, bins=["tool"])
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     project = tmp_path / "proj_noop"

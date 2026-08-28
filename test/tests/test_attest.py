@@ -493,7 +493,7 @@ def test_push_with_sbom_and_no_signing_material_reports_unsigned_and_reads_back_
     step resolves the same ``AttestMode::Unsigned`` polarity ``package
     attest`` would.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     sbom = cyclonedx_predicate(tmp_path)
 
     result = ocx.run(*push_argv(pkg, tmp_path, sbom), check=False)
@@ -568,7 +568,7 @@ def test_offline_push_with_sbom_refuses_at_77_not_the_generic_offline_81(
     ``ocx package attest``, so 81 is asserted against by name rather than merely
     being "not 77".
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     sbom = cyclonedx_predicate(tmp_path)
 
     result = ocx.run(
@@ -624,7 +624,7 @@ def test_push_with_sbom_keeps_the_push_when_the_attestation_fails(
         probe.bind(("127.0.0.1", 0))
         dead = f"http://127.0.0.1:{probe.getsockname()[1]}"
 
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     sbom = cyclonedx_predicate(tmp_path)
 
     result = ocx.run(
@@ -673,7 +673,7 @@ def test_push_with_sbom_reaches_the_stack_through_trust_sigstore_config(
     dex, which builtin public Fulcio rejects. A run that ignored the config
     could never reach ``attestation.status == "succeeded"``.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     sbom = cyclonedx_predicate(tmp_path)
 
     (Path(ocx.env["OCX_HOME"]) / "config.toml").write_text(

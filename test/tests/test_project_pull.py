@@ -138,7 +138,7 @@ def _published_tool(
     short = uuid4().hex[:8]
     repo = f"t_{short}_pull_{label}"
     tag = "1.0.0"
-    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, tag, tmp_path, cascade=False)
     return repo, tag
 
 

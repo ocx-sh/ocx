@@ -228,7 +228,7 @@ def test_direnv_export_is_idempotent(ocx: OcxRunner, tmp_path: Path):
 
     label = uuid4().hex[:8]
     repo = f"t_{label}_direnv"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["tool"])
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False, bins=["tool"])
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     project = tmp_path / "proj"

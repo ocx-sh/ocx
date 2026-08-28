@@ -196,13 +196,11 @@ def _publish_two_versions(ocx: OcxRunner, repo: str, tmp_path: Path) -> None:
     version so ``query_installed_version`` can resolve the running version.
     """
     make_package(
-        ocx, repo, "0.0.1", tmp_path,
-        new=True, cascade=False, bins=["ocx"],
+        ocx, repo, "0.0.1", tmp_path, cascade=False, bins=["ocx"],
         outputs={"ocx": {"--format json version": json.dumps({"version": "0.0.1"})}},
     )
     make_package(
-        ocx, repo, "0.0.2", tmp_path,
-        new=False, cascade=False, bins=["ocx"],
+        ocx, repo, "0.0.2", tmp_path, cascade=False, bins=["ocx"],
         outputs={"ocx": {"--format json version": json.dumps({"version": "0.0.2"})}},
     )
     ocx.plain("index", "update", repo)
@@ -443,13 +441,11 @@ def test_self_update_installs_newer_version(
     #    cascade churn; we only need the two patch tags discoverable in the
     #    remote tag list.
     v1 = make_package(
-        ocx, repo, "0.0.1", tmp_path,
-        new=True, cascade=False, bins=["ocx"],
+        ocx, repo, "0.0.1", tmp_path, cascade=False, bins=["ocx"],
         outputs={"ocx": {"--format json version": json.dumps({"version": "0.0.1"})}},
     )
     v2 = make_package(
-        ocx, repo, "0.0.2", tmp_path,
-        new=False, cascade=False, bins=["ocx"],
+        ocx, repo, "0.0.2", tmp_path, cascade=False, bins=["ocx"],
         outputs={"ocx": {"--format json version": json.dumps({"version": "0.0.2"})}},
     )
     # Make both tags visible in the index for self_check_update's tag walk.

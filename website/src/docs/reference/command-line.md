@@ -3293,7 +3293,6 @@ ocx package push [OPTIONS] <LAYERS>...
 - `-i`, `--identifier <IDENTIFIER>`: Package identifier including the tag, e.g. `kitware/cmake:3.28.1_20260216120000`. Omit it to publish under the identifier the [build receipt](#package-create-receipt) beside the bundle recorded; with neither, exit 64.
 - `-p`, `--platform <PLATFORM>`: Target platform to publish — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Omit it to publish for the platform the [build receipt](#package-create-receipt) beside the bundle recorded; a value given here is used as given, and the receipt is not consulted for it. With neither, exit 64. Every dependency is projected for this platform (see the gate table above).
 - `-c`, `--cascade`: Cascade rolling releases. When set, pushing `kitware/cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`kitware/cmake:3.28.1`, `kitware/cmake:3.28`, `kitware/cmake:3`, and `kitware/cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
-- `-n`, `--new`: Declare this as a new package that does not exist in the registry yet. Skips the pre-push tag listing that is otherwise used for cascade resolution.
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided (all layers are digest references, or the layer list is empty).
 - `--build-timestamp [<FORMAT>]`: Append a UTC build-metadata segment to the published tag. `datetime` (default when flag passed bare) appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`, `none` is a no-op. The identifier's tag must already be `X.Y.Z` (optionally with a variant prefix or pre-release suffix) and must not already carry build metadata. Use this in continuous-deploy pipelines that publish rolling pre-release versions like `dev.ocx.sh/ocx/cli:0.3.0-dev_20260514120000`. The wire-format tag uses `_` (OCI tags forbid `+`); semver `+` is accepted on input and normalized. When the flag is omitted entirely, no build-metadata segment is appended. Passing `--build-timestamp=none` is the explicit equivalent.
 - `--canonical-tag` / `--no-canonical-tag`: `--canonical-tag` (default) also pushes a digest-named `sha256.<hex>` tag for each platform manifest pushed in this invocation; `--no-canonical-tag` skips it. This is a pure registry-side deletion safety net — a stray tag delete cannot orphan a digest still referenced by a lock, since the canonical tag itself keeps the manifest reachable. It has no effect on [`index.ocx.sh`][in-depth-indices-public] resolution, which ignores canonical tags entirely.
@@ -5285,7 +5284,7 @@ use, so fleets track a floating tag while individual hosts can pin any published
 **Usage**
 
 ```shell
-ocx config push -i <IDENTIFIER> [--cascade] [--new] [--platform PLATFORM] <CONFIG>
+ocx config push -i <IDENTIFIER> [--cascade] [--platform PLATFORM] <CONFIG>
 ```
 
 **Options**
@@ -5294,7 +5293,6 @@ ocx config push -i <IDENTIFIER> [--cascade] [--new] [--platform PLATFORM] <CONFI
 |------|-------|-------------|---------|
 | `--identifier ID` | `-i` | Identifier to publish under (e.g. `corp/ocx-config:user-1.4.2`). Required. | — |
 | `--cascade` | `-c` | Update rolling variant tags derived from the version tag. | off |
-| `--new` | `-n` | The repository does not exist yet; tolerate a failing tag listing during `--cascade`. | off |
 | `--platform` | `-p` | Platform entry written into the package index. `ocx config update` only consumes the platform-independent `any` entry — keep the default. | `any` |
 | `-h`, `--help` | | Print help information. | — |
 

@@ -87,7 +87,7 @@ def test_copy_across_registries_preserves_the_leaf_bytes_and_digest(
     re-serialised an equal manifest — which is exactly the defect that would
     orphan every signature.
     """
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
     result = _copy(ocx, target_registry, "--to", target_registry, package.short)
     assert result.returncode == 0, result.stderr
@@ -168,7 +168,7 @@ def test_a_copied_package_is_installable_from_the_target(
 ) -> None:
     """Digest identity is necessary, not sufficient: the blobs have to arrive
     too. Installing from the target proves the whole chain landed."""
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     _copy(ocx, target_registry, "--to", target_registry, package.short)
 
     result = ocx.run(
@@ -194,14 +194,14 @@ def test_copy_merges_into_the_target_index_instead_of_replacing_it(
     host = current_platform()
     other = "windows/amd64" if not host.startswith("windows") else "linux/amd64"
 
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, platform=host)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, platform=host)
     # The target already publishes the same tag for a different platform. A
     # separate build directory: the two packages share a repo and tag, so one
     # tmp_path would collide on the bundle directory name.
     target_build = tmp_path / "target-build"
     target_build.mkdir()
     target_runner = OcxRunner(ocx.binary, ocx.ocx_home, target_registry)
-    make_package(target_runner, unique_repo, "1.0.0", target_build, new=True, platform=other)
+    make_package(target_runner, unique_repo, "1.0.0", target_build, platform=other)
 
     result = _copy(ocx, target_registry, "--to", target_registry, "--platform", host, package.short)
     assert result.returncode == 0, result.stderr
@@ -233,10 +233,10 @@ def test_copy_within_the_same_registry_to_a_different_repository(
     other = "windows/amd64" if not host.startswith("windows") else "linux/amd64"
     dest_repo = f"{unique_repo}_renamed"
 
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, platform=host)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, platform=host)
     other_build = tmp_path / "other-build"
     other_build.mkdir()
-    make_package(ocx, unique_repo, "1.0.0", other_build, new=False, platform=other)
+    make_package(ocx, unique_repo, "1.0.0", other_build, platform=other)
 
     result = ocx.run(
         "package",
@@ -262,14 +262,14 @@ def test_a_second_copy_after_the_source_gains_a_platform_adds_only_the_new_one(
     host = current_platform()
     other = "windows/amd64" if not host.startswith("windows") else "linux/amd64"
 
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, platform=host)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, platform=host)
     first = _copy(ocx, target_registry, "--to", target_registry, package.short)
     assert first.returncode == 0, first.stderr
     assert _dispositions(first) == {host: "added"}
 
     other_build = tmp_path / "other-build"
     other_build.mkdir()
-    make_package(ocx, unique_repo, "1.0.0", other_build, new=False, platform=other)
+    make_package(ocx, unique_repo, "1.0.0", other_build, platform=other)
 
     second = _copy(ocx, target_registry, "--to", target_registry, package.short)
     assert second.returncode == 0, second.stderr
@@ -284,7 +284,7 @@ def test_a_repeated_copy_reports_unchanged(
 ) -> None:
     """Promotion has to be safe to re-run: the second pass must recognise the
     target already points at this digest rather than re-uploading it."""
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
     first = _copy(ocx, target_registry, "--to", target_registry, package.short)
     assert set(_dispositions(first).values()) == {"added"}
@@ -305,13 +305,13 @@ def test_cascade_is_computed_against_the_target_not_the_source(
     """The target already publishes a newer patch, so promoting the older one
     must not drag the rolling tag backwards. Reading the source's tag list
     instead would move `1.0` to the older release."""
-    make_package(ocx, unique_repo, "1.0.1", tmp_path, new=True)
-    older = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "1.0.1", tmp_path)
+    older = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
 
     target_build = tmp_path / "target-build"
     target_build.mkdir()
     target_runner = OcxRunner(ocx.binary, ocx.ocx_home, target_registry)
-    newer_at_target = make_package(target_runner, unique_repo, "1.0.1", target_build, new=True)
+    newer_at_target = make_package(target_runner, unique_repo, "1.0.1", target_build)
 
     result = _copy(ocx, target_registry, "--to", target_registry, "--cascade", older.short)
     assert result.returncode == 0, result.stderr
@@ -321,10 +321,36 @@ def test_cascade_is_computed_against_the_target_not_the_source(
     assert rolling == newer, "the rolling tag must keep pointing at the newer release"
 
 
+def test_cascade_into_a_target_repository_that_does_not_exist_yet(
+    ocx: OcxRunner, target_registry: str, unique_repo: str, tmp_path: Path
+) -> None:
+    """The first promotion of a package must cascade, not fail.
+
+    A repository nobody has pushed to answers the tag listing with a 404, and
+    that is the empty tag list, not a failure: none of the rolling tags are
+    taken. Propagating it made every *first* `--cascade` promotion exit 79 and
+    every second one succeed (#366). Every other copy test pre-seeds the
+    target, which is why this never reded.
+    """
+    package = make_package(ocx, unique_repo, "1.0.1", tmp_path)
+    assert not _target_has_tag(target_registry, package.repo, package.tag), (
+        "the target repository must be untouched for this to test a first publish"
+    )
+
+    result = _copy(ocx, target_registry, "--to", target_registry, "--cascade", package.short)
+    assert result.returncode == 0, result.stderr
+
+    pinned = fetch_platform_manifest_digest(target_registry, package.repo, "1.0.1")
+    for rolling in ("1.0", "1", "latest"):
+        assert fetch_platform_manifest_digest(target_registry, package.repo, rolling) == pinned, (
+            f"a first promotion must write the rolling tag {rolling}"
+        )
+
+
 def test_dry_run_reports_the_plan_and_writes_nothing(
     ocx: OcxRunner, target_registry: str, unique_repo: str, tmp_path: Path
 ) -> None:
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
     # Positive control for `_target_has_tag`: prove it can observe a tag that
     # genuinely exists, at the source, before trusting its negative below.
@@ -352,11 +378,11 @@ def test_dry_run_leaves_the_targets_existing_index_byte_for_byte_unchanged(
     host = current_platform()
     other = "windows/amd64" if not host.startswith("windows") else "linux/amd64"
 
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, platform=host)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, platform=host)
     target_build = tmp_path / "target-build"
     target_build.mkdir()
     target_runner = OcxRunner(ocx.binary, ocx.ocx_home, target_registry)
-    make_package(target_runner, unique_repo, "1.0.0", target_build, new=True, platform=other)
+    make_package(target_runner, unique_repo, "1.0.0", target_build, platform=other)
 
     before_bytes, before_digest = fetch_manifest_raw(target_registry, package.repo, package.tag)
 
@@ -383,7 +409,7 @@ def test_canonical_tag_default_writes_a_digest_named_tag(
     the default), so a pin can still resolve after the mutable tag moves on.
     Paired with the `--no-canonical-tag` suppression test below, which proves
     the tag comes from this flag rather than merely from copying at all."""
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
     result = _copy(ocx, target_registry, "--to", target_registry, package.short)
     assert result.returncode == 0, result.stderr
@@ -397,7 +423,7 @@ def test_canonical_tag_default_writes_a_digest_named_tag(
 def test_no_canonical_tag_suppresses_it(
     ocx: OcxRunner, target_registry: str, unique_repo: str, tmp_path: Path
 ) -> None:
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
     result = _copy(ocx, target_registry, "--to", target_registry, "--no-canonical-tag", package.short)
     assert result.returncode == 0, result.stderr
@@ -429,7 +455,7 @@ def test_a_signature_survives_the_promotion(
     subject is the leaf digest, so it stays valid only because the digest did
     not move and the referrer travelled with it.
     """
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     both = f"{ocx.registry},{target_registry}"
 
     signed = subprocess.run(
@@ -469,7 +495,7 @@ def test_referrers_against_a_registry_without_the_api_exits_84(
     Paired with the `--no-referrers` run below, which proves the 84 comes from
     the capability probe and not merely from the target being another host.
     """
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
     refused = _copy(ocx, legacy_registry, "--to", legacy_registry, package.short, check=False)
     assert refused.returncode == 84, refused.stderr
@@ -491,7 +517,7 @@ def test_a_digest_source_without_a_platform_is_a_usage_error(
     """A leaf manifest carries no platform, so it has to be declared. The
     refusal must land before the target is contacted — a broken invocation must
     not first authenticate against a production registry."""
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     digest = fetch_platform_manifest_digest(ocx.registry, package.repo, package.tag)
     source = f"{package.repo}@{digest}"
 
@@ -520,7 +546,7 @@ def test_a_digest_source_without_an_identifier_is_a_usage_error(
     ocx: OcxRunner, target_registry: str, unique_repo: str, tmp_path: Path
 ) -> None:
     """`--to` preserves the source's tag, and a digest has none."""
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     digest = fetch_platform_manifest_digest(ocx.registry, package.repo, package.tag)
 
     result = _copy(
@@ -557,7 +583,7 @@ def test_a_platform_the_source_does_not_offer_is_a_usage_error(
     candidates = ["linux/amd64", "linux/arm64", "windows/amd64", "darwin/arm64"]
     absent = next(candidate for candidate in candidates if candidate != host)
 
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, platform=host)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, platform=host)
 
     result = _copy(
         ocx, target_registry, "--to", target_registry, "--platform", absent, package.short, check=False
@@ -582,7 +608,7 @@ def test_a_platform_typo_names_the_platform_not_the_manifest(
     host = current_platform()
     typo = f"{host}-typo"
 
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, platform=host)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, platform=host)
 
     result = _copy(
         ocx, target_registry, "--to", target_registry, "--platform", typo, package.short, check=False
@@ -599,7 +625,7 @@ def test_an_image_index_named_by_digest_is_a_usage_error(
 ) -> None:
     """An index digest is a snapshot of a mutable set; there is no honest merge
     of "the platform list as it was" into a target that has moved on."""
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     _, index_digest = fetch_manifest_raw(ocx.registry, package.repo, package.tag)
 
     result = _copy(
@@ -684,7 +710,7 @@ def test_the_description_travels_only_when_asked(
 ) -> None:
     """A description is repository-level prose, not part of the version being
     promoted, so a plain copy leaves the target's alone."""
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     readme = tmp_path / "README.md"
     readme.write_text("# Staging catalog page\n")
     described = ocx.run("package", "describe", "--readme", str(readme), package.repo)
@@ -708,7 +734,7 @@ def test_the_description_travels_only_when_asked(
 def test_describe_from_copies_the_description_alone(
     ocx: OcxRunner, target_registry: str, unique_repo: str, tmp_path: Path
 ) -> None:
-    package = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     readme = tmp_path / "README.md"
     readme.write_text("# Staging catalog page\n")
     ocx.run("package", "describe", "--readme", str(readme), package.repo)

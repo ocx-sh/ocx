@@ -15,7 +15,7 @@ cat >config.toml <<'TOML'
 TOML
 
 # region cast
-ocx config push -i corp/ocx-config:user-1.4.2 ./config.toml --cascade --new
+ocx config push -i corp/ocx-config:user-1.4.2 ./config.toml --cascade
 # endregion cast
 
 # The push validated the payload and wrote the rolling variant tags: a host

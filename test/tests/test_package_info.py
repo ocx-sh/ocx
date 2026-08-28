@@ -51,14 +51,14 @@ def _push_description(
 
 def test_info_no_description(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """package info on a repo without __ocx.desc returns 'No description found'."""
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     result = ocx.plain("package", "info", pkg.fq)
     assert "No description found" in result.stdout
 
 
 def test_info_with_description(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """package info returns title, description, keywords after describe push."""
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     _push_description(ocx, unique_repo, tmp_path, title="My Tool", description="A great tool", keywords="my,tool")
 
     result = ocx.plain("package", "info", pkg.fq)
@@ -69,7 +69,7 @@ def test_info_with_description(ocx: OcxRunner, unique_repo: str, tmp_path: Path)
 
 def test_info_json(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """package info --format json returns an object keyed by the raw identifier."""
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     _push_description(ocx, unique_repo, tmp_path, title="CMake", description="Build system", keywords="cmake,build")
 
     data = ocx.json("package", "info", pkg.fq)[pkg.fq]
@@ -80,7 +80,7 @@ def test_info_json(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
 
 def test_info_json_no_description(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """package info --format json keys the package with a null value when absent."""
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     data = ocx.json("package", "info", pkg.fq)
     assert list(data.keys()) == [pkg.fq]
     assert data[pkg.fq] is None
@@ -88,7 +88,7 @@ def test_info_json_no_description(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
 
 def test_info_save_readme(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """--save-readme writes the README content to a file."""
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     readme_content = "# My Tool\n\nThis is the readme.\n"
     _push_description(ocx, unique_repo, tmp_path, readme_text=readme_content)
 
@@ -100,7 +100,7 @@ def test_info_save_readme(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
 
 def test_info_save_readme_to_dir(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """--save-readme with a directory path uses README.md as default filename."""
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     readme_content = "# Dir Test\n"
     _push_description(ocx, unique_repo, tmp_path, readme_text=readme_content)
 
@@ -113,7 +113,7 @@ def test_info_save_readme_to_dir(ocx: OcxRunner, unique_repo: str, tmp_path: Pat
 
 def test_info_save_logo(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """--save-logo writes the logo file."""
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     _push_description(ocx, unique_repo, tmp_path, logo=True)
 
     save_path = tmp_path / "output" / "my-logo.png"
@@ -133,8 +133,8 @@ def test_info_multiple_packages_json_keyed_object(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """Multi-package ``package info A B`` returns an object keyed by each identifier."""
-    a = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_a", "1.0.0", tmp_path, new=True)
-    b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_b", "1.0.0", tmp_path, new=True)
+    a = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_a", "1.0.0", tmp_path)
+    b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_b", "1.0.0", tmp_path)
     _push_description(ocx, a.repo, tmp_path, title="Alpha")
 
     data = ocx.json("package", "info", a.fq, b.fq)
@@ -162,8 +162,8 @@ def test_info_multiple_packages_plain_shows_header_per_package(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """Plain multi-package ``package info A B`` prints a ``== <id> ==`` header per package, in input order."""
-    a = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_plain_a", "1.0.0", tmp_path, new=True)
-    b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_plain_b", "1.0.0", tmp_path, new=True)
+    a = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_plain_a", "1.0.0", tmp_path)
+    b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_plain_b", "1.0.0", tmp_path)
 
     result = ocx.plain("package", "info", a.fq, b.fq)
 
@@ -176,8 +176,8 @@ def test_info_save_readme_rejected_with_multiple_packages(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """--save-readme is rejected when more than one package is given (nonzero exit)."""
-    a = make_package(ocx, f"t_{uuid4().hex[:8]}_info_save_readme_a", "1.0.0", tmp_path, new=True)
-    b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_save_readme_b", "1.0.0", tmp_path, new=True)
+    a = make_package(ocx, f"t_{uuid4().hex[:8]}_info_save_readme_a", "1.0.0", tmp_path)
+    b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_save_readme_b", "1.0.0", tmp_path)
 
     result = ocx.run(
         "package", "info", "--save-readme", str(tmp_path / "out.md"), a.fq, b.fq,
@@ -192,8 +192,8 @@ def test_info_save_logo_rejected_with_multiple_packages(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """--save-logo is rejected when more than one package is given (nonzero exit)."""
-    a = make_package(ocx, f"t_{uuid4().hex[:8]}_info_save_logo_a", "1.0.0", tmp_path, new=True)
-    b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_save_logo_b", "1.0.0", tmp_path, new=True)
+    a = make_package(ocx, f"t_{uuid4().hex[:8]}_info_save_logo_a", "1.0.0", tmp_path)
+    b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_save_logo_b", "1.0.0", tmp_path)
 
     result = ocx.run(
         "package", "info", "--save-logo", str(tmp_path / "out.png"), a.fq, b.fq,

@@ -113,8 +113,8 @@ def test_concurrent_add_serialized_by_flock(
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_conc_a"
     repo_b = f"t_{short}_conc_b"
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -189,8 +189,8 @@ def test_concurrent_lock_command_serialized(
     short = uuid4().hex[:8]
     repo_existing = f"t_{short}_lockconc_existing"
     repo_new = f"t_{short}_lockconc_new"
-    make_package(ocx, repo_existing, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_new, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_existing, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_new, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()

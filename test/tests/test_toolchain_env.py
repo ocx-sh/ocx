@@ -91,7 +91,7 @@ def _make_project(
     short = uuid4().hex[:8]
     repo = f"t_{short}_{label}"
     make_package(
-        ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=[bin_name],
+        ocx, repo, "1.0.0", tmp_path, cascade=False, bins=[bin_name],
         no_bin_scan=no_bin_scan, integrations=integrations,
     )
     fq = f"{ocx.registry}/{repo}:1.0.0"
@@ -386,7 +386,7 @@ def test_package_env_shell_zsh_emits_sourceable(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_pkgenv_zsh"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     # Install first (package env needs it installed).
@@ -419,7 +419,7 @@ def test_package_env_shell_require_equals_not_swallowed(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_req_eq"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
     fq = f"{ocx.registry}/{repo}:1.0.0"
     assert _run(ocx, tmp_path, "package", "install", fq).returncode == EXIT_SUCCESS
 
@@ -756,7 +756,6 @@ def test_no_entrypoint_global_tool_reachable_via_path_modifier(
         unique_repo,
         "1.0.0",
         tmp_path,
-        new=True,
         cascade=False,
         bins=[bin_name],
         # Explicit env: only PATH (Modifier::Path) — no _HOME constant, no extras.
@@ -872,7 +871,7 @@ def test_env_bash_history_expansion_chars_land_literally(
             "visibility": "public",
         },
     ]
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False, env=pkg_env)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False, env=pkg_env)
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
 
     project = tmp_path / "proj_sec_a"
@@ -949,7 +948,7 @@ def test_env_nushell_dollar_env_home_lands_verbatim_in_output(
             "visibility": "public",
         },
     ]
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False, env=pkg_env)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False, env=pkg_env)
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
 
     project = tmp_path / "proj_sec_b"
@@ -1005,7 +1004,7 @@ def test_env_global_resolves_host_leaf_digest(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_te_v3leaf"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["genv"])
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False, bins=["genv"])
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     empty = tmp_path / "no_proj_te"
@@ -1076,7 +1075,7 @@ def _make_multigroup_project(
     for group in ("default", "lint", "ci"):
         short = uuid4().hex[:8]
         repo = f"t_{short}_{label}_{group}"
-        make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["tool"])
+        make_package(ocx, repo, "1.0.0", tmp_path, cascade=False, bins=["tool"])
         repos[group] = repo
 
     project = tmp_path / f"proj_{label}"
@@ -1219,7 +1218,7 @@ def test_env_json_integrations_ordered_across_roots(
         short = uuid4().hex[:8]
         repo = f"t_{short}_te_s3_{binding}"
         kwargs = {"integrations": {namespace: {"k": binding}}} if namespace else {}
-        make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["tool"], **kwargs)
+        make_package(ocx, repo, "1.0.0", tmp_path, cascade=False, bins=["tool"], **kwargs)
         lines.append(f'{binding} = "{ocx.registry}/{repo}:1.0.0"')
 
     project = tmp_path / "proj_s3_order"
@@ -1428,7 +1427,7 @@ def test_env_global_unknown_group_is_empty_env(ocx: OcxRunner, tmp_path: Path) -
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_gunknown"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["tool"])
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False, bins=["tool"])
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     empty = tmp_path / "no_project"
@@ -1478,7 +1477,7 @@ def test_env_global_group_scoped_composition(ocx: OcxRunner, tmp_path: Path) -> 
     for group in ("default", "lint", "ci"):
         short = uuid4().hex[:8]
         repo = f"t_{short}_gscoped_{group}"
-        make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["tool"])
+        make_package(ocx, repo, "1.0.0", tmp_path, cascade=False, bins=["tool"])
         repos[group] = repo
     home = {g: r.upper().replace("-", "_") + "_HOME" for g, r in repos.items()}
 
@@ -1527,7 +1526,7 @@ def _make_unpulled_project(
     """Publish a package, create a locked but NOT pulled project."""
     short = uuid4().hex[:8]
     repo = f"t_{short}_{label}"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=[bin_name])
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False, bins=[bin_name])
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     project = tmp_path / f"proj_{label}"
@@ -1621,7 +1620,6 @@ def _make_project_with_binaries(
         repo,
         "1.0.0",
         tmp_path,
-        new=True,
         cascade=False,
         bins=[bin_name],
         binaries=binaries,

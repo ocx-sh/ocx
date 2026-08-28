@@ -138,7 +138,7 @@ ocx package test --keep -i acme/mytool:1.0.0 \
 ls "$HOME/.ocx/temp/test/"*/
 
 # 4. Happy with it? Push.
-ocx package push -n -i acme/mytool:1.0.0 mytool-1.0.0.tar.xz
+ocx package push -i acme/mytool:1.0.0 mytool-1.0.0.tar.xz
 ```
 
 <Terminal src="/casts/authoring/package-test.cast" title="Testing a package locally before pushing" collapsed />

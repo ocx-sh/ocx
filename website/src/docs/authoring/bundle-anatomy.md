@@ -21,7 +21,7 @@ That matters because [layer reuse][in-depth-storage-layers] hinges on digest equ
 
 ```sh
 ocx package create build -p linux/amd64 -m metadata.json -o mytool-1.0.0.tar.xz
-ocx package push -n -p linux/amd64 -m metadata.json acme/mytool:1.0.0 mytool-1.0.0.tar.xz
+ocx package push -p linux/amd64 -m metadata.json acme/mytool:1.0.0 mytool-1.0.0.tar.xz
 
 # Record the layer digest. The on-disk archive is the same blob the registry stores,
 # so a local sha256 matches the layer digest the registry will hold.

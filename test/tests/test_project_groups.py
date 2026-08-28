@@ -105,7 +105,7 @@ def test_add_same_name_default_and_named_group_succeeds(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_grp_both"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
     binding = repo  # repo basename = binding key
 
     project_dir = tmp_path / "proj"
@@ -156,7 +156,7 @@ def test_add_same_name_same_group_rejected(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_grp_dup"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -203,7 +203,7 @@ def test_remove_with_group_targets_named_group(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_grp_tgt"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
     binding = repo
 
     project_dir = tmp_path / "proj"
@@ -257,7 +257,7 @@ def test_remove_without_group_when_ambiguous_errors(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_grp_amb"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
     binding = repo
 
     project_dir = tmp_path / "proj"
@@ -311,7 +311,7 @@ def test_remove_without_group_when_unique_succeeds(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_grp_uniq"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
     binding = repo
 
     project_dir = tmp_path / "proj"
@@ -351,7 +351,7 @@ def test_no_ocx_lock_sentinel_after_add(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_nosentinel_add"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -377,7 +377,7 @@ def test_no_ocx_lock_sentinel_after_lock(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_nosentinel_lock"
-    pkg = make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()

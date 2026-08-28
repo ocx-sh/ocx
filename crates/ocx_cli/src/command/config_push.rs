@@ -26,13 +26,6 @@ pub struct ConfigPushArgs {
     #[clap(long = "cascade", short = 'c')]
     cascade: bool,
 
-    /// The repository does not exist in the registry yet.
-    ///
-    /// Skips checks that require an existing repository (such as listing
-    /// current tags for `--cascade`).
-    #[clap(long = "new", short = 'n')]
-    new: bool,
-
     /// Platform entry written into the package index. Defaults to `any`.
     ///
     /// `ocx config update` only consumes the platform-independent `any`
@@ -57,7 +50,6 @@ impl ConfigPushArgs {
             &self.config,
             ManagedConfigPublishOptions {
                 cascade: self.cascade,
-                new: self.new,
                 platform: self.platform.clone(),
             },
         )

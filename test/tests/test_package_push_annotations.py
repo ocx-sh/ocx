@@ -34,7 +34,6 @@ def test_annotation_lands_on_the_primary_tag_and_every_cascade_tag(
         unique_repo,
         "1.2.3",
         tmp_path,
-        new=True,
         cascade=True,
         extra_push_args=["--annotation", f"{SOURCE}={SOURCE_URL}", "--annotation", f"{REVISION}=deadbeef"],
     )
@@ -51,7 +50,7 @@ def test_push_without_the_flag_writes_no_index_annotations(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     """The absent-value case: no flag, no annotations, no behaviour change."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
 
     assert index_annotations(ocx, unique_repo, "1.0.0") == {}
 
@@ -67,11 +66,10 @@ def test_a_later_plain_push_does_not_unlink_the_source_repository(
         unique_repo,
         "1.0.0",
         tmp_path,
-        new=True,
         cascade=True,
         extra_push_args=["--annotation", f"{SOURCE}={SOURCE_URL}"],
     )
-    make_package(ocx, unique_repo, "1.0.1", tmp_path, new=False, cascade=True)
+    make_package(ocx, unique_repo, "1.0.1", tmp_path, cascade=True)
 
     # `latest` was re-pointed by the second, annotation-less push.
     assert index_annotations(ocx, unique_repo, "latest").get(SOURCE) == SOURCE_URL

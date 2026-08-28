@@ -103,7 +103,7 @@ def _published_tool(
     short = uuid4().hex[:8]
     repo = f"t_{short}_hook_{label}"
     tag = "1.0.0"
-    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False, bins=[bin_name])
+    make_package(ocx, repo, tag, tmp_path, cascade=False, bins=[bin_name])
     return repo, tag
 
 
@@ -610,7 +610,7 @@ def test_global_env_sh_activation_replaces_departed_hook(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_gdepart"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=["gtool"])
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False, bins=["gtool"])
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     # Add into the global tier.
@@ -755,7 +755,7 @@ def test_direnv_export_byte_stability_after_emit_lines_extraction(
             "visibility": "public",
         },
     ]
-    _make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, env=pkg_env)
+    _make_package(ocx, repo, "1.0.0", tmp_path, cascade=False, env=pkg_env)
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     project = tmp_path / "proj_w7"

@@ -65,7 +65,7 @@ def _push_leaf(ocx: OcxRunner, repo: str, tmp_path: Path, **kwargs) -> PackageIn
         },
     ]
     kwargs.setdefault("env", public_env)
-    return make_package(ocx, repo, "1.0.0", tmp_path, new=True, **kwargs)
+    return make_package(ocx, repo, "1.0.0", tmp_path, **kwargs)
 
 
 def _env_keys(env_result: dict) -> list[str]:
@@ -95,8 +95,7 @@ def test_consumer_mode_excludes_private_dep_env(
     cuda = _push_leaf(ocx, f"{unique_repo}_cuda", tmp_path)
     dep = _dep_entry(ocx, cuda, visibility="private")
     cmake = make_package(
-        ocx, f"{unique_repo}_cmake", "1.0.0", tmp_path,
-        new=True, dependencies=[dep],
+        ocx, f"{unique_repo}_cmake", "1.0.0", tmp_path, dependencies=[dep],
     )
     ocx.json("package", "install", "--select", cmake.short)
 
@@ -115,8 +114,7 @@ def test_self_mode_includes_private_dep_env(
     cuda = _push_leaf(ocx, f"{unique_repo}_cuda", tmp_path)
     dep = _dep_entry(ocx, cuda, visibility="private")
     cmake = make_package(
-        ocx, f"{unique_repo}_cmake", "1.0.0", tmp_path,
-        new=True, dependencies=[dep],
+        ocx, f"{unique_repo}_cmake", "1.0.0", tmp_path, dependencies=[dep],
     )
     ocx.json("package", "install", "--select", cmake.short)
 
@@ -142,8 +140,7 @@ def test_consumer_mode_includes_interface_deps(
         _dep_entry(ocx, maven, visibility="interface"),
     ]
     toolchain = make_package(
-        ocx, f"{unique_repo}_toolchain", "1.0.0", tmp_path,
-        new=True, dependencies=deps,
+        ocx, f"{unique_repo}_toolchain", "1.0.0", tmp_path, dependencies=deps,
     )
     ocx.json("package", "install", "--select", toolchain.short)
 
@@ -177,8 +174,7 @@ def test_env_self_mode_excludes_interface_only_deps(
         _dep_entry(ocx, maven, visibility="interface"),
     ]
     toolchain = make_package(
-        ocx, f"{unique_repo}_toolchain", "1.0.0", tmp_path,
-        new=True, dependencies=deps,
+        ocx, f"{unique_repo}_toolchain", "1.0.0", tmp_path, dependencies=deps,
     )
     ocx.json("package", "install", "--select", toolchain.short)
 
@@ -211,18 +207,15 @@ def test_diamond_merge_self_mode_preserves_public_path(
 
     # Two intermediate packages reaching the leaf via different visibilities.
     middle_a = make_package(
-        ocx, f"{unique_repo}_mid_a", "1.0.0", tmp_path,
-        new=True, dependencies=[leaf_dep_iface],
+        ocx, f"{unique_repo}_mid_a", "1.0.0", tmp_path, dependencies=[leaf_dep_iface],
     )
     middle_b = make_package(
-        ocx, f"{unique_repo}_mid_b", "1.0.0", tmp_path,
-        new=True, dependencies=[leaf_dep_public],
+        ocx, f"{unique_repo}_mid_b", "1.0.0", tmp_path, dependencies=[leaf_dep_public],
     )
 
     # Root depends on both intermediates publicly.
     root = make_package(
         ocx, f"{unique_repo}_root", "1.0.0", tmp_path,
-        new=True,
         dependencies=[
             _dep_entry(ocx, middle_a, visibility="public"),
             _dep_entry(ocx, middle_b, visibility="public"),
@@ -328,7 +321,6 @@ def test_bare_binary_consumer_default_hides_path_without_stamp(
     # Phase 1: PATH absent visibility (= default private under v2).
     pkg_default = make_package(
         ocx, f"{unique_repo}_priv_path", "1.0.0", tmp_path,
-        new=True,
         env=[{"key": "PATH", "type": "path", "value": "${installPath}/bin"}],
     )
     ocx.json("package", "install", "--select", pkg_default.short)
@@ -345,7 +337,6 @@ def test_bare_binary_consumer_default_hides_path_without_stamp(
     # Phase 2: explicit public stamp restores accessibility.
     pkg_public = make_package(
         ocx, f"{unique_repo}_pub_path", "1.0.0", tmp_path,
-        new=True,
         env=[{
             "key": "PATH", "type": "path",
             "value": "${installPath}/bin",
@@ -427,8 +418,7 @@ def test_default_exec_mode_is_consumer(
     cuda = _push_leaf(ocx, f"{unique_repo}_cuda", tmp_path)
     dep = _dep_entry(ocx, cuda, visibility="private")
     cmake = make_package(
-        ocx, f"{unique_repo}_cmake", "1.0.0", tmp_path,
-        new=True, dependencies=[dep],
+        ocx, f"{unique_repo}_cmake", "1.0.0", tmp_path, dependencies=[dep],
     )
     ocx.json("package", "install", "--select", cmake.short)
 
@@ -526,7 +516,6 @@ def test_suite_b_dep_interface_entry_visibility_matrix(
     # A: leaf with FOO=interface.
     pkg_a = make_package(
         ocx, repo_a, "1.0.0", tmp_path,
-        new=True,
         env=[{
             "key": "FOO",
             "type": "constant",
@@ -539,7 +528,6 @@ def test_suite_b_dep_interface_entry_visibility_matrix(
     # R: root with no env of its own.
     pkg_r = make_package(
         ocx, unique_repo, "1.0.0", tmp_path,
-        new=True,
         dependencies=[dep_a],
         env=[],
     )
@@ -604,7 +592,6 @@ def test_suite_c_dep_private_entry_never_crosses_edges(
     # A: leaf with FOO=private (default visibility).
     pkg_a = make_package(
         ocx, repo_a, "1.0.0", tmp_path,
-        new=True,
         env=[{
             "key": "FOO",
             "type": "constant",
@@ -617,7 +604,6 @@ def test_suite_c_dep_private_entry_never_crosses_edges(
     # R: root with no env of its own.
     pkg_r = make_package(
         ocx, unique_repo, "1.0.0", tmp_path,
-        new=True,
         dependencies=[dep_a],
         env=[],
     )
@@ -679,7 +665,6 @@ def test_suite_d_dep_public_entry_visibility_matrix(
     # A: leaf with FOO=public.
     pkg_a = make_package(
         ocx, repo_a, "1.0.0", tmp_path,
-        new=True,
         env=[{
             "key": "FOO",
             "type": "constant",
@@ -692,7 +677,6 @@ def test_suite_d_dep_public_entry_visibility_matrix(
     # R: root with no env of its own.
     pkg_r = make_package(
         ocx, unique_repo, "1.0.0", tmp_path,
-        new=True,
         dependencies=[dep_a],
         env=[],
     )

@@ -75,7 +75,7 @@ def _setup_project_with_tool(
 
     Returns (project_dir, candidate_symlink_path).
     """
-    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, tag, tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir(exist_ok=True)
@@ -173,7 +173,7 @@ def test_remove_from_named_group(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_rem_grp"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -229,8 +229,8 @@ def test_remove_preserves_untouched_pins_when_upstream_moved(
     repo_b = f"t_{short}_rempres_b"
 
     # A on a moving ``:latest`` tag; B as the binding to remove.
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=True)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -255,7 +255,7 @@ def test_remove_preserves_untouched_pins_when_upstream_moved(
     assert initial_a, "survivor A must record leaf digests"
 
     # Advance A's upstream ``:latest`` to a new digest, refresh the local index.
-    make_package(ocx, repo_a, "2.0.0", tmp_path, new=False, cascade=True)
+    make_package(ocx, repo_a, "2.0.0", tmp_path, cascade=True)
     refresh = subprocess.run(
         [str(ocx.binary), "index", "update", f"{ocx.registry}/{repo_a}"],
         cwd=project_dir,
@@ -291,9 +291,9 @@ def test_remove_fails_when_toml_handedited_since_lock(
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_remhe_a"
     repo_b = f"t_{short}_remhe_b"
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_a, "2.0.0", tmp_path, new=False, cascade=False)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_a, "2.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -348,8 +348,8 @@ def test_remove_multiple_bindings_in_one_call(
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_multi_a"
     repo_b = f"t_{short}_multi_b"
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()

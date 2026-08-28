@@ -526,7 +526,7 @@ def test_add_then_remove_preserves_trust_policy_section(
     (project_dir / "ocx.toml").write_text(body)
 
     added = make_package(
-        ocx, f"t_{uuid4().hex[:8]}_trustadd", "1.0.0", tmp_path, new=True, cascade=False
+        ocx, f"t_{uuid4().hex[:8]}_trustadd", "1.0.0", tmp_path, cascade=False
     )
 
     add_result = subprocess.run(

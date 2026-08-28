@@ -224,7 +224,7 @@ def test_push_default_creates_canonical_sha256_tag(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     """Default `ocx package push` (no flag) pushes the `sha256.<hex>` tag."""
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
 
     platform_digest = fetch_platform_manifest_digest(
         ocx.registry, pkg.repo, pkg.tag, platform=pkg.platform
@@ -247,7 +247,6 @@ def test_push_no_canonical_tag_suppresses_the_extra_tag(
         unique_repo,
         "1.0.0",
         tmp_path,
-        new=True,
         cascade=False,
         extra_push_args=["--no-canonical-tag"],
     )
@@ -269,7 +268,7 @@ def test_push_cascade_tags_only_the_pushed_platform_once(
     invocation actually pushed, never retroactively for tags or platforms
     already sitting in the registry.
     """
-    pkg = make_package(ocx, unique_repo, "3.28.1", tmp_path, new=True, cascade=True)
+    pkg = make_package(ocx, unique_repo, "3.28.1", tmp_path, cascade=True)
 
     platform_digest = fetch_platform_manifest_digest(
         ocx.registry, pkg.repo, pkg.tag, platform=pkg.platform

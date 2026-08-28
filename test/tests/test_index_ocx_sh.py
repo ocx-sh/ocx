@@ -144,7 +144,7 @@ def test_no_lock_litter_in_index_home_after_catalog_sync(
     directory's file identity, never written into the (possibly committed or
     read-only) index tree.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -191,7 +191,7 @@ def test_two_hop_resolve_snapshots_offline_and_hits_only_the_fixture(
     dispatch-object and config request in this flow lands on the fixture,
     never the default `https://index.ocx.sh`.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -259,7 +259,7 @@ def test_two_hop_resolve_licensed_by_config_registries_entry_alone(
     this is the config half, exercised end to end through a real two-hop
     resolve.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -316,7 +316,7 @@ def test_two_hop_resolve_under_a_non_ocx_sh_namespace(
     and the offline re-resolve would find no platforms.
     """
     namespace = "corp.example"
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -389,7 +389,7 @@ def test_package_install_pulls_layers_from_physical_registry_and_execs_offline(
     successful install with a runnable binary is the proof the physical rewrite
     reaches the content-fetch site, not only the manifest resolve.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -461,7 +461,7 @@ def test_corrupt_leaf_manifest_blob_self_heals_online_then_resolves_offline(
     by `write_blob`'s fast path anyway; a non-empty mismatch is the case the
     remove-before-refetch guards.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     leaf_hex = leaf_digest.split(":", 1)[1]
     os_name, arch_name = pkg.platform.split("/")
@@ -527,7 +527,7 @@ def test_dispatch_object_tamper_is_hard_dataerror_and_persists_nothing(
     tmp_path: Path,
     index_server: static_index.StaticIndexServer,
 ) -> None:
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -592,7 +592,7 @@ def test_unsupported_format_version_fails_closed_registry_only_unaffected(
 
     # A registry-only package never reaches the ocx.sh namespace guard —
     # the broken index config must not leak into unrelated resolves.
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     ocx.plain("index", "update", pkg.short)
 
 
@@ -608,7 +608,7 @@ def test_yanked_tag_refused_optin_allows_digest_pin_bypasses(
     tmp_path: Path,
     index_server: static_index.StaticIndexServer,
 ) -> None:
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -676,7 +676,7 @@ def test_deprecated_status_resolves_with_stderr_warning(
     tmp_path: Path,
     index_server: static_index.StaticIndexServer,
 ) -> None:
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -722,7 +722,7 @@ def test_repository_migration_preserves_logical_id_and_committed_lock(
     """
     repo_before = f"{unique_repo}a"
     repo_after = f"{unique_repo}b"
-    pkg = make_package(ocx, repo_before, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, repo_before, "1.0.0", tmp_path, index=False)
     expected_leaf_digest = fetch_platform_manifest_digest(
         ocx.registry, pkg.repo, pkg.tag
     )
@@ -839,7 +839,7 @@ def test_index_role_mirror_override_routes_every_request_to_the_override(
     root, dispatch-object and config request lands on the fixture, none on the un-mirrored
     base host.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -902,7 +902,7 @@ def test_ocx_mirrors_env_union_forms_override_index_base(
     for the SAME override — parsed through the identical shared branch a
     `[mirrors]` TOML entry uses (`parse_mirror_value`).
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -960,7 +960,7 @@ def test_absent_index_field_never_touches_a_dead_index_endpoint(
     tier makes `ocx.sh` itself index-bearing, so it is no longer an example of
     an unconfigured namespace.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
 
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     config_path.write_text(
@@ -1009,7 +1009,7 @@ def test_builtin_base_tier_makes_ocx_sh_index_bearing(
     write — would see this pass with the compiled-in tier deleted. It doubles
     as the proof that the compiled-in tier is NOT gated on `OCX_NO_CONFIG`.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -1071,7 +1071,7 @@ def test_mirror_entry_for_ocx_sh_suppresses_the_builtin_index(
     and `build_index_sources_skips_an_empty_index_value` for the filter that
     acts on it.)
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
 
     config_path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     config_path.write_text(
@@ -1112,7 +1112,7 @@ def test_tag_scoped_update_preserves_sibling_tag_in_persisted_root(
     Seeded by a BARE update first: with no prior copy there is no sibling to
     preserve, and a tagged first-sight lands only the tag it names.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -1207,7 +1207,7 @@ def test_tag_scoped_update_fetches_every_distinct_sibling_dispatch_object(
     a distinct digest here precisely so a fetch narrowed to `1.0`'s would leave
     it dangling.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -1310,7 +1310,7 @@ def test_offline_yanked_tag_resolve_refused_from_committed_root(
     reading the committed local root — which currently ignores the `yanked`
     marker entirely, so an offline resolve of a yanked tag succeeds silently.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -1419,7 +1419,7 @@ def test_offline_deprecated_tag_resolve_warns_from_committed_root(
     exercises the ONLINE `index update` path; this pins the OFFLINE resolve —
     `LocalIndex::resolve_dispatch` — which currently drops the warning.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -1580,7 +1580,7 @@ def test_registry_role_only_mirror_for_index_host_never_redirects_index_traffic(
     lookup, every root, dispatch-object and config request would be sent there instead and
     `ocx index update` would fail outright.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -1645,7 +1645,7 @@ def test_registry_and_index_role_mirrors_compose_in_one_install(
     """
     mirror_ocx = OcxRunner(ocx.binary, ocx.ocx_home, mirror_registry)
     pkg = make_package(
-        mirror_ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False
+        mirror_ocx, unique_repo, "1.0.0", tmp_path, index=False
     )
     leaf_digest = fetch_platform_manifest_digest(mirror_registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
@@ -1765,7 +1765,7 @@ def _arrange_dead_physical_host(
     allowance, index home — is byte-identical, so the pair isolates the
     rewrite and nothing else.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -1927,7 +1927,7 @@ def test_pinned_leaf_digest_resolves_and_leaves_the_dispatch_store_untouched(
     exactly why the negative half (nothing written) and the positive half (it
     resolves at all) are asserted together.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -1995,7 +1995,7 @@ def test_superseded_tag_still_resolves_from_the_local_dispatch_object(
     re-fetched and silently followed the moved tag — the opposite of a
     snapshot.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -2091,7 +2091,7 @@ def test_published_absent_dispatch_recovers_from_the_physical_registry_and_self_
     the recovery is just an ordinary re-fetch from the source, which proves
     nothing about `content` being registry-addressable.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
 
     configure_index_source(ocx, index_server)
     static_index.write_config(index_server.root)
@@ -2310,7 +2310,7 @@ def test_flat_name_the_index_does_hold_resolves_and_keeps_its_yank_gate(
     not refused for its shape. An index that holds a root for it owns it — and
     its yank refusal is never bypassed by the plain-OCI catch-all.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     assert "/" not in unique_repo, "the fixture repository must be flat for this test"
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
@@ -2359,7 +2359,7 @@ def test_index_update_of_a_name_the_index_does_not_hold_fails_loudly(
     owns the namespace, gets a miss, and fails — no root is written, so a later
     resolve cannot read a locally-derived answer the index never gave.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     assert "/" not in unique_repo, "the fixture repository must be flat for this test"
 
     configure_index_source(ocx, index_server, namespace=ocx.registry)

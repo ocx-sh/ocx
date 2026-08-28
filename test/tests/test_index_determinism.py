@@ -124,8 +124,8 @@ def test_a_tag_the_remote_dropped_survives_in_the_local_copy(
     Without that, a publisher retiring an old tag would silently break every
     machine still pinned to it, which is the opposite of what a lock is for.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path / "v2", new=False, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path / "v2", index=False)
     old = fetch_platform_manifest_digest(ocx.registry, pkg.repo, "1.0.0")
     new = fetch_platform_manifest_digest(ocx.registry, pkg.repo, "2.0.0")
     configure_index_source(ocx, index_server)
@@ -159,8 +159,8 @@ def test_updating_one_package_leaves_every_other_root_untouched(
     re-snapshot both — B's root, its tag pins and its `repository` pointer all
     silently replaced by a command that named only A.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path / "v2", new=False, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path / "v2", index=False)
     first = fetch_platform_manifest_digest(ocx.registry, pkg.repo, "1.0.0")
     second = fetch_platform_manifest_digest(ocx.registry, pkg.repo, "2.0.0")
     assert first != second, "prerequisite: the two versions must be distinct manifests"
@@ -234,13 +234,13 @@ def test_reinstalling_a_tag_resolves_to_the_first_install_digest(
         assert digest.startswith("sha256:"), f"expected a pinned identifier, got {identifier!r}"
         return digest
 
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     published = fetch_platform_manifest_digest(ocx.registry, pkg.repo, "1.0.0")
     first = install_digest()
 
     # Re-push the SAME tag: `make_package` bakes a fresh marker per call, so the
     # content — and therefore the manifest the tag now points at — differs.
-    make_package(ocx, unique_repo, "1.0.0", tmp_path / "republish", new=False, index=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "republish", index=False)
     assert fetch_platform_manifest_digest(ocx.registry, pkg.repo, "1.0.0") != published, (
         "prerequisite: the re-push must have moved the tag at the registry"
     )

@@ -75,8 +75,8 @@ def test_j2_repair_re_points_a_broken_alias_without_publishing_new_content(
     platform; `repair` re-points the alias back to exactly the digest it held
     before the break — a pure re-point, no new content published.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path / "amd64", platform="linux/amd64", new=True)
-    make_package(ocx, unique_repo, "1.0.0", tmp_path / "arm64", platform="linux/arm64", new=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "amd64", platform="linux/amd64")
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "arm64", platform="linux/arm64")
 
     original_body, original_digest = fetch_manifest_raw(ocx.registry, unique_repo, "latest")
     document = json.loads(original_body)
@@ -113,8 +113,8 @@ def test_j2b_dry_run_repair_leaves_the_registry_byte_identical(
     but the registry is untouched until the flag is dropped — both outcomes
     proven on the same break.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path / "amd64", platform="linux/amd64", new=True)
-    make_package(ocx, unique_repo, "1.0.0", tmp_path / "arm64", platform="linux/arm64", new=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "amd64", platform="linux/amd64")
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "arm64", platform="linux/arm64")
 
     body, _ = fetch_manifest_raw(ocx.registry, unique_repo, "latest")
     document = json.loads(body)
@@ -156,8 +156,8 @@ def test_j3_never_created_aliases_become_present_after_repair(
     """Two versions pushed without `--cascade` (the pnpm shape) leave every
     rolling tag `absent`; `repair` creates all of them from existing content.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False, new=True)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False, new=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
 
     broken = _check(ocx, unique_repo, check=False)
     assert broken.returncode == 65
@@ -218,8 +218,8 @@ def test_j6_two_platform_cascade_checks_clean(ocx: OcxRunner, unique_repo: str, 
     """Both platforms of a single cascaded version check clean, and both
     appear in the report's rows.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path / "amd64", platform="linux/amd64", new=True)
-    make_package(ocx, unique_repo, "1.0.0", tmp_path / "arm64", platform="linux/arm64", new=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "amd64", platform="linux/amd64")
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "arm64", platform="linux/arm64")
 
     result = _check(ocx, unique_repo)
     assert result.returncode == 0
@@ -236,7 +236,7 @@ def test_j7_a_second_repair_after_one_writes_nothing(
     """Repairing an already-healthy graph is a no-op: the second run of two
     back-to-back repairs plans and writes nothing.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False, new=True)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
 
     first = _repair(ocx, unique_repo)
     assert first.returncode == 0
@@ -345,7 +345,7 @@ def test_j10_logical_check_reports_index_staleness(
     follow-up. The whole run touches zero local index bytes.
     """
     with _index_server() as server:
-        pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+        pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
         before_digests = {
             tag: fetch_manifest_digest(ocx.registry, pkg.repo, tag) for tag in ("latest", "1", "1.0")
         }
@@ -362,7 +362,7 @@ def test_j10_logical_check_reports_index_staleness(
         assert _reports(clean)[0]["index_findings"] == []
         assert not index_dir.exists(), "a pure read must leave zero local index bytes"
 
-        make_package(ocx, unique_repo, "1.1.0", tmp_path, new=False, index=False)
+        make_package(ocx, unique_repo, "1.1.0", tmp_path, index=False)
         after_latest_digest = fetch_manifest_digest(ocx.registry, pkg.repo, "latest")
         assert after_latest_digest != before_digests["latest"], "precondition: the alias actually moved"
 
@@ -399,7 +399,7 @@ def test_j11_physical_identifier_makes_zero_index_requests(
     foreign-registry jurisdiction check costs no I/O.
     """
     with _index_server() as server:
-        pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+        pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
         _configure_index_source(ocx, server)
         static_index.write_config(server.root)
 
@@ -420,7 +420,7 @@ def test_j12_announce_tags_file_holds_exactly_the_created_aliases(
     empty and would make a useless preview), and a second repair against the
     now-healthy graph writes an empty file.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False, new=True)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     expected = ["1", "1.0", "latest"]
 
     tags_path = tmp_path / "tags.txt"
@@ -451,8 +451,8 @@ def test_j13_announce_tags_rejects_a_multi_package_run(
     package, so the flag is a usage error there — and nothing is written.
     """
     other_repo = f"{unique_repo}_second"
-    make_package(ocx, unique_repo, "1.0.0", tmp_path / "first", cascade=False, new=True)
-    make_package(ocx, other_repo, "1.0.0", tmp_path / "second", cascade=False, new=True)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path / "first", cascade=False)
+    make_package(ocx, other_repo, "1.0.0", tmp_path / "second", cascade=False)
 
     tags_path = tmp_path / "tags.txt"
     rejected = _repair(ocx, "--announce-tags", str(tags_path), unique_repo, other_repo, check=False)

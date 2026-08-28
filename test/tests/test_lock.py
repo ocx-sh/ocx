@@ -115,8 +115,8 @@ def _two_pushed_tools(
     repo_b = f"t_{short}_tool_b"
     tag_a = "1.0.0"
     tag_b = "2.0.0"
-    make_package(ocx, repo_a, tag_a, tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_b, tag_b, tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_a, tag_a, tmp_path, cascade=False)
+    make_package(ocx, repo_b, tag_b, tmp_path, cascade=False)
     return repo_a, tag_a, repo_b, tag_b
 
 
@@ -311,7 +311,7 @@ def test_lock_clean_does_not_bump_moved_tag(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_clean_noop"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=True)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -332,7 +332,7 @@ mover = "{ocx.registry}/{repo}:latest"
     # Advance the moving tag upstream (cascade re-points ``:latest``). The
     # ``ocx.toml`` text is unchanged, so the lock is still CLEAN (its stored
     # declaration_hash still matches the config).
-    make_package(ocx, repo, "2.0.0", tmp_path, new=False, cascade=True)
+    make_package(ocx, repo, "2.0.0", tmp_path, cascade=True)
     refresh = subprocess.run(
         _ocx_cmd(ocx, "index", "update", f"{ocx.registry}/{repo}"),
         cwd=project,
@@ -372,8 +372,8 @@ def test_lock_dirty_reresolves_all_declared_tags(
     repo_a = f"t_{short}_dirty_a"
     repo_b = f"t_{short}_dirty_b"
     # `a` cascades so its `:latest` is a real moving tag we can advance.
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=True)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -394,7 +394,7 @@ a = "{ocx.registry}/{repo_a}:latest"
     # second tool. The config change makes the lock DIRTY (declaration_hash
     # mismatch), so a whole-file reconcile re-resolves every declared tag —
     # including the moved `a`.
-    make_package(ocx, repo_a, "2.0.0", tmp_path, new=False, cascade=True)
+    make_package(ocx, repo_a, "2.0.0", tmp_path, cascade=True)
     for repo in (repo_a, repo_b):
         refresh = subprocess.run(
             _ocx_cmd(ocx, "index", "update", f"{ocx.registry}/{repo}"),
@@ -446,10 +446,10 @@ def test_lock_tag_change_rewrites_only_that_entry(
     repo_b = f"t_{short}_swap_b"
 
     # Tool 'a': two different tags (distinct digests).
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_a, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_a, "2.0.0", tmp_path, cascade=False)
     # Tool 'b': single tag, unchanging.
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -531,7 +531,7 @@ def test_lock_advisory_tag_change_but_same_digest_preserves_generated_at(
     short = uuid4().hex[:8]
     repo = f"t_{short}_cascade"
     # Cascade pushes 1.0.0 and also tags 1, 1.0, latest at the same digest.
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=True)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -588,7 +588,7 @@ def test_lock_nonexistent_tag_exits_79_no_file_written(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_missing"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -657,7 +657,7 @@ def test_lock_rejects_group_flag(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_lock_grpflag"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -690,7 +690,7 @@ def test_lock_rejects_upgrade_flag(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_lock_upgflag"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -722,7 +722,7 @@ def test_lock_corrupt_existing_lock_exits_78(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_corrupt"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -768,7 +768,7 @@ def test_lock_gitattributes_note_emitted_when_line_missing(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_gitattr"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     # --- Case A: no .gitattributes file at all → note emitted -----------
     proj_a = tmp_path / "proj_a"
@@ -845,8 +845,8 @@ def test_lock_project_flag_uses_explicit_config_not_cwd(
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_proj_a"
     repo_b = f"t_{short}_proj_b"
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
 
     # CWD project: contains tool_a.
     cwd_proj = tmp_path / "default"
@@ -909,8 +909,8 @@ def test_lock_resolves_root_and_all_groups(
     short = uuid4().hex[:8]
     repo_cmake = f"t_{short}_cmake"
     repo_ruff = f"t_{short}_ruff"
-    make_package(ocx, repo_cmake, "3.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_ruff, "0.11.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_cmake, "3.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_ruff, "0.11.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -955,7 +955,7 @@ def test_lock_same_name_across_groups_locks_both_entries(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_same"
-    make_package(ocx, repo, "3.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "3.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -1133,7 +1133,7 @@ def _single_tool_project(
     short = uuid4().hex[:8]
     repo = f"t_{short}_eager"
     tag = "1.0.0"
-    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, tag, tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -1261,7 +1261,7 @@ def test_lock_rejects_committed_v1_lock_with_regenerate_hint(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_v1rej"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -1314,7 +1314,7 @@ def test_lock_rejects_committed_v2_lock_with_regenerate_hint(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_v2rej"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -1375,8 +1375,8 @@ def test_fault_injected_add_rolls_back_committed_lock_without_panic(
     short = uuid4().hex[:8]
     repo_existing = f"t_{short}_rollpred"
     repo_added = f"t_{short}_rolladd"
-    make_package(ocx, repo_existing, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_added, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_existing, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_added, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -1540,7 +1540,7 @@ def test_relock_new_platform_lock_is_noop_update_adds_key(
     tag = "1.0.0"
 
     # Push the first platform (linux/amd64 or whatever the host is).
-    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, tag, tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -1574,7 +1574,6 @@ tool = "{ocx.registry}/{repo}:{tag}"
     second_platform = "linux/arm64"
     make_package(
         ocx, repo, tag, tmp_path / "second",
-        new=False,
         cascade=False,
         platform=second_platform,
     )

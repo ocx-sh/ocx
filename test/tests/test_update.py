@@ -177,8 +177,8 @@ def test_update_bumps_every_tag(
     repo_b = f"t_{short}_bump_b"
 
     # Cascade so ``:latest`` is a real moving tag for both tools.
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=True)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=True)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -201,8 +201,8 @@ b = "{ocx.registry}/{repo_b}:latest"
     # Advance both moving tags upstream (cascade re-points ``:latest``).
     # Remote-default resolution means bare ``ocx update`` sees this directly —
     # no ``ocx index update`` snapshot step is needed.
-    make_package(ocx, repo_a, "2.0.0", tmp_path, new=False, cascade=True)
-    make_package(ocx, repo_b, "2.0.0", tmp_path, new=False, cascade=True)
+    make_package(ocx, repo_a, "2.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_b, "2.0.0", tmp_path, cascade=True)
 
     # Bare ``ocx update`` re-resolves the whole file; both tags advance.
     result = _run_update(ocx, project)
@@ -233,8 +233,8 @@ def test_update_no_args_full_resolution_equivalent_to_lock(
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_full_a"
     repo_b = f"t_{short}_full_b"
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_b, "2.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_b, "2.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -287,7 +287,7 @@ def test_update_default_resolves_against_live_registry(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_live_default"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=True)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -302,7 +302,7 @@ def test_update_default_resolves_against_live_registry(
 
     # Upstream moves the tag — index=False keeps the local snapshot stale
     # (`make_package` otherwise runs `ocx index update` as part of publishing).
-    make_package(ocx, repo, "2.0.0", tmp_path, new=False, cascade=True, index=False)
+    make_package(ocx, repo, "2.0.0", tmp_path, cascade=True, index=False)
 
     result = _run_update(ocx, project)
     assert result.returncode == EXIT_SUCCESS, (
@@ -328,7 +328,7 @@ def test_update_does_not_write_local_tag_pointers(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_no_tag_write"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=True)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -345,7 +345,7 @@ tool = "{ocx.registry}/{repo}:latest"
 
     # Upstream moves — index=False keeps the local snapshot stale, so the
     # live re-resolve below would be the only thing that could write tags/.
-    make_package(ocx, repo, "2.0.0", tmp_path, new=False, cascade=True, index=False)
+    make_package(ocx, repo, "2.0.0", tmp_path, cascade=True, index=False)
 
     before = _tags_snapshot(ocx)
 
@@ -381,8 +381,8 @@ def test_update_single_tool_bumps_only_named(
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_scoped_a"
     repo_b = f"t_{short}_scoped_b"
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=True)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=True)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -404,8 +404,8 @@ b = "{ocx.registry}/{repo_b}:latest"
 
     # Advance both moving tags upstream (cascade re-points ``:latest``) —
     # no ``ocx index update`` snapshot needed under remote-default.
-    make_package(ocx, repo_a, "2.0.0", tmp_path, new=False, cascade=True)
-    make_package(ocx, repo_b, "2.0.0", tmp_path, new=False, cascade=True)
+    make_package(ocx, repo_a, "2.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_b, "2.0.0", tmp_path, cascade=True)
 
     # Scoped update of ONLY ``a``.
     result = _run_update(ocx, project, "a")
@@ -432,8 +432,8 @@ def test_update_scoped_preserves_untouched_pins(
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_preserve_a"
     repo_b = f"t_{short}_preserve_b"
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=True)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=True)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -459,7 +459,7 @@ b = "{ocx.registry}/{repo_b}:latest"
 
     # Advance only ``a`` upstream, then scoped-update ``a``. No ``ocx index
     # update`` snapshot needed under remote-default.
-    make_package(ocx, repo_a, "2.0.0", tmp_path, new=False, cascade=True)
+    make_package(ocx, repo_a, "2.0.0", tmp_path, cascade=True)
 
     result = _run_update(ocx, project, "a")
     assert result.returncode == EXIT_SUCCESS, result.stderr
@@ -479,8 +479,8 @@ def test_update_group_scopes_to_group(
     short = uuid4().hex[:8]
     repo_default = f"t_{short}_grp_def"
     repo_ci = f"t_{short}_grp_ci"
-    make_package(ocx, repo_default, "1.0.0", tmp_path, new=True, cascade=True)
-    make_package(ocx, repo_ci, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo_default, "1.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_ci, "1.0.0", tmp_path, cascade=True)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -503,8 +503,8 @@ citool = "{ocx.registry}/{repo_ci}:latest"
     assert initial_default and initial_ci, "both tools must record leaf digests"
 
     # No ``ocx index update`` snapshot needed under remote-default.
-    make_package(ocx, repo_default, "2.0.0", tmp_path, new=False, cascade=True)
-    make_package(ocx, repo_ci, "2.0.0", tmp_path, new=False, cascade=True)
+    make_package(ocx, repo_default, "2.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_ci, "2.0.0", tmp_path, cascade=True)
 
     result = _run_update(ocx, project, "-g", "ci")
     assert result.returncode == EXIT_SUCCESS, (
@@ -529,7 +529,7 @@ def test_update_scoped_no_lock_errors_78(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_scoped_nolock"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -562,8 +562,8 @@ def test_update_scoped_stale_toml_errors_65(
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_stale_a"
     repo_b = f"t_{short}_stale_b"
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -607,7 +607,7 @@ def test_update_unknown_name_errors_64(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_unknown_name"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -706,7 +706,7 @@ def test_update_frozen_unsnapshotted_tag_exits_81(
     # index=False: the package must exist on the registry but stay
     # un-snapshotted locally — `make_package` otherwise runs `ocx index
     # update` as part of publishing.
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, index=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False, index=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -765,7 +765,7 @@ def test_update_check_succeeds_on_current(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_upd_check_ok"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -848,7 +848,7 @@ def test_update_check_exits_65_on_whole_file_drift(
     short = uuid4().hex[:8]
     repo = f"t_{short}_upd_check_drift"
 
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=True)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -865,7 +865,7 @@ mover = "{ocx.registry}/{repo}:latest"
 
     # Publish 2.0.0 with cascade=True — "latest" now points at the new
     # digest — and snapshot it via ``ocx index update``.
-    make_package(ocx, repo, "2.0.0", tmp_path, new=False, cascade=True)
+    make_package(ocx, repo, "2.0.0", tmp_path, cascade=True)
     snapshot = subprocess.run(
         _ocx_cmd(ocx, "index", "update", f"{ocx.registry}/{repo}"),
         cwd=project,
@@ -905,7 +905,7 @@ mover = "{ocx.registry}/{repo}:latest"
 
     # Upstream moves AGAIN, past the snapshot — index=False so no further
     # `index update` runs (`make_package` snapshots by default).
-    make_package(ocx, repo, "3.0.0", tmp_path, new=False, cascade=True, index=False)
+    make_package(ocx, repo, "3.0.0", tmp_path, cascade=True, index=False)
 
     frozen_second = subprocess.run(
         _ocx_cmd(ocx, "--frozen", "update"),
@@ -940,8 +940,8 @@ def test_update_scoped_check_isolates_scope(
     short = uuid4().hex[:8]
     repo_a = f"t_{short}_chk_a"
     repo_b = f"t_{short}_chk_b"
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, cascade=True)
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, cascade=True)
+    make_package(ocx, repo_a, "1.0.0", tmp_path, cascade=True)
+    make_package(ocx, repo_b, "1.0.0", tmp_path, cascade=True)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -959,7 +959,7 @@ b = "{ocx.registry}/{repo_b}:latest"
 
     # Only ``b`` advances upstream; ``a`` stays put. No ``ocx index update``
     # snapshot needed under remote-default.
-    make_package(ocx, repo_b, "2.0.0", tmp_path, new=False, cascade=True)
+    make_package(ocx, repo_b, "2.0.0", tmp_path, cascade=True)
 
     # ``a`` is still current → scoped --check on ``a`` passes; ``b``'s drift is
     # out of scope and carried forward frozen.
@@ -1024,8 +1024,8 @@ def _two_tag_project(
     repo = f"t_{short}_upg_eager"
     tag_v1 = "1.0.0"
     tag_v2 = "2.0.0"
-    make_package(ocx, repo, tag_v1, tmp_path, new=True, cascade=False)
-    make_package(ocx, repo, tag_v2, tmp_path, new=False, cascade=False)
+    make_package(ocx, repo, tag_v1, tmp_path, cascade=False)
+    make_package(ocx, repo, tag_v2, tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()

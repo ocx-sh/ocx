@@ -70,7 +70,6 @@ def _push_multi_layer(
     layers: list[str],
     tmp_path: Path,
     *,
-    new: bool = True,
     cascade: bool = False,
     metadata_path: Path | None = None,
 ) -> str:
@@ -89,8 +88,6 @@ def _push_multi_layer(
         }))
 
     args = ["package", "push", "-p", plat, "-m", str(metadata_path)]
-    if new:
-        args.append("-n")
     if cascade:
         args.append("--cascade")
     args.extend(["-i", fq])
@@ -142,7 +139,7 @@ def test_push_zero_layers_succeeds_with_metadata(
     }))
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     ocx.plain(
-        "package", "push", "-p", plat, "-m", str(meta), "-n", "-i", fq,
+        "package", "push", "-p", plat, "-m", str(meta), "-i", fq,
     )
 
     # Walk the index → per-platform manifest and confirm `layers: []`.
@@ -163,7 +160,7 @@ def test_push_zero_layers_without_metadata_fails(
     plat = current_platform()
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     result = ocx.run(
-        "package", "push", "-p", plat, "-n", "-i", fq,
+        "package", "push", "-p", plat, "-i", fq,
         check=False, format=None,
     )
     assert result.returncode != 0
@@ -191,7 +188,7 @@ def test_round_trip_zero_layers(
     }))
     short = f"{unique_repo}:1.0.0"
     fq = f"{ocx.registry}/{short}"
-    ocx.plain("package", "push", "-p", plat, "-m", str(meta), "-n", "-i", fq)
+    ocx.plain("package", "push", "-p", plat, "-m", str(meta), "-i", fq)
     ocx.plain("index", "update", short)
 
     result = ocx.json("package", "install", short)
@@ -299,7 +296,7 @@ def test_push_digest_layer_reuse(
     _push_multi_layer(
         ocx, unique_repo, "2.0.0",
         [f"{layer_a_digest}.tar.gz", str(bundle_b)],
-        tmp_path, new=False,
+        tmp_path,
     )
     ocx.plain("index", "update", f"{unique_repo}:2.0.0")
 
@@ -335,7 +332,7 @@ def test_push_digest_layer_reuse_tar_xz(
     _push_multi_layer(
         ocx, unique_repo, "2.0.0",
         [f"{layer_a_digest}.tar.xz", str(bundle_b)],
-        tmp_path, new=False,
+        tmp_path,
     )
     ocx.plain("index", "update", f"{unique_repo}:2.0.0")
 
@@ -401,7 +398,7 @@ def test_round_trip_zstd_layer(
     _push_multi_layer(
         ocx, unique_repo, "2.0.0",
         [f"{layer_a_digest}.tar.zst", str(bundle_b)],
-        tmp_path, new=False,
+        tmp_path,
     )
     ocx.plain("index", "update", f"{unique_repo}:2.0.0")
 
@@ -442,7 +439,6 @@ def test_push_bare_digest_is_rejected(
     result = ocx.run(
         "package", "push", "-p", current_platform(),
         "-m", str(tmp_path / "meta.json"),
-        "-n",
         "-i", f"{ocx.registry}/{unique_repo}:1.0.0",
         bare_digest,
         str(bundle_b),
@@ -471,7 +467,6 @@ def test_push_digest_layer_not_found(
     result = ocx.run(
         "package", "push", "-p", current_platform(),
         "-m", str(tmp_path / "meta.json"),
-        "-n",
         "-i", f"{ocx.registry}/{unique_repo}:1.0.0",
         f"{fake_digest}.tar.gz",
         str(bundle_b),
@@ -498,7 +493,6 @@ def test_push_digest_only_without_metadata_fails(
 
     result = ocx.run(
         "package", "push", "-p", current_platform(),
-        "-n",
         "-i", f"{ocx.registry}/{unique_repo}:2.0.0",
         f"{layer_a_digest}.tar.gz",
         check=False, format=None,
@@ -560,7 +554,7 @@ def test_push_ambiguous_metadata_rejected(
     plat = current_platform()
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     result = ocx.run(
-        "package", "push", "-p", plat, "-n", "-i", fq,
+        "package", "push", "-p", plat, "-i", fq,
         str(bundle_a), str(bundle_b),
         check=False, format=None,
     )

@@ -11,21 +11,21 @@ This page covers the publisher view: how to assemble a multi-platform package, h
 
 An [OCI Image Index][oci-image-index] is a manifest of manifests — a single descriptor that points at one image manifest per platform. When a consumer runs `ocx package install acme/mytool:1.0.0`, OCX fetches the index, finds the manifest matching the consumer's platform, and pulls only that manifest's layers. No conditional logic in install scripts, no platform-suffixed tags to keep in sync.
 
-The publisher equivalent of "build for amd64, then arm64, then push the index" collapses to: push each platform separately under the same tag, and OCX assembles the index for you. When [`ocx package push`][cmd-package-push] sees a tag that already has a manifest, it merges the new platform into the existing index rather than replacing it. (`--new` on the first push tells the cascade resolver to skip that lookup; everywhere else it is a no-op.)
+The publisher equivalent of "build for amd64, then arm64, then push the index" collapses to: push each platform separately under the same tag, and OCX assembles the index for you. When [`ocx package push`][cmd-package-push] sees a tag that already has a manifest, it merges the new platform into the existing index rather than replacing it.
 
 ## The Per-Platform Push Pattern {#pattern}
 
 The hand-publishing flow (the [`ocx_mirror`][mirror-pipeline] tool runs the same pattern from a YAML spec):
 
 1. **Bundle each platform's content with [`ocx package create`][cmd-package-create].** Pass `-i mytool:1.0.0 -p <platform>` and let `-o .` infer the output name. Each create call drops a `<name>-<tag>-<os>-<arch>.tar.xz` archive (`<name>` is the OCI repository's last segment) plus a sibling `<…>-metadata.json` sidecar — the pair [`ocx package push`][cmd-package-push] picks up automatically. The full sidecar/inferred-name convention lives in [Bundle Anatomy → sidecars][authoring-bundle-sidecars].
-2. **Push the first platform with `--new --cascade`.** `--cascade` keeps your rolling-tag aliases (`1.0`, `1`, `latest`) in sync; `--new` skips the existence lookup that cascade would otherwise issue against a tag that does not yet exist. Omit `-m`: push reads the sidecar next to the layer.
-3. **Push subsequent platforms with `--cascade`** (no `--new`). OCX detects the existing manifest, merges the new platform into the image index, re-points the tag at the index digest, and updates each rolling alias.
+2. **Push the first platform with `--cascade`.** `--cascade` keeps your rolling-tag aliases (`1.0`, `1`, `latest`) in sync. Omit `-m`: push reads the sidecar next to the layer.
+3. **Push subsequent platforms with `--cascade`** too. OCX detects the existing manifest, merges the new platform into the image index, re-points the tag at the index digest, and updates each rolling alias.
 
 ```sh
 ocx package create build -i mytool:1.0.0 -p linux/amd64 -m metadata.json -o .
 ocx package create build -i mytool:1.0.0 -p linux/arm64 -m metadata.json -o .
 
-ocx package push -n -c -p linux/amd64 -i acme/mytool:1.0.0 mytool-1.0.0-linux-amd64.tar.xz
+ocx package push -c -p linux/amd64 -i acme/mytool:1.0.0 mytool-1.0.0-linux-amd64.tar.xz
 ocx package push    -c -p linux/arm64 -i acme/mytool:1.0.0 mytool-1.0.0-linux-arm64.tar.xz
 ```
 
@@ -118,7 +118,7 @@ After mirroring, the published image index carries the `os.features` array in ea
 Hand-driven publishers (not using the mirror tool) declare the same `os_features` directly on [`ocx package push`][cmd-package-push]'s `--platform` value — append `+libc.glibc` or `+libc.musl` to the standard `os/arch` value, following [the Per-Platform Push Pattern](#pattern):
 
 ```sh
-ocx package push -n -c -p linux/amd64+libc.glibc -i acme/mytool:1.0.0 mytool-1.0.0-linux-amd64-glibc.tar.xz
+ocx package push -c -p linux/amd64+libc.glibc -i acme/mytool:1.0.0 mytool-1.0.0-linux-amd64-glibc.tar.xz
 ocx package push    -c -p linux/amd64+libc.musl  -i acme/mytool:1.0.0 mytool-1.0.0-linux-amd64-musl.tar.xz
 ```
 

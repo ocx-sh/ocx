@@ -77,7 +77,7 @@ def test_index_update_records_only_the_image_index_tag_and_stores_no_manifest(
     """
     from src.helpers import make_package
 
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False, index=False)
     leaf_digest = _publish_bare_manifest_tag(registry, pkg.repo, "1.0.0", "9.9.9")
     published = fetch_manifest_raw(registry, pkg.repo, "9.9.9")[0]
     assert json.loads(published)["mediaType"] == IMAGE_MANIFEST_MEDIA_TYPE, (
@@ -133,7 +133,7 @@ def test_index_update_of_a_bare_manifest_tag_alone_is_no_indexable_tag(
     """
     from src.helpers import make_package
 
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False, index=False)
     _publish_bare_manifest_tag(registry, pkg.repo, "1.0.0", "9.9.9")
 
     result = ocx.plain("index", "update", f"{pkg.repo}:9.9.9", check=False)
@@ -165,7 +165,7 @@ def test_bare_manifest_tag_never_becomes_a_root_entry_through_the_resolve_path(
     """
     from src.helpers import make_package
 
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False, index=False)
     _publish_bare_manifest_tag(registry, pkg.repo, "1.0.0", "9.9.9")
 
     ocx.json("package", "install", f"{pkg.repo}:9.9.9")
@@ -331,8 +331,8 @@ def test_index_update_tag_scoped(
     # own tag to the default source's root document — both tags are already
     # present at this point, which is why the wipe below is load-bearing for
     # the "update only 1.0 must not fetch 2.0" assertion.
-    make_package(ocx, repo, "1.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, repo, "2.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, repo, "1.0", tmp_path, cascade=False)
+    make_package(ocx, repo, "2.0", tmp_path, cascade=False)
 
     # Wipe the default index home so we start fresh (`adr_index_indirection.md`
     # A1: `$OCX_HOME/index`, not the deleted `$OCX_HOME/tags` or
@@ -623,7 +623,7 @@ def test_index_list_excludes_internal_tags(
 
     # Push a real package so the repo has a normal tag.
     from src.helpers import make_package
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True)
+    make_package(ocx, repo, "1.0.0", tmp_path)
 
     # Push a description, creating the __ocx.desc tag on the registry.
     readme = tmp_path / "README.md"

@@ -280,7 +280,7 @@ def _make_toolchain_project(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_{label}"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False, bins=[bin_name])
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False, bins=[bin_name])
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     project = tmp_path / f"proj_{label}"

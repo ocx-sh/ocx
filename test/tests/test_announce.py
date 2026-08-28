@@ -75,7 +75,7 @@ def test_announce_out_writes_canonical_root_and_content_addressed_cas(
     """
     import requests
 
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -182,7 +182,7 @@ def test_announce_out_writes_the_whole_entry_even_when_nothing_changed(
     readme is deliberately pushed with no title (no frontmatter, no `--title`),
     the state that produced a schema-invalid `desc.title: ""`.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     readme = tmp_path / "README.md"
     readme.write_text("# widget\n\nDoes widget things.\n")
     ocx.plain("package", "describe", "--readme", str(readme), f"{ocx.registry}/{unique_repo}")
@@ -245,7 +245,7 @@ def test_announce_refuses_a_tag_resolving_to_a_bare_manifest(
     """
     import requests
 
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
 
     # Publish a tag that points DIRECTLY at the leaf platform manifest, the
     # one shape `ocx package push` never writes under a version tag.
@@ -279,7 +279,7 @@ def test_announce_refuses_a_tag_resolving_to_a_bare_manifest(
 def test_announce_fork_happy_path_opens_pull_request(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -322,7 +322,7 @@ def test_announce_fork_second_identical_run_is_unchanged_and_reuses_the_pull_req
     branch already diverges from the upstream base reports `status: "unchanged"`
     and makes ZERO new commit or pull-request *create* calls, while still
     reusing (never duplicating) the open PR."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -358,7 +358,7 @@ def test_announce_fork_unchanged_with_no_branch_is_a_pure_noop(
     the committed root already matches AND no announce branch exists yet, the
     run is a pure no-op — no fork, no commit, and (unlike the branch-ahead
     case) NO pull-request call at all."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -393,7 +393,7 @@ def test_announce_fork_unchanged_with_a_branch_not_ahead_is_a_pure_noop(
     index base carries nothing unmerged (the shape a merged-but-undeleted branch
     leaves behind), so an unchanged run against it must stay a pure no-op rather
     than ensuring a pull request for work that is already in the index."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -430,7 +430,7 @@ def test_announce_fork_recovers_stranded_pull_request_on_a_later_unchanged_run(
     open fails, the update is stranded (committed, no PR). A later identical run
     reports `unchanged` yet — because the branch diverges from the upstream
     base — ensures the PR is opened, so the update is never lost."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -460,8 +460,8 @@ def test_announce_fork_retries_once_on_non_fast_forward_preserving_concurrent_ch
     regenerates against it, and retries once. The result preserves BOTH changes:
     the concurrent yank on `1.0.0` survives verbatim, and our new `2.0.0` lands —
     exactly the lost-update the amendment closes."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -511,9 +511,9 @@ def test_announce_tags_file_race_retry_unions_against_the_winning_head(
     `2.0.0` — a tag the loser never resolved — which is exactly what a stale
     replay drops.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
-    make_package(ocx, unique_repo, "3.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "3.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -561,8 +561,8 @@ def test_announce_identical_race_retry_makes_no_empty_diff_commit(
     unchanged predicate against the WINNING head (not the pre-race root it was
     first evaluated against), skips the commit, and still ensures the pull
     request so nothing is stranded."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -615,7 +615,7 @@ def test_announce_unchanged_indeterminate_compare_is_refused(
     indeterminate compare, not "not ahead". Guessing "not ahead" would report a
     clean unchanged no-op while a committed update sits on the branch with no
     pull request — the stranded-commit window C6 exists to close."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -637,7 +637,7 @@ def test_announce_unchanged_unmodelled_compare_status_is_refused(
     exhaustive over GitHub's four documented values. A value the client does not
     model must surface, never fall through to "not ahead" — same stranded-commit
     consequence as an indeterminate compare."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -658,8 +658,8 @@ def test_announce_unchanged_unmodelled_compare_status_is_refused(
 def test_announce_tags_replace_drops_omitted_committed_tag(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -678,8 +678,8 @@ def test_announce_tags_replace_drops_omitted_committed_tag(
 def test_announce_tags_file_union_adds_without_dropping(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -705,7 +705,7 @@ def _seed_cascade_and_curate_one(
 
     Returns the package id and the argv prefix shared by the announce calls.
     """
-    make_package(ocx, unique_repo, "1.2.3", tmp_path, new=True, cascade=True)
+    make_package(ocx, unique_repo, "1.2.3", tmp_path, cascade=True)
     package = f"acme/{unique_repo}"
     seed_empty_root(fake_forge, package, f"oci://{ocx.registry}/{unique_repo}")
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
@@ -757,7 +757,7 @@ def test_announce_tags_from_registry_never_drops_a_committed_tag(
     """Additive only. A committed tag the registry no longer serves survives: the
     index treats a vanished non-yanked tag as an anomaly for a human to look at,
     so announce silently dropping it would pre-empt that decision."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     seed_empty_root(fake_forge, package, f"oci://{ocx.registry}/{unique_repo}")
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
@@ -766,7 +766,7 @@ def test_announce_tags_from_registry_never_drops_a_committed_tag(
 
     # A second package pushed into the same repo moves the registry on without
     # removing 1.0.0 from the committed root's claim.
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     announce_json(ocx, fake_forge, *args, "--tags-from-registry")
 
     tags = committed_root(fake_forge, package)["tags"]
@@ -819,8 +819,8 @@ def test_announce_after_its_pull_request_squash_merges_rebuilds_from_the_base(
 
     The parent assertion is what discriminates: the tag set alone passes either
     way, because the merged root is read back in both worlds."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -849,8 +849,8 @@ def test_announce_keeps_accumulating_while_its_pull_request_is_open(
     anything else landed on the index base — the exact failure C4's
     "update, don't overwrite" rule exists to prevent. Here nothing merged, the
     pull request is still open, and the second announce must build ON the first."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -877,7 +877,7 @@ def test_announce_keeps_accumulating_while_its_pull_request_is_open(
 def test_announce_refresh_reobserves_and_updates_a_moved_digest(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -893,7 +893,7 @@ def test_announce_refresh_reobserves_and_updates_a_moved_digest(
     # deterministic `pkg-<repo>-<tag>` bundle directory.
     second_build = tmp_path / "second-build"
     second_build.mkdir()
-    make_package(ocx, unique_repo, "1.0.0", second_build, new=False, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", second_build, cascade=False)
 
     report = announce_json(ocx, fake_forge, *args, "--refresh")
     assert report["status"] == "updated", "a moved digest must not short-circuit as unchanged"
@@ -907,7 +907,7 @@ def test_announce_refresh_reobserves_and_updates_a_moved_digest(
 def test_announce_yank_and_unyank_apply_to_curated_tags(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -926,7 +926,7 @@ def test_announce_yank_and_unyank_apply_to_curated_tags(
 def test_announce_yank_and_unyank_same_tag_errors(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -965,8 +965,8 @@ def test_announce_fork_reused_across_runs_without_duplicate_creation(
     check means a fork already known never gets a duplicate create — proven
     across two runs whose curated sets genuinely differ (both take the
     Updated path, both call `ensure_fork`)."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -982,8 +982,8 @@ def test_announce_fork_reused_across_runs_without_duplicate_creation(
 def test_announce_pull_request_422_reuses_existing_pr_without_duplicate(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -1002,7 +1002,7 @@ def test_announce_pull_request_422_reuses_existing_pr_without_duplicate(
 def test_announce_renamed_fork_resolves_via_response_body(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -1029,7 +1029,7 @@ def test_announce_renamed_fork_resolves_via_response_body(
 def test_announce_parent_mismatch_fork_is_refused(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -1061,7 +1061,7 @@ def test_announce_explicit_target_owner_fork_threads_organization(
     """S12 shared-fork path: `--fork ocx-contrib/index` threads
     `organization: "ocx-contrib"` into the fork-create body and opens the PR
     against that fork, not a personal one."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -1092,7 +1092,7 @@ def test_announce_explicit_target_owner_fork_threads_organization(
 def test_announce_fork_readiness_pending_then_ready_succeeds(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -1136,7 +1136,7 @@ def test_announce_fork_readiness_unresolvable_keeps_retrying(
     a real HTTP round trip — still retrying past the first backoff window,
     not failing or succeeding early.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -1194,7 +1194,7 @@ def test_announce_forge_redirect_is_not_followed(
     response must not be chased. Proven with a single server: the redirect
     `Location` points at an otherwise-never-legitimately-requested path on
     the SAME fake forge, and the assertion is that path was never hit."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -1233,7 +1233,7 @@ def test_announce_fresh_fork_first_request_404_race_retry_fires(
     the blob POSTs after it — unprotected, and a 404 there surfaced as a
     `missing field tree.sha` error that gives the publisher no hint a retry
     would fix it."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -1267,7 +1267,7 @@ def test_announce_fresh_fork_tree_404_race_retry_fires(
     """X5, the later-write half: the provisioning window can also close after
     the base-tree read succeeds, so a 404 on `POST .../git/trees` must be
     absorbed by the same single retry of the whole sequence."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -1300,7 +1300,7 @@ def test_announce_token_never_leaks_to_stdout_stderr_or_forge_request_log(
     additionally proves it never reaches stdout, stderr, or any logged forge
     request URL (headers legitimately carry it as a bearer value; a URL
     never should)."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -1380,7 +1380,7 @@ def test_announce_ssrf_guard_active_permits_cidr_trusted_ip_literal_registry(
     DNS-rebinding proof needs a controllable authoritative resolver, out of this
     stdlib-only suite's scope.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     port = ocx.registry.split(":", 1)[1] if ":" in ocx.registry else "443"
     physical = f"oci://127.0.0.1:{port}/{unique_repo}"
@@ -1418,7 +1418,7 @@ def test_announce_direct_commits_the_branch_to_the_index_repo_and_opens_a_pull_r
     straight onto the default branch, which is what the index's governance gate
     and its `refresh`/`new-package` labelling run on.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -1462,7 +1462,7 @@ def test_announce_direct_without_push_access_fails_closed_naming_repo_and_permis
     fresh-fork provisioning race `commit_files` sleeps and retries for — so
     without it this failure is a delayed, bare status code naming a URL.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -1488,7 +1488,7 @@ def test_announce_requires_the_credential_for_every_mode_that_writes(
     """`OCX_ANNOUNCE_TOKEN` gates writing, not forking: `--out` is the one mode
     that runs without it, and the fork-free path — which has no `--fork` to key
     a credential check off — is refused just like `--fork` is."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)

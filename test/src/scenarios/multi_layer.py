@@ -68,7 +68,7 @@ class MultiLayer(Scenario):
         fq = f"{self.ocx.registry}/{repo}:1.0.0"
         push_args = [
             "package", "push", "-p", plat, "-m", str(metadata_path),
-            "-n", "--cascade", "-i", fq,
+            "--cascade", "-i", fq,
             *[str(b) for b in bundles],
         ]
         self.ocx.plain(*push_args)

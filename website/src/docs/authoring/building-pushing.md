@@ -14,8 +14,6 @@ ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64 
 ocx package push mytool-1.0.0.tar.xz
 ```
 
-`--new` (`-n`) is a `--cascade` modifier: it tells the cascade resolver to skip the existing-tag lookup on the first publish of a repository. Outside `--cascade` the flag is a no-op. Reach for it once you adopt rolling tags.
-
 <Terminal src="/casts/authoring/package-push.cast" title="Publishing a package for the first time" collapsed />
 
 ::: tip Test before you push

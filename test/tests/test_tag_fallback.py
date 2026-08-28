@@ -170,7 +170,7 @@ def test_ac4_stale_cached_tag_uses_cached_digest(
     # Push v1 and install to seed the cache.
     v1_dir = tmp_path / "v1"
     v1_dir.mkdir()
-    pkg_v1 = make_package(ocx, unique_repo, "1.0.0", v1_dir, new=True, cascade=False)
+    pkg_v1 = make_package(ocx, unique_repo, "1.0.0", v1_dir, cascade=False)
     ocx.json("package", "install", pkg_v1.short)
 
     # Record the digest that was installed (digest A).
@@ -190,7 +190,7 @@ def test_ac4_stale_cached_tag_uses_cached_digest(
     # new content (the marker UUID gives v2 a different digest from v1).
     v2_dir = tmp_path / "v2"
     v2_dir.mkdir()
-    _ = make_package(ocx, unique_repo, "1.0.0", v2_dir, new=False, cascade=False)
+    _ = make_package(ocx, unique_repo, "1.0.0", v2_dir, cascade=False)
 
     # Verify v2 has a different digest on the registry.
     registry_digest_b = fetch_manifest_digest(registry, unique_repo, "1.0.0")
@@ -230,8 +230,8 @@ def test_ac5_batch_install_empty_index_both_succeed(
 
     Each package triggers its own fallback chain walk in parallel.
     """
-    pkg1 = make_package(ocx, f"{unique_repo}_1", "1.0.0", tmp_path, new=True, cascade=False)
-    pkg2 = make_package(ocx, f"{unique_repo}_2", "1.0.0", tmp_path, new=True, cascade=False)
+    pkg1 = make_package(ocx, f"{unique_repo}_1", "1.0.0", tmp_path, cascade=False)
+    pkg2 = make_package(ocx, f"{unique_repo}_2", "1.0.0", tmp_path, cascade=False)
 
     # Wipe the local index so both packages must fall through to remote.
     _wipe_local_index(ocx)
@@ -296,8 +296,8 @@ def test_parallel_install_races_preserve_both_tags(
     With the per-repo lock + in-place write path wired up, both entries
     must survive.
     """
-    v1 = make_package(ocx, unique_repo, "1.0.0", tmp_path / "v1", new=True, cascade=False)
-    v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path / "v2", new=False, cascade=False)
+    v1 = make_package(ocx, unique_repo, "1.0.0", tmp_path / "v1", cascade=False)
+    v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path / "v2", cascade=False)
     assert v1.repo == v2.repo, "both versions must target the same repo for the race"
 
     # Fresh local index → both installs exercise the fallback path.

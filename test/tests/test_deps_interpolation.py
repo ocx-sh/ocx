@@ -38,7 +38,7 @@ def _push_dep_and_app(
     leaf_repo = f"{unique_repo}_leaf"
     app_repo = f"{unique_repo}_app"
 
-    leaf = make_package(ocx, leaf_repo, "1.0.0", tmp_path, new=True)
+    leaf = make_package(ocx, leaf_repo, "1.0.0", tmp_path)
     dep = _dep_entry(ocx, leaf, name=dep_name)
 
     app = make_package(
@@ -46,7 +46,6 @@ def _push_dep_and_app(
         app_repo,
         "1.0.0",
         tmp_path,
-        new=True,
         # Tagged ``public`` so the per-entry filter under v2 default-Consumer
         # admits the entry — interpolation tests assert the resolved value
         # is reachable via `ocx env`, which uses Consumer mode.
@@ -130,7 +129,7 @@ def test_transitive_dep_install_path_propagates_via_public_chain(
     a_repo = f"{unique_repo}_a"
 
     # C: leaf, no deps.
-    c = make_package(ocx, c_repo, "1.0.0", tmp_path, new=True)
+    c = make_package(ocx, c_repo, "1.0.0", tmp_path)
 
     # B: Public dep on C, env references C's installPath. ``C_PATH`` is
     # tagged ``public`` so it propagates to A under Consumer mode (default).
@@ -138,7 +137,6 @@ def test_transitive_dep_install_path_propagates_via_public_chain(
     c_dep["visibility"] = "public"
     b = make_package(
         ocx, b_repo, "1.0.0", tmp_path,
-        new=True,
         env=[{"key": "C_PATH", "type": "constant", "value": f"${{deps.{c_repo}.installPath}}",
               "visibility": "public"}],
         dependencies=[c_dep],
@@ -149,7 +147,6 @@ def test_transitive_dep_install_path_propagates_via_public_chain(
     b_dep["visibility"] = "public"
     a = make_package(
         ocx, a_repo, "1.0.0", tmp_path,
-        new=True,
         dependencies=[b_dep],
     )
 
@@ -238,7 +235,7 @@ def test_package_push_rejects_undeclared_dep_ref(
     leaf_repo = f"{unique_repo}_leaf"
     app_repo = f"{unique_repo}_app"
 
-    leaf = make_package(ocx, leaf_repo, "1.0.0", tmp_path, new=True)
+    leaf = make_package(ocx, leaf_repo, "1.0.0", tmp_path)
     dep = _dep_entry(ocx, leaf)
 
     # The dep is declared as `leaf_repo`, but the env var references `nonexistent`
@@ -248,7 +245,6 @@ def test_package_push_rejects_undeclared_dep_ref(
             app_repo,
             "1.0.0",
             tmp_path,
-            new=True,
             env=[{"key": "X", "type": "constant", "value": "${deps.nonexistent.installPath}"}],
             dependencies=[dep],
         )
@@ -324,12 +320,11 @@ def test_package_push_rejects_transitive_dep_ref(
     d_repo = f"{unique_repo}_direct"
     r_repo = f"{unique_repo}_root"
 
-    t_pkg = make_package(ocx, t_repo, "1.0.0", tmp_path, new=True)
+    t_pkg = make_package(ocx, t_repo, "1.0.0", tmp_path)
     t_dep_entry = _dep_entry(ocx, t_pkg)
 
     d_pkg = make_package(
         ocx, d_repo, "1.0.0", tmp_path,
-        new=True,
         dependencies=[t_dep_entry],
     )
     d_dep_entry = _dep_entry(ocx, d_pkg)
@@ -339,7 +334,6 @@ def test_package_push_rejects_transitive_dep_ref(
     with pytest.raises(AssertionError) as exc_info:
         make_package(
             ocx, r_repo, "1.0.0", tmp_path,
-            new=True,
             env=[{"key": "T_PATH", "type": "constant", "value": f"${{deps.{t_repo}.installPath}}"}],
             dependencies=[d_dep_entry],
         )
@@ -357,7 +351,7 @@ def test_package_push_rejects_unsupported_field(
     leaf_repo = f"{unique_repo}_leaf"
     app_repo = f"{unique_repo}_app"
 
-    leaf = make_package(ocx, leaf_repo, "1.0.0", tmp_path, new=True)
+    leaf = make_package(ocx, leaf_repo, "1.0.0", tmp_path)
     dep = _dep_entry(ocx, leaf)
 
     with pytest.raises(AssertionError) as exc_info:
@@ -366,7 +360,6 @@ def test_package_push_rejects_unsupported_field(
             app_repo,
             "1.0.0",
             tmp_path,
-            new=True,
             env=[{"key": "X", "type": "constant", "value": f"${{deps.{leaf_repo}.version}}"}],
             dependencies=[dep],
         )
@@ -467,13 +460,12 @@ def test_transitive_dep_token_rejected_at_exec_resolve_time(
     r_repo = f"{unique_repo}_r"
 
     # T: leaf package, no deps.
-    t_pkg = make_package(ocx, t_repo, "1.0.0", tmp_path, new=True)
+    t_pkg = make_package(ocx, t_repo, "1.0.0", tmp_path)
     t_dep = _dep_entry(ocx, t_pkg)
 
     # D: direct dep on T.
     d_pkg = make_package(
         ocx, d_repo, "1.0.0", tmp_path,
-        new=True,
         dependencies=[t_dep],
     )
     d_dep = _dep_entry(ocx, d_pkg)
@@ -481,7 +473,6 @@ def test_transitive_dep_token_rejected_at_exec_resolve_time(
     # R: direct dep on D only. No reference to T at push time.
     r_pkg = make_package(
         ocx, r_repo, "1.0.0", tmp_path,
-        new=True,
         dependencies=[d_dep],
     )
 

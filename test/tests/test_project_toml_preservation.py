@@ -53,7 +53,7 @@ def _publish(
     onto a tagless value, so resolution looks that tag up for real.
     """
     repo = f"t_{uuid4().hex[:8]}_{suffix}"
-    return make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=cascade)
+    return make_package(ocx, repo, "1.0.0", tmp_path, cascade=cascade)
 
 
 def _assert_contains_all(content: str, fragments: list[str], context: str) -> None:
@@ -162,8 +162,8 @@ def test_add_preserves_declaration_order(ocx: OcxRunner, tmp_path: Path) -> None
     """Existing bindings keep the order the user wrote them in, and the new
     binding is appended last — not sorted into place."""
     short = uuid4().hex[:8]
-    zeta = make_package(ocx, f"t_{short}_zeta", "1.0.0", tmp_path, new=True, cascade=False)
-    alpha = make_package(ocx, f"t_{short}_alpha", "1.0.0", tmp_path, new=True, cascade=False)
+    zeta = make_package(ocx, f"t_{short}_zeta", "1.0.0", tmp_path, cascade=False)
+    alpha = make_package(ocx, f"t_{short}_alpha", "1.0.0", tmp_path, cascade=False)
     added = _publish(ocx, tmp_path, "ordered")
 
     body = (

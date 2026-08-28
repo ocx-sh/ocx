@@ -49,7 +49,7 @@ def test_init_add_update_pull_remove_roundtrip(
     short = uuid4().hex[:8]
     repo = f"t_{short}_lifecycle"
     # Push both 3.28.0 and a "3.28" alias so update has a real target.
-    make_package(ocx, repo, "3.28.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "3.28.0", tmp_path, cascade=False)
 
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -125,7 +125,7 @@ def test_lifecycle_writes_v3_lock_shape(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_lc_v3"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     project_dir = tmp_path / "proj_lc_v3"

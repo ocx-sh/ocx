@@ -16,7 +16,7 @@ cat >config-new.toml <<'TOML'
 [mirrors]
 "ghcr.io" = "https://ghcr-new.corp.example.com"
 TOML
-ocx config push -i corp/ocx-config:user-1.4.1 ./config-old.toml --cascade --new
+ocx config push -i corp/ocx-config:user-1.4.1 ./config-old.toml --cascade
 ocx config push -i corp/ocx-config:user-1.4.2 ./config-new.toml --cascade
 export OCX_MANAGED_CONFIG="$REGISTRY/corp/ocx-config:user"
 ocx config update

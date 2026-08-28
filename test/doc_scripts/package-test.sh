@@ -9,5 +9,5 @@ cd "$SCENARIO_TMP"
 ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64
 ocx package test -i acme/mytool:1.0.0 mytool-1.0.0.tar.xz -- mytool
 ocx package test --keep -i acme/mytool:1.0.0 mytool-1.0.0.tar.xz -- mytool
-ocx package push -n -i acme/mytool:1.0.0 mytool-1.0.0.tar.xz
+ocx package push -i acme/mytool:1.0.0 mytool-1.0.0.tar.xz
 # endregion cast

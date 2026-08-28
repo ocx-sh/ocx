@@ -15,7 +15,7 @@ def test_install_variant_package(
     """Installing a variant-prefixed package creates the correct candidate symlink."""
     make_package(
         ocx, unique_repo, "debug-1.0.0", tmp_path,
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
 
     ocx.plain("package", "install", f"{unique_repo}:debug-1.0.0")
@@ -36,7 +36,7 @@ def test_install_variant_rolling_tag(
     """Installing via a variant rolling tag resolves correctly."""
     make_package(
         ocx, unique_repo, "debug-1.2.3", tmp_path,
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
 
     # debug-1 is a rolling tag created by cascade
@@ -58,7 +58,7 @@ def test_select_variant_package(
     """Selecting a variant package sets the current symlink."""
     make_package(
         ocx, unique_repo, "debug-1.0.0", tmp_path,
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
 
     ocx.plain("package", "install", "--select", f"{unique_repo}:debug-1.0.0")
@@ -78,11 +78,11 @@ def test_variant_and_default_coexist(
     """Variant and default (unadorned) packages can be installed side by side."""
     make_package(
         ocx, unique_repo, "debug-1.0.0", tmp_path / "debug",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     make_package(
         ocx, unique_repo, "1.0.0", tmp_path / "default",
-        platform="linux/amd64", new=False, cascade=False,
+        platform="linux/amd64", cascade=False,
     )
 
     ocx.plain("package", "install", f"{unique_repo}:debug-1.0.0")
@@ -105,16 +105,16 @@ def test_index_list_variants(
     """The --variants flag extracts unique variant names from tags."""
     make_package(
         ocx, unique_repo, "debug-1.0.0", tmp_path / "debug",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     make_package(
         ocx, unique_repo, "pgo-2.0.0", tmp_path / "pgo",
-        platform="linux/amd64", new=False,
+        platform="linux/amd64",
     )
     # Push an unadorned version to represent the default variant
     make_package(
         ocx, unique_repo, "3.0.0", tmp_path / "default",
-        platform="linux/amd64", new=False,
+        platform="linux/amd64",
     )
 
     result = ocx.json("index", "list", "--variants", unique_repo)

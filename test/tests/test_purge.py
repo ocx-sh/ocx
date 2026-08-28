@@ -18,7 +18,7 @@ from tests.test_assembly import _make_two_packages_sharing_layer
 
 
 def _push_leaf(ocx: OcxRunner, repo: str, tmp_path: Path, **kwargs) -> PackageInfo:
-    return make_package(ocx, repo, "1.0.0", tmp_path, new=True, **kwargs)
+    return make_package(ocx, repo, "1.0.0", tmp_path, **kwargs)
 
 
 def _dep_entry(ocx: OcxRunner, pkg: PackageInfo) -> dict:

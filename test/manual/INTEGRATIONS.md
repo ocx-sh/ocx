@@ -584,7 +584,7 @@ integrations — arrive because **site policy** says so, with no `[patches]`
 in the machine's own config at all.
 
 ```sh
-ocx config push -n -i localhost:5000/corp/ocx-config:1.0.0 site-config.toml
+ocx config push -i localhost:5000/corp/ocx-config:1.0.0 site-config.toml
 ```
 
 ```

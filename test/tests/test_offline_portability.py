@@ -80,7 +80,7 @@ def test_offline_install_succeeds_from_copied_store(
     offline (the package re-assembles locally — no candidate symlink was
     copied, so this also proves install is not relying on stale symlinks).
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     ocx.json("package", "install", "--select", pkg.short)
 
     fresh_home = tmp_path / "fresh_home"
@@ -113,7 +113,7 @@ def test_offline_package_exec_runs_binary_from_copied_store(
     offline against a copied store — no install/symlink step in the fresh
     home first; ``exec`` auto-installs on miss.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     ocx.json("package", "install", "--select", pkg.short)  # warm blobs+layers in home A
 
     fresh_home = tmp_path / "fresh_home"
@@ -151,7 +151,7 @@ def test_offline_project_toolchain_run_succeeds_from_copied_store(
     repo = f"t_{short_id}_offline_toolchain"
     tag = "1.0.0"
     bin_name = "hello"
-    pkg = make_package(ocx, repo, tag, tmp_path, new=True, cascade=False, bins=[bin_name])
+    pkg = make_package(ocx, repo, tag, tmp_path, cascade=False, bins=[bin_name])
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -202,7 +202,7 @@ def test_offline_install_missing_index_exits_policy_blocked(
     documented code as an entirely un-indexed package (see
     ``test_offline.py::test_exit_code_on_offline_blocks_fetch``).
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     ocx.json("package", "install", "--select", pkg.short)
 
     fresh_home = tmp_path / "fresh_home_no_index"
@@ -270,7 +270,7 @@ def test_index_update_subtree_carries_every_file_a_recursive_mirror_would(
     server serves its root directory verbatim, so that directory IS the mirror,
     with no new tool dependency and nothing to run in CI.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -330,7 +330,7 @@ def test_offline_install_missing_blobs_exits_policy_blocked(
     exits ``PolicyBlocked`` (81) with a distinct "not in the local cache"
     message, never falling back to the network under ``--offline``.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     ocx.json("package", "install", "--select", pkg.short)
 
     fresh_home = tmp_path / "fresh_home_no_blobs"
@@ -434,7 +434,7 @@ def test_indirected_install_from_copied_store_without_index_configuration(
     local-root fallback: without them the only holder of the physical pointer
     is the index site, and a fresh home has no way to ask it.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 

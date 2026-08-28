@@ -441,6 +441,25 @@ impl Client {
         Ok(tags)
     }
 
+    /// [`list_tags`](Self::list_tags), with an absent repository answered as
+    /// the empty list it is.
+    ///
+    /// For a cascade prelude only: "which rolling tags may move" has an
+    /// authoritative answer for a repository that has never been published to,
+    /// and it is "none of them are taken". Narrow on purpose — every other
+    /// failure still propagates, so a transient 5xx can never be mistaken for
+    /// an empty tag list and cascade against a listing nobody read (#157).
+    pub(crate) async fn list_tags_or_empty_addressed(
+        &self,
+        identifier: Identifier,
+        addressing: ReadAddressing,
+    ) -> Result<Vec<String>> {
+        match self.list_tags_addressed(identifier, addressing).await {
+            Err(crate::Error::OciClient(ClientError::RepositoryNotFound(_))) => Ok(Vec::new()),
+            other => other,
+        }
+    }
+
     pub async fn list_repositories(&self, registry: impl Into<String>) -> Result<Vec<String>> {
         let registry = registry.into();
         let image = self.transport_registry(&registry);

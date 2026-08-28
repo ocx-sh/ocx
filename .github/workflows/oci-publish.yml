@@ -350,7 +350,6 @@ jobs:
                 --identifier "${identifier}" \
                 --platform "${platform}" \
                 --cascade \
-                --new \
                 --annotation "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
                 "${announce_flag[@]}" \
                 "$ARCHIVE"

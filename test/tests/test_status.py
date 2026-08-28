@@ -79,11 +79,11 @@ def test_status_with_lock_reports_every_platform(
     """
     make_package(
         ocx, unique_repo, "1.0.0", tmp_path / "amd64",
-        platform="linux/amd64", new=True, cascade=False,
+        platform="linux/amd64", cascade=False,
     )
     make_package(
         ocx, unique_repo, "1.0.0", tmp_path / "arm64",
-        platform="linux/arm64", new=False, cascade=False,
+        platform="linux/arm64", cascade=False,
     )
     project = _project(ocx, tmp_path)
     assert _run(

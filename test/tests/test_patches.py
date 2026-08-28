@@ -131,7 +131,6 @@ def _make_companion(
                 "visibility": "interface",
             }
         ],
-        new=True,
         cascade=True,
         platform="any",
     )
@@ -202,7 +201,7 @@ def test_corp_ca_wildcard_descriptor_composes_on_base(
     _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "SSL_CERT_FILE", "/etc/ssl/certs/corp-ca.pem")
 
     # ── Publish base and a matching descriptor at its per-package path ──
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "ca_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
     _write_config(ocx, registry)
@@ -266,10 +265,10 @@ def test_global_descriptor_applies_to_multiple_bases(
 
     # Build two distinct base packages
     base1_repo = _unique_repo("global_base1")
-    base1 = make_package(ocx, base1_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base1 = make_package(ocx, base1_repo, "1.0.0", tmp_path, cascade=True)
 
     base2_repo = _unique_repo("global_base2")
-    base2 = make_package(ocx, base2_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base2 = make_package(ocx, base2_repo, "1.0.0", tmp_path, cascade=True)
 
     # Install both bases; lazy discovery fires for each
     ocx.plain("package", "install", base1.short)
@@ -327,8 +326,8 @@ def test_global_companion_appears_once_when_it_matches_several_bases(
     )
     assert result.returncode == 0, f"--global publish failed:\n{result.stderr}"
 
-    base1 = make_package(ocx, _unique_repo("dedup_base1"), "1.0.0", tmp_path, new=True, cascade=True)
-    base2 = make_package(ocx, _unique_repo("dedup_base2"), "1.0.0", tmp_path, new=True, cascade=True)
+    base1 = make_package(ocx, _unique_repo("dedup_base1"), "1.0.0", tmp_path, cascade=True)
+    base2 = make_package(ocx, _unique_repo("dedup_base2"), "1.0.0", tmp_path, cascade=True)
     ocx.plain("package", "install", base1.short)
     ocx.plain("package", "install", base2.short)
 
@@ -358,11 +357,11 @@ def test_per_base_descriptor_only_applies_to_its_base(
 
     # ── Publish matched base (JDK) ──
     base_a_repo = _unique_repo("jdk_base")
-    base_a = make_package(ocx, base_a_repo, "21.0.0", tmp_path, new=True, cascade=True)
+    base_a = make_package(ocx, base_a_repo, "21.0.0", tmp_path, cascade=True)
 
     # ── Publish unrelated base ──
     base_b_repo = _unique_repo("cmake_base")
-    base_b = make_package(ocx, base_b_repo, "3.28.0", tmp_path, new=True, cascade=True)
+    base_b = make_package(ocx, base_b_repo, "3.28.0", tmp_path, cascade=True)
 
     # ── Publish descriptor ONLY at base_a's path ──
     descriptor_path = tmp_path / "per_base_descriptor.json"
@@ -404,7 +403,7 @@ def test_required_true_missing_companion_fails_closed(
     _write_config(ocx, registry, required=True)
 
     # Publish base and its descriptor (companion does not exist)
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
 
     # Install must fail because companion is not in registry
@@ -434,7 +433,7 @@ def test_required_false_missing_companion_fails_open(
     )
     _write_config(ocx, registry, required=False)
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
 
     # Install must succeed despite missing optional companion
@@ -473,7 +472,7 @@ def test_unreachable_patch_registry_required_false_installs(
     """
     # Publish + index the base BEFORE writing the patch config, so the only
     # discovery pass that probes the unreachable registry is our explicit install.
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     _write_config(ocx, _UNREACHABLE_PATCH_REGISTRY, required=False)
 
     result = ocx.run("package", "install", base_pkg.short, format=None, check=False)
@@ -490,7 +489,7 @@ def test_unreachable_patch_registry_required_true_fails_closed(
     install closed — OCX cannot confirm that no mandated companion applies, so it
     must not silently install the base without the overlay (C7).
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     _write_config(ocx, _UNREACHABLE_PATCH_REGISTRY, required=True)
 
     result = ocx.run("package", "install", base_pkg.short, format=None, check=False)
@@ -519,7 +518,7 @@ def test_patch_sync_fails_closed_on_required_missing_companion(
     _write_config(ocx, registry, required=True)
 
     # Install the base while no descriptor exists yet -> install succeeds.
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     install_result = ocx.run("package", "install", base_pkg.short, format=None, check=False)
     assert install_result.returncode == 0, (
         "base install must succeed before any descriptor is published; "
@@ -569,7 +568,7 @@ def test_global_env_fails_closed_on_missing_required_companion(
     # under `required=false` so discovery RECORDS the descriptor but tolerates the
     # missing companion (fail-open), then register the base in the global lock.
     missing_companion = f"{registry}/nonexistent-companion-{uuid4().hex[:8]}:latest"
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "global_fc_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [missing_companion]}])
     _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
@@ -618,7 +617,7 @@ def test_patch_sync_refreshes_descriptor_and_companion(
     companion_v1 = _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "SYNC_CA", "/certs/v1/ca.pem")
 
     # ── Publish base + descriptor pointing at v1 ──
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "sync_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_v1.fq]}])
     _write_config(ocx, registry)
@@ -721,7 +720,7 @@ def test_patch_sync_advances_a_same_tag_companion(
     rolling_fq = f"{registry}/{companion_repo}:1"
     _make_companion(ocx, companion_repo, "1.0.0", tmp_path / "v1", "ROLLING_CA", "/certs/v1/ca.pem")
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "rolling_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [rolling_fq]}])
     _write_config(ocx, registry)
@@ -743,7 +742,6 @@ def test_patch_sync_advances_a_same_tag_companion(
         tmp_path / "v2",
         bins=[],
         env=[{"key": "ROLLING_CA", "type": "constant", "value": "/certs/v2/ca.pem", "visibility": "interface"}],
-        new=True,
         cascade=True,
         platform="any",
         index=False,
@@ -782,7 +780,7 @@ def test_compose_does_not_advance_a_companion_between_syncs(
     rolling_fq = f"{registry}/{companion_repo}:1"
     _make_companion(ocx, companion_repo, "1.0.0", tmp_path / "v1", "DETERMINISM_CA", "/certs/v1/ca.pem")
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "determinism_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [rolling_fq]}])
     config_path = _write_config(ocx, registry)
@@ -798,7 +796,6 @@ def test_compose_does_not_advance_a_companion_between_syncs(
         tmp_path / "v2",
         bins=[],
         env=[{"key": "DETERMINISM_CA", "type": "constant", "value": "/certs/v2/ca.pem", "visibility": "interface"}],
-        new=True,
         cascade=True,
         platform="any",
         index=False,
@@ -842,7 +839,7 @@ def test_patch_freeze_pins_companion_digest(
     companion_v1 = _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "FROZEN_CA", "/certs/frozen-v1/ca.pem")
 
     # ── Publish base + v1 descriptor ──
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "freeze_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_v1.fq]}])
     _write_config(ocx, registry)
@@ -942,7 +939,7 @@ def test_no_patches_opt_out_suppresses_overlay_in_direnv_export(
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
     _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "DIRENV_OPT_CA", "/etc/ssl/direnv-opt-ca.pem")
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "direnv_opt_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
     _write_config(ocx, registry)
@@ -1016,7 +1013,7 @@ def test_show_patches_attributes_the_overlay_and_not_the_project_env(
         ocx, companion_repo, "1.0.0", tmp_path, "SHOW_PATCHES_CA", "/etc/ssl/show-patches-ca.pem"
     )
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "show_patches_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
     _write_config(ocx, registry)
@@ -1114,7 +1111,6 @@ def test_patch_companion_contributes_integrations(
         integrations={
             "com.example.companion": {"marker": "COMPANION_PAYLOAD"},
         },
-        new=True,
         cascade=True,
         # Env-only, binary-free companions publish `any` (adr_platform_model_
         # unification.md D1) so they survive install regardless of host
@@ -1123,7 +1119,7 @@ def test_patch_companion_contributes_integrations(
     )
 
     base_pkg = make_package(
-        ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True,
+        ocx, unique_repo, "1.0.0", tmp_path, cascade=True,
         integrations={"com.example.base": {"k": "v"}},
     )
     descriptor_path = tmp_path / "integrations_companion_descriptor.json"
@@ -1204,7 +1200,6 @@ def test_patch_companion_integrations_appear_once_across_several_bases(
             }
         ],
         integrations={"com.example.dedup": {"marker": "once"}},
-        new=True,
         cascade=True,
         platform="any",
     )
@@ -1222,8 +1217,8 @@ def test_patch_companion_integrations_appear_once_across_several_bases(
     )
     assert publish.returncode == 0, f"--global publish failed:\n{publish.stderr}"
 
-    base1 = make_package(ocx, _unique_repo("dedup_cust_base1"), "1.0.0", tmp_path, new=True, cascade=True)
-    base2 = make_package(ocx, _unique_repo("dedup_cust_base2"), "1.0.0", tmp_path, new=True, cascade=True)
+    base1 = make_package(ocx, _unique_repo("dedup_cust_base1"), "1.0.0", tmp_path, cascade=True)
+    base2 = make_package(ocx, _unique_repo("dedup_cust_base2"), "1.0.0", tmp_path, cascade=True)
     ocx.plain("package", "install", base1.short)
     ocx.plain("package", "install", base2.short)
 
@@ -1411,7 +1406,7 @@ def test_no_patches_opt_out_suppresses_overlay_in_toolchain_env(
         ocx, companion_repo, "1.0.0", tmp_path, "TOOLCHAIN_ENV_OPT_CA", "/etc/ssl/toolchain-env-opt-ca.pem"
     )
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "toolchain_env_opt_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
     _write_config(ocx, registry)
@@ -1487,7 +1482,7 @@ def test_global_no_patches_opt_out_suppresses_overlay_in_global_env(
         "/etc/ssl/global-toolchain-env-opt-ca.pem",
     )
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "global_toolchain_env_opt_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
     _write_config(ocx, registry)
@@ -1563,7 +1558,7 @@ def test_forwarded_opt_out_does_not_leak_into_unrelated_child_process(
     # (fail-open) during install-time discovery.
     _write_config(ocx, registry, required=False)
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     ocx.plain("package", "install", base_pkg.short)
 
     # An UNRELATED opt-out key: a repository the base is not, so it is only
@@ -1626,7 +1621,7 @@ def test_gc_retains_companion_as_patch_root(
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
     _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "GC_TEST_CA", "/certs/gc.pem")
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "gc_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
     _write_config(ocx, registry)
@@ -1660,7 +1655,7 @@ def test_patch_test_composes_env_locally_without_publishing(
     Companion var appears in composed output; descriptor is not published.
     """
     # Publish a base (patch test still resolves it from registry)
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     # Publish companion (patch test pulls it from registry to resolve)
     companion_repo = _unique_repo("patchtest_companion")
@@ -1747,7 +1742,7 @@ def test_patch_test_companion_archive_still_resolves(
     round-trip. That registration is patch-tier state, so it has to travel with
     the scratch `FileStructure` the preview composes against.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     companion_repo = _unique_repo("archive_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
@@ -1790,7 +1785,7 @@ def test_frozen_patch_test_resolves_an_unindexed_companion_live(
     no local tag pointer at all and only the mode-independent live view can
     find it.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     companion_repo = _unique_repo("frozen_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
@@ -1801,7 +1796,6 @@ def test_frozen_patch_test_resolves_an_unindexed_companion_live(
         tmp_path,
         bins=[],
         env=[{"key": "FROZEN_PATCH_VAR", "type": "constant", "value": "v", "visibility": "interface"}],
-        new=True,
         cascade=True,
         platform="any",
         # The whole point: resolvable from the registry, absent from the local
@@ -1847,7 +1841,7 @@ def test_patch_publish_roundtrip_install_discovers_companion(
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
     _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "ROUNDTRIP_VAR", "roundtrip-value")
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "roundtrip_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
     _write_config(ocx, registry)
@@ -1896,7 +1890,7 @@ def test_package_env_without_patch_config_unaffected(
     only the base package's own env vars -- no patch overlay applied.
     """
     # No config.toml written
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     ocx.plain("package", "install", base_pkg.short)
 
     entries = _env_entries(ocx, base_pkg.short)
@@ -1938,7 +1932,6 @@ def test_exec_receives_companion_env_var(
                 "visibility": "public",
             }
         ],
-        new=True,
         cascade=True,
     )
     descriptor_path = tmp_path / "exec_descriptor.json"
@@ -2006,7 +1999,7 @@ def test_patch_test_without_config_errors(
     `test_patch_test_registry_flag_composes_without_config`, which composes
     from this same tier-less state once `--registry` supplies one.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "desc.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": ["some/companion:latest"]}])
     # No config.toml written
@@ -2047,11 +2040,11 @@ def test_multiple_rules_match_only_specific_bases(
 
     # base_b will be named in rule B's glob match
     base_b_repo = _unique_repo("multi_base_b")
-    base_b = make_package(ocx, base_b_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_b = make_package(ocx, base_b_repo, "1.0.0", tmp_path, cascade=True)
 
     # base_other won't match rule B (but matches rule A via '*')
     base_other_repo = _unique_repo("multi_base_other")
-    base_other = make_package(ocx, base_other_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_other = make_package(ocx, base_other_repo, "1.0.0", tmp_path, cascade=True)
 
     # Descriptor: rule A='*' (all bases), rule B=specific to base_b_repo
     descriptor_path = tmp_path / "multi_descriptor.json"
@@ -2117,8 +2110,8 @@ def test_parallel_discovery_installs_each_bases_companion(
     companion_b_fq = f"{registry}/{companion_b_repo}:1.0.0"
     _make_companion(ocx, companion_b_repo, "1.0.0", tmp_path, "PAR_B_VAR", "value-b")
 
-    base_a = make_package(ocx, _unique_repo("par_base_a"), "1.0.0", tmp_path, new=True, cascade=True)
-    base_b = make_package(ocx, _unique_repo("par_base_b"), "1.0.0", tmp_path, new=True, cascade=True)
+    base_a = make_package(ocx, _unique_repo("par_base_a"), "1.0.0", tmp_path, cascade=True)
+    base_b = make_package(ocx, _unique_repo("par_base_b"), "1.0.0", tmp_path, cascade=True)
 
     _write_config(ocx, registry)
 
@@ -2178,7 +2171,7 @@ def test_rule_required_false_overrides_tier_default(
     # Tier default is required=true (fail-closed), but rule overrides to false
     _write_config(ocx, registry, required=True)
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     _publish_descriptor_at_base(ocx, descriptor_path, base_pkg.fq)
 
     result = ocx.run("package", "install", base_pkg.short, format=None, check=False)
@@ -2229,7 +2222,6 @@ def test_patch_on_sealed_dep_not_inherited(
         "1.0.0",
         tmp_path,
         env=[{"key": "SEALED_DEP_OWN", "type": "constant", "value": "own", "visibility": "public"}],
-        new=True,
         cascade=True,
     )
 
@@ -2240,7 +2232,6 @@ def test_patch_on_sealed_dep_not_inherited(
         "1.0.0",
         tmp_path,
         dependencies=[_dep_entry(ocx, dep, visibility="sealed")],
-        new=True,
         cascade=True,
     )
 
@@ -2315,7 +2306,6 @@ def test_patch_on_private_dep_only_under_self(
         "1.0.0",
         tmp_path,
         env=[{"key": "PRIVATE_DEP_OWN", "type": "constant", "value": "own", "visibility": "public"}],
-        new=True,
         cascade=True,
     )
 
@@ -2326,7 +2316,6 @@ def test_patch_on_private_dep_only_under_self(
         "1.0.0",
         tmp_path,
         dependencies=[_dep_entry(ocx, dep, visibility="private")],
-        new=True,
         cascade=True,
     )
 
@@ -2404,7 +2393,6 @@ def test_patch_on_public_dep_inherited_by_consumer(
         "1.0.0",
         tmp_path,
         env=[{"key": "PUBLIC_DEP_OWN", "type": "constant", "value": "own", "visibility": "public"}],
-        new=True,
         cascade=True,
     )
 
@@ -2415,7 +2403,6 @@ def test_patch_on_public_dep_inherited_by_consumer(
         "1.0.0",
         tmp_path,
         dependencies=[_dep_entry(ocx, dep, visibility="public")],
-        new=True,
         cascade=True,
     )
 
@@ -2482,7 +2469,6 @@ def test_patch_on_interface_dep_inherited_by_consumer(
         "1.0.0",
         tmp_path,
         env=[{"key": "IFACE_DEP_OWN", "type": "constant", "value": "own", "visibility": "public"}],
-        new=True,
         cascade=True,
     )
 
@@ -2493,7 +2479,6 @@ def test_patch_on_interface_dep_inherited_by_consumer(
         "1.0.0",
         tmp_path,
         dependencies=[_dep_entry(ocx, dep, visibility="interface")],
-        new=True,
         cascade=True,
     )
 
@@ -2554,7 +2539,7 @@ def test_patch_why_names_rule_and_companion_for_applicable_base(
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
     _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "WHY_VAR", "why-value")
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "why_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
     _write_config(ocx, registry)
@@ -2589,7 +2574,7 @@ def test_patch_why_reports_no_patches_for_unaffected_base(
     `[patches]` tier configured) exits 0 with an empty result -- not an error.
     """
     # No config.toml written -- no `[patches]` tier configured.
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     ocx.plain("package", "install", base_pkg.short)
 
     entries = ocx.json("patch", "why", base_pkg.short)
@@ -2635,7 +2620,7 @@ def test_relocated_ocx_home_offline_companion_env_identical(
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
     _make_companion(ocx, companion_repo, "1.0.0", tmp_path, "RELOCATE_CA", "/certs/relocate.pem")
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "relocate_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
     _write_config(ocx, registry)
@@ -2717,7 +2702,7 @@ def test_gc_collects_companion_after_base_uninstall(
     )
     companion_fq = f"{registry}/{companion.repo}:1.0.0"
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     descriptor_path = tmp_path / "gc_collect_descriptor.json"
     _write_descriptor(descriptor_path, rules=[{"match": "*", "packages": [companion_fq]}])
     _write_config(ocx, registry)
@@ -2789,7 +2774,7 @@ def test_package_specific_descriptor_overrides_global_on_shared_key(
     )
 
     # Base + per-base descriptor → package-specific companion.
-    base_pkg = make_package(ocx, _unique_repo("override_base"), "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, _unique_repo("override_base"), "1.0.0", tmp_path, cascade=True)
     base_descriptor_path = tmp_path / "override_base_descriptor.json"
     _write_descriptor(base_descriptor_path, rules=[{"match": "*", "packages": [specific_companion_fq]}])
     _publish_descriptor_at_base(ocx, base_descriptor_path, base_pkg.fq)
@@ -2833,7 +2818,7 @@ def test_patch_test_script_asserts_composed_env(
     of `test_patch_test_composes_env_locally_without_publishing` (which uses
     `--format json` output instead of a script).
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     companion_repo = _unique_repo("scripttest_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
@@ -2911,7 +2896,7 @@ def test_index_update_does_not_pin_a_global_companion_in_the_local_index(
         f"global patch publish must succeed; got {published.returncode}\nstderr: {published.stderr}"
     )
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
     ocx.plain("package", "install", base_pkg.short)
 
     # The discovery that ran with the base install recorded the companion in
@@ -3094,7 +3079,7 @@ def test_patch_test_report_lists_env_override_without_companion(
     vector — the report must attribute the entry to nothing, not index past
     the end of the vector.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     descriptor_path = tmp_path / "no_companion_descriptor.json"
     _write_descriptor(descriptor_path, rules=[])
@@ -3136,7 +3121,7 @@ def test_patch_test_report_lists_env_override_alongside_companion(
     Both attributions must be right in the same report: the companion entry
     names its rule + companion, the override names nothing.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     companion_repo = _unique_repo("report_probe_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
@@ -3215,7 +3200,7 @@ def test_patch_test_with_path_prefixed_registry_composes(
     a scratch store and must read the very same bytes back to compose the
     companion overlay.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     companion_repo = _unique_repo("prefixed_registry_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
@@ -3264,7 +3249,7 @@ def test_patch_test_companion_archive_composes_unpublished_companion(
     `"identifier"` key in that sidecar (`patch_test.rs::metadata_identifier_or_error`)
     naming the companion — there is no `-i` flag on `patch test`.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     # Build the companion archive locally via `ocx package create` — never
     # pushed to the registry, proving `--companion-archive` needs no
@@ -3354,7 +3339,7 @@ def test_patch_test_companion_archive_tag_mismatch_is_loud(
     descriptor entry naming `1.0.0`, so the supplied archive is silently
     discarded and never actually satisfies the required companion.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     companion_repo = _unique_repo("tag_mismatch_companion")
     descriptor_tag = "1.0.0"
@@ -3454,7 +3439,7 @@ def test_patch_test_resolves_registry_from_managed_config(
         f"got {setup_result.returncode}\nstderr: {setup_result.stderr}"
     )
 
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     companion_repo = _unique_repo("managed_config_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
@@ -3501,7 +3486,7 @@ def test_patch_test_optional_tier_with_path_prefixed_registry_composes(
     descriptor. Now the key agrees and the seed is read back before compose, so
     the only honest outcome is a successful compose carrying the companion var.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     companion_repo = _unique_repo("optional_prefixed_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
@@ -3563,7 +3548,7 @@ def test_patch_test_registry_flag_composes_without_config(
     `--registry` actually constructing the tier, and the pair shows both
     outcomes of the same gate.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     companion_repo = _unique_repo("bootstrap_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
@@ -3619,7 +3604,7 @@ def test_patch_test_registry_flag_wins_over_configured_tier(
     local read). The tier's `required` posture is preserved by the override, so
     it cannot serve as a second discriminator either.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     companion_repo = _unique_repo("override_registry_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"
@@ -3675,7 +3660,7 @@ def test_patch_test_platform_flag_composes_for_named_platform(
     foreign_platform = "linux/arm64" if current_platform() != "linux/arm64" else "linux/amd64"
 
     base_pkg = make_package(
-        ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True, platform=foreign_platform
+        ocx, unique_repo, "1.0.0", tmp_path, cascade=True, platform=foreign_platform
     )
 
     companion_repo = _unique_repo("platform_companion")
@@ -3696,7 +3681,6 @@ def test_patch_test_platform_flag_composes_for_named_platform(
                 "visibility": "interface",
             }
         ],
-        new=True,
         cascade=True,
         platform=foreign_platform,
     )
@@ -3743,7 +3727,7 @@ def test_patch_test_invalid_descriptor_json_exits_65(
     `test_patch_test_composes_env_locally_without_publishing`), so a 65 here is
     attributable to the descriptor and not to an unrelated missing package.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     descriptor_path = tmp_path / "invalid_descriptor.json"
     descriptor_path.write_text("not json {{{")
@@ -3778,7 +3762,7 @@ def test_patch_test_unsupported_descriptor_version_exits_65(
     compatibility is deliberately fail-closed — a descriptor a newer ocx
     published is refused, never silently composed as v1.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     descriptor_path = tmp_path / "future_version_descriptor.json"
     # Not `_write_descriptor`, which always writes `"version": 1`.
@@ -3818,7 +3802,7 @@ def test_patch_test_forwards_child_exit_code(
     half of this contract (that test asserts a successful trailing command
     exits 0, this one that a failing one does not collapse to 0 or 1).
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     descriptor_path = tmp_path / "exit_code_descriptor.json"
     _write_descriptor(descriptor_path, rules=[])
@@ -3855,7 +3839,7 @@ def test_patch_test_optional_missing_companion_warns_and_skips(
     skip is the failure mode — the maintainer has to be able to see which
     companion the preview did without.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     # Never published: `_unique_repo` mints a name nothing pushed to.
     missing_companion_fq = f"{registry}/{_unique_repo('unpublished_companion')}:1.0.0"
@@ -3909,7 +3893,7 @@ def test_patch_test_script_failing_assertion_exits_1(
     same fixture shape, same script shape, only the expected value differs, and
     that one exits 0.
     """
-    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=True)
 
     companion_repo = _unique_repo("scriptfail_companion")
     companion_fq = f"{registry}/{companion_repo}:1.0.0"

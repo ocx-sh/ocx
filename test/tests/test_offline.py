@@ -18,7 +18,7 @@ from src.registry import fetch_platform_manifest_digest
 
 
 def _push_leaf(ocx: OcxRunner, repo: str, tmp_path: Path, **kwargs) -> PackageInfo:
-    return make_package(ocx, repo, "1.0.0", tmp_path, new=True, **kwargs)
+    return make_package(ocx, repo, "1.0.0", tmp_path, **kwargs)
 
 
 def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, visibility: str | None = None) -> dict:
@@ -32,7 +32,7 @@ def _dep_entry(ocx: OcxRunner, pkg: PackageInfo, *, visibility: str | None = Non
 def _push_with_deps(
     ocx: OcxRunner, repo: str, tag: str, tmp_path: Path, deps: list[dict], **kwargs,
 ) -> PackageInfo:
-    return make_package(ocx, repo, tag, tmp_path, new=True, dependencies=deps, **kwargs)
+    return make_package(ocx, repo, tag, tmp_path, dependencies=deps, **kwargs)
 
 
 # ---------------------------------------------------------------------------

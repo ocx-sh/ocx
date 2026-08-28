@@ -159,7 +159,7 @@ def test_create_ambiguous_platform_lists_candidates(
     )
     leaf = make_package(
         ocx, dep_repo, "1.0.0", tmp_path.joinpath("second"),
-        platform="linux/amd64+libc.musl", cascade=False, new=False,
+        platform="linux/amd64+libc.musl", cascade=False,
     )
     pkg_dir, metadata = _write_app(tmp_path, "ambiguous", [{"identifier": leaf.fq}])
     out = tmp_path / "app-ambiguous.tar.xz"

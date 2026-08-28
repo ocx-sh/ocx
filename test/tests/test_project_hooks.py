@@ -80,7 +80,7 @@ def _published_tool(
             "visibility": "public",
         },
     ]
-    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False, env=env)
+    make_package(ocx, repo, tag, tmp_path, cascade=False, env=env)
     return repo, tag, home_key
 
 
@@ -120,8 +120,8 @@ def test_run_later_group_env_overrides_earlier(
             "visibility": "public",
         },
     ]
-    make_package(ocx, repo_a, tag, tmp_path, new=True, cascade=False, env=env_a)
-    make_package(ocx, repo_b, tag, tmp_path, new=True, cascade=False, env=env_b)
+    make_package(ocx, repo_a, tag, tmp_path, cascade=False, env=env_a)
+    make_package(ocx, repo_b, tag, tmp_path, cascade=False, env=env_b)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -183,7 +183,7 @@ def test_run_default_path_precedes_inherited(
     short = uuid4().hex[:8]
     repo = f"t_{short}_pathprec"
     tag = "1.0.0"
-    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, tag, tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()

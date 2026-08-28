@@ -44,7 +44,7 @@ FORK_FULL = f"{FORK_NAMESPACE}/{INDEX_REPO}"
 def _prepare(ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path, *, tag: str = "1.0.0") -> str:
     """Publish a package and seed the claimed-but-empty index root it announces
     against. Returns the logical package name."""
-    make_package(ocx, unique_repo, tag, tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, tag, tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     seed_empty_root(fake_forge, package, f"oci://{ocx.registry}/{unique_repo}")
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
@@ -115,7 +115,7 @@ def test_second_announce_accumulates_onto_the_live_branch(
     """Two announces before a merge land in one merge request carrying both tags
     (C4): the second bases on the branch head, not on the index base."""
     package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
 
     first = announce_json(
         ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab"
@@ -181,7 +181,7 @@ def test_a_spent_branch_is_rebuilt_on_the_upstream_head_not_the_forks_own(
     upstream_main = fake_forge.branch_head(INDEX_OWNER, INDEX_REPO, "main")
     assert stale_fork_main != upstream_main, "precondition: the fork's main must be behind the upstream"
 
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     announce(
         ocx, fake_forge, "--package", package, "--tags", "1.0.0,2.0.0", "--fork", FORK_FULL, forge="gitlab"
     )
@@ -223,8 +223,8 @@ def test_a_concurrent_announce_is_unioned_not_clobbered(
     `2.0.0`.
     """
     package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
-    make_package(ocx, unique_repo, "3.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "3.0.0", tmp_path, cascade=False)
     announce(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab")
 
     # The winner adds 2.0.0 with a placeholder digest, so the loser's retry can
@@ -277,7 +277,7 @@ def test_a_nested_group_index_is_addressed_as_one_segment(
     """
     nested_index = "acme/platform/tooling/index"
     nested_fork = "contrib/team/index"
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     fake_forge.seed_root(
         "acme/platform/tooling",

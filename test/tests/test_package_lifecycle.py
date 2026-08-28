@@ -53,7 +53,7 @@ def test_create_push_install_find(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
 
     # --- Push ---
     fq = f"{ocx.registry}/{unique_repo}:{tag}"
-    ocx.plain("package", "push", "-n", "-p", plat, "-m", str(metadata), "-i", fq, str(bundle))
+    ocx.plain("package", "push", "-p", plat, "-m", str(metadata), "-i", fq, str(bundle))
 
     # --- Index update ---
     short = f"{unique_repo}:{tag}"

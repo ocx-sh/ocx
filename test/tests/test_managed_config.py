@@ -97,7 +97,6 @@ def _publish_self_image(ocx: OcxRunner, tmp_path: Path, repo: str) -> str:
         repo,
         "0.0.1",
         tmp_path,
-        new=True,
         cascade=False,
         bins=["ocx"],
         outputs={"ocx": {"--format json version": json.dumps({"version": "0.0.1"})}},
@@ -276,7 +275,7 @@ def test_setup_refresh_syncs_patch_descriptors(
     # Install a base BEFORE any patch tier exists anywhere -- `sync_patches`'
     # known-set enumeration walks the symlink store, so an already-installed
     # base becomes a sync target the moment a patch tier appears.
-    base_pkg = make_package(ocx, f"{unique_repo}_base", "1.0.0", tmp_path, new=True, cascade=True)
+    base_pkg = make_package(ocx, f"{unique_repo}_base", "1.0.0", tmp_path, cascade=True)
     ocx.plain("package", "install", base_pkg.short)
 
     # Publish a global descriptor + its companion to a dedicated patch
@@ -298,7 +297,6 @@ def test_setup_refresh_syncs_patch_descriptors(
                 "visibility": "interface",
             }
         ],
-        new=True,
         cascade=True,
         platform="any",
     )
@@ -1002,7 +1000,7 @@ def test_config_update_version_pin_rolls_back_and_survives_required_gate(
     )
     digest_new = push_managed_config(
         ocx, unique_repo, "user-1.0.1", '[registry]\ndefault = "pin-new.example"\n', tmp_path,
-        cascade=True, new=False,
+        cascade=True,
     )
     ref = f"{registry}/{unique_repo}:user"
     env = {"OCX_MANAGED_CONFIG": ref}
@@ -1119,7 +1117,7 @@ def test_config_update_pause_with_version_pins_then_pauses(
     )
     push_managed_config(
         ocx, unique_repo, "user-1.0.1", '[registry]\ndefault = "hold-new.example"\n', tmp_path,
-        cascade=True, new=False,
+        cascade=True,
     )
     ref = f"{registry}/{unique_repo}:user"
     env = {"OCX_MANAGED_CONFIG": ref}

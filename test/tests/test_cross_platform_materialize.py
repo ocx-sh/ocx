@@ -49,8 +49,8 @@ def _run(ocx: OcxRunner, cwd: Path, *args: str) -> subprocess.CompletedProcess[s
 
 def _publish_multiplatform(ocx: OcxRunner, repo: str, tmp_path: Path) -> None:
     """Push the same version for amd64 and arm64 → a 2-platform image index."""
-    make_package(ocx, repo, PUSH_VERSION, tmp_path / "amd64", platform=AMD64, new=True)
-    make_package(ocx, repo, PUSH_VERSION, tmp_path / "arm64", platform=ARM64, new=False)
+    make_package(ocx, repo, PUSH_VERSION, tmp_path / "amd64", platform=AMD64)
+    make_package(ocx, repo, PUSH_VERSION, tmp_path / "arm64", platform=ARM64)
 
 
 def _project_with_lock(ocx: OcxRunner, repo: str, tmp_path: Path, *, lock: bool = True) -> Path:
@@ -158,8 +158,8 @@ def test_update_platform_materializes_foreign_leaf(ocx: OcxRunner, unique_repo: 
     # Bump: publish a second version for both platforms. `cascade` (default
     # True in `make_package`) re-points the bound minor tag (3.28) at the
     # new digest, so `ocx update` has a moved tag to re-resolve.
-    make_package(ocx, unique_repo, "3.28.1", tmp_path / "bump_amd64", platform=AMD64, new=False)
-    make_package(ocx, unique_repo, "3.28.1", tmp_path / "bump_arm64", platform=ARM64, new=False)
+    make_package(ocx, unique_repo, "3.28.1", tmp_path / "bump_amd64", platform=AMD64)
+    make_package(ocx, unique_repo, "3.28.1", tmp_path / "bump_arm64", platform=ARM64)
 
     assert _dry_run_status(ocx, project_dir, ARM64) == "would-fetch", "arm64 must start uncached"
 
@@ -202,8 +202,8 @@ def test_pull_platform_ambiguous_dual_libc_leaf_exits_65(ocx: OcxRunner, unique_
     # (`new=True` then `new=False`, `cascade=False` keeps it minimal) — same
     # fixture shape as the fresh-resolve ambiguity regression in
     # `test_install_libc.py::test_install_errors_ambiguous_when_host_reports_both_libcs`.
-    make_package(ocx, unique_repo, PUSH_VERSION, tmp_path / "glibc", platform=glibc, new=True, cascade=False)
-    make_package(ocx, unique_repo, PUSH_VERSION, tmp_path / "musl", platform=musl, new=False, cascade=False)
+    make_package(ocx, unique_repo, PUSH_VERSION, tmp_path / "glibc", platform=glibc, cascade=False)
+    make_package(ocx, unique_repo, PUSH_VERSION, tmp_path / "musl", platform=musl, cascade=False)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir(exist_ok=True)

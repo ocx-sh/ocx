@@ -395,7 +395,6 @@ def make_package(
     tag: str,
     tmp_path: Path,
     *,
-    new: bool = True,
     cascade: bool = True,
     index: bool = True,
     size_mb: int = 0,
@@ -621,8 +620,6 @@ def make_package(
     # resolved dependency pins.
     fq = f"{ocx.registry}/{repo}:{tag}"
     push_args = ["package", "push", "-p", plat, "-m", str(resolved_metadata_path(bundle_l0))]
-    if new:
-        push_args.append("-n")
     if cascade:
         push_args.append("--cascade")
     if extra_push_args:
@@ -663,7 +660,6 @@ def push_managed_config(
     tmp_path: Path,
     *,
     cascade: bool = False,
-    new: bool = True,
 ) -> str:
     """Publishes a managed-config payload via the real ``ocx config push``
     (the product path — prefer this over ``src.registry.push_raw_config_package``
@@ -676,8 +672,6 @@ def push_managed_config(
     args = ["config", "push", "-i", f"{ocx.registry}/{repo}:{tag}"]
     if cascade:
         args.append("--cascade")
-    if new:
-        args.append("--new")
     args.append(str(payload))
     report = ocx.json(*args)
     return report["manifest_digest"]
@@ -805,7 +799,6 @@ def make_package_with_entrypoints(
         plat,
         "-m",
         str(resolved_metadata_path(bundle)),
-        "-n",
         "--cascade",
         "-i",
         fq,

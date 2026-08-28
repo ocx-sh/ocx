@@ -291,7 +291,7 @@ registry = "${REGISTRY}"
 required = true
 EOF
 
-ocx config push -n -i "${MANAGED_ID}" "${SITE_CONFIG}"
+ocx config push -i "${MANAGED_ID}" "${SITE_CONFIG}"
 
 printf '# local config: NO [patches] section — the patch tier arrives by site policy.\n' \
     >"${CONFIG_FILE}"

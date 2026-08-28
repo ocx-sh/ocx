@@ -57,7 +57,7 @@ def test_package_push_mount_cross_repository_reuse(
     # (1) Push the layer archive as its own package — establishes the blob in
     # the source repository so later mounts have something to reuse.
     ocx.plain(
-        "package", "push", "-p", plat, "-n",
+        "package", "push", "-p", plat,
         "-i", f"{ocx.registry}/{source_repo}:1.0.0",
         str(bundle),
     )
@@ -66,7 +66,7 @@ def test_package_push_mount_cross_repository_reuse(
     # The registry must mount the blob already present in source_repo rather
     # than re-uploading it.
     report_a = ocx.json(
-        "package", "push", "-p", plat, "-n",
+        "package", "push", "-p", plat,
         "-i", f"{ocx.registry}/{app_a_repo}:1.0.0",
         f"{bundle}:from={source_repo}",
     )
@@ -76,7 +76,7 @@ def test_package_push_mount_cross_repository_reuse(
     # (3) Push app-b the same way — cross-repo reuse works from a second,
     # independent target repository too (not just the original app-a mount).
     report_b = ocx.json(
-        "package", "push", "-p", plat, "-n",
+        "package", "push", "-p", plat,
         "-i", f"{ocx.registry}/{app_b_repo}:1.0.0",
         f"{bundle}:from={source_repo}",
     )

@@ -44,9 +44,6 @@ pub struct ManagedConfigPublishOptions {
     /// Update rolling variant tags derived from the pushed version tag
     /// (e.g. `user-1.4.2` also updates `user-1.4`, `user-1`, `user`).
     pub cascade: bool,
-    /// The repository does not exist yet — tolerate a failing tag listing
-    /// during a cascade push instead of aborting.
-    pub new: bool,
     /// Platform entry written into the package index. Managed-config fetch
     /// only consumes the platform-agnostic `any/any` entry, so anything else
     /// produces a package `ocx config update` cannot use.
@@ -138,9 +135,8 @@ pub enum ManagedConfigPublishError {
         source: Box<crate::Error>,
     },
 
-    /// Listing existing tags for a cascade push failed and `--new` was not
-    /// passed.
-    #[error("failed to list existing tags for '{identifier}' (pass --new for a first publish)")]
+    /// Listing existing tags for a cascade push failed.
+    #[error("failed to list existing tags for '{identifier}'")]
     ListTagsFailed {
         /// The identifier whose tags could not be listed.
         identifier: Box<Identifier>,
@@ -387,20 +383,12 @@ pub async fn publish_managed_config(
     }];
 
     let outcome = if options.cascade {
-        let existing_tags = match publisher.list_tags(identifier.clone()).await {
-            Ok(tags) => tags,
-            Err(source) => {
-                if options.new {
-                    crate::log::info!("failed to list tags, assuming new managed-config repository: {source}");
-                    Vec::new()
-                } else {
-                    return Err(ManagedConfigPublishError::ListTagsFailed {
-                        identifier: Box::new(identifier.clone()),
-                        source: Box::new(source),
-                    });
-                }
+        let existing_tags = publisher.list_tags(identifier.clone()).await.map_err(|source| {
+            ManagedConfigPublishError::ListTagsFailed {
+                identifier: Box::new(identifier.clone()),
+                source: Box::new(source),
             }
-        };
+        })?;
         let existing_versions = Publisher::parse_versions(&existing_tags);
         // Canonical tagging (`adr_index_indirection.md` Decision E) is a
         // `ocx package push` CLI contract; managed-config publishing has no

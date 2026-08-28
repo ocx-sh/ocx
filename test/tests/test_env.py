@@ -614,7 +614,7 @@ def test_unrecognised_token_is_refused_before_anything_reaches_the_registry(
         "package", "push",
         "-p", platform,
         "-m", str(sidecar),
-        "-n", "--cascade",
+        "--cascade",
         "-i", f"{ocx.registry}/{repository}:1.0.0",
         str(bundle),
         check=False,
@@ -896,7 +896,7 @@ def _push_integrations_package(
     fq = f"{ocx.registry}/{repo}:{tag}"
     return ocx.run(
         "package", "push", "-p", plat, "-m", str(resolved_metadata_path(bundle)),
-        "-n", "-i", fq, str(bundle), format=None, check=False,
+        "-i", fq, str(bundle), format=None, check=False,
     )
 
 

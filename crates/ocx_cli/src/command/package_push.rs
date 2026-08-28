@@ -21,11 +21,6 @@ pub struct PackagePush {
     #[clap(long = "cascade", short = 'c')]
     cascade: bool,
 
-    /// Indicates that this is a new package that doesn't exist in the registry yet.
-    /// This will skip some checks that requires an existing index.
-    #[clap(long = "new", short = 'n')]
-    new: bool,
-
     /// Push a `sha256.<hex>` tag pointing at each pushed platform manifest
     /// (default). A stray delete of a rolling or cascade tag can then never
     /// orphan a digest something else still pins, since the canonical tag
@@ -254,20 +249,10 @@ impl PackagePush {
         let annotations: BTreeMap<String, String> = self.annotation.iter().cloned().collect();
 
         let outcome = if self.cascade {
-            let existing_tags = match publisher.list_tags(identifier.clone()).await {
-                Ok(tags) => tags,
-                Err(err) => {
-                    if self.new {
-                        log::info!("failed to list tags, assuming new package: {err}");
-                        Vec::new()
-                    } else {
-                        return Err(anyhow::anyhow!(
-                            "failed to list existing tags for {}: {err}",
-                            identifier
-                        ));
-                    }
-                }
-            };
+            let existing_tags = publisher
+                .list_tags(identifier.clone())
+                .await
+                .with_context(|| format!("listing existing tags for {identifier}"))?;
 
             let existing_versions = Publisher::parse_versions(&existing_tags);
             publisher

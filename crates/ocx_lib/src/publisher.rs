@@ -275,16 +275,21 @@ impl Publisher {
             .await?)
     }
 
-    /// Lists existing tags for the given identifier from the registry.
+    /// The cascade prelude: which tags the push target already publishes.
     ///
-    /// Convenience method for callers that need to fetch existing versions
-    /// before calling [`push_cascade`](Self::push_cascade).
-    /// Mirrored is inherited, not chosen: callers feed these tags to
-    /// [`push_cascade`](Self::push_cascade), which makes it the same Invariant
-    /// #5 case the copy path fixed. Moving it changes every push.
+    /// Canonical, never a mirror. Callers feed these tags straight to
+    /// [`push_cascade`](Self::push_cascade), so this listing decides which
+    /// rolling tags get re-pointed on the canonical registry — deciding that
+    /// from a mirror is the Invariant #5 / CWE-345 fail-open the copy path
+    /// already fixed, and a stale mirror missing a repository the canonical
+    /// registry does publish would silently move `latest` backwards.
+    ///
+    /// A repository nobody has pushed to yet answers with a 404, which is the
+    /// empty list, not a failure — `Client::list_tags_or_empty_addressed`
+    /// carries why that fold is exactly this narrow.
     pub async fn list_tags(&self, identifier: oci::Identifier) -> Result<Vec<String>> {
         self.client
-            .list_tags_addressed(identifier, ReadAddressing::Mirrored)
+            .list_tags_or_empty_addressed(identifier, ReadAddressing::Canonical)
             .await
     }
 

@@ -111,7 +111,7 @@ def _published_tool(ocx: OcxRunner, tmp_path: Path, label: str) -> tuple[str, st
     short = uuid4().hex[:8]
     repo = f"t_{short}_bkl_{label}"
     tag = "1.0.0"
-    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, tag, tmp_path, cascade=False)
     return repo, tag
 
 

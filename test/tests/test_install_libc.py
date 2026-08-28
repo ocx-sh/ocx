@@ -97,11 +97,11 @@ def test_install_selects_libc_glibc_on_glibc_host(
 
     glibc_pkg = make_package(
         ocx, unique_repo, "1.0.0", glibc_build,
-        platform="linux/amd64+libc.glibc", new=True, cascade=False,
+        platform="linux/amd64+libc.glibc", cascade=False,
     )
     musl_pkg = make_package(
         ocx, unique_repo, "1.0.0", musl_build,
-        platform="linux/amd64+libc.musl", new=False, cascade=False,
+        platform="linux/amd64+libc.musl", cascade=False,
     )
     assert glibc_pkg.marker != musl_pkg.marker, "markers must differ to discriminate entries"
 
@@ -168,11 +168,11 @@ def test_install_selects_libc_musl_on_alpine_gcompat_host(
 
     glibc_pkg = make_package(
         ocx, unique_repo, "1.0.0", glibc_build,
-        platform="linux/amd64+libc.glibc", new=True, cascade=False,
+        platform="linux/amd64+libc.glibc", cascade=False,
     )
     musl_pkg = make_package(
         ocx, unique_repo, "1.0.0", musl_build,
-        platform="linux/amd64+libc.musl", new=False, cascade=False,
+        platform="linux/amd64+libc.musl", cascade=False,
     )
     assert glibc_pkg.marker != musl_pkg.marker, "markers must differ to discriminate entries"
 
@@ -241,12 +241,12 @@ def test_install_falls_back_when_libc_undetectable(
 
     glibc_pkg = make_package(
         ocx, unique_repo, "1.0.0", glibc_build,
-        platform="linux/amd64+libc.glibc", new=True, cascade=False,
+        platform="linux/amd64+libc.glibc", cascade=False,
     )
     # Untagged entry — empty os.features, accepted by a host with no detected libc.
     untagged_pkg = make_package(
         ocx, unique_repo, "1.0.0", untagged_build,
-        platform="linux/amd64", new=False, cascade=False,
+        platform="linux/amd64", cascade=False,
     )
     assert glibc_pkg.marker != untagged_pkg.marker, "markers must differ to discriminate entries"
 
@@ -308,7 +308,7 @@ def test_install_errors_when_no_compatible_entry(
     # Publish a single linux/amd64 entry that requires libc.musl.
     make_package(
         ocx, unique_repo, "1.0.0", tmp_path,
-        platform="linux/amd64+libc.musl", new=True, cascade=False,
+        platform="linux/amd64+libc.musl", cascade=False,
     )
 
     # Host declares glibc — the musl-only entry cannot satisfy it.
@@ -363,11 +363,11 @@ def test_install_errors_ambiguous_when_host_reports_both_libcs(
     # `test_install_discriminates_glibc_vs_musl_by_explicit_platform`.
     make_package(
         ocx, unique_repo, "1.0.0", glibc_build,
-        platform="linux/amd64+libc.glibc", new=True, cascade=False,
+        platform="linux/amd64+libc.glibc", cascade=False,
     )
     make_package(
         ocx, unique_repo, "1.0.0", musl_build,
-        platform="linux/amd64+libc.musl", new=False, cascade=False,
+        platform="linux/amd64+libc.musl", cascade=False,
     )
 
     # Dual-libc host — the seam's comma-separated form yields {Glibc, Musl}.
@@ -512,13 +512,13 @@ def test_install_discriminates_glibc_vs_musl_by_explicit_platform(
     # keeps the index minimal so the two pushes merge into one image index.
     glibc_pkg = make_package(
         ocx, unique_repo, "1.0.0", glibc_build,
-        platform="linux/amd64+libc.glibc", new=True, cascade=False,
+        platform="linux/amd64+libc.glibc", cascade=False,
     )
     # Second entry: musl-marked under the SAME tag. `new=False` merges into the
     # existing image index instead of replacing it.
     musl_pkg = make_package(
         ocx, unique_repo, "1.0.0", musl_build,
-        platform="linux/amd64+libc.musl", new=False, cascade=False,
+        platform="linux/amd64+libc.musl", cascade=False,
     )
     assert glibc_pkg.marker != musl_pkg.marker, "markers must differ to discriminate entries"
 

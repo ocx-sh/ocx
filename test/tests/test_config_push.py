@@ -70,7 +70,7 @@ def test_config_push_produces_ordinary_package_manifest(
     The report surfaces the index digest (operator TOFU signal)."""
     payload = _write_payload(tmp_path, '[registry]\ndefault = "corp.example.com"\n')
 
-    report = ocx.json("config", "push", "-i", f"{unique_repo}:1.0.0", "--new", str(payload))
+    report = ocx.json("config", "push", "-i", f"{unique_repo}:1.0.0", str(payload))
     assert report["status"] == "pushed"
     assert report["manifest_digest"].startswith("sha256:")
     assert report["cascade_tags_written"] == []
@@ -103,14 +103,14 @@ def test_config_push_rejects_managed_section_exit_78(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     payload = _write_payload(tmp_path, '[managed]\nsource = "corp.example.com/ocx-config:user"\n')
-    result = ocx.run("config", "push", "-i", f"{unique_repo}:1.0.0", "--new", str(payload), check=False)
+    result = ocx.run("config", "push", "-i", f"{unique_repo}:1.0.0", str(payload), check=False)
     assert result.returncode == 78, result.stderr
     assert "[managed]" in result.stderr
 
 
 def test_config_push_rejects_invalid_toml_exit_78(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> None:
     payload = _write_payload(tmp_path, "not = [valid\n")
-    result = ocx.run("config", "push", "-i", f"{unique_repo}:1.0.0", "--new", str(payload), check=False)
+    result = ocx.run("config", "push", "-i", f"{unique_repo}:1.0.0", str(payload), check=False)
     assert result.returncode == 78, result.stderr
 
 
@@ -118,7 +118,7 @@ def test_config_push_rejects_oversize_payload_exit_78(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     payload = _write_payload(tmp_path, "# padding\n" * 7_000)  # ~70 KiB > 64 KiB cap
-    result = ocx.run("config", "push", "-i", f"{unique_repo}:1.0.0", "--new", str(payload), check=False)
+    result = ocx.run("config", "push", "-i", f"{unique_repo}:1.0.0", str(payload), check=False)
     assert result.returncode == 78, result.stderr
 
 
@@ -128,7 +128,7 @@ def test_config_push_rejected_payload_pushes_nothing(
     """Validation happens before any registry write — a rejected payload must
     leave the repository absent."""
     payload = _write_payload(tmp_path, '[managed]\nsource = "x/y:z"\n')
-    ocx.run("config", "push", "-i", f"{unique_repo}:1.0.0", "--new", str(payload), check=False)
+    ocx.run("config", "push", "-i", f"{unique_repo}:1.0.0", str(payload), check=False)
     assert _list_tags(registry, unique_repo) == set()
 
 
@@ -140,13 +140,13 @@ def test_config_push_rejected_payload_pushes_nothing(
 def test_config_push_cascade_writes_variant_tags_without_latest(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
-    """`user-1.4.2 --cascade` on an empty repo (--new) writes the rolling
+    """`user-1.4.2 --cascade` on an empty repo writes the rolling
     variant tags `user-1.4`, `user-1`, `user` — variant pushes are terminal at
     the bare variant tag, never `latest`."""
     payload = _write_payload(tmp_path, '[registry]\ndefault = "corp.example.com"\n')
 
     report = ocx.json(
-        "config", "push", "-i", f"{unique_repo}:user-1.4.2", "--cascade", "--new", str(payload)
+        "config", "push", "-i", f"{unique_repo}:user-1.4.2", "--cascade", str(payload)
     )
     assert set(report["cascade_tags_written"]) == {"user-1.4", "user-1", "user"}
 
@@ -162,7 +162,7 @@ def test_config_push_cascade_rollforward_updates_variant_tags(
     payload_a = _write_payload(tmp_path, '[registry]\ndefault = "a.example.com"\n', name="a.toml")
     payload_b = _write_payload(tmp_path, '[registry]\ndefault = "b.example.com"\n', name="b.toml")
 
-    ocx.json("config", "push", "-i", f"{unique_repo}:user-1.0.0", "--cascade", "--new", str(payload_a))
+    ocx.json("config", "push", "-i", f"{unique_repo}:user-1.0.0", "--cascade", str(payload_a))
     report_b = ocx.json("config", "push", "-i", f"{unique_repo}:user-1.0.1", "--cascade", str(payload_b))
     assert set(report_b["cascade_tags_written"]) == {"user-1.0", "user-1", "user"}
 
@@ -171,21 +171,22 @@ def test_config_push_cascade_rollforward_updates_variant_tags(
     assert floating == pinned, "floating variant tag must follow the newest version"
 
 
-def test_config_push_cascade_without_new_on_missing_repo_exits_79(
+def test_config_push_cascade_first_publish_writes_variant_tags(
     ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
 ) -> None:
-    """`config push --cascade` without `--new` against a repository that has no
-    tags yet cannot list existing versions to roll the cascade forward. It
-    fails closed with exit 79 (the tag-list 404 → NotFound via ListTagsFailed)
-    and a hint to pass `--new` for a first publish; nothing is written."""
+    """`config push --cascade` into a repository that has no tags yet succeeds.
+
+    The tag-list 404 is the authoritative "nothing is published here", so the
+    cascade computes against an empty version set and writes the rolling
+    variant tags on the first publish. This used to exit 79 unless the operator
+    passed `--new`; the flag is gone (#366)."""
     payload = _write_payload(tmp_path, '[registry]\ndefault = "corp.example.com"\n')
 
-    result = ocx.run("config", "push", "-i", f"{unique_repo}:1.0.0", "--cascade", str(payload), check=False)
-    assert result.returncode == 79, (
-        f"cascade without --new on an empty repo must exit 79, got {result.returncode}: {result.stderr}"
+    report = ocx.json(
+        "config", "push", "-i", f"{unique_repo}:user-1.0.0", "--cascade", str(payload)
     )
-    assert "--new" in result.stderr, f"the error must hint at passing --new: {result.stderr!r}"
-    assert _list_tags(registry, unique_repo) == set(), "a failed first-publish cascade must write nothing"
+    assert set(report["cascade_tags_written"]) == {"user-1.0", "user-1", "user"}
+    assert {"user-1.0.0", "user-1.0", "user-1", "user"} <= _list_tags(registry, unique_repo)
 
 
 # ---------------------------------------------------------------------------

@@ -232,8 +232,8 @@ def test_inspect_subset_survives_an_unnamed_group_collision(
     The colliding binding still errors when it IS named, so the check is
     narrowed rather than dropped.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     other = make_package(ocx, f"{unique_repo}_other", "1.0.0", tmp_path)
     project = _project(ocx, tmp_path)
 

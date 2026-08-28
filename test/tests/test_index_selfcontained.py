@@ -120,7 +120,7 @@ def test_no_lock_litter_in_index_home_after_resolve_and_update(
     used to leave behind — the exact litter `ocx --index=<dir> package exec`
     dropped on every resolve.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
 
     index_home = tmp_path / "index_home"
     index_home.mkdir()
@@ -161,7 +161,7 @@ def test_dispatch_object_count_multi_platform_one_single_platform_zero(
     fall back on, so "zero objects" here is the absence of a write, not the
     absence of a fetch.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
 
     # Multi-platform (ordinary) tag: exactly one dispatch object, the
@@ -249,7 +249,7 @@ def test_shipped_copy_resolves_version_choice_offline_with_no_network_and_no_blo
     network — B2, ADR Consequences "Cold-store content fetch needs
     network").
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
 
     # Simulates the project-committed `.ocx/index/`.
     committed_index = tmp_path / "committed_index"
@@ -322,7 +322,7 @@ def test_absent_dispatch_object_self_heals_on_next_online_update(
     self-heals on the next online `ocx index update`: the object is
     re-fetched, re-verified, and re-materialized at the same path.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     index_dir = tmp_path / "index_dir"
     index_dir.mkdir()
     ocx.plain("--index", str(index_dir), "index", "update", pkg.short)
@@ -359,7 +359,7 @@ def test_a_copied_subtree_and_an_authored_one_resolve_identically(
     claimed nor wanted. What must hold is that either tree answers the same
     question the same way, offline: same tags, same platform, same routing.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -440,7 +440,7 @@ def test_copied_subtree_resolves_with_no_source_kind_configured(
     kind. And the copied tree is byte-compared before and after: an unknown
     source kind must not provoke a re-authoring of somebody else's documents.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -512,7 +512,7 @@ def test_catalog_entry_delete_self_heals_on_next_local_read(
     fixture just needs to stay configured so kind detection resolves
     `Published`.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -562,7 +562,7 @@ def test_catalog_entry_delete_self_heals_on_next_local_read(
 def test_tampered_dispatch_object_fails_offline_read_with_dataerror(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     index_dir = tmp_path / "index_dir"
     index_dir.mkdir()
     ocx.plain("--index", str(index_dir), "index", "update", pkg.short)
@@ -606,7 +606,7 @@ def test_gc_retention_oci_derived_keeps_index_blob_index_resolved_adds_no_edge(
     derived_home = tmp_path / "derived_home"
     derived_home.mkdir()
     derived = OcxRunner(ocx.binary, derived_home, ocx.registry)
-    pkg = make_package(derived, unique_repo, "1.0.0", tmp_path, new=True)
+    pkg = make_package(derived, unique_repo, "1.0.0", tmp_path)
     derived.json("package", "install", pkg.short)
 
     index_digest = fetch_manifest_digest(derived.registry, pkg.repo, pkg.tag)
@@ -621,7 +621,7 @@ def test_gc_retention_oci_derived_keeps_index_blob_index_resolved_adds_no_edge(
 
     # --- index.ocx.sh-resolved leg: no image-index blob ever exists --------
     unique_repo2 = f"{unique_repo}b"
-    pkg2 = make_package(ocx, unique_repo2, "1.0.0", tmp_path, new=True, index=False)
+    pkg2 = make_package(ocx, unique_repo2, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg2.repo, pkg2.tag)
     os_name, arch_name = pkg2.platform.split("/")
 
@@ -681,8 +681,8 @@ def test_catalog_concurrent_updates_of_distinct_packages_both_entries_survive(
     a wholesale replace from a stale pre-lock read would silently drop
     whichever writer committed second.
     """
-    pkg_a = make_package(ocx, f"{unique_repo}a", "1.0.0", tmp_path, new=True, index=False)
-    pkg_b = make_package(ocx, f"{unique_repo}b", "1.0.0", tmp_path, new=True, index=False)
+    pkg_a = make_package(ocx, f"{unique_repo}a", "1.0.0", tmp_path, index=False)
+    pkg_b = make_package(ocx, f"{unique_repo}b", "1.0.0", tmp_path, index=False)
     leaf_a = fetch_platform_manifest_digest(ocx.registry, pkg_a.repo, pkg_a.tag)
     leaf_b = fetch_platform_manifest_digest(ocx.registry, pkg_b.repo, pkg_b.tag)
     os_a, arch_a = pkg_a.platform.split("/")
@@ -764,7 +764,7 @@ def test_default_mode_resolve_never_refetches_root_observed_bumps_only_on_update
     for both source kinds, this is the simpler one to drive without an
     index.ocx.sh fixture.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
 
     index_dir = tmp_path / "index_dir"
     index_dir.mkdir()
@@ -809,7 +809,7 @@ def test_orphan_dispatch_object_without_root_self_heals_on_next_online_update(
     leave a fully consistent root + catalog, reusing the orphaned object
     rather than duplicating it.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 
@@ -895,7 +895,7 @@ def test_root_updated_catalog_stale_self_heals_on_next_local_read(
     self-heal without error, corruption, or crash — not just skip the write
     because the key happens to be present.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
     os_name, arch_name = pkg.platform.split("/")
 

@@ -166,7 +166,7 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 |---------|---------|-----------|
 | `config setup` | Adopt (or clear) the `[managed]` tier — config-only counterpart to `self setup --managed-config`; shares `ocx_lib::setup::apply_managed_config` + the CLI precedence seam `command/config_setup.rs::resolve_managed_config_arg` (flag > `OCX_MANAGED_CONFIG` > seed). Nothing resolved → exit 64 (unlike `self setup`'s no-op); dirty fence → exit 82 | `--managed-config REF`, `--dry-run`, `--force` |
 | `config update [VERSION]` | Fetch + persist the managed-config snapshot (throttle-bypassing); `--check` probes only; `--pause`/`--resume` gate the background tick | `--check`, `--pause`, `--resume` |
-| `config push -i ID CONFIG` | Operator-side publish of a `config.toml` as a managed-config package | `-i`, `-c/--cascade`, `-n/--new`, `-p` |
+| `config push -i ID CONFIG` | Operator-side publish of a `config.toml` as a managed-config package | `-i`, `-c/--cascade`, `-p` |
 | `config test CONFIG` | Validate a managed-config payload locally — reports what a fleet would adopt (default registry, registries, mirrors, `[patches]`) plus this machine's `[managed]` posture. Unknown keys are warnings, never failures; keys inside a `[mirrors]` entry are not checked. Nothing is published, adopted or written; exit 78 when the file is not a publishable payload | — |
 
 All `ConfigGroup` variants are exempt from the required-snapshot gate; `config setup`, `config update`, and `self setup` are the three onboarding commands that get a managed-fetch client with no seed present (`app.rs::is_managed_config_onboarding_command`).

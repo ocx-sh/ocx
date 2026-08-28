@@ -80,7 +80,7 @@ def test_push_pull_three_layers(ocx: OcxRunner, unique_repo: str, tmp_path: Path
     fq = f"{ocx.registry}/{short}"
     plat = current_platform()
     ocx.plain(
-        "package", "push", "-p", plat, "-m", str(meta), "-n", "-i", fq,
+        "package", "push", "-p", plat, "-m", str(meta), "-i", fq,
         str(bundle_a), str(bundle_b), str(bundle_c),
     )
     ocx.plain("index", "update", short)
@@ -116,7 +116,7 @@ def test_default_push_emits_no_layer_annotations(ocx: OcxRunner, unique_repo: st
         ],
     }))
     ocx.plain(
-        "package", "push", "-p", current_platform(), "-m", str(meta), "-n",
+        "package", "push", "-p", current_platform(), "-m", str(meta),
         "-i", f"{ocx.registry}/{unique_repo}:1.0.0", str(bundle_a), str(bundle_b),
     )
 
@@ -151,7 +151,7 @@ def test_cascade_layout_annotations_identical_across_tags(ocx: OcxRunner, unique
         ],
     }))
     ocx.plain(
-        "package", "push", "-p", current_platform(), "-m", str(meta), "-n", "--cascade",
+        "package", "push", "-p", current_platform(), "-m", str(meta), "--cascade",
         "-i", f"{ocx.registry}/{unique_repo}:3.28.1",
         f"{bundle_a}:strip=1,prefix=share",
         str(bundle_b),

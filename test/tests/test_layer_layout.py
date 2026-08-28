@@ -103,7 +103,7 @@ def test_layer_ref_strip_and_prefix_round_trip(ocx: OcxRunner, unique_repo: str,
     short = f"{unique_repo}:1.0.0"
     fq = f"{ocx.registry}/{short}"
     ocx.plain(
-        "package", "push", "-p", current_platform(), "-m", str(meta), "-n", "-i", fq,
+        "package", "push", "-p", current_platform(), "-m", str(meta), "-i", fq,
         f"{bundle_a}:strip=1,prefix=share",
         str(bundle_b),
     )
@@ -188,7 +188,7 @@ def test_pull_rejects_escaping_prefix_annotation(ocx: OcxRunner, unique_repo: st
     bundle = _bundle_layer(ocx, layer, tmp_path)
     meta = _write_meta(tmp_path)
     ocx.plain(
-        "package", "push", "-p", current_platform(), "-m", str(meta), "-n",
+        "package", "push", "-p", current_platform(), "-m", str(meta),
         "-i", f"{ocx.registry}/{unique_repo}:1.0.0", str(bundle),
     )
 

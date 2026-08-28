@@ -107,7 +107,7 @@ def test_bare_run_no_project_exits_64(
     # Set up a global toolchain so there IS a global file to (incorrectly) fall
     # back to — proves the absence of the fallback, not just the absence of a
     # global file.
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gonly"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gonly"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     assert _run_cmd(ocx, tmp_path, "--global", "add", fq).returncode == EXIT_SUCCESS
 
@@ -145,7 +145,7 @@ def test_run_global_composes_global_toolchain_for_child(
     The tool is NOT in any project ``ocx.toml`` — it can only be reached
     via ``--global``.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     assert _run_cmd(ocx, tmp_path, "--global", "add", fq).returncode == EXIT_SUCCESS
 
@@ -183,14 +183,14 @@ def test_bare_run_in_project_cannot_resolve_global_only_tool(
     g_repo = unique_repo
     p_repo = f"{unique_repo}_proj"
 
-    make_package(ocx, g_repo, "1.0.0", tmp_path, new=True, bins=["gonly"])
+    make_package(ocx, g_repo, "1.0.0", tmp_path, bins=["gonly"])
     assert (
         _run_cmd(ocx, tmp_path, "--global", "add", f"{ocx.registry}/{g_repo}:1.0.0").returncode
         == EXIT_SUCCESS
     )
 
     # Project carries a different tool, never `gonly`.
-    make_package(ocx, p_repo, "1.0.0", tmp_path, new=True, bins=["ptool"])
+    make_package(ocx, p_repo, "1.0.0", tmp_path, bins=["ptool"])
     project = tmp_path / "proj"
     project.mkdir()
     _write_ocx_toml(project, f'[tools]\nptool = "{ocx.registry}/{p_repo}:1.0.0"\n')
@@ -230,7 +230,7 @@ def test_run_global_does_not_mutate_parent_env(
     while the parent's env does not. The isolation is by PATH *prepend* in
     the child env only — not a subshell strip mutation on the parent.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     assert _run_cmd(ocx, tmp_path, "--global", "add", fq).returncode == EXIT_SUCCESS
 
@@ -284,7 +284,7 @@ def test_run_produces_no_strip_subshell_output(
     Tests both the bare-run error path (no project → exit 64) and the global
     success path, verifying that neither emits strip-related output.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     assert _run_cmd(ocx, tmp_path, "--global", "add", fq).returncode == EXIT_SUCCESS
 

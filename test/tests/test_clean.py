@@ -149,7 +149,7 @@ def test_clean_preserves_committed_index_home(
     every file under the index home survives bit-identical — a machine-local
     GC must never be able to eat committed, git-tracked snapshot data.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, index=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, index=False)
 
     index_home = tmp_path / "committed_index"
     index_home.mkdir()

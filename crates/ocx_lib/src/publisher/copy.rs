@@ -430,13 +430,20 @@ async fn run(client: &Client, request: CopyRequest<'_>) -> std::result::Result<C
 /// Answering that question from a mirror and applying it to the canonical
 /// registry is a decision about a repository nobody read
 /// (`subsystem-oci.md` Invariant #5, CWE-345/367).
+///
+/// A target repository nobody has pushed to yet answers the tag listing with a
+/// 404, and that is an answer, not a failure: none of the rolling tags are
+/// taken. `list_tags_or_empty_addressed` folds exactly that case and nothing
+/// else, so a transient failure still aborts the promotion.
 async fn target_tags(client: &Client, request: &CopyRequest<'_>, platform: &oci::Platform) -> Result<Vec<String>> {
     if !request.cascade {
         return Ok(Vec::new());
     }
     let tag = request.target.tag_or_latest();
     let version = Version::parse(tag).ok_or_else(|| crate::package::error::Error::VersionInvalid(tag.to_string()))?;
-    let listed = client.list_tags(request.target.clone()).await?;
+    let listed = client
+        .list_tags_or_empty_addressed(request.target.clone(), crate::oci::client::ReadAddressing::Canonical)
+        .await?;
     let existing = super::Publisher::parse_versions(&listed);
     let (tags, _) = cascade::resolve_cascade_tags(client, request.target, &version, &existing, platform).await?;
     Ok(tags.into_iter().filter(|candidate| candidate != tag).collect())
@@ -1344,6 +1351,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The first promotion of any package cascades, because a repository
+    /// nobody has pushed to yet is an empty tag list.
+    ///
+    /// A registry answers `GET /v2/<name>/tags/list` for an absent repository
+    /// with a 404, which the transport maps to `RepositoryNotFound`. Letting
+    /// that propagate made every *first* `--cascade` promotion exit 79 and
+    /// every second one succeed (#366).
+    #[tokio::test]
+    async fn a_target_repository_that_does_not_exist_yet_cascades_as_an_empty_tag_list() {
+        let data = StubTransportData::new();
+        seed_source(&data, "3.28.1", &[("linux/amd64", AMD64_LAYER)]);
+        let source = identifier("dev.example.com", "3.28.1");
+        let target = identifier("prod.example.com", "3.28.1");
+        let annotations = BTreeMap::new();
+        data.write().list_tags_results = vec![Err(ClientError::RepositoryNotFound(
+            "prod.example.com/team/demo".to_string(),
+        ))];
+
+        let mut req = request(&source, &target, &annotations);
+        req.cascade = true;
+        let outcome = publisher_for(&data).copy(req).await.expect("copy");
+
+        assert!(
+            outcome.cascade_tags.contains(&"3.28".to_string()),
+            "an absent target repository takes none of the rolling tags, got {:?}",
+            outcome.cascade_tags
+        );
+    }
+
+    /// A tag listing that merely *failed* still aborts the promotion.
+    ///
+    /// The sibling of the test above, and the arm that proves the fold is
+    /// narrow: without it a blanket `Err(_) => Ok(vec![])` would pass just as
+    /// happily, and a transient 5xx would cascade `latest` backwards against a
+    /// listing nobody read (#157).
+    #[tokio::test]
+    async fn a_tag_listing_that_merely_failed_still_aborts_the_promotion() {
+        let data = StubTransportData::new();
+        seed_source(&data, "3.28.1", &[("linux/amd64", AMD64_LAYER)]);
+        let source = identifier("dev.example.com", "3.28.1");
+        let target = identifier("prod.example.com", "3.28.1");
+        let annotations = BTreeMap::new();
+        data.write().list_tags_results = vec![Err(ClientError::Registry(Box::new(std::io::Error::other(
+            "503 from the target registry",
+        ))))];
+
+        let mut req = request(&source, &target, &annotations);
+        req.cascade = true;
+        let error = publisher_for(&data)
+            .copy(req)
+            .await
+            .expect_err("a failing tag listing must abort the promotion");
+
+        assert!(
+            chain(&error).contains("503 from the target registry"),
+            "the listing failure must reach the caller, got: {}",
+            chain(&error)
+        );
     }
 
     /// Content lands before any tag names it, so a promotion that dies partway

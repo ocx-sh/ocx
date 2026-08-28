@@ -33,7 +33,7 @@ def test_push_announce_file_feeds_announce_tags_file_union(
 
     # A pre-existing committed tag on a DIFFERENT, real version — proves the
     # union keeps it (deletion only ever happens via --tags, not --tags-from-file).
-    make_package(ocx, unique_repo, "0.9.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "0.9.0", tmp_path, cascade=False)
 
     # The cascading push under test: writes the pushed tag + cascade tags
     # (e.g. "1.2.3,1.2,1,latest") to `announce_file`.
@@ -42,7 +42,6 @@ def test_push_announce_file_feeds_announce_tags_file_union(
         unique_repo,
         "1.2.3",
         tmp_path,
-        new=False,
         cascade=True,
         extra_push_args=["--announce-file", str(announce_file)],
     )
@@ -85,7 +84,7 @@ def test_push_reports_canonical_tags_and_keeps_them_out_of_the_announce_file(
     changed and the file assertion below has nothing to exclude.
     """
     announce_file = tmp_path / "announce-tags.txt"
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     bundle = tmp_path / f"bundle-{unique_repo}-1.0.0.tar.xz"
 
     report = json.loads(
@@ -127,7 +126,7 @@ def test_push_still_reports_when_the_announce_file_cannot_be_written(
     still fail the command (the caller asked for the file) while the push report
     is emitted regardless: without it, a pipeline whose push genuinely succeeded
     has no way to learn the digest and tags it just published."""
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     bundle = tmp_path / f"bundle-{unique_repo}-1.0.0.tar.xz"
     # A path under a directory that does not exist: the create fails at write
     # time, on every platform, with no permission games.

@@ -136,7 +136,7 @@ def _published_tool(
     short = uuid4().hex[:8]
     repo = f"t_{short}_penv_{label}"
     tag = "1.0.0"
-    make_package(ocx, repo, tag, tmp_path, new=True, cascade=False, env=env)
+    make_package(ocx, repo, tag, tmp_path, cascade=False, env=env)
     return repo, tag
 
 
@@ -924,7 +924,7 @@ def test_global_env_applies_to_global_tier_resolution(ocx: OcxRunner, tmp_path: 
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_globalenv"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     empty = tmp_path / "no_project"
@@ -994,7 +994,7 @@ def test_global_env_applies_when_locked_tool_not_materialised(
     """
     short = uuid4().hex[:8]
     repo = f"t_{short}_globalunmaterialised"
-    make_package(ocx, repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, repo, "1.0.0", tmp_path, cascade=False)
 
     empty = tmp_path / "no_project"
     empty.mkdir()

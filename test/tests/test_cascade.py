@@ -23,11 +23,11 @@ def test_cascade_preserves_platforms(
     # Use separate tmp dirs since make_package uses repo+tag as dir key.
     make_package(
         ocx, unique_repo, "3.28.0", tmp_path / "amd64",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     make_package(
         ocx, unique_repo, "3.28.0", tmp_path / "arm64",
-        platform="linux/arm64", new=False,
+        platform="linux/arm64",
     )
 
     # Rolling tag "3.28" must contain both platforms.
@@ -50,13 +50,13 @@ def test_cascade_platform_aware_version_filter(
     # Step 1: Push 3.28.0 for amd64.
     make_package(
         ocx, unique_repo, "3.28.0", tmp_path,
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
 
     # Step 2: Push a newer patch 3.28.1 for arm64 only.
     make_package(
         ocx, unique_repo, "3.28.1", tmp_path,
-        platform="linux/arm64", new=False,
+        platform="linux/arm64",
     )
 
     # Step 3: Push yet another patch 3.28.2 for amd64.
@@ -65,7 +65,7 @@ def test_cascade_platform_aware_version_filter(
     # But this test specifically verifies the minor tag has both platforms.
     make_package(
         ocx, unique_repo, "3.28.2", tmp_path,
-        platform="linux/amd64", new=False,
+        platform="linux/amd64",
     )
 
     # "3.28" must contain amd64 (from step 3 cascade) AND arm64 (from step 2).
@@ -81,7 +81,7 @@ def test_cascade_new_package_all_levels(
     """Cascade on a fresh package creates all rolling tags with correct platform."""
     make_package(
         ocx, unique_repo, "1.2.3", tmp_path,
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
 
     for tag in ["1.2", "1", "latest"]:
@@ -115,12 +115,12 @@ def test_cascade_old_version_different_platform(
     # Push 3.28.0 for amd64.
     make_package(
         ocx, unique_repo, "3.28.0", tmp_path / "amd64",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     # Push 3.27.0 for arm64 — should cascade past 3.28 since arm64 is not present there.
     make_package(
         ocx, unique_repo, "3.27.0", tmp_path / "arm64",
-        platform="linux/arm64", new=False,
+        platform="linux/arm64",
     )
 
     # "3" should have arm64 (from 3.27.0 cascade).
@@ -136,7 +136,7 @@ def test_cascade_old_version_same_platform(
     # Push 3.28.0 for amd64.
     make_package(
         ocx, unique_repo, "3.28.0", tmp_path / "new",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     amd64_digest_328 = _platform_digest(
         fetch_manifest_from_registry(ocx.registry, unique_repo, "3"), "linux/amd64"
@@ -145,7 +145,7 @@ def test_cascade_old_version_same_platform(
     # Push 3.27.0 for amd64 — should be blocked at "3" because 3.28.0 has amd64.
     make_package(
         ocx, unique_repo, "3.27.0", tmp_path / "old",
-        platform="linux/amd64", new=False,
+        platform="linux/amd64",
     )
 
     # "3" should still point to the 3.28.0 amd64 digest (cascade stopped).
@@ -162,11 +162,11 @@ def test_cascade_same_version_different_platform(
     """Pushing the same version for a second platform cascades all levels with both platforms."""
     make_package(
         ocx, unique_repo, "3.28.0", tmp_path / "amd64",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     make_package(
         ocx, unique_repo, "3.28.0", tmp_path / "arm64",
-        platform="linux/arm64", new=False,
+        platform="linux/arm64",
     )
 
     for tag in ["3.28", "3", "latest"]:
@@ -183,17 +183,17 @@ def test_cascade_patch_one_platform_preserves_other(
     # Push 3.28.0 for both platforms.
     make_package(
         ocx, unique_repo, "3.28.0", tmp_path / "amd64_0",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     make_package(
         ocx, unique_repo, "3.28.0", tmp_path / "arm64_0",
-        platform="linux/arm64", new=False,
+        platform="linux/arm64",
     )
 
     # Push 3.28.1 for amd64 only.
     make_package(
         ocx, unique_repo, "3.28.1", tmp_path / "amd64_1",
-        platform="linux/amd64", new=False,
+        platform="linux/amd64",
     )
 
     # "3.28" should have amd64 (from 3.28.1) AND arm64 (preserved from 3.28.0).
@@ -212,7 +212,7 @@ def test_variant_cascade_full_chain(
     """Variant-prefixed tags cascade within their own variant track."""
     make_package(
         ocx, unique_repo, "debug-1.2.3", tmp_path,
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
 
     # Rolling tags debug-1.2, debug-1, debug should all exist with correct platform.
@@ -242,7 +242,7 @@ def test_variant_newer_cross_variant_no_overwrite(
     # Push debug-1.2.3 — creates debug-1.2, debug-1, debug
     make_package(
         ocx, unique_repo, "debug-1.2.3", tmp_path / "debug",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     debug1_digest = _platform_digest(
         fetch_manifest_from_registry(ocx.registry, unique_repo, "debug-1"),
@@ -257,7 +257,7 @@ def test_variant_newer_cross_variant_no_overwrite(
     # Must create pgo-2.0, pgo-2, pgo — must NOT touch debug-1, debug.
     make_package(
         ocx, unique_repo, "pgo-2.0.0", tmp_path / "pgo",
-        platform="linux/amd64", new=False,
+        platform="linux/amd64",
     )
 
     # Verify pgo cascade was created correctly
@@ -285,7 +285,7 @@ def test_variant_same_version_different_variant(
     # Push debug-1.2.3
     make_package(
         ocx, unique_repo, "debug-1.2.3", tmp_path / "debug",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     debug1_digest = _platform_digest(
         fetch_manifest_from_registry(ocx.registry, unique_repo, "debug-1"),
@@ -295,7 +295,7 @@ def test_variant_same_version_different_variant(
     # Push pgo-1.2.3 — SAME version number, different variant.
     make_package(
         ocx, unique_repo, "pgo-1.2.3", tmp_path / "pgo",
-        platform="linux/amd64", new=False,
+        platform="linux/amd64",
     )
     pgo1_digest = _platform_digest(
         fetch_manifest_from_registry(ocx.registry, unique_repo, "pgo-1"),
@@ -327,7 +327,7 @@ def test_default_same_version_as_variant(
     # Push debug-1.2.3
     make_package(
         ocx, unique_repo, "debug-1.2.3", tmp_path / "debug",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     debug1_digest = _platform_digest(
         fetch_manifest_from_registry(ocx.registry, unique_repo, "debug-1"),
@@ -341,7 +341,7 @@ def test_default_same_version_as_variant(
     # Push 1.2.3 (no variant, SAME version number)
     make_package(
         ocx, unique_repo, "1.2.3", tmp_path / "default",
-        platform="linux/amd64", new=False,
+        platform="linux/amd64",
     )
 
     # Default cascade tags must exist
@@ -379,7 +379,7 @@ def test_newer_default_no_variant_overwrite(
     # Push debug-1.0.0
     make_package(
         ocx, unique_repo, "debug-1.0.0", tmp_path / "debug",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     debug_digest = _platform_digest(
         fetch_manifest_from_registry(ocx.registry, unique_repo, "debug"),
@@ -389,7 +389,7 @@ def test_newer_default_no_variant_overwrite(
     # Push 2.0.0 (default, NEWER version number) — must not touch debug
     make_package(
         ocx, unique_repo, "2.0.0", tmp_path / "default",
-        platform="linux/amd64", new=False,
+        platform="linux/amd64",
     )
 
     # Default tags exist
@@ -418,7 +418,7 @@ def test_newer_variant_no_default_overwrite(
     # Push 1.0.0 (default)
     make_package(
         ocx, unique_repo, "1.0.0", tmp_path / "default",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     latest_digest = _platform_digest(
         fetch_manifest_from_registry(ocx.registry, unique_repo, "latest"),
@@ -432,7 +432,7 @@ def test_newer_variant_no_default_overwrite(
     # Push debug-3.0.0 (variant, MUCH newer version number) — must not touch latest or 1
     make_package(
         ocx, unique_repo, "debug-3.0.0", tmp_path / "debug",
-        platform="linux/amd64", new=False,
+        platform="linux/amd64",
     )
 
     # Variant cascade created
@@ -461,7 +461,7 @@ def test_variant_same_variant_blocking(
     # Push debug-1.2.3
     make_package(
         ocx, unique_repo, "debug-1.2.3", tmp_path / "newer",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     debug1_digest = _platform_digest(
         fetch_manifest_from_registry(ocx.registry, unique_repo, "debug-1"),
@@ -471,7 +471,7 @@ def test_variant_same_variant_blocking(
     # Push debug-1.1.0 — should be blocked at debug-1 because debug-1.2.3 exists
     make_package(
         ocx, unique_repo, "debug-1.1.0", tmp_path / "older",
-        platform="linux/amd64", new=False,
+        platform="linux/amd64",
     )
 
     # debug-1 should still point to debug-1.2.3
@@ -491,11 +491,11 @@ def test_variant_preserves_platforms(
     """Variant cascade preserves platform entries from previous pushes."""
     make_package(
         ocx, unique_repo, "debug-1.2.3", tmp_path / "amd64",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     make_package(
         ocx, unique_repo, "debug-1.2.3", tmp_path / "arm64",
-        platform="linux/arm64", new=False,
+        platform="linux/arm64",
     )
 
     for tag in ["debug-1.2", "debug-1", "debug"]:
@@ -512,22 +512,22 @@ def test_three_variants_independent(
     # Push default 1.0.0
     make_package(
         ocx, unique_repo, "1.0.0", tmp_path / "default",
-        platform="linux/amd64", new=True,
+        platform="linux/amd64",
     )
     # Push debug-1.5.0
     make_package(
         ocx, unique_repo, "debug-1.5.0", tmp_path / "debug",
-        platform="linux/amd64", new=False,
+        platform="linux/amd64",
     )
     # Push pgo-2.0.0
     make_package(
         ocx, unique_repo, "pgo-2.0.0", tmp_path / "pgo",
-        platform="linux/amd64", new=False,
+        platform="linux/amd64",
     )
     # Push slim-3.0.0
     make_package(
         ocx, unique_repo, "slim-3.0.0", tmp_path / "slim",
-        platform="linux/amd64", new=False,
+        platform="linux/amd64",
     )
 
     # Collect all terminal digests — each must be unique
@@ -582,11 +582,11 @@ def test_cascade_libc_variants_preserved(
     # index as explicit ``os.features`` values set during publish.
     make_package(
         ocx, unique_repo, "1.0.0", tmp_path / "glibc",
-        platform="linux/amd64+libc.glibc", new=True,
+        platform="linux/amd64+libc.glibc",
     )
     make_package(
         ocx, unique_repo, "1.0.0", tmp_path / "musl",
-        platform="linux/amd64+libc.musl", new=False,
+        platform="linux/amd64+libc.musl",
     )
 
     # Rolling tag "1.0" must contain BOTH linux/amd64 libc entries.

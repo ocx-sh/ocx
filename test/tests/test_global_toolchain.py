@@ -118,7 +118,7 @@ def test_global_add_install_select_then_fresh_shell_sees_tool(
     + static ``$OCX_HOME/init.bash`` activation. The new model uses
     ``ocx --global add`` and ``ocx --global env --shell=sh``.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
 
     add = _run_cmd(ocx, tmp_path, "--global", "add", fq)
@@ -163,7 +163,7 @@ def test_global_add_when_global_file_absent(
     """F7 decision: `ocx --global add` auto-creates ``$OCX_HOME/ocx.toml`` (and
     its ``ocx.lock``) when absent, mirroring project ``add`` on a fresh
     project — no pre-existing global file required."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     ocx_home = Path(ocx.env["OCX_HOME"])
     global_toml = ocx_home / "ocx.toml"
@@ -193,8 +193,8 @@ def test_project_tool_shadows_global_in_project(
     (project supersedes — strict isolation, no merge)."""
     g_repo = f"{unique_repo}_g"
     p_repo = f"{unique_repo}_p"
-    make_package(ocx, g_repo, "1.0.0", tmp_path, new=True, bins=["tool"])
-    make_package(ocx, p_repo, "1.0.0", tmp_path, new=True, bins=["tool"])
+    make_package(ocx, g_repo, "1.0.0", tmp_path, bins=["tool"])
+    make_package(ocx, p_repo, "1.0.0", tmp_path, bins=["tool"])
 
     # Global tier carries `tool` → g_repo.
     _run_cmd(ocx, tmp_path, "--global", "add", f"{ocx.registry}/{g_repo}:1.0.0")
@@ -250,7 +250,7 @@ def test_project_strict_isolation_global_bin_absent(
     g_repo = unique_repo
     p_repo = f"{unique_repo}_proj"
 
-    make_package(ocx, g_repo, "1.0.0", tmp_path, new=True, bins=["gonly"])
+    make_package(ocx, g_repo, "1.0.0", tmp_path, bins=["gonly"])
     # Use the live `ocx --global add` (not the deleted `install --global`).
     add = _run_cmd(ocx, tmp_path, "--global", "add", f"{ocx.registry}/{g_repo}:1.0.0")
     assert add.returncode == EXIT_SUCCESS, (
@@ -258,7 +258,7 @@ def test_project_strict_isolation_global_bin_absent(
     )
 
     # A project that does NOT declare `gonly`.
-    make_package(ocx, p_repo, "1.0.0", tmp_path, new=True, bins=["ptool"])
+    make_package(ocx, p_repo, "1.0.0", tmp_path, bins=["ptool"])
     project = tmp_path / "proj"
     project.mkdir()
     _write_ocx_toml(
@@ -301,14 +301,14 @@ def test_run_is_hermetic_ignores_global(
     """adr_global_toolchain_tier.md §Decision 4: a project ``ocx run`` cannot
     resolve a tool that exists only in ``$OCX_HOME/ocx.toml`` — `run` reads
     only the in-effect project file, never the global one."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gonly"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gonly"])
     _run_cmd(
         ocx, tmp_path, "--global", "add", f"{ocx.registry}/{unique_repo}:1.0.0"
     )
 
     # A project that declares a *different* tool, never `gonly`.
     other_repo = f"{unique_repo}_other"
-    make_package(ocx, other_repo, "1.0.0", tmp_path, new=True, bins=["ptool"])
+    make_package(ocx, other_repo, "1.0.0", tmp_path, bins=["ptool"])
     project = tmp_path / "proj"
     project.mkdir()
     _write_ocx_toml(
@@ -338,7 +338,7 @@ def test_home_ocx_toml_not_discovered_without_global(
     """adr_global_toolchain_tier.md §Decision 1: a present
     ``$OCX_HOME/ocx.toml`` is NOT discovered when no project is in scope and
     no ``--global`` is given — the implicit home fallback was removed."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gonly"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gonly"])
     _run_cmd(
         ocx, tmp_path, "--global", "add", f"{ocx.registry}/{unique_repo}:1.0.0"
     )
@@ -371,7 +371,7 @@ def test_global_and_project_flags_conflict(
 ) -> None:
     """adr_global_toolchain_tier.md §Decision 2: `--global` and `--project`
     both pick a project file → mutually exclusive → ``UsageError`` (64)."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     explicit = tmp_path / "explicit.toml"
     explicit.write_text("[tools]\n")
@@ -405,7 +405,7 @@ def test_env_global_with_explicit_project_flag_conflict(
     check fire on ``(config_view.global || command_global) &&
     has_explicit_project_selection()``.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     explicit = tmp_path / "explicit.toml"
     explicit.write_text("[tools]\n")
@@ -437,7 +437,7 @@ def test_env_global_with_env_project_conflict(
     rejects the flag form. Pre-B1 this slips through entirely (neither the
     flag-only seam nor clap's top-level ``conflicts_with`` sees an env pair).
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     explicit = tmp_path / "explicit.toml"
     explicit.write_text("[tools]\n")
@@ -481,7 +481,7 @@ def test_global_env_follows_lock_pin_not_current_symlink(
     Consequence: deleting (or repointing) the ``current`` symlink for a
     globally-installed tool must NOT change ``ocx --global env`` output.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
 
     add = _run_cmd(ocx, tmp_path, "--global", "add", fq)
@@ -558,7 +558,7 @@ def test_global_update_takes_effect_without_select(
     bin_name = "gtool"
 
     # Step 1: push v1 with cascade — creates ``latest`` pointing at v1.
-    v1 = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=[bin_name])
+    v1 = make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=[bin_name])
     # Bind the global tier to ``latest`` (rolling tag), not the pinned ``1.0.0``.
     fq_latest = f"{ocx.registry}/{unique_repo}:latest"
     add_v1 = _run_cmd(ocx, tmp_path, "--global", "add", fq_latest)
@@ -567,7 +567,7 @@ def test_global_update_takes_effect_without_select(
     )
 
     # Step 2: push v2 with cascade + new=False — overwrites ``latest`` with v2 digest.
-    v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, bins=[bin_name])
+    v2 = make_package(ocx, unique_repo, "2.0.0", tmp_path, bins=[bin_name])
     assert v1.marker != v2.marker, "precondition: markers differ between versions"
 
     # Step 3: update the global toolchain.
@@ -638,7 +638,7 @@ def test_clean_keeps_global_lock_pinned_package(
     import json as _json
 
     bin_name = "gtool"
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=[bin_name])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=[bin_name])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
 
     # Step 1: add to global toolchain — installs + writes lock + selects current.
@@ -725,7 +725,7 @@ def test_no_self_link_for_global_file(
     rule applies — no ``$OCX_HOME/projects/<hash>`` symlink may resolve to
     ``$OCX_HOME``. The global toolchain is GC-protected purely by its
     ``current`` install symlinks."""
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
     add = _run_cmd(ocx, tmp_path, "--global", "add", fq)
     assert add.returncode == EXIT_SUCCESS, (
@@ -767,7 +767,7 @@ def test_global_env_resolves_v3_leaf_digest(
     1. The global lock carries ``[tool.platforms]``, no ``pinned =`` line.
     2. ``ocx --global env --shell=sh`` exits 0 and emits ``export`` lines.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
 
     add = _run_cmd(ocx, tmp_path, "--global", "add", fq)
@@ -825,9 +825,9 @@ def test_global_partial_mutator_fail_closed_message_not_project_only(
     repo_a = f"{unique_repo}_a"
     repo_b = f"{unique_repo}_b"
     repo_extra = f"{unique_repo}_extra"
-    make_package(ocx, repo_a, "1.0.0", tmp_path, new=True, bins=["atool"])
-    make_package(ocx, repo_b, "1.0.0", tmp_path, new=True, bins=["btool"])
-    make_package(ocx, repo_extra, "1.0.0", tmp_path, new=True, bins=["xtool"])
+    make_package(ocx, repo_a, "1.0.0", tmp_path, bins=["atool"])
+    make_package(ocx, repo_b, "1.0.0", tmp_path, bins=["btool"])
+    make_package(ocx, repo_extra, "1.0.0", tmp_path, bins=["xtool"])
 
     # Step 1: bind A into the global tier (auto-creates ocx.toml + ocx.lock).
     add_a = _run_cmd(
@@ -900,7 +900,7 @@ def test_global_remove_emits_no_warning_for_ordinary_binding(
     binding. Warning there fires on the happy path and tells the user nothing
     (ocx-sh/ocx#274) — the absence is debug-level.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, bins=["gtool"])
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, bins=["gtool"])
     fq = f"{ocx.registry}/{unique_repo}:1.0.0"
 
     add = _run_cmd(ocx, tmp_path, "--global", "add", fq)

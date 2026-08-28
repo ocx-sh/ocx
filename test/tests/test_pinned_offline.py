@@ -55,7 +55,7 @@ def test_pinned_id_exec_offline_succeeds(ocx: OcxRunner, tmp_path: Path) -> None
     tag = "1.0.0"
     bin_name = "hello"
 
-    pkg = make_package(ocx, repo, tag, tmp_path, new=True, cascade=False, bins=[bin_name])
+    pkg = make_package(ocx, repo, tag, tmp_path, cascade=False, bins=[bin_name])
 
     project = tmp_path / "proj"
     project.mkdir()

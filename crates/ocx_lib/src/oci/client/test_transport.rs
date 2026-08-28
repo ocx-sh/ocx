@@ -68,6 +68,14 @@ pub(crate) struct StubTransportInner {
     pub digest: Option<String>,
     /// Successive results for push operations (consumed FIFO).
     pub push_results: Vec<Result<String>>,
+    /// Successive results for `list_tags` calls (consumed FIFO); an empty queue
+    /// falls through to [`tags`](Self::tags).
+    ///
+    /// `tags` alone can only express a *successful* listing, so without this a
+    /// test cannot tell "the target repository does not exist" from "the target
+    /// publishes nothing" — which is exactly the distinction the cascade
+    /// prelude turns on.
+    pub list_tags_results: Vec<Result<Vec<String>>>,
     /// Log of method calls for assertions.
     pub calls: Vec<String>,
     /// Log of `ensure_auth` calls: `(registry, operation)`.
@@ -223,6 +231,9 @@ impl OciTransport for StubTransport {
             tokio::time::sleep(delay).await;
         }
         let mut inner = self.data.write();
+        if !inner.list_tags_results.is_empty() {
+            return inner.list_tags_results.remove(0);
+        }
         if inner.tags.is_empty() {
             Ok(vec![])
         } else {

@@ -86,7 +86,7 @@ def test_announce_drops_every_reserved_form_from_explicit_tags(
     that failed to drop them fails here on the observe (an unresolved tag),
     never silently.
     """
-    make_package(ocx, unique_repo, "1.2.3", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.2.3", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -126,7 +126,7 @@ def test_announce_refresh_drops_a_reserved_tag_already_in_the_committed_root(
     than at the flag, a committed reserved entry is dropped on the next
     refresh — the committed root heals itself.
     """
-    make_package(ocx, unique_repo, "1.2.3", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.2.3", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     _seed_root_with_tags(
@@ -156,8 +156,8 @@ def test_announce_tags_file_drops_a_reserved_tag_from_the_file(
     the drop applies to the union, so a reserved name is filtered whichever
     side it entered from.
     """
-    make_package(ocx, unique_repo, "1.2.3", tmp_path, new=True, cascade=False)
-    make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False, cascade=False)
+    make_package(ocx, unique_repo, "1.2.3", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     _seed_root_with_tags(
@@ -196,7 +196,7 @@ def test_announce_entirely_reserved_selection_is_the_existing_empty_set_error(
       "no curated tags given" would be a false statement about an invocation
       that gave five.
     """
-    make_package(ocx, unique_repo, "1.2.3", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.2.3", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
@@ -261,7 +261,7 @@ def test_index_list_omits_every_reserved_form_local_and_remote(
     The non-vacuity anchor is the real version tag: it must be listed by both
     paths, so an empty listing (or a broken command) cannot pass this test.
     """
-    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     _publish_reserved_tags(ocx, pkg.repo, "1.0.0")
 
     # The canonical tag `ocx package push` writes by default is itself a

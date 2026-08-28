@@ -94,7 +94,7 @@ push_simple() {
         ocx package create --force -p "$PLATFORM" -m metadata.json -o "out/${repo}-${TAG}.tar.xz" build
         # No `-m`: push picks up the create-emitted sidecar carrying the
         # resolved dep pins and the auto-scanned `binaries` claim.
-        ocx package push -n -c -p "$PLATFORM" -i "$(id "$repo")" "out/${repo}-${TAG}.tar.xz"
+        ocx package push -c -p "$PLATFORM" -i "$(id "$repo")" "out/${repo}-${TAG}.tar.xz"
     )
     ocx index update "${NAMESPACE}/${repo}" >/dev/null
 }

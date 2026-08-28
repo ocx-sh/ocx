@@ -135,11 +135,11 @@ def test_inspect_resolve_platform_selects_child(
     """Multi-platform tag: default lists both; ``--resolve -p`` picks one."""
     make_package(
         ocx, unique_repo, "1.0.0", tmp_path / "amd64",
-        platform="linux/amd64", new=True, cascade=False,
+        platform="linux/amd64", cascade=False,
     )
     make_package(
         ocx, unique_repo, "1.0.0", tmp_path / "arm64",
-        platform="linux/arm64", new=False, cascade=False,
+        platform="linux/arm64", cascade=False,
     )
     short = f"{unique_repo}:1.0.0"
 
@@ -233,11 +233,11 @@ def test_inspect_default_platform_flag_ignored_without_resolve(
     """
     make_package(
         ocx, unique_repo, "1.0.0", tmp_path / "amd64",
-        platform="linux/amd64", new=True, cascade=False,
+        platform="linux/amd64", cascade=False,
     )
     make_package(
         ocx, unique_repo, "1.0.0", tmp_path / "arm64",
-        platform="linux/arm64", new=False, cascade=False,
+        platform="linux/arm64", cascade=False,
     )
     short = f"{unique_repo}:1.0.0"
 
@@ -272,7 +272,7 @@ def test_inspect_default_flat_tag_shows_metadata_no_chain(
     manifest is materialized by retagging a child manifest digest directly
     on the registry, then re-indexing that tag.
     """
-    make_package(ocx, unique_repo, "1.0.0", tmp_path, new=True, cascade=False)
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     tag_ref = f"{unique_repo}:1.0.0"
     child = inspect_entry(ocx.json("package", "inspect", tag_ref), tag_ref)[
         "candidates"

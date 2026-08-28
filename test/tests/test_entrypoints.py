@@ -215,7 +215,7 @@ def test_reselect_to_package_without_entrypoints_drops_entrypoints_dir(
         bins=["hello"],
         tag="1.0.0",
     )
-    pkg_without = make_package(ocx, unique_repo, "2.0.0", tmp_path, new=False)
+    pkg_without = make_package(ocx, unique_repo, "2.0.0", tmp_path)
 
     ocx.plain("package", "install", "--select", pkg_with.short)
     entrypoints_dir = current_entrypoints(ocx, pkg_with)

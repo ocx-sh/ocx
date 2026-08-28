@@ -186,7 +186,7 @@ ocx package create -p linux/amd64 -m $m -o /tmp/app.tar.gz  test/manual/packages
 
 # Push v1 with three file layers.
 fq=$OCX_DEFAULT_REGISTRY/dojo/multi-layer-app:1.0.0
-ocx package push -n -p linux/amd64 -m $m -i $fq /tmp/base.tar.gz /tmp/libs.tar.gz /tmp/app.tar.gz
+ocx package push -p linux/amd64 -m $m -i $fq /tmp/base.tar.gz /tmp/libs.tar.gz /tmp/app.tar.gz
 
 # Inspect the manifest to grab the base layer's digest.
 base_digest=$(curl -fs http://$OCX_DEFAULT_REGISTRY/v2/dojo/multi-layer-app/manifests/1.0.0 \
