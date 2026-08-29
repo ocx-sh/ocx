@@ -29,6 +29,9 @@ pub enum Error {
     /// A symlink target escapes the archive or extraction root (path traversal).
     #[error("symlink '{link}' with target '{target}' escapes the root directory", link = .link.display(), target = .target.display())]
     SymlinkEscape { link: PathBuf, target: PathBuf },
+    /// A hard-link entry's target does not resolve inside the extraction root.
+    #[error("hard link '{link}' target '{target}' does not resolve inside the extraction root", link = .link.display(), target = .target.display())]
+    HardLinkEscape { link: PathBuf, target: PathBuf },
     /// The archive format is not supported.
     #[error("unsupported archive format: {0}")]
     UnsupportedFormat(String),
@@ -52,6 +55,7 @@ impl ClassifyExitCode for Error {
             | Self::Zip(_)
             | Self::EntryEscape(_)
             | Self::SymlinkEscape { .. }
+            | Self::HardLinkEscape { .. }
             | Self::UnsupportedFormat(_) => ExitCode::DataError,
             Self::Internal(_) => ExitCode::Failure,
         })

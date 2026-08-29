@@ -209,6 +209,17 @@ fn extract_from_archive<R: std::io::Read>(
                 crate::symlink::validate_target(output, &output_path, target.as_ref())?;
                 crate::symlink::create(target.as_ref(), &output_path)?;
             }
+        } else if entry.header().entry_type() == tar::EntryType::Link {
+            let target = entry.link_name().map_err(Error::Tar)?.unwrap_or_default().into_owned();
+            let source =
+                resolve_hard_link_source(output, &target, strip_components).ok_or_else(|| Error::HardLinkEscape {
+                    link: stripped.clone(),
+                    target: target.clone(),
+                })?;
+            std::fs::hard_link(&source, &output_path).map_err(|e| Error::Io {
+                path: output_path.clone(),
+                source: e,
+            })?;
         } else {
             // QW2 deferred: wrapping the regular-file write in a BufWriter is not
             // achievable cleanly with tar 0.4.46. `Entry::unpack`/`unpack_in`
@@ -233,9 +244,117 @@ fn extract_from_archive<R: std::io::Read>(
     Ok(())
 }
 
+/// Resolves a hard-link entry's link name to an existing path inside `output`.
+///
+/// Returns `None` when the link name is absent, is emptied by `strip_components`,
+/// or does not resolve to a file inside `output`.
+///
+/// `tar::Entry::unpack` cannot be trusted with hard links: it calls
+/// `fields.unpack(None, dst)`, and with `target_base: None` the hard-link branch
+/// hands the archive's raw link name to `fs::hard_link` verbatim (tar 0.4.46,
+/// `src/entry.rs`). That is wrong in both directions — an absolute link name
+/// pulls any host file the extracting user can read into the tree as an ordinary
+/// regular file (invisible to every symlink guard, so it gets bundled and
+/// published), and a relative one resolves against the process CWD instead of
+/// `output`, which makes ordinary GNU-tar-deduplicated archives fail to extract.
+fn resolve_hard_link_source(output: &Path, link_name: &Path, strip_components: usize) -> Option<PathBuf> {
+    // The link name addresses an earlier entry by its path *within the archive*,
+    // so it takes the same `strip_components` transform as the entry paths.
+    let stripped: PathBuf = link_name.iter().skip(strip_components).collect();
+    if stripped.as_os_str().is_empty() {
+        return None;
+    }
+    let candidate = crate::utility::fs::path::join_under_root(output, &stripped).ok()?;
+    // `join_under_root` is lexical, and the extraction root need not be empty:
+    // an intermediate component that is itself a symlink can collapse a
+    // declared in-root path onto a real out-of-root file. The source has to
+    // exist already for `hard_link` to succeed, so resolve it for real and
+    // re-check — the same containment argument tar's own `validate_inside_dst`
+    // makes for `unpack_in`.
+    let source = dunce::canonicalize(&candidate).ok()?;
+    let root = dunce::canonicalize(output).ok()?;
+    source.starts_with(&root).then_some(source)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::archive::Archive;
+
+    /// Builds a tar containing `dir/original.txt` plus a hard-link entry
+    /// `dir/alias.txt` whose link name is `link_target`, and extracts it.
+    async fn extract_with_hard_link(link_target: &str) -> (tempfile::TempDir, crate::Result<()>) {
+        let out_dir = tempfile::tempdir().unwrap();
+        let archive_path = out_dir.path().join("pkg.tar");
+        {
+            let file = std::fs::File::create(&archive_path).unwrap();
+            let mut builder = ::tar::Builder::new(file);
+            let body = b"original contents";
+            let mut header = ::tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, "dir/original.txt", &body[..]).unwrap();
+
+            let mut link = ::tar::Header::new_gnu();
+            link.set_entry_type(::tar::EntryType::Link);
+            link.set_size(0);
+            link.set_mode(0o644);
+            builder.append_link(&mut link, "dir/alias.txt", link_target).unwrap();
+            builder.finish().unwrap();
+        }
+        let extract_dir = tempfile::tempdir().unwrap();
+        let result = Archive::extract(&archive_path, extract_dir.path()).await;
+        (extract_dir, result)
+    }
+
+    /// Regression for #275: a hard-link entry whose link name points outside the
+    /// extraction root must fail the run. `tar::Entry::unpack` passes the raw link
+    /// name to `fs::hard_link`, so an absolute name links a host file into the tree
+    /// as an ordinary regular file — no symlink guard can see it afterwards, and it
+    /// would be bundled and published under the attacker's chosen name.
+    #[tokio::test]
+    async fn hard_link_target_outside_the_root_is_rejected() {
+        let secret_dir = tempfile::tempdir().unwrap();
+        let secret = secret_dir.path().join("secret");
+        std::fs::write(&secret, b"host secret").unwrap();
+
+        for target in [secret.to_str().unwrap(), "../../etc/passwd"] {
+            let (extract_dir, result) = extract_with_hard_link(target).await;
+            let err = result.unwrap_err();
+            assert!(
+                matches!(err, crate::Error::Archive(crate::archive::Error::HardLinkEscape { .. })),
+                "link name {target:?} was not rejected as an escape: {err}"
+            );
+            assert!(
+                !extract_dir.path().join("dir/alias.txt").exists(),
+                "link name {target:?} still produced an entry in the tree"
+            );
+        }
+    }
+
+    /// Regression for #275: an ordinary GNU-tar-deduplicated archive — two identical
+    /// files stored once, the second as a hard link — must extract. Passing the raw
+    /// link name to `fs::hard_link` resolved it against the process CWD instead of
+    /// the extraction root, so these archives (Kibana's release tarballs among them)
+    /// failed outright.
+    #[tokio::test]
+    async fn legitimate_in_tree_hard_link_extracts() {
+        let (extract_dir, result) = extract_with_hard_link("dir/original.txt").await;
+        result.unwrap();
+
+        let alias = extract_dir.path().join("dir/alias.txt");
+        assert_eq!(std::fs::read(&alias).unwrap(), b"original contents");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let original = extract_dir.path().join("dir/original.txt");
+            assert_eq!(
+                std::fs::metadata(&alias).unwrap().ino(),
+                std::fs::metadata(&original).unwrap().ino(),
+                "alias is a copy, not a hard link"
+            );
+        }
+    }
 
     /// Regression: tar archives must not embed the build host's ownership or per-file
     /// mtimes. Without `HeaderMode::Deterministic` every entry carries the build user's
