@@ -139,7 +139,7 @@ def _clean_env(home: Path, shell_abs: str, *, ocx_home: Path | None = None, shel
 
 def _run_setup(binary: Path, env: dict[str, str], *extra: str) -> subprocess.CompletedProcess[str]:
     cmd = [str(binary), "--offline", "self", "setup", *extra]
-    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
 
 def _assert_no_missing_env_error(stderr: str, shell: str) -> None:
@@ -198,7 +198,7 @@ def test_posix_fence_activation_survives_unset_ocx_home(shell: str, tmp_path: Pa
         [shell_abs, "-c", script],
         capture_output=True,
         text=True,
-        env=_clean_env(home, shell_abs),
+        env=_clean_env(home, shell_abs), check=False,
     )
     _assert_activation(shell, result, bin_seg)
 
@@ -238,7 +238,7 @@ def test_dash_login_activates_via_dot_profile_when_bash_profile_exists(tmp_path:
         [shell_abs, "-c", script],
         capture_output=True,
         text=True,
-        env=_clean_env(home, shell_abs),
+        env=_clean_env(home, shell_abs), check=False,
     )
     _assert_activation("dash", result, bin_seg)
 
@@ -277,7 +277,7 @@ def test_fish_dedicated_activation_survives_unset_ocx_home(tmp_path: Path) -> No
         [shell_abs, "-c", script],
         capture_output=True,
         text=True,
-        env=_clean_env(home, shell_abs),
+        env=_clean_env(home, shell_abs), check=False,
     )
     _assert_activation("fish", result, bin_seg)
 
@@ -296,7 +296,7 @@ def test_nushell_dedicated_activation_survives_unset_ocx_home(tmp_path: Path) ->
         [shell_abs, "--no-config-file", "-c", script],
         capture_output=True,
         text=True,
-        env=_clean_env(home, shell_abs),
+        env=_clean_env(home, shell_abs), check=False,
     )
     _assert_activation("nu", result, bin_seg)
 
@@ -440,7 +440,7 @@ def _pwsh_profile(shell_abs: str, home: Path) -> Path:
         [shell_abs, "-NoProfile", "-NonInteractive", "-Command", "$PROFILE.CurrentUserAllHosts"],
         capture_output=True,
         text=True,
-        env=_clean_env(home, shell_abs),
+        env=_clean_env(home, shell_abs), check=False,
     )
     return Path(query.stdout.strip())
 
@@ -527,7 +527,7 @@ def test_interactive_login_shell_registers_the_prompt_hook(shell: str, tmp_path:
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        env=_clean_env(quiet_home, shell_abs),
+        env=_clean_env(quiet_home, shell_abs), check=False,
     )
     output = quiet.stdout + quiet.stderr
     # Load-bearing on its own: a managed block that failed outright also prints
@@ -678,7 +678,7 @@ def test_elvish_hook_registration_is_inert_without_a_tty(tmp_path: Path) -> None
         [str(_OCX), "--offline", "self", "activate", "--shell=elvish", "--hook", "--no-completion"],
         capture_output=True,
         text=True,
-        env=_clean_env(home, shell_abs, ocx_home=ocx_home),
+        env=_clean_env(home, shell_abs, ocx_home=ocx_home), check=False,
     )
     assert stream.returncode == 0, f"elvish: activation must exit 0; stderr:\n{stream.stderr}"
     assert "edit:before-readline" in stream.stdout, (
@@ -691,7 +691,7 @@ def test_elvish_hook_registration_is_inert_without_a_tty(tmp_path: Path) -> None
         [shell_abs, "-c", probe],
         capture_output=True,
         text=True,
-        env=_clean_env(home, shell_abs),
+        env=_clean_env(home, shell_abs), check=False,
     )
     combined = result.stdout + result.stderr
     assert result.returncode == 0, (
@@ -733,7 +733,7 @@ def test_elvish_path_activation_survives_completion_failure_without_tty(tmp_path
         [shell_abs, "-c", probe],
         capture_output=True,
         text=True,
-        env=_clean_env(home, shell_abs),
+        env=_clean_env(home, shell_abs), check=False,
     )
     combined = result.stdout + result.stderr
     # The try/catch must swallow the completion compile error so the whole eval
@@ -766,7 +766,7 @@ def test_powershell_fence_activation_survives_unset_ocx_home(tmp_path: Path) -> 
         [shell_abs, "-NoProfile", "-NonInteractive", "-Command", "$PROFILE.CurrentUserAllHosts"],
         capture_output=True,
         text=True,
-        env=_clean_env(home, shell_abs),
+        env=_clean_env(home, shell_abs), check=False,
     )
     profile = Path(query.stdout.strip())
     assert profile.is_file(), f"pwsh: setup must write the managed block to $PROFILE ({profile})"
@@ -776,6 +776,6 @@ def test_powershell_fence_activation_survives_unset_ocx_home(tmp_path: Path) -> 
         [shell_abs, "-NoProfile", "-Command", script],
         capture_output=True,
         text=True,
-        env=_clean_env(home, shell_abs),
+        env=_clean_env(home, shell_abs), check=False,
     )
     _assert_activation("pwsh", result, bin_seg)

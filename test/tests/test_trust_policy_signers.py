@@ -169,7 +169,7 @@ def _verify(
         ],
         capture_output=True,
         text=True,
-        env={**ocx.env, **(extra_env or {})},
+        env={**ocx.env, **(extra_env or {})}, check=False,
     )
 
 
@@ -178,7 +178,7 @@ def _sign(ocx: OcxRunner, stack: SigstoreStack, token: Path, pkg: PackageInfo) -
         [str(ocx.binary), "package", "sign", *stack.sign_args(token), pkg.short],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert signed.returncode == 0, f"sign setup failed: {signed.stderr}"
 

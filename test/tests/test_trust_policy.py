@@ -41,7 +41,7 @@ def _sign(
         [str(ocx.binary), "package", "sign", *stack.sign_args(token), pkg.short],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert sign.returncode == 0, f"sign setup failed: {sign.stderr}"
 
@@ -66,7 +66,7 @@ def _attest(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert attest.returncode == 0, f"attest setup failed: {attest.stderr}"
 
@@ -108,7 +108,7 @@ def _verify(
         ],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
 
 
@@ -535,7 +535,7 @@ def test_add_then_remove_preserves_trust_policy_section(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert add_result.returncode == 0, (
         f"ocx add failed: rc={add_result.returncode}, stderr={add_result.stderr!r}"
@@ -550,7 +550,7 @@ def test_add_then_remove_preserves_trust_policy_section(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert remove_result.returncode == 0, (
         f"ocx remove failed: rc={remove_result.returncode}, stderr={remove_result.stderr!r}"

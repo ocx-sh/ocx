@@ -76,7 +76,7 @@ def schema_binary() -> Path:
             ["cargo", "build", "--release", "-p", "ocx_schema"],
             cwd=PROJECT_ROOT,
             capture_output=True,
-            text=True,
+            text=True, check=False,
         )
         if result.returncode != 0:
             pytest.skip(
@@ -98,7 +98,7 @@ def _run_schema(binary: Path, kind: str) -> str:
     result = subprocess.run(
         [str(binary), kind],
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
     assert result.returncode == 0, (
         f"ocx_schema {kind} failed (exit {result.returncode})\n"
@@ -256,7 +256,7 @@ def test_unknown_schema_kind_exits_nonzero(schema_binary: Path) -> None:
     result = subprocess.run(
         [str(schema_binary), "nonsense-kind"],
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
     assert result.returncode != 0, (
         "unknown schema kind must produce a non-zero exit code; "

@@ -68,7 +68,7 @@ def _capture(ocx: OcxRunner, *args: str) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
         [str(ocx.binary), *args],
         capture_output=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 

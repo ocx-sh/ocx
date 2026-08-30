@@ -32,7 +32,7 @@ def _run_cmd(ocx: OcxRunner, cwd: Path, *args: str) -> subprocess.CompletedProce
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 

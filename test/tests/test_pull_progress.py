@@ -66,7 +66,7 @@ def _run_pull(
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
 
 
@@ -80,7 +80,7 @@ def _run_lock(
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 

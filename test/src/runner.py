@@ -122,7 +122,7 @@ class OcxRunner:
             capture_output=True,
             text=True,
             env=env,
-            input=stdin,
+            input=stdin, check=False,
         )
         if check and result.returncode != 0:
             raise AssertionError(

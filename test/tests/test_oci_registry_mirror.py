@@ -111,7 +111,7 @@ def run_with_env(
     if extra_env:
         env.update(extra_env)
     cmd = [str(ocx.binary)] + list(args)
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
     if check and result.returncode != 0:
         raise AssertionError(
             f"ocx {' '.join(args)} failed (rc={result.returncode})\n"
@@ -340,7 +340,7 @@ def test_mirror_ocx_lock_records_canonical_host_and_digest(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 0, (
         f"ocx lock failed: rc={result.returncode}\nstderr:\n{result.stderr}"

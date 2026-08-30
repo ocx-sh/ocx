@@ -463,7 +463,7 @@ def test_a_signature_survives_the_promotion(
         [str(ocx.binary), "package", "sign", *sigstore_stack.sign_args(identity_token), package.short],
         capture_output=True,
         text=True,
-        env={**ocx.env, "OCX_INSECURE_REGISTRIES": both},
+        env={**ocx.env, "OCX_INSECURE_REGISTRIES": both}, check=False,
     )
     assert signed.returncode == 0, signed.stderr
 
@@ -481,7 +481,7 @@ def test_a_signature_survives_the_promotion(
         ],
         capture_output=True,
         text=True,
-        env={**ocx.env, "OCX_INSECURE_REGISTRIES": both},
+        env={**ocx.env, "OCX_INSECURE_REGISTRIES": both}, check=False,
     )
     assert verified.returncode == 0, verified.stderr
 

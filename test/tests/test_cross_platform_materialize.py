@@ -43,7 +43,7 @@ def _run(ocx: OcxRunner, cwd: Path, *args: str) -> subprocess.CompletedProcess[s
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 

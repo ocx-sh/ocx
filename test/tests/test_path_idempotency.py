@@ -110,7 +110,7 @@ def _exports(ocx: OcxRunner, pkg: PackageInfo, shell: str) -> str:
         [str(ocx.binary), "package", "env", f"--shell={shell}", pkg.short],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 0, f"package env --shell={shell} failed:\n{result.stderr}"
     return result.stdout.strip()
@@ -129,7 +129,7 @@ def _run(recipe: ShellRecipe, script: str) -> str:
         [interpreter, *recipe.argv[1:], script],
         capture_output=True,
         text=True,
-        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, check=False,
     )
     assert proc.returncode == 0, (
         f"{recipe.interpreter} eval failed (rc={proc.returncode})\n"
@@ -270,5 +270,5 @@ def _run_in(ocx: OcxRunner, cwd: Path, *args: str) -> subprocess.CompletedProces
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )

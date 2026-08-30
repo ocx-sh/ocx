@@ -61,7 +61,7 @@ def _run_lock(ocx: OcxRunner, cwd: Path, *extra: str) -> subprocess.CompletedPro
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 
@@ -71,7 +71,7 @@ def _run_add(ocx: OcxRunner, cwd: Path, *extra: str) -> subprocess.CompletedProc
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 
@@ -81,7 +81,7 @@ def _run_update(ocx: OcxRunner, cwd: Path, *extra: str) -> subprocess.CompletedP
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 
@@ -684,7 +684,7 @@ repository = "{fake_registry}/{repo}"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == EXIT_POLICY_BLOCKED, (
         f"ocx --offline update with an uncached moving tag must exit "
@@ -744,7 +744,7 @@ repository = "{ocx.registry}/{repo}"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == EXIT_POLICY_BLOCKED, (
         f"ocx --frozen update with an unsnapshotted tag must exit "
@@ -871,7 +871,7 @@ mover = "{ocx.registry}/{repo}:latest"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert snapshot.returncode == EXIT_SUCCESS, snapshot.stderr
 
@@ -891,7 +891,7 @@ mover = "{ocx.registry}/{repo}:latest"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert frozen_first.returncode == EXIT_SUCCESS, (
         f"ocx --frozen update must resolve from the local snapshot; "
@@ -912,7 +912,7 @@ mover = "{ocx.registry}/{repo}:latest"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert frozen_second.returncode == EXIT_SUCCESS, (
         f"ocx --frozen update must resolve from the local snapshot even when "

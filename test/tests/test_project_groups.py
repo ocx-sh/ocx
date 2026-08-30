@@ -44,7 +44,7 @@ def _run_cmd(ocx: OcxRunner, cwd: Path, *args: str) -> subprocess.CompletedProce
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 
@@ -393,7 +393,7 @@ def test_no_ocx_lock_sentinel_after_lock(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert r_lock.returncode == EXIT_SUCCESS, (
         f"ocx lock failed: rc={r_lock.returncode}, stderr={r_lock.stderr!r}"

@@ -49,7 +49,7 @@ def _run_cmd(ocx: OcxRunner, cwd: Path, *args: str) -> subprocess.CompletedProce
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 
@@ -89,14 +89,14 @@ def _setup_project_with_tool(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert lock_r.returncode == EXIT_SUCCESS, f"baseline lock failed: {lock_r.stderr}"
     install_r = subprocess.run(
         [str(ocx.binary), "package", "install", f"{ocx.registry}/{repo}:{tag}"],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert install_r.returncode == EXIT_SUCCESS, f"baseline install failed: {install_r.stderr}"
     return project_dir, _candidate_path(ocx, repo, tag)
@@ -188,7 +188,7 @@ def test_remove_from_named_group(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert lock_r.returncode == EXIT_SUCCESS, f"baseline lock failed: {lock_r.stderr}"
 
@@ -248,7 +248,7 @@ def test_remove_preserves_untouched_pins_when_upstream_moved(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert lock_r.returncode == EXIT_SUCCESS, f"baseline lock failed: {lock_r.stderr}"
     initial_a = _leaves_for_remove((project_dir / "ocx.lock").read_text(), repo_a)
@@ -261,7 +261,7 @@ def test_remove_preserves_untouched_pins_when_upstream_moved(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert refresh.returncode == EXIT_SUCCESS, refresh.stderr
 
@@ -311,7 +311,7 @@ def test_remove_fails_when_toml_handedited_since_lock(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert lock_r.returncode == EXIT_SUCCESS, f"baseline lock failed: {lock_r.stderr}"
 
@@ -364,7 +364,7 @@ def test_remove_multiple_bindings_in_one_call(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert lock_r.returncode == EXIT_SUCCESS, f"baseline lock failed: {lock_r.stderr}"
     for repo in (repo_a, repo_b):

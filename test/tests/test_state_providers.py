@@ -141,6 +141,7 @@ print("OK")
         capture_output=True,
         text=True,
         cwd=str(Path(__file__).parent.parent),  # test/ root on PYTHONPATH
+        check=False,
     )
     assert result.returncode == 0, (
         f"import test failed (rc={result.returncode}):\n"
@@ -1195,6 +1196,7 @@ print("OK")
         capture_output=True,
         text=True,
         cwd=str(Path(__file__).parent.parent),  # test/ root on PYTHONPATH
+        check=False,
     )
     assert result.returncode == 0, (
         f"DE4 zero-I/O test failed (rc={result.returncode}):\n"

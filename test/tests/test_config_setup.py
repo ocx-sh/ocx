@@ -59,7 +59,7 @@ def _run(
         [str(ocx.binary), "--format", "json", *args],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
 
 

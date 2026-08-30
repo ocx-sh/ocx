@@ -161,11 +161,11 @@ def test_offline_project_toolchain_run_succeeds_from_copied_store(
 """)
 
     lock = subprocess.run(
-        [str(ocx.binary), "lock"], cwd=project, capture_output=True, text=True, env=ocx.env
+        [str(ocx.binary), "lock"], cwd=project, capture_output=True, text=True, env=ocx.env, check=False
     )
     assert lock.returncode == 0, f"ocx lock failed: rc={lock.returncode}\nstderr:\n{lock.stderr}"
     pull = subprocess.run(
-        [str(ocx.binary), "pull"], cwd=project, capture_output=True, text=True, env=ocx.env
+        [str(ocx.binary), "pull"], cwd=project, capture_output=True, text=True, env=ocx.env, check=False
     )
     assert pull.returncode == 0, f"ocx pull failed: rc={pull.returncode}\nstderr:\n{pull.stderr}"
 
@@ -178,7 +178,7 @@ def test_offline_project_toolchain_run_succeeds_from_copied_store(
         cwd=project,
         capture_output=True,
         text=True,
-        env=fresh_env,
+        env=fresh_env, check=False,
     )
     assert result.returncode == 0, (
         f"offline `ocx run` against a blobs+layers+index-only copy must succeed; "

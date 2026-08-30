@@ -52,7 +52,7 @@ def _platform_arg(ocx: OcxRunner, platform: str) -> subprocess.CompletedProcess[
         [str(ocx.binary), "package", "install", f"--platform={platform}", f"{ocx.registry}/absent:1.0.0"],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 

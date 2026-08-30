@@ -151,7 +151,7 @@ class Scenario:
             env=full_env,
             cwd=str(cwd) if cwd else str(self.tmp_path),
             capture_output=True,
-            text=True,
+            text=True, check=False,
         )
         if check and result.returncode != 0:
             raise AssertionError(

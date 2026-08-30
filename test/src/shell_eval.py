@@ -82,7 +82,7 @@ def run_after_sourcing(
             cwd=cwd,
             capture_output=True,
             text=True,
-            env=env,
+            env=env, check=False,
         )
     finally:
         import os

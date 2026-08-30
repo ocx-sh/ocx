@@ -110,7 +110,7 @@ def test_sign_then_verify_happy_path(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert sign_result.returncode == 0, sign_result.stderr
     sign_envelope = json.loads(sign_result.stdout)
@@ -138,7 +138,7 @@ def test_sign_then_verify_happy_path(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert verify_result.returncode == 0, verify_result.stderr
     verify_envelope = json.loads(verify_result.stdout)
@@ -172,7 +172,7 @@ def test_sign_rejects_identity_token_flag(ocx: OcxRunner) -> None:
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     # clap prints "unexpected argument" / "unknown option" to stderr.
     assert result.returncode != 0, (
@@ -208,7 +208,7 @@ def test_sign_identity_token_file_and_stdin_are_mutually_exclusive(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode != 0, (
         f"expected rejection for conflicting token sources, got rc=0\n"
@@ -250,7 +250,7 @@ def test_sign_reads_env_token(
         ],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
@@ -281,7 +281,7 @@ def test_sign_reads_stdin_token(
         input=identity_token.read_text().strip(),
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
@@ -321,7 +321,7 @@ def test_sign_offline_refused(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 77, (
         f"expected exit 77 (PermissionDenied / OfflineSignRefused), "
@@ -370,7 +370,7 @@ def test_sign_token_file_only(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
@@ -412,7 +412,7 @@ def test_sign_token_stdin_overrides_env(
         input=identity_token.read_text().strip(),
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
@@ -454,7 +454,7 @@ def test_sign_token_file_overrides_stdin_and_env(
         ],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
@@ -494,7 +494,7 @@ def test_sign_rejects_world_readable_identity_token_file(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 77, (
         f"expected exit 77 (PermissionDenied / IdentityTokenFilePermissive), "
@@ -551,7 +551,7 @@ def test_sign_lands_in_the_fallback_index_on_a_registry_without_the_referrers_ap
         ],
         capture_output=True,
         text=True,
-        env=legacy_ocx.env,
+        env=legacy_ocx.env, check=False,
     )
     assert result.returncode == 0, (
         f"sign must succeed on a registry without the Referrers API, got "
@@ -616,7 +616,7 @@ def test_signature_format_both_writes_a_bundle_referrer_and_a_cosign_sidecar(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)["data"]
@@ -695,7 +695,7 @@ def test_sign_with_a_cosign_key_reports_a_key_backend_and_writes_no_certificate(
         ],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)["data"]
@@ -750,7 +750,7 @@ def test_sign_does_not_forward_identity_token_to_children(
         ],
         capture_output=True,
         text=True,
-        env={**ocx.env, "OCX_IDENTITY_TOKEN": token},
+        env={**ocx.env, "OCX_IDENTITY_TOKEN": token}, check=False,
     )
     assert result.returncode == 0, result.stderr
     # The identity token must never surface in the command's output streams.
@@ -781,7 +781,7 @@ def test_sign_rejects_http_non_loopback_fulcio_url(ocx: OcxRunner) -> None:
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 64, (
         f"expected exit 64 (UsageError / InvalidEndpointUrl on --fulcio-url), got {result.returncode}\n"
@@ -806,7 +806,7 @@ def test_sign_rejects_ftp_scheme_url(ocx: OcxRunner) -> None:
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 64, (
         f"expected exit 64 (UsageError / InvalidEndpointUrl on ftp scheme), got {result.returncode}\n"
@@ -859,7 +859,7 @@ def test_sign_then_sign_again_is_idempotent(
             ],
             capture_output=True,
             text=True,
-            env=ocx.env,
+            env=ocx.env, check=False,
         )
         assert result.returncode == 0, result.stderr
         subject_digest = json.loads(result.stdout)["data"]["subject_digest"]
@@ -911,7 +911,7 @@ def test_sign_no_tty_skips_browser_fallback_exits_77(
         ],
         capture_output=True,
         text=True,
-        env=env_no_token,
+        env=env_no_token, check=False,
     )
     assert result.returncode == 77, (
         f"expected exit 77 (PermissionDenied / OidcPreCheckFailed), got {result.returncode}\n"
@@ -958,7 +958,7 @@ def test_sign_transparency_log_unavailable_exits_83(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 83, (
         f"expected exit 83 (TransparencyLogUnavailable) when Rekor 503s during sign, got "
@@ -997,7 +997,7 @@ def test_sign_wrong_key_oidc_token_exits_80(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 80, (
         f"expected exit 80 (AuthError / OidcTokenRejected) for a wrong-key token, got "
@@ -1036,7 +1036,7 @@ def test_sign_refuses_a_rekor_url_that_resolves_into_a_forbidden_range(
         ],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 64, (
         f"expected exit 64 (UsageError / InvalidEndpointUrl) for a link-local "
@@ -1117,7 +1117,7 @@ def test_sign_source_date_epoch_pins_the_created_annotation(
             *sigstore_stack.sign_args(identity_token), pkg.short,
         ],
         capture_output=True, text=True,
-        env={**ocx.env, "SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH},
+        env={**ocx.env, "SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH}, check=False,
     )
     assert result.returncode == 0, f"sign failed: {result.stderr}"
 
@@ -1165,7 +1165,7 @@ def test_attest_source_date_epoch_stamps_one_instant_in_both_places(
             pkg.short,
         ],
         capture_output=True, text=True,
-        env={**ocx.env, "SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH},
+        env={**ocx.env, "SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH}, check=False,
     )
     assert result.returncode == 0, f"attest failed: {result.stderr}"
 

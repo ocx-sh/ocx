@@ -171,7 +171,7 @@ def _run_script(
         text=True,
         env=ocx.env,
         input=stdin,
-        timeout=120.0,
+        timeout=120.0, check=False,
     )
 
 
@@ -697,7 +697,7 @@ def test_u17_child_killed_on_parent_sigterm(
 
     time.sleep(2.0)
     pgrep = subprocess.run(
-        ["pgrep", "-f", sentinel], capture_output=True, text=True
+        ["pgrep", "-f", sentinel], capture_output=True, text=True, check=False
     )
     assert pgrep.returncode != 0, (
         "U17: child must be killed on parent termination (no orphaned "
@@ -763,7 +763,7 @@ def test_u18_stdin_read_failure_is_io_error_74(
         capture_output=True,
         env=ocx.env,
         text=True,
-        timeout=120.0,
+        timeout=120.0, check=False,
     )
 
     assert proc.returncode == 74, (
@@ -1136,7 +1136,7 @@ def test_nonexecutable_package_binary_fails_script(
         capture_output=True,
         text=True,
         env=env,
-        timeout=120.0,
+        timeout=120.0, check=False,
     )
 
     assert result.returncode == 1, (

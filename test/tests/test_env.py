@@ -85,7 +85,7 @@ def test_shell_env_removed(
         [str(ocx.binary), "shell", "env", pkg.short],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == EXIT_USAGE, (
         f"ocx shell env must exit {EXIT_USAGE} (deleted); "

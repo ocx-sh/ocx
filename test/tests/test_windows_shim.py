@@ -216,7 +216,7 @@ def test_shim_resolves_via_pathext(shim_entrypoint: dict, shell: list[str]) -> N
         [*cmd, invocation],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     # The shim must be reached and hit its deterministic pinned-miss E5
     # path. Its `ocx-shim:` stderr line is the authoritative cross-shell
@@ -246,7 +246,7 @@ def test_shim_argv0_is_real_target_not_cmd_exe(shim_entrypoint: dict) -> None:
         [str(shim_entrypoint["exe"]), "--version"],
         capture_output=True,
         text=True,
-        env=shim_entrypoint["env"],
+        env=shim_entrypoint["env"], check=False,
     )
     assert "cmd.exe" not in proc.stderr.lower(), (
         f"shim must not route through cmd.exe; stderr={proc.stderr!r}"
@@ -259,7 +259,7 @@ def test_shim_forwards_args_verbatim(shim_entrypoint: dict) -> None:
         [str(shim_entrypoint["exe"]), "arg with spaces", "café"],
         capture_output=True,
         text=True,
-        env=shim_entrypoint["env"],
+        env=shim_entrypoint["env"], check=False,
     )
     # Pre-spawn failures (no ocx) exit 69; a successful forward exits 0.
     assert proc.returncode in (0, 69), (
@@ -306,7 +306,7 @@ def test_shim_ampersand_arg_not_executed(shim_entrypoint: dict, tmp_path: Path) 
         [str(shim_entrypoint["exe"]), "& whoami"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert proc.returncode == 0, (
         f"the pinned fake ocx must run and exit 0; rc={proc.returncode} "
@@ -363,7 +363,7 @@ def test_shim_propagates_child_exit_code(shim_entrypoint: dict, tmp_path: Path) 
         [str(shim_entrypoint["exe"])],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert proc.returncode == 42, (
         f"shim must propagate the child's exit code verbatim (E8 full "
@@ -419,7 +419,7 @@ def test_shim_exe_resolves_and_no_cmd_emitted(shim_entrypoint: dict) -> None:
         ["cmd", "/c", "hello"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert proc.returncode in (0, 69), (
         f"bare-name `hello` must resolve the `.exe` shim via default PATHEXT "
@@ -444,7 +444,7 @@ def test_shim_missing_sidecar_exits_78(shim_entrypoint: dict) -> None:
         [str(shim_entrypoint["exe"])],
         capture_output=True,
         text=True,
-        env=shim_entrypoint["env"],
+        env=shim_entrypoint["env"], check=False,
     )
     assert proc.returncode == 78, (
         f"missing sidecar must exit 78 (EX_CONFIG / E1); rc={proc.returncode}"
@@ -461,7 +461,7 @@ def test_shim_malformed_sidecar_exits_78(shim_entrypoint: dict) -> None:
         [str(shim_entrypoint["exe"])],
         capture_output=True,
         text=True,
-        env=shim_entrypoint["env"],
+        env=shim_entrypoint["env"], check=False,
     )
     assert proc.returncode == 78, (
         f"malformed sidecar must exit 78 (EX_CONFIG / E2); rc={proc.returncode}"
@@ -490,7 +490,7 @@ def test_shim_honours_ocx_binary_pin(shim_entrypoint: dict, tmp_path: Path) -> N
         [str(shim_entrypoint["exe"])],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert proc.returncode == 57, (
         f"shim must spawn the OCX_BINARY_PIN binary (exit 57 sentinel), not a "
@@ -535,7 +535,7 @@ def test_shim_runs_without_console(shim_entrypoint: dict, tmp_path: Path) -> Non
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         creationflags=detached_process,
-        env=env,
+        env=env, check=False,
     )
     assert proc.returncode == 73, (
         f"a no-console (DETACHED_PROCESS) shim must still spawn the pinned "
@@ -569,7 +569,7 @@ def test_shim_empty_pin_deterministic_fail(shim_entrypoint: dict) -> None:
         [str(shim_entrypoint["exe"])],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert proc.returncode in (69, 74, 77), (
         f"an empty OCX_BINARY_PIN must take the pin branch and fail the spawn "

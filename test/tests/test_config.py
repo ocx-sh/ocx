@@ -48,7 +48,7 @@ def run_with_extra_env(
     if extra_env:
         env.update(extra_env)
     cmd = [str(ocx.binary), "--format", "json"] + list(args)
-    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
 
 def run_plain_with_extra_env(
@@ -62,7 +62,7 @@ def run_plain_with_extra_env(
     if extra_env:
         env.update(extra_env)
     cmd = [str(ocx.binary)] + list(args)
-    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ def test_config_default_registry_takes_effect(ocx: OcxRunner) -> None:
         [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode != 0, "install of nonexistent package should fail"
     combined = result.stdout + result.stderr
@@ -114,7 +114,7 @@ def test_env_var_overrides_config_file(ocx: OcxRunner) -> None:
         [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode != 0, "install of nonexistent package should fail"
     combined = result.stdout + result.stderr
@@ -141,7 +141,7 @@ def test_no_config_kills_file_loading(ocx: OcxRunner) -> None:
         [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode != 0, "install of nonexistent package should fail"
     combined = result.stdout + result.stderr
@@ -168,7 +168,7 @@ def test_invalid_config_produces_clear_error_with_path(ocx: OcxRunner) -> None:
         [str(ocx.binary), "index", "catalog"],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode != 0, (
         "command should fail when config file is invalid TOML"
@@ -337,7 +337,7 @@ def test_explicit_config_flag_loads_file(ocx: OcxRunner, tmp_path: Path) -> None
         [str(ocx.binary), "--config", str(custom_config), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode != 0, "install of nonexistent package should fail"
     combined = result.stdout + result.stderr
@@ -361,7 +361,7 @@ def test_ocx_config_file_env_loads_file(ocx: OcxRunner, tmp_path: Path) -> None:
         [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode != 0, "install of nonexistent package should fail"
     combined = result.stdout + result.stderr
@@ -396,7 +396,7 @@ def test_no_config_with_explicit_flag_loads_only_explicit(ocx: OcxRunner, tmp_pa
         [str(ocx.binary), "--config", str(hermetic), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode != 0, "install of bogus package should fail"
     combined = result.stdout + result.stderr
@@ -427,7 +427,7 @@ def test_registry_default_is_a_literal_prefix(ocx: OcxRunner) -> None:
         [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode != 0, "install of nonexistent package should fail"
     combined = result.stdout + result.stderr
@@ -453,7 +453,7 @@ def test_empty_ocx_config_file_is_escape_hatch(ocx: OcxRunner) -> None:
         [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode != 0, "install of bogus package should fail"
     combined = result.stdout + result.stderr
@@ -479,7 +479,7 @@ def test_explicit_config_nonexistent_file_errors(ocx: OcxRunner) -> None:
         [str(ocx.binary), "--config", nonexistent, "index", "catalog"],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode != 0, "missing --config file should fail"
     combined = result.stdout + result.stderr
@@ -527,7 +527,7 @@ def test_unknown_top_level_section_ignored(ocx: OcxRunner) -> None:
         [str(ocx.binary), "index", "catalog"],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 0, (
         f"unknown top-level config section should not cause failure, "
@@ -559,7 +559,7 @@ def test_file_too_large_errors_with_helpful_message(ocx: OcxRunner) -> None:
         [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 78, (
         f"FileTooLarge should exit with code 78 (EX_CONFIG), got {result.returncode}; "
@@ -594,7 +594,7 @@ def test_explicit_config_overrides_env_var_config_file(ocx: OcxRunner, tmp_path:
         [str(ocx.binary), "--config", str(cli_config), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode != 0, "install of nonexistent package should fail"
     combined = result.stdout + result.stderr
@@ -629,7 +629,7 @@ def test_layered_merge_home_tier_and_explicit_config(ocx: OcxRunner, tmp_path: P
         [str(ocx.binary), "--config", str(extra_config), "index", "catalog"],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     # The command must succeed: if either tier had clobbered the other or
     # rejected the config, the loader would emit ConfigError (78). Returncode 0
@@ -650,7 +650,7 @@ def test_exit_code_on_config_not_found(ocx: OcxRunner) -> None:
         [str(ocx.binary), "--config", "/tmp/ocx-spec-test-nonexistent-config.toml", "index", "catalog"],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 79, (
         f"config not found should exit with code 79 (NotFound), got {result.returncode}; "
@@ -669,7 +669,7 @@ def test_exit_code_on_config_parse_error(ocx: OcxRunner) -> None:
         [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 78, (
         f"TOML parse error should exit with code 78 (EX_CONFIG), got {result.returncode}; "
@@ -687,7 +687,7 @@ def test_cli_help_mentions_config_env_vars(ocx: OcxRunner) -> None:
         [str(ocx.binary), "--help"],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 0, f"--help should exit 0, got {result.returncode}"
     combined = result.stdout + result.stderr
@@ -713,7 +713,7 @@ def test_no_config_env_var_suppresses_discovery(ocx: OcxRunner) -> None:
         [str(ocx.binary), "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode != 0, "install of nonexistent package should fail"
     combined = result.stdout + result.stderr

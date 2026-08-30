@@ -46,7 +46,7 @@ def _run_in_project(
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
 
 
@@ -63,7 +63,7 @@ def _run(
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
-        [str(ocx.binary), *args], capture_output=True, text=True, env=env
+        [str(ocx.binary), *args], capture_output=True, text=True, env=env, check=False
     )
 
 

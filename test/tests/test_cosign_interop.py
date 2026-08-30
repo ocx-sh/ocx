@@ -44,7 +44,7 @@ def cosign_image() -> str:
     pulled = subprocess.run(
         ["docker", "pull", "--quiet", cosign.COSIGN_IMAGE],
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
     assert pulled.returncode == 0, f"could not pull {cosign.COSIGN_IMAGE}:\n{pulled.stderr}"
     return cosign.COSIGN_IMAGE

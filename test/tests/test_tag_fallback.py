@@ -369,7 +369,7 @@ def test_ac6b_unreachable_registry_fails_with_network_error(
         [str(ocx_binary), "--format", "json", "package", "install", "cmake:3.28"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
 
     assert result.returncode != 0, (

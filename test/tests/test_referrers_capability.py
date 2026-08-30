@@ -50,7 +50,7 @@ def _sign(
         [str(ocx.binary), "package", "sign", *stack.sign_args(token), pkg.short],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 

@@ -112,7 +112,7 @@ def test_taplo_check_accepts_valid_ocx_toml(
         [taplo_binary, "check", str(fixture)],
         cwd=PROJECT_ROOT,
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
     assert result.returncode == 0, (
         f"taplo check rejected a valid ocx.toml fixture (exit "
@@ -137,7 +137,7 @@ def test_taplo_check_rejects_integer_tool_value(
         [taplo_binary, "check", str(fixture)],
         cwd=PROJECT_ROOT,
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
     assert result.returncode != 0, (
         "taplo check accepted an integer-valued tool entry — schema "

@@ -54,7 +54,7 @@ def _run_with_env(
     if extra_env:
         env.update(extra_env)
     cmd = [str(ocx.binary)] + list(args)
-    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +320,7 @@ def test_project_flag_canonicalized_for_registry(
         [str(ocx.binary), "--project", str(path_a), "lock"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert r1.returncode == 0, (
         f"first ocx lock must succeed; rc={r1.returncode}, stderr={r1.stderr!r}"
@@ -336,7 +336,7 @@ def test_project_flag_canonicalized_for_registry(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert r2.returncode == 0, (
         f"second ocx lock (bare relative --project) must succeed; "
@@ -552,7 +552,7 @@ def _run_lock_in(
     if extra_env:
         env.update(extra_env)
     cmd = [str(ocx.binary), "lock"]
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=env)
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=env, check=False)
 
 
 def test_home_ocx_toml_not_discovered_without_global(
@@ -603,7 +603,7 @@ def test_home_ocx_toml_not_discovered_without_global(
         cwd=cwd,
         capture_output=True,
         text=True,
-        env={**ocx.env, **env},
+        env={**ocx.env, **env}, check=False,
     )
     assert explicit.returncode == 0, (
         f"`ocx --global lock` must select $OCX_HOME/ocx.toml; "

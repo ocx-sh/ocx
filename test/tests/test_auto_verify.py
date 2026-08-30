@@ -55,7 +55,7 @@ def _sign(ocx: OcxRunner, stack: SigstoreStack, token: Path, pkg: PackageInfo) -
     """Sign `pkg` online against the real stack; publishes the signature referrer."""
     result = subprocess.run(
         [str(ocx.binary), "package", "sign", *stack.sign_args(token), pkg.short],
-        capture_output=True, text=True, env=ocx.env,
+        capture_output=True, text=True, env=ocx.env, check=False,
     )
     assert result.returncode == 0, f"sign setup failed: {result.stderr}"
 
@@ -64,7 +64,7 @@ def _run(ocx: OcxRunner, verb: str, *packages: str, flags: tuple[str, ...] = (),
     """Run `ocx package <verb> -p <host platform> [flags] <packages...>`."""
     return subprocess.run(
         [str(ocx.binary), "package", verb, "-p", current_platform(), *flags, *packages],
-        capture_output=True, text=True, env={**ocx.env, **(extra_env or {})},
+        capture_output=True, text=True, env={**ocx.env, **(extra_env or {})}, check=False,
     )
 
 
@@ -279,7 +279,7 @@ def test_package_exec_is_policy_gated(
 
     result = subprocess.run(
         [str(ocx.binary), "package", "exec", "-p", current_platform(), pkg.short, "--", "hello"],
-        capture_output=True, text=True, env={**ocx.env, **_tuf(sigstore_stack)},
+        capture_output=True, text=True, env={**ocx.env, **_tuf(sigstore_stack)}, check=False,
     )
     assert result.returncode == 79, (
         f"exec on a policy-covered unsigned package must abort (79), not silently install, "
@@ -300,7 +300,7 @@ def test_package_env_is_policy_gated(
 
     result = subprocess.run(
         [str(ocx.binary), "package", "env", pkg.short],
-        capture_output=True, text=True, env={**ocx.env, **_tuf(sigstore_stack)},
+        capture_output=True, text=True, env={**ocx.env, **_tuf(sigstore_stack)}, check=False,
     )
     assert result.returncode == 77, (
         f"env on a covered-but-mismatched package must abort (77), not silently install, "
@@ -374,13 +374,13 @@ def test_run_is_policy_gated(
     tuf_env = _tuf(sigstore_stack)
     lock = subprocess.run(
         [str(ocx.binary), "lock", "--no-pull"],
-        cwd=project, capture_output=True, text=True, env={**ocx.env, **tuf_env},
+        cwd=project, capture_output=True, text=True, env={**ocx.env, **tuf_env}, check=False,
     )
     assert lock.returncode == 0, f"lock setup failed: rc={lock.returncode}\nstderr: {lock.stderr.strip()}"
 
     result = subprocess.run(
         [str(ocx.binary), "exec", "--", "hello"],
-        cwd=project, capture_output=True, text=True, env={**ocx.env, **tuf_env},
+        cwd=project, capture_output=True, text=True, env={**ocx.env, **tuf_env}, check=False,
     )
     assert result.returncode == 79, (
         f"ocx run on a policy-covered unsigned tool must abort (79), not silently install "

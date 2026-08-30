@@ -50,7 +50,7 @@ def _run_env(
         [str(ocx.binary), "package", "env", *args],
         capture_output=True,
         text=True,
-        env=env if env is not None else ocx.env,
+        env=env if env is not None else ocx.env, check=False,
     )
 
 
@@ -256,7 +256,7 @@ def test_ci_command_still_removed(
         cwd=str(tmp_path),
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == EXIT_USAGE, (
         f"ocx ci must exit {EXIT_USAGE} (removed command); got {result.returncode}\n"
@@ -292,7 +292,7 @@ def _make_toolchain_project(
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert lock_result.returncode == 0, (
         f"ocx lock failed during project setup; rc={lock_result.returncode}\n"
@@ -304,7 +304,7 @@ def _make_toolchain_project(
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert pull_result.returncode == 0, (
         f"ocx pull failed during project setup; rc={pull_result.returncode}\n"
@@ -335,7 +335,7 @@ def test_toolchain_env_ci_gitlab_export_file_json_lines(
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 0, (
         f"ocx env --ci=gitlab --export-file must succeed for a locked project; "
@@ -380,7 +380,7 @@ def test_toolchain_env_ci_conflicts_with_shell(
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == EXIT_USAGE, (
         f"ocx env --ci=gitlab --shell=bash must exit {EXIT_USAGE} "
@@ -433,7 +433,7 @@ def test_toolchain_env_ci_gitlab_resolves_host_leaf(
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 0, (
         f"ocx env --ci=gitlab must exit 0 (host-leaf resolved); "

@@ -124,7 +124,7 @@ def _run(
     if log_level:
         cmd += ["--log-level", log_level]
     cmd += list(args)
-    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
 
 def _self_setup(
@@ -718,7 +718,7 @@ def test_zip_and_move_warm_home_offline_identical(
         [str(ocx.binary), "--format", "json", "--offline", "package", "install", "nonexistent_pkg_ocx_test:0"],
         capture_output=True,
         text=True,
-        env=moved_env,
+        env=moved_env, check=False,
     )
     combined = result.stdout + result.stderr
     assert "warm-home.example" in combined, (

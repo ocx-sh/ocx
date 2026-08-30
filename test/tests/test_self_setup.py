@@ -136,7 +136,7 @@ def _setup(
     env = dict(ocx.env)
     if home is not None:
         env["HOME"] = str(home)
-    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +225,7 @@ def test_setup_env_sh_double_source_no_path_duplication(ocx: OcxRunner) -> None:
         ["bash", "-c", f'. "{env_sh}"; . "{env_sh}"; printf "%s" "$PATH"'],
         capture_output=True,
         text=True,
-        env={**ocx.env, "OCX_HOME": str(ocx_home)},
+        env={**ocx.env, "OCX_HOME": str(ocx_home)}, check=False,
     )
     assert sourced.returncode == 0, (
         f"double-source must exit 0; rc={sourced.returncode}\nstderr:\n{sourced.stderr}"
@@ -517,7 +517,7 @@ def test_setup_no_modify_path_via_env_var(ocx: OcxRunner, tmp_path: Path, truthy
     cmd = [str(ocx.binary), "--format", "json", "--offline", "self", "setup", "--profile", str(profile)]
     env = dict(ocx.env)
     env["OCX_NO_MODIFY_PATH"] = truthy
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
     assert result.returncode == 0, f"OCX_NO_MODIFY_PATH={truthy} setup must exit 0; stderr:\n{result.stderr}"
 
     payload = json.loads(result.stdout)
@@ -699,7 +699,7 @@ def test_setup_bootstrap_failure_writes_nothing(ocx: OcxRunner, tmp_path: Path) 
     # loopback registry. Online (no --offline) so the miss is a real failure,
     # not the offline self-heal path.
     env["__OCX_SELF_IMAGE"] = f"{ocx.registry}/nonexistent_self_image_xyz"
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
     assert result.returncode != 0, (
         f"a failed bootstrap must exit non-zero; rc={result.returncode}\n"
@@ -789,7 +789,7 @@ def test_setup_bootstrap_pulls_latest_published(
     cmd = [str(ocx.binary), "--format", "json", "self", "setup", "--no-modify-path"]
     env = dict(ocx.env)
     env["__OCX_SELF_IMAGE"] = f"{ocx.registry}/{repo}"
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
     assert result.returncode == 0, (
         f"success-path setup must exit 0; rc={result.returncode}\n"
@@ -894,7 +894,7 @@ def _setup_pinned(
     cmd += [*root_args, "self", "setup", "--no-modify-path", *sub_args, version_spec]
     env = dict(ocx.env)
     env["__OCX_SELF_IMAGE"] = f"{ocx.registry}/{repo}"
-    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
 
 # ── UX row: pinned tag install ───────────────────────────────────────────────

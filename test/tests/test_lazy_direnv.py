@@ -48,7 +48,7 @@ def _run(
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
-        [str(ocx.binary), *args], cwd=cwd, capture_output=True, text=True, env=env
+        [str(ocx.binary), *args], cwd=cwd, capture_output=True, text=True, env=env, check=False
     )
 
 

@@ -87,7 +87,7 @@ def _run_activate(
     if extra_env:
         env.update(extra_env)
     cmd = [str(ocx.binary), "self", "activate", *extra_args]
-    return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env)
+    return subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, check=False)
 
 
 # `ocx self activate` gates completions on an interactive (TTY) session, probing
@@ -121,7 +121,7 @@ def _run_activate_interactive(
             stderr=secondary,
             stdin=subprocess.DEVNULL,
             text=True,
-            env=env,
+            env=env, check=False,
         )
     finally:
         os.close(secondary)
@@ -266,7 +266,7 @@ def _run_activate_with_spaced_home(
     env = dict(ocx.env)
     env["OCX_HOME"] = str(spaced_home)
     cmd = [str(ocx.binary), "self", "activate", f"--shell={shell}"]
-    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
 
 def test_activate_bash_path_survives_space_in_ocx_home(
@@ -603,7 +603,7 @@ def test_activate_falls_back_to_home_when_ocx_home_unset(
     env = {k: v for k, v in ocx.env.items() if k != "OCX_HOME"}
     env["HOME"] = str(tmp_path)
     cmd = [str(ocx.binary), "self", "activate", "--shell=sh"]
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
     assert result.returncode == 0, (
         "self activate must exit 0 when OCX_HOME is unset and HOME is set; "
@@ -799,7 +799,7 @@ echo '# noop'
             "OCX_HOME": ocx.env["OCX_HOME"],
             "PATH": "/usr/bin:/bin",
             "OCX_ACTIVATED": "1",
-        },
+        }, check=False,
     )
     assert result.returncode == 0, (
         f"sourcing must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
@@ -879,7 +879,7 @@ def _generate_real_env_sh(ocx_binary: Path, ocx_home: Path) -> tuple[Path, dict[
         [str(ocx_binary), "--offline", "self", "setup", "--no-modify-path"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert gen.returncode == 0, f"ocx self setup must succeed; stderr:\n{gen.stderr}"
     env_sh = ocx_home / "env.sh"
@@ -901,7 +901,7 @@ def test_real_env_sh_loads_bash_completions_when_interactive(ocx_binary: Path, o
         ["bash", "-i", "-c", f'. "{env_sh}"; complete -p ocx'],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert "_ocx" in result.stdout, (
         "interactive bash sourcing the real env.sh must inline + register the ocx completion; "
@@ -931,7 +931,7 @@ def test_real_env_sh_honours_completion_opt_out_when_interactive(ocx_binary: Pat
         ["bash", "-i", "-c", f'. "{env_sh}"; type -P ocx; complete -p ocx'],
         capture_output=True,
         text=True,
-        env={**env, "OCX_NO_COMPLETIONS": "1"},
+        env={**env, "OCX_NO_COMPLETIONS": "1"}, check=False,
     )
     assert str(ocx_home) in result.stdout, (
         "env.sh must still prepend the ocx bin dir to PATH under OCX_NO_COMPLETIONS=1; "
@@ -953,7 +953,7 @@ def test_real_env_sh_loads_zsh_completions_when_interactive(ocx_binary: Path, oc
         ["zsh", "-i", "-c", f'. "{env_sh}"'],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     # env.sh is sourced before the user's compinit; the inlined zsh completion
     # must self-load compinit so clap's trailing `compdef` is defined. The
