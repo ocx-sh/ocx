@@ -206,6 +206,33 @@ pub(crate) const SIG_SIDECAR_SUFFIX: &str = ".sig";
 pub(crate) const ATT_SIDECAR_SUFFIX: &str = ".att";
 pub(crate) const SBOM_SIDECAR_SUFFIX: &str = ".sbom";
 
+/// Every cosign sidecar suffix, for a caller that sweeps all three.
+///
+/// A bare suffix list and deliberately **not** a fourth
+/// [`SidecarKind`](crate::oci::verify::simplesigning_read::SidecarKind) variant:
+/// that enum names the doors a *reader* reaches, and re-adding `.sbom` to it to
+/// serve a copy-side consumer would make a documented reader gap look covered —
+/// the exact shape the variant was deleted for. Iterating suffixes carries no
+/// such claim.
+///
+/// Ordered `.sig`, `.att`, `.sbom` so a sweep's request order is fixed rather
+/// than incidental.
+pub(crate) const SIDECAR_SUFFIXES: [&str; 3] = [SIG_SIDECAR_SUFFIX, ATT_SIDECAR_SUFFIX, SBOM_SIDECAR_SUFFIX];
+
+/// `<algorithm>-<hex><suffix>` — the cosign sidecar tag naming an attachment of
+/// `subject`.
+///
+/// The one place the sidecar tag shape is spelled. Both typed doors delegate
+/// here — [`sbom_sidecar_tag`] and
+/// [`sidecar_tag`](crate::oci::verify::simplesigning_read::sidecar_tag) — so the
+/// truncated-digest half cannot drift between the three suffixes, and neither
+/// can drift from [`referrer_fallback_tag`], which it is derived from.
+pub(crate) fn sidecar_tag(subject: &Digest, suffix: &str) -> String {
+    let mut tag = referrer_fallback_tag(subject);
+    tag.push_str(suffix);
+    tag
+}
+
 /// The cosign `sha256-<hex>.sbom` sidecar tag naming `subject`'s SBOM
 /// attachment.
 ///
@@ -218,9 +245,7 @@ pub(crate) const SBOM_SIDECAR_SUFFIX: &str = ".sbom";
 /// exactly this tag, and a second attach **replaces** the manifest rather than
 /// appending a layer to it.
 pub fn sbom_sidecar_tag(subject: &Digest) -> String {
-    let mut tag = referrer_fallback_tag(subject);
-    tag.push_str(SBOM_SIDECAR_SUFFIX);
-    tag
+    sidecar_tag(subject, SBOM_SIDECAR_SUFFIX)
 }
 
 /// Matches the OCI Referrers tag-schema fallback shape `<algorithm>-<hex>`

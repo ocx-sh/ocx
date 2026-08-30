@@ -202,9 +202,7 @@ impl SidecarKind {
 /// rather than formatted here, so this and the fallback-index writer cannot
 /// disagree about the truncated-digest half; only the suffix is added.
 pub fn sidecar_tag(subject: &Digest, kind: SidecarKind) -> String {
-    let mut tag = crate::package::tag::referrer_fallback_tag(subject);
-    tag.push_str(kind.suffix());
-    tag
+    crate::package::tag::sidecar_tag(subject, kind.suffix())
 }
 
 /// Everything a sidecar layer is judged against: the crypto, the policies, and
