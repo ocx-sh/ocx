@@ -18,6 +18,7 @@ from pathlib import Path
 
 from src.helpers import make_package
 from src.registry import (
+    IMAGE_MANIFEST_MEDIA_TYPE,
     fetch_blob,
     fetch_manifest_from_registry,
     fetch_manifest_raw,
@@ -651,6 +652,66 @@ def test_no_referrers_copies_no_sidecar_tags(
     assert not _target_has_tag(target_registry, unique_repo, tag)
     assert _target_has_tag(ocx.registry, unique_repo, tag), (
         "control: the sidecar the copy was asked to skip does exist at the source"
+    )
+
+
+def test_a_destination_sidecar_tag_holding_a_different_manifest_is_refused(
+    ocx: OcxRunner, target_registry: str, unique_repo: str
+) -> None:
+    """S-020 — the destination's own signatures are not collateral.
+
+    A `.sig` manifest accumulates signatures **as layers within itself**, so a
+    verbatim PUT over a tag the destination already holds silently destroys
+    every signature the destination has and the source does not. Merging the two
+    layer sets is not the alternative — merging is reconstruction, and
+    reconstruction is what corrupts signatures (cosign#4207).
+
+    So the refusal is per-sidecar, not per-copy: the leaf lands, the `.att`
+    sidecar lands, the `.sig` is named, and the exit is 65. Failing the whole
+    promotion would block the legitimate case this guard exists to permit —
+    re-promoting onto a destination that merely holds *more* signatures than the
+    source, which by construction has a different `.sig` digest.
+    """
+    subject, sig_tag, _ = _push_signed_subject(ocx.registry, unique_repo)
+    # A second sidecar under `.att`, which has no conflict and must still land.
+    att_tag = sig_tag.replace(".sig", ".att")
+    put_manifest(
+        ocx.registry,
+        unique_repo,
+        att_tag,
+        json.dumps(get_manifest(ocx.registry, unique_repo, sig_tag)).encode(),
+        IMAGE_MANIFEST_MEDIA_TYPE,
+    )
+    # The destination already publishes a DIFFERENT `.sig` — the shape of a
+    # registry carrying a signature the source never had.
+    occupier = get_manifest(ocx.registry, unique_repo, sig_tag)
+    occupier["annotations"] = {"org.example.provenance": "signed at the destination"}
+    occupier_bytes = json.dumps(occupier).encode()
+    cosign_artifacts.push_subject(target_registry, unique_repo)
+    push_blob(target_registry, unique_repo, b"{}")
+    push_blob(target_registry, unique_repo, fetch_blob(ocx.registry, unique_repo, occupier["layers"][0]["digest"]))
+    put_manifest(target_registry, unique_repo, sig_tag, occupier_bytes, IMAGE_MANIFEST_MEDIA_TYPE)
+    assert occupier_bytes != fetch_manifest_raw(ocx.registry, unique_repo, sig_tag)[0], (
+        "the destination's sidecar must genuinely differ from the source's, "
+        "or the refusal below has nothing to refuse"
+    )
+
+    result = _copy_by_digest(ocx, target_registry, unique_repo, subject, check=False)
+
+    assert result.returncode == 65, result.stderr
+    report = json.loads(result.stdout)
+    assert report["sidecar_conflicts"] == [sig_tag], report
+    assert sig_tag in result.stderr, "the receipt must name the tag an operator has to go look at"
+
+    assert fetch_manifest_raw(target_registry, unique_repo, sig_tag)[0] == occupier_bytes, (
+        "the destination's own signature must survive untouched"
+    )
+    assert report["sidecars_copied"] == 1, report
+    assert _target_has_tag(target_registry, unique_repo, att_tag), (
+        "the non-conflicting sidecar still lands — the refusal is local to one tag"
+    )
+    assert fetch_platform_manifest_digest(target_registry, unique_repo, "promoted") == subject, (
+        "and so does the leaf, under its target tag"
     )
 
 

@@ -92,8 +92,8 @@ impl fmt::Display for DescriptionOutcome {
 /// JSON format:
 /// `{ "source", "target", "status", "platforms": [{ "platform", "digest",
 /// "disposition" }], "cascade_tags_written", "keep_tags_written",
-/// "referrers_copied", "blobs": { "present", "mounted", "uploaded" },
-/// "description" }`.
+/// "referrers_copied", "sidecars_copied", "sidecar_conflicts",
+/// "blobs": { "present", "mounted", "uploaded" }, "description" }`.
 #[derive(Serialize)]
 pub struct CopyReport {
     /// The source reference as given.
@@ -112,6 +112,11 @@ pub struct CopyReport {
     pub keep_tags_written: Vec<String>,
     /// Referrer manifests carried over — signatures, SBOMs, attestations.
     pub referrers_copied: usize,
+    /// cosign `<algorithm>-<hex>.{sig,att,sbom}` sidecar tags carried over.
+    pub sidecars_copied: usize,
+    /// Sidecar tags the target already held under a different manifest, and
+    /// this copy therefore refused to overwrite. Non-empty means exit 65.
+    pub sidecar_conflicts: Vec<String>,
     pub blobs: BlobSummary,
     /// What became of the repository description, or `null` when
     /// `--description` was not passed.
@@ -163,6 +168,8 @@ impl CopyReport {
             cascade_tags_written: outcome.cascade_tags,
             keep_tags_written: outcome.keep_tags,
             referrers_copied: outcome.referrers,
+            sidecars_copied: outcome.sidecars,
+            sidecar_conflicts: outcome.sidecar_conflicts,
             blobs: BlobSummary {
                 present: outcome.blobs.present,
                 mounted: outcome.blobs.mounted,
@@ -210,6 +217,20 @@ impl CopyReport {
         );
         if let Some(description) = self.description {
             line.push_str(&format!("; description {description}"));
+        }
+        // Named, not counted. A conflict is the one outcome here the operator
+        // has to act on, and "1 sidecar conflict" does not say which tag to go
+        // look at.
+        if !self.sidecar_conflicts.is_empty() {
+            line.push_str(&format!(
+                "; REFUSED {} sidecar tag(s) already at the target under a different manifest: {}",
+                self.sidecar_conflicts.len(),
+                self.sidecar_conflicts
+                    .iter()
+                    .map(|tag| sanitize_for_terminal(tag))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
         line
     }
@@ -290,6 +311,8 @@ mod tests {
             cascade_tags_written: Vec::new(),
             keep_tags_written: Vec::new(),
             referrers_copied: 0,
+            sidecars_copied: 0,
+            sidecar_conflicts: Vec::new(),
             blobs: BlobSummary {
                 present: 0,
                 mounted: 0,
@@ -374,6 +397,7 @@ mod tests {
     fn registry_text_is_neutralized_before_it_reaches_the_terminal() {
         let mut hostile = report(CopyStatus::Copied, vec![row(HOSTILE, Disposition::Added)]);
         hostile.cascade_tags_written = vec![HOSTILE.to_string()];
+        hostile.sidecar_conflicts = vec![HOSTILE.to_string()];
         hostile.target = format!("prod.example.com/acme/{HOSTILE}");
 
         for column in hostile.plain_rows() {

@@ -2,13 +2,22 @@
 
 Branch `hex/issue-sweep--wp10`, based on `goat @ ef1c76fb`.
 Gate: `task rust:verify` → **exit 0**, 6463 tests run, 6463 passed, 8 skipped.
-Acceptance: `pytest tests/test_package_copy.py` → **exit 0**, 28 passed.
+Acceptance: `pytest tests/test_package_copy.py` → **exit 0**, 29 passed.
 
-Files touched — all four inside the declared scope:
-`crates/ocx_lib/src/oci/copy.rs`,
-`crates/ocx_lib/src/oci/verify/simplesigning_read.rs`,
-`crates/ocx_lib/src/package/tag.rs`,
-`test/tests/test_package_copy.py`.
+Two commits. The first is the sweep itself, inside the originally declared
+scope. The second is C-098's exit path, on the three files the orchestrator
+granted after reviewing the argument — plus one doc correction, flagged below.
+
+| File | Commit |
+|---|---|
+| `crates/ocx_lib/src/oci/copy.rs` | 1 |
+| `crates/ocx_lib/src/oci/verify/simplesigning_read.rs` | 1 |
+| `crates/ocx_lib/src/package/tag.rs` | 1 |
+| `test/tests/test_package_copy.py` | 1 and 2 |
+| `crates/ocx_lib/src/publisher/copy.rs` | 2 (granted) |
+| `crates/ocx_cli/src/api/data/package_copy.rs` | 2 (granted) |
+| `crates/ocx_cli/src/command/package_copy.rs` | 2 (granted) |
+| `website/src/docs/reference/command-line.md` | 2 (**not granted** — see *Scope taken beyond the grant*) |
 
 ---
 
@@ -25,9 +34,16 @@ Files touched — all four inside the declared scope:
 | C-096 | **Done.** `--no-referrers` skips the sweep entirely: zero probes, not merely zero writes. | `copy.rs::copy_leaf` |
 | C-097 | **Done.** `copy_blobs(&blob_set(image, …))` runs before the manifest PUT, so the signed payload layer travels first. | `copy.rs::copy_sidecar_tags` |
 | C-097a | **Done.** An image-index-shaped sidecar returns `InvalidManifest` before `ensure_auth` or any PUT, reusing the `copy_referrers` refusal wording. | same |
-| C-098 | **Detection done, exit path BLOCKED.** Absent → write; same digest → counted no-op; different → the tag is pushed onto `LeafCopy.sidecars.conflicts`, the sweep continues, the leaf and the other sidecars land. What is missing is only that a non-empty `conflicts` reaches the process exit — see *Blocked*. | `copy.rs::SidecarCopy` |
+| C-098 | **Done.** Absent → write; same digest → counted no-op; different → the tag goes on `LeafCopy.sidecars.conflicts`, the sweep continues, the leaf and the other sidecars land. The conflict travels as data through `CopyOutcome` → `CopyReport` and becomes **exit 65**, computed *after* `context.api().report(&report)?` so the rows and the named tags still print. | `copy.rs`, `publisher/copy.rs`, `api/data/package_copy.rs`, `command/package_copy.rs` |
+| C-098b | **Done.** The PUT is read back and must resolve to this call's own digest; anything else is a conflict, not a counted copy. Adopted from `client/transport.rs:645-660` rather than invented. Guarantee boundaries stated below. | `copy.rs::copy_sidecar_tags` |
 
-New public surface: `oci::copy::SidecarCopy { copied: usize, conflicts: Vec<String> }`, reached as `LeafCopy.sidecars`.
+New surface: `oci::copy::SidecarCopy { copied, conflicts }` on `LeafCopy.sidecars`;
+`CopyOutcome.sidecars` / `.sidecar_conflicts`; and two JSON report fields,
+`sidecars_copied` and `sidecar_conflicts`.
+
+**This is an interface change.** `ocx package copy` could previously only exit 0
+on a completed run and can now exit **65**. That is the commit subject's job, per
+CLAUDE.md — `CHANGELOG.md` is untouched.
 
 ---
 
@@ -70,6 +86,11 @@ stale `test/bin/ocx` cannot make a mutation look green.
 | C-091 / S-017: gate before the sweep | `test_sidecar_tags_land_on_a_registry_without_the_referrers_api` | RED, pytest exit 1 |
 | C-097 / S-019: manifest without its payload blob | `test_a_cosign_sidecar_signature_survives_the_promotion` | RED, exit 1 |
 | C-096 / S-024: sweep under `--no-referrers` | `test_no_referrers_copies_no_sidecar_tags` | RED, exit 1 |
+| C-098 / S-020: refusal arm falls through and overwrites | `test_a_destination_sidecar_tag_holding_a_different_manifest_is_refused` | RED, exit 1 (`assert 0 == 65`) |
+| C-098 / S-020: report the conflict but return `SUCCESS` | same | RED, exit 1 (`assert 0 == 65`) |
+
+The last two mutate different files — the refusal arm in `oci/copy.rs` and the
+exit wiring in `command/package_copy.rs` — so neither stands in for the other.
 
 **S-017 executes, it does not merely pass.** Under the ordering mutation the
 failure is pinned to the ordering assertion, not the exit code:
@@ -81,7 +102,7 @@ test/tests/test_package_copy.py:627: AssertionError
 
 The un-mutated run exits 84 (the referrers verdict is unchanged) *and* finds the
 `.sig` tag plus its payload blob at `registry:2`, with the never-pushed `.att`
-tag absent as the control. Restored binary, full file: pytest exit 0, 28 passed.
+tag absent as the control. Restored binary, full file: pytest exit 0, 29 passed.
 
 ---
 
@@ -111,41 +132,16 @@ that would produce `Ok(other_digest)` in the wild is not reproduced.
 
 ---
 
-## Blocked
+## Scope taken beyond the grant
 
-**C-098's exit path needs three files outside the declared scope.** Raised with
-the orchestrator before implementation, with the exact patch; unanswered at
-commit time.
-
-`copy_leaf` returns `Result<LeafCopy, ClientError>` and `publisher/copy.rs:335`
-consumes it with `?`. A conflict raised as `Err` aborts `run()` before phase 2
-(`publisher/copy.rs:358` — index merge, cascade, keep tags), so the destination
-tag never moves — which blocks exactly the case C-098 exists to protect:
-re-promotion onto a destination holding *more* signatures than the source, whose
-`.sig` digest necessarily differs. Carried as data it is correct, but
-`command/package_copy.rs:183` ends `Ok(ExitCode::SUCCESS)` unconditionally.
-
-The patch, ~20 lines:
-
-1. `crates/ocx_lib/src/publisher/copy.rs` — `CopyOutcome` gains `sidecars: usize`
-   and `sidecar_conflicts: Vec<String>`; the loop extends/sums them beside
-   `referrers += copied.referrers` at `:344`.
-2. `crates/ocx_cli/src/api/data/package_copy.rs` — `CopyReport` gains
-   `sidecars_copied` and `sidecar_conflicts` in `from_outcome`.
-3. `crates/ocx_cli/src/command/package_copy.rs` — the final `Ok(ExitCode::SUCCESS)`
-   becomes `if report.sidecar_conflicts.is_empty() { SUCCESS } else { DataError }`,
-   after `context.api().report(&report)?` so the rows and the named tags still print.
-
-Exit code proposed: **65 (`DataError`)** — registry-supplied state this build
-declines, the class `copy.rs`'s `TraversalLimitExceeded` already carries. 84 is
-taken by the referrers verdict.
-
-Consequently **S-020 has no acceptance test.** Its unit coverage is complete
-(`a_destination_sidecar_tag_holding_a_different_manifest_is_refused_and_named`
-and `…_the_same_manifest_is_a_no_op`, both proven red), but the "exits non-zero"
-half is not CLI-observable until the patch above lands.
-
----
+`website/src/docs/reference/command-line.md`. The `--referrers` bullet stated, in
+so many words, that *"a cosign simplesigning signature published to a
+`sha256-<hex>.sig` or `.att` sidecar tag ... is not carried by `copy` — re-sign
+at the destination if the target needs one."* This change makes that sentence
+false. Leaving a reference page asserting the opposite of the shipped binary is a
+defect I would have introduced, so I replaced the sentence with what the command
+now does, including the 65. One paragraph, no migration prose, no new links.
+Revert it if you would rather it rode a separate commit.
 
 ## Deferrals
 
@@ -154,11 +150,17 @@ half is not CLI-observable until the patch above lands.
   manifest deletes the tag. Covered by
   `a_sidecar_tag_that_heads_but_cannot_be_fetched_fails_the_copy`, with a
   positive control that carries the same fixture end to end.
-- **S-023's wording contradicts C-094.** As written it asks for "no extra
-  sidecar-tag GETs [when discovery is non-empty]; exactly three [when empty]" —
-  the probe-only-when-empty optimisation C-094 explicitly deletes. Implemented
-  and tested per C-094: three unconditional HEADs, zero manifest GETs when all
-  three 404. Flagged to the orchestrator; no correction received.
+- **S-023's wording contradicted C-094; the orchestrator has fixed the plan.**
+  As written it asked for the probe-only-when-empty optimisation C-094 deletes.
+  Implemented and tested per C-094: three unconditional HEADs, zero manifest GETs
+  when all three 404.
+
+  Worth recording as a pattern rather than an incident: this is the **second**
+  contract in this sweep whose scenario and rationale had drifted apart, and both
+  were caught by the work package implementing them rather than by review. A
+  scenario list that is not regenerated when a contract is corrected will keep
+  encoding the deleted behaviour, and the only reader positioned to notice is the
+  one who has to satisfy both at once.
 - **Promoting a cosign-signed package to `registry:2` still exits 84.** The
   sidecars land (S-017), but `ensure_target_serves_referrers` refuses the target
   regardless, and `--no-referrers` would skip the sidecars too (C-096). So no

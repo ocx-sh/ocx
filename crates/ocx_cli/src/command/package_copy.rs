@@ -179,7 +179,19 @@ impl PackageCopy {
         // diagnostics" (`subsystem-cli-api.md`).
         context.ui().status(report.action(), report.summary());
         context.api().report(&report)?;
-        Ok(ExitCode::SUCCESS)
+        // Reported first, then failed. A sidecar tag the target already holds
+        // under a different manifest is refused rather than overwritten — a
+        // `.sig` accumulates signatures as layers within itself, so a verbatim
+        // PUT would destroy every one the target has and the source does not.
+        // The leaf and the other sidecars landed, so this is a data fault in
+        // what the *target* holds, not a failed promotion: 65, the code
+        // registry-supplied state this build declines already carries. Exiting
+        // before the report would swallow the tag names, which are the only
+        // part of this an operator can act on.
+        Ok(match report.sidecar_conflicts.is_empty() {
+            true => ExitCode::SUCCESS,
+            false => ExitCode::from(ocx_lib::cli::ExitCode::DataError),
+        })
     }
 
     /// Resolves where the copy lands.
