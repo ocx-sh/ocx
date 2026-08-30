@@ -234,6 +234,66 @@ def test_trusted_root_override_pins_rekor_key_no_fetch(
     )
 
 
+def test_trusted_root_flag_and_env_take_the_file_url_spelling(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """D3 — both hand-reached doors read a bare path or a ``file://`` one.
+
+    The config tier's ``[trust.sigstore] trusted_root`` and these two flags read
+    one grammar (`ocx-sh/ocx#379`), so the door an operator is most likely to use
+    must not be the one covered by unit tests alone.
+
+    Verify addresses a dead Rekor port throughout, so a pass can only come from
+    the pinned key inside the trusted root the value names — and the bare-path
+    leg is the control that shows the spelling, not the rung, is what the
+    ``file://`` legs prove.
+    """
+    pkg = published_package
+    _sign(ocx, sigstore_stack, identity_token, pkg)
+
+    root = sigstore_stack.trusted_root_json.resolve()
+
+    def _verify_with_flag(value: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                str(ocx.binary),
+                "package", "verify",
+                "--certificate-identity", sigstore_stack.identity,
+                "--certificate-oidc-issuer", sigstore_stack.issuer,
+                "--rekor-url", adversarial.unreachable_rekor_url(),
+                "--sigstore-trusted-root", value,
+                "--platform", current_platform(),
+                pkg.short,
+            ],
+            capture_output=True, text=True, env=ocx.env, check=False,
+        )
+
+    control = _verify_with_flag(str(root))
+    assert control.returncode == 0, (
+        f"the bare path form is the control and must verify, got "
+        f"{control.returncode}\nstderr: {control.stderr.strip()}"
+    )
+
+    flag = _verify_with_flag(f"file://{root.as_posix()}")
+    assert flag.returncode == 0, (
+        f"--sigstore-trusted-root must read the file:// spelling, got "
+        f"{flag.returncode}\nstderr: {flag.stderr.strip()}"
+    )
+
+    env = _verify(
+        ocx, sigstore_stack, pkg,
+        rekor_url=adversarial.unreachable_rekor_url(),
+        extra_env={"OCX_SIGSTORE_TRUSTED_ROOT": f"file://{root.as_posix()}"},
+    )
+    assert env.returncode == 0, (
+        f"OCX_SIGSTORE_TRUSTED_ROOT must read the file:// spelling, got "
+        f"{env.returncode}\nstderr: {env.stderr.strip()}"
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Fully air-gapped: OCX_OFFLINE + OCX_SIGSTORE_TRUSTED_ROOT, no Sigstore network
 # ──────────────────────────────────────────────────────────────────────────────

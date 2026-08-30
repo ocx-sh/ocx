@@ -549,7 +549,7 @@ async fn project_trust_policies(
 /// A non-UTF-8 value carries no `file://` spelling to read (the prefix is
 /// ASCII) and is passed through untouched, so a path an `OsString` can hold
 /// and a `String` cannot is not lost at this door.
-fn explicit_trust_root_path(value: std::path::PathBuf) -> std::path::PathBuf {
+pub(crate) fn explicit_trust_root_path(value: std::path::PathBuf) -> std::path::PathBuf {
     match value.to_str() {
         Some(written) => FileReference::parse(written).as_written().to_path_buf(),
         None => value,

@@ -14,7 +14,7 @@ use ocx_lib::{
 };
 
 use crate::api;
-use crate::command::package_sign_common::{SigstoreEndpoint, resolve_endpoint};
+use crate::command::package_sign_common::{SigstoreEndpoint, explicit_trust_root_path, resolve_endpoint};
 
 use super::ContextOptions;
 
@@ -1096,7 +1096,14 @@ fn build_auto_verify(
         rekor_url,
         offline,
         state,
-        trusted_root_env: std::env::var_os("OCX_SIGSTORE_TRUSTED_ROOT").map(PathBuf::from),
+        // Through the same door `ocx package verify` reads it at, so one env
+        // value cannot mean a bare path here and a `file://` one there.
+        // Through the same door `ocx package verify` reads it at, so one env
+        // value cannot mean a bare path here and a `file://` one there.
+        trusted_root_env: std::env::var_os("OCX_SIGSTORE_TRUSTED_ROOT")
+            .map(PathBuf::from)
+            .map(explicit_trust_root_path),
+
         sigstore_trust,
         home_trusted_root: ocx_lib::ConfigLoader::home_sigstore_trusted_root_path(),
         user_opted_out,

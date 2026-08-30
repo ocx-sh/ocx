@@ -264,6 +264,37 @@ def test_offline_auto_verify_with_pinned_material(
     )
 
 
+def test_offline_auto_verify_reads_the_file_url_spelling(
+    ocx: OcxRunner, published_package: PackageInfo,
+    sigstore_stack: SigstoreStack, identity_token: Path,
+) -> None:
+    """D1 — auto-verify reads ``OCX_SIGSTORE_TRUSTED_ROOT`` at the same door verify does.
+
+    ``ocx package verify`` and auto-verify read the variable at two different
+    call sites, so a widening applied to one and not the other leaves an
+    operator holding "the env var takes ``file://`` except on install".
+
+    Offline is what makes it discriminating: with the spelling unconsumed there
+    is no pinned Rekor key, install carries no ``--rekor-url``, and
+    ``OCX_OFFLINE=1`` forbids the default-endpoint fetch — so the run fails
+    closed rather than passing for some other reason.
+    """
+    pkg = published_package
+    _sign(ocx, sigstore_stack, identity_token, pkg)
+    _write_operator_policy(ocx, _policy_scope(ocx, pkg), sigstore_stack.identity, sigstore_stack.issuer)
+
+    spelled = {"OCX_SIGSTORE_TRUSTED_ROOT": f"file://{sigstore_stack.trusted_root_json.resolve().as_posix()}"}
+
+    online = _run(ocx, "install", pkg.short, extra_env=spelled)
+    assert online.returncode == 0, f"online install (cache warm) failed: {online.stderr.strip()}"
+
+    offline = _run(ocx, "install", pkg.short, extra_env={"OCX_OFFLINE": "1", **spelled})
+    assert offline.returncode == 0, (
+        f"auto-verify must read the file:// spelling of OCX_SIGSTORE_TRUSTED_ROOT, got "
+        f"{offline.returncode}\nstderr: {offline.stderr.strip()}"
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # The bypass is closed: every auto-install surface is gated, not just install/pull
 # ──────────────────────────────────────────────────────────────────────────────
