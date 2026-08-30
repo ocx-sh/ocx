@@ -18,11 +18,10 @@ from typing import TYPE_CHECKING, TypedDict
 
 import pytest
 
-from src.doc_scripts import strip_ansi
-from src.runner import OcxRunner, registry_dir
-
 from recordings.cast_layer import _cast_path, _substitute_command_head, rewrite_command
 from recordings.cast_recorder import CastRecorder
+from src.doc_scripts import strip_ansi
+from src.runner import OcxRunner, registry_dir
 
 if TYPE_CHECKING:
     from src.doc_scripts import DocScriptMeta
@@ -111,11 +110,11 @@ def _assert_reconciler_was_alive(
     "ignore:This process .* is multi-threaded, use of forkpty\\(\\):DeprecationWarning"
 )
 def test_record(
-    script: "ScriptFixture",
+    script: ScriptFixture,
     ocx: OcxRunner,
     ocx_binary: Path,
     recorder: CastRecorder,
-    provider: "StateProvider",
+    provider: StateProvider,
     cast_dir: Path,
     registry: str,
     ocx_home: Path,

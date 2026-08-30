@@ -19,13 +19,12 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from uuid import uuid4
 
 import pytest
-
-from uuid import uuid4
 
 from src import OcxRunner, PackageInfo
 from src.helpers import make_package

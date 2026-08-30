@@ -28,7 +28,6 @@ import pytest
 from src.helpers import make_package_with_entrypoints
 from src.runner import OcxRunner
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

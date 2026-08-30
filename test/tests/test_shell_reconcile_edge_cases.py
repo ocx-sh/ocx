@@ -838,8 +838,10 @@ def test_ec_fp_001_same_size_same_second_write_is_invisible(arena: Arena) -> Non
             # A-14's ceiling, which is exactly how it read before #347: the gate
             # had no term for this project's `ocx.toml` at all, so the edit was
             # unseen because the shell was blind, not because the mtime held.
-            f"printf '%s' '{edited}' > '{project / 'ocx.toml'}' && touch -r '{mtime_ref}' "
-            f"'{project / 'ocx.toml'}'",
+            (
+                f"printf '%s' '{edited}' > '{project / 'ocx.toml'}' && touch -r '{mtime_ref}' "
+                f"'{project / 'ocx.toml'}'"
+            ),
             "true",
             'printf "%s\n" "@@after@@${WP15_CONST-__OCX_ABSENT__}"',
             # The positive control, in the same session and on the same file:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import socket
 import threading
+from typing import Self
 
 
 class TcpRelay:
@@ -46,7 +47,7 @@ class TcpRelay:
         assert not self._thread.is_alive(), "accept loop did not stop; the port may still accept"
         self._server.close()
 
-    def __enter__(self) -> TcpRelay:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_exc: object) -> None:

@@ -41,7 +41,6 @@ from src.helpers import make_package
 from src.registry import fetch_manifest_raw
 from src.runner import OcxRunner
 
-
 BINDING = "warmtool"
 
 

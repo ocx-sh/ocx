@@ -69,7 +69,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 (stdlib signature)
+    def log_message(self, format: str, *args: object) -> None:
         pass  # quiet test output — assertions read `server.requests` instead
 
     # ── request helpers ──────────────────────────────────────────────────
@@ -105,7 +105,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     # ── dispatch ──────────────────────────────────────────────────────────
 
-    def do_GET(self) -> None:  # noqa: N802 (stdlib API)
+    def do_GET(self) -> None:
         parts = urllib.parse.urlsplit(self.path)
         path = parts.path
         query = urllib.parse.parse_qs(parts.query)
@@ -159,7 +159,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         self._reply_json(404, {"message": "not found"})
 
-    def do_POST(self) -> None:  # noqa: N802 (stdlib API)
+    def do_POST(self) -> None:
         path = urllib.parse.urlsplit(self.path).path
         self.server.record("POST", path)
         body = self._read_body()
@@ -204,7 +204,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         self._reply_json(404, {"message": "not found"})
 
-    def do_PATCH(self) -> None:  # noqa: N802 (stdlib API)
+    def do_PATCH(self) -> None:
         path = urllib.parse.urlsplit(self.path).path
         self.server.record("PATCH", path)
         body = self._read_body()

@@ -28,7 +28,12 @@ from pathlib import Path
 import pytest
 
 from src import OcxRunner, PackageInfo
-from src.helpers import assert_shim_dir_absent, assert_shim_dir_exists, make_package, write_ocx_toml
+from src.helpers import (
+    assert_shim_dir_absent,
+    assert_shim_dir_exists,
+    make_package,
+    write_ocx_toml,
+)
 from src.shell_eval import run_after_sourcing
 
 EXIT_SUCCESS = 0

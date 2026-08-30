@@ -1170,7 +1170,11 @@ def test_a_poisoned_catalog_key_is_refused_before_anything_is_written(
     catalog_path = index_server.root / "c" / "index.json"
     clean = static_index.read_catalog(catalog_path)
 
-    for poisoned in (f"../../{unique_repo}/victim", f"{unique_repo}/pkg:‮gnp.exe"):
+    # The U+202E RIGHT-TO-LEFT OVERRIDE below is the fixture, which is why the
+    # three PLE2502 directives in this test suppress rather than fix: it asserts
+    # ocx rejects a catalog key carrying one and never echoes it back into
+    # stderr. Stripping the character would delete the subject of the test.
+    for poisoned in (f"../../{unique_repo}/victim", f"{unique_repo}/pkg:‮gnp.exe"):  # noqa: PLE2502
         static_index.write_catalog(index_server.root, {**clean, poisoned: "sha256:" + "00" * 32})
         index_dir = tmp_path / f"index_{abs(hash(poisoned))}"
         index_dir.mkdir()
@@ -1184,7 +1188,7 @@ def test_a_poisoned_catalog_key_is_refused_before_anything_is_written(
             f"a refused enumeration writes nothing at all, not even the well-formed keys "
             f"beside {poisoned!r}"
         )
-        assert "‮" not in result.stderr, (
+        assert "‮" not in result.stderr, (  # noqa: PLE2502
             "the key is echoed back to the operator and must be neutralized on the way out: "
             f"{result.stderr!r}"
         )
@@ -1201,7 +1205,7 @@ def test_a_poisoned_catalog_key_is_refused_before_anything_is_written(
             "--log-level", "debug", "--index", str(verbose_dir), "index", "sync", NAMESPACE, check=False
         )
         assert verbose.returncode == 65
-        assert "‮" not in verbose.stderr, (
+        assert "‮" not in verbose.stderr, (  # noqa: PLE2502
             f"a raised verbosity must not be a way around the neutralization: {verbose.stderr!r}"
         )
         assert len(verbose.stderr) > len(result.stderr), (

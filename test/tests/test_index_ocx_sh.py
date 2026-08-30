@@ -43,9 +43,12 @@ import pytest
 from src import static_index
 from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import make_package
-from src.registry import clone_manifest_chain, fetch_manifest_raw, fetch_platform_manifest_digest
+from src.registry import (
+    clone_manifest_chain,
+    fetch_manifest_raw,
+    fetch_platform_manifest_digest,
+)
 from src.runner import OcxRunner, registry_dir
-
 
 # ---------------------------------------------------------------------------
 # Fixture: a local `index.ocx.sh`-shaped HTTP server, one per test
@@ -1481,7 +1484,7 @@ def test_offline_deprecated_tag_resolve_warns_from_committed_root(
 # not in the Accept set, so an OCX package (an OCI image index at the tag) is
 # only visible via HEAD when the index media type is advertised. Local to
 # this file (DAMP) — mirrors `test_oci_registry_mirror.py::head_manifest`.
-_MANIFEST_ACCEPT_HEADERS = ", ".join(
+_MANIFEST_ACCEPT_HEADERS = ", ".join(  # noqa: FLY002 - the list is the documentation
     [
         "application/vnd.oci.image.index.v1+json",
         "application/vnd.oci.image.manifest.v1+json",

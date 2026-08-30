@@ -31,7 +31,6 @@ W7: direnv byte-stability (kept, written Phase 2)
 """
 from __future__ import annotations
 
-import re
 import subprocess
 from pathlib import Path
 from uuid import uuid4
@@ -39,7 +38,6 @@ from uuid import uuid4
 from src.helpers import make_package
 from src.runner import OcxRunner
 from src.shell_eval import run_after_sourcing
-
 
 # ---------------------------------------------------------------------------
 # Exit code constants — mirror crates/ocx_lib/src/cli/exit_code.rs
@@ -739,6 +737,7 @@ def test_direnv_export_byte_stability_after_emit_lines_extraction(
     contract — do not add a ``--shell`` flag to ``direnv export``).
     """
     from uuid import uuid4 as _uuid4
+
     from src.helpers import make_package as _make_package
 
     short = _uuid4().hex[:8]

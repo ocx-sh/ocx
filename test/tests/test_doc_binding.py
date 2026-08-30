@@ -42,7 +42,7 @@ from src.doc_binding import (
     find_unrecognised_region_markers,
     unresolved_transclusions,
 )
-from src.doc_scripts import doc_scripts_export, parse_doc_header, DocScriptParseError
+from src.doc_scripts import DocScriptParseError, doc_scripts_export, parse_doc_header
 from src.helpers import PROJECT_ROOT
 
 # Import the render layer (website-owned stdlib module) the same way
@@ -50,7 +50,7 @@ from src.helpers import PROJECT_ROOT
 _WEBSITE_SCRIPTS_DIR: Path = PROJECT_ROOT / "website" / "scripts"
 if str(_WEBSITE_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_WEBSITE_SCRIPTS_DIR))
-from publish_doc_scripts import render_display  # noqa: E402
+from publish_doc_scripts import render_display
 
 # RN9 (LDR 2026-05-18): verification scaffolding banned from the *displayed*
 # output.  A reader/cast must see only documented commands; captures and
@@ -477,20 +477,6 @@ def test_nc4b_unclosed_region_raises_render_error(tmp_path: Path) -> None:
     # representation of an unclosed region reaching render_display.
     # We directly verify the hard-error via a script whose cast_region tuple
     # spans a region with *no content between markers* (empty region).
-    script_text = textwrap.dedent(
-        """\
-        #!/usr/bin/env bash
-        # state: setup:basic
-        # doc: nc4b/unclosed-test
-        set -euo pipefail
-        # region cast
-        ocx package install uv:0.10
-        # endregion cast
-        # region cast
-        ocx package which uv
-        # endregion cast
-        """
-    )
     # Two cast regions → cast_region from the parser would be an error (EX9).
     # For the render path, we test the >1 region case by calling render_display
     # with a cast_region that covers the first region and checking that a

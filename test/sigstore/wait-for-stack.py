@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.request
 
+
 # (service, url, what a 200 proves)
 def endpoints() -> list[tuple[str, str, str]]:
     dex = os.environ.get("OCX_TEST_DEX_PORT", "5556")

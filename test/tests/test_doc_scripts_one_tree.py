@@ -27,11 +27,10 @@ from pathlib import Path
 
 import pytest
 
-from src.doc_scripts import doc_scripts_export, parse_doc_header
-from src.helpers import PROJECT_ROOT
-
 from recordings.cast_layer import _extract_region_lines
 from recordings.conftest import sweep_orphan_casts
+from src.doc_scripts import doc_scripts_export, parse_doc_header
+from src.helpers import PROJECT_ROOT
 
 _DOC_SCRIPTS_DIR = PROJECT_ROOT / "test" / "doc_scripts"
 _LEGACY_SCRIPTS_DIR = PROJECT_ROOT / "test" / "recordings" / "scripts"
@@ -90,7 +89,7 @@ def test_eq2_no_cast_script_outside_doc_scripts_tree() -> None:
             continue
         try:
             meta = parse_doc_header(sh)
-        except Exception:  # noqa: BLE001 — non-doc scripts are not our concern
+        except Exception:  # noqa: BLE001, S112 — non-doc scripts are not our concern
             continue
         if meta.cast:
             offenders.append(str(sh))

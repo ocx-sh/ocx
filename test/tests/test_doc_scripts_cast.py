@@ -96,26 +96,26 @@ class FakeRecorder:
     def pause(self, seconds: float) -> None:
         pass
 
-    def build(self, title: str = "") -> "FakeRecording":
+    def build(self, title: str = "") -> FakeRecording:
         return FakeRecording()
 
 
 class FakeRecording:
     """Minimal stand-in for ``CastRecording`` returned by ``FakeRecorder.build``."""
 
-    def strip_progress(self) -> "FakeRecording":
+    def strip_progress(self) -> FakeRecording:
         return self
 
-    def sanitize(self, replacements: dict) -> "FakeRecording":
+    def sanitize(self, replacements: dict) -> FakeRecording:
         return self
 
-    def truncate_digests(self) -> "FakeRecording":
+    def truncate_digests(self) -> FakeRecording:
         return self
 
-    def realign_tables(self) -> "FakeRecording":
+    def realign_tables(self) -> FakeRecording:
         return self
 
-    def auto_height(self, **kwargs: Any) -> "FakeRecording":
+    def auto_height(self, **kwargs: Any) -> FakeRecording:
         return self
 
     def write(self, path: Path) -> None:
@@ -361,6 +361,7 @@ def test_ca3_run_doc_script_never_writes_cast() -> None:
     Design ref: §4 CA3 — 'the same script run on the verify path: no .cast written (EX8)'
     """
     import inspect
+
     from src.doc_scripts import run_doc_script
 
     source = inspect.getsource(run_doc_script)
@@ -439,7 +440,7 @@ def test_ca4_cast_layer_calls_provider_display_map(tmp_path: Path) -> None:
 
 def test_ca4_actual_repo_names_come_from_provider_display_map(
     tmp_path: Path,
-    ocx: "OcxRunner",  # noqa: F821 — forward ref; resolved at runtime
+    ocx: OcxRunner,  # noqa: F821 — forward ref; resolved at runtime
 ) -> None:
     """CA4 (integration): actual repo names in recorder commands derive from provider.
 
@@ -476,7 +477,7 @@ def test_ca4_actual_repo_names_come_from_provider_display_map(
     provider.provision(ocx, tmp_path)
 
     # display_map must now contain actual UUID-prefixed repo names
-    sanitize_map, repo_map = provider.display_map()
+    _sanitize_map, repo_map = provider.display_map()
     assert repo_map, (
         "CA4: provider.display_map() must return non-empty repo_map after provision"
     )

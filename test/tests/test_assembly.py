@@ -328,13 +328,13 @@ def test_versioned_symlink_chain_preserved_after_install(
 
     # Verify: symlinks are preserved with verbatim target strings
     installed_v1 = content_path / "lib" / "libfoo.so.1"
-    assert installed_v1.is_symlink(), f"libfoo.so.1 is not a symlink in installed package"
+    assert installed_v1.is_symlink(), "libfoo.so.1 is not a symlink in installed package"
     assert os.readlink(str(installed_v1)) == "libfoo.so.1.2.3", (
         f"libfoo.so.1 target mismatch: got {os.readlink(str(installed_v1))!r}"
     )
 
     installed_major = content_path / "lib" / "libfoo.so"
-    assert installed_major.is_symlink(), f"libfoo.so is not a symlink in installed package"
+    assert installed_major.is_symlink(), "libfoo.so is not a symlink in installed package"
     assert os.readlink(str(installed_major)) == "libfoo.so.1", (
         f"libfoo.so target mismatch: got {os.readlink(str(installed_major))!r}"
     )

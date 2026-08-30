@@ -14,7 +14,6 @@ from pathlib import Path
 
 from src import OcxRunner, assert_dir_exists, current_platform
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -24,7 +24,6 @@ from src.helpers import make_package
 from src.runner import OcxRunner, PackageInfo, current_platform
 from tests.fixtures.sigstore_stack import SigstoreStack
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Local scaffolding — sign once, then verify with a crafted policy
 # ──────────────────────────────────────────────────────────────────────────────

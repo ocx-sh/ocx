@@ -35,7 +35,6 @@ from src.assertions import assert_not_exists
 from src.helpers import make_package
 from src.runner import OcxRunner, registry_dir
 
-
 # ---------------------------------------------------------------------------
 # Exit code constants — align with crates/ocx_lib/src/cli/exit_code.rs
 # ---------------------------------------------------------------------------
@@ -1097,7 +1096,7 @@ alpha = "{ocx.registry}/{repo_a}:{tag_a}"
 # ---------------------------------------------------------------------------
 
 
-def _candidate_path(ocx: OcxRunner, repo: str, tag: str) -> "Path":
+def _candidate_path(ocx: OcxRunner, repo: str, tag: str) -> Path:
     """Return the expected candidate-symlink path for ``repo:tag``."""
     return (
         Path(ocx.ocx_home)
@@ -1122,8 +1121,8 @@ def _packages_present_count(ocx: OcxRunner) -> int:
 
 
 def _single_tool_project(
-    ocx: OcxRunner, tmp_path: "Path"
-) -> tuple["Path", str, str]:
+    ocx: OcxRunner, tmp_path: Path
+) -> tuple[Path, str, str]:
     """Publish one tool and return ``(project_dir, repo, tag)``.
 
     The project directory contains only ``ocx.toml``; NO ``ocx.lock`` yet.

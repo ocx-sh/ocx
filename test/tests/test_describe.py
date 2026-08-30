@@ -9,7 +9,6 @@ import pytest
 import requests
 
 from src import OcxRunner, fetch_manifest_from_registry
-from src.registry import make_client
 
 
 @pytest.fixture()

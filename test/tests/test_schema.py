@@ -10,11 +10,7 @@ This test extends the schema acceptance surface rather than creating a parallel 
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
-
-import pytest
-
 
 # Path to the generated v1.json schema in the repository.
 _SCHEMA_PATH = (
@@ -255,9 +251,7 @@ def test_old_metadata_without_entrypoints_parses_successfully(
     ADR §Schema Evolution: old ocx reading new metadata → field defaults to empty.
     New ocx reading old metadata → same path.
     """
-    import stat  # noqa: PLC0415
-    import sys  # noqa: PLC0415
-    from src.helpers import make_package  # noqa: PLC0415
+    from src.helpers import make_package
 
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     # install must succeed (backward compat — no entrypoints in old metadata).
@@ -272,10 +266,11 @@ def test_metadata_with_empty_entrypoints_object_installs(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     """Metadata with explicit empty entrypoints: {} must install without error."""
-    import json as _json  # noqa: PLC0415
-    import sys  # noqa: PLC0415
-    import stat  # noqa: PLC0415
-    from src.helpers import current_platform, resolved_metadata_path  # noqa: PLC0415
+    import json as _json
+    import stat
+    import sys
+
+    from src.helpers import current_platform, resolved_metadata_path
 
     pkg_dir = tmp_path / "pkg-empty-ep"
     bin_dir = pkg_dir / "bin"
@@ -320,4 +315,4 @@ def test_metadata_with_empty_entrypoints_object_installs(
 
 
 # Import OcxRunner for type hints in function signatures above.
-from src.runner import OcxRunner  # noqa: E402
+from src.runner import OcxRunner

@@ -35,14 +35,10 @@ import json
 import os
 import shutil
 import subprocess
-import time
 from pathlib import Path
-
-import pytest
 
 from src import OcxRunner, PackageInfo, make_package, registry_dir
 from src.registry import fetch_manifest_digest, fetch_manifest_from_registry
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -99,8 +95,7 @@ def _collect_sidecar_files(blobs_dir: Path) -> list[Path]:
         return []
     sidecars: list[Path] = []
     for suffix in (".lock", ".log", ".tmp"):
-        for path in blobs_dir.rglob(f"*{suffix}"):
-            sidecars.append(path)
+        sidecars.extend(blobs_dir.rglob(f"*{suffix}"))
     return sidecars
 
 
@@ -221,7 +216,6 @@ def test_clean_retains_reachable_blobs(
 
     ocx.plain("clean")
 
-    blobs_after = _count_blobs(_blobs_dir(ocx))
     # All blobs that are reachable via refs/blobs/ must survive.
     refs_blobs = _refs_blobs_dir(content)
     # `if refs_blobs.is_dir()` guarded existence but not contents, so an empty
@@ -366,7 +360,7 @@ def test_remote_flag_install_persists_and_links_chain(
     )
     entries = list(refs_blobs.iterdir())
     assert len(entries) >= 1, (
-        f"AC8: refs/blobs/ must contain at least one forward-ref after --remote install"
+        "AC8: refs/blobs/ must contain at least one forward-ref after --remote install"
     )
 
 

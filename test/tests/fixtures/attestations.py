@@ -175,7 +175,6 @@ def _attestation_referrer(registry: str, repo: str, subject_digest: str) -> dict
     silently found nothing would assert against nothing.
     """
     from src import registry as reg
-
     from tests.fixtures import adversarial
 
     status, index = reg.list_referrers(
@@ -244,7 +243,6 @@ def tamper_attestation_payload(
     # Local imports: `self_check()` runs this module standalone, and neither the
     # registry client nor the signature mutators are needed for that.
     from src import registry as reg
-
     from tests.fixtures import adversarial
 
     referrer = _attestation_referrer(registry, repo, subject_digest)
@@ -304,7 +302,6 @@ def replace_attestation_envelope(
     # Local imports: `self_check()` runs this module standalone, and neither the
     # registry client nor the signature mutators are needed for that.
     from src import registry as reg
-
     from tests.fixtures import adversarial
 
     referrer = _attestation_referrer(registry, repo, subject_digest)

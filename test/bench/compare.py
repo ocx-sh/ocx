@@ -219,7 +219,7 @@ def _format_report(report: CompareReport) -> str:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:  # noqa: PLR2004
+    if len(sys.argv) < 3:
         print(
             "Usage: python -m bench.compare <baseline.json> <current.json> [--threshold 0.85]",
             file=sys.stderr,

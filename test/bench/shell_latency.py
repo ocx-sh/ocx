@@ -346,7 +346,7 @@ for _candidate in (_TEST_DIR, _TEST_DIR / "src"):
     if str(_candidate) not in sys.path:
         sys.path.insert(0, str(_candidate))
 
-import shell_matrix as matrix  # noqa: E402
+import shell_matrix as matrix
 
 # ---------------------------------------------------------------------------
 # Contract constants
@@ -1523,8 +1523,10 @@ def measure_exec_counts(
                 #
                 # No fallback: a touch that cannot push the mtime forward must
                 # fail the session loudly rather than quietly weaken the gate.
-                f"touch -t {time.strftime('%Y%m%d%H%M.%S', time.localtime(time.time() + 3600))} "
-                f"{_sh_quote(str(watched))} || exit 1",
+                (
+                    f"touch -t {time.strftime('%Y%m%d%H%M.%S', time.localtime(time.time() + 3600))} "
+                    f"{_sh_quote(str(watched))} || exit 1"
+                ),
                 "__ocx_prompt_hook",
                 f"wc -c < {_sh_quote(str(counter))} | tr -d ' \\n' > {_sh_quote(str(root / 'touched'))}",
             ]

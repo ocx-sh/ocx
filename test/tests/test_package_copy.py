@@ -16,8 +16,6 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from src.helpers import make_package
 from src.registry import (
     fetch_manifest_from_registry,

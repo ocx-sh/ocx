@@ -19,9 +19,12 @@ from pathlib import Path
 import pytest
 
 from src.helpers import make_package, resolved_metadata_path
-from src.registry import fetch_manifest_digest, fetch_platform_manifest_digest, make_client
+from src.registry import (
+    fetch_manifest_digest,
+    fetch_platform_manifest_digest,
+    make_client,
+)
 from src.runner import OcxRunner, current_platform
-
 
 # ---------------------------------------------------------------------------
 # Shared: build one bundle, push it, hand back the `--format json` report.

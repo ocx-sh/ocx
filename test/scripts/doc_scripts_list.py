@@ -24,7 +24,7 @@ _PROJECT_ROOT = _TEST_DIR.parent
 if str(_TEST_DIR) not in sys.path:
     sys.path.insert(0, str(_TEST_DIR))
 
-from src.doc_scripts import doc_scripts_export  # noqa: E402
+from src.doc_scripts import doc_scripts_export
 
 
 def main() -> None:

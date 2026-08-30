@@ -31,7 +31,6 @@ import time
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
-
 # ---------------------------------------------------------------------------
 # Wire-shape builders
 # ---------------------------------------------------------------------------
@@ -214,11 +213,11 @@ class _StaticIndexHandler(http.server.SimpleHTTPRequestHandler):
 
     server: StaticIndexServer  # narrows the inherited Any-typed attribute
 
-    def do_GET(self) -> None:  # noqa: N802 (stdlib override name)
+    def do_GET(self) -> None:
         with self.server.in_flight():
             self._serve()
 
-    def do_HEAD(self) -> None:  # noqa: N802 (stdlib override name)
+    def do_HEAD(self) -> None:
         # Same path, same log, no body — so a HEAD is measured rather than
         # missed. `_serve` reads `self.command` to decide about the body.
         with self.server.in_flight():
@@ -290,7 +289,7 @@ class _StaticIndexHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(piece)
             self.wfile.flush()
 
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 (stdlib signature)
+    def log_message(self, format: str, *args: object) -> None:
         pass  # quiet test output — assertions read `server.requests` instead
 
 
@@ -350,7 +349,7 @@ class StaticIndexServer(http.server.ThreadingHTTPServer):
     def peak_in_flight(self, value: int) -> None:
         self._counter.peak = value
 
-    def share_in_flight_with(self, other: "StaticIndexServer") -> None:
+    def share_in_flight_with(self, other: StaticIndexServer) -> None:
         """Make `other` count into THIS server's high-water mark.
 
         A bound that spans two origins has to be measured as one number. Summing

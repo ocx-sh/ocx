@@ -37,7 +37,6 @@ from pathlib import Path
 from src.helpers import make_package
 from src.runner import OcxRunner
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -68,7 +67,7 @@ def write_home_config(ocx: OcxRunner, content: str) -> Path:
 # index at the tag) is only visible via HEAD when the index media type is
 # advertised. Mirror these the way the OCI client does so the HEAD probe
 # reflects real presence, not an Accept-header mismatch.
-_MANIFEST_ACCEPT = ", ".join(
+_MANIFEST_ACCEPT = ", ".join(  # noqa: FLY002 - the list is the documentation
     [
         "application/vnd.oci.image.index.v1+json",
         "application/vnd.oci.image.manifest.v1+json",
@@ -179,7 +178,7 @@ def test_mirror_install_routes_to_configured_mirror(
 
     # Verify the package installed (candidate symlink present).
     home = Path(ocx.env["OCX_HOME"])
-    from src.assertions import assert_symlink_exists  # noqa: PLC0415
+    from src.assertions import assert_symlink_exists
     assert_symlink_exists(
         home
         / "symlinks"
@@ -281,7 +280,7 @@ def test_no_mirrors_config_behaviour_unchanged(
     ocx.plain("package", "install", pkg.short)
 
     home = Path(ocx.env["OCX_HOME"])
-    from src.assertions import assert_symlink_exists  # noqa: PLC0415
+    from src.assertions import assert_symlink_exists
     assert_symlink_exists(
         home
         / "symlinks"
@@ -414,7 +413,7 @@ def test_mirror_library_prefix_repo_routes_verbatim(
     )
 
     home = Path(ocx.env["OCX_HOME"])
-    from src.assertions import assert_symlink_exists  # noqa: PLC0415
+    from src.assertions import assert_symlink_exists
     assert_symlink_exists(
         home
         / "symlinks"
@@ -468,7 +467,7 @@ def test_plain_http_mirror_with_insecure_flag_succeeds(
     )
 
     home = Path(ocx.env["OCX_HOME"])
-    from src.assertions import assert_symlink_exists  # noqa: PLC0415
+    from src.assertions import assert_symlink_exists
     assert_symlink_exists(
         home
         / "symlinks"
@@ -523,7 +522,7 @@ def test_plain_http_mirror_with_config_insecure_entry_succeeds(
     )
 
     home = Path(ocx.env["OCX_HOME"])
-    from src.assertions import assert_symlink_exists  # noqa: PLC0415
+    from src.assertions import assert_symlink_exists
     assert_symlink_exists(
         home
         / "symlinks"
@@ -634,7 +633,7 @@ def test_mirror_install_cas_paths_keyed_by_canonical_slug(
 
     Traces: mirror-invariant audit 2026-07-19, gap G3.
     """
-    from src.assertions import assert_dir_exists, assert_not_exists  # noqa: PLC0415
+    from src.assertions import assert_dir_exists, assert_not_exists
 
     # Push to the mirror only — the package exists ONLY there.
     mirror_ocx = OcxRunner(ocx.binary, ocx.ocx_home, mirror_registry)
@@ -774,7 +773,7 @@ def test_mirror_install_clean_reachability_is_mirror_agnostic(
 
     Traces: mirror-invariant audit 2026-07-19, gap G5.
     """
-    from src.assertions import assert_dir_exists, assert_not_exists  # noqa: PLC0415
+    from src.assertions import assert_dir_exists, assert_not_exists
 
     mirror_ocx = OcxRunner(ocx.binary, ocx.ocx_home, mirror_registry)
     make_package(mirror_ocx, unique_repo, "1.0.0", tmp_path)

@@ -63,7 +63,11 @@ import pytest
 
 from src import OcxRunner, PackageInfo, static_index
 from src.helpers import make_package
-from src.registry import fetch_manifest_digest, fetch_manifest_raw, fetch_platform_manifest_digest
+from src.registry import (
+    fetch_manifest_digest,
+    fetch_manifest_raw,
+    fetch_platform_manifest_digest,
+)
 from src.runner import registry_dir
 
 # ---------------------------------------------------------------------------
@@ -724,8 +728,8 @@ def test_catalog_concurrent_updates_of_distinct_packages_both_entries_survive(
         [str(ocx.binary), "--index", str(index_dir), "index", "update", logical_b],
         env=ocx.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
-    out_a, err_a = proc_a.communicate(timeout=30)
-    out_b, err_b = proc_b.communicate(timeout=30)
+    _out_a, err_a = proc_a.communicate(timeout=30)
+    _out_b, err_b = proc_b.communicate(timeout=30)
     assert proc_a.returncode == 0, f"concurrent update A failed: {err_a}"
     assert proc_b.returncode == 0, f"concurrent update B failed: {err_b}"
 

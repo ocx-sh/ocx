@@ -16,7 +16,6 @@ import pytest
 from src.helpers import make_package_with_entrypoints
 from src.runner import OcxRunner, PackageInfo
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -44,7 +43,7 @@ def get_entrypoints_dir(ocx: OcxRunner, pkg: PackageInfo) -> Path | None:
     `current` targets the package root and `current/entrypoints` is the
     publish anchor for launchers.
     """
-    from src.runner import registry_dir  # noqa: PLC0415
+    from src.runner import registry_dir
     reg = registry_dir(ocx.registry)
     current = Path(str(ocx.ocx_home)) / "symlinks" / reg / pkg.repo / "current"
     if not (current.exists() or current.is_symlink()):
@@ -162,7 +161,7 @@ def test_macos_path_with_spaces_in_ocx_home(
     spaced_home = tmp_path / "ocx home with spaces"
     spaced_home.mkdir(parents=True)
 
-    from src.runner import OcxRunner as _OcxRunner  # noqa: PLC0415
+    from src.runner import OcxRunner as _OcxRunner
     spaced_ocx = _OcxRunner(ocx.binary, spaced_home, ocx.registry)
 
     pkg = _make_pkg(
@@ -201,7 +200,7 @@ def test_windows_native_shim_launcher_exists_no_cmd(
     )
     ocx.plain("package", "install", "--select", pkg.short)
 
-    from src.runner import registry_dir  # noqa: PLC0415
+    from src.runner import registry_dir
     reg = registry_dir(ocx.registry)
     current = Path(str(ocx.ocx_home)) / "symlinks" / reg / pkg.repo / "current"
     assert current.exists() or current.is_symlink(), (

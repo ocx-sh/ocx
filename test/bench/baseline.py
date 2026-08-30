@@ -191,7 +191,7 @@ def build_baseline_command(
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) < 4:  # noqa: PLR2004
+    if len(sys.argv) < 4:
         print(
             "Usage: python -m bench.baseline <registry> <proxy_host> <repo> <tag>",
             file=sys.stderr,

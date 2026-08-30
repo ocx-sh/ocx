@@ -50,7 +50,7 @@ def _table() -> str:
 
     r0 = drow(f"ocx.sh/cmake{_TAG}:3.28{_R}", "public", "sha256:aa..", False)
     r1 = drow(f"ocx.sh/ninja{_TAG}:1.12{_R}", "private", "sha256:bb..", True)
-    return "\r\n".join([header, r0, r1])
+    return f"{header}\r\n{r0}\r\n{r1}"
 
 
 def test_recomputes_widths() -> None:

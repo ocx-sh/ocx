@@ -11,7 +11,6 @@ Per `subsystem-cli.md` "Cross-Cutting: OCX Configuration Forwarding".
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +19,6 @@ import pytest
 
 from src.helpers import make_package_with_entrypoints
 from src.runner import OcxRunner
-
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",

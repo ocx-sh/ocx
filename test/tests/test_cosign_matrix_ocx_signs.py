@@ -42,6 +42,7 @@ from tests.fixtures import cosign_matrix as matrix
 from tests.fixtures.cosign_matrix import Cell
 from tests.fixtures.sigstore_stack import SigstoreStack
 
+
 def _refusal_exit(cell: Cell) -> int:
     """cosign's exit code when it refuses a signature this module corrupted.
 

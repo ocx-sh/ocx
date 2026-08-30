@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from src import OcxRunner, PackageInfo, assert_not_exists, assert_symlink_exists, registry_dir
+from src import (
+    OcxRunner,
+    PackageInfo,
+    assert_not_exists,
+    assert_symlink_exists,
+    registry_dir,
+)
 
 
 def test_uninstall_removes_candidate_symlink(

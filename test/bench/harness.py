@@ -40,17 +40,17 @@ _TEST_DIR = _BENCH_DIR.parent
 if str(_TEST_DIR) not in sys.path:
     sys.path.insert(0, str(_TEST_DIR))
 
-from bench.baseline import build_baseline_command  # noqa: E402
-from bench.compare import compare_against_baseline  # noqa: E402
-from bench.scenarios import (  # noqa: E402
+from bench.baseline import build_baseline_command
+from bench.compare import compare_against_baseline
+from bench.scenarios import (
     DEFAULT_RUNS,
     DEFAULT_WARMUP,
     SCENARIOS,
     SUITE_ORDER,
     Scenario,
 )
-from src.helpers import make_package  # noqa: E402
-from src.runner import OcxRunner  # noqa: E402
+from src.helpers import make_package
+from src.runner import OcxRunner
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -393,7 +393,7 @@ class BenchRunner:
                 cmd += ["--command-name", scenario.name]
                 cmd += [bench_cmd]
 
-                subprocess.run(cmd, check=True)  # noqa: S603
+                subprocess.run(cmd, check=True)
 
         finally:
             self._remove_toxics()
@@ -427,7 +427,7 @@ class BenchRunner:
         results_dir:
             Directory for the emitted hyperfine-compatible JSON.
         """
-        if scenario.shape != "floor" or scenario.concurrency < 2:  # noqa: PLR2004
+        if scenario.shape != "floor" or scenario.concurrency < 2:
             msg = (
                 f"parallel_curl_wall_clock is for floor scenarios with concurrency>=2; "
                 f"got shape={scenario.shape!r} concurrency={scenario.concurrency}"
@@ -839,7 +839,7 @@ def _warm_ocx_home(
     }
     for pkg_short in packages:
         repo = pkg_short.split(":")[0]
-        subprocess.run(  # noqa: S603
+        subprocess.run(
             [str(ocx_binary), "index", "update", repo],
             env=env,
             check=True,
@@ -863,7 +863,7 @@ def _probe_manifest(registry_url: str, repo: str, tag: str) -> bool:
     )
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
-            return resp.status == 200  # noqa: PLR2004
+            return resp.status == 200
     except (urllib.error.HTTPError, urllib.error.URLError, OSError):
         return False
 
@@ -1009,7 +1009,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:  # noqa: PLR0912,PLR0915
+def main(argv: list[str] | None = None) -> int:
     """Harness entry point. Returns process exit code."""
     args = _parse_args(argv)
     capture_baseline = args.capture_baseline or args.save_baseline
@@ -1052,7 +1052,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0912,PLR0915
                 + ", ".join(s.name for s in SCENARIOS),
                 file=sys.stderr,
             )
-            return 2  # noqa: PLR2004
+            return 2
     else:
         # Default: medium suite (backward compat — same as before suite flag existed).
         selected = [s for s in SCENARIOS if s.suite in {"small", "medium"}]
@@ -1175,7 +1175,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0912,PLR0915
         baseline_data = json.loads(BASELINE_JSON.read_text())
         current_data = json.loads(suite_results_path.read_text())
         report = compare_against_baseline(baseline_data, current_data)
-        from bench.compare import _format_report  # noqa: PLC0415
+        from bench.compare import _format_report
 
         print("\n" + _format_report(report))
         return 0 if report.passed else 1

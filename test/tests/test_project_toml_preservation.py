@@ -20,7 +20,6 @@ from uuid import uuid4
 from src.helpers import PackageInfo, make_package
 from src.runner import OcxRunner
 
-
 EXIT_SUCCESS = 0
 
 SCHEMA_DIRECTIVE = "#:schema https://ocx.sh/schemas/project/v1.json"
@@ -129,11 +128,11 @@ def test_add_inserts_exactly_one_line(ocx: OcxRunner, tmp_path: Path) -> None:
     added_lines = [line for line in diff if line.startswith("+") and not line.startswith("+++")]
     removed_lines = [line for line in diff if line.startswith("-") and not line.startswith("---")]
 
-    assert len(added_lines) == 1, f"expected exactly one added line; diff:\n" + "\n".join(diff)
+    assert len(added_lines) == 1, "expected exactly one added line; diff:\n" + "\n".join(diff)
     assert added.repo in added_lines[0], (
         f"the added line must be the new binding; got {added_lines[0]!r}"
     )
-    assert removed_lines == [], f"ocx add must remove nothing; diff:\n" + "\n".join(diff)
+    assert removed_lines == [], "ocx add must remove nothing; diff:\n" + "\n".join(diff)
 
 
 def test_add_emits_no_empty_group_or_package_tables(

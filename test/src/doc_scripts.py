@@ -239,9 +239,8 @@ def parse_doc_header(path: Path) -> DocScriptMeta:
     state = raw_meta.get("state", "setup:basic")
 
     doc: str | None = raw_meta.get("doc", None)
-    if doc is not None:
-        if not SLUG_RE.fullmatch(doc):
-            raise DocScriptParseError(
+    if doc is not None and not SLUG_RE.fullmatch(doc):
+        raise DocScriptParseError(
                 f"invalid doc slug {doc!r} in {path}; must match {SLUG_RE.pattern}"
             )
 
@@ -530,7 +529,7 @@ def substitute_renderable(text: str, display_env: dict[str, str]) -> str:
 
 def run_doc_script(
     path: Path,
-    ocx: "OcxRunner",
+    ocx: OcxRunner,
     tmp_path: Path,
 ) -> None:
     """Parse, provision, and execute a doc script as a drift-gate case.
