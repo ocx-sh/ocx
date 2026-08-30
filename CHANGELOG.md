@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-30
+
+### Added
+
+- Keyless Sigstore signing and identity-pinned verification over OCI referrers *(sign)* **BREAKING**
+- Distribute the Sigstore trusted root through config, the OCX home, and managed config packages *(trust)*
+- Publish and verify DSSE in-toto attestations over OCI referrers *(oci)*
+- Unsigned SBOM referrers with demand/permissive verification on package sbom *(oci)*
+- Accept an include/exclude scope set in a trust policy *(trust)*
+- Add wasm platforms (wasip1/wasm, wasip2/wasm) and enforce supported platform pairs *(oci)*
+- Add `ocx package copy` to promote a built artifact between registries *(cli)*
+- Support GitLab, self-hosted forges and nested group paths *(announce)*
+- Declare plain HTTP per registry; refuse unsafe destinations with exit 65 *(oci)* **BREAKING**
+- Reconcile the environment on every prompt, replacing direnv *(shell)* **BREAKING**
+- Rename run to exec, describe/info to description push/pull *(cli)* **BREAKING**
+- Sign, attest and verify packages compatibly with cosign *(sign)*
+- Read the signing key from an environment variable with `--key env://VAR` *(sign)*
+- Carry cosign .sig/.att/.sbom sidecar tags to the destination *(copy)*
+- Exit 65 when a destination sidecar tag is refused *(copy)* **BREAKING**
+
+### Changed
+
+- Cache and coalesce the registry authentication handshake *(oci)*
+- Make `ocx index sync` fast and survive a transient failure *(index)*
+- Make a configured index authoritative for its whole registry *(oci)* **BREAKING**
+- Read a local-file reference through one shared grammar *(config)*
+
+### Documentation
+
+- `integrations` is not devcontainer's `customizations` *(package)*
+- Add Katherine Draheim as Marketing & Community Lead *(website)*
+- Add a self-hosted Sigstore guide covering GitHub and GitLab as OIDC issuers *(signing)*
+- Document attesting, verifying and reading SBOMs with use-case casts *(website)*
+- Document unsigned SBOM attach and the sbom verification modes with casts *(website)*
+- Replace the jfrog placeholder mirror host and document the manifest gate *(website)*
+- Correct index update/sync partial-commit granularity to per-tag *(index)*
+- Say why the owners fixture is the wrong shape *(oci/index)*
+
+### Fixed
+
+- Publish every JSON Schema, not just metadata *(website)*
+- Record casts in the scenario dir, not the repo's test tree *(test)*
+- Fetch Git LFS assets when building the website *(ci)*
+- Refuse a non-manifest registry response with the response named *(oci)*
+- Classify a wire digest mismatch as a data error *(oci)*
+- Name the mirror a failed fetch was routed through *(oci)*
+- Decide mirror provenance from the fetch, not the host *(oci)*
+- Annotate auth and manifest-shape failures with mirror provenance *(oci)*
+- Bound `ocx index catalog --tags` to a fixed number of in-flight listings *(cli)*
+- Wait out a contended ocx.toml lock and refuse a symlink planted mid-retry *(project)*
+- Gate the wasm test helper to unix so the Windows build compiles *(package)*
+- Re-sync a fork behind upstream before replaying the commit *(announce)*
+- Cascade into a target repository that does not exist yet *(publisher)* **BREAKING**
+- Decide any-pin provenance on the canonical registry *(publisher)* **BREAKING**
+- Hard links resolve under the extraction root, not the host *(archive)* **BREAKING**
+- Exit 74 when writing the --out tree fails *(announce)*
+- Refuse index = "file:/srv/x" instead of resolving it as a host *(index)*
+- Bound the project walk with a relative OCX_CEILING_PATH *(config)*
+- Resolve the $OCX_HOME default in one place *(config)*
+- Bound every operator-typed trust-root, tags and token file read *(verify)*
+- An unreadable trusted-root path exits 74, not 78 *(verify)*
+- Bound the tags-file read `--tags-file` does before merging *(push)*
+- Resolve each Rekor log key once per run, and cache trust material after a sidecar verify *(verify)*
+- List every SBOM a cosign .sbom tag or referrer manifest carries, not just the first *(verify)*
+- Resolve each swept tag once instead of twice *(sign)*
+- Read a file:// trusted root at every door, not only verify and sbom *(trust)*
+
 ## [0.5.8] - 2026-08-11
 
 ### Added
@@ -35,6 +102,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reconcile the blob-store test seam with main's tests *(rebase)*
 - Three suites still assumed pre-shim shapes and Linux-only errnos *(test)*
 - Package test refuses a layer archive it cannot name a media type for *(package)*
+
+### Release
+
+- V0.5.8
 
 ## [0.5.7] - 2026-08-07
 
@@ -913,6 +984,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.6.0]: https://github.com/ocx-sh/ocx/compare/v0.5.8..v0.6.0
 [0.5.8]: https://github.com/ocx-sh/ocx/compare/v0.5.7..v0.5.8
 [0.5.7]: https://github.com/ocx-sh/ocx/compare/v0.5.6..v0.5.7
 [0.5.6]: https://github.com/ocx-sh/ocx/compare/v0.5.5..v0.5.6
