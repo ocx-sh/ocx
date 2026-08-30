@@ -112,6 +112,7 @@ tasks:
       - task: shell:verify
       - task: ci:verify
       - task: claude:verify
+      - task: test:lint
 
   .verify:build-test:
     internal: true
