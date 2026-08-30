@@ -112,6 +112,7 @@ impl PackageManager {
         package: &oci::Identifier,
         platform: Option<&oci::Platform>,
         opts: SignOptions,
+        resolved: Option<&(oci::Digest, oci::Manifest)>,
     ) -> Result<SignReport, PackageError> {
         let client = self
             .require_client()
@@ -128,6 +129,7 @@ impl PackageManager {
             token_provider: &token_provider,
             no_cache: opts.no_cache,
             index: self.index(),
+            resolved,
             fulcio_url: &opts.fulcio_url,
             rekor_url: &opts.rekor_url,
             state: &self.file_structure().state,
@@ -197,9 +199,9 @@ impl PackageManager {
         let mut swept = Vec::with_capacity(tags.len());
         for tag in tags {
             let identifier = package.clone_with_tag(tag.clone());
-            let outcome = match self.resolves_to_index(&identifier).await {
+            let outcome = match self.resolve_swept_index(&identifier).await {
                 Err(error) => SweptOutcome::Failed(Box::new(error)),
-                Ok(false) => {
+                Ok(None) => {
                     crate::log::warn!(
                         "Skipping '{identifier}': it resolves to a single manifest, which push already signed."
                     );
@@ -207,7 +209,11 @@ impl PackageManager {
                 }
                 // `None` for the platform, always: a sweep acts on the index
                 // itself, and clap refuses `--platform` alongside `--tags`.
-                Ok(true) => match self.sign_one(&identifier, None, opts.clone()).await {
+                //
+                // The resolution travels with it: this loop just asked the
+                // index chain what the tag names, and the pipeline would
+                // otherwise ask the identical question one call later (#373).
+                Ok(Some(resolved)) => match self.sign_one(&identifier, None, opts.clone(), Some(&resolved)).await {
                     Ok(report) => SweptOutcome::Done(report),
                     Err(error) => SweptOutcome::Failed(Box::new(error)),
                 },
@@ -220,8 +226,9 @@ impl PackageManager {
         swept
     }
 
-    /// Whether `identifier` resolves to an image index — the only thing a
-    /// sweep acts on.
+    /// The image index `identifier` resolves to — the only thing a sweep acts
+    /// on — or `None` when it resolves to a bare manifest and the sweep must
+    /// skip it.
     ///
     /// Resolution goes through the index chain, the same route
     /// [`resolve_platform_target`](crate::oci::sign::pipeline::resolve_platform_target)
@@ -230,6 +237,13 @@ impl PackageManager {
     /// the reference's form: OCX supports bare-manifest tags, so a tag implies
     /// nothing about the shape underneath it.
     ///
+    /// The resolution is **returned, not discarded**, because the pipeline asks
+    /// the index the identical question about the identical identifier
+    /// immediately afterwards — a sweep that threw this answer away paid two
+    /// manifest fetches per tag (#373). Handing it on also closes the window
+    /// where a tag moved between the two calls and the sweep signed something
+    /// other than what it inspected.
+    ///
     /// # Errors
     ///
     /// The chain's own failure, and [`SignErrorKind::TargetNotFound`] when the
@@ -237,15 +251,18 @@ impl PackageManager {
     /// not a reason to skip it silently.
     ///
     /// [`SignErrorKind::TargetNotFound`]: crate::oci::sign::SignErrorKind::TargetNotFound
-    pub(super) async fn resolves_to_index(&self, identifier: &oci::Identifier) -> Result<bool, PackageError> {
+    pub(super) async fn resolve_swept_index(
+        &self,
+        identifier: &oci::Identifier,
+    ) -> Result<Option<(oci::Digest, oci::Manifest)>, PackageError> {
         let resolved = self
             .index()
             .fetch_manifest(identifier, IndexOperation::Resolve)
             .await
             .map_err(|e| PackageError::new(identifier.clone(), PackageErrorKind::Internal(e)))?;
         match resolved {
-            Some((_, oci::Manifest::ImageIndex(_))) => Ok(true),
-            Some((_, oci::Manifest::Image(_))) => Ok(false),
+            Some(index @ (_, oci::Manifest::ImageIndex(_))) => Ok(Some(index)),
+            Some((_, oci::Manifest::Image(_))) => Ok(None),
             None => Err(map_sign_error(
                 identifier.clone(),
                 SignError::new(
@@ -288,7 +305,10 @@ impl PackageManager {
         let mut signed = Vec::with_capacity(platforms.len());
         for (platform, digest) in platforms {
             let pinned = package.clone_with_digest(digest.clone()).without_tag();
-            let outcome = self.sign_one(&pinned, None, opts.clone()).await;
+            // `None`: nothing was pre-resolved here. The reference is already
+            // pinned to the digest the push wrote, so the pipeline's own
+            // resolution is the only one this path ever performs.
+            let outcome = self.sign_one(&pinned, None, opts.clone(), None).await;
             signed.push((platform.clone(), outcome));
         }
         signed
@@ -340,4 +360,219 @@ fn map_sign_error(identifier: oci::Identifier, err: SignError) -> PackageError {
         identifier,
         PackageErrorKind::Internal(crate::Error::Sign(Box::new(err))),
     )
+}
+
+/// Fixtures for the `--tags` sweep tests here and in [`super::attest`].
+///
+/// Shared rather than copied because the two sweeps are one mechanism —
+/// `resolve_swept_index` followed by a pipeline that resolves the same
+/// reference — and a second copy of the counting index would be a second place
+/// for "what does a swept tag resolve to" to drift.
+#[cfg(test)]
+pub(super) mod sweep_test_support {
+    use std::sync::{Arc, Mutex};
+
+    use crate::file_structure::FileStructure;
+    use crate::oci::client::Client;
+    use crate::oci::client::test_transport::{StubTransport, StubTransportData};
+    use crate::oci::index::{Index, IndexOperation};
+    use crate::oci::{self, Digest, Identifier, Manifest};
+    use crate::package_manager::PackageManager;
+
+    /// The tags every sweep test runs. Three, not one: the defect is a *per
+    /// tag* multiplier, and 1 vs 2 is the one length where N and 2N are close
+    /// enough that an off-by-one elsewhere could imitate the fix.
+    pub(crate) const TAGS: [&str; 3] = ["1.0.0", "1.0.1", "1.1.0"];
+
+    /// The digest every swept tag resolves to.
+    pub(crate) fn swept_digest() -> Digest {
+        oci::Algorithm::Sha256.hash(b"swept image index")
+    }
+
+    /// The repository a sweep runs against.
+    ///
+    /// A **public** IP literal, matching the sign pipeline's own fixtures: the
+    /// pipeline resolves the physical host before dialling it, and a DNS name
+    /// would make this unit test depend on a resolver while a private range
+    /// would be refused by the SSRF floor.
+    pub(crate) fn sweep_identifier() -> Identifier {
+        Identifier::parse("8.8.8.8/acme/tool:1.0").expect("sweep identifier")
+    }
+
+    /// An index that answers every reference with the same image index and
+    /// **records which reference it was asked about**.
+    ///
+    /// The references, not a bare tally: a count alone proves how many
+    /// resolutions a sweep performed and says nothing about what each one was
+    /// for, so a sweep that resolved the wrong tag N times would read as fixed.
+    ///
+    /// It answers with an image *index*, never a bare manifest: a sweep skips a
+    /// bare manifest without entering the pipeline at all, so a fixture of that
+    /// shape would record one resolution per tag whether or not the answer is
+    /// threaded — green for a reason that has nothing to do with the fix.
+    #[derive(Clone)]
+    pub(crate) struct CountingIndex {
+        asked: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CountingIndex {
+        pub(crate) fn new(asked: Arc<Mutex<Vec<String>>>) -> Self {
+            Self { asked }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::oci::index::IndexImpl for CountingIndex {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_tags(&self, _: &Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+
+        async fn fetch_manifest(
+            &self,
+            identifier: &Identifier,
+            _: IndexOperation,
+        ) -> crate::Result<Option<(Digest, Manifest)>> {
+            self.asked.lock().expect("asked lock").push(identifier.to_string());
+            Ok(Some((
+                swept_digest(),
+                Manifest::ImageIndex(oci::ImageIndex {
+                    schema_version: 2,
+                    media_type: Some(oci::OCI_IMAGE_INDEX_MEDIA_TYPE.to_string()),
+                    manifests: Vec::new(),
+                    artifact_type: None,
+                    annotations: None,
+                }),
+            )))
+        }
+
+        async fn fetch_manifest_digest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<Digest>> {
+            Ok(Some(swept_digest()))
+        }
+
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+
+        fn box_clone(&self) -> Box<dyn crate::oci::index::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// A manager whose index counts resolutions and whose registry holds
+    /// nothing.
+    ///
+    /// The empty registry is deliberate: the pipeline fetches the subject
+    /// manifest bytes immediately **after** resolving the target and long
+    /// before it acquires an OIDC token, so every swept tag fails there. That
+    /// keeps the test off the network while still driving the pipeline past
+    /// the resolution the count is about.
+    pub(crate) fn sweep_manager(
+        asked: Arc<Mutex<Vec<String>>>,
+        ocx_home: &std::path::Path,
+    ) -> (PackageManager, StubTransportData) {
+        let data = StubTransportData::new();
+        let client = Client::with_transport(Box::new(StubTransport::new(data.clone())));
+        let manager = PackageManager::new(
+            FileStructure::with_root(ocx_home.to_path_buf()),
+            Index::from_impl(CountingIndex::new(asked)),
+            Some(client),
+            "8.8.8.8",
+        );
+        (manager, data)
+    }
+
+    /// The tags, spelled as the sweep spells them — one reference resolution is
+    /// owed per entry, in order.
+    pub(crate) fn expected_resolutions() -> Vec<String> {
+        TAGS.iter()
+            .map(|tag| sweep_identifier().clone_with_tag((*tag).to_string()).to_string())
+            .collect()
+    }
+
+    /// How many manifest reads the registry served — the positive control.
+    ///
+    /// A count of zero would mean the pipeline never got past resolution, and
+    /// the fetch count would then be one per tag for a reason unrelated to the
+    /// fix. Asserting on it is what keeps the green honest.
+    pub(crate) fn manifest_reads(data: &StubTransportData) -> usize {
+        data.read()
+            .calls
+            .iter()
+            .filter(|call| call.as_str() == "pull_manifest_raw")
+            .count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::sweep_test_support::{TAGS, expected_resolutions, manifest_reads, sweep_identifier, sweep_manager};
+    use super::{SignOptions, SweptOutcome};
+
+    fn sign_options() -> SignOptions {
+        SignOptions {
+            // Loopback, like the sign pipeline's own fixtures: the dial-time
+            // SSRF guard resolves whatever it is handed, and a documentation
+            // domain would put DNS in a unit test's path.
+            fulcio_url: url::Url::parse("http://127.0.0.1:5555").expect("fulcio url"),
+            rekor_url: url::Url::parse("http://127.0.0.1:3000").expect("rekor url"),
+            identity_token: None,
+            no_cache: true,
+            no_tty: true,
+            key: None,
+            format: crate::oci::sign::SignatureFormat::Bundle,
+            rekor_upload: true,
+        }
+    }
+
+    /// **S-011 / C-040.** A `--tags` sweep of N tags resolves N times, not 2N.
+    ///
+    /// The sweep asks the index chain what each tag names so it can skip bare
+    /// manifests; the pipeline then asked the identical question about the
+    /// identical reference, and the second answer was the one that got used
+    /// (#373). Counted rather than smoke-tested: a run that fetches twice
+    /// produces exactly the same reports as one that fetches once, so nothing
+    /// about the outcome can tell the two apart.
+    #[tokio::test]
+    async fn a_tag_sweep_resolves_each_tag_exactly_once() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let temp = tempfile::TempDir::new().expect("ocx home");
+        let (manager, transport) = sweep_manager(Arc::clone(&asked), temp.path());
+        let tags: Vec<String> = TAGS.iter().map(|tag| (*tag).to_string()).collect();
+
+        let swept = manager.sign_tags(&sweep_identifier(), &tags, &sign_options()).await;
+
+        assert_eq!(swept.len(), TAGS.len(), "one row per swept tag");
+        for row in &swept {
+            let outcome = match &row.outcome {
+                SweptOutcome::Done(_) => "signed",
+                SweptOutcome::SkippedBareManifest => "skipped",
+                SweptOutcome::Failed(_) => "failed",
+            };
+            assert_eq!(
+                outcome, "failed",
+                "the empty registry fails each tag inside the pipeline; a skip would mean \
+                 the sweep never entered it, and the count would then be one per tag for a \
+                 reason unrelated to the fix (tag '{}')",
+                row.tag,
+            );
+        }
+        assert_eq!(
+            manifest_reads(&transport),
+            TAGS.len(),
+            "positive control: each tag reached the pipeline's subject fetch, which is \
+             past the resolution this test counts",
+        );
+        assert_eq!(
+            *asked.lock().expect("asked lock"),
+            expected_resolutions(),
+            "one manifest resolution per swept tag, each for that tag — the sweep's answer \
+             is the pipeline's",
+        );
+    }
 }

@@ -88,6 +88,7 @@ impl PackageManager {
         package: &oci::Identifier,
         platform: Option<&oci::Platform>,
         opts: AttestOptions,
+        resolved: Option<&(oci::Digest, oci::Manifest)>,
     ) -> Result<AttestReport, PackageError> {
         // The S1-E refusal has to answer here as well as in the pipeline:
         // `require_client` below reports `OfflineMode` (81) for an offline
@@ -151,6 +152,7 @@ impl PackageManager {
             no_cache: opts.no_cache,
             offline: opts.offline,
             index: self.index(),
+            resolved,
             fulcio_url: &opts.fulcio_url,
             rekor_url: &opts.rekor_url,
             state: &self.file_structure().state,
@@ -182,15 +184,18 @@ impl PackageManager {
         let mut swept = Vec::with_capacity(tags.len());
         for tag in tags {
             let identifier = package.clone_with_tag(tag.clone());
-            let outcome = match self.resolves_to_index(&identifier).await {
+            let outcome = match self.resolve_swept_index(&identifier).await {
                 Err(error) => SweptOutcome::Failed(Box::new(error)),
-                Ok(false) => {
+                Ok(None) => {
                     crate::log::warn!(
                         "Skipping '{identifier}': it resolves to a single manifest, which push already signed."
                     );
                     SweptOutcome::SkippedBareManifest
                 }
-                Ok(true) => match self.attest_one(&identifier, None, opts.clone()).await {
+                // The resolution travels on, exactly as it does in
+                // `sign_tags`: this loop already asked the index chain what the
+                // tag names, and the pipeline would ask again (#373).
+                Ok(Some(resolved)) => match self.attest_one(&identifier, None, opts.clone(), Some(&resolved)).await {
                     Ok(report) => SweptOutcome::Done(report),
                     Err(error) => SweptOutcome::Failed(Box::new(error)),
                 },
@@ -286,6 +291,7 @@ mod tests {
                     offline: true,
                     ..options(br#"{"bomFormat":"CycloneDX"}"#)
                 },
+                None,
             )
             .await
             .expect_err("an offline attest must be refused");
@@ -310,7 +316,7 @@ mod tests {
 
         for bytes in [b"not json at all".to_vec(), vec![0xff, 0xfe, 0xfd]] {
             let error = manager
-                .attest_one(&package, Some(&crate::oci::Platform::any()), options(&bytes))
+                .attest_one(&package, Some(&crate::oci::Platform::any()), options(&bytes), None)
                 .await
                 .expect_err("a non-JSON predicate must be refused");
 
@@ -321,5 +327,56 @@ mod tests {
             );
             assert_eq!(classify_error(sign), ExitCode::DataError);
         }
+    }
+
+    /// **S-011 / C-041.** The attest sweep resolves each tag once too.
+    ///
+    /// The issue names only `sign_tags`, but `attest_tags` imports the same
+    /// `resolve_swept_index` and the same `resolve_platform_target`, so it
+    /// carried the identical 2N multiplier. Asserted separately rather than
+    /// assumed from the sign test: the two sweeps are two call sites, and one
+    /// of them could be threaded while the other was not.
+    #[tokio::test]
+    async fn an_attest_tag_sweep_resolves_each_tag_exactly_once() {
+        use std::sync::{Arc, Mutex};
+
+        use super::super::sign::SweptOutcome;
+        use super::super::sign::sweep_test_support::{
+            TAGS, expected_resolutions, manifest_reads, sweep_identifier, sweep_manager,
+        };
+
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let temp = tempfile::TempDir::new().expect("ocx home");
+        let (manager, transport) = sweep_manager(Arc::clone(&asked), temp.path());
+        let tags: Vec<String> = TAGS.iter().map(|tag| (*tag).to_string()).collect();
+
+        let swept = manager
+            .attest_tags(&sweep_identifier(), &tags, &options(br#"{"bomFormat":"CycloneDX"}"#))
+            .await;
+
+        assert_eq!(swept.len(), TAGS.len(), "one row per swept tag");
+        for row in &swept {
+            let outcome = match &row.outcome {
+                SweptOutcome::Done(_) => "attested",
+                SweptOutcome::SkippedBareManifest => "skipped",
+                SweptOutcome::Failed(_) => "failed",
+            };
+            assert_eq!(
+                outcome, "failed",
+                "the empty registry fails each tag inside the pipeline; a skip would mean \
+                 the sweep never entered it (tag '{}')",
+                row.tag,
+            );
+        }
+        assert_eq!(
+            manifest_reads(&transport),
+            TAGS.len(),
+            "positive control: each tag reached the pipeline's subject fetch",
+        );
+        assert_eq!(
+            *asked.lock().expect("asked lock"),
+            expected_resolutions(),
+            "one manifest resolution per swept tag, each for that tag",
+        );
     }
 }

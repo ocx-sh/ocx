@@ -138,6 +138,11 @@ pub struct AttestContext<'a> {
     pub offline: bool,
     /// Index for resolving tag → per-platform manifest digest.
     pub index: &'a Index,
+    /// A resolution the caller already performed for `identifier` — see
+    /// [`SignContext::resolved`](crate::oci::sign::SignContext::resolved),
+    /// which this mirrors so the `--tags` sweep costs one manifest fetch per
+    /// tag on both verbs (#373).
+    pub resolved: Option<&'a (Digest, crate::oci::Manifest)>,
     /// Fulcio URL (validated at the CLI boundary).
     pub fulcio_url: &'a Url,
     /// Rekor URL (validated at the CLI boundary).
@@ -300,7 +305,7 @@ impl AttestPipeline {
         //    subject — never one derived from a keep tag, which
         //    `--no-keep-tag` may have suppressed (D-f).
         let SignTarget { subject_digest, .. } =
-            resolve_platform_target(ctx.index, ctx.identifier, ctx.platform).await?;
+            resolve_platform_target(ctx.index, ctx.identifier, ctx.platform, ctx.resolved).await?;
         let resolved = ctx.identifier.clone_with_digest(subject_digest.clone());
         // Index indirection: a logical name (`ocx.sh/<ns>/<pkg>`) may point at
         // a different physical registry, so every transport-facing call below
@@ -1108,6 +1113,7 @@ mod tests {
                 no_cache: true,
                 offline,
                 index: &index,
+                resolved: None,
                 fulcio_url: &fulcio_url,
                 rekor_url: &rekor_url,
                 state: &state,
