@@ -70,7 +70,7 @@ tasks:
     cmds:
       - mkdir -p {{.REPORTS_DIR}}
       - >
-        lychee --offline --no-progress --include-verbatim
+        lychee --offline --no-progress --include-verbatim --include-fragments
         --exclude-path artifacts
         --exclude-path tests/.venv
         --exclude-path worktrees

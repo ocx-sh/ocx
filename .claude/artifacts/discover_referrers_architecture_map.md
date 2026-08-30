@@ -1,5 +1,13 @@
 # Architecture Discovery: Referrers (`ocx verify` / `ocx sbom`)
 
+> **Stale symbol notice — 2026-08-30.** The fork's `Client::pull_referrers` and its private
+> `pull_referrers_via_tag_schema` were **deleted** ([#368](https://github.com/ocx-sh/ocx/issues/368)).
+> The live path is `pull_referrers_native` (`crates/ocx_lib/src/oci/client/native_transport.rs:698`),
+> whose `Ok(None)` on a `404` is the `ReferrersUnsupported` capability verdict; the OCI referrers
+> tag-schema fallback is OCX-side in `OciTransport::list_referrers_with_fallback`
+> (`crates/ocx_lib/src/oci/client/transport.rs:578`). Every symbol name and line number below is a
+> Phase-1 snapshot of the tree as discovered — read them as history, not as a lookup table.
+
 Phase 1 of `/swarm-plan max 24`. Factual current-state map, no design opinions.
 
 ## 1. OCI Client Surface
@@ -202,7 +210,7 @@ async fn list_referrers(
 ) -> Result<oci::ImageIndex>;
 ```
 
-All three implementors (`NativeTransport`, `StubTransport`, future test doubles) must gain this method. `NativeTransport` delegates to `self.client.pull_referrers(image, artifact_type)`.
+All three implementors (`NativeTransport`, `StubTransport`, future test doubles) must gain this method. As shipped, `NativeTransport` delegates to `self.client.pull_referrers_native(image, artifact_type)` — a native-only lookup whose `Ok(None)` on a `404` is the `ReferrersUnsupported` capability verdict rather than an empty listing. The OCI referrers tag-schema fallback is owned by OCX (`OciTransport::list_referrers_with_fallback`), not by the fork.
 
 **Seam 2: `Client` public facade** — `crates/ocx_lib/src/oci/client.rs` (~line 867)
 
@@ -257,7 +265,7 @@ CLI: command/verify.rs
   → client.list_referrers(&pinned_id, Some(SIG_ARTIFACT_TYPE))
       → transport.ensure_auth(image, Pull)
       → transport.list_referrers(image, artifact_type)           [NEW in OciTransport]
-          → NativeTransport: self.client.pull_referrers(image, artifact_type)
+          → NativeTransport: self.client.pull_referrers_native(image, artifact_type)
           → GET /v2/{repo}/referrers/{digest}?artifactType=...
           → Returns OciImageIndex (list of referrer descriptors)
   → for each referrer descriptor: pull blob (signature/SBOM data)
