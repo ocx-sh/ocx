@@ -490,6 +490,33 @@ def _sign_token_file_oversized(
     )
 
 
+def _push_tags_file_oversized(
+    ocx: OcxRunner, repo: str, tmp_path: Path
+) -> tuple[list[str], str]:
+    """C-011 sibling. `push --tags-file` reads the file back before merging.
+
+    That read is on an operator-typed path too, so it is bounded like the input
+    side. Absence stays fine — the file is created — and
+    `test_announce_push_file.py` is what holds that half; this row is the other
+    one, where the file is there and too big.
+
+    Publishes for real first: the read only happens once the push has landed.
+    """
+    bundle, sidecar = _published(ocx, repo, tmp_path)
+    path = _oversized(tmp_path, "pushed-tags.txt", 128 * 1024)
+    return (
+        [
+            "package", "push",
+            "-p", "linux/amd64",
+            "-m", str(sidecar),
+            "-i", f"{ocx.registry}/{repo}:1.0.1",
+            "--tags-file", str(path),
+            str(bundle),
+        ],
+        str(path),
+    )
+
+
 def _announce_tags_file_oversized(
     ocx: OcxRunner, repo: str, tmp_path: Path
 ) -> tuple[list[str], str]:
@@ -530,6 +557,7 @@ def _announce_tags_file_oversized(
         pytest.param(_verify_trusted_root_oversized, 74, id="verify--trusted-root-big"),
         pytest.param(_sign_token_file_oversized, 74, id="sign--identity-token-file-big"),
         pytest.param(_announce_tags_file_oversized, 74, id="announce--tags-file-big"),
+        pytest.param(_push_tags_file_oversized, 74, id="push--tags-file-big"),
     ],
 )
 def test_an_operator_supplied_path_never_exits_internal(

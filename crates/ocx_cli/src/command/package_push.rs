@@ -599,14 +599,10 @@ pub(crate) fn parse_annotation(argument: &str) -> anyhow::Result<(String, String
 /// Appends `tags` onto the tags-file at `path` (created if absent),
 /// deduping against whatever is already there (design register C2).
 async fn append_to_tags_file(path: &std::path::Path, tags: &[String]) -> anyhow::Result<()> {
-    let existing = match tokio::fs::read(path).await {
-        Ok(bytes) => conventions::parse_tags_file(&bytes),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(err) => {
-            return Err(ocx_lib::error::file_error(path, err))
-                .with_context(|| format!("reading tags file {}", path.display()));
-        }
-    };
+    // The shared bounded reader, not a bare `fs::read`: this path is
+    // operator-typed, so `--tags-file /dev/zero` read until memory ran out.
+    // Absence is still not a failure — the file is created below.
+    let existing = crate::options::tags::read_tags_file_if_present(path).await?;
     let merged = conventions::merge_tags_file(&existing, tags);
     tokio::fs::write(path, merged)
         .await
