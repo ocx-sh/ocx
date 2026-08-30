@@ -107,6 +107,21 @@ tasks:
           # parallelize.
           CLI_ARGS: '-n auto --dist loadgroup {{.CLI_ARGS | default "-v"}}'
 
+  lint:
+    desc: Lint the acceptance suite with ruff (rule set + Python floor in pyproject.toml)
+    # No `sources:`/`generates:`, deliberately, and for the same reason
+    # `ci:actionlint` has none: a lint that is fingerprint-cached reports the
+    # verdict of the last run it actually did. A cached green is
+    # indistinguishable from a lint that never ran, which is the whole failure
+    # mode this task exists to close. It is fast enough that caching buys
+    # nothing worth that.
+    #
+    # `uv run` (not `ocx exec`, not a bare `ruff`) because ruff is a member of
+    # this directory's own [dependency-groups] dev, exactly like pytest and
+    # every other Python tool here -- so the version is pinned by uv.lock and
+    # the rule set cannot drift under the gate.
+    cmd: uv run ruff check .
+
   shells:
     desc: >-
       Build the shell-zoo Docker image and run the all-shell activation matrix
