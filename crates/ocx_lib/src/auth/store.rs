@@ -156,11 +156,16 @@ impl DockerCredentialStore {
 ///
 /// Reads `DOCKER_CONFIG` via the project-wide `env::var` shim so unit tests
 /// can inject overrides through `test::env::lock`.
+///
+/// The home fallback goes through [`crate::file_structure::home_directory`],
+/// the one home resolver — `dirs::home_dir` ignores `%USERPROFILE%`, which is
+/// what a Windows CI runner or container overrides and what docker itself
+/// reads, so the two could name different `config.json` files (#381).
 fn resolve_config_path() -> Result<PathBuf, AuthError> {
     if let Some(dir) = crate::env::var("DOCKER_CONFIG") {
         return Ok(PathBuf::from(dir).join("config.json"));
     }
-    let home = dirs::home_dir().ok_or_else(|| AuthError::WriteConfigFailed {
+    let home = crate::file_structure::home_directory().ok_or_else(|| AuthError::WriteConfigFailed {
         path: PathBuf::new(),
         source: std::io::Error::new(ErrorKind::NotFound, "home directory not found"),
     })?;

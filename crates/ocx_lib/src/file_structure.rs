@@ -175,18 +175,41 @@ impl FileStructure {
     }
 }
 
+/// The current user's home directory.
+///
+/// One resolver, because two of them disagreed. `std::env::home_dir` (stable
+/// since 1.85), never `dirs::home_dir`: on Windows the former reads
+/// `%USERPROFILE%` first and only asks the OS for the registered profile path
+/// when that is unset, while `dirs` calls `SHGetKnownFolderPath`
+/// unconditionally — so a sandbox, container or CI runner that overrides
+/// `%USERPROFILE%` handed one `ocx` invocation two different home directories.
+/// They also disagree on Unix over an empty `pw_dir` (#381).
+///
+/// `setup::home_env_from_environment` deliberately stays on its own resolver.
+/// It answers a different question — the *login shell's* home, for writing
+/// `.bashrc`/`.zshrc` — and reads `$HOME` first for exactly that reason.
+pub fn home_directory() -> Option<PathBuf> {
+    std::env::home_dir()
+}
+
 /// Returns the OCX data root directory.
 ///
 /// Resolution order:
 /// 1. `OCX_HOME` environment variable (if set and non-empty)
-/// 2. `~/.ocx` (fallback)
-pub fn default_ocx_root() -> Option<std::path::PathBuf> {
-    if let Ok(home) = std::env::var("OCX_HOME")
-        && !home.is_empty()
-    {
-        return Some(std::path::PathBuf::from(home));
+/// 2. `~/.ocx` (fallback, via [`home_directory`])
+///
+/// **The one definition of that default.** `$OCX_HOME` has to name a single
+/// directory for a whole invocation, so every caller resolves it here —
+/// including the config loader's `home_*_path()` accessors, which used to
+/// re-derive it and could land somewhere else.
+///
+/// Read through [`crate::env::var`], the project-wide shim, so a test injects
+/// `OCX_HOME` the same way it does for every other variable.
+pub fn default_ocx_root() -> Option<PathBuf> {
+    if let Some(home) = crate::env::var("OCX_HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(home));
     }
-    std::env::home_dir().map(|home| home.join(".ocx"))
+    home_directory().map(|home| home.join(".ocx"))
 }
 
 use std::path::PathBuf;
@@ -221,6 +244,46 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    /// C-002 (#381): the `$OCX_HOME` default has one definition, and the
+    /// config loader's accessors resolve through it.
+    ///
+    /// The two used to be separate resolvers reading the fallback home through
+    /// different APIs (`std::env::home_dir` here, `dirs::home_dir` there),
+    /// which can name different directories — so this asserts the *paths*
+    /// agree, not that both functions merely return `Some`.
+    #[test]
+    fn the_ocx_home_default_has_one_definition() {
+        let env = crate::test::env::lock();
+        let home = env.isolate_project_home();
+
+        assert_eq!(
+            default_ocx_root().as_deref(),
+            Some(home.path()),
+            "OCX_HOME must be read through the shared shim, not std::env::var"
+        );
+        assert_eq!(
+            crate::config::loader::ConfigLoader::home_path(),
+            Some(home.path().join("config.toml")),
+            "the loader's home tier must sit under the same root"
+        );
+        assert_eq!(
+            crate::config::loader::ConfigLoader::home_sigstore_trusted_root_path(),
+            Some(home.path().join("sigstore").join("trusted-root.json")),
+            "the trust-root convention path must sit under the same root"
+        );
+
+        // An empty value is not a root. Falling back keeps `$OCX_HOME=""` from
+        // resolving every store to the process working directory.
+        env.set("OCX_HOME", "");
+        let fallback = home_directory().map(|h| h.join(".ocx"));
+        assert_eq!(default_ocx_root(), fallback, "an empty OCX_HOME must fall back");
+        assert_eq!(
+            crate::config::loader::ConfigLoader::home_path(),
+            fallback.map(|d| d.join("config.toml")),
+            "the two must still agree on the fallback"
+        );
+    }
 
     #[test]
     fn repository_path_single_segment() {
