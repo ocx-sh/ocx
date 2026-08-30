@@ -1,7 +1,11 @@
 [project]
 name = "ocx-tests"
 version = "0.0.0"
-requires-python = ">=3.10"
+# The project floor is 3.13+ (`.claude/rules/product-tech-strategy.md`). The
+# declaration used to say 3.10, which is also what ruff derives `target-version`
+# from: three f-strings reusing the outer quote character read as SYNTAX ERRORS
+# against that floor, and a file ruff cannot parse is a file ruff does not lint.
+requires-python = ">=3.13"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -31,6 +35,16 @@ markers = [
 tmp_path_retention_count = 1
 tmp_path_retention_policy = "failed"
 
+[tool.ruff]
+# The rule set is the pinned ruff's own default (`ruff` in [dependency-groups]
+# below, exact version in uv.lock) — not an enumerated `select`, which would be a
+# second list to keep in step with it. `target-version` is deliberately absent:
+# ruff derives it from `project.requires-python` above, so the floor is declared
+# once and the linter cannot disagree with the interpreter.
+#
+# Invoked as `uv run ruff check .` (task test:lint), the same way every other
+# Python tool in this directory runs.
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
@@ -40,4 +54,5 @@ dev = [
     "rich>=14.0",
     "cryptography>=42",
     "pyjwt[crypto]>=2.8",
+    "ruff>=0.16",
 ]
