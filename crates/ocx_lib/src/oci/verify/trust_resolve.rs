@@ -27,6 +27,13 @@
 //! Rungs 1–3 name material the operator asked for, so a missing or unreadable
 //! file is an error. Rung 4 is a convention: absent means "not configured this
 //! way" and falls through, while an unreadable *present* file still fails.
+//!
+//! Every read here is bounded ([`MAX_TRUSTED_ROOT_BYTES`]) and refuses a
+//! non-regular file, and every one of those failures exits 74 `io_error` —
+//! `TrustRootLoadReason::TrustRootUnreadable`, matching what
+//! `--key file:<missing>` has always answered. 78 `config_error` is left to the
+//! rungs that read no operator-named file: the TUF fetch and the assembled
+//! root.
 
 use std::path::{Path, PathBuf};
 
@@ -59,10 +66,10 @@ const MAX_TRUSTED_ROOT_BYTES: u64 = 1024 * 1024;
 /// trust-root cache layout; `rekor_cache_key` keys it by Rekor authority.
 ///
 /// # Errors
-/// Returns the [`VerifyErrorKind`] describing the failure (asset read failure,
-/// a `trusted_root` / `trusted_root_json` ambiguity, JSON parse failure,
-/// offline-with-no-pinned-key, or a failed TUF fetch). Callers tag it with the
-/// target identifier.
+/// Returns the [`VerifyErrorKind`] describing the failure (an unreadable
+/// operator-named file, a `trusted_root` / `trusted_root_json` ambiguity, JSON
+/// parse failure, offline-with-no-pinned-key, or a failed TUF fetch). Callers
+/// tag it with the target identifier.
 pub async fn resolve_trust_root(
     explicit_override: Option<&Path>,
     sigstore: Option<&SigstoreTrust>,
@@ -71,8 +78,12 @@ pub async fn resolve_trust_root(
     rekor_cache_key: &str,
     offline: bool,
 ) -> Result<TrustRoot, VerifyErrorKind> {
+    // 74 `io_error`, not 78 `config_error`: every door this closure serves is a
+    // path the operator typed, and `--key file:<missing>` has always answered 74
+    // for the identical shape. `AssetReadFailed` stays behind for the two sites
+    // that read no operator-named file at all.
     let read_err = |error: BoundedReadError| {
-        VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::AssetReadFailed {
+        VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::TrustRootUnreadable {
             source: Box::new(error),
         })
     };
@@ -346,7 +357,7 @@ mod tests {
             matches!(
                 result,
                 Err(VerifyErrorKind::TrustRootLoad(
-                    TrustRootLoadReason::AssetReadFailed { .. }
+                    TrustRootLoadReason::TrustRootUnreadable { .. }
                 ))
             ),
             "the explicit override must be read first, got {result:?}"
@@ -419,7 +430,7 @@ mod tests {
             matches!(
                 refused_directory,
                 Err(VerifyErrorKind::TrustRootLoad(
-                    TrustRootLoadReason::AssetReadFailed { .. }
+                    TrustRootLoadReason::TrustRootUnreadable { .. }
                 ))
             ),
             "a convention path that is not a regular file must fail, not fall through, got {refused_directory:?}"
@@ -432,7 +443,7 @@ mod tests {
             matches!(
                 refused_huge,
                 Err(VerifyErrorKind::TrustRootLoad(
-                    TrustRootLoadReason::AssetReadFailed { .. }
+                    TrustRootLoadReason::TrustRootUnreadable { .. }
                 ))
             ),
             "a convention file past the cap must fail, not fall through, got {refused_huge:?}"
@@ -445,7 +456,7 @@ mod tests {
     /// The discriminator is the error kind: an unbounded `fs::read` of this
     /// file succeeds and hands a megabyte of `x` to
     /// `load_trusted_root_json`, which answers `PemParseFailed`. Only the cap
-    /// produces `AssetReadFailed`, so this assertion cannot pass on the
+    /// produces `TrustRootUnreadable`, so this assertion cannot pass on the
     /// pre-change code.
     #[tokio::test]
     async fn the_explicit_override_is_refused_at_the_cap_not_by_the_parser() {
@@ -459,7 +470,7 @@ mod tests {
             matches!(
                 result,
                 Err(VerifyErrorKind::TrustRootLoad(
-                    TrustRootLoadReason::AssetReadFailed { .. }
+                    TrustRootLoadReason::TrustRootUnreadable { .. }
                 ))
             ),
             "--sigstore-trusted-root past the cap must be refused by the read, got {result:?}"

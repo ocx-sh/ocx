@@ -431,6 +431,81 @@ def _verify_key_file(ocx: OcxRunner, repo: str, tmp_path: Path) -> tuple[list[st
     )
 
 
+# --- WP-2 (#370, #371). The operator-typed reads that had no ceiling at all,
+# --- and the trust-root family that answered 78 for a filesystem failure.
+
+
+def _oversized(tmp_path: Path, name: str, size: int) -> Path:
+    """A regular file one byte past ``size``, so it fails the ceiling only."""
+    path = tmp_path / name
+    path.write_bytes(b"x" * (size + 1))
+    return path
+
+
+def _verify_trusted_root_missing(
+    ocx: OcxRunner, repo: str, tmp_path: Path
+) -> tuple[list[str], str]:
+    """S-005/C-012. `--sigstore-trusted-root <missing>` is 74, like `--key`.
+
+    The trust root is resolved before the target is, so an unpublished
+    identifier still reaches the read — the same shape `_verify_key_file`
+    relies on. The needle is the path, which only the read names.
+    """
+    path = _missing(tmp_path)
+    return (
+        ["package", "verify", "--sigstore-trusted-root", str(path), f"{repo}:1.0.0"],
+        str(path),
+    )
+
+
+def _verify_trusted_root_oversized(
+    ocx: OcxRunner, repo: str, tmp_path: Path
+) -> tuple[list[str], str]:
+    """S-006/C-010. A trusted root past the 1 MiB ceiling is refused by the read.
+
+    Not by the JSON parser downstream of it: a parse failure is
+    `trust_root_load` at 78, so this row's pin at 74 is what separates the two.
+    """
+    path = _oversized(tmp_path, "huge-trusted-root.json", 1024 * 1024)
+    return (
+        ["package", "verify", "--sigstore-trusted-root", str(path), f"{repo}:1.0.0"],
+        str(path),
+    )
+
+
+def _sign_token_file_oversized(
+    ocx: OcxRunner, repo: str, tmp_path: Path
+) -> tuple[list[str], str]:
+    """S-021/C-011. An oversized token file is refused at the ceiling.
+
+    Written 0600 and owned by this uid so it clears the permission and
+    ownership gates ahead of the read — otherwise the row would pass on those
+    instead, and prove nothing about the bound.
+    """
+    path = _oversized(tmp_path, "token.jwt", 64 * 1024)
+    path.chmod(0o600)
+    return (
+        ["package", "sign", "--identity-token-file", str(path), f"{repo}:1.0.0"],
+        "--identity-token-file",
+    )
+
+
+def _announce_tags_file_oversized(
+    ocx: OcxRunner, repo: str, tmp_path: Path
+) -> tuple[list[str], str]:
+    """S-021/C-011. `announce --tags-file` shares `TagsOpt`'s bounded reader."""
+    path = _oversized(tmp_path, "tags.txt", 128 * 1024)
+    return (
+        [
+            "package", "announce",
+            "--tags-file", str(path),
+            "--package", "acme/widget",
+            "--out", str(tmp_path),
+        ],
+        str(path),
+    )
+
+
 @pytest.mark.parametrize(
     ("build", "expected"),
     [
@@ -451,6 +526,10 @@ def _verify_key_file(ocx: OcxRunner, repo: str, tmp_path: Path) -> tuple[list[st
         pytest.param(_control_sign_key_file, 74, id="control-sign--key-file"),
         pytest.param(_attest_key_file, 74, id="attest--key-file"),
         pytest.param(_verify_key_file, 74, id="verify--key-file"),
+        pytest.param(_verify_trusted_root_missing, 74, id="verify--trusted-root"),
+        pytest.param(_verify_trusted_root_oversized, 74, id="verify--trusted-root-big"),
+        pytest.param(_sign_token_file_oversized, 74, id="sign--identity-token-file-big"),
+        pytest.param(_announce_tags_file_oversized, 74, id="announce--tags-file-big"),
     ],
 )
 def test_an_operator_supplied_path_never_exits_internal(
@@ -492,4 +571,54 @@ def test_an_operator_supplied_path_never_exits_internal(
     assert result.returncode == expected, (
         f"expected exactly {expected}, got {result.returncode}\n"
         f"argv: {argv}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_a_character_device_trusted_root_is_refused_by_the_regular_file_guard(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """S-006/C-010. A character device named as the trusted root is refused, 74.
+
+    This is the reported defect (#370): a character device reports length 0 and
+    then yields whatever it likes, so the whole-file read this path used to go
+    through was unbounded on a value an operator typed. ``install``, ``pull``,
+    ``exec`` and ``env`` reach the same ladder through the auto-verify hook —
+    ``trust_resolve.rs``'s module doc states that it is shared — so the guard
+    that refuses here refuses for all of them.
+
+    ``/dev/null`` rather than the reported ``/dev/zero`` **on purpose**. Both
+    are the same character-device class and hit the same regular-file guard,
+    but the pre-fix behaviour differs: ``/dev/null`` returns empty and the run
+    ends in a parse failure at 78, which is a red this test can be shown in,
+    while ``/dev/zero`` allocates until the machine dies, which is not a state
+    a test suite may enter to prove a point. The exit code is the contract
+    either way, and the guard does not know which device it refused.
+
+    The env var, not the flag, because it is the entry point the auto-verify
+    hook uses; the flag half is a row in the sweep above.
+    """
+    device = Path("/dev/null")
+    if not device.exists():
+        pytest.skip("no /dev/null on this platform")
+
+    env = {**ocx.env, "OCX_SIGSTORE_TRUSTED_ROOT": str(device)}
+    result = subprocess.run(
+        [str(ocx.binary), "package", "verify", f"{unique_repo}:1.0.0"],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(tmp_path),
+        timeout=60,
+        check=False,
+    )
+
+    assert str(device) in result.stderr, (
+        f"the run failed before it reached the trusted-root path, so this "
+        f"proves nothing\nreturncode: {result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert result.returncode == 74, (
+        f"expected exactly 74 for an unreadable trusted-root path, "
+        f"got {result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
