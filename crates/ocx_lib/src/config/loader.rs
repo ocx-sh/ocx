@@ -646,7 +646,30 @@ impl ConfigLoader {
         // Tier 3: CWD walk.
         let walk_result = match cwd {
             Some(start) => {
-                let ceiling = crate::env::var("OCX_CEILING_PATH").map(PathBuf::from);
+                // Absolutized against `start` before the walk: `current` is
+                // absolute throughout (it comes from `current_dir()` and only
+                // ever moves to `.parent()`), and `Path` equality distinguishes
+                // an absolute path from a relative one by its root component,
+                // so a relative `OCX_CEILING_PATH` could never equal any level
+                // the walk produced — the ceiling silently never fired (#380).
+                //
+                // The join alone is not enough. A ceiling only ever fires at
+                // `start` or one of its ancestors, so every useful relative
+                // spelling is `..`-prefixed, and `..` is a component `Path`
+                // equality keeps rather than folds — `<cwd>/..` is not equal to
+                // `<cwd>`'s parent. `lexical_normalize` folds it without
+                // touching the disk, which is what keeps `current` (never
+                // canonicalized) comparable.
+                //
+                // `Path::join` with an absolute value replaces, and normalizing
+                // a path that carries no `.`/`..` is the identity, so an
+                // absolute ceiling behaves exactly as it did. Empty stays the
+                // ignored value it already was, matching the `OCX_PROJECT`
+                // escape hatch above; joining it would bound the walk at
+                // `start` instead.
+                let ceiling = crate::env::var("OCX_CEILING_PATH")
+                    .filter(|value| !value.is_empty())
+                    .map(|value| crate::utility::fs::path::lexical_normalize(&start.join(value)));
                 Self::walk_for_project_file(start, ceiling.as_deref()).await
             }
             None => None,
@@ -2844,6 +2867,72 @@ mod tests {
         assert_eq!(
             resolved, None,
             "OCX_CEILING_PATH must bound the walk before reaching outer ocx.toml"
+        );
+    }
+
+    /// C-001/S-001 (#380): a **relative** `OCX_CEILING_PATH` bounds the walk
+    /// exactly as the absolute one in
+    /// [`project_path_walk_stops_at_ceiling`] does.
+    ///
+    /// `current` is absolute throughout the walk, and `Path` equality
+    /// distinguishes an absolute path from a relative one by its root
+    /// component, so before the join the comparison could never fire and the
+    /// walk ran unbounded to the outer `ocx.toml`. The two tests are the same
+    /// tree with the same ceiling written two ways, and must answer the same.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_walk_stops_at_a_relative_ceiling() {
+        let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT");
+        let dir = TempDir::new().unwrap();
+        // ocx.toml above the ceiling — the file an unbounded walk would find.
+        write_file(&dir.path().join("ocx.toml"), "");
+        let ceiling = dir.path().join("ceiling");
+        std::fs::create_dir(&ceiling).unwrap();
+        let cwd = ceiling.join("project");
+        std::fs::create_dir(&cwd).unwrap();
+
+        // Written relative to `cwd`, the directory the walk starts from.
+        env.set("OCX_CEILING_PATH", "..");
+
+        let resolved = ConfigLoader::project_path(Some(&cwd), None)
+            .await
+            .expect("ceiling-bounded walk should resolve, not error");
+        assert_eq!(
+            resolved, None,
+            "a relative OCX_CEILING_PATH must bound the walk, not be silently ignored"
+        );
+    }
+
+    /// C-001 (#380): the empty value stays the ignored one it already was.
+    ///
+    /// Joining it would make the ceiling equal `start` and stop the walk at
+    /// cwd — turning the escape hatch every other path-valued `OCX_*` variable
+    /// spells the same way into a bound nobody asked for.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_empty_ceiling_does_not_bound_the_walk() {
+        let env = crate::test::env::lock();
+        let _ocx_home = env.isolate_project_home();
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_PROJECT");
+        let dir = TempDir::new().unwrap();
+        let outer_project = dir.path().join("ocx.toml");
+        write_file(&outer_project, "");
+        let cwd = dir.path().join("nested");
+        std::fs::create_dir(&cwd).unwrap();
+
+        env.set("OCX_CEILING_PATH", "");
+
+        let resolved = ConfigLoader::project_path(Some(&cwd), None)
+            .await
+            .expect("an empty ceiling should resolve, not error");
+        assert_eq!(
+            resolved,
+            Some(outer_project),
+            "an empty OCX_CEILING_PATH must stay ignored, not bound the walk at cwd"
         );
     }
 
