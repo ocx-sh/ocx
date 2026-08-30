@@ -95,7 +95,7 @@ async fn list_referrers(
 ) -> Result<oci::ImageIndex>;
 ```
 
-Native impl (native_transport.rs): `self.client.pull_referrers(image, artifact_type)` → map errors via `registry_error()`.
+Native impl (native_transport.rs): as shipped, `self.client.pull_referrers_native(image, artifact_type)` → map errors via `registry_error()`, with `Ok(None)` becoming `ClientError::ReferrersUnsupported`. The OCI referrers tag-schema fallback is owned by OCX (`OciTransport::list_referrers_with_fallback`), not by the fork.
 
 ## 4. Error Taxonomy
 

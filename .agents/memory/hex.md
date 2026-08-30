@@ -483,3 +483,74 @@ research-axes:
     never re-reconciled — nushell was unaffected, which is exactly why nothing caught it.
     `shell/hook.rs` was unowned by any work package. **Assign every file the feature's
     headline scenario traverses**, not only the files the contracts name.
+
+- **`adversarial-review --background` is a no-op in this codex-companion.mjs version** (2026-08-30,
+  issue-sweep plan gate). Only `handleTask` checks `options.background`, so the review ran in the
+  foreground and was SIGTERM'd by the 2-minute Bash call timeout after ~15 tool calls, before
+  emitting a verdict. **Use the Bash tool's own `run_in_background`, never the script's flag.**
+  - The tell is a stale job file: `"status":"running"` with a dead pid and a log whose last entry
+    is minutes old. That reads as *pending* and is actually *failed* — the same silent-negative
+    class as an empty grep. Treat "running + dead pid" as FAIL, and check the pid, not the status
+    field.
+  - Costs nothing to survive: the adversary's deliverable must be an incrementally-appended FILE.
+    A gate killed at 90% leaves a full report on disk instead of nothing. This is the third
+    distinct failure mode for review-shaped workers here, alongside "idle without reporting" and
+    "terminated on an API error before starting".
+
+- **rustc exempts leading-underscore identifiers from `dead_code`, so an underscore-named probe
+  red-proofs nothing** (2026-08-30, WP-7 fork deletion). A worker's first mutation probes were
+  named `__wp7_*` and came back green even under `RUSTFLAGS="-D dead_code"` — the canary was
+  structurally incapable of firing. Renaming them without the underscore produced the expected
+  `function ... is never used` at both lib level and inside `#[cfg(test)] mod test`. Two
+  compounding traps in the same check: `cargo build` never compiles `#[cfg(test)]` mods at all,
+  and the `rtk` hook replaces compiler output with its own summary, hiding warnings entirely.
+  **A zero-warning claim needs `cargo check --all-targets`, run unfiltered, with a probe whose
+  name rustc will actually complain about.**
+- **A submodule gitlink bump can cross a merge without carrying a foreign change — prove it by
+  tree, not by log.** WP-7 branched off `origin/ocx/integration` (`609d3f7`), one merge past the
+  pinned `21ded5e`. Commit ancestry says a change rode along; `git rev-parse <sha>^{tree}` on both
+  says the trees are identical (`253279661d64c…`), so nothing did. Same lesson shape as
+  "not on either branch does not mean unlanded": compare the *effect*, never the graph.
+
+- **Prove the mutation changed the BINARY, not just the file** (2026-08-30, WP-9, issue sweep).
+  Gate an acceptance mutation on the release binary's **sha256 changing**, not only on a
+  file-level `grep -c`: the grep proves the edit landed on disk, which is *not* the same as
+  proving the binary under test contains it.
+  - **But do NOT gate on the rebuilt binary hashing back to the baseline** — `vergen-gix` stamps
+    build metadata into `ocx`, so a rebuild is not byte-identical and that assertion is luck, not
+    a check. It reported three correct proofs as BROKEN when run against a stale baseline. The
+    sound gates are: **mutated ≠ baseline, restored ≠ mutated, source byte-identical, green run
+    passes.** (WP-9 shipped the wrong form first and corrected it — carry the corrected form.)
+  - **Restore on abort.** The same harness aborted mid-mutation and left the mutation on disk when
+    a mutation broke the compile under `-D warnings`; only the *next* run's anchor gate
+    (`anchor hits=0`) stopped it silently measuring a mutated tree. Write mutations that revert
+    behaviour without breaking the build, and restore in a trap.
+  Two sibling packages in the same run hit the weaker form: one measured the previous mutation's
+  binary after `cargo fmt` silently staledated its needle, another had two mutations come back
+  **build-broken rather than red** ("a build break is not a red").
+- **Keep a control leg that passes UNDER the mutation.** WP-9's acceptance test carried a
+  bare-path leg beside the `file://` leg; the bare leg stayed green while the mutated `file://`
+  leg reddened, which is what proves the test discriminates *the spelling* rather than the whole
+  rung. A red alone only shows something broke.
+- **A guard that cannot red on this host is a platform guard, not a weak test.** WP-9 could not
+  red the rooted rows of `anchored_at`: Unix `Path::join` already replaces the base for an
+  absolute argument, so the `has_root()` branch is Windows-only. It mutated the branch
+  *condition* instead and recorded which rows are load-bearing only on Windows. Correct reading
+  of the "a mutation that fails to red means you have not found every guard" corollary.
+- **The recurring defect shape of this run: a widening that lands at some doors and not others.**
+  Three separate packages found a third or fourth reader of the thing they were fixing —
+  `append_to_tags_file` (third unbounded `--tags-file` caller), `read_unverified_referrer`
+  (second `.first()` site), `context.rs:1099` + `managed_config/publish.rs:316` (third and fourth
+  readers of `OCX_SIGSTORE_TRUSTED_ROOT`). **Every one was found by the implementer, none by
+  either review pass.** Brief work packages to enumerate every reader/caller of the seam they
+  touch, and grant the scope extension when they do — a contract honoured at two of four doors
+  is a worse contract than the one before it.
+- **Scenario lists do not get regenerated when a contract is corrected.** S-023 kept specifying
+  the probe-only-when-empty optimisation that C-094 had explicitly deleted; a tester working from
+  it would have pinned the defect as the spec. Second instance in one plan. The only reader
+  forced to reconcile a contract with its scenario is the implementer — so when a review corrects
+  a contract, re-read its scenarios in the same edit.
+- **Worker idle-notifications race the orchestrator's reply.** Two packages committed "awaiting
+  your decision" while the grant was already in their inbox, costing a round trip each. When a
+  worker parks on a decision, assume the next message it sends crossed yours and re-state the
+  answer in one short paragraph rather than referring back to it.
