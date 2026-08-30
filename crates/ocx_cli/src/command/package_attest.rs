@@ -215,7 +215,7 @@ impl PackageAttest {
 
         let result = context
             .manager()
-            .attest_one(&identifier, self.platform.as_ref(), options)
+            .attest_one(&identifier, self.platform.as_ref(), options, None)
             .await
             .map_err(package_sign_common::attest_error_into_anyhow)?
             .result;

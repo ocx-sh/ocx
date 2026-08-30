@@ -212,7 +212,7 @@ impl PackageSign {
 
         let result = context
             .manager()
-            .sign_one(&identifier, self.platform.as_ref(), options)
+            .sign_one(&identifier, self.platform.as_ref(), options, None)
             .await
             .map_err(sign_error_into_anyhow)?
             .result;

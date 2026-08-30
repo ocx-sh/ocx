@@ -69,6 +69,20 @@ pub struct SignContext<'a> {
     pub no_cache: bool,
     /// Index for resolving tag → per-platform manifest digest.
     pub index: &'a Index,
+    /// The resolution the caller already performed for `identifier`, when it
+    /// performed one.
+    ///
+    /// A `--tags` sweep asks the index chain what each tag resolves to before
+    /// it can decide whether the tag is an index worth signing; without this
+    /// the pipeline asked the identical question one call later, so a sweep of
+    /// N tags cost 2N manifest fetches (#373). `None` — every caller that
+    /// pre-resolves nothing — leaves the pipeline resolving it itself.
+    ///
+    /// It is the *same* question or nothing: the pair must be what
+    /// `Index::fetch_manifest(identifier, IndexOperation::Resolve)` answered
+    /// for this exact identifier, or the subject digest stops being what the
+    /// reference names.
+    pub resolved: Option<&'a (Digest, crate::oci::Manifest)>,
     /// Fulcio URL (validated at the CLI boundary).
     pub fulcio_url: &'a Url,
     /// Rekor URL (validated at the CLI boundary).
@@ -233,6 +247,13 @@ pub(crate) async fn guard_dialed_endpoints(
 /// digest the reference names, and whether that object is an index listing
 /// children.
 ///
+/// `resolved` is that same answer, when the caller already has it: a `--tags`
+/// sweep asks the chain what each tag names in order to skip bare manifests,
+/// and re-asking here cost every sweep a second fetch per tag (#373). It must
+/// be `Index::fetch_manifest(identifier, IndexOperation::Resolve)`'s own answer
+/// for this identifier — anything else silently redefines what the reference
+/// names. `None` fetches, exactly as before.
+///
 /// # Errors
 ///
 /// [`SignErrorKind::TargetNotFound`] when the reference resolves to nothing, or
@@ -245,20 +266,31 @@ pub(crate) async fn resolve_platform_target(
     index: &Index,
     identifier: &Identifier,
     platform: Option<&Platform>,
+    resolved: Option<&(Digest, crate::oci::Manifest)>,
 ) -> Result<SignTarget, SignErrorKind> {
-    let Some((resolved_digest, manifest)) = index
-        .fetch_manifest(identifier, IndexOperation::Resolve)
-        .await
-        .map_err(|e| SignErrorKind::Internal(Box::new(e)))?
-    else {
-        return Err(SignErrorKind::TargetNotFound {
-            platform: platform_label(platform),
-        });
+    // The caller's resolution when it had one, this function's otherwise.
+    // `fetched` is declared out here so the borrow taken inside the arm can
+    // outlive the match.
+    let fetched;
+    let (resolved_digest, manifest) = match resolved {
+        Some((digest, manifest)) => (digest, manifest),
+        None => {
+            fetched = index
+                .fetch_manifest(identifier, IndexOperation::Resolve)
+                .await
+                .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+            let Some((digest, manifest)) = fetched.as_ref() else {
+                return Err(SignErrorKind::TargetNotFound {
+                    platform: platform_label(platform),
+                });
+            };
+            (digest, manifest)
+        }
     };
     // `None` for a bare image manifest — resolution reached the acted-on object
     // directly and there is no index to narrow into. That distinction, not the
     // reference's form, is what the rule branches on.
-    let children: Option<Vec<(Platform, Digest)>> = match &manifest {
+    let children: Option<Vec<(Platform, Digest)>> = match manifest {
         crate::oci::Manifest::ImageIndex(index) => Some(
             index
                 .manifests
@@ -276,7 +308,7 @@ pub(crate) async fn resolve_platform_target(
         crate::oci::Manifest::Image(_) => None,
     };
     let target =
-        resolve_sign_target(&resolved_digest, children.as_deref(), platform).map_err(map_resolve_target_error)?;
+        resolve_sign_target(resolved_digest, children.as_deref(), platform).map_err(map_resolve_target_error)?;
     // The sha256 floor, applied at the one seam both `sign` and `attest` pass
     // through and before either has written anything. Not in
     // `resolve_sign_target`: that module is the `--platform` rule and verify
@@ -359,7 +391,7 @@ impl SignPipeline {
         //    rule. `enclosing_index` is verify's to read (the membership test);
         //    signing acts on the subject and nothing else.
         let SignTarget { subject_digest, .. } =
-            resolve_platform_target(ctx.index, ctx.identifier, ctx.platform).await?;
+            resolve_platform_target(ctx.index, ctx.identifier, ctx.platform, ctx.resolved).await?;
         let resolved = ctx.identifier.clone_with_digest(subject_digest.clone());
         // Index indirection: a logical name (`ocx.sh/<ns>/<pkg>`) may point at a
         // different physical registry, so every transport-facing call below —
@@ -823,20 +855,65 @@ mod platform_narrowing_tests {
         })
     }
 
+    /// The two-child index every `image_index()` test resolves to, as a bare
+    /// manifest — so a supplied resolution can carry the same shape the index
+    /// would have answered with.
+    fn image_index_manifest() -> crate::oci::Manifest {
+        crate::oci::Manifest::ImageIndex(ImageIndex {
+            schema_version: INDEX_SCHEMA_VERSION,
+            media_type: Some(crate::oci::OCI_IMAGE_INDEX_MEDIA_TYPE.to_string()),
+            artifact_type: None,
+            manifests: vec![
+                child(native::Os::Linux, native::Arch::Amd64, 0x01),
+                child(native::Os::Linux, native::Arch::ARM64, 0x02),
+            ],
+            annotations: None,
+        })
+    }
+
     fn image_index() -> Index {
         Index::from_impl(ShapedIndex {
             resolved: digest(0xaa),
-            manifest: crate::oci::Manifest::ImageIndex(ImageIndex {
-                schema_version: INDEX_SCHEMA_VERSION,
-                media_type: Some(crate::oci::OCI_IMAGE_INDEX_MEDIA_TYPE.to_string()),
-                artifact_type: None,
-                manifests: vec![
-                    child(native::Os::Linux, native::Arch::Amd64, 0x01),
-                    child(native::Os::Linux, native::Arch::ARM64, 0x02),
-                ],
-                annotations: None,
-            }),
+            manifest: image_index_manifest(),
         })
+    }
+
+    /// **The `resolved` argument's own contract (#373).** A resolution the
+    /// caller supplies is the one acted on, and the index is never asked.
+    ///
+    /// The sweep tests in `package_manager::tasks` prove how many resolutions a
+    /// run performs and which reference each was for; neither can see *which
+    /// answer* the rule then applied. `EmptyIndex` is what makes that visible:
+    /// it resolves to nothing, so a run that fell through to it would answer
+    /// `TargetNotFound` instead of the supplied subject. Both arms of the
+    /// narrowing rule are driven, because the `Some` path has to reach the
+    /// supplied manifest's children too — an implementation that used the
+    /// supplied digest but re-fetched the children would pass a digest-only
+    /// assertion.
+    #[tokio::test]
+    async fn a_supplied_resolution_is_acted_on_and_the_index_is_never_asked() {
+        let supplied = (digest(0xaa), image_index_manifest());
+
+        let whole = resolve_platform_target(&Index::from_impl(EmptyIndex), &identifier(), None, Some(&supplied))
+            .await
+            .expect("a supplied resolution needs no fetch");
+        assert_eq!(whole.subject_digest, digest(0xaa));
+        assert_eq!(whole.enclosing_index, None, "nothing was narrowed into");
+
+        let narrowed = resolve_platform_target(
+            &Index::from_impl(EmptyIndex),
+            &identifier(),
+            Some(&platform("linux/arm64")),
+            Some(&supplied),
+        )
+        .await
+        .expect("arm64 is listed in the supplied index");
+        assert_eq!(
+            narrowed.subject_digest,
+            digest(0x02),
+            "the child came from the supplied manifest"
+        );
+        assert_eq!(narrowed.enclosing_index, Some(digest(0xaa)));
     }
 
     /// A sha384 digest. 96 hex characters, and a perfectly legal OCI address —
@@ -884,6 +961,7 @@ mod platform_narrowing_tests {
             &index_listing(&digest(0x02)),
             &identifier(),
             Some(&platform("linux/arm64")),
+            None,
         )
         .await
         .expect("a sha256 child is signable");
@@ -894,6 +972,7 @@ mod platform_narrowing_tests {
             &index_listing(&sha384(0x02)),
             &identifier(),
             Some(&platform("linux/arm64")),
+            None,
         )
         .await
         .expect_err("cosign addresses its subject by sha256 alone");
@@ -911,7 +990,7 @@ mod platform_narrowing_tests {
             resolved: sha384(0xaa),
             manifest: crate::oci::Manifest::Image(ImageManifest::default()),
         });
-        let resolved = resolve_platform_target(&bare, &identifier(), None)
+        let resolved = resolve_platform_target(&bare, &identifier(), None, None)
             .await
             .expect_err("the resolved object is the subject, and it is sha384");
         assert_eq!(resolved.kind_detail(), "subject_digest_unsupported");
@@ -920,7 +999,7 @@ mod platform_narrowing_tests {
     /// The absent flag on a BARE MANIFEST: sign what resolved.
     #[tokio::test]
     async fn no_platform_against_a_bare_manifest_acts_on_the_resolved_object() {
-        let target = resolve_platform_target(&bare_manifest_index(), &identifier(), None)
+        let target = resolve_platform_target(&bare_manifest_index(), &identifier(), None, None)
             .await
             .expect("a bare manifest needs no narrowing");
         assert_eq!(target.subject_digest, digest(0xaa));
@@ -932,7 +1011,7 @@ mod platform_narrowing_tests {
     /// multi-platform tag signature lives on.
     #[tokio::test]
     async fn no_platform_against_an_index_signs_the_index_itself() {
-        let target = resolve_platform_target(&image_index(), &identifier(), None)
+        let target = resolve_platform_target(&image_index(), &identifier(), None, None)
             .await
             .expect("an index is a legal subject");
         assert_eq!(
@@ -946,7 +1025,7 @@ mod platform_narrowing_tests {
     /// The present flag on an INDEX: narrow to that child.
     #[tokio::test]
     async fn a_platform_against_an_index_narrows_to_that_child() {
-        let target = resolve_platform_target(&image_index(), &identifier(), Some(&platform("linux/arm64")))
+        let target = resolve_platform_target(&image_index(), &identifier(), Some(&platform("linux/arm64")), None)
             .await
             .expect("arm64 is listed");
         assert_eq!(target.subject_digest, digest(0x02));
@@ -960,9 +1039,14 @@ mod platform_narrowing_tests {
     /// `case $?` contract is untouched while the word tells the two apart.
     #[tokio::test]
     async fn a_platform_against_a_bare_manifest_is_refused_as_not_an_index() {
-        let error = resolve_platform_target(&bare_manifest_index(), &identifier(), Some(&platform("linux/amd64")))
-            .await
-            .expect_err("there is nothing to narrow into");
+        let error = resolve_platform_target(
+            &bare_manifest_index(),
+            &identifier(),
+            Some(&platform("linux/amd64")),
+            None,
+        )
+        .await
+        .expect_err("there is nothing to narrow into");
         assert!(
             matches!(&error, SignErrorKind::TargetNotAnIndex { platform } if platform == "linux/amd64"),
             "expected TargetNotAnIndex, got {error:?}"
@@ -984,7 +1068,7 @@ mod platform_narrowing_tests {
     /// reclassify a plain typo.
     #[tokio::test]
     async fn a_platform_the_index_does_not_list_is_still_target_not_found() {
-        let error = resolve_platform_target(&image_index(), &identifier(), Some(&platform("windows/amd64")))
+        let error = resolve_platform_target(&image_index(), &identifier(), Some(&platform("windows/amd64")), None)
             .await
             .expect_err("windows is not listed");
         assert_eq!(error.kind_detail(), "target_not_found");
@@ -997,14 +1081,14 @@ mod platform_narrowing_tests {
     #[tokio::test]
     async fn an_unresolvable_reference_labels_the_absent_platform_as_any() {
         let index = Index::from_impl(EmptyIndex);
-        let error = resolve_platform_target(&index, &identifier(), None)
+        let error = resolve_platform_target(&index, &identifier(), None, None)
             .await
             .expect_err("nothing resolved");
         assert!(
             matches!(&error, SignErrorKind::TargetNotFound { platform } if platform == "any"),
             "expected the `any` label, got {error:?}"
         );
-        let named = resolve_platform_target(&index, &identifier(), Some(&platform("linux/amd64")))
+        let named = resolve_platform_target(&index, &identifier(), Some(&platform("linux/amd64")), None)
             .await
             .expect_err("nothing resolved");
         assert!(
@@ -1566,6 +1650,7 @@ mod tests {
                 token_provider: &token_provider,
                 no_cache: true,
                 index: &index,
+                resolved: None,
                 fulcio_url: &fulcio_url,
                 rekor_url: &rekor_url,
                 state: &state,

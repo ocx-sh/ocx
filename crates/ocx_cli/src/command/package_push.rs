@@ -562,6 +562,7 @@ impl PackagePush {
                     no_tty: options.no_tty,
                     offline: context.is_offline(),
                 },
+                None,
             )
             .await
             .map_err(package_sign_common::attest_error_into_anyhow)?
