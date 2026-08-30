@@ -15,7 +15,7 @@ OCX enforces a hard boundary between the global toolchain and project-tier resol
 
 This applies without exception to:
 
-- [`ocx run`][cmd-run] — project-tier env-composition command. Reads `ocx.toml` + `ocx.lock`. The global toolchain (`$OCX_HOME/ocx.toml`) is not consulted, not merged, and not used as a fallback for tools the project does not declare.
+- [`ocx exec`][cmd-run] — project-tier env-composition command. Reads `ocx.toml` + `ocx.lock`. The global toolchain (`$OCX_HOME/ocx.toml`) is not consulted, not merged, and not used as a fallback for tools the project does not declare.
 - [`ocx package exec`][cmd-exec] — OCI-tier env-composition command. Never reads any `ocx.toml`, whether project or global. Takes OCI identifiers directly.
 
 Both commands are hermetic: the environment they produce is determined entirely by their declared inputs. An undeclared tool is absent, never filled from the global set.
@@ -28,7 +28,7 @@ Both commands are hermetic: the environment they produce is determined entirely 
 
 ### PATH precedence model {#strict-isolation-shell-hook}
 
-OCX enforces isolation by **PATH precedence**, not PATH stripping. The global toolchain's `current/entrypoints/` directory sits on `PATH` at login time (via `$OCX_HOME/env.sh` sourced from the login profile). When a project toolchain is activated — via `ocx run` or `ocx direnv` — the project tools are **prepended** to `PATH`, shadowing any global tools of the same name.
+OCX enforces isolation by **PATH precedence**, not PATH stripping. The global toolchain's `current/entrypoints/` directory sits on `PATH` at login time (via `$OCX_HOME/env.sh` sourced from the login profile). When a project toolchain is activated — via `ocx exec` or `ocx direnv` — the project tools are **prepended** to `PATH`, shadowing any global tools of the same name.
 
 There is no PATH strip, no `# ocx: global toolchain suppressed` comment, and no `_OCX_APPLIED` fingerprint. The per-prompt shell hook (`ocx shell hook`) has been removed entirely. Isolation is a static consequence of PATH ordering: project tools appear earlier in `PATH` than global tools.
 
@@ -44,23 +44,23 @@ The emitted shell statements are **self-contained**: they depend on no `ocx` pro
 ocx package env kitware/cmake --shell bash >> ~/.bashrc
 ```
 
-— where every later shell re-sources the block with `ocx` possibly absent and the directory still lands exactly once, at the front. The same move-to-front dedup applies to the in-process environment ([`ocx run`][cmd-run], [`ocx package exec`][cmd-exec]) and to CI exports (`--ci=github`, `--ci=gitlab`).
+— where every later shell re-sources the block with `ocx` possibly absent and the directory still lands exactly once, at the front. The same move-to-front dedup applies to the in-process environment ([`ocx exec`][cmd-run], [`ocx package exec`][cmd-exec]) and to CI exports (`--ci=github`, `--ci=gitlab`).
 
 ::: info Shell-specific requirements
 All ten supported shells — bash, zsh, ash, ksh, dash, fish, PowerShell, elvish, nushell, and Windows `cmd` — emit idempotent move-to-front output. The `cmd` form rebuilds `PATH` with `%VAR:search=%` substring deletion (no `FOR /F`, no delayed expansion, so `!`-bearing paths stay intact) and matches segments case-insensitively, the way Windows `PATH` lookup does. A couple of shells have version floors: elvish needs the `str:` module (0.16+); nushell needs the auto-list `PATH` conversion (0.101+).
 :::
 
-### What "hermetic" means for `ocx run` {#strict-isolation-run}
+### What "hermetic" means for `ocx exec` {#strict-isolation-exec}
 
-`ocx run` reads exactly two files: `ocx.toml` and its sibling `ocx.lock`. The resolved environment consists of the tools those files declare — no more. If a tool is not in `ocx.toml`, it is not in the child environment, regardless of what is installed globally or what is on the parent shell's PATH.
+`ocx exec` reads exactly two files: `ocx.toml` and its sibling `ocx.lock`. The resolved environment consists of the tools those files declare — no more. If a tool is not in `ocx.toml`, it is not in the child environment, regardless of what is installed globally or what is on the parent shell's PATH.
 
-Naming a binding subset (`ocx run cmake -- …`) narrows composition further: only the named tools are resolved to a host leaf and installed. A `-g` group selects the *namespace* for name resolution, not a mandate that every tool in it be available — an unrelated tool in scope with no leaf for the current host does not block a narrowly-named run. Omit the names and the whole scope must resolve.
+Naming a binding subset (`ocx exec cmake -- …`) narrows composition further: only the named tools are resolved to a host leaf and installed. A `-g` group selects the *namespace* for name resolution, not a mandate that every tool in it be available — an unrelated tool in scope with no leaf for the current host does not block a narrowly-named run. Omit the names and the whole scope must resolve.
 
-By default `ocx run` **inherits** the spawning shell's environment and merely **prepends** the composed tool `bin/` directories to `PATH` — ambient parent-shell `PATH` entries remain reachable after the project tools. The default is *not* hermetic. Pass `--clean` for a hermetic environment that drops the inherited environment and exposes only the composed tool set, exactly like `exec --clean`.
+By default `ocx exec` **inherits** the spawning shell's environment and merely **prepends** the composed tool `bin/` directories to `PATH` — ambient parent-shell `PATH` entries remain reachable after the project tools. The default is *not* hermetic. Pass `--clean` for a hermetic environment that drops the inherited environment and exposes only the composed tool set, exactly like `exec --clean`.
 
-One part of the spawning shell's environment is **not** inherited: whatever [shell integration][in-depth-shell-integration] applied to it. An explicit `ocx run` names the environment it wants, so the toolchain the per-prompt reconciler folded into your shell is taken back out first, using the [`__OCX_ENV_STATE`][env-ocx-env-state] ledger as the revert set — the same set the reconciler itself would revert on leaving the directory. Your own variables and your own `PATH` entries are untouched; only what OCX put there is removed, and only where the value is still the one OCX wrote. Without shell integration there is no ledger and nothing is removed. The same applies to `ocx package exec`, `ocx package test` and `ocx patch test`.
+One part of the spawning shell's environment is **not** inherited: whatever [shell integration][in-depth-shell-integration] applied to it. An explicit `ocx exec` names the environment it wants, so the toolchain the per-prompt reconciler folded into your shell is taken back out first, using the [`__OCX_ENV_STATE`][env-ocx-env-state] ledger as the revert set — the same set the reconciler itself would revert on leaving the directory. Your own variables and your own `PATH` entries are untouched; only what OCX put there is removed, and only where the value is still the one OCX wrote. Without shell integration there is no ledger and nothing is removed. The same applies to `ocx package exec`, `ocx package test` and `ocx patch test`.
 
-### What "hermetic" means for `ocx package exec` {#strict-isolation-exec}
+### What "hermetic" means for `ocx package exec` {#strict-isolation-package-exec}
 
 `ocx package exec` takes one or more OCI identifiers on the command line. It resolves each identifier, composes the declared environment variables from the resolved packages, and spawns the command with that environment. No `ocx.toml` is read — not the project file, not the global file. The entire operation is stateless with respect to project configuration.
 
@@ -77,7 +77,7 @@ subcommand, resolving its own base from a synthetic content-addressed identifier
 `ocx.toml` — so on its own it has no way to know the parent project opted this base out, and
 would re-apply the companion the parent just suppressed.
 
-[`ocx run`][cmd-run] closes that gap by forwarding the opt-out to the child process over
+[`ocx exec`][cmd-run] closes that gap by forwarding the opt-out to the child process over
 [`OCX_PATCHES`][env-ocx-patches]: alongside the resolved `[patches]` tier, it includes the
 opted-out bases' canonical `registry/repository` keys **and** the content digest of each one
 actually resolved that run. The digest leg is what a launcher's re-entry matches against,
@@ -116,7 +116,7 @@ The two flags are mutually exclusive — combining `--global` with `--project` e
 | [`ocx lock`][cmd-lock] | Re-locks the global file |
 | [`ocx update`][cmd-update] | Advances a binding in the global file |
 | [`ocx pull`][cmd-pull] | Pre-warms packages declared by the global file |
-| [`ocx run`][cmd-run] | Composes env from the global file + its lock |
+| [`ocx exec`][cmd-run] | Composes env from the global file + its lock |
 | [`ocx env`][cmd-env-root] | Emits composed toolchain env for the global file |
 
 ## Visibility Surfaces {#visibility-surfaces}
@@ -157,7 +157,7 @@ declared var, regardless of its own visibility, is resolved before the composer 
 crosses. A malformed template, a `required` [`path`][metadata-env-path] that does not exist on
 disk, or an unresolvable `${self.env.KEY}` reference on any var — including one that will not
 itself be emitted on the surface in play — fails the whole composition with exit 65. This holds
-for [`ocx env`][cmd-env-root] / [`ocx package env`][cmd-package-env] and [`ocx run`][cmd-run] /
+for [`ocx env`][cmd-env-root] / [`ocx package env`][cmd-package-env] and [`ocx exec`][cmd-run] /
 [`ocx package exec`][cmd-package-exec] alike, on either surface: a package's own metadata either
 resolves in full or the composition refuses, independent of who is asking or which surface they
 asked for.
@@ -218,9 +218,9 @@ Neither [`--shell`][cmd-env-root] nor `--ci` output carries an `integrations` re
 
 ## Composition Order {#composition-order}
 
-When multiple packages contribute to an environment (via `ocx run -g GROUP1,GROUP2` or `ocx package exec PKG1 PKG2`), env entries are **prepended** — the last tool walked has its `PATH` entries placed **first** in the resolved `PATH`. In `-g` argument order, groups listed **later** win PATH lookup.
+When multiple packages contribute to an environment (via `ocx exec -g GROUP1,GROUP2` or `ocx package exec PKG1 PKG2`), env entries are **prepended** — the last tool walked has its `PATH` entries placed **first** in the resolved `PATH`. In `-g` argument order, groups listed **later** win PATH lookup.
 
-For `ocx run`, the full order rule is:
+For `ocx exec`, the full order rule is:
 
 > First by group-selection order (the order of `-g` flags, after `all` expansion, deduplicated); then alphabetical by binding name within each group.
 
@@ -239,7 +239,7 @@ Every fold — `path` or `list` — is a **render, not accumulated state**: the 
 `path` contributions land ahead of the ambient value, most-recently-applied first (move-to-front). `list` contributions land after it, in the order applied (move-to-back) — the last package or project stage to contribute a `list` value lands at the very end, which is what a last-wins consumer resolves to.
 
 ::: tip Idempotence, the same guarantee as `path`
-Re-running the fold with a value already present removes it from its old position and re-appends it at the back, so a repeated `ocx run`, a re-evaluated `.envrc`, or a launcher re-entry never grows a `list` variable — the same [move-to-front idempotence](#strict-isolation-idempotent) `path` entries guarantee, mirrored for the opposite end.
+Re-running the fold with a value already present removes it from its old position and re-appends it at the back, so a repeated `ocx exec`, a re-evaluated `.envrc`, or a launcher re-entry never grows a `list` variable — the same [move-to-front idempotence](#strict-isolation-idempotent) `path` entries guarantee, mirrored for the opposite end.
 :::
 
 #### Separator agreement across a composition {#composition-order-list-separator}
@@ -251,22 +251,22 @@ This agreement runs once every contributing entry for the composition is known �
 Settling a separator also re-checks every entry's value against it, because a parse-time check can only compare a value to the separator that entry itself declared — an entry that inherits a separator from another contributor was never checked against it. A value edged by the separator it inherits therefore fails the composition closed (exit 65) even though its own parse-time check passed.
 
 ::: warning `cmd.exe` cannot export a `list` entry
-`ocx env --shell=cmd` and `ocx package env --shell=cmd` skip every `list`-typed entry with a `# ocx:` note on stderr, naming the key. `cmd.exe`'s only string-replacement primitive, `%VAR:search=replace%`, matches case-**insensitively** with no case-sensitive form — and list elements are opaque option strings where `-DFOO=1` and `-Dfoo=1` are different options, so a case-blind removal would delete the wrong one. Every other type (`path`, `constant`) still exports normally under `cmd`. This is a text-export limitation only: the in-process environment `ocx run` and `ocx package exec` build for a child process on Windows is unaffected — only a captured `--shell=cmd` script loses the `list` lines.
+`ocx env --shell=cmd` and `ocx package env --shell=cmd` skip every `list`-typed entry with a `# ocx:` note on stderr, naming the key. `cmd.exe`'s only string-replacement primitive, `%VAR:search=replace%`, matches case-**insensitively** with no case-sensitive form — and list elements are opaque option strings where `-DFOO=1` and `-Dfoo=1` are different options, so a case-blind removal would delete the wrong one. Every other type (`path`, `constant`) still exports normally under `cmd`. This is a text-export limitation only: the in-process environment `ocx exec` and `ocx package exec` build for a child process on Windows is unaffected — only a captured `--shell=cmd` script loses the `list` lines.
 :::
 
 ## Project Environment {#project-env}
 
 `ocx.toml` can declare its own environment on top of what packages provide: [`[env]`][config-project-env] for project-wide constants, [`[group.<name>.env]`][config-project-env] for group-scoped ones, and the [`--env`][cmd-run] flag for a one-off override.
 
-Before this stage existed, the only channel was the ambient shell (`FOO=bar ocx run -- …`). That fails outright on Windows — neither PowerShell nor `cmd.exe` has a per-invocation variable prefix, both mutate session state that persists after the command — and it fails for any caller that builds an argv array rather than a shell command line, which is the shape a [GitHub Action][github-actions-docs], a [Bazel rule][bazel-rules], or a Python subprocess call all use.
+Before this stage existed, the only channel was the ambient shell (`FOO=bar ocx exec -- …`). That fails outright on Windows — neither PowerShell nor `cmd.exe` has a per-invocation variable prefix, both mutate session state that persists after the command — and it fails for any caller that builds an argv array rather than a shell command line, which is the shape a [GitHub Action][github-actions-docs], a [Bazel rule][bazel-rules], or a Python subprocess call all use.
 
-Project and group `[env]` entries materialize as ordinary env entries and are **appended** to the same vector [Composition order](#composition-order) already produces — the same uniform channel every consumer (`ocx run`, `ocx env`, `ocx direnv export`, the `--ci=github`/`--ci=gitlab` writers) reads.
+Project and group `[env]` entries materialize as ordinary env entries and are **appended** to the same vector [Composition order](#composition-order) already produces — the same uniform channel every consumer (`ocx exec`, `ocx env`, `ocx direnv export`, the `--ci=github`/`--ci=gitlab` writers) reads.
 
 ### Precedence {#project-env-precedence}
 
 | Stage | Source | Notes |
 |---|---|---|
-| 1 (lowest) | Ambient inherited env | Minus the shell reconciler's own contribution ([above](#strict-isolation-run)); skipped entirely under [`--clean`][cmd-run] |
+| 1 (lowest) | Ambient inherited env | Minus the shell reconciler's own contribution ([above](#strict-isolation-exec)); skipped entirely under [`--clean`][cmd-run] |
 | 2 | Package-composed env | [Composition order](#composition-order) above — group-selection order, then alphabetical by binding name |
 | 3 | Patch-companion overlay | [`[patches]`][config-patches] — unaffected by this feature |
 | 4 | Project [`[env]`][config-project-env] | Constants replace; `path` entries prepend; `list` entries append |
@@ -281,13 +281,13 @@ A stage-4, 5, or 6 `path` entry therefore lands ahead of a stage-2 package `path
 
 | Tier | Commands | Also available |
 |---|---|---|
-| Project toolchain | [`ocx run`][cmd-run], [`ocx env`][cmd-env-root], [`ocx direnv export`][cmd-direnv-export] | `-g/--group` selects which groups' `[env]` composes |
+| Project toolchain | [`ocx exec`][cmd-run], [`ocx env`][cmd-env-root], [`ocx direnv export`][cmd-direnv-export] | `-g/--group` selects which groups' `[env]` composes |
 | Package (OCI) | [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx package test`][cmd-package-test], [`ocx patch test`][cmd-patch-test] | `--self` selects the visibility surface |
 
 The package tier still reads no `ocx.toml` — see the boundary note above. `--env` there composes only what the caller typed on that invocation; stages 4 and 5 do not exist, because there is no project file to declare them.
 
 ::: tip Export what you would execute
-`ocx run` never prints — it replaces itself with the child process — so the only way to see a composed environment is to ask the command that emits one. `ocx env --env X` composes stages 1–6 exactly as `ocx run --env X` does, so the export and the execution agree by construction. The same pairing holds on the package tier between [`ocx package env`][cmd-package-env] and [`ocx package exec`][cmd-package-exec].
+`ocx exec` never prints — it replaces itself with the child process — so the only way to see a composed environment is to ask the command that emits one. `ocx env --env X` composes stages 1–6 exactly as `ocx exec --env X` does, so the export and the execution agree by construction. The same pairing holds on the package tier between [`ocx package env`][cmd-package-env] and [`ocx package exec`][cmd-package-exec].
 :::
 
 ::: warning `--clean` is not the hermeticity boundary
@@ -312,7 +312,7 @@ Project and group `[env]` entries have no visibility axis at all — a project i
 [cmd-lock]: ./command-line.md#lock
 [cmd-pull]: ./command-line.md#pull
 [cmd-remove]: ./command-line.md#remove
-[cmd-run]: ./command-line.md#run
+[cmd-run]: ./command-line.md#exec
 [in-depth-shell-integration]: ../in-depth/shell-integration.md
 [env-ocx-env-state]: ./environment.md#ocx-env-state
 [cmd-update]: ./command-line.md#update

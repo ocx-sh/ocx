@@ -2446,7 +2446,7 @@ mod chain_refs_tests {
     // ── routing invariant: Op::Query never walks the source chain ────────
 
     /// `IndexOperation::Query` is the contract for pure-read callers
-    /// (`index list`, `index catalog`, `package info`). The invariant this
+    /// (`index list`, `index catalog`, `package description pull`). The invariant this
     /// routing split exists to protect is *no query-path writes to the local
     /// index* in any mode — never a chain walk, never a tag-pointer commit.
     ///

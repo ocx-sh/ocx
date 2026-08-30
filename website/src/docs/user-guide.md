@@ -382,7 +382,7 @@ These are OCI-tier operations — they work on identifiers directly, never read 
 
 ### Strict isolation — the hard boundary {#global-toolchain-isolation}
 
-The global toolchain is a **shell convenience tier only**. Project builds are hermetic: the project toolchain wins by PATH precedence when you `cd` into a project, and `ocx run` never consults the global file without `--global`.
+The global toolchain is a **shell convenience tier only**. Project builds are hermetic: the project toolchain wins by PATH precedence when you `cd` into a project, and `ocx exec` never consults the global file without `--global`.
 
 :::info Why hard isolation, not gap-fill?
 [Volta][volta] pioneered this model for Node.js: "Volta covers its tracks … your npm/Yarn scripts never see what's in your toolchain." The alternative — filling in tools the project does not declare from the global set — is exactly what [mise][mise] and [asdf][asdf] do, and it produces the reproducibility hole that OCX is designed to avoid: a collaborator without the same `$OCX_HOME/ocx.toml` gets different resolved tools.
@@ -392,10 +392,10 @@ Two commands that are always hermetic regardless of context:
 
 <<< @/_scripts/user-guide/isolation.sh{sh}
 
-A project's `ocx run` cannot resolve a tool that exists only in `$OCX_HOME/ocx.toml`. This is intentional and not a bug — the project declared its dependencies; anything else is ambient noise.
+A project's `ocx exec` cannot resolve a tool that exists only in `$OCX_HOME/ocx.toml`. This is intentional and not a bug — the project declared its dependencies; anything else is ambient noise.
 
 ::: tip Learn more
-[Command-line reference → root `--global` flag][cmd-add-global] — root flag before the subcommand; affects toolchain-tier commands `add`, `remove`, `lock`, `update`, `pull`, `run`, `env`.
+[Command-line reference → root `--global` flag][cmd-add-global] — root flag before the subcommand; affects toolchain-tier commands `add`, `remove`, `lock`, `update`, `pull`, `exec`, `env`.
 [Env-composition reference → Strict isolation][env-composition-strict-isolation] — reference-level statement of the no-composition rule.
 [Command-line reference → `ocx env`][cmd-env-root] — toolchain env exporter, format options, `--shell` safety rule.
 :::
@@ -419,10 +419,10 @@ Each value is a fully-qualified [OCI identifier][oci-identifier] — `registry/r
 
 <<< @/_scripts/user-guide/project-lifecycle.sh{sh}
 
-[`ocx lock`][cmd-lock] resolves every tag to per-platform leaf digests and writes `ocx.lock`. For each tool, the lock records every platform the publisher ships. Subsequent [`ocx pull`][cmd-pull] / [`ocx run`][cmd-run] runs read the lock for the host platform, never the registry, so two machines on the same commit get the same bytes. The lock carries a hash of the canonicalized `ocx.toml`; if you edit `ocx.toml` and forget to re-run `ocx lock`, dependent commands refuse to run with stale digests.
+[`ocx lock`][cmd-lock] resolves every tag to per-platform leaf digests and writes `ocx.lock`. For each tool, the lock records every platform the publisher ships. Subsequent [`ocx pull`][cmd-pull] / [`ocx exec`][cmd-run] runs read the lock for the host platform, never the registry, so two machines on the same commit get the same bytes. The lock carries a hash of the canonicalized `ocx.toml`; if you edit `ocx.toml` and forget to re-run `ocx lock`, dependent commands refuse to run with stale digests.
 
 ::: tip Edited `ocx.toml` by hand? Run `ocx lock`.
-[`ocx add`][cmd-add] / [`ocx remove`][cmd-remove] regenerate `ocx.lock` for you, but hand-edits to `ocx.toml` do not. The lock carries a hash over the canonicalized `ocx.toml`; commands that read the lock ([`ocx pull`][cmd-pull], [`ocx run`][cmd-run]) detect the drift and exit 65 telling you the lock is stale. Re-run [`ocx lock`][cmd-lock] to sync. The default is intentional: read paths never silently re-resolve, so CI cannot drift behind a stray editor save.
+[`ocx add`][cmd-add] / [`ocx remove`][cmd-remove] regenerate `ocx.lock` for you, but hand-edits to `ocx.toml` do not. The lock carries a hash over the canonicalized `ocx.toml`; commands that read the lock ([`ocx pull`][cmd-pull], [`ocx exec`][cmd-run]) detect the drift and exit 65 telling you the lock is stale. Re-run [`ocx lock`][cmd-lock] to sync. The default is intentional: read paths never silently re-resolve, so CI cannot drift behind a stray editor save.
 
 Adding or removing a tool never silently updates your other tools — [`ocx add`][cmd-add] and [`ocx remove`][cmd-remove] carry every untouched lock entry forward unchanged. Only [`ocx update`][cmd-update] re-resolves surviving tags.
 :::
@@ -464,7 +464,7 @@ The same binding name may appear in `[tools]` and any `[group.*.tools]` table �
 
 ### Environment variables {#project-env}
 
-A tool binding pins *which binary* runs. It says nothing about the environment that binary needs — a `SOURCE_DATE_EPOCH` for reproducible builds, a `NODE_ENV`, a `node_modules/.bin` directory that will never be an OCX package because it does not have a publisher. Before `[env]`, the only channel for any of this was the ambient shell (`FOO=bar ocx run -- …`), and that channel does not exist on Windows — neither PowerShell nor `cmd.exe` has a per-invocation variable prefix, both mutate the session instead — and it does not exist for a caller that builds an argv array rather than a shell command line, which is exactly how a [GitHub Action][github-actions-docs] or a [Bazel rule][bazel-rules] invokes a tool.
+A tool binding pins *which binary* runs. It says nothing about the environment that binary needs — a `SOURCE_DATE_EPOCH` for reproducible builds, a `NODE_ENV`, a `node_modules/.bin` directory that will never be an OCX package because it does not have a publisher. Before `[env]`, the only channel for any of this was the ambient shell (`FOO=bar ocx exec -- …`), and that channel does not exist on Windows — neither PowerShell nor `cmd.exe` has a per-invocation variable prefix, both mutate the session instead — and it does not exist for a caller that builds an argv array rather than a shell command line, which is exactly how a [GitHub Action][github-actions-docs] or a [Bazel rule][bazel-rules] invokes a tool.
 
 `[env]` declares project-wide constants; `[group.<name>.env]` scopes them to a group, the same way `[group.<name>.tools]` scopes bindings:
 
@@ -485,7 +485,7 @@ A `path`-typed value prepends instead of replacing, for the PATH case specifical
 PATH = { type = "path", value = "node_modules/.bin" }
 ```
 
-The relative value resolves against the **project root** — the directory holding `ocx.toml` — not the shell's current directory, so `ocx run` finds `node_modules/.bin` the same way whether it is invoked from the repo root or a subdirectory.
+The relative value resolves against the **project root** — the directory holding `ocx.toml` — not the shell's current directory, so `ocx exec` finds `node_modules/.bin` the same way whether it is invoked from the repo root or a subdirectory.
 
 ::: info Comparable tools
 [Cargo][cargo]'s `.cargo/config.toml` has its own `[env]` table, and [GitHub Actions][github-actions-docs] has a workflow-level `env:` block — both are precedent for "declare environment alongside the tool config, not in a separate script." The `path` type mirrors [direnv][direnv]'s `PATH_add` and [mise][mise]'s `_.path`: an idempotent prepend rather than a hand-rolled `PATH="$X:$PATH"` string, which breaks across shells and double-prepends on re-entry.
@@ -493,14 +493,14 @@ The relative value resolves against the **project root** — the directory holdi
 
 For a one-off override that should not go in the committed file, `--env KEY[:TYPE[:SEP]]=VALUE` wins over everything else. `TYPE` is `constant` (the default), `path`, or `list` — the same three kinds `[env]` supports — so `--env PATH:path=node_modules/.bin` prepends instead of replacing. This is the one thing the ambient-shell channel could never do: a caller that builds an argv array rather than a shell command line — a [GitHub Action][github-actions-docs] step, a [Bazel rule][bazel-rules], a Python `subprocess.run` call — has no way to splice `$PATH` or `%PATH%` into a value it constructs, so `:path` is how it says "prepend a directory to `PATH` for this invocation."
 
-The flag is on every command that composes an environment, not just `ocx run`. That matters because `ocx run` never prints — it replaces itself with the child process — so the only way to *see* what it would run with is to ask a command that emits:
+The flag is on every command that composes an environment, not just `ocx exec`. That matters because `ocx exec` never prints — it replaces itself with the child process — so the only way to *see* what it would run with is to ask a command that emits:
 
 ```shell
-ocx run --env PATH:path=node_modules/.bin -- vitest        # execute in it
+ocx exec --env PATH:path=node_modules/.bin -- vitest        # execute in it
 ocx env --env PATH:path=node_modules/.bin --shell=bash     # print the same thing
 ```
 
-Both compose identically, which is what makes the second useful for debugging the first. The same pairing holds one tier down, between [`ocx package env`][cmd-package-env] and [`ocx package exec`][cmd-package-exec] — those read no `ocx.toml`, so `--env` is the only thing a caller contributes there. [`ocx run`][cmd-run] documents the full precedence order and the [environment reference][env-composition-project-env] documents the value grammar, including why keys starting `OCX_` or `__OCX_` are rejected everywhere `[env]` can appear.
+Both compose identically, which is what makes the second useful for debugging the first. The same pairing holds one tier down, between [`ocx package env`][cmd-package-env] and [`ocx package exec`][cmd-package-exec] — those read no `ocx.toml`, so `--env` is the only thing a caller contributes there. [`ocx exec`][cmd-run] documents the full precedence order and the [environment reference][env-composition-project-env] documents the value grammar, including why keys starting `OCX_` or `__OCX_` are rejected everywhere `[env]` can appear.
 
 ### Shell activation {#project-shell}
 
@@ -508,18 +508,18 @@ Project tools should land on `PATH` the moment you `cd` into the project, and le
 
 In bash, zsh, fish, PowerShell, and elvish, this rides the same per-prompt hook the [global toolchain](#global-toolchain-shell) uses: `cd` into a project OCX has been given consent to activate, and its locked tools land on `PATH` at the very next prompt — no `.envrc`, no `direnv allow`, no separate `eval`. `cd` back out and they revert. The same [`OCX_NO_HOOK`][env-ocx-no-hook] / `ocx self setup --no-hook` switch turns it off.
 
-**A fresh clone stays inert until consented.** Unlike the global toolchain — always trusted, since `$OCX_HOME/ocx.toml` is your own file — a project's `ocx.toml` can name any OCI registry, so OCX will not put its tools on `PATH` just because you `cd`'d in. The first `ocx add`, `ocx lock`, `ocx update`, `ocx pull`, or `ocx run` you run against a project records consent automatically; an operator can also pre-authorize a checkout path or a whole namespace of registries in advance, which is how a devcontainer or a fleet skips the per-project prompt entirely. See [Shell Integration → Consent grants][in-depth-shell-integration-consent] for the full predicate and where each kind of grant can live.
+**A fresh clone stays inert until consented.** Unlike the global toolchain — always trusted, since `$OCX_HOME/ocx.toml` is your own file — a project's `ocx.toml` can name any OCI registry, so OCX will not put its tools on `PATH` just because you `cd`'d in. The first `ocx add`, `ocx lock`, `ocx update`, `ocx pull`, or `ocx exec` you run against a project records consent automatically; an operator can also pre-authorize a checkout path or a whole namespace of registries in advance, which is how a devcontainer or a fleet skips the per-project prompt entirely. See [Shell Integration → Consent grants][in-depth-shell-integration-consent] for the full predicate and where each kind of grant can live.
 
-nushell and the strict-POSIX shells (`ash`, `dash`, `ksh`) and Windows Batch have no append-safe per-prompt hook point, so a project scope on those shells needs one of two explicit entry points instead: [`ocx direnv export`][cmd-direnv-export] — stateless, exports only, never installs missing tools or contacts the registry, so run [`ocx pull`][cmd-pull] first; [`ocx direnv init`][cmd-direnv-init] drops a ready `.envrc` that re-evaluates on each directory entry — or [`ocx run`][cmd-run] for CI and scripts, which needs no hook at all.
+nushell and the strict-POSIX shells (`ash`, `dash`, `ksh`) and Windows Batch have no append-safe per-prompt hook point, so a project scope on those shells needs one of two explicit entry points instead: [`ocx direnv export`][cmd-direnv-export] — stateless, exports only, never installs missing tools or contacts the registry, so run [`ocx pull`][cmd-pull] first; [`ocx direnv init`][cmd-direnv-init] drops a ready `.envrc` that re-evaluates on each directory entry — or [`ocx exec`][cmd-run] for CI and scripts, which needs no hook at all.
 
 ::: tip Learn more
 [Project Toolchain In Depth][in-depth-project] — schema details, declaration-hash canonicalization (RFC 8785 JCS), in-place flock concurrency, per-group binding semantics, multi-project GC retention, SLSA roadmap.
 [Shell Integration][in-depth-shell-integration] — the full per-shell coverage table, the consent grants, `ocx shell state`'s diagnostic role, and how OCX yields to a live direnv or mise session.
 :::
 
-## Run tools from your project {#run}
+## Run tools from your project {#exec}
 
-You have an `ocx.toml`, the lock is current, and you want to invoke a tool from it — without translating binding names into OCI identifiers first. That is what [`ocx run`][cmd-run] is for.
+You have an `ocx.toml`, the lock is current, and you want to invoke a tool from it — without translating binding names into OCI identifiers first. That is what [`ocx exec`][cmd-run] is for.
 
 The simplest form runs a command in the default group (`[tools]`) environment:
 
@@ -539,12 +539,12 @@ When you only need a specific binding from the composed set, name it:
 
 <<< @/_scripts/user-guide/run-named.sh{sh}
 
-The name must resolve unambiguously in the selected scope; `ocx run` exits 64 if a name is unknown or matches entries in more than one selected group with conflicting identifiers.
+The name must resolve unambiguously in the selected scope; `ocx exec` exits 64 if a name is unknown or matches entries in more than one selected group with conflicting identifiers.
 
-:::tip `ocx run` vs `ocx package exec`
-`ocx run` is the project-tier command — it reads `ocx.toml` + `ocx.lock` and maps binding names to installed packages. `ocx package exec` is the OCI-tier command — it accepts an OCI identifier directly, with no project file involved.
+:::tip `ocx exec` vs `ocx package exec`
+`ocx exec` is the project-tier command — it reads `ocx.toml` + `ocx.lock` and maps binding names to installed packages. `ocx package exec` is the OCI-tier command — it accepts an OCI identifier directly, with no project file involved.
 
-**Rule:** if you have an `ocx.toml`, use `ocx run`; otherwise use [`ocx package exec`][cmd-package-exec].
+**Rule:** if you have an `ocx.toml`, use `ocx exec`; otherwise use [`ocx package exec`][cmd-package-exec].
 :::
 
 ::: tip Learn more
@@ -721,7 +721,7 @@ The index resolves *version choice* offline — which platform-manifest digest a
 
 ### What has to travel for a home copy to work offline {#offline-portable}
 
-A CI cache restore, a container image layer, a devcontainer feature's shipped cache — anything that copies `$OCX_HOME` between machines needs to know which of its stores actually matter for `ocx package install`, `ocx package exec`, and a project's `ocx run` to work with zero egress on the target machine. Copy the wrong subset and a command either silently reaches back out to the network or fails outright.
+A CI cache restore, a container image layer, a devcontainer feature's shipped cache — anything that copies `$OCX_HOME` between machines needs to know which of its stores actually matter for `ocx package install`, `ocx package exec`, and a project's `ocx exec` to work with zero egress on the target machine. Copy the wrong subset and a command either silently reaches back out to the network or fails outright.
 
 Three stores make a copy fully offline-capable: `blobs/` (manifests), `layers/` (extracted archives), and the [local index][in-depth-indices-local] (tag → digest resolution). `packages/` does not need to be part of the copy — it holds hardlink assemblies of `layers/` content, built locally at install time. A fresh `$OCX_HOME` seeded with only `blobs/`, `layers/`, and `index/` still installs, runs, and toolchain-runs every package those three stores cover: `packages/` is reconstructed on demand from the local layer cache, no egress required.
 
@@ -818,7 +818,7 @@ For CI or container setups where the command line is not controlled, set mirrors
 export OCX_MIRRORS='{"ghcr.io":"https://artifactory.example.com/ghcr-remote"}'
 ```
 
-`OCX_MIRRORS` wins over `[mirrors]` on a per-host, per-role basis and is forwarded to every subprocess `ocx` spawns, so nested invocations — generated launchers, `ocx run` — see the same mirror map automatically.
+`OCX_MIRRORS` wins over `[mirrors]` on a per-host, per-role basis and is forwarded to every subprocess `ocx` spawns, so nested invocations — generated launchers, `ocx exec` — see the same mirror map automatically.
 
 ::: info Mirroring `index.ocx.sh` traffic is a role, not a separate table
 A plain `[mirrors]` string redirects both OCI registry traffic (manifests, layers) and index traffic (root/index-object/catalog fetches) for that host — but the two usually live on different hosts. A project resolving packages through [index.ocx.sh][index-ocx-sh] sets the **`index` role** on that entry: `"index.ocx.sh" = { index = "https://artifactory.corp/ocx-index" }`. See [Route index traffic through a mirror][in-depth-indices-mirroring] for the full split.
@@ -1110,7 +1110,7 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
 
 A [`[[trust.policy]]`][config-trust] entry is only useful if the check it describes actually runs. Left as a manual step, verification is the thing that gets skipped the first time a deploy is running late — the exact gap the [tip](#supply-chain-verification) earlier in this section called out.
 
-Once a policy covers a package, every command that fetches it verifies its signature automatically — [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull], and every command that auto-installs on demand: [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx run`][cmd-run], [`ocx env`][cmd-env-root], and patch discovery ([`ocx patch why`][cmd-patch-why] / [`ocx patch test`][cmd-patch-test]). No extra flag, no separate step before or after:
+Once a policy covers a package, every command that fetches it verifies its signature automatically — [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull], and every command that auto-installs on demand: [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx exec`][cmd-run], [`ocx env`][cmd-env-root], and patch discovery ([`ocx patch why`][cmd-patch-why] / [`ocx patch test`][cmd-patch-test]). No extra flag, no separate step before or after:
 
 ```shell
 # with the ghcr.io/acme/* policy from the previous section in place
@@ -1138,7 +1138,7 @@ Under [`--offline`][arg-offline] a policy-covered install needs its trust materi
 
 When multiple projects share the same `OCX_HOME`, `ocx clean` retains every package referenced by *any* registered project's `ocx.lock` — not just the active one. A project is registered automatically whenever `ocx lock`, `ocx add`, or `ocx remove` writes its lockfile. Deleting a project's directory makes its packages collectable at the next clean (silently — no warning). Browse `$OCX_HOME/projects/` to see which projects are currently registered. Pass `--force` to bypass the project registry; live install symlinks are always honoured.
 
-`ocx clean` also garbage-collects [consent][in-depth-shell-integration-consent]: a project's stamp is removed once its directory is confirmed gone, the same way its packages become collectable. A project you move or delete loses both its held packages and its consent silently in the same pass — moving a checkout back re-consents it the same way a fresh clone would, via the next [`ocx add`][cmd-add], [`ocx lock`][cmd-lock], [`ocx pull`][cmd-pull], or [`ocx run`][cmd-run].
+`ocx clean` also garbage-collects [consent][in-depth-shell-integration-consent]: a project's stamp is removed once its directory is confirmed gone, the same way its packages become collectable. A project you move or delete loses both its held packages and its consent silently in the same pass — moving a checkout back re-consents it the same way a fresh clone would, via the next [`ocx add`][cmd-add], [`ocx lock`][cmd-lock], [`ocx pull`][cmd-pull], or [`ocx exec`][cmd-run].
 
 ::: tip Learn more
 [Storage In Depth → Garbage Collection][in-depth-storage-gc] — full reachability walk across `refs/symlinks/`, `refs/deps/`, `refs/layers/`, `refs/blobs/`.
@@ -1153,9 +1153,9 @@ Users coming from [uv][uv], [Cargo][cargo], or [pnpm][pnpm] often look for `--lo
 | You used to write… | OCX equivalent |
 |---|---|
 | [`uv lock --check`][uv-lock] | [`ocx lock --check`][cmd-lock] |
-| [`uv sync --locked`][uv-sync] | [`ocx pull`][cmd-pull] / [`ocx run`][cmd-run] (default; exit 65 on drift) |
+| [`uv sync --locked`][uv-sync] | [`ocx pull`][cmd-pull] / [`ocx exec`][cmd-run] (default; exit 65 on drift) |
 | [`uv sync --frozen`][uv-sync] | [`ocx --frozen pull`][arg-frozen] / [`ocx --frozen run`][arg-frozen] |
-| [`cargo build --locked`][cargo-build] | [`ocx run`][cmd-run] / [`ocx pull`][cmd-pull] (default) |
+| [`cargo build --locked`][cargo-build] | [`ocx exec`][cmd-run] / [`ocx pull`][cmd-pull] (default) |
 | [`cargo build --frozen`][cargo-build] | [`--offline`][arg-offline] (subsumes `--frozen`: no unknown tags, no network) |
 | [`pnpm install --frozen-lockfile`][pnpm-install] | [`ocx pull`][cmd-pull] (default) |
 
@@ -1290,14 +1290,14 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-version]: ./reference/command-line.md#version
 [cmd-logout]: ./reference/command-line.md#logout
 [cmd-login]: ./reference/command-line.md#login
-[cmd-run]: ./reference/command-line.md#run
+[cmd-run]: ./reference/command-line.md#exec
 [arg-config]: ./reference/command-line.md#arg-config
 [cmd-clean]: ./reference/command-line.md#clean
 [cmd-which]: ./reference/command-line.md#which
 [cmd-exec]: ./reference/command-line.md#package-exec
 [cmd-package-sign]: ./reference/command-line.md#package-sign
 [cmd-package-verify]: ./reference/command-line.md#package-verify
-[cmd-launcher-exec]: ./reference/command-line.md#exec
+[cmd-launcher-exec]: ./reference/command-line.md#launcher-exec
 [cmd-package-install]: ./reference/command-line.md#package-install
 [cmd-package-select]: ./reference/command-line.md#package-select
 [cmd-package-deselect]: ./reference/command-line.md#package-deselect

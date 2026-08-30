@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Shared project-tier resolution prologue for `pull.rs` and `run.rs`.
+//! Shared project-tier resolution prologue for `pull.rs` and `toolchain_exec.rs`.
 //!
 //! Consolidates the project-context loading logic currently inlined in
 //! `pull.rs:58–135` (Phase 2–3: project resolution, lock load, staleness
 //! gate) into a single reusable async helper.
-//! Callers: `command/pull.rs` (Phase 4 extraction), `command/run.rs`.
+//! Callers: `command/pull.rs` (Phase 4 extraction), `command/toolchain_exec.rs`.
 //!
 //! # Project-registry registration is lock-write-driven, not load-driven
 //!
@@ -20,7 +20,7 @@
 //!
 //! Rationale: the previous load-driven path did a stat + (when the lock
 //! existed) flock + JSON read + tempfile + atomic-rename + parent fsync
-//! on every `ocx run` / `ocx pull`. Direnv-style use re-runs `ocx run`
+//! on every `ocx exec` / `ocx pull`. Direnv-style use re-runs `ocx exec`
 //! at every shell prompt, which made the registry write the dominant
 //! cost of warm reads. Moving registration to the write side recovers
 //! that overhead at the cost of one documented behaviour change: a
@@ -132,7 +132,7 @@ impl ocx_lib::cli::ClassifyExitCode for ProjectContextError {
 ///
 /// Registration of the lock path in `ProjectRegistry` is deliberately
 /// NOT performed here — it lives exclusively at lock-write sites (see the
-/// module doc comment). Hot-path callers (`ocx run`, `ocx pull`) only pay
+/// module doc comment). Hot-path callers (`ocx exec`, `ocx pull`) only pay
 /// for the staleness gate, not the registry write.
 ///
 /// # Errors
@@ -316,7 +316,7 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
     // the lock was written → DataError (exit 65).
     //
     // Use the cached accessor so the JCS canonicalization + SHA-256 cost is
-    // paid once per loaded `ProjectConfig`. Hot-path callers (`ocx run`,
+    // paid once per loaded `ProjectConfig`. Hot-path callers (`ocx exec`,
     // `ocx pull`) hit this gate on every invocation and previously
     // recomputed the hash from scratch on each call.
     if ocx_lib::project::lock::is_stale(&lock, &config) {
@@ -334,7 +334,7 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
 /// Load the project exactly as [`load_project_with_lock`] does, then record
 /// shell-activation consent for it (C-024).
 ///
-/// The opt-in half of the write seam. `ocx run` and `ocx pull` call this;
+/// The opt-in half of the write seam. `ocx exec` and `ocx pull` call this;
 /// `ocx inspect`, `ocx patch freeze`, `ocx env` and `ocx lock --check` call
 /// the plain loader and stamp nothing.
 ///
@@ -524,7 +524,7 @@ pub(crate) fn ensure_groups_known(groups: &[String], config: &ProjectConfig) -> 
 /// the order of `names`, not of `selected`. A name repeated on the command line
 /// is silently deduplicated (naming one binding twice is not a usage error).
 ///
-/// Shared by `ocx run` and `ocx inspect`, the two commands that accept a NAME
+/// Shared by `ocx exec` and `ocx inspect`, the two commands that accept a NAME
 /// subset of the selected groups.
 ///
 /// # Errors
@@ -811,7 +811,7 @@ mod tests {
             ("lock", include_str!("../command/lock.rs")),
             ("update", include_str!("../command/update.rs")),
             ("pull", include_str!("../command/pull.rs")),
-            ("run", include_str!("../command/run.rs")),
+            ("exec", include_str!("../command/toolchain_exec.rs")),
         ];
         // The commands that reach a project loader but must never consent —
         // `inspect`, `patch freeze` and `ocx env` share `load_project_with_lock`

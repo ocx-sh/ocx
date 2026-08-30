@@ -100,13 +100,13 @@ pub struct PackageTest {
     /// Command to execute inside the composed env, with arguments. Required
     /// unless `--script` is given (exactly one of the two forms must be supplied).
     ///
-    /// `last = true` (mirroring `run.rs`'s `argv`) makes clap parse everything
+    /// `last = true` (mirroring `toolchain_exec.rs`'s `argv`) makes clap parse everything
     /// before the mandatory `--` into `layers` and everything after into
     /// `command`. Without it, `command` is an ordinary positional sitting
     /// after the optional `layers` (index 1), which trips clap's debug-assert
     /// "non-required positional with a lower index than a required positional" -
     /// fatal in debug builds when the command tree is built (e.g. completion
-    /// generation). Requires clap >= 4.5.57 (see `run.rs` NOTE).
+    /// generation). Requires clap >= 4.5.57 (see `toolchain_exec.rs` NOTE).
     #[clap(allow_hyphen_values = true, last = true, required_unless_present = "script", num_args = 1..)]
     command: Vec<String>,
 }

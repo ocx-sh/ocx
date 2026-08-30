@@ -123,9 +123,9 @@ Status values, category tags, bounded sets = enums with `Display` and `Serialize
 3. Add `report_{name}()` method to `Api` in `api.rs` (delegates to `self.report()`)
 4. Call from `command/{name}.rs` with data built from task results
 
-## Project-Tier Commands: `Run` Pattern
+## Project-Tier Commands: `Exec` Pattern
 
-`command/run.rs` follows the same `struct + execute(&self, context)` pattern but diverges from the `Printable` / `api/data/` path: it never calls `context.api().report()` because execution diverges via `child_process::exec`. No structured output to emit from parent.
+`command/toolchain_exec.rs` (`ToolchainExec`) follows the same `struct + execute(&self, context)` pattern but diverges from the `Printable` / `api/data/` path: it never calls `context.api().report()` because execution diverges via `child_process::exec`. No structured output to emit from parent.
 
 ## `ocx env` / `ocx package env` Command Pattern
 

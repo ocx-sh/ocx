@@ -745,7 +745,7 @@ mod tests {
     // `${` with no `}` anywhere after it. Asking "is there a terminator?" once
     // per `$` re-reads the whole remainder each time, which is O(n²) — 1 MiB
     // cost 9.1 s of single-threaded CPU, and `MAX_METADATA_BLOB_BYTES` admits
-    // 4 MiB. That is a victim's CPU, burnt on every `ocx run` through a
+    // 4 MiB. That is a victim's CPU, burnt on every `ocx exec` through a
     // transitive dependency they never named, so the bound belongs in the test
     // suite and not in a comment. It sits two orders of magnitude above the
     // linear scan's cost, which is what makes it discriminating and not flaky.

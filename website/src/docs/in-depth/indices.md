@@ -298,7 +298,7 @@ Every command that resolves a package identifier — [`ocx package install`][cmd
 **`--remote`** forces tag and catalog lookups to query the registry directly for a single command,
 and the two shapes that can take it differ in what happens to the local index. A **query**
 ([`index list --remote`](#index-list), [`index catalog --remote`](#index-catalog),
-[`package info --remote`][cmd-package-info]) reads the registry and reports — the local index is
+[`package description pull --remote`][cmd-package-info]) reads the registry and reports — the local index is
 **not** updated. A **resolve** (`package install --remote`, `package exec --remote`, and similar)
 still writes, despite the flag's name: it re-fetches the tag it resolved and rewrites the local copy
 for that one tag, exactly like an [`ocx index update`][cmd-index-update] scoped to it (see
@@ -421,11 +421,11 @@ A package's root document carries publisher-set status fields, which OCX surface
 | Field | Behavior |
 |---|---|
 | `yanked` (per tag) | A tag resolve against a yanked entry prints a warning and is refused by default — a yank is a publisher signal, not a delete. This surfaces identically whether the root was just fetched live or read from a [committed or shipped local copy](#bundled) with zero network: the same field, the same refusal. Set [`OCX_ALLOW_YANKED`][env-ocx-allow-yanked] to opt in and resolve it anyway. A digest-pinned resolve of the same content never needs the opt-in, since immutable content cannot itself be "yanked". |
-| `deprecated` + message | Resolve prints a warning; the message is surfaced in [`ocx package info`][cmd-package-info]. |
-| `superseded_by` | Shown as advisory information in [`ocx package info`][cmd-package-info] and resolve diagnostics; OCX never auto-follows it — that would silently substitute a different package than the one you asked for. |
+| `deprecated` + message | Resolve prints a warning; the message is surfaced in [`ocx package description pull`][cmd-package-info]. |
+| `superseded_by` | Shown as advisory information in [`ocx package description pull`][cmd-package-info] and resolve diagnostics; OCX never auto-follows it — that would silently substitute a different package than the one you asked for. |
 
 ::: info Open interop point — description assets
-Index objects share the same object store as `desc` blobs (README text, logo images) the index may carry for a package, but that part of the wire format is not yet frozen. [`ocx package info --save-readme`][cmd-package-info] / `--save-logo` stay driven by registry-side metadata for now, independent of `index.ocx.sh`.
+Index objects share the same object store as `desc` blobs (README text, logo images) the index may carry for a package, but that part of the wire format is not yet frozen. [`ocx package description pull --save-readme`][cmd-package-info] / `--save-logo` stay driven by registry-side metadata for now, independent of `index.ocx.sh`.
 :::
 
 ## Route index traffic through a mirror {#mirroring}
@@ -508,7 +508,7 @@ A fifth command belongs to the family without carrying the verb: [`ocx index syn
 [cmd-package-cascade-check]: ../reference/command-line.md#package-cascade-check
 [cmd-package-cascade-repair]: ../reference/command-line.md#package-cascade-repair
 [cmd-config-push]: ../reference/command-line.md#config-push
-[cmd-package-info]: ../reference/command-line.md#package-info
+[cmd-package-info]: ../reference/command-line.md#package-description-pull
 [cmd-self-update]: ../reference/command-line.md#self-update
 [cmd-config-update]: ../reference/command-line.md#config-update
 [cmd-update]: ../reference/command-line.md#update

@@ -138,11 +138,11 @@ Project-wide conventions enforced by reviewer:
 | Feature type | Location | Notes |
 |--------------|----------|-------|
 | New CLI command | `crates/ocx_cli/src/command/` | One file per command, follow command pattern |
-| Project-tier env-composition command | `crates/ocx_cli/src/command/run.rs` | Project-tier mirror of OCI-tier `exec.rs`; calls `load_project_with_lock` from `app/project_context.rs`, then `compose_tool_set` + `expand_all_keyword`, then `child_process::exec` |
+| Project-tier env-composition command | `crates/ocx_cli/src/command/toolchain_exec.rs` | Project-tier mirror of OCI-tier `exec.rs`; calls `load_project_with_lock` from `app/project_context.rs`, then `compose_tool_set` + `expand_all_keyword`, then `child_process::exec` |
 | Toolchain env exporter (project + global) | `crates/ocx_cli/src/command/toolchain_env.rs` (root) | Root `ocx [--global] env [--shell[=NAME]]`; `--global` is a root flag (before subcommand); output format = context concern (root `--format`, default plain — no subcommand `--format`); `--shell` is the eval-safe channel; reuses `resolve_env` → `composer::compose` |
 | OCI-tier package primitives group | `crates/ocx_cli/src/command/package.rs` | `ocx package {install,uninstall,select,deselect,exec,env,which,deps}` — moved from root; root forms removed (exit 64) |
 | Shared shell emit helper | `crates/ocx_cli/src/app/conventions.rs` | `emit_lines(shell, &[Entry])` consumed by `ocx env`, `ocx package env`, `ocx direnv export` |
-| Shared project-resolve prologue | `crates/ocx_cli/src/app/project_context.rs` | `load_project_with_lock` helper consumed by `pull.rs` and `run.rs`; returns `ProjectContext` (owned — no borrow on `Context`) |
+| Shared project-resolve prologue | `crates/ocx_cli/src/app/project_context.rs` | `load_project_with_lock` helper consumed by `pull.rs` and `toolchain_exec.rs`; returns `ProjectContext` (owned — no borrow on `Context`) |
 | New task method | `crates/ocx_lib/src/package_manager/tasks/` | Add error variant to `error.rs` if needed |
 | New output format | `crates/ocx_cli/src/api/data/` | Impl `Printable` trait |
 | New storage path | `crates/ocx_lib/src/file_structure/` | Add to appropriate store |

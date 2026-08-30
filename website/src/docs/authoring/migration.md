@@ -107,29 +107,29 @@ Binary Homebrew bottles unpack as `<formula>/<version>/bin/...`, so `strip_compo
 
 ## Attaching Description Metadata {#describe}
 
-Once the package is in the registry, publishers attach a README, logo, title, search keywords, and short description via [`ocx package describe`][cmd-package-describe]. The fields land as an OCI image manifest pushed under the dedicated internal tag `__ocx.desc`, so the description travels with every registry export and powers the [package catalog][catalog]. The round-trip is cheap to verify: [`ocx package info`][cmd-package-info] reads the same fields back, with `--save-readme` writing the published markdown to disk for diffing.
+Once the package is in the registry, publishers attach a README, logo, title, search keywords, and short description via [`ocx package description push`][cmd-package-describe]. The fields land as an OCI image manifest pushed under the dedicated internal tag `__ocx.desc`, so the description travels with every registry export and powers the [package catalog][catalog]. The round-trip is cheap to verify: [`ocx package description pull`][cmd-package-info] reads the same fields back, with `--save-readme` writing the published markdown to disk for diffing.
 
 ```sh
-ocx package describe \
+ocx package description push \
   --readme README.md \
   --logo logo.svg \
   --title "mytool" \
   --description "A small example tool" \
   --keywords cli,linting \
   mytool
-ocx package info acme/mytool
+ocx package description pull acme/mytool
 ```
 
 <Terminal src="/casts/authoring/package-describe.cast" title="Attaching package descriptions and reading them back" collapsed />
 
 ::: tip Re-publish runs do not auto-refresh descriptions
-The `ocx_mirror` pipeline pushes packages, not descriptions — `ocx package describe` is a separate hand-driven step. Re-run it whenever your README or logo changes; otherwise the registry keeps the previously published `__ocx.desc` manifest.
+The `ocx_mirror` pipeline pushes packages, not descriptions — `ocx package description push` is a separate hand-driven step. Re-run it whenever your README or logo changes; otherwise the registry keeps the previously published `__ocx.desc` manifest.
 :::
 
 ## See Also {#see-also}
 
-- [`ocx package describe` reference][cmd-package-describe]
-- [`ocx package info` reference][cmd-package-info]
+- [`ocx package description push` reference][cmd-package-describe]
+- [`ocx package description pull` reference][cmd-package-info]
 - [Building & pushing][authoring-building-pushing] — when running mirror commands by hand
 
 <!-- external -->
@@ -144,8 +144,8 @@ The `ocx_mirror` pipeline pushes packages, not descriptions — `ocx package des
 [catalog]: https://index.ocx.sh
 
 <!-- commands -->
-[cmd-package-describe]: ../reference/command-line.md#package-describe
-[cmd-package-info]: ../reference/command-line.md#package-info
+[cmd-package-describe]: ../reference/command-line.md#package-description-push
+[cmd-package-info]: ../reference/command-line.md#package-description-pull
 
 <!-- authoring -->
 [authoring-building-pushing]: ./building-pushing.md

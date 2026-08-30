@@ -12,7 +12,7 @@ ocx init
 ocx add --no-pull "$PKG_KITWARE_CMAKE" "$PKG_ASTRAL_SH_UV"
 ocx env --lazy-mode always
 ocx package which --lazy-mode always "$PKG_KITWARE_CMAKE" "$PKG_ASTRAL_SH_UV"
-ocx run --lazy-mode always -- cmake --version
+ocx exec --lazy-mode always -- cmake --version
 ocx package which --lazy-mode always "$PKG_KITWARE_CMAKE" "$PKG_ASTRAL_SH_UV"
 # endregion cast
 

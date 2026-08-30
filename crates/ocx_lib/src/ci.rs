@@ -61,10 +61,10 @@ impl CiFlavor {
 /// value from `values` (in accumulation order) through
 /// [`move_to_front`](crate::utility::path::move_to_front) — the same
 /// operation `Env::add_path` applies once per entry on the in-process
-/// `ocx run` path. This is the one place the env-read + move-to-front
+/// `ocx exec` path. This is the one place the env-read + move-to-front
 /// semantics live for CI export, so GitHub's `$GITHUB_ENV` path case and
 /// GitLab's flattened path case stay byte-identical *and* agree with
-/// `ocx run`'s in-process precedence.
+/// `ocx exec`'s in-process precedence.
 ///
 /// **Last-applied wins, landing at the front.** `values` accumulate in the
 /// same order `write_entry` is called (earliest-processed package or stage
@@ -77,8 +77,8 @@ impl CiFlavor {
 /// **Direction fixed by `adr_project_env_declaration.md` C1a.** This used to
 /// prepend the whole buffered block and keep the *first* occurrence, so the
 /// *first*-applied value held the front — the inverse of `Env::add_path`'s
-/// `ocx run` semantics. Under `--ci=github`/`--ci=gitlab` a later stage could
-/// not override an earlier one; it now can, matching `ocx run`.
+/// `ocx exec` semantics. Under `--ci=github`/`--ci=gitlab` a later stage could
+/// not override an earlier one; it now can, matching `ocx exec`.
 fn prepend_existing(key: &str, values: &[String]) -> String {
     use std::ffi::{OsStr, OsString};
 
@@ -99,7 +99,7 @@ fn prepend_existing(key: &str, values: &[String]) -> String {
 /// (in accumulation order) through
 /// [`append_unique`](crate::utility::list::append_unique) — the same
 /// operation [`Env::add_list`](crate::env::Env::add_list) applies once per
-/// entry on the in-process `ocx run` path.
+/// entry on the in-process `ocx exec` path.
 ///
 /// **Last-applied wins, landing at the BACK** — the opposite end from
 /// `prepend_existing`'s front, matching `list`'s move-to-back operator
@@ -174,7 +174,7 @@ mod tests {
     //
     // C1a fix (`adr_project_env_declaration.md`): among several path values
     // for one key, the value applied *last* now lands at the front, matching
-    // `Env::add_path`'s `ocx run` semantics — the inverse of the old
+    // `Env::add_path`'s `ocx exec` semantics — the inverse of the old
     // first-applied-wins direction. These four tests pin the fixed
     // direction; the first three assertions are unchanged by the flip
     // (single-value / identical-duplicate cases are order-independent), the
@@ -243,7 +243,7 @@ mod tests {
     //
     // W-9: the append-direction sibling of `prepend_existing`. A `list`
     // contribution moves to the BACK on re-application — the opposite end
-    // from `path`'s front — matching `Env::add_list`'s `ocx run` semantics.
+    // from `path`'s front — matching `Env::add_list`'s `ocx exec` semantics.
 
     #[test]
     fn append_existing_on_an_empty_ambient_yields_the_bare_value() {

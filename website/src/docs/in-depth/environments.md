@@ -68,7 +68,7 @@ The `ocx launcher exec` subcommand â€” used by every generated launcher script â
 | [`ocx package exec`][cmd-package-exec] | off | OCI-tier entry point; launchers embed `--self` |
 | [`ocx package env`][cmd-package-env] | off | Inspect the resolved env for one or more packages |
 
-`--self` is package vocabulary and exists only on the OCI tier. The project-tier commands ([`ocx run`][cmd-run], [`ocx env`][cmd-env]) do not accept it: the self view leaves a package's own `entrypoints/` off `PATH`, and a project toolchain is a consumer of every tool it declares, so it would compose a strictly worse toolchain rather than a fuller one.
+`--self` is package vocabulary and exists only on the OCI tier. The project-tier commands ([`ocx exec`][cmd-run], [`ocx env`][cmd-env]) do not accept it: the self view leaves a package's own `entrypoints/` off `PATH`, and a project toolchain is a consumer of every tool it declares, so it would compose a strictly worse toolchain rather than a fuller one.
 | [`ocx env`][cmd-env] | off | Toolchain-tier env exporter (reads `ocx.toml`); eval-safe via `--shell` |
 | [`ocx package deps`][cmd-deps] | off | Show dependency tree with visibility annotations |
 
@@ -260,7 +260,7 @@ Example: a package that sets `JAVA_HOME` with default (`private`) visibility wil
 
 <!-- commands -->
 [cmd-package-exec]: ../reference/command-line.md#package-exec
-[cmd-run]: ../reference/command-line.md#run
+[cmd-run]: ../reference/command-line.md#exec
 [cmd-package-env]: ../reference/command-line.md#package-env
 [cmd-env]: ../reference/command-line.md#env-root
 [cmd-deps]: ../reference/command-line.md#deps

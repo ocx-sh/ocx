@@ -98,7 +98,7 @@ concurrency:
 
 ### 7. Lint workflows with actionlint
 
-Workflow YAML is linted by [actionlint](https://github.com/rhysd/actionlint) (project toolchain via `ocx.toml`). Local + CI gate = `task ci:actionlint`; the `workflow-lint` job in `verify-basic.yml` runs it on push + PR via `ocx run -- task ci:actionlint` (dogfoods `setup-ocx` + the composed toolchain). actionlint catches invalid contexts (e.g. `matrix` on a step's `shell:` key), unpinned/typo'd expressions, and runs shellcheck over `run:` scripts. Conventions:
+Workflow YAML is linted by [actionlint](https://github.com/rhysd/actionlint) (project toolchain via `ocx.toml`). Local + CI gate = `task ci:actionlint`; the `workflow-lint` job in `verify-basic.yml` runs it on push + PR via `ocx exec -- task ci:actionlint` (dogfoods `setup-ocx` + the composed toolchain). actionlint catches invalid contexts (e.g. `matrix` on a step's `shell:` key), unpinned/typo'd expressions, and runs shellcheck over `run:` scripts. Conventions:
 
 - Embedded shellcheck severity floor = `--severity=warning` (`SHELLCHECK_OPTS` in the task), matching `shell:shellcheck`. Info/style findings are not gated.
 - The cargo-dist-generated `release.yml` is excluded via `.github/actionlint.yaml` (`paths:` ignore-all) — never hand-edited, drift policed by `verify-release-ci.yml`.

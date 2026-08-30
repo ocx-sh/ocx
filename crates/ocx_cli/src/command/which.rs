@@ -190,7 +190,7 @@ async fn locate(
 /// Locates every requested package concurrently, preserving request order.
 ///
 /// Fans out one [`locate`] per identifier the way every other multi-package CLI
-/// command that does per-item network work does (`package info`, `index
+/// command that does per-item network work does (`package description pull`, `index
 /// update`, `pull --dry-run`): an index-tagged `JoinSet`, results placed by
 /// index, failures sorted by index so the surfaced error — and therefore the
 /// exit code — is deterministic across runs.

@@ -205,7 +205,7 @@ X = "group-value"
     )
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, project, "run", "-g", "g", "--env", "X=flag-value", "--", "env")
+    result = _run(ocx, project, "exec", "-g", "g", "--env", "X=flag-value", "--", "env")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run --env must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
@@ -222,7 +222,7 @@ def test_env_flag_splits_on_first_equals_only(ocx: OcxRunner, tmp_path: Path) ->
     _write_ocx_toml(project, "[tools]\n")
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, project, "run", "--env", "FOO=a=b", "--", "env")
+    result = _run(ocx, project, "exec", "--env", "FOO=a=b", "--", "env")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run --env FOO=a=b must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
@@ -242,7 +242,7 @@ def test_env_flag_bare_key_without_equals_exits_64(ocx: OcxRunner, tmp_path: Pat
     _write_ocx_toml(project, "[tools]\n")
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, project, "run", "--env", "FOO", "--", "echo", "hi")
+    result = _run(ocx, project, "exec", "--env", "FOO", "--", "echo", "hi")
     assert result.returncode == EXIT_USAGE, (
         f"bare --env FOO (no '=') must exit {EXIT_USAGE}; "
         f"got {result.returncode}\nstderr:\n{result.stderr}"
@@ -257,7 +257,7 @@ def test_env_flag_repeated_last_wins(ocx: OcxRunner, tmp_path: Path) -> None:
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
     result = _run(
-        ocx, project, "run", "--env", "FOO=1", "--env", "FOO=2", "--env", "BAR=b", "--", "env"
+        ocx, project, "exec", "--env", "FOO=1", "--env", "FOO=2", "--env", "BAR=b", "--", "env"
     )
     assert result.returncode == EXIT_SUCCESS, (
         f"repeated --env must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
@@ -296,7 +296,7 @@ def test_env_flag_survives_clean(ocx: OcxRunner, tmp_path: Path) -> None:
     result = _run(
         ocx,
         project,
-        "run",
+        "exec",
         "--clean",
         "--env",
         "FOO=1",
@@ -326,7 +326,7 @@ def test_env_flag_rejects_ocx_prefixed_key_exits_64(ocx: OcxRunner, tmp_path: Pa
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
     for key in ("OCX_FOO", "__OCX_BAR"):
-        result = _run(ocx, project, "run", "--env", f"{key}=x", "--", "echo", "hi")
+        result = _run(ocx, project, "exec", "--env", f"{key}=x", "--", "echo", "hi")
         assert result.returncode == EXIT_USAGE, (
             f"--env {key}=x must exit {EXIT_USAGE} (reserved OCX_*/__OCX_* namespace); "
             f"got {result.returncode}\nstderr:\n{result.stderr}"
@@ -358,12 +358,12 @@ def test_env_flag_path_type_prepends_instead_of_replacing(
     )
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    baseline = _run(ocx, project, "run", "--", "env")
+    baseline = _run(ocx, project, "exec", "--", "env")
     assert baseline.returncode == EXIT_SUCCESS, baseline.stderr
     baseline_path = _env_value(baseline.stdout, "PATH")
     assert baseline_path is not None, f"PATH must be present; stdout:\n{baseline.stdout}"
 
-    result = _run(ocx, project, "run", "--env", f"PATH:path={extra}", "--", "env")
+    result = _run(ocx, project, "exec", "--env", f"PATH:path={extra}", "--", "env")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run --env PATH:path=... must succeed; rc={result.returncode}\n"
         f"stderr:\n{result.stderr}"
@@ -410,7 +410,7 @@ def test_env_flag_without_type_replaces_path(ocx: OcxRunner, tmp_path: Path) -> 
     env_binary = shutil.which("env")
     assert env_binary is not None, "the POSIX `env` binary must be available"
 
-    result = _run(ocx, project, "run", "--env", f"PATH={only}", "--", env_binary)
+    result = _run(ocx, project, "exec", "--env", f"PATH={only}", "--", env_binary)
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run --env PATH=... must succeed; rc={result.returncode}\n"
         f"stderr:\n{result.stderr}"
@@ -441,7 +441,7 @@ def test_env_flag_relative_path_resolves_against_cwd(
     _write_ocx_toml(project, "[tools]\n")
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, subdirectory, "run", "--env", "PATH:path=rel_bin", "--", "env")
+    result = _run(ocx, subdirectory, "exec", "--env", "PATH:path=rel_bin", "--", "env")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run from a subdirectory must succeed; rc={result.returncode}\n"
         f"stderr:\n{result.stderr}"
@@ -470,7 +470,7 @@ def test_env_flag_rejects_unknown_and_empty_type_exits_64(
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
     for argument in ("X:bogus=v", "X:=v"):
-        result = _run(ocx, project, "run", "--env", argument, "--", "echo", "hi")
+        result = _run(ocx, project, "exec", "--env", argument, "--", "echo", "hi")
         assert result.returncode == EXIT_USAGE, (
             f"--env {argument} must exit {EXIT_USAGE}; got {result.returncode}\n"
             f"stderr:\n{result.stderr}"
@@ -496,7 +496,7 @@ def test_env_flag_reserved_key_rejected_with_type_qualifier_exits_64(
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
     for argument in ("OCX_INDEX:path=/tmp/evil", "__OCX_TESTING_X:constant=1"):
-        result = _run(ocx, project, "run", "--env", argument, "--", "echo", "hi")
+        result = _run(ocx, project, "exec", "--env", argument, "--", "echo", "hi")
         assert result.returncode == EXIT_USAGE, (
             f"--env {argument} must exit {EXIT_USAGE} (reserved OCX_*/__OCX_* "
             f"namespace); got {result.returncode}\nstderr:\n{result.stderr}"
@@ -532,7 +532,7 @@ FROM_FILE = "file-value"
 
     overrides = ["--env", "FROM_FLAG=flag-value", "--env", "FROM_FILE=flag-wins"]
 
-    executed = _run(ocx, project, "run", *overrides, "--", "env")
+    executed = _run(ocx, project, "exec", *overrides, "--", "env")
     assert executed.returncode == EXIT_SUCCESS, executed.stderr
 
     exported = _run(ocx, project, "env", *overrides, "--shell=bash")
@@ -692,7 +692,7 @@ CI = "1"
     )
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, project, "run", "--", "env", extra_env={"CI": "true"})
+    result = _run(ocx, project, "exec", "--", "env", extra_env={"CI": "true"})
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
@@ -731,7 +731,7 @@ def test_project_env_constant_overrides_package_constant(
     )
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, project, "run", "--", "env")
+    result = _run(ocx, project, "exec", "--", "env")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
@@ -774,7 +774,7 @@ X = "group-value"
     )
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, project, "run", "-g", "g", "--", "env")
+    result = _run(ocx, project, "exec", "-g", "g", "--", "env")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run -g g must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
@@ -804,7 +804,7 @@ X = "value-b"
     )
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, project, "run", "-g", "a,b", "--", "env")
+    result = _run(ocx, project, "exec", "-g", "a,b", "--", "env")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run -g a,b must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
@@ -863,7 +863,7 @@ B_MARKER = "b-value"
         f"the group between the repeats must still contribute; entries={entries}"
     )
 
-    executed = _run(ocx, project, "run", "-g", "a", "-g", "b", "-g", "a", "--", "env")
+    executed = _run(ocx, project, "exec", "-g", "a", "-g", "b", "-g", "a", "--", "env")
     assert executed.returncode == EXIT_SUCCESS, (
         f"ocx run -g a -g b -g a must succeed; rc={executed.returncode}\n"
         f"stderr:\n{executed.stderr}"
@@ -901,7 +901,7 @@ PATH = {{ type = "path", value = "local_bin" }}
     )
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, project, "run", "--", "env")
+    result = _run(ocx, project, "exec", "--", "env")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
@@ -1041,7 +1041,7 @@ def test_global_env_never_composes_into_project_run(ocx: OcxRunner, tmp_path: Pa
     _write_ocx_toml(project, "[tools]\n")
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, project, "run", "--", "env")
+    result = _run(ocx, project, "exec", "--", "env")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
@@ -1255,11 +1255,11 @@ def test_run_package_composed_env_byte_identical_with_and_without_clean(
     _write_ocx_toml(project, f'[tools]\n{repo} = "{ocx.registry}/{repo}:{tag}"\n')
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    dirty = _run(ocx, project, "run", "--", "env")
+    dirty = _run(ocx, project, "exec", "--", "env")
     assert dirty.returncode == EXIT_SUCCESS, (
         f"ocx run (no --clean) must succeed; rc={dirty.returncode}\nstderr:\n{dirty.stderr}"
     )
-    clean = _run(ocx, project, "run", "--clean", "--", "env")
+    clean = _run(ocx, project, "exec", "--clean", "--", "env")
     assert clean.returncode == EXIT_SUCCESS, (
         f"ocx run --clean must succeed; rc={clean.returncode}\nstderr:\n{clean.stderr}"
     )
@@ -1321,7 +1321,7 @@ tool = "{base_pkg.fq}"
     )
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, project, "run", "--", "showenv")
+    result = _run(ocx, project, "exec", "--", "showenv")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run -- showenv must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
@@ -1395,7 +1395,7 @@ inner = "{inner_pkg.fq}"
     )
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    result = _run(ocx, project, "run", "--", "outer")
+    result = _run(ocx, project, "exec", "--", "outer")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run -- outer must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"
     )
@@ -1440,12 +1440,12 @@ tool = "{pkg.fq}"
     )
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    baseline = _run(ocx, project, "run", "--", "showenv")
+    baseline = _run(ocx, project, "exec", "--", "showenv")
     assert baseline.returncode == EXIT_SUCCESS, baseline.stderr
     baseline_path = _env_value(baseline.stdout, "PATH")
     assert baseline_path is not None, f"PATH must be present; stdout:\n{baseline.stdout}"
 
-    result = _run(ocx, project, "run", "--env", f"PATH:path={extra}", "--", "showenv")
+    result = _run(ocx, project, "exec", "--env", f"PATH:path={extra}", "--", "showenv")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run --env PATH:path=... -- showenv must succeed; "
         f"rc={result.returncode}\nstderr:\n{result.stderr}"
@@ -1549,7 +1549,7 @@ def test_run_strips_stale_ambient_ocx_env(ocx: OcxRunner, tmp_path: Path) -> Non
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
     stale_marker = "STALE_OCX_ENV_MARKER_MUST_NOT_LEAK"
-    result = _run(ocx, project, "run", "--", "env", extra_env={"OCX_ENV": stale_marker})
+    result = _run(ocx, project, "exec", "--", "env", extra_env={"OCX_ENV": stale_marker})
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run must succeed even with a garbage ambient OCX_ENV; "
         f"rc={result.returncode}\nstderr:\n{result.stderr}"

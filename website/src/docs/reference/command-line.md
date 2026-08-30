@@ -68,7 +68,7 @@ itself available offline.
 Routes mutable lookups (tag list, catalog, tag→manifest resolution) to the
 remote registry instead of the local index. Pure-query commands
 ([`ocx index list`](#index-list), [`ocx index catalog`](#index-catalog),
-[`ocx package info`](#package-info)) do **not** persist the result to the
+[`ocx package description pull`](#package-description-pull)) do **not** persist the result to the
 local index — to refresh it, run
 [`ocx index update`](#index-update) explicitly. Implies network access.
 
@@ -255,7 +255,7 @@ ocx add --global ripgrep/ripgrep:14      # error: unknown flag
 
 The short form is position-sensitive, and deliberately so: `-g` before the subcommand is `--global`, while `-g` after it is the `--group` selector of the toolchain-tier commands. `ocx -g update -g ci` updates the `ci` group of the global toolchain.
 
-When `--global` is set, the following toolchain-tier commands target `$OCX_HOME/ocx.toml` instead of a discovered project file: `add`, `remove`, `lock`, `update`, `pull`, `run`, and `env`. `shell allow` and `shell revoke` honour the same selector, and `shell allow` then refuses: the ocx home toolchain is always consented and never carries a consent stamp.
+When `--global` is set, the following toolchain-tier commands target `$OCX_HOME/ocx.toml` instead of a discovered project file: `add`, `remove`, `lock`, `update`, `pull`, `exec`, and `env`. `shell allow` and `shell revoke` honour the same selector, and `shell allow` then refuses: the ocx home toolchain is always consented and never carries a consent stamp.
 
 `--global` is mutually exclusive with `--project`. Passing both — whether as flags or via the `OCX_GLOBAL` / `OCX_PROJECT` environment variables — exits with code 64 (`UsageError`). The global toolchain never composes into project resolution; see [strict isolation][env-composition-strict-isolation] for the full hermetic contract.
 
@@ -265,9 +265,9 @@ There is no implicit fallback to `$OCX_HOME/ocx.toml` when no project is found i
 
 **Strict isolation**
 
-The global toolchain is a shell-convenience tier only. `ocx run` and `ocx package exec` are always hermetic:
+The global toolchain is a shell-convenience tier only. `ocx exec` and `ocx package exec` are always hermetic:
 
-- `ocx run` without `--global` reads only the in-effect project file. The global file is never consulted.
+- `ocx exec` without `--global` reads only the in-effect project file. The global file is never consulted.
 - `ocx package exec` reads no project file at all.
 
 Neither command performs gap-fill from the global toolchain.
@@ -347,7 +347,7 @@ esac
 ### `--candidate` / `--current` {#path-resolution}
 
 The `--candidate` and `--current` flags are available on commands that resolve a package's
-location on disk, for example [`package env`](#package-env), [`package which`](#which), or [`exec`](#exec).
+location on disk, for example [`package env`](#package-env), [`package which`](#which), or [`package exec`](#package-exec).
 
 Every mode returns a **package root** — the directory that contains the package's `content/` and
 `entrypoints/` subdirectories alongside `metadata.json`, `manifest.json`, and the other per-package
@@ -378,7 +378,7 @@ consumers traverse into `<root>/entrypoints/`, and metadata readers open `<root>
 
 ### `--lazy-mode` {#arg-lazy-mode}
 
-Available on the seven commands that compose or pre-warm an environment: [`env`](#env-root), [`run`](#run), [`pull`](#pull), [`direnv export`](#direnv-export), [`package env`](#env), [`package exec`](#exec), and [`package which`](#which). Not available on [`package install`](#package-install) or [`package select`](#package-select) — those are the only two commands that write the [candidate/current symlink namespace](#path-resolution), and a symlink must never point at a shim directory.
+Available on the seven commands that compose or pre-warm an environment: [`env`](#env-root), [`exec`](#exec), [`pull`](#pull), [`direnv export`](#direnv-export), [`package env`](#env), [`package exec`](#package-exec), and [`package which`](#which). Not available on [`package install`](#package-install) or [`package select`](#package-select) — those are the only two commands that write the [candidate/current symlink namespace](#path-resolution), and a symlink must never point at a shim directory.
 
 Controls when a declared tool's content downloads: now, or on first use.
 
@@ -460,7 +460,7 @@ ocx add [OPTIONS] <[NAME=]IDENTIFIER>...
 |------|-------|-------------|
 | `--group <NAME>` | `-g` | Add the binding to a named group instead of the default `[tools]` table. Must be non-empty and contain only alphanumeric characters, `-`, or `_`. |
 | `--pull` | — | After writing the lock, materialise the newly added tool into the object store and create its candidate symlink. Default when `--no-pull` is absent. |
-| `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. |
+| `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx exec`. |
 | `--platform <PLATFORM>` | `-p` | Materialise the leaf for the named platform instead of the host — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. The lock already pins every shipped platform's leaf, so this only selects which to fetch — the lock stays host-agnostic (an amd64 host can pre-warm an arm64 leaf). Defaults to the current host. A platform the publisher does not ship exits 78. |
 | `--help` | `-h` | Print help information. |
 
@@ -495,7 +495,7 @@ ocx add gh=ocx.sh/github/cli:2.40
 ocx add glab=ocx.sh/gitlab/cli:1.30
 ```
 
-Both tools now coexist under their own keys — `ocx run gh`, `ocx run glab`, `ocx remove glab`, and the `ocx.lock` entry all key on the name you gave, not the repository path. `NAME` must be non-empty and contain only `[A-Za-z0-9._-]`; an invalid name exits 64.
+Both tools now coexist under their own keys — `ocx exec gh`, `ocx exec glab`, `ocx remove glab`, and the `ocx.lock` entry all key on the name you gave, not the repository path. `NAME` must be non-empty and contain only `[A-Za-z0-9._-]`; an invalid name exits 64.
 
 ### `clean` {#clean}
 
@@ -590,13 +590,13 @@ ocx package deps [OPTIONS] <PACKAGE>...
 **Arguments**
 
 - `<PACKAGE>`: Package identifiers to inspect. Accepts multiple packages — when given more than one,
-  the command builds the combined dependency graph (the same graph [`exec`](#exec) uses for environment
+  the command builds the combined dependency graph (the same graph [`package exec`](#package-exec) uses for environment
   composition).
 
 **Options**
 
 - `--flat`: Show the resolved evaluation order instead of the tree. This is the exact order
-  [`exec`](#exec) and [`env`](#env) use for environment composition — useful for debugging
+  [`package exec`](#package-exec) and [`env`](#env) use for environment composition — useful for debugging
   unexpected variable values.
 - `--why <DEP>`: Explain why a dependency is pulled in. Shows all paths from the given root
   packages to `<DEP>`. Mutually exclusive with `--flat`.
@@ -684,16 +684,16 @@ ocx env [OPTIONS]
 | `--export-file=PATH` | — | Write GitLab CI/CD JSON-lines output to `PATH` instead of stdout. Requires `--ci=gitlab`. Rejected with exit 64 when combined with `--ci=github` (GitHub infers its sink from [`GITHUB_ENV`][env-github-env] and [`GITHUB_PATH`][env-github-path]) or when given without `--ci`. | *(unset — stdout for gitlab)* |
 | `--platform <PLATFORM>` | `-p` | Compose the environment for a single target platform instead of the host (cross-build export). Single-valued: passing more than one exits 64. A tool that ships no leaf for the target exits 78 (project tier) or is skipped (global tier, lenient). Defaults to the current host. | *(current host)* |
 | [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim for every tool the ladder resolves to `always`, instead of downloading its content up front. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
-| `--pull` | — | Materialise missing tools into the object store before composing (single batched install, like `ocx run`). A tool already present resolves locally with no network — only a genuine miss pulls. Last-wins with `--no-pull`. Ignored under `--global` — the global tier never installs. | **default** |
+| `--pull` | — | Materialise missing tools into the object store before composing (single batched install, like `ocx exec`). A tool already present resolves locally with no network — only a genuine miss pulls. Last-wins with `--no-pull`. Ignored under `--global` — the global tier never installs. | **default** |
 | `--no-pull` | — | Skip the install fallback: resolve against local state only. A lock-pinned tool that is not materialised is reported on stderr with an `ocx pull` hint and omitted from the composed env; the command never contacts the registry and the exit code stays 0. | — |
 | `--show-patches` | — | Annotate each entry with its origin. When [`[patches]`][config-patches] is configured, companion overlay entries are appended after the toolchain's own entries; this flag adds a `Source` column to the plain table (a `"source"` object in JSON) naming the descriptor rule and companion that produced each overlay entry. No effect when `[patches]` is not configured. Mutually exclusive with `--shell` and `--ci`. | false |
-| `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Only the segment before that first `=` is checked for a `:TYPE[:SEP]` qualifier — an environment variable name can never contain `:`, so a Windows-style value with its own colon (`--env PATH:path=C:\tools\bin`) is read correctly, and `--env FOO:constant=a=b` sets `FOO` to `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends) — the same three kinds [`[env]`][config-project-env] uses. `SEP` qualifies `list` only: the string a `list` contribution is joined to the existing value with (`--env GODEBUG:list:,=gctrace=1`); omitted, the key inherits whatever separator another contributor already declared, or a single space if none did — see [Env Composition][env-composition-list]. A relative `path` value resolves against the **current directory** the flag was invoked from, not the project root [`[env]`][config-project-env] resolves against: a checked-in file must mean the same thing from any subdirectory, while a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx run`](#run). | — |
+| `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Only the segment before that first `=` is checked for a `:TYPE[:SEP]` qualifier — an environment variable name can never contain `:`, so a Windows-style value with its own colon (`--env PATH:path=C:\tools\bin`) is read correctly, and `--env FOO:constant=a=b` sets `FOO` to `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends) — the same three kinds [`[env]`][config-project-env] uses. `SEP` qualifies `list` only: the string a `list` contribution is joined to the existing value with (`--env GODEBUG:list:,=gctrace=1`); omitted, the key inherits whatever separator another contributor already declared, or a single space if none did — see [Env Composition][env-composition-list]. A relative `path` value resolves against the **current directory** the flag was invoked from, not the project root [`[env]`][config-project-env] resolves against: a checked-in file must mean the same thing from any subdirectory, while a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx exec`](#exec). | — |
 | `-h`, `--help` | | Print help information. | — |
 
 **Reserved group keywords**
 
 - `default` — always valid; selects the top-level `[tools]` table.
-- `all` — always valid as a `-g` argument; expands to `[default, *named_groups_alphabetical]` before composition (identical to [`run`](#run)). Not declarable: `[group.all]` in `ocx.toml` exits 78 at parse time; `ocx add --group all` exits 64 at mutate time.
+- `all` — always valid as a `-g` argument; expands to `[default, *named_groups_alphabetical]` before composition (identical to [`exec`](#exec)). Not declarable: `[group.all]` in `ocx.toml` exits 78 at parse time; `ocx add --group all` exits 64 at mutate time.
 
 ::: tip Target the global toolchain
 Pass `--global` **before** the subcommand to target `$OCX_HOME/ocx.toml`: `ocx --global env --shell=bash`.
@@ -737,7 +737,7 @@ ocx env --ci=gitlab >> "${{ export_file }}"
 :::
 
 ::: tip `ocx env` installs missing tools by default
-The exporter resolves each lock-pinned tool locally first — a tool already in the object store needs no network (its digest is content-addressed, nothing to look up). Only a genuine miss falls through to install it inline, like [`ocx run`](#run). Pass `--no-pull` to skip that fallback and stay strictly offline: unmaterialised tools are warned about on stderr and omitted (the deterministic-CI shape), and the command never downloads.
+The exporter resolves each lock-pinned tool locally first — a tool already in the object store needs no network (its digest is content-addressed, nothing to look up). Only a genuine miss falls through to install it inline, like [`ocx exec`](#exec). Pass `--no-pull` to skip that fallback and stay strictly offline: unmaterialised tools are warned about on stderr and omitted (the deterministic-CI shape), and the command never downloads.
 :::
 
 **Exit codes**
@@ -791,53 +791,102 @@ ocx package env [OPTIONS] <PACKAGE>...
 
 ### `exec` {#exec}
 
-> **Moved to `ocx package exec`** — exits 64 if invoked as bare `ocx exec`. See [`package exec`](#package-exec) for the current form.
+Alias: `x`.
 
-Executes a command within the environment of one or more packages.
+Spawns a child process whose environment is composed from the project's `ocx.lock`. This is the **project-tier** env-composition command — symbols are binding names from `ocx.toml`, not OCI identifiers. For OCI-identifier-based invocations, use [`package exec`](#package-exec).
 
-Each positional accepts a bare OCI identifier (e.g. `node:20`); identifiers are resolved through the index and auto-installed when missing (unless [`--offline`](#arg-offline) is set).
+A binding missing from the local object store is auto-installed as part of composition. Because it auto-installs, a binding covered by a [`[[trust.policy]]`][config-trust] is signature-verified first — the same gate as [`package install`](#package-install) (see its auto-verify contract). No `--verify`/`--no-verify` flag here; opt out via [`OCX_NO_VERIFY`][env-no-verify].
 
-If a package declares [dependencies][ug-dependencies], their environment variables are applied in [topological order][ug-deps-env] before the package's own variables. Env entries layer in the order identifiers appear on the command line.
-
-<span id="launcher-exec"></span>
-
-::: tip Generated launchers use `ocx launcher exec`, not `ocx package exec`
-Entry-point launchers generated by `ocx package install` call the internal `ocx launcher exec '<pkg-root>' -- <argv0> [args...]` subcommand, not `ocx package exec`. That subcommand validates the package root, forces the self view internally, resolves `${installPath}` (or its exact alias `${self.installPath}`, each optionally `:native`/`:posix`) in any baked entry-point `args`, then prepends the resolved arguments before user-supplied ones and executes the resolved entrypoint. A `${deps.*}` or `${self.env.*}` token is not legal in entry-point `args` — neither is any other unrecognised token — and refuses the launcher at exit 65, at run time, after install. The wire ABI (`<pkg-root> -- <argv0> [args...]`) is frozen so launchers generated by older OCX releases keep working after an upgrade. See the [Entry Points][entry-points] guide for the launcher ABI. On Windows, the native `.exe` shim makes this call without routing through `cmd.exe`, closing the `%*` argument-injection surface for default resolution.
-:::
+`--` is mandatory and at least one token after it is required. A missing `--` or empty argv produces exit 64.
 
 **Usage**
 
 ```shell
-ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
+ocx exec [OPTIONS] [NAME...] -- ARGV...
 ```
 
 **Arguments**
 
-- `<PACKAGES>`: Bare OCI identifiers (e.g. `node:20`).
-- `<COMMAND>`: The command to execute within the package environment.
-- `[ARGS...]`: Arguments to pass to the command.
+- `[NAME...]`: Zero or more binding names to include in the composed environment. Each name must exist and be unambiguous in the selected scope. When omitted, every binding in the selected scope is composed. The `-g` scope only *selects the namespace* for name resolution — when you name a subset, only those tools must resolve and install; an unrelated tool in scope that ships no leaf for the current host (exit 78) does not block the run. When you omit `NAME`, the whole scope is the set and every tool must resolve.
+- `ARGV...`: Command to execute with arguments. The first token is the binary name; the rest are passed unchanged to the child. `--` is mandatory before `ARGV`.
 
 **Options**
 
-- `-p`, `--platform`: Specify the platform to use.
-- `--clean`: Start with a clean environment containing only the package-defined variables, instead of inheriting the current shell environment. Resolution-affecting `OCX_*` variables (binary path, offline, remote, config file, index) are still written explicitly from the running ocx's parsed state — see [OCX Configuration Forwarding][env-composition-forwarding].
-- `--self`: Use the self view (mask `Visibility::PRIVATE`) — emits `private` and `public` entries. Default off = consumer view (mask `Visibility::INTERFACE`) emits `public` and `interface`. See [Visibility Views][exec-modes].
-- `-h`, `--help`: Print help information.
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--group <NAME>` | `-g` | Scope env composition to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). `default` selects `[tools]`; `all` expands to `default` + every declared `[group.*]`. | `[tools]` only |
+| `--clean` | — | Start with a clean environment containing only the composed package variables, instead of inheriting the current shell environment. | off |
+| [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim for every tool the ladder resolves to `always`; its content downloads the first time the child process invokes it. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
+| `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Only the segment before that first `=` is checked for a `:TYPE[:SEP]` qualifier — an environment variable name can never contain `:`, so a Windows-style value with its own colon (`--env PATH:path=C:\tools\bin`) is read correctly, and `--env FOO:constant=a=b` sets `FOO` to `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends) — the same three kinds [`[env]`][config-project-env] uses. `SEP` qualifies `list` only: the string a `list` contribution is joined to the existing value with (`--env GODEBUG:list:,=gctrace=1`); omitted, the key inherits whatever separator another contributor already declared, or a single space if none did — see [Env Composition][env-composition-list]. A relative `path` value resolves against the **current directory** the flag was invoked from, not the project root [`[env]`][config-project-env] resolves against: a checked-in file must mean the same thing from any subdirectory, while a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
+| `--help` | `-h` | Print help information. | — |
 
-::: info Stdin always inherits
-`ocx package exec` always inherits the parent's stdin so piped input flows into the child unchanged (`echo hi | ocx package exec pkg -- cat` prints `hi`). There is no opt-out — the previous `--interactive` flag was removed; matching standard shell exec semantics is the default.
+::: tip Target the global toolchain
+Pass `--global` **before** the subcommand: `ocx --global exec -- cmake --version`. The global file must exist (no auto-init for read commands). See [`--global`][global-flag].
 :::
 
-::: info Process replacement on Unix
-On Unix, `ocx package exec` hands the current process image off to the target via `execvp(2)`, so the child inherits ocx's PID. Signals reach the target without an ocx forwarder, `pgrep <name>` shows the wrapped binary, and the process tree drops the ocx layer entirely — matching the same semantics shells use when chaining `exec "$@"` in entry-point scripts. On Windows, `ocx package exec` spawns the target and waits for it, since `CreateProcess` has no exec equivalent; the propagated exit code is forwarded as ocx's own exit code.
+::: warning `--env PATH=...` replaces the composed `PATH`, it does not extend it
+`--env` with no `:TYPE` is a `constant` — it replaces the key outright, the same as a bare-string [`[env]`][config-project-env] entry. `--env PATH=/opt/tools/bin` therefore overwrites the composed `PATH`, silently dropping every package's `bin/` and `entrypoints/` directory. There is no name-based special case for `PATH`; write `--env PATH:path=/opt/tools/bin` to prepend instead of replace.
 :::
+
+**Composition order**
+
+> First by group-selection order (the order of `-g` flags after `all` expansion, deduplicated); then alphabetical by binding name within each group.
+
+The composer prepends env entries in iteration order, so the **last group listed** has its `bin/` directories searched **first** in the child's `PATH`. Example: `-g default,ci` puts `[group.ci]`'s entries ahead of `[tools]`' on `PATH`; flip to `-g ci,default` to invert. Same rule applies within a group — alphabetically-later bindings land ahead of alphabetically-earlier ones.
+
+**Reserved group keywords**
+
+- `default` — always valid; selects the top-level `[tools]` table.
+- `all` — always valid as a `-g` argument; expands to `[default, *named_groups_alphabetical]` before composition. Not declarable: `[group.all]` in `ocx.toml` exits 78 at parse time; `ocx add --group all` exits 64 at mutate time.
 
 **Exit codes**
 
 | Code | Meaning |
 |------|---------|
-| 0 | Command exited successfully (`exec` propagates the wrapped command's exit code). |
-| _N_ | Wrapped command exited with code _N_ — `exec` forwards the child status verbatim. |
+| *(child)* | Child ran; its exit code is forwarded byte-for-byte. |
+| 1 | Child spawn failed (binary not found, exec errno). |
+| 64 | `--` missing; empty argv; empty `-g` segment; no `ocx.toml` found; unknown `-g` group; unknown binding NAME; ambiguous NAME across groups with conflicting identifiers; `--global` combined with `--project`; a bare `--env FOO` with no `=`; an `--env` `TYPE` that names no modifier or is empty (`--env X:bogus=v`, `--env X:=v`); or `--env` sets an `OCX_*`/`__OCX_*` key. (OCX remaps clap's default exit 2 to 64.) |
+| 65 | `ocx.lock` is stale — run `ocx lock`; or two contributors to one env key declared conflicting list separators (see [Separator agreement][env-composition-list-separator]); or a policy-covered binding's Sigstore bundle is tampered (auto-verify). |
+| 69 | Registry unreachable during auto-install of a missing package. |
+| 75 | Transient registry failure during auto-install (connect failure, timeout, 429/502/503/504) — rerunning may succeed. |
+| 77 | A policy-covered binding's certificate identity or OIDC issuer does not match (auto-verify). |
+| 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error — including a tool binding declared directly under `[group.<name>]` instead of `[group.<name>.tools]`, or an `[env]`/`[group.<name>.env]` entry with an `OCX_*`/`__OCX_*` key (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve; or a policy-covered binding's trust root/policy is misconfigured (auto-verify). The host-leaf check fires only for tools actually composed: the named subset when `NAME` is given, or every tool in scope when it is omitted. |
+| 79 | Package not found in registry during auto-install; or no signature found for a policy-covered binding (auto-verify). |
+| 80 | Authentication failure during auto-install. |
+
+**Examples**
+
+```shell
+# Run task in the default [tools] environment
+ocx exec -- task build
+
+# Run shellcheck from [group.ci] only
+ocx exec -g ci -- shellcheck ./script.sh
+
+# Compose all groups and print the resulting environment
+ocx exec -g all -- env
+
+# Use only the cmake binding from the default scope
+ocx exec cmake -- cmake --version
+
+# Pass flags to the child (-- separates ocx args from child argv)
+ocx exec -g ci -- shellcheck --format=gcc ./script.sh
+
+# Clean environment — only package-declared vars, no shell inheritance
+ocx exec --clean -- env
+
+# One-off override — wins over ambient, package, and project/group [env]
+ocx exec --env CI=1 --env SOURCE_DATE_EPOCH=0 -- task build
+
+# Prepend a project-local directory to PATH for this invocation only
+ocx exec --env PATH:path=node_modules/.bin -- eslint .
+```
+
+::: tip Project-tier vs OCI-tier
+`ocx exec` requires `ocx.toml` and `ocx.lock`. If you do not have a project file, use [`ocx package exec`](#package-exec) with an OCI identifier instead.
+:::
+
+See [Project Toolchain In Depth → Running tools][in-depth-project-running] for composition order, PATH precedence, the `all` keyword, and worked examples.
 
 ### `which` (package-tier — `ocx package which`) {#which}
 
@@ -929,8 +978,8 @@ ocx direnv export [OPTIONS]
 
 **Options**
 
-- `--group <NAME>` / `-g`: Scope composition to the named group(s), same grammar as [`ocx run -g`](#run). Omitted, the scope is the top-level `[tools]` table and its `[env]` — a group's `[env]` is otherwise unreachable from an `.envrc`.
-- `--env <KEY[:TYPE[:SEP]]=VALUE>`: Set an environment variable for this invocation only, same grammar as [`ocx run --env`](#run). A relative `path` value resolves against the directory ocx runs in, which under direnv is the directory holding `.envrc`.
+- `--group <NAME>` / `-g`: Scope composition to the named group(s), same grammar as [`ocx exec -g`](#exec). Omitted, the scope is the top-level `[tools]` table and its `[env]` — a group's `[env]` is otherwise unreachable from an `.envrc`.
+- `--env <KEY[:TYPE[:SEP]]=VALUE>`: Set an environment variable for this invocation only, same grammar as [`ocx exec --env`](#exec). A relative `path` value resolves against the directory ocx runs in, which under direnv is the directory holding `.envrc`.
 - [`--lazy-mode <MODE>`](#arg-lazy-mode): Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. Without it, a project declaring `lazy-mode = "always"` in `ocx.toml` would still compose eagerly here even though [`ocx env`](#env-root) defers it — `ocx direnv export` composes through the same ladder as every other env-composing command, so the environment does not depend on which command opened the shell.
 - `--pull` / `--no-pull`: `--pull` (default) installs a missing tool on the object-store miss before exporting; `--no-pull` keeps the hook strictly offline and omits it. POSIX last-wins.
 - `-h`, `--help`: Print help information.
@@ -969,6 +1018,8 @@ Lists all packages available in the index. Uses the local index by default; pass
 
 #### `list` {#index-list}
 
+Alias: `ls`.
+
 ```bash
 ocx index list [OPTIONS] <PACKAGE>...
 ```
@@ -977,7 +1028,7 @@ Lists available tags for one or more packages.
 
 Identifiers carrying a digest (`@sha256:...`) are rejected with a usage
 error — `index list` enumerates tags, and a digest narrows nothing. Use
-[`ocx package info <pkg>@<digest>`](#package-info) for a single artifact, or
+[`ocx package description pull <pkg>@<digest>`](#package-description-pull) for a single artifact, or
 drop the `@digest` suffix. Tag-only identifiers (`<pkg>:<tag>`) still work
 as a tag filter on the returned list. With `--platforms`, a digest-bearing
 identifier (`<pkg>@<digest>`) is accepted and resolves directly to that
@@ -1260,7 +1311,7 @@ Home       /home/user/.ocx
 
 Reports what `ocx.toml` and `ocx.lock` say, without resolving anything. Offline, read-only, and never writes either file: no registry is contacted, no platform is selected, no package metadata is read, and no relative `path` value is anchored to the project root.
 
-Status answers on projects that other commands refuse. A missing `ocx.lock` exits 78 for [`pull`](#pull) and [`run`](#run); a drifted one exits 65; an unparseable one fails outright. All three are states `status` reports as payload and still exits `0` for — it is the command you reach for when the project is broken.
+Status answers on projects that other commands refuse. A missing `ocx.lock` exits 78 for [`pull`](#pull) and [`exec`](#exec); a drifted one exits 65; an unparseable one fails outright. All three are states `status` reports as payload and still exits `0` for — it is the command you reach for when the project is broken.
 
 For what those declarations *resolve to* on this host — the pinned digest per binding, the composed environment, what would land on `PATH` — use [`inspect`](#inspect).
 
@@ -1366,7 +1417,7 @@ ocx inspect [OPTIONS] [NAME]...
 
 **Options**
 
-- `-g`, `--group <GROUP>`: Restrict the selection to the named group(s). Repeatable and comma-separated. `default` selects the top-level `[tools]` table; `all` expands to `default` plus every declared `[group.*]`. Omitted means the default group, not everything — matching [`run`](#run) and [`env`](#env-root).
+- `-g`, `--group <GROUP>`: Restrict the selection to the named group(s). Repeatable and comma-separated. `default` selects the top-level `[tools]` table; `all` expands to `default` plus every declared `[group.*]`. Omitted means the default group, not everything — matching [`exec`](#exec) and [`env`](#env-root).
 - `-p`, `--platform <PLATFORM>`: Platform to resolve each binding's leaf against. Defaults to the host. Applies with `--resolve` and `--closure`; ignored in default mode, where the candidate list always shows every locked platform.
 - `--resolve`: Select this host's leaf and emit its metadata plus the OCI resolution chain. The lock already pins a platform manifest, so the chain starts there and carries no `index` entry.
 - `--closure`: Compute each binding's dependency closure from metadata alone, plus the `interface` / `private` surface projections. Because the walk sees the whole selection at once, it also reports collisions between two *different* tools before either is installed.
@@ -1649,7 +1700,7 @@ Resolves every tool tag in the nearest `ocx.toml` to per-platform leaf digests a
 
 For each tool, the lock records the bare registry/repository coordinates plus a `[tool.platforms]` table mapping every platform the publisher ships to its leaf manifest digest. The command records all shipped platforms regardless of which OS it runs on, so a lock committed on Linux is complete for macOS and Windows CI runners. The command is fully transactional — either every tool resolves successfully and the file is rewritten atomically, or nothing is written and the previous `ocx.lock` survives unchanged.
 
-The lock carries a `declaration_hash` over the canonicalized [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) of `ocx.toml`. Downstream commands ([`ocx pull`](#pull), [`ocx run`](#run)) consult this hash to detect when the lock is stale relative to the source declaration. When the resolved content of every tool is unchanged between two `ocx lock` runs, the file's `generated_at` timestamp is preserved verbatim — the byte-stable output keeps version-control diffs minimal.
+The lock carries a `declaration_hash` over the canonicalized [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) of `ocx.toml`. Downstream commands ([`ocx pull`](#pull), [`ocx exec`](#exec)) consult this hash to detect when the lock is stale relative to the source declaration. When the resolved content of every tool is unchanged between two `ocx lock` runs, the file's `generated_at` timestamp is preserved verbatim — the byte-stable output keeps version-control diffs minimal.
 
 After a successful write, the command checks whether the project's `.gitattributes` declares `ocx.lock merge=union` and emits a one-line stderr advisory when it does not, helping prevent merge conflicts on team projects.
 
@@ -1668,7 +1719,7 @@ ocx lock [OPTIONS]
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--pull` | — | After writing the lock, materialise all resolved tools into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
-| `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. | — |
+| `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx exec`. | — |
 | `--check` | — | Verify `ocx.lock` is current relative to `ocx.toml` and exit. No re-resolution, no writes, no network calls. Exit 0 if the lock matches; 65 if stale; 78 if the lock file is absent. CI primitive for "is the lock committed and current?" verification. | off |
 | `--platform <PLATFORM>` | `-p` | Materialise the leaf for the named platform instead of the host — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Selects which already-locked leaf to fetch (the lock stays host-agnostic); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
 | `--help` | `-h` | Print help information. | — |
@@ -1730,7 +1781,7 @@ ocx update [OPTIONS] [NAME...]
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--pull` | — | After writing the lock, materialise all resolved tools into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
-| `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx run`. | — |
+| `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx exec`. | — |
 | `--group <NAME>` | `-g` | Advance every binding in one or more named groups; freeze the rest. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table; `all` expands to `default` plus every declared `[group.*]`. Combine with `NAME` arguments to advance only those bindings within the named groups. | *(whole file)* |
 | `NAME...` | — | Binding names to advance; every other pin is frozen. Each name is advanced in every group it appears in (narrow with `-g`). | *(whole file)* |
 | `--check` | — | Re-resolves the selected scope (every declared tag, or only the bindings named by `-g`/positional names), compares the candidate to the predecessor, and exits 0 (matches) or 65 (`DataError`, a pin would change). No writes, no commit. When the predecessor lock is absent, exits 78. | off |
@@ -1795,7 +1846,7 @@ ocx pull [OPTIONS]
 | `--group <NAME>` | `-g` | Restrict the pull to one or more named groups. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table; the reserved name `all` expands to `default` + every declared `[group.*]`. When omitted, every entry from the lock is pulled. | *(all groups)* |
 | `--dry-run` | — | Print which locked tools are already cached vs. would be fetched, then exit without writing to the store. | off |
 | `--platform <PLATFORM>` | `-p` | Pre-warm the leaf for the named platform instead of the host — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Selects which already-locked leaf to fetch (the lock stays host-agnostic — an amd64 host can pre-warm an arm64 leaf); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
-| [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `pull` composes nothing, so `always` changes *what* is pre-warmed instead of what reaches `PATH`: a tool the ladder resolves to `always` gets its metadata, its dependency closure's config blobs, and its generated shim launchers — no content. The content downloads the first time one of those launchers runs, in whatever environment a later `ocx run` or `ocx env` composes. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
+| [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `pull` composes nothing, so `always` changes *what* is pre-warmed instead of what reaches `PATH`: a tool the ladder resolves to `always` gets its metadata, its dependency closure's config blobs, and its generated shim launchers — no content. The content downloads the first time one of those launchers runs, in whatever environment a later `ocx exec` or `ocx env` composes. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
 | `--help` | `-h` | Print help information. | — |
 
 ::: tip Target the global toolchain
@@ -1846,104 +1897,9 @@ The staleness gate fires ahead of the dry-run branch, so a stale lock still
 exits 65 — the preview is not a way to bypass `declaration_hash` validation.
 The output respects [`--format json`](#arg-format) and [`--quiet`](#arg-quiet).
 
-### `run` {#run}
-
-Spawns a child process whose environment is composed from the project's `ocx.lock`. This is the **project-tier** env-composition command — symbols are binding names from `ocx.toml`, not OCI identifiers. For OCI-identifier-based invocations, use [`exec`](#exec).
-
-A binding missing from the local object store is auto-installed as part of composition. Because it auto-installs, a binding covered by a [`[[trust.policy]]`][config-trust] is signature-verified first — the same gate as [`package install`](#package-install) (see its auto-verify contract). No `--verify`/`--no-verify` flag here; opt out via [`OCX_NO_VERIFY`][env-no-verify].
-
-`--` is mandatory and at least one token after it is required. A missing `--` or empty argv produces exit 64.
-
-**Usage**
-
-```shell
-ocx run [OPTIONS] [NAME...] -- ARGV...
-```
-
-**Arguments**
-
-- `[NAME...]`: Zero or more binding names to include in the composed environment. Each name must exist and be unambiguous in the selected scope. When omitted, every binding in the selected scope is composed. The `-g` scope only *selects the namespace* for name resolution — when you name a subset, only those tools must resolve and install; an unrelated tool in scope that ships no leaf for the current host (exit 78) does not block the run. When you omit `NAME`, the whole scope is the set and every tool must resolve.
-- `ARGV...`: Command to execute with arguments. The first token is the binary name; the rest are passed unchanged to the child. `--` is mandatory before `ARGV`.
-
-**Options**
-
-| Flag | Short | Description | Default |
-|------|-------|-------------|---------|
-| `--group <NAME>` | `-g` | Scope env composition to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). `default` selects `[tools]`; `all` expands to `default` + every declared `[group.*]`. | `[tools]` only |
-| `--clean` | — | Start with a clean environment containing only the composed package variables, instead of inheriting the current shell environment. | off |
-| [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim for every tool the ladder resolves to `always`; its content downloads the first time the child process invokes it. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
-| `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Only the segment before that first `=` is checked for a `:TYPE[:SEP]` qualifier — an environment variable name can never contain `:`, so a Windows-style value with its own colon (`--env PATH:path=C:\tools\bin`) is read correctly, and `--env FOO:constant=a=b` sets `FOO` to `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends) — the same three kinds [`[env]`][config-project-env] uses. `SEP` qualifies `list` only: the string a `list` contribution is joined to the existing value with (`--env GODEBUG:list:,=gctrace=1`); omitted, the key inherits whatever separator another contributor already declared, or a single space if none did — see [Env Composition][env-composition-list]. A relative `path` value resolves against the **current directory** the flag was invoked from, not the project root [`[env]`][config-project-env] resolves against: a checked-in file must mean the same thing from any subdirectory, while a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
-| `--help` | `-h` | Print help information. | — |
-
-::: tip Target the global toolchain
-Pass `--global` **before** the subcommand: `ocx --global run -- cmake --version`. The global file must exist (no auto-init for read commands). See [`--global`][global-flag].
-:::
-
-::: warning `--env PATH=...` replaces the composed `PATH`, it does not extend it
-`--env` with no `:TYPE` is a `constant` — it replaces the key outright, the same as a bare-string [`[env]`][config-project-env] entry. `--env PATH=/opt/tools/bin` therefore overwrites the composed `PATH`, silently dropping every package's `bin/` and `entrypoints/` directory. There is no name-based special case for `PATH`; write `--env PATH:path=/opt/tools/bin` to prepend instead of replace.
-:::
-
-**Composition order**
-
-> First by group-selection order (the order of `-g` flags after `all` expansion, deduplicated); then alphabetical by binding name within each group.
-
-The composer prepends env entries in iteration order, so the **last group listed** has its `bin/` directories searched **first** in the child's `PATH`. Example: `-g default,ci` puts `[group.ci]`'s entries ahead of `[tools]`' on `PATH`; flip to `-g ci,default` to invert. Same rule applies within a group — alphabetically-later bindings land ahead of alphabetically-earlier ones.
-
-**Reserved group keywords**
-
-- `default` — always valid; selects the top-level `[tools]` table.
-- `all` — always valid as a `-g` argument; expands to `[default, *named_groups_alphabetical]` before composition. Not declarable: `[group.all]` in `ocx.toml` exits 78 at parse time; `ocx add --group all` exits 64 at mutate time.
-
-**Exit codes**
-
-| Code | Meaning |
-|------|---------|
-| *(child)* | Child ran; its exit code is forwarded byte-for-byte. |
-| 1 | Child spawn failed (binary not found, exec errno). |
-| 64 | `--` missing; empty argv; empty `-g` segment; no `ocx.toml` found; unknown `-g` group; unknown binding NAME; ambiguous NAME across groups with conflicting identifiers; `--global` combined with `--project`; a bare `--env FOO` with no `=`; an `--env` `TYPE` that names no modifier or is empty (`--env X:bogus=v`, `--env X:=v`); or `--env` sets an `OCX_*`/`__OCX_*` key. (OCX remaps clap's default exit 2 to 64.) |
-| 65 | `ocx.lock` is stale — run `ocx lock`; or two contributors to one env key declared conflicting list separators (see [Separator agreement][env-composition-list-separator]); or a policy-covered binding's Sigstore bundle is tampered (auto-verify). |
-| 69 | Registry unreachable during auto-install of a missing package. |
-| 75 | Transient registry failure during auto-install (connect failure, timeout, 429/502/503/504) — rerunning may succeed. |
-| 77 | A policy-covered binding's certificate identity or OIDC issuer does not match (auto-verify). |
-| 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error — including a tool binding declared directly under `[group.<name>]` instead of `[group.<name>.tools]`, or an `[env]`/`[group.<name>.env]` entry with an `OCX_*`/`__OCX_*` key (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve; or a policy-covered binding's trust root/policy is misconfigured (auto-verify). The host-leaf check fires only for tools actually composed: the named subset when `NAME` is given, or every tool in scope when it is omitted. |
-| 79 | Package not found in registry during auto-install; or no signature found for a policy-covered binding (auto-verify). |
-| 80 | Authentication failure during auto-install. |
-
-**Examples**
-
-```shell
-# Run task in the default [tools] environment
-ocx run -- task build
-
-# Run shellcheck from [group.ci] only
-ocx run -g ci -- shellcheck ./script.sh
-
-# Compose all groups and print the resulting environment
-ocx run -g all -- env
-
-# Use only the cmake binding from the default scope
-ocx run cmake -- cmake --version
-
-# Pass flags to the child (-- separates ocx args from child argv)
-ocx run -g ci -- shellcheck --format=gcc ./script.sh
-
-# Clean environment — only package-declared vars, no shell inheritance
-ocx run --clean -- env
-
-# One-off override — wins over ambient, package, and project/group [env]
-ocx run --env CI=1 --env SOURCE_DATE_EPOCH=0 -- task build
-
-# Prepend a project-local directory to PATH for this invocation only
-ocx run --env PATH:path=node_modules/.bin -- eslint .
-```
-
-::: tip Project-tier vs OCI-tier
-`ocx run` requires `ocx.toml` and `ocx.lock`. If you do not have a project file, use [`ocx package exec`](#package-exec) with an OCI identifier instead.
-:::
-
-See [Project Toolchain In Depth → Running tools][in-depth-project-running] for composition order, PATH precedence, the `all` keyword, and worked examples.
-
 ### `remove` {#remove}
+
+Alias: `rm`.
 
 Removes one or more tool bindings from `ocx.toml`, rewrites `ocx.lock`, and uninstalls the tools.
 
@@ -2154,7 +2110,7 @@ When none of these apply and a project is consented but not yet reflected in the
 
 Consent to a project's [shell integration][in-depth-shell-integration]: record the consent stamp that lets a shell prompt apply that project's tools and environment.
 
-Six commands — `add`, `remove`, `lock`, `update`, `pull`, `run` — already write this stamp as a side effect: running a mutating ocx command in a directory *is* consent. `allow` is the way to write one on purpose, without mutating anything.
+Six commands — `add`, `remove`, `lock`, `update`, `pull`, `exec` — already write this stamp as a side effect: running a mutating ocx command in a directory *is* consent. `allow` is the way to write one on purpose, without mutating anything.
 
 The stamp records the source set the project's `ocx.lock` resolves from at the moment it is written. Adding a tool from a new registry or organisation invalidates it (`state` reports *source-set drift*); run `allow` again to consent to the wider set.
 
@@ -2209,7 +2165,7 @@ ocx shell revoke ../other   # revoke the project governing another directory
 | The stamp was removed, or there was none to remove | 0 |
 | No `ocx.toml` governs `PATH` | 64 |
 
-A later `ocx add`, `ocx lock`, `ocx pull`, `ocx run`, `ocx remove` or `ocx update` in that directory writes the stamp again.
+A later `ocx add`, `ocx lock`, `ocx pull`, `ocx exec`, `ocx remove` or `ocx update` in that directory writes the stamp again.
 
 #### `init` {#shell-init}
 
@@ -2723,7 +2679,7 @@ An unchanged run normally opens no pull request either. The one exception is a r
 
 `--out` is unaffected by all of that: it writes the whole entry every run, unchanged included, so `announce --out dir` followed by a step that consumes `dir` never sees an empty directory. Only `status` reports that nothing moved.
 
-Every run also observes the package description published by [`ocx package describe`][cmd-package-describe]. When its artifact has moved since the last announce, the entry's description block is rebuilt — title, summary, keywords, and content-addressed copies of the README and logo — and the report's `desc_status` reads `updated`. An unmoved description costs one request and writes nothing. A description recorded in the index that the registry no longer serves stops the run rather than clearing it silently.
+Every run also observes the package description published by [`ocx package description push`][cmd-package-describe]. When its artifact has moved since the last announce, the entry's description block is rebuilt — title, summary, keywords, and content-addressed copies of the README and logo — and the report's `desc_status` reads `updated`. An unmoved description costs one request and writes nothing. A description recorded in the index that the registry no longer serves stops the run rather than clearing it silently.
 
 Publishing tags for a package that has no entry in the index yet is out of scope for `announce` — a first-time claim goes through a manual pull request against the index repository.
 
@@ -3249,7 +3205,7 @@ ocx package pull [OPTIONS] <PACKAGE>...
 
 ::: tip
 `package pull` reports the package root for each package — the same
-digest-derived directory that [`package which`](#which) and [`exec`](#exec) resolve to.
+digest-derived directory that [`package which`](#which) and [`package exec`](#package-exec) resolve to.
 The package root contains `content/` and `entrypoints/` as siblings; consumers
 traverse one level in. Two pulls of the same digest are safe to run concurrently.
 
@@ -3337,7 +3293,7 @@ ocx package push -c -p linux/amd64 -i ghcr.io/acme/tools/widget:1.2.3 \
 Any other annotation key works the same way — `org.opencontainers.image.revision` for the commit that produced the build, `org.opencontainers.image.licenses` for the SPDX expression. The [OCI annotation spec][oci-annotations] lists the pre-defined keys and the reverse-domain convention for custom ones; OCX does not validate keys beyond rejecting an empty one.
 
 ::: tip Catalog display lives elsewhere
-Title, description, and keywords shown in a catalog come from [`ocx package describe`](#package-describe), which publishes them on the separate `__ocx.desc` tag. `--annotation` is for facts about a *published build* that a registry reads off the index itself.
+Title, description, and keywords shown in a catalog come from [`ocx package description push`](#package-description-push), which publishes them on the separate `__ocx.desc` tag. `--annotation` is for facts about a *published build* that a registry reads off the index itself.
 :::
 
 #### Layer layout {#package-push-layout}
@@ -3413,7 +3369,7 @@ ocx package test [OPTIONS] --identifier <IDENTIFIER> [LAYERS]... --script <PATH|
 | `--output <DIR>` | `-o` | Materialize into `DIR` instead of an auto-managed temp dir. `DIR` must not exist or must be empty. Implies keep. Must reside on the same filesystem as `$OCX_HOME/layers/`. On Windows, must point under `$OCX_HOME/`. Mutually exclusive with `--keep`. | — |
 | `--self` | — | Compose the package's private env surface (default: interface surface). Same semantics as [`ocx package exec --self`][cmd-exec-self]. | false |
 | `--clean` | — | Strip ambient parent env before composing — only `OCX_*` config and composed package vars reach the child. Mirrors [`ocx package exec --clean`][cmd-exec-clean]. | false |
-| `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends); `SEP` qualifies `list` only (`--env GODEBUG:list:,=gctrace=1`) and, if omitted, inherits whatever separator another contributor to the key already declared, or a single space if none did. A relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx run`](#run). | — |
+| `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends); `SEP` qualifies `list` only (`--env GODEBUG:list:,=gctrace=1`) and, if omitted, inherits whatever separator another contributor to the key already declared, or a single space if none did. A relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx exec`](#exec). | — |
 | `--help` | `-h` | Print help information. | — |
 
 **Examples**
@@ -3679,7 +3635,7 @@ Each surface carries four attributed arrays plus a completeness flag:
 
 `closure.conflicts` names install/compose conditions detected over the interface projection: `entrypoints` (two or more packages claiming the same entrypoint name) and `repositories` (one repository resolving to two or more distinct digests). Both arrays are always present; empty means the surface is realizable.
 
-A non-empty `conflicts` exits **65** (`DataError`) while still reporting the condition in full — the payload is what a caller reads to act, the exit code is what a pipeline branches on. 65 is the same code install/compose already returns when it hard-rejects the identical condition, so `inspect --closure` exits exactly where the corresponding `ocx run` would.
+A non-empty `conflicts` exits **65** (`DataError`) while still reporting the condition in full — the payload is what a caller reads to act, the exit code is what a pipeline branches on. 65 is the same code install/compose already returns when it hard-rejects the identical condition, so `inspect --closure` exits exactly where the corresponding `ocx exec` would.
 
 **Examples**
 
@@ -3848,7 +3804,7 @@ ocx package copy [OPTIONS] <SOURCE>
 - `-c`, `--cascade`: Also re-point the rolling ancestors (`1.4`, `1`, `latest`) at the target. The blocker checks read the target's tag list, so promoting `1.4.1` into a production registry that already publishes `1.4.2` leaves `1.4` where it is.
 - `--canonical-tag` / `--no-canonical-tag`: `--canonical-tag` (default) also writes a digest-named `sha256.<hex>` tag for each copied platform manifest at the target — the same registry-side deletion safety net [`push`](#package-push) writes.
 - `--referrers` / `--no-referrers`: `--referrers` (default) also copies everything anchored to each manifest — signatures, SBOMs, attestations — following referrer chains recursively. Requires the [OCI Referrers API][oci-referrers-spec] at the target; a registry without it exits 84 rather than accepting a referrer manifest it will never list. `--no-referrers` promotes the package alone.
-- `--description`: Also copy the repository description (README, logo, catalog annotations) from the `__ocx.desc` tag. Off by default — a description is repository-level prose rather than part of the version being promoted, and environments legitimately carry different ones. [`ocx package describe --from`](#package-describe) copies it on its own.
+- `--description`: Also copy the repository description (README, logo, catalog annotations) from the `__ocx.desc` tag. Off by default — a description is repository-level prose rather than part of the version being promoted, and environments legitimately carry different ones. [`ocx package description push --from`](#package-description-push) copies it on its own.
 - `--annotation <KEY=VALUE>`: Record an [OCI annotation][oci-annotations] on the target's image index. Repeatable, same semantics as [`push`](#package-push-annotations). Platform manifests are never annotated — that would change their digest, which is the one thing a copy must not do.
 - `--dry-run`: Report what would be copied and write nothing. The preview covers only the per-platform disposition below — a `--cascade` or `--canonical-tag` promotion's rolling-tag and canonical-tag moves are never computed under `--dry-run`, so those fields report empty regardless of what a real run would write. See **Output** below.
 - `-h`, `--help`: Print help information.
@@ -3896,14 +3852,14 @@ A second identical copy is idempotent in effect — no new content lands and no 
 The signature travels with the manifest, so it still names the identity that signed it in the source environment. If your policy requires a production-specific attestation, sign again at the target — promotion preserves provenance, it does not create it.
 :::
 
-#### `describe` {#package-describe}
+#### `description push` {#package-description-push}
 
-Pushes package description metadata (title, description, keywords, README, logo) to the registry.
+Pushes or updates package description metadata (title, description, keywords, README, logo) on the registry. When updating an existing description, only the provided fields change — an omitted field is preserved from the current description, so a `--title`-only push does not blank the README.
 
 **Usage**
 
 ```shell
-ocx package describe [OPTIONS] <IDENTIFIER>
+ocx package description push [OPTIONS] <IDENTIFIER>
 ```
 
 **Arguments**
@@ -3912,7 +3868,7 @@ ocx package describe [OPTIONS] <IDENTIFIER>
 
 **Options**
 
-- `--readme <PATH>`: Path to a README markdown file.
+- `--readme <PATH>`: Path to a README markdown file. Required on the first push to a repository with no existing description.
 - `--logo <PATH>`: Path to a logo image (PNG or SVG). The file's bytes must be the format its extension names; anything else exits 65 without touching the published description.
 - `--title <TITLE>`: Short display title for the package catalog.
 - `--description <TEXT>`: One-line summary.
@@ -4613,7 +4569,7 @@ ocx package sbom -p linux/amd64 --type cyclonedx --output sbom.json registry.exa
 ocx package sbom -p linux/amd64 --type cyclonedx --output - registry.example/pkg:1.0 | jq .
 ```
 
-#### `info` {#package-info}
+#### `description pull` {#package-description-pull}
 
 Displays description metadata for one or more packages from the registry.
 
@@ -4622,7 +4578,7 @@ JSON output is an object keyed by the requested identifier (`{"<id>": {...}|null
 **Usage**
 
 ```shell
-ocx package info [OPTIONS] <IDENTIFIER>...
+ocx package description pull [OPTIONS] <IDENTIFIER>...
 ```
 
 **Arguments**
@@ -4645,7 +4601,7 @@ This is the OCI-tier install command. For project-tier installs driven by `ocx.t
 
 When a [`[[trust.policy]]`][config-trust] entry in the operator `config.toml` tier covers the package's `registry/repository`, install verifies its [Sigstore][sigstore] signature automatically — at the metadata-first seam, after the manifest digest resolves and before any layer downloads. A failed check aborts before any package-store or symlink state is written, so a rejected artifact costs a manifest fetch, not a wasted download. Auto-verify consults the operator tier only; unlike [`package verify`][cmd-package-verify], a project `ocx.toml` policy is never considered here.
 
-The same gate applies to **every** command that fetches a package, not just `install`: `package pull`, and every command that auto-installs on demand — [`package exec`](#package-exec), [`package env`](#package-env), root [`env`](#env-root), [`run`](#run), and patch discovery ([`patch why`](#patch-why) / [`patch test`](#patch-test)). Only `install` and `pull` carry the `--verify` / `--no-verify` flag; the others opt out via [`OCX_NO_VERIFY`][env-no-verify].
+The same gate applies to **every** command that fetches a package, not just `install`: `package pull`, and every command that auto-installs on demand — [`package exec`](#package-exec), [`package env`](#package-env), root [`env`](#env-root), [`exec`](#exec), and patch discovery ([`patch why`](#patch-why) / [`patch test`](#patch-test)). Only `install` and `pull` carry the `--verify` / `--no-verify` flag; the others opt out via [`OCX_NO_VERIFY`][env-no-verify].
 
 A package outside every policy's scope is not verified — trust is opt-in, and OCX logs an `INFO` line noting the skip. This opt-in is per scope: a covered package's transitive dependencies are verified only if a policy also covers *their* scope. When a policy does cover the package, a failed check exits with the same taxonomy [`package verify`][cmd-package-verify] uses: `65` for a tampered bundle, `77` for a certificate identity or issuer mismatch, `78` for a trust-root or policy configuration problem, `79` for no signature found.
 
@@ -4752,9 +4708,19 @@ ocx package deselect <PACKAGE>...
 
 #### `exec` {#package-exec}
 
+Alias: `x`.
+
 Executes a command within the environment of one or more OCI-tier packages.
 
-Identifiers are OCI references (e.g. `kitware/cmake:3.28`), resolved through the index and auto-installed when missing. Because it auto-installs, a package covered by a [`[[trust.policy]]`][config-trust] is signature-verified before it runs — the same gate as [`package install`](#package-install) (see its auto-verify contract). The full reference body — stdin inheritance, process replacement on Unix, exit codes — is in the [`exec`](#exec) section. For project-tier execution driven by `ocx.toml`, use [`ocx run`](#run).
+Identifiers are OCI references (e.g. `kitware/cmake:3.28`), resolved through the index and auto-installed when missing. Because it auto-installs, a package covered by a [`[[trust.policy]]`][config-trust] is signature-verified before it runs — the same gate as [`package install`](#package-install) (see its auto-verify contract). For project-tier execution driven by `ocx.toml`, use [`ocx exec`](#exec).
+
+If a package declares [dependencies][ug-dependencies], their environment variables are applied in [topological order][ug-deps-env] before the package's own variables. Env entries layer in the order identifiers appear on the command line.
+
+<span id="launcher-exec"></span>
+
+::: tip Generated launchers use `ocx launcher exec`, not `ocx package exec`
+Entry-point launchers generated by `ocx package install` call the internal `ocx launcher exec '<pkg-root>' -- <argv0> [args...]` subcommand, not `ocx package exec`. That subcommand validates the package root, forces the self view internally, resolves `${installPath}` (or its exact alias `${self.installPath}`, each optionally `:native`/`:posix`) in any baked entry-point `args`, then prepends the resolved arguments before user-supplied ones and executes the resolved entrypoint. A `${deps.*}` or `${self.env.*}` token is not legal in entry-point `args` — neither is any other unrecognised token — and refuses the launcher at exit 65, at run time, after install. The wire ABI (`<pkg-root> -- <argv0> [args...]`) is frozen so launchers generated by older OCX releases keep working after an upgrade. See the [Entry Points][entry-points] guide for the launcher ABI. On Windows, the native `.exe` shim makes this call without routing through `cmd.exe`, closing the `%*` argument-injection surface for default resolution.
+:::
 
 **Usage**
 
@@ -4776,8 +4742,23 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 | `--clean` | | Start with a clean environment; only package-declared variables and `OCX_*` config vars reach the child. |
 | `--self` | | Use the self view (expose `private` + `public` entries). Default: consumer view (`public` + `interface` only). |
 | [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim instead of downloading content up front; the requested command's own invocation is what triggers materialization if it names one of the deferred package's entries. Typing `always` together with `--self` is a usage error (exit 64) — a shim is a consumer-facing launcher and `--self` selects the private view that bypasses launchers, so the two ask for contradictory things. An `always` merely *inherited* from `OCX_LAZY_MODE` is not: `--self` outranks it and composes eagerly. | *(inherit from `OCX_LAZY_MODE`; there is no `ocx.toml` to consult on this OCI-tier command)* |
-| `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends); `SEP` qualifies `list` only (`--env GODEBUG:list:,=gctrace=1`) and, if omitted, inherits whatever separator another contributor to the key already declared, or a single space if none did. A relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx run`](#run). | — |
+| `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends); `SEP` qualifies `list` only (`--env GODEBUG:list:,=gctrace=1`) and, if omitted, inherits whatever separator another contributor to the key already declared, or a single space if none did. A relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx exec`](#exec). | — |
 | `-h`, `--help` | | Print help information. |
+
+::: info Stdin always inherits
+`ocx package exec` always inherits the parent's stdin so piped input flows into the child unchanged (`echo hi | ocx package exec pkg -- cat` prints `hi`). There is no opt-out — the previous `--interactive` flag was removed; matching standard shell exec semantics is the default.
+:::
+
+::: info Process replacement on Unix
+On Unix, `ocx package exec` hands the current process image off to the target via `execvp(2)`, so the child inherits ocx's PID. Signals reach the target without an ocx forwarder, `pgrep <name>` shows the wrapped binary, and the process tree drops the ocx layer entirely — matching the same semantics shells use when chaining `exec "$@"` in entry-point scripts. On Windows, `ocx package exec` spawns the target and waits for it, since `CreateProcess` has no exec equivalent; the propagated exit code is forwarded as ocx's own exit code.
+:::
+
+**Exit codes**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Command exited successfully (`exec` propagates the wrapped command's exit code). |
+| _N_ | Wrapped command exited with code _N_ — `exec` forwards the child status verbatim. |
 
 #### `env` {#package-env}
 
@@ -4821,7 +4802,7 @@ ocx --format json package env [OPTIONS] <PACKAGE>...
 | `--ci[=PROVIDER]` | | Write the resolved environment into the CI system's persistence channel for later pipeline steps. `PROVIDER` ∈ `github` / `github-actions`, `gitlab` / `gitlab-ci`. Bare `--ci` auto-detects. Equals-form required. Mutually exclusive with `--shell`. |
 | `--export-file=PATH` | | Write [GitLab CI/CD][gitlab-ci-export-docs] JSON-lines to `PATH`. Requires `--ci=gitlab`; exit 64 for `--ci=github` or without `--ci`. |
 | `--show-patches` | | Annotate each entry with its origin. When [`[patches]`][config-patches] is configured, companion overlay entries are appended after the package's own entries; this flag adds a `Source` column to the plain table (a `"source"` object in JSON) naming the descriptor rule and companion that produced each overlay entry. No effect when `[patches]` is not configured. Mutually exclusive with `--shell` and `--ci`. |
-| `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends); `SEP` qualifies `list` only (`--env GODEBUG:list:,=gctrace=1`) and, if omitted, inherits whatever separator another contributor to the key already declared, or a single space if none did. A relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx run`](#run). | — |
+| `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends); `SEP` qualifies `list` only (`--env GODEBUG:list:,=gctrace=1`) and, if omitted, inherits whatever separator another contributor to the key already declared, or a single space if none did. A relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx exec`](#exec). | — |
 | `-h`, `--help` | | Print help information. |
 
 ::: warning `--ci=gitlab` requires GitLab Functions / step runner
@@ -5010,7 +4991,7 @@ ocx patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- COMMAND [ARGS...]]
 | `--platform <PLATFORM>` | `-p` | Target platform for composing the environment. Defaults to host platform. |
 | `--registry <HOST/PATH>` | | Patch registry to compose against, e.g. `registry.corp.example/ocx-patches`. Overrides the configured [`[patches]`][config-patches] tier, so you can preview a descriptor against a new patch registry without a config block. Defaults to the configured registry. |
 | `--script <FILE>` | | Starlark test script to run in the composed environment. Mutually exclusive with `-- COMMAND`. |
-| `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends); `SEP` qualifies `list` only (`--env GODEBUG:list:,=gctrace=1`) and, if omitted, inherits whatever separator another contributor to the key already declared, or a single space if none did. A relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx run`](#run). | — |
+| `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` -> `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends); `SEP` qualifies `list` only (`--env GODEBUG:list:,=gctrace=1`) and, if omitted, inherits whatever separator another contributor to the key already declared, or a single space if none did. A relative `path` value resolves against the **current directory**. Applied last, so it overrides every package-declared variable. This is a per-invocation override, not project configuration -- it does **not** make this command read `ocx.toml`. A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx exec`](#exec). | — |
 | `-h`, `--help` | | Print help information. |
 
 **Exit codes**
@@ -5556,12 +5537,12 @@ or a registry error) — the report then degrades to a local-state-only summary
 [ug-attestations-attach]: ../user-guide/attestations.md#attestations-attach
 
 <!-- commands (package-test options) -->
-[cmd-package-describe]: #package-describe
+[cmd-package-describe]: #package-description-push
 [cmd-package-push]: #package-push
 [cmd-package-push-layout]: #package-push-layout
 [cmd-package-test]: #package-test
-[cmd-exec-self]: #exec
-[cmd-exec-clean]: #exec
+[cmd-exec-self]: #package-exec
+[cmd-exec-clean]: #package-exec
 
 <!-- global flags (package-inspect) -->
 [arg-offline]: #arg-offline

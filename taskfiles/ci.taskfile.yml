@@ -3,7 +3,7 @@
 # CI / GitHub Actions quality tasks. actionlint comes from the project
 # toolchain (`ocx.toml` -> direnv -> PATH); no `ocx package exec` wrapping.
 # When running outside direnv, prefix with `direnv exec . <task>` or
-# `ocx run -- <task>` so the project tools (actionlint + its embedded
+# `ocx exec -- <task>` so the project tools (actionlint + its embedded
 # shellcheck) are on PATH.
 
 version: '3'

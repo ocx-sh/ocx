@@ -251,8 +251,8 @@ impl Publisher {
     /// Returns `Ok(None)` if no description exists yet.
     ///
     /// Canonical because every caller of this form writes back what it returns —
-    /// `package copy --description`, `package describe --from`, and the merge in
-    /// `package describe` (invariant 5, `subsystem-oci.md`). A read that only
+    /// `package copy --description`, `package description push --from`, and the merge in
+    /// `package description push` (invariant 5, `subsystem-oci.md`). A read that only
     /// renders is [`pull_description_mirrored`](Self::pull_description_mirrored).
     pub async fn pull_description(&self, identifier: &oci::Identifier, temp_dir: &Path) -> Result<Option<Description>> {
         Ok(self.client.pull_description(identifier, temp_dir).await?)
@@ -261,7 +261,7 @@ impl Publisher {
     /// [`pull_description`](Self::pull_description) served by a configured
     /// mirror.
     ///
-    /// Only for a description nothing is written from — `ocx package info`
+    /// Only for a description nothing is written from — `ocx package description pull`
     /// renders one and stops. Named rather than implied, because nothing in a
     /// call site's shape says whether its answer will back a write.
     pub async fn pull_description_mirrored(

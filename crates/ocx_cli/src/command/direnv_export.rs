@@ -133,7 +133,7 @@ impl DirenvExport {
         let platform = oci::Platform::current().unwrap_or_else(oci::Platform::any);
 
         // One request per in-scope lock tool, each carrying the `lazy-mode` its
-        // ladder resolved to — the same ladder `ocx env` and `ocx run` apply, so
+        // ladder resolved to — the same ladder `ocx env` and `ocx exec` apply, so
         // a project cannot compose two different environments depending on
         // which door it came through. A tool that ships no leaf for this host is
         // dropped here with a note: `direnv export` never fails a prompt.
@@ -227,7 +227,7 @@ impl DirenvExport {
             eprintln!("# ocx: {advisory}");
         }
 
-        // Stages 4-6, same assembly as `ocx run` and `ocx env`: the project's
+        // Stages 4-6, same assembly as `ocx exec` and `ocx env`: the project's
         // `[env]`, each selected group's `[env]` in `-g` order, then `--env`.
         let mut project_env = ocx_lib::project::project_env_entries(&project.config, &project.config_path, &expanded);
         project_env.extend(env_overrides);

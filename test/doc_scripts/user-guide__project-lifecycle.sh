@@ -11,6 +11,6 @@ ocx init
 ocx add "$PKG_KITWARE_CMAKE"
 ocx lock
 ocx pull
-ocx run -- cmake --version
+ocx exec -- cmake --version
 # endregion cast
 ocx remove "$REPO_KITWARE_CMAKE"

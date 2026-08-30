@@ -73,7 +73,7 @@ mod tests {
     /// (argv path, trailing operands the command requires).
     const COMPOSING_COMMANDS: [(&[&str], &[&str]); 7] = [
         (&["env"], &[]),
-        (&["run"], &["--", "true"]),
+        (&["exec"], &["--", "true"]),
         (&["pull"], &[]),
         (&["direnv", "export"], &[]),
         (&["package", "env"], &["cmake"]),
@@ -268,11 +268,17 @@ mod tests {
             .map(|(where_, _)| where_.clone())
             .collect();
         modes.sort();
+        // The deprecated `ocx run` reuses `ToolchainExec` wholesale, so it
+        // necessarily carries `--lazy-mode` too — one composing command with
+        // two spellings, not an eighth. Delete this line with the rest of
+        // `command::deprecated` in 0.7.
         let mut expected = composing.clone();
+        expected.push("ocx run".to_string());
         expected.sort();
         assert_eq!(
             modes, expected,
-            "the walk must reach exactly the seven composing commands"
+            "the walk must reach exactly the seven composing commands \
+             (plus the deprecated `run` spelling of `exec`, removed in 0.7)"
         );
 
         let offenders: Vec<&String> = found

@@ -3561,7 +3561,7 @@ def test_ec_ident_012_every_offline_reachable_writer_stamps_consent(arena: Arena
     two; the other four are named as untestable-within-constraints in the
     coverage report, not silently skipped.
     """
-    for command in (["lock"], ["run", "--", "true"]):
+    for command in (["lock"], ["exec", "--", "true"]):
         project = arena.projects / f"ident012_{command[0]}"
         matrix.write_project(project, 'WP15_CONST = "v1"\n')
         if command != ["lock"]:

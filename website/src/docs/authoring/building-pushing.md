@@ -46,7 +46,7 @@ The cross-host session, the redirected upload request, and the downgraded redire
 [`ocx package push`][cmd-package-push] does not bundle a directory for you. Every file layer must be a pre-built `.tar.gz` / `.tar.xz` / `.tar.zst` archive (the aliases `.tgz`, `.txz`, `.tzst`, and `.tar.zstd` are also accepted) — and that asymmetry is deliberate. Re-bundling the same content yields a non-deterministic digest (timestamps, compression entropy), and the registry treats every distinct digest as a fresh layer. Bundle once with [`ocx package create`][cmd-package-create] (see [Bundle Anatomy][authoring-bundle-anatomy]), then reference that archive across every subsequent push.
 
 ::: warning Zero-layer pushes need explicit `--metadata`
-A push with zero file layers is valid: it produces a config-only OCI artefact (the same shape OCX uses internally for the `__ocx.desc` description tag written by [`ocx package describe`][cmd-package-describe]). With no file layer next to which to look for `<stem>-metadata.json`, `--metadata` is mandatory — the same rule applies whenever every layer is a `sha256:…` digest reference.
+A push with zero file layers is valid: it produces a config-only OCI artefact (the same shape OCX uses internally for the `__ocx.desc` description tag written by [`ocx package description push`][cmd-package-describe]). With no file layer next to which to look for `<stem>-metadata.json`, `--metadata` is mandatory — the same rule applies whenever every layer is a `sha256:…` digest reference.
 :::
 
 ## Resolving Dependency Pins {#dependency-pins}
@@ -176,7 +176,7 @@ For command flags, token-source precedence, and exit codes see the
 [cmd-package-create]: ../reference/command-line.md#package-create
 [cmd-package-push]: ../reference/command-line.md#package-push
 [cmd-package-push-annotations]: ../reference/command-line.md#package-push-annotations
-[cmd-package-describe]: ../reference/command-line.md#package-describe
+[cmd-package-describe]: ../reference/command-line.md#package-description-push
 [cmd-package-sign]: ../reference/command-line.md#package-sign
 [cmd-package-verify]: ../reference/command-line.md#package-verify
 [arg-remote]: ../reference/command-line.md#arg-remote

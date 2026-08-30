@@ -506,7 +506,7 @@ fn annotation(annotations: &BTreeMap<String, String>, key: &str) -> Value {
 /// the empty string is not a value it has. A root carrying one passes the pull
 /// request checks — neither `indexbot validate` nor the claim re-derivation
 /// looks at title length — and then fails `schema:validate:rendered`, blocking
-/// the deploy for every package in the index. `ocx package describe --readme`
+/// the deploy for every package in the index. `ocx package description push --readme`
 /// over a readme with no frontmatter title pushes exactly that artifact, so the
 /// annotation is genuinely optional and the fallback carries the invariant.
 ///
@@ -1292,7 +1292,7 @@ mod tests {
     ///
     /// `title` is required too, but typed `minLength: 1`: the empty string is
     /// not a value it has. An `__ocx.desc` pushed without a title annotation
-    /// (`ocx package describe --readme` on a readme with no frontmatter title)
+    /// (`ocx package description push --readme` on a readme with no frontmatter title)
     /// therefore falls back to the last segment of the root's `name` — the
     /// package's own display name, without the namespace path the card renders
     /// beside it. Emitting `""` builds a root the pull request checks pass and
@@ -1324,7 +1324,7 @@ mod tests {
     }
 
     /// The same fallback for a title annotation the publisher set to the empty
-    /// string (`ocx package describe --title ""`): present-but-empty is exactly
+    /// string (`ocx package description push --title ""`): present-but-empty is exactly
     /// the value the schema refuses, so absence is not the only trigger.
     #[tokio::test(flavor = "multi_thread")]
     async fn observe_desc_replaces_an_empty_title_annotation() {

@@ -5,7 +5,7 @@ paths:
 
 # OCX CLI Commands — Quick Reference
 
-> **Authority:** `.claude/artifacts/handshake_toolchain_cli.md` (signed 2026-05-16). The taxonomy below reflects the signed handshake. Commands listed in the **Deleted Commands (exit 64)** section do NOT exist; any description of them in older ADRs or rules is superseded. Do not implement deleted commands.
+> **Authority:** `.claude/artifacts/handshake_toolchain_cli.md` (signed 2026-05-16). The taxonomy below reflects the signed handshake. Commands listed as **Deleted** in "Deleted vs Deprecated Commands" do NOT exist; any description of them in older ADRs or rules is superseded. Do not implement deleted commands.
 
 Concise index of all `ocx` CLI commands. User-facing per-command docs live in `website/src/docs/reference/command-line.md`. Implementation under `crates/ocx_cli/src/command/`.
 
@@ -17,13 +17,15 @@ The CLI surface splits into two tiers. The split is firm.
 
 | Tier | Commands | Input | Consults `ocx.toml`? |
 |------|----------|-------|----------------------|
-| **Toolchain-tier** | `add`, `remove`, `lock`, `update`, `run`, `env`, `status`, `inspect` | Binding names / OCI id (add) | **Yes** (or `$OCX_HOME/ocx.toml` under `--global`) |
+| **Toolchain-tier** | `add`, `remove`, `lock`, `update`, `exec`, `env`, `status`, `inspect` | Binding names / OCI id (add) | **Yes** (or `$OCX_HOME/ocx.toml` under `--global`) |
 | **OCI-tier** (`ocx package`) | `install`, `uninstall`, `select`, `deselect`, `exec`, `env`, `which`, `deps` | OCI identifiers | **Never** |
 | **Bootstrap / mixed** | `init`, `direnv init`, `direnv export`, `about`, `version`, `shell completion`, `shell state`, `shell allow`, `shell revoke` | Varies | — |
-| **Low-level registry** | `package pull`, `package push`, `package copy`, `package describe`, `package info`, `package create`, `index update/sync/list/catalog`, `login`, `logout` | OCI identifiers | Never |
+| **Low-level registry** | `package pull`, `package push`, `package copy`, `package description push`, `package description pull`, `package create`, `index update/sync/list/catalog`, `login`, `logout` | OCI identifiers | Never |
 | **Low-level local store** | `clean`, `launcher exec` | OCI identifiers | Never |
 
-**Layer-purity rule:** `ocx run` is toolchain-tier (binding-name semantics); `ocx package exec` is OCI-tier (identifier semantics). `ocx env` is toolchain-tier; `ocx package env` is OCI-tier. No command silently switches contract based on CWD.
+**Layer-purity rule:** `ocx exec` is toolchain-tier (binding-name semantics); `ocx package exec` is OCI-tier (identifier semantics). Both carry the visible alias `x`. `ocx env` is toolchain-tier; `ocx package env` is OCI-tier. No command silently switches contract based on CWD.
+
+**Deprecated hidden spellings** (still execute, warn once on stderr via `command/deprecated.rs`, removed in 0.7 — see "Deleted vs Deprecated Commands" below): `ocx run` → `ocx exec`, `ocx package describe` → `ocx package description push`, `ocx package info` → `ocx package description pull`.
 
 ---
 
@@ -39,13 +41,13 @@ The CLI surface splits into two tiers. The split is firm.
 | `--format plain\|json` | — | plain (all commands, no exceptions) | Root-only output format; no subcommand-level `--format` |
 | `--index PATH` | `OCX_INDEX` | — | Override local index directory |
 | `-l/--log-level` | — | — | Tracing level |
-| `--global` | `OCX_GLOBAL` | false | Select `$OCX_HOME/ocx.toml` toolchain tier; affects toolchain-tier commands `add`/`remove`/`lock`/`update`/`pull`/`run`/`env` (plus `patch freeze`, which reads `context.global()`); mutually exclusive with `--project` |
+| `--global` | `OCX_GLOBAL` | false | Select `$OCX_HOME/ocx.toml` toolchain tier; affects toolchain-tier commands `add`/`remove`/`lock`/`update`/`pull`/`exec`/`env` (plus `patch freeze`, which reads `context.global()`); mutually exclusive with `--project` |
 
 ## Toolchain-Tier: `--global` vs Project
 
 `--global` is a **root flag** (before the subcommand), defined once on `ContextOptions` (peer of
 `--project`). It re-targets the project file to `$OCX_HOME/ocx.toml` for the toolchain-tier
-commands: `add`, `remove`, `lock`, `update`, `pull`, `run`, `env`. Canonical form:
+commands: `add`, `remove`, `lock`, `update`, `pull`, `exec`, `env`. Canonical form:
 `ocx --global <subcommand>` — e.g. `ocx --global add ripgrep:14`.
 
 Project-tier commands resolve their project file in strict precedence order: `--global` (explicit) → `--project`/`OCX_PROJECT` (explicit) → CWD walk → None.
@@ -64,10 +66,10 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 |---------|---------|-----------|
 | `add IDENTIFIER...` | Append one or more bindings to `ocx.toml`, update lock, install (staged atomically) | `-g/--group`, `--pull/--no-pull` |
 | `init` | Create minimal `ocx.toml` in current directory | — |
-| `remove IDENTIFIER...` | Drop one or more bindings from `ocx.toml`, rewrite lock (fail-fast, all-or-nothing) | — |
+| `remove IDENTIFIER...` (visible alias `rm`) | Drop one or more bindings from `ocx.toml`, rewrite lock (fail-fast, all-or-nothing) | — |
 | `lock` | Resolve tags to digests, write `ocx.lock` | `-g/--group`, `--pull/--no-pull` |
 | `update [-g GROUP]... [NAME...]` | Re-resolve advisory tags in lock against the LIVE registry by default (update-family verb: writes `ocx.lock` only, never tag pointers; `--remote` redundant-but-accepted; `--frozen` caps at snapshot, unknown tag exit 81); whole file (no args) or a scoped subset by name/group (reuses `resolve_lock_touched`: named bindings re-resolve, rest carried forward verbatim; scoped needs a predecessor lock, exit 78 if absent; refuses drifted `ocx.toml`, exit 65; unknown group/name, exit 64). ADR `adr_toolchain_update_family.md` | `-g/--group`, `--check`, `--pull/--no-pull` |
-| `run [-g GROUP]... [NAME...] -- ARGV...` | Spawn child with composed toolchain env. No `--self`: the self view is package vocabulary and drops a package's own `entrypoints/` from `PATH`, so it composes a strictly worse toolchain | `-g/--group`, `--clean`, `--env` |
+| `exec [-g GROUP]... [NAME...] -- ARGV...` (visible alias `x`) | Spawn child with composed toolchain env. No `--self`: the self view is package vocabulary and drops a package's own `entrypoints/` from `PATH`, so it composes a strictly worse toolchain | `-g/--group`, `--clean`, `--env` |
 | `env [--shell[=NAME]] [--ci[=PROVIDER]]` | Composed toolchain env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step); installs on miss by default (`--no-pull` opts out → offline local probe; missing tool → stderr warn + omit, exit 0); JSON also carries `binaries`/`entrypoints`/`integrations` admitted-claim attribution arrays — `integrations` is the payload-carrying `{namespace, package, payload}` shape, one row per (package, namespace) pair, never merged (never in `--shell`/`--ci` output) | `-g/--group`, `--env`, `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file`, `--pull/--no-pull` |
 | `pull` | Pre-warm package store from `ocx.lock`; re-saves lock to advance mtime for direnv re-fire (skipped under `--dry-run`) | `--dry-run` |
 | `status` | Report what `ocx.toml` + `ocx.lock` declare; no resolution, no network, no flock, no staleness gate. Missing / stale / unparseable lock are all payload with exit 0 — it is the command that answers on a project the others refuse. Full per-platform digest map (no host-leaf selection), per-scope `[env]` verbatim (relative `path` values NOT anchored), `[package.*]`, both declaration hashes. Absence-as-signal per binding: no `platforms` = unlocked, no `declared` = orphaned. NO selectors by design | — |
@@ -84,15 +86,15 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 | `package uninstall PKGS...` | Remove candidate symlink | `-d/--deselect`, `--purge` |
 | `package select PKGS...` | Set `current` symlink | `-p` |
 | `package deselect PKGS...` | Remove `current` symlink | — |
-| `package exec PKGS... -- CMD` | Run command with package env (hermetic) | `--clean`, `-p`, `--self`, `--env` |
+| `package exec PKGS... -- CMD` (visible alias `x`) | Run command with package env (hermetic) | `--clean`, `-p`, `--self`, `--env` |
 | `package env PKGS... [--shell[=NAME]] [--ci[=PROVIDER]]` | Per-package composed env; output via root `--format` (default plain); `--shell[=NAME]` = eval-safe; `--ci` = CI sink (later-step); JSON also carries `binaries`/`entrypoints`/`integrations` admitted-claim attribution arrays — `binaries`/`entrypoints` are `{name, package}`, `integrations` is `{namespace, package, payload}` (one row per (package, namespace) pair, never merged, always `[]` under `--self`); `package` = canonical resolved identifier, possibly tagless digest-pinned; never in `--shell`/`--ci` output; plain mode gets a hint line | `--shell[=NAME]`, `--ci[=PROVIDER]`, `--export-file`, `--self`, `--env` |
 | `package pull PKGS...` | Download to object store only | `-p` |
 | `package create PATH` | Bundle directory into archive; `--bin-scan`/`--no-bin-scan` fill or verify the `binaries` claim | `-o`, `-m`, `-l`, `-j`, `--force`, `--bin-scan`/`--no-bin-scan` |
 | `package push -i ID LAYERS...` | Publish archive to registry | `-i`, `-c`, `-n`, `-m`, `-p`, `--build-timestamp`, `--canonical-tag/--no-canonical-tag` (default on — pushes `sha256.<hex>` per platform manifest, registry-side deletion safety net; `index.ocx.sh` ignores it), `--announce-file` (append pushed + cascade tags to a scratch file `package announce --tags-from-file` can consume) |
 | `package copy SOURCE` | Promote a published package to another registry/repository. Leaf manifests + blobs + referrers copied verbatim (digest preserved, so signatures and lock pins survive); the target index is merged **per platform**, never byte-copied; rolling tags recomputed against the **target**. Per-platform report rows: `added`/`unchanged`/`replaced`/`kept (not in source)` | `--to` (host rewrite) \| `-i/--identifier` (mutually exclusive; required for a digest source), `-p/--platform` (filter for a tag source, **required declaration** for a digest source), `-c/--cascade`, `--canonical-tag`/`--no-canonical-tag` (default on), `--referrers`/`--no-referrers` (default on; exit 84 without the Referrers API), `--description`, `--annotation`, `--dry-run` |
-| `package describe ID` | Push description metadata; `--from SOURCE` copies another repository's description wholesale (replace, not merge; mutually exclusive with the field flags) | `--from`, `--readme`, `--logo`, `--title`, `--description`, `--keywords` |
+| `package description push ID` | Push description metadata; `--from SOURCE` copies another repository's description wholesale (replace, not merge; mutually exclusive with the field flags) | `--from`, `--readme`, `--logo`, `--title`, `--description`, `--keywords` |
 | `package inspect PKGS...` | Inspect each reference (candidates / metadata+layers / resolution); `--closure` adds a metadata-only dependency closure OBJECT without installing — `closure.deps` (transitive dependencies in transitive-closure order, root excluded, each with `effective_visibility` + tri-state `binaries` + `entrypoints` + declared `integrations` namespace keys (`Vec<String>`, no payload) + own `dependencies`), `closure.surface.{interface,private}` (the two symmetric projections: binaries/entrypoints `{name, package}` + env `{key, type, package}` value-omitted + integrations `{name, package}` (`name` = namespace, no payload; interface surface only — `private.integrations` is always `[]`) + `binaries_complete`; public entries cross both axes), and `closure.conflicts`. Read-only inspect never grows the local index (writes content to the GC-able blob cache only). Keyed object for multiple | `--resolve`, `--closure`, `-p` |
-| `package info PKGS...` | Display description metadata; keyed object for multiple | `--save-readme`, `--save-logo` (single package only) |
+| `package description pull PKGS...` | Display description metadata; keyed object for multiple | `--save-readme`, `--save-logo` (single package only) |
 | `package sign IDENTIFIER` | Keyless Sigstore sign via OCI Referrers | `-p/--platform` (required), `--fulcio-url`, `--rekor-url`, `--identity-token-file`, `--identity-token-stdin`, `--no-tty`, `--no-cache` |
 | `package verify IDENTIFIER` | Keyless Sigstore verify via OCI Referrers | `-p/--platform` (required), `--certificate-identity` / `--certificate-oidc-issuer` (optional-when-a-`[trust.policy]`-matches; **both-or-neither**, one alone → exit 64), `--sigstore-trusted-root`, `--rekor-url`, `--offline`, `--no-cache` |
 | `package attest --predicate FILE --type TYPE IDENTIFIER` | Attach a signed in-toto attestation (SBOM/provenance) as a cosign-bundle referrer | `--predicate` (required), `--type` (required; cyclonedx/spdx/spdxjson/slsaprovenance1/URI), `-p/--platform`, `--fulcio-url`, `--rekor-url`, `--identity-token-file`, `--identity-token-stdin`, `--no-tty`, `--no-cache` |
@@ -107,6 +109,11 @@ Mutually exclusive with `--project` — combining both is a clap conflict (exit 
 - The identifier's own tag selects scope: tagless = every variant track (`WholeGraph`); an explicit `:latest` = the default variant track only; a rolling tag (`:3.28`) = its subtree plus the path up to its own root; a fully build-tagged leaf = the path to root only (never a write target). Multiple identifiers for the same package union their scopes into one report.
 - A logical identifier gets a third finding layer (`index_findings`) from the live public index root; a physical identifier skips it — no reverse mapping from registry path back to a logical name.
 - `repair --announce-tags <PATH>` writes the tags this run re-pointed or created (newline-separated, `parse_tags_file`-compatible; empty file when nothing changed) — the follow-up publish step is `package announce --tags-from-file <PATH>` (union semantics, so it also picks up an alias that was never committed at all).
+
+**`description` group notes:**
+- Files: `command/package_description.rs` (dispatcher, `DescriptionGroup`) + `package_description_{push,pull}.rs` (`PackageDescriptionPush`/`PackageDescriptionPull`, one leaf per subcommand) — same flat, no-`mod.rs` shape as `cascade`/`patch`, one level deeper under `package.rs`'s own `Description` variant.
+- `push`/`pull` write/read one registry-side object (the `__ocx.desc` tag) — the pair is spelled with the tier's own transport verbs (the same `push`/`pull` that move a package), not `describe`/`info`.
+- Renamed from `ocx package describe` (→ `push`) and `ocx package info` (→ `pull`); both old spellings are hidden, deprecated commands that still execute, warn once on stderr, and are removed in 0.7 — see "Deleted vs Deprecated Commands" below.
 
 ### Installation Management Commands (`ocx self`)
 
@@ -189,16 +196,16 @@ All `ConfigGroup` variants are exempt from the required-snapshot gate; `config s
 | `direnv init` | Write `.envrc` wiring `ocx direnv export` | `--force` |
 | `direnv export` | Stateless bash export generator for direnv `.envrc`; installs on miss by default (best-effort — never fails the prompt), `--no-pull` stays strictly offline. `-g` selects groups (hand-edit the generated `.envrc` line); an unknown group or malformed `--env` exits 64 — argv faults fail loudly, toolchain-state faults do not | `-g/--group`, `--env`, `--pull/--no-pull` |
 | `index catalog` | List known repositories | `--tags` |
-| `index list PKGS...` | List tags for packages | `--platforms`, `--variants` |
+| `index list PKGS...` (visible alias `ls`) | List tags for packages | `--platforms`, `--variants` |
 | `index update PKGS...` | Merge the named packages' remote roots into the local index via `LocalIndex::refresh_tags` — per-tag dispatch object plus root document (never a leaf manifest, A3), so a version choice resolves fully offline afterwards. Tagged identifier = that tag only; bare = every remote tag plus package-level fields (routing). Never deletes a locally-known tag, never fetches anything about a package you did not name. At least one PACKAGE required (exit 64); aggregates any per-package failure to a single nonzero exit (first failure in input order, deterministic) | — |
 | `index sync REGISTRIES...` | The whole-registry form of `index update`: each registry's own catalog (published) or repository listing (derived) names the packages, read live from the source, then refreshed through the *same* loop with a bare identifier each. At least one REGISTRY required (exit 64). Every registry is enumerated before any is refused, so one unreachable source does not cost the others their snapshot; an enumeration failure outranks a refresh failure in deciding the exit. `--dry-run` prints the set and refreshes nothing | `--dry-run` |
 | `index regenerate REGISTRIES...` | Re-derive a published source's `c/index.json` from the `p/` walk — the one writer that can drop a catalog entry whose root document is gone. Consults no source. Refuses a derived (plain-OCI) namespace, which has no catalog document by grammar. Skips symlinked roots and directories, so a symlink-deduplicated layout loses every package reached through a link | `--dry-run` |
 | `version` | Print version | — |
 | `about` | Print version + registry + platform + shell + home | — |
 
-### Deleted Commands (exit 64 if invoked)
+### Deleted vs Deprecated Commands
 
-These commands **do not exist** in the current model. Any invocation returns exit 64 (ocx maps clap usage errors → EX_USAGE 64; see `app.rs:112-119`):
+**Deleted** commands **do not exist** in the current model. Any invocation returns exit 64 (ocx maps clap usage errors → EX_USAGE 64; see `app.rs:112-119`):
 
 | Deleted command | Replacement |
 |-----------------|-------------|
@@ -206,13 +213,22 @@ These commands **do not exist** in the current model. Any invocation returns exi
 | `ocx uninstall` | `ocx package uninstall` |
 | `ocx select` | `ocx package select` |
 | `ocx deselect` | `ocx package deselect` |
-| `ocx exec` | `ocx package exec` |
 | `ocx which` | `ocx package which` |
 | `ocx deps` | `ocx package deps` |
 | `ocx ci` | Removed as a command; CI export is the `--ci[=PROVIDER]` flag on `ocx env` / `ocx package env` |
 | `ocx shell hook` | Removed (login-shell activation via `$OCX_HOME/env.sh` + `ocx --global env --shell=sh`; per-prompt reconciliation for a consenting project now rides the emitted hook body's hidden `ocx self activate --reconcile` arm — `adr_shell_env_overhaul.md` Decision 3/5 — never a resurrected `ocx shell hook`) |
 | `ocx shell init` | Removed (`ocx self setup` owns profile modification) |
 | `ocx shell env` | `ocx env` (toolchain) or `ocx package env` (per-package) |
+
+Root `ocx exec` is **not** deleted — the pre-handshake root `exec` that moved to `ocx package exec` is gone, but the name was reused: it is now the toolchain-tier command renamed from `ocx run` (see below).
+
+**Deprecated** spellings are a different mechanism: hidden (not shown in `--help`), still execute, warn once on stderr via `command/deprecated.rs`, and are deleted whole — module and hidden variants together — in 0.7:
+
+| Deprecated spelling | Canonical spelling |
+|---|---|
+| `ocx run` | `ocx exec` |
+| `ocx package describe` | `ocx package description push` |
+| `ocx package info` | `ocx package description pull` |
 
 ---
 
@@ -229,7 +245,7 @@ These commands **do not exist** in the current model. Any invocation returns exi
 | Either, CI sink (later-step) | `ocx [--global] env --ci=github` / `ocx package env <ids...> --ci=gitlab [--export-file PATH]` | GitHub two-file sink / GitLab JSON-lines |
 
 Rules:
-- `--env KEY[:TYPE]=VALUE` is on **both** tiers — it is a per-invocation override, not project configuration, so adding it to an OCI-tier command does not make that command read `ocx.toml`. `-g` stays project-tier only (no groups without a project file). `ocx env --env X` composes exactly what `ocx run --env X` executes with; same pairing for `package env` / `package exec`.
+- `--env KEY[:TYPE]=VALUE` is on **both** tiers — it is a per-invocation override, not project configuration, so adding it to an OCI-tier command does not make that command read `ocx.toml`. `-g` stays project-tier only (no groups without a project file). `ocx env --env X` composes exactly what `ocx exec --env X` executes with; same pairing for `package env` / `package exec`.
 - `--shell` is the **only eval-safe form**. Plain/JSON are NOT sourceable.
 - `eval "$(ocx env)"` is a user error. `eval "$(ocx env --shell=bash)"` is correct.
 - `--shell=sh` ≡ `--shell=dash` (POSIX strict; `sh` is a `PossibleValue` alias on `Shell::Dash` — no new enum variant).
@@ -258,8 +274,8 @@ Rules:
 
 ## Semantics & Gotchas
 
-- **`ocx run` semantics** — `--` mandatory, exit 64 if missing (ocx maps clap usage errors → EX_USAGE 64); default scope = `[tools]` only; `ocx --global run` = compose global toolchain env for child only, never mutates parent; `ocx run` (no `--global`) never reads `$OCX_HOME/ocx.toml`; missing `ocx.toml` → exit 64; missing `ocx.lock` → exit 78.
-- **`ocx run NAME` scopes host-leaf resolution** — `-g` selects the *namespace* for name resolution, not a mandate that every tool in it be available. The phases split selection from resolution: `select_tool_set` (resolution-free) runs whole-scope duplicate-across-groups validation; `filter_by_names` narrows to the requested NAMEs; `resolve_selected_tools` resolves host leaves for the named subset ONLY. A `NoHostLeaf` (exit 78) on an unrelated, unnamed sibling no longer aborts a narrowly-named run; an unnamed run (`ocx run -- …`) still resolves the whole scope. Duplicate-across-groups validation stays whole-scope regardless of what is named.
+- **`ocx exec` semantics** — `--` mandatory, exit 64 if missing (ocx maps clap usage errors → EX_USAGE 64); default scope = `[tools]` only; `ocx --global exec` = compose global toolchain env for child only, never mutates parent; `ocx exec` (no `--global`) never reads `$OCX_HOME/ocx.toml`; missing `ocx.toml` → exit 64; missing `ocx.lock` → exit 78.
+- **`ocx exec NAME` scopes host-leaf resolution** — `-g` selects the *namespace* for name resolution, not a mandate that every tool in it be available. The phases split selection from resolution: `select_tool_set` (resolution-free) runs whole-scope duplicate-across-groups validation; `filter_by_names` narrows to the requested NAMEs; `resolve_selected_tools` resolves host leaves for the named subset ONLY. A `NoHostLeaf` (exit 78) on an unrelated, unnamed sibling no longer aborts a narrowly-named run; an unnamed invocation (`ocx exec -- …`) still resolves the whole scope. Duplicate-across-groups validation stays whole-scope regardless of what is named.
 - **`ocx env` output format is a context-only concern** — root `--format` (default plain, same as every command); no subcommand `--format`; no env-specific JSON default (handshake §3 amended 2026-05-19, reversing the original backend-first JSON default). JSON via `ocx --format json env`. Plain and JSON are both NOT sourceable; `--shell[=NAME]` only eval-safe channel.
 - **`package env` auto-installs** — `ocx package env` uses `find_or_install_all` (unlike the deleted `shell env` which used `find_all`). Do NOT assert no-download semantics against `ocx package env`. **`ocx shell state` is the one command family exception** — read-only diagnostics only, it never installs, never mutates, never stamps consent, and is a named non-member of the six-writer `state/projects/<key>/` allowlist (`adr_shell_env_overhaul.md` C-050).
 - **Root `ocx env` auto-installs on miss by default** — the project tier runs the batched `find_or_install_all` (a present lock-pinned tool resolves locally with no network; only a genuine miss pulls). `--no-pull` opts out: it probes the store through an offline `PackageManager` clone (`offline_view` + `find`), warns on stderr (`run \`ocx pull\``) + omits a not-materialised tool, exit 0, never touching the registry (shared `options::Pull` flatten, **eager default — same as `add`/`lock`/`update`**; `direnv export` shares the same pair, best-effort pull so a prompt never fails). The global tier never installs regardless.

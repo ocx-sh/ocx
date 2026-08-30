@@ -60,13 +60,13 @@ A digest-only pin works under `--frozen` when the blobs are cached locally. A ta
 
 ## Project Toolchain {#project}
 
-### When should I use `ocx package exec` vs `ocx run`? {#exec-vs-run}
+### When should I use `ocx package exec` vs `ocx exec`? {#exec-vs-package-exec}
 
-**Short rule:** if you have an `ocx.toml`, use [`ocx run`][cmd-run]; if you do not, use [`ocx package exec`][cmd-package-exec].
+**Short rule:** if you have an `ocx.toml`, use [`ocx exec`][cmd-run]; if you do not, use [`ocx package exec`][cmd-package-exec].
 
 [`ocx package exec`][cmd-package-exec] is the OCI-tier command — its first argument is an OCI identifier (`node:20`, `ocx.sh/kitware/cmake:3.28@sha256:…`). It never reads `ocx.toml` or `ocx.lock`, so it behaves identically regardless of the current directory and regardless of any project file nearby. This makes it the right primitive for embedding in [GitHub Actions][github-actions-docs], [Bazel rules][bazel-rules], and CI scripts that manage their own tool pins.
 
-[`ocx run`][cmd-run] is the project-tier command — its symbols are binding names declared in `ocx.toml` (e.g. `cmake`, `shellcheck`). It resolves those names through `ocx.lock`, auto-installs missing packages, composes the declared environment, and spawns the child. A missing `ocx.toml` is a usage error (exit 64), not a fallback to OCI-tier behavior.
+[`ocx exec`][cmd-run] is the project-tier command — its symbols are binding names declared in `ocx.toml` (e.g. `cmake`, `shellcheck`). It resolves those names through `ocx.lock`, auto-installs missing packages, composes the declared environment, and spawns the child. A missing `ocx.toml` is a usage error (exit 64), not a fallback to OCI-tier behavior.
 
 Both commands:
 
@@ -78,7 +78,7 @@ Both commands:
 
 Only `ocx package exec` accepts `--self`. That flag selects a package's own private surface, which leaves the package's `entrypoints/` off `PATH` — launchers exist for a consumer to invoke the package, while the package's own runtime calls `bin/` directly. A project toolchain is a consumer of every tool it declares, so the self view would compose a strictly worse toolchain there.
 
-Neither command is deprecated. They cover complementary use cases — running a tool by its project-assigned name (`run`) vs running it by its registry identity (`package exec`).
+Neither command is deprecated. They cover complementary use cases — running a tool by its project-assigned name (`exec`) vs running it by its registry identity (`package exec`).
 
 See [Project Toolchain In Depth → Running tools][in-depth-project-running] for the full contract, composition order, and exit code table.
 
@@ -104,7 +104,7 @@ This tradeoff matches the [Nix][nix] model: a security patch means rebuilding ev
 
 When multiple installed packages depend on the same package at the same digest, the dependency is stored once in the [object store][fs-objects] (content-addressed deduplication). Each dependent creates a back-reference, so the shared dependency is not garbage collected until all dependents are removed.
 
-When two packages depend on the same tool at *different* digests, both versions are installed as separate objects. If both would contribute to the same environment — through `ocx package env`, `ocx env`, `ocx package exec`, or `ocx run` — composition fails: a single environment cannot expose two versions of one package, since `PATH` resolves only one. The error names the conflicting repository and the versions involved. Two tags that resolve to the *same* digest are the same version and never conflict. Use [`ocx package deps --flat`][cmd-deps] to see the evaluation order and [`ocx package deps --why`][cmd-deps] to trace the conflicting paths — `deps` reports the conflict as a non-fatal warning so the tree stays inspectable.
+When two packages depend on the same tool at *different* digests, both versions are installed as separate objects. If both would contribute to the same environment — through `ocx package env`, `ocx env`, `ocx package exec`, or `ocx exec` — composition fails: a single environment cannot expose two versions of one package, since `PATH` resolves only one. The error names the conflicting repository and the versions involved. Two tags that resolve to the *same* digest are the same version and never conflict. Use [`ocx package deps --flat`][cmd-deps] to see the evaluation order and [`ocx package deps --why`][cmd-deps] to trace the conflicting paths — `deps` reports the conflict as a non-fatal warning so the tree stays inspectable.
 
 See [Dependencies][ug-dependencies] in the user guide for the full picture: automatic installation, environment composition, garbage collection, and inspection commands.
 
@@ -134,7 +134,7 @@ In any case where detection finds nothing — a truly minimal container, a stati
 
 No — and this is a deliberate, documented limitation. OCX detects the libc of **the host it runs on**, at install time. If you install on one host and then run the binary in a *different* namespace — a [distrobox][distrobox] / toolbox guest, a bind-mounted container, or a copied `~/.ocx` on another machine — that environment may provide a different libc than the one OCX detected.
 
-For the normal flow this never bites: [`ocx package exec`][cmd-package-exec] and [`ocx run`][cmd-run] launch the binary on the same host and kernel that detection ran against. The gap only appears when the run environment is deliberately decoupled from the install environment.
+For the normal flow this never bites: [`ocx package exec`][cmd-package-exec] and [`ocx exec`][cmd-run] launch the binary on the same host and kernel that detection ran against. The gap only appears when the run environment is deliberately decoupled from the install environment.
 
 ::: warning Install where you run
 When the run environment differs from the install environment (distrobox, a bind-mounted container, a copied store), install *inside* the environment you intend to run in, or pin the variant explicitly with `--platform linux/amd64+libc.glibc`. Exec-time / target-namespace detection is tracked for a future design pass.
@@ -246,7 +246,7 @@ This caveat is about a packaged tool that ships as a `.bat`/`.cmd` script — *n
 [cmd-self-setup]: ./reference/command-line.md#self-setup
 [cmd-deps]: ./reference/command-line.md#deps
 [cmd-package-exec]: ./reference/command-line.md#package-exec
-[cmd-run]: ./reference/command-line.md#run
+[cmd-run]: ./reference/command-line.md#exec
 
 <!-- in-depth -->
 [in-depth-environments]: ./in-depth/environments.md

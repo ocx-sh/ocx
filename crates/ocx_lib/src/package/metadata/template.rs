@@ -55,7 +55,7 @@ use crate::utility::fs::path::RelativePath;
 /// value, so a var that names the previous one twice doubles per var while the
 /// authored metadata stays flat: 41 vars — under 4 KiB serialized, and accepted
 /// by `validate_for_publish`, which never resolves — expand to 32 MiB at
-/// compose time. That runs on every `ocx env` / `ocx run` / `ocx package exec` /
+/// compose time. That runs on every `ocx env` / `ocx exec` / `ocx package exec` /
 /// launcher re-entry, and is reachable through a **transitive dependency's**
 /// metadata, so the victim never named the document that did it
 /// (CWE-400/409/776).

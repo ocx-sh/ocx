@@ -12,10 +12,10 @@ use crate::options;
 /// Push or update description metadata for a package repository.
 ///
 /// Pushes a README, optional logo, and catalog annotations to the __ocx.desc tag.
-/// When updating an existing description, only the provided fields are changed —
+/// When updating an existing description, only the provided fields are changed -
 /// omitted fields are preserved from the current description.
 #[derive(Parser)]
-pub struct PackageDescribe {
+pub struct PackageDescriptionPush {
     /// Copy the whole description from another package repository.
     ///
     /// Promotes README, logo and catalog annotations verbatim, so a staging
@@ -53,7 +53,7 @@ pub struct PackageDescribe {
     identifier: options::Identifier,
 }
 
-impl PackageDescribe {
+impl PackageDescriptionPush {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifier = self.identifier.with_domain(context.default_registry())?;
 

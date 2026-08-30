@@ -14,6 +14,7 @@ pub mod config_push;
 pub mod config_setup;
 pub mod config_test;
 pub mod config_update;
+pub mod deprecated;
 pub mod deps;
 pub mod deselect;
 pub mod direnv;
@@ -43,8 +44,9 @@ pub mod package_cascade_check;
 pub mod package_cascade_repair;
 pub mod package_copy;
 pub mod package_create;
-pub mod package_describe;
-pub mod package_info;
+pub mod package_description;
+pub mod package_description_pull;
+pub mod package_description_push;
 pub mod package_inspect;
 pub mod package_pull;
 pub mod package_push;
@@ -62,7 +64,6 @@ pub mod patch_test;
 pub mod patch_why;
 pub mod pull;
 pub mod remove;
-pub mod run;
 pub mod script_runner;
 pub mod select;
 pub mod self_group;
@@ -73,6 +74,7 @@ pub mod shell_revoke;
 pub mod shell_state;
 pub mod status;
 pub mod toolchain_env;
+pub mod toolchain_exec;
 pub mod uninstall;
 pub mod update;
 pub mod version;
@@ -144,9 +146,14 @@ pub enum Command {
     /// Pre-warm the object store from the project ocx.lock without creating symlinks.
     Pull(pull::Pull),
     /// Remove one or more tool bindings from ocx.toml.
+    #[command(visible_alias = "rm")]
     Remove(remove::Remove),
     /// Run a command with the composed environment from the project toolchain.
-    Run(run::Run),
+    #[command(visible_alias = "x")]
+    Exec(toolchain_exec::ToolchainExec),
+    /// Deprecated spelling of `ocx exec`; removed in 0.7.
+    #[command(name = "run", hide = true)]
+    DeprecatedRun(toolchain_exec::ToolchainExec),
     #[command(subcommand)]
     Shell(shell::Shell),
     /// Manage the OCX installation itself (PATH activation, completions, self-update).
@@ -184,7 +191,11 @@ impl Command {
             Command::Patch(patch_group) => patch_group.execute(context).await,
             Command::Pull(pull) => pull.execute(context).await,
             Command::Remove(remove) => remove.execute(context).await,
-            Command::Run(r) => r.execute(context).await,
+            Command::Exec(exec) => exec.execute(context).await,
+            Command::DeprecatedRun(exec) => {
+                deprecated::warn_renamed(&context, "run", "exec");
+                exec.execute(context).await
+            }
             Command::Shell(shell) => shell.execute(context).await,
             Command::Self_(group) => group.execute(context).await,
             Command::Status(status) => status.execute(context).await,

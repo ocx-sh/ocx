@@ -138,7 +138,7 @@ pub struct Inspect {
 impl Inspect {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // Reject malformed `-g` / `--env` before any filesystem or network
-        // work, matching `ocx run`.
+        // work, matching `ocx exec`.
         crate::app::project_context::ensure_group_segments_nonempty(self.groups.names())?;
         let cwd = std::env::current_dir()
             .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;

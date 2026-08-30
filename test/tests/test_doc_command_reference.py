@@ -50,6 +50,7 @@ NEW_COMMAND_ANCHORS = [
     ("{#env-root}", "env (toolchain-tier)"),
     ("{#env}", "env (package-tier alias)"),
     ("{#package-env}", "package env"),
+    ("{#exec}", "exec (toolchain-tier)"),
     ("{#status}", "status"),
     ("{#inspect}", "inspect (toolchain-tier)"),
 ]
@@ -66,7 +67,6 @@ TOMBSTONE_ANCHORS = [
     ("{#ci-export}", "ci export", "REMOVED"),
     ("{#install}", "install", "Moved to"),
     ("{#select}", "select", "Moved to"),
-    ("{#exec}", "exec", "Moved to"),
     ("{#deselect}", "deselect", "Moved to"),
     ("{#uninstall}", "uninstall", "Moved to"),
 ]
@@ -295,9 +295,9 @@ def env_composition_text() -> str:
 def test_env_composition_does_not_claim_ambient_path_not_forwarded(
     env_composition_text: str,
 ) -> None:
-    """Plan C: the env-composition page's ``ocx run`` section currently
+    """Plan C: the env-composition page's ``ocx exec`` section currently
     states "Ambient PATH entries from the parent shell are not forwarded",
-    which is FALSE for the default (non-``--clean``) ``ocx run`` — the
+    which is FALSE for the default (non-``--clean``) ``ocx exec`` — the
     default inherits the parent environment and merely *prepends* the
     composed tool ``bin/`` dirs to PATH; only ``--clean`` is hermetic.
 
@@ -308,7 +308,7 @@ def test_env_composition_does_not_claim_ambient_path_not_forwarded(
     lowered = env_composition_text.lower()
     assert "ambient path entries from the parent shell are not forwarded" not in lowered, (
         "env-composition.md must NOT claim ambient PATH is not forwarded for "
-        "the default `ocx run` — the default inherits the parent environment "
+        "the default `ocx exec` — the default inherits the parent environment "
         "and prepends composed tool bin/ dirs; only `--clean` is hermetic "
         "(plan amendment C)."
     )
@@ -318,17 +318,17 @@ def test_env_composition_states_default_run_inherits_and_prepends(
     env_composition_text: str,
 ) -> None:
     """Plan C positive form: the corrected page must state that the default
-    ``ocx run`` inherits the parent environment and prepends the composed
+    ``ocx exec`` inherits the parent environment and prepends the composed
     tool bin dirs, and that only ``--clean`` is hermetic (matching
     ``exec --clean``). Substring presence — phrasing is the writer's call,
     but the load-bearing tokens must be there."""
     lowered = env_composition_text.lower()
     assert "--clean" in lowered, (
-        "env-composition.md `ocx run` section must reference `--clean` as the "
+        "env-composition.md `ocx exec` section must reference `--clean` as the "
         "hermetic opt-in (plan amendment C)"
     )
     assert ("inherit" in lowered and "prepend" in lowered), (
-        "env-composition.md must state the default `ocx run` *inherits* the "
+        "env-composition.md must state the default `ocx exec` *inherits* the "
         "parent environment and *prepends* composed tool bin/ dirs (plan "
         "amendment C — the default is not hermetic)."
     )
@@ -336,13 +336,13 @@ def test_env_composition_states_default_run_inherits_and_prepends(
 
 @pytest.mark.parametrize("anchor,name", [
     ("{#pull}", "pull"),
-    ("{#run}", "run"),
+    ("{#exec}", "exec"),
     ("{#update}", "update"),
 ])
 def test_exit64_row_mentions_global_project_conflict(
     cli_ref_text: str, anchor: str, name: str
 ) -> None:
-    """Plan C: ``command-line.md``'s exit-64 row for ``pull``/``run``/
+    """Plan C: ``command-line.md``'s exit-64 row for ``pull``/``exec``/
     ``update`` must mention the ``--global`` + ``--project`` conflict, for
     parity with ``add``/``lock``/``remove`` (which already say "`--global`
     combined with `--project`").
@@ -389,7 +389,10 @@ def test_global_flag_section_links_strict_isolation(cli_ref_text: str) -> None:
 # an allowlist to stay green, and an allowlist is a thing people append to
 # instead of fixing the doc. The ceiling is that prose still drifts (~80 such
 # references today); fix that with a sweep, not by broadening the guard.
-MOVED_ROOT_COMMANDS = ("install", "uninstall", "select", "deselect", "exec", "which", "deps")
+# `exec` is deliberately absent: unlike the others, the name was reused.
+# The root `exec` that moved to `ocx package exec` is gone, and `ocx exec`
+# is now the live toolchain-tier command renamed from `ocx run`.
+MOVED_ROOT_COMMANDS = ("install", "uninstall", "select", "deselect", "which", "deps")
 _MOVED_INVOCATION = re.compile(
     r"(?<![\w.-])ocx\s+(?:" + "|".join(MOVED_ROOT_COMMANDS) + r")(?![\w-])"
 )

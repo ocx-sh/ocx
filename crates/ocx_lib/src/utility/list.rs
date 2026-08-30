@@ -8,7 +8,7 @@
 ///
 /// The algorithm is pinned by `adr_env_modifier_types.md` D1 and is
 /// implemented identically in every emitted shell snippet, so the in-process
-/// child env (`ocx run` / `ocx package exec`) and the exported shell text agree
+/// child env (`ocx exec` / `ocx package exec`) and the exported shell text agree
 /// byte for byte:
 ///
 /// > Wrap `existing` in the separator; replace **every** occurrence of

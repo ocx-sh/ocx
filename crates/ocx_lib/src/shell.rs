@@ -353,7 +353,7 @@ impl Shell {
     ///
     /// The fold is pinned by `adr_env_modifier_types.md` D1 and computes the
     /// same function as [`utility::list::append_unique`](crate::utility::list::append_unique),
-    /// so an exported shell line and the in-process child env (`ocx run`) agree
+    /// so an exported shell line and the in-process child env (`ocx exec`) agree
     /// byte for byte:
     ///
     /// > wrap the ambient value in the separator; replace **every**

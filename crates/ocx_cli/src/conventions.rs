@@ -145,7 +145,7 @@ pub async fn read_published_metadata(path: &std::path::Path) -> anyhow::Result<o
 ///
 /// The single source of truth for "which platform does this command resolve
 /// against" — every resolution command (`ocx package install/pull/exec`,
-/// `ocx run`, `ocx env`, ...) applies the same default.
+/// `ocx exec`, `ocx env`, ...) applies the same default.
 pub fn platform_or_default(platform: Option<oci::Platform>) -> oci::Platform {
     platform.unwrap_or_else(|| oci::Platform::current().unwrap_or_else(oci::Platform::any))
 }
@@ -211,7 +211,7 @@ pub fn resolved_lazy_mode(cli: Option<LazyMode>, self_view: bool) -> Result<Lazy
 /// is a consent bypass — but the refusal belongs at
 /// `PackageManager::resolve_env_with_attribution`, the one seam this function
 /// and `Env::apply_entries` both read from. A second copy of the check here
-/// would silently absorb a regression in that one, and would leave `ocx run` —
+/// would silently absorb a regression in that one, and would leave `ocx exec` —
 /// which never comes through here — exposed anyway. `is_valid_env_key` below is
 /// the *grammar* gate and is not a substitute for it.
 ///
@@ -411,7 +411,7 @@ pub fn env_entries(entries: &[Entry]) -> Vec<crate::api::data::env::EnvEntry> {
 /// Shared by both inspect commands. `DataError` is the code compose already
 /// returns for the identical condition (`DependencyError::Conflict`,
 /// `PackageErrorKind::EntrypointCollision`), so `ocx inspect --closure` exits
-/// exactly where `ocx run` over the same set would. The conflict detail stays
+/// exactly where `ocx exec` over the same set would. The conflict detail stays
 /// in the payload — the exit code is the machine-readable half, not a
 /// replacement for it.
 pub fn inspect_exit_code(report: &crate::api::data::package_inspect::InspectReport) -> std::process::ExitCode {

@@ -25,7 +25,7 @@ def test_describe_readme_only(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     readme.write_text("# My Tool\n\nA great tool for great things.\n")
 
     fq = f"{ocx.registry}/{unique_repo}"
-    ocx.plain("package", "describe", "--readme", str(readme), fq)
+    ocx.plain("package", "description", "push", "--readme", str(readme), fq)
 
     # Verify __ocx.desc tag exists via registry API.
     manifest = fetch_manifest_from_registry(ocx.registry, unique_repo, "__ocx.desc")
@@ -53,7 +53,7 @@ def test_describe_readme_and_logo(ocx: OcxRunner, unique_repo: str, tmp_path: Pa
     )
 
     fq = f"{ocx.registry}/{unique_repo}"
-    ocx.plain("package", "describe", "--readme", str(readme), "--logo", str(logo), fq)
+    ocx.plain("package", "description", "push", "--readme", str(readme), "--logo", str(logo), fq)
 
     manifest = fetch_manifest_from_registry(ocx.registry, unique_repo, "__ocx.desc")
     layers = manifest["layers"]
@@ -70,10 +70,10 @@ def test_describe_idempotent_overwrite(ocx: OcxRunner, unique_repo: str, tmp_pat
 
     readme.write_text("# Version 1\n")
     fq = f"{ocx.registry}/{unique_repo}"
-    ocx.plain("package", "describe", "--readme", str(readme), fq)
+    ocx.plain("package", "description", "push", "--readme", str(readme), fq)
 
     readme.write_text("# Version 2\n")
-    ocx.plain("package", "describe", "--readme", str(readme), fq)
+    ocx.plain("package", "description", "push", "--readme", str(readme), fq)
 
     # Should still have a valid manifest.
     manifest = fetch_manifest_from_registry(ocx.registry, unique_repo, "__ocx.desc")
@@ -89,7 +89,7 @@ def test_describe_svg_logo(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     logo.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>')
 
     fq = f"{ocx.registry}/{unique_repo}"
-    ocx.plain("package", "describe", "--readme", str(readme), "--logo", str(logo), fq)
+    ocx.plain("package", "description", "push", "--readme", str(readme), "--logo", str(logo), fq)
 
     manifest = fetch_manifest_from_registry(ocx.registry, unique_repo, "__ocx.desc")
     layers = manifest["layers"]
@@ -104,7 +104,7 @@ def test_describe_with_annotations(ocx: OcxRunner, unique_repo: str, tmp_path: P
 
     fq = f"{ocx.registry}/{unique_repo}"
     ocx.plain(
-        "package", "describe",
+        "package", "description", "push",
         "--readme", str(readme),
         "--title", "My Tool",
         "--description", "A fantastic build tool",
@@ -131,7 +131,7 @@ def test_describe_merge_preserves_existing(ocx: OcxRunner, unique_repo: str, tmp
 
     # First push: README + logo + title.
     ocx.plain(
-        "package", "describe",
+        "package", "description", "push",
         "--readme", str(readme),
         "--logo", str(logo),
         "--title", "Original Title",
@@ -139,7 +139,7 @@ def test_describe_merge_preserves_existing(ocx: OcxRunner, unique_repo: str, tmp
     )
 
     # Second push: only update keywords — README, logo, and title should be preserved.
-    ocx.plain("package", "describe", "--keywords", "new,keywords", fq)
+    ocx.plain("package", "description", "push", "--keywords", "new,keywords", fq)
 
     manifest = fetch_manifest_from_registry(ocx.registry, unique_repo, "__ocx.desc")
 
@@ -177,7 +177,7 @@ def test_describe_frontmatter_extraction(ocx: OcxRunner, unique_repo: str, tmp_p
     )
 
     fq = f"{ocx.registry}/{unique_repo}"
-    ocx.plain("package", "describe", "--readme", str(readme), fq)
+    ocx.plain("package", "description", "push", "--readme", str(readme), fq)
 
     manifest = fetch_manifest_from_registry(ocx.registry, unique_repo, "__ocx.desc")
 
@@ -209,7 +209,7 @@ def test_describe_cli_flags_override_frontmatter(ocx: OcxRunner, unique_repo: st
 
     fq = f"{ocx.registry}/{unique_repo}"
     ocx.plain(
-        "package", "describe",
+        "package", "description", "push",
         "--readme", str(readme),
         "--title", "FromFlag",
         "--keywords", "flag,keywords",
@@ -262,12 +262,12 @@ def test_describe_refuses_a_logo_whose_bytes_are_not_an_image(
     good.write_bytes(VALID_PNG)
 
     fq = f"{ocx.registry}/{unique_repo}"
-    ocx.plain("package", "describe", "--readme", str(readme), "--logo", str(good), fq)
+    ocx.plain("package", "description", "push", "--readme", str(readme), "--logo", str(good), fq)
     published = _sole_logo_digest(ocx.registry, unique_repo)
 
     pointer = tmp_path / "pointer.png"
     pointer.write_bytes(LFS_POINTER)
-    result = ocx.plain("package", "describe", "--logo", str(pointer), fq, check=False)
+    result = ocx.plain("package", "description", "push", "--logo", str(pointer), fq, check=False)
 
     assert result.returncode == 65, f"rc={result.returncode} stderr={result.stderr}"
     assert "is not a PNG image" in result.stderr, result.stderr

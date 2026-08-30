@@ -307,7 +307,7 @@ pub(super) fn validate_env_reserved_keys(metadata: &Metadata) -> Result<(), crat
 
     for var in env {
         // Through `crate::env::is_reserved_ocx_key`, the same predicate that
-        // gates project `[env]`, `ocx run --env`, the forwarded `OCX_ENV`
+        // gates project `[env]`, `ocx exec --env`, the forwarded `OCX_ENV`
         // payload and the resolver: a second spelling of "reserved" here would
         // let the write path and the read path disagree about which keys exist.
         if crate::env::is_reserved_ocx_key(&var.key) {
@@ -970,7 +970,7 @@ mod tests {
     ///
     /// This is the repo's one hard backward-compatibility exception, so the
     /// assertion is on `ValidMetadata::try_from` — the structural gate every
-    /// ingress path runs, including `ocx run` on an installed package.
+    /// ingress path runs, including `ocx exec` on an installed package.
     #[test]
     fn a_published_package_carrying_a_reserved_env_key_still_reads() {
         let meta = make_metadata(&dep_json("cmake", None), &constant_env("OCX_CONSENT_NAMESPACES", "*/*"));

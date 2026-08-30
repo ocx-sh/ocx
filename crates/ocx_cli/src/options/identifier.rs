@@ -34,7 +34,7 @@ impl Identifier {
     /// Rejects a batch that names the same package twice.
     ///
     /// Commands that emit an identifier-keyed report (`package inspect`,
-    /// `package info`) must not receive duplicate references: the keyed shape
+    /// `package description pull`) must not receive duplicate references: the keyed shape
     /// would otherwise drop a result row (inspect collapses duplicates through
     /// `drain_package_tasks`) or emit a duplicate JSON key (info). Returns a
     /// usage error (exit 64) naming the first duplicate.

@@ -713,7 +713,7 @@ def test_the_description_travels_only_when_asked(
     package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     readme = tmp_path / "README.md"
     readme.write_text("# Staging catalog page\n")
-    described = ocx.run("package", "describe", "--readme", str(readme), package.repo)
+    described = ocx.run("package", "description", "push", "--readme", str(readme), package.repo)
     assert described.returncode == 0, described.stderr
 
     plain = _copy(ocx, target_registry, "--to", target_registry, package.short)
@@ -737,11 +737,12 @@ def test_describe_from_copies_the_description_alone(
     package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     readme = tmp_path / "README.md"
     readme.write_text("# Staging catalog page\n")
-    ocx.run("package", "describe", "--readme", str(readme), package.repo)
+    ocx.run("package", "description", "push", "--readme", str(readme), package.repo)
 
     result = ocx.run(
         "package",
-        "describe",
+        "description",
+        "push",
         "--from",
         package.repo,
         f"{target_registry}/{package.repo}",

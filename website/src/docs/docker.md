@@ -63,10 +63,10 @@ COPY ocx.toml ocx.lock ./
 RUN ocx pull
 
 COPY . .
-ENTRYPOINT ["ocx", "--offline", "run", "--", "task", "serve"]
+ENTRYPOINT ["ocx", "--offline", "exec", "--", "task", "serve"]
 ```
 
-[`ocx pull`][cmd-pull] walks the lockfile and downloads every digest-pinned tool for the image platform — it needs both files and touches nothing else, which makes it an ideal cache layer. [`ocx run`][cmd-run] composes the project environment and replaces itself with the child process, so no wrapper lingers in the process tree. [`--offline`][arg-offline] turns any accidental network dependency into a hard error at start instead of a silent pull — if the image builds, it runs.
+[`ocx pull`][cmd-pull] walks the lockfile and downloads every digest-pinned tool for the image platform — it needs both files and touches nothing else, which makes it an ideal cache layer. [`ocx exec`][cmd-run] composes the project environment and replaces itself with the child process, so no wrapper lingers in the process tree. [`--offline`][arg-offline] turns any accidental network dependency into a hard error at start instead of a silent pull — if the image builds, it runs.
 
 ## Reproducible Resolution {#frozen}
 
@@ -107,7 +107,7 @@ shellcheck = "ocx.sh/shellcheck/shellcheck:0.10"
 shfmt = "ocx.sh/shfmt/shfmt:3"
 ```
 
-Run [`ocx lock`][cmd-lock] locally, commit both files, and the [project toolchain pattern](#project-toolchain) applies unchanged — `ocx run -- <cmd>` puts the tools on `PATH` for exactly that command. A more direct global-install story for Dockerfiles (persistent `PATH` without a project) is planned.
+Run [`ocx lock`][cmd-lock] locally, commit both files, and the [project toolchain pattern](#project-toolchain) applies unchanged — `ocx exec -- <cmd>` puts the tools on `PATH` for exactly that command. A more direct global-install story for Dockerfiles (persistent `PATH` without a project) is planned.
 
 For CI pipelines that run *inside* these images — caching, matrix setups, and the full project-mode flow — see [CI Integration][ci-indepth].
 
@@ -125,7 +125,7 @@ For CI pipelines that run *inside* these images — caching, matrix setups, and 
 
 <!-- commands -->
 [cmd-pull]: ./reference/command-line.md#pull
-[cmd-run]: ./reference/command-line.md#run
+[cmd-run]: ./reference/command-line.md#exec
 [cmd-lock]: ./reference/command-line.md#lock
 
 <!-- arguments -->

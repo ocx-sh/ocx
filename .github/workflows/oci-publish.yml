@@ -373,7 +373,7 @@ jobs:
             # publishes ocx.sh/ocx/mirror from its own repository.
             if [[ -z "$variant" ]]; then
               echo "==> Pushing catalog description for ${REGISTRY}/${physical_prefix}${repo_path}"
-              ocx package describe "${REGISTRY}/${physical_prefix}${repo_path}" \
+              ocx package description push "${REGISTRY}/${physical_prefix}${repo_path}" \
                 --readme packaging/ocx/CATALOG.md \
                 --logo assets/logo.svg
             fi

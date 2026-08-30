@@ -16,7 +16,7 @@ use crate::{api, options};
 ///
 /// Identifiers carrying a digest (`@sha256:...`) are rejected for tag and
 /// variant listing — a digest narrows nothing there; use
-/// `ocx package info <pkg>@<digest>` for a single artifact. With `--platforms`
+/// `ocx package description pull <pkg>@<digest>` for a single artifact. With `--platforms`
 /// a digest is accepted and resolves to that one artifact's platform set.
 #[derive(Parser)]
 pub struct IndexList {
@@ -39,7 +39,7 @@ type ResolvedTags = Vec<(String, oci::Identifier, Vec<String>)>;
 impl IndexList {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // `index list` enumerates tags, where a digest-bearing identifier narrows
-        // nothing — reject it early with a usage error pointing at `package info`.
+        // nothing — reject it early with a usage error pointing at `package description pull`.
         // With `--platforms` a digest DOES resolve to that one artifact's platform
         // set (report_platforms handles it directly), so it is accepted there.
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
@@ -47,7 +47,7 @@ impl IndexList {
             if identifier.digest().is_some() && !self.platforms {
                 anyhow::bail!(
                     "`ocx index list` lists tags and does not accept digest-pinned identifiers. \
-                     Use `ocx package info {raw}` for a single artifact, or drop the @digest suffix.",
+                     Use `ocx package description pull {raw}` for a single artifact, or drop the @digest suffix.",
                     raw = raw.raw(),
                 );
             }

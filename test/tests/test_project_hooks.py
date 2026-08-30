@@ -142,7 +142,7 @@ def test_run_later_group_env_overrides_earlier(
     assert lock_result.returncode == EXIT_SUCCESS, lock_result.stderr
 
     # `env` reflects the composed environment; the last group on argv wins.
-    result = _run_in(ocx, project, "run", "-g", "groupA", "-g", "groupB", "--", "env")
+    result = _run_in(ocx, project, "exec", "-g", "groupA", "-g", "groupB", "--", "env")
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx run -g groupA -g groupB failed: stderr={result.stderr!r}"
     )
@@ -214,7 +214,7 @@ def test_run_default_path_precedes_inherited(
     result = _run_in(
         ocx,
         project,
-        "run",
+        "exec",
         "--",
         "env",
         extra_env={"PATH": inherited_path},

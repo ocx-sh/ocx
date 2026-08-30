@@ -250,7 +250,7 @@ def test_frozen_allows_direct_registry_query(
     # ``package info`` queries the ``__ocx.desc`` tag via remote_client(),
     # not the Index.  No description has been pushed, so it returns empty
     # results — but the command exits 0, not 81.
-    result = _run(ocx, "--frozen", "package", "info", pkg.short)
+    result = _run(ocx, "--frozen", "package", "description", "pull", pkg.short)
     assert result.returncode == 0, (
         f"--frozen package info must succeed (direct registry query bypasses index "
         f"resolution); rc={result.returncode}\nstderr: {result.stderr}"

@@ -261,7 +261,7 @@ This slot is **host-only**: installing a foreign platform (`-p windows/amd64` on
 [cmd-clean]: ../reference/command-line.md#clean
 [cmd-package-push]: ../reference/command-line.md#package-push
 [cmd-package-create]: ../reference/command-line.md#package-create
-[cmd-launcher-exec]: ../reference/command-line.md#exec
+[cmd-launcher-exec]: ../reference/command-line.md#launcher-exec
 [cmd-exec]: ../reference/command-line.md#package-exec
 [cmd-package-env]: ../reference/command-line.md#package-env
 

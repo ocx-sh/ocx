@@ -672,7 +672,7 @@ def test_s006_frozen_run_materializes_by_digest_and_writes_nothing_under_index(
     project = _lazy_project(ocx, tmp_path, _toolchain_lazy(pkg))
     shutil.rmtree(ocx.ocx_home / "index")
 
-    result = _run(ocx, project, "--frozen", "run", "--", "hello")
+    result = _run(ocx, project, "--frozen", "exec", "--", "hello")
 
     assert result.returncode == EXIT_SUCCESS, (
         f"S-006: `ocx --frozen run` on a cold deferred tool must succeed; "

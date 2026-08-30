@@ -17,7 +17,7 @@ pub const DEFAULT_GROUP: &str = "default";
 
 /// Reserved CLI keyword that expands to the union of the default group
 /// and every named group declared in `ocx.toml`. Used by project-tier
-/// commands that accept `-g` (e.g. `ocx run`, `ocx pull`). Unlike
+/// commands that accept `-g` (e.g. `ocx exec`, `ocx pull`). Unlike
 /// `DEFAULT_GROUP`, `ALL_GROUP` is never a literal group name that can
 /// appear in `ocx.toml` — it is a CLI expansion alias. Parse-time and
 /// mutate-time validators reject `[group.all]` declarations and

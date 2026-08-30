@@ -18,7 +18,7 @@ pub enum Shell {
     /// Records a consent stamp for the project governing PATH (default: the
     /// current directory), so a new shell prompt applies that project's tools
     /// and environment. This is the same stamp `ocx add`, `ocx lock`,
-    /// `ocx pull` and `ocx run` write as a side effect - running a mutating
+    /// `ocx pull` and `ocx exec` write as a side effect - running a mutating
     /// command in a directory is itself consent; this is the way to record one
     /// on purpose.
     ///
@@ -50,7 +50,7 @@ pub enum Shell {
     /// Revoking a project that carries no stamp is not an error: the result is
     /// the state you asked for either way.
     ///
-    /// A later `ocx add`, `ocx lock`, `ocx pull`, `ocx run`, `ocx remove` or
+    /// A later `ocx add`, `ocx lock`, `ocx pull`, `ocx exec`, `ocx remove` or
     /// `ocx update` in that directory writes the stamp again.
     ///
     /// Exits 64 when no `ocx.toml` governs PATH.

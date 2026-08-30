@@ -17,7 +17,7 @@
 //! HOME, auth tokens, etc.) verbatim, matching cargo / git / kubectl plugin
 //! conventions. This is by design — plugins are first-party or user-vetted
 //! extensions of `ocx`, not arbitrary user packages running via `ocx exec`.
-//! Use `ocx exec` (or `ocx run`) when you need clean-env execution semantics.
+//! Use `ocx exec` or `ocx package exec` when you need clean-env execution semantics.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

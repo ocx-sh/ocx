@@ -238,6 +238,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
     use command::launcher::Launcher as LauncherCmd;
     use command::package::Package as PackageCmd;
     use command::package_cascade::CascadeGroup as CascadeCmd;
+    use command::package_description::DescriptionGroup as DescriptionCmd;
     use command::patch::PatchGroup as PatchCmd;
     use command::self_group::SelfGroup;
     use command::shell::Shell as ShellCmd;
@@ -280,10 +281,16 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
             },
             PackageCmd::Copy(_) => "package copy",
             PackageCmd::Create(_) => "package create",
-            PackageCmd::Describe(_) => "package describe",
+            PackageCmd::Description(sub) => match sub {
+                DescriptionCmd::Push(_) => "package description push",
+                DescriptionCmd::Pull(_) => "package description pull",
+            },
+            // Old spellings keep their released strings — see the note on
+            // `Command::DeprecatedRun` above.
+            PackageCmd::DeprecatedDescribe(_) => "package describe",
+            PackageCmd::DeprecatedInfo(_) => "package info",
             PackageCmd::Deps(_) => "package deps",
             PackageCmd::Env(_) => "package env",
-            PackageCmd::Info(_) => "package info",
             PackageCmd::Inspect(_) => "package inspect",
             PackageCmd::Install(_) => "package install",
             PackageCmd::Pull(_) => "package pull",
@@ -307,7 +314,12 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
         },
         Command::Pull(_) => "pull",
         Command::Remove(_) => "remove",
-        Command::Run(_) => "run",
+        Command::Exec(_) => "exec",
+        // The deprecated spelling keeps reporting `"run"`, so no mapping a
+        // released binary already emitted changes meaning and the frozen v1
+        // envelope needs no version bump — `"exec"` is purely additive until
+        // 0.7 deletes this arm along with the rest of `command::deprecated`.
+        Command::DeprecatedRun(_) => "run",
         Command::Shell(sub) => match sub {
             ShellCmd::Allow(_) => "shell allow",
             ShellCmd::Completion(_) => "shell completion",

@@ -18,6 +18,8 @@ Early stage. Core lib + CLI implemented.
 
 **Even interfaces break pre-1.0.** A break is announced in the changelog and nowhere else — no migration prose in user docs, no dual-form parsing, no warning schedule. The one hard exception: already-published packages must keep resolving, so metadata and OCI manifest changes stay backward compatible on the read path.
 
+**Batched-window carve-out.** A rename reaching dozens of files across docs, tests and downstream repos may ship one deprecation window instead of a hard break, on these terms: the old spelling stays as a *hidden* command — a clap alias is undetectable at parse time, so a warning needs its own hidden variant — it warns once on stderr and never on stdout, its removal release is named when the window opens, and every old spelling in flight lives in one `deprecated.rs` deleted whole. One window per release pair, not one per rename; still no migration prose in user docs. In flight: `ocx run` → `ocx exec`, deprecated in 0.6, removed in 0.7.
+
 Practical test: if only this repo can observe the change, just make it. If a published artifact or someone's script can observe it, weigh it — then still just make it, and write the changelog line — which means the commit subject (see below), never the file.
 
 ### ⛔ Never edit `CHANGELOG.md`
@@ -56,7 +58,7 @@ Before plan/research/architectural decision, scan "By concern" in catalog. Auto-
 
 Task runner [`task`](https://taskfile.dev) (Taskfile v3). **Run `task --list` before invent ad-hoc commands.** Common: `task` (fast check), `task verify` (full gate), `task rust:verify`, `task test`, `task checkpoint`. Cargo OK for finer control. Always `cargo fmt` before commit, `task verify` after implementation. Conventions → [subsystem-taskfiles.md](./.claude/rules/subsystem-taskfiles.md).
 
-**Project toolchain.** `ocx.toml` lists `actionlint`, `bun`, `git-cliff`, `go-task`, `lychee`, `shellcheck`, `shfmt`, `uv`. [direnv](https://direnv.net) loads them onto `PATH` via `.envrc` (`eval "$(ocx direnv export)"`); CI bootstraps the same set via the `setup-ocx` action. Taskfiles call the tools directly — no `ocx package exec` wrapping. After editing `ocx.toml`, direnv reloads automatically (`watch_file ocx.toml ocx.lock`). For one-off overrides — e.g. testing a freshly built ocx, or invoking from a shell that hasn't allowed direnv — prefix with `direnv exec . <cmd>` or `ocx run -- <cmd>`.
+**Project toolchain.** `ocx.toml` lists `actionlint`, `bun`, `git-cliff`, `go-task`, `lychee`, `shellcheck`, `shfmt`, `uv`. [direnv](https://direnv.net) loads them onto `PATH` via `.envrc` (`eval "$(ocx direnv export)"`); CI bootstraps the same set via the `setup-ocx` action. Taskfiles call the tools directly — no `ocx package exec` wrapping. After editing `ocx.toml`, direnv reloads automatically (`watch_file ocx.toml ocx.lock`). For one-off overrides — e.g. testing a freshly built ocx, or invoking from a shell that hasn't allowed direnv — prefix with `direnv exec . <cmd>` or `ocx exec -- <cmd>`.
 
 Single acceptance test:
 ```sh

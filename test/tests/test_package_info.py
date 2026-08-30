@@ -25,7 +25,7 @@ def _push_description(
     fq = f"{ocx.registry}/{repo}:1.0.0"
 
     args = [
-        "package", "describe",
+        "package", "description", "push",
         "--readme", str(readme_path),
         "--title", title,
         "--description", description,
@@ -52,7 +52,7 @@ def _push_description(
 def test_info_no_description(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """package info on a repo without __ocx.desc returns 'No description found'."""
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
-    result = ocx.plain("package", "info", pkg.fq)
+    result = ocx.plain("package", "description", "pull", pkg.fq)
     assert "No description found" in result.stdout
 
 
@@ -61,7 +61,7 @@ def test_info_with_description(ocx: OcxRunner, unique_repo: str, tmp_path: Path)
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     _push_description(ocx, unique_repo, tmp_path, title="My Tool", description="A great tool", keywords="my,tool")
 
-    result = ocx.plain("package", "info", pkg.fq)
+    result = ocx.plain("package", "description", "pull", pkg.fq)
     assert "Title:       My Tool" in result.stdout
     assert "Description: A great tool" in result.stdout
     assert "Keywords:    my,tool" in result.stdout
@@ -72,7 +72,7 @@ def test_info_json(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
     _push_description(ocx, unique_repo, tmp_path, title="CMake", description="Build system", keywords="cmake,build")
 
-    data = ocx.json("package", "info", pkg.fq)[pkg.fq]
+    data = ocx.json("package", "description", "pull", pkg.fq)[pkg.fq]
     assert data["title"] == "CMake"
     assert data["description"] == "Build system"
     assert data["keywords"] == "cmake,build"
@@ -81,7 +81,7 @@ def test_info_json(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
 def test_info_json_no_description(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """package info --format json keys the package with a null value when absent."""
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path)
-    data = ocx.json("package", "info", pkg.fq)
+    data = ocx.json("package", "description", "pull", pkg.fq)
     assert list(data.keys()) == [pkg.fq]
     assert data[pkg.fq] is None
 
@@ -93,7 +93,7 @@ def test_info_save_readme(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     _push_description(ocx, unique_repo, tmp_path, readme_text=readme_content)
 
     save_path = tmp_path / "output" / "readme.md"
-    ocx.plain("package", "info", "--save-readme", str(save_path), pkg.fq)
+    ocx.plain("package", "description", "pull", "--save-readme", str(save_path), pkg.fq)
     assert save_path.exists()
     assert save_path.read_text() == readme_content
 
@@ -106,7 +106,7 @@ def test_info_save_readme_to_dir(ocx: OcxRunner, unique_repo: str, tmp_path: Pat
 
     out_dir = tmp_path / "outdir"
     out_dir.mkdir()
-    ocx.plain("package", "info", "--save-readme", str(out_dir), pkg.fq)
+    ocx.plain("package", "description", "pull", "--save-readme", str(out_dir), pkg.fq)
     assert (out_dir / "README.md").exists()
     assert (out_dir / "README.md").read_text() == readme_content
 
@@ -117,7 +117,7 @@ def test_info_save_logo(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     _push_description(ocx, unique_repo, tmp_path, logo=True)
 
     save_path = tmp_path / "output" / "my-logo.png"
-    ocx.plain("package", "info", "--save-logo", str(save_path), pkg.fq)
+    ocx.plain("package", "description", "pull", "--save-logo", str(save_path), pkg.fq)
     assert save_path.exists()
     # Should start with PNG magic bytes
     data = save_path.read_bytes()
@@ -137,7 +137,7 @@ def test_info_multiple_packages_json_keyed_object(
     b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_b", "1.0.0", tmp_path)
     _push_description(ocx, a.repo, tmp_path, title="Alpha")
 
-    data = ocx.json("package", "info", a.fq, b.fq)
+    data = ocx.json("package", "description", "pull", a.fq, b.fq)
 
     assert set(data.keys()) == {a.fq, b.fq}
     assert data[a.fq]["title"] == "Alpha"
@@ -151,7 +151,7 @@ def test_info_rejects_duplicate_references(ocx: OcxRunner) -> None:
     repeated reference, so the duplicate is rejected before any fetch.
     """
     result = ocx.run(
-        "package", "info", "dup-tool:1.0.0", "dup-tool:1.0.0", format=None, check=False
+        "package", "description", "pull", "dup-tool:1.0.0", "dup-tool:1.0.0", format=None, check=False
     )
 
     assert result.returncode == 64, f"expected usage error, got {result.returncode}: {result.stderr}"
@@ -165,7 +165,7 @@ def test_info_multiple_packages_plain_shows_header_per_package(
     a = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_plain_a", "1.0.0", tmp_path)
     b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_multi_plain_b", "1.0.0", tmp_path)
 
-    result = ocx.plain("package", "info", a.fq, b.fq)
+    result = ocx.plain("package", "description", "pull", a.fq, b.fq)
 
     assert f"== {a.fq} ==" in result.stdout
     assert f"== {b.fq} ==" in result.stdout
@@ -180,7 +180,7 @@ def test_info_save_readme_rejected_with_multiple_packages(
     b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_save_readme_b", "1.0.0", tmp_path)
 
     result = ocx.run(
-        "package", "info", "--save-readme", str(tmp_path / "out.md"), a.fq, b.fq,
+        "package", "description", "pull", "--save-readme", str(tmp_path / "out.md"), a.fq, b.fq,
         format=None, check=False,
     )
 
@@ -196,7 +196,7 @@ def test_info_save_logo_rejected_with_multiple_packages(
     b = make_package(ocx, f"t_{uuid4().hex[:8]}_info_save_logo_b", "1.0.0", tmp_path)
 
     result = ocx.run(
-        "package", "info", "--save-logo", str(tmp_path / "out.png"), a.fq, b.fq,
+        "package", "description", "pull", "--save-logo", str(tmp_path / "out.png"), a.fq, b.fq,
         format=None, check=False,
     )
 

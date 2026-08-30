@@ -111,7 +111,7 @@ pub mod warmed_paths;
 ///   exactly the failures no other line reports.
 ///
 ///   **Unrouted, outside the owned set**, each printing a name or chain that
-///   may not be operator-authored: `command/package_info.rs:93` (argv
+///   may not be operator-authored: `command/package_description_pull.rs:93` (argv
 ///   identifier, but the error's own text is remote-derived),
 ///   `app/update_check.rs:72` (`{identifier}` from the index chain),
 ///   `command/direnv_export.rs:153` (a pull failure's chain),

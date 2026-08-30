@@ -65,7 +65,7 @@ mod tests {
     /// same project.
     const COMPOSING_COMMANDS: [(&[&str], &[&str]); 7] = [
         (&["env"], &[]),
-        (&["run"], &["--", "true"]),
+        (&["exec"], &["--", "true"]),
         (&["pull"], &[]),
         (&["direnv", "export"], &[]),
         (&["package", "env"], &["cmake"]),

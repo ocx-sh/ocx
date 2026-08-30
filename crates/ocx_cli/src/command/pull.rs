@@ -58,7 +58,7 @@ pub struct Pull {
     /// rather than what reaches `PATH`: a tool it applies to gets its metadata,
     /// its dependency closure's config blobs and its generated launchers, and
     /// no content. The content downloads the first time one of those launchers
-    /// runs, in whatever environment a later `ocx run` or `ocx env` composes.
+    /// runs, in whatever environment a later `ocx exec` or `ocx env` composes.
     #[clap(flatten)]
     pub lazy_mode: options::LazyMode,
 }
@@ -283,7 +283,7 @@ async fn run_dry_run(
     // `resolve` hits the index (network on a cold cache), so a sequential loop
     // is an O(n) round-trip chain — the real pull already fans out via
     // `pull_all`, so the preview must too. Same index-tagged JoinSet shape as
-    // `ocx package info` and `index update`.
+    // `ocx package description pull` and `index update`.
     let mut join_set: tokio::task::JoinSet<(usize, anyhow::Result<DryRunProbe>)> = tokio::task::JoinSet::new();
     for (index, id) in pinned.iter().enumerate() {
         let manager = context.manager().clone();

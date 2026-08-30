@@ -171,7 +171,7 @@ A single `entrypoints` declaration covers every platform of the package. OCX gen
 
 <!-- commands -->
 [cmd-exec]: ../reference/command-line.md#package-exec
-[cmd-exec-pathext]: ../reference/command-line.md#exec
+[cmd-exec-pathext]: ../reference/command-line.md#package-exec
 
 <!-- in-depth -->
 [in-depth-entry-points]: ../in-depth/entry-points.md

@@ -121,7 +121,7 @@ impl LauncherShim {
         let mut entries = manager
             .resolve_env(&[Arc::new(info)], false, EnvScope::package_tier(), &platform)
             .await?;
-        // Same per-key list-separator agreement `ocx run` and `ocx package exec`
+        // Same per-key list-separator agreement `ocx exec` and `ocx package exec`
         // settle before applying: this process composes the closure afresh, so
         // two contributors disagreeing on one key's separator has to fail here
         // too rather than fold with a silently chosen one.
@@ -129,7 +129,7 @@ impl LauncherShim {
 
         let mut process_env = env::Env::new();
         // No forwarded payload: a shim is invoked from a bare `PATH` lookup, not
-        // from an `ocx run` parent, so there is no project `[env]` to replay.
+        // from an `ocx exec` parent, so there is no project `[env]` to replay.
         process_env.apply_child_env(
             env::ChildEnv {
                 composed: &entries,

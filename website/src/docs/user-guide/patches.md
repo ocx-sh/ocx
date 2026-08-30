@@ -11,7 +11,7 @@ organization's concern, not the upstream maintainer's.
 
 The patches tier solves this without forking upstream packages. You publish a tiny companion
 package that carries your CA bundle, write a descriptor that says "apply this companion to
-every JDK install", and from then on every `ocx run` or `ocx package exec` for any JDK
+every JDK install", and from then on every `ocx exec` or `ocx package exec` for any JDK
 version automatically picks up the right CA bundle. No package forks, no per-version
 maintenance.
 
@@ -28,7 +28,7 @@ A patch descriptor is a small JSON document stored in your organization's OCI re
 It declares rules: when an installed package's identifier matches a glob pattern, apply
 these companion packages to its execution environment.
 
-At `ocx run` time, OCX fetches the descriptor, identifies the matching companions, and
+At `ocx exec` time, OCX fetches the descriptor, identifies the matching companions, and
 composes their `interface` environment entries on top of the base package's entries. The
 base package is never modified.
 
@@ -128,7 +128,7 @@ ocx package exec java:21 -- java -version
 ```
 
 The companion packages install automatically during `ocx patch sync`, or during the next
-`ocx run` / `ocx package exec` for new packages. The composed environment is visible with:
+`ocx exec` / `ocx package exec` for new packages. The composed environment is visible with:
 
 ```sh
 ocx package env java:21 --show-patches
@@ -311,7 +311,7 @@ prefer the pinned digests:
 export OCX_PATCH_SNAPSHOT="/workspace/patches.snapshot.json"
 ```
 
-With the snapshot in place, `ocx run` uses the frozen companion digests and skips live tag
+With the snapshot in place, `ocx exec` uses the frozen companion digests and skips live tag
 lookups even offline. To return to floating (live) tags, unset the variable.
 
 Freezing the patch tier is a deliberate opt-in and is independent of
@@ -388,15 +388,15 @@ A system-required tier always applies regardless of `no-patches` — enforcement
 opt-out.
 
 **Where this takes effect.** The opt-out is read from the project's `ocx.toml`, so it only
-applies where that file is directly in scope: [`ocx run`][cmd-run], [`ocx env`][cmd-env-root],
+applies where that file is directly in scope: [`ocx exec`][cmd-run], [`ocx env`][cmd-env-root],
 and [`ocx direnv export`][cmd-direnv-export]. Each of these composes the environment itself
 after reading the project config.
 
-A tool that `ocx run` launches can still reach the opt-out one hop further: if that tool
-re-enters ocx through its own generated launcher, `ocx run` forwards the opt-out to the child
+A tool that `ocx exec` launches can still reach the opt-out one hop further: if that tool
+re-enters ocx through its own generated launcher, `ocx exec` forwards the opt-out to the child
 process over [`OCX_PATCHES`][env-ocx-patches], so the launcher honors the same suppression
 its parent did. A **direct** launcher invocation — one not spawned by an opt-out-forwarding
-`ocx run`, including a package run through [`ocx package exec`][cmd-package-exec] — has no
+`ocx exec`, including a package run through [`ocx package exec`][cmd-package-exec] — has no
 opt-out to decode and composes the companion overlay as if `no-patches` were never set.
 
 :::info Why not everywhere?
@@ -411,7 +411,7 @@ reference for the full forwarding mechanics.
 
 ## Working offline {#patches-offline}
 
-Composing the environment never touches the network: `ocx run`, `ocx package exec`, and `ocx env`
+Composing the environment never touches the network: `ocx exec`, `ocx package exec`, and `ocx env`
 always resolve companions from whatever is already installed locally, snapshot or not.
 `--offline` only affects whether OCX can *discover and install* companions in the first
 place, at `ocx package install` or `ocx patch sync` time — it changes nothing about how an
@@ -525,7 +525,7 @@ For the full field reference, see the [`[patches]` configuration section][config
 [cmd-patch-why]: ../reference/command-line.md#patch-why
 [cmd-patch-sync]: ../reference/command-line.md#patch-sync
 [cmd-index-update]: ../reference/command-line.md#index-update
-[cmd-run]: ../reference/command-line.md#run
+[cmd-run]: ../reference/command-line.md#exec
 [cmd-env-root]: ../reference/command-line.md#env-root
 [cmd-direnv-export]: ../reference/command-line.md#direnv-export
 [cmd-package-exec]: ../reference/command-line.md#package-exec

@@ -3,7 +3,7 @@
 # Shell-script quality tasks. shellcheck + shfmt come from the project
 # toolchain (`ocx.toml` → direnv → PATH); no `ocx package exec` wrapping.
 # When running outside direnv, prefix with `direnv exec . <task>` or
-# `ocx run -- <task>` so the project tools are on PATH.
+# `ocx exec -- <task>` so the project tools are on PATH.
 
 version: '3'
 

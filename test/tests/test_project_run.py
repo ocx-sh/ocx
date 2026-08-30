@@ -104,7 +104,7 @@ def _run_run(
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``ocx run`` with ``cwd`` driving the ``ocx.toml`` CWD-walk."""
-    return _run_cmd(ocx, cwd, "run", *extra, extra_env=extra_env)
+    return _run_cmd(ocx, cwd, "exec", *extra, extra_env=extra_env)
 
 
 def _run_lock(

@@ -589,7 +589,7 @@ fn tools_content_equal(a: &[LockedTool], b: &[LockedTool]) -> bool {
 /// Why the `ocx.lock` beside an `ocx.toml` cannot be used as it stands.
 ///
 /// The two states this names were duplicated: `ProjectContextError` (the
-/// `ocx pull` / `ocx run` prologue) and `activation::SessionError` (the
+/// `ocx pull` / `ocx exec` prologue) and `activation::SessionError` (the
 /// per-prompt reconciler) each carried their own `LockMissing`/`StaleLock`
 /// variant, with byte-identical `#[error]` strings and the same 78/65 mapping
 /// written out twice. A user meeting this state from a command and from a

@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Project-tier `ocx run` command.
+//! Project-tier `ocx exec` command.
 //!
-//! `ocx run` is the project-tier counterpart to the OCI-tier `ocx exec`.
+//! `ocx exec` is the project-tier counterpart to the OCI-tier
+//! `ocx package exec` — one verb, two addressing modes, the same way
+//! `ocx pull` pairs with `ocx package pull`. The module is named
+//! `toolchain_exec` for the same reason `toolchain_env` is: two commands share
+//! a CLI name across the tiers, so the project-tier one carries the prefix.
 //! Symbols are binding names from `ocx.toml`, not OCI identifiers. The
 //! command selects the bindings in the requested groups (resolution-free),
 //! narrows that selection to the requested `NAME`s, resolves the host leaf of
@@ -54,7 +58,7 @@ use crate::options;
 /// deduplicated); then alphabetical by binding name within each group
 /// (lock-file order).
 #[derive(Parser, Clone)]
-pub struct Run {
+pub struct ToolchainExec {
     #[clap(flatten)]
     pub groups: options::GroupSelection,
 
@@ -97,15 +101,15 @@ pub struct Run {
     /// `--format json` is forwarded to the child unchanged. `last = true`
     /// makes clap parse everything before the first `--` into `names`
     /// and everything after into `argv`. `required = true` ensures
-    /// clap rejects `ocx run` / `ocx run NAME` / `ocx run NAME --` with
+    /// clap rejects `ocx exec` / `ocx exec NAME` / `ocx exec NAME --` with
     /// a usage error (exit 2) instead of letting an empty argv slip
     /// through to a runtime panic on `split_first`.
     #[arg(allow_hyphen_values = true, last = true, num_args = 1.., required = true)]
     pub argv: Vec<String>,
 }
 
-impl Run {
-    /// Execute the `ocx run` command.
+impl ToolchainExec {
+    /// Execute the `ocx exec` command.
     ///
     /// # Behavior
     ///
@@ -131,7 +135,7 @@ impl Run {
     /// - Other exit codes from package-manager / registry errors forwarded
     ///   via the existing `ClassifyExitCode` chain.
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // Strict isolation (C2.6): `run` composes exactly the in-effect
+        // Strict isolation (C2.6): `exec` composes exactly the in-effect
         // project file. Root `--global` only re-targets which single file
         // that is (the global one) — `select_tool_set` below is still fed
         // one tier (`&ctx.config`/`&ctx.lock`), never a union with a project.
@@ -229,7 +233,7 @@ impl Run {
         let install_infos = composed.roots;
         // Per-package opt-out set from the project `ocx.toml` (`no-patches`):
         // opted-out bases get no companion overlay unless the tier is
-        // system-required. `run.rs` does not need the patch boundary index.
+        // system-required. `toolchain_exec.rs` does not need the patch boundary index.
         // Bound once here: it drives the parent resolve below AND is forwarded
         // into the child's patch tier (Phase G) so a generated launcher's
         // re-entry (`ocx launcher exec`) honours the same opt-out.
@@ -344,7 +348,7 @@ impl Run {
 /// `project_env`'s own copy at whatever separator it was declared with —
 /// `None` inherits nothing, and a re-entrant launcher would fold it with the
 /// bare default instead of the separator the package actually established.
-/// Extracted from [`Run::execute`] so this exact wiring is unit-testable
+/// Extracted from [`ToolchainExec::execute`] so this exact wiring is unit-testable
 /// without a full project/registry fixture.
 ///
 /// # Errors
@@ -384,7 +388,7 @@ mod tests {
     /// must reach the project's own entry for the same key even though it
     /// lives in the disjoint `project_env` vector — `ocx_lib::env`'s own
     /// `reconcile_spans_two_disjoint_vectors` test proves the underlying
-    /// primitive; this proves `run.rs` actually wires it with both vectors.
+    /// primitive; this proves `toolchain_exec.rs` actually wires it with both vectors.
     #[test]
     fn reconcile_run_entries_lets_project_env_inherit_the_package_separator() {
         let mut entries = vec![list_entry("GODEBUG", "gctrace=1", Some(","))];
@@ -415,9 +419,9 @@ mod tests {
     // ── select → filter → resolve (named scope regression) ────────────────────
 
     /// Regression (bugfix `run_named_scope_resolution`), integrated over the
-    /// `ocx run` Phase D/E/F pipeline: `select_tool_set` → `filter_by_names` →
+    /// `ocx exec` Phase D/E/F pipeline: `select_tool_set` → `filter_by_names` →
     /// `resolve_selected_tools`. A windows-only sibling in the default group
-    /// must NOT block `ocx run cmake` on a linux host; but `ocx run -- ...`
+    /// must NOT block `ocx exec cmake` on a linux host; but `ocx exec -- ...`
     /// (no NAME → whole group) must still surface the sibling's `NoHostLeaf`,
     /// locking the unnamed-run contract.
     #[test]
@@ -473,46 +477,46 @@ mod tests {
     // ── C4: no-strip clap surface ────────────────────────────────────────────
     //
     // `--global` is no longer a per-command flag — it is a single root-level
-    // selector on `ContextOptions` (peer of `--project`), so `Run` carries no
-    // `global` field and `ocx run --global` parses as `ocx --global run`.
+    // selector on `ContextOptions` (peer of `--project`), so `ToolchainExec` carries no
+    // `global` field and `ocx exec --global` parses as `ocx --global exec`.
     // Root-flag parsing is clap-derived; the `--global` ⟂ `--project`
     // exclusivity is covered by `app::context` unit tests and the acceptance
     // suite (`test/tests/test_run_global_isolation.py`).
 
-    /// C4 (no-strip contract): the `Run` struct exposes no strip mechanism
+    /// C4 (no-strip contract): the `ToolchainExec` struct exposes no strip mechanism
     /// (`--strip-global`, `--emit-global-path-strip`).
     ///
     /// Compile-and-parse structural proof: if a strip flag were re-introduced
-    /// on `Run`, clap would accept it and these assertions would fail —
+    /// on `ToolchainExec`, clap would accept it and these assertions would fail —
     /// keeping the deletion explicit and enforced.
     #[test]
     fn run_no_strip_field_clap_surface() {
         // `--strip-global` or `--emit-strip` do not exist — clap must reject them.
-        let result = Run::try_parse_from(["run", "--strip-global", "--", "echo", "hi"]);
+        let result = ToolchainExec::try_parse_from(["exec", "--strip-global", "--", "echo", "hi"]);
         assert!(
             result.is_err(),
-            "the strip mechanism (`--strip-global`) must not exist on `Run`; clap must reject it"
+            "the strip mechanism (`--strip-global`) must not exist on `ToolchainExec`; clap must reject it"
         );
 
-        let result = Run::try_parse_from(["run", "--emit-global-path-strip", "--", "echo", "hi"]);
+        let result = ToolchainExec::try_parse_from(["exec", "--emit-global-path-strip", "--", "echo", "hi"]);
         assert!(
             result.is_err(),
-            "the strip mechanism (`--emit-global-path-strip`) must not exist on `Run`; clap must reject it"
+            "the strip mechanism (`--emit-global-path-strip`) must not exist on `ToolchainExec`; clap must reject it"
         );
     }
 
-    /// `--self` was removed from `ocx run` (a documented breaking change): the
+    /// `--self` was removed from `ocx exec` (a documented breaking change): the
     /// self view selects a package's own private surface, which by construction
     /// drops that package's `entrypoints/` from `PATH`, so a toolchain consumer
     /// asking for it composed a strictly worse toolchain. The flag survives on
     /// the package tier, where a package's own surface is the thing being asked
-    /// about — this pins only that `Run` no longer accepts it.
+    /// about — this pins only that `ToolchainExec` no longer accepts it.
     #[test]
     fn run_rejects_the_removed_self_flag() {
-        let result = Run::try_parse_from(["run", "--self", "--", "echo", "hi"]);
+        let result = ToolchainExec::try_parse_from(["exec", "--self", "--", "echo", "hi"]);
         assert!(
             result.is_err(),
-            "`--self` was removed from `ocx run`; clap must reject it"
+            "`--self` was removed from `ocx exec`; clap must reject it"
         );
     }
 }

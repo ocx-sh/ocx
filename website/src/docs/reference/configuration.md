@@ -466,16 +466,16 @@ resolved the opt-out.
 
 **Where the opt-out is honored.** The opt-out is a project-toolchain concern: it only takes
 effect where a project's `ocx.toml` is directly in scope. That covers three commands —
-[`ocx run`][cmd-run], [`ocx env`][cmd-env-root], and [`ocx direnv export`][cmd-direnv-export] —
+[`ocx exec`][cmd-run], [`ocx env`][cmd-env-root], and [`ocx direnv export`][cmd-direnv-export] —
 each of which reads the project config and composes the environment itself.
 
-A fourth surface reaches the opt-out indirectly: a tool spawned by `ocx run` that re-enters
-ocx through its own generated launcher (`ocx launcher exec`). `ocx run` forwards the opt-out
+A fourth surface reaches the opt-out indirectly: a tool spawned by `ocx exec` that re-enters
+ocx through its own generated launcher (`ocx launcher exec`). `ocx exec` forwards the opt-out
 to that child process over [`OCX_PATCHES`][env-ocx-patches] — including, for each opted-out
 base actually resolved that run, its content digest, since a launcher resolves its base via a
 synthetic content-addressed identifier with no real `registry/repository` to match against.
 
-A **direct** launcher invocation — one not spawned by an `ocx run` that forwarded the
+A **direct** launcher invocation — one not spawned by an `ocx exec` that forwarded the
 opt-out, for example a generated launcher run standalone, or reached through the OCI-tier
 [`ocx package exec`][cmd-package-exec] — has no forwarded opt-out to decode and does not
 honor `no-patches`. It composes the same companion overlay [`ocx package env`][cmd-package-env]
@@ -1062,7 +1062,7 @@ The activation whitelist: which projects the per-prompt reconciler — and
 environment for at all, independent of whether `hook` / `completions` are on. A project
 outside every grant below stays inert, and none of the tools its `ocx.lock` names reach
 `PATH`, until a consent stamp is written for it by an ordinary [`ocx add`][cmd-add] /
-[`ocx lock`][cmd-lock] / [`ocx pull`][cmd-pull] / [`ocx run`][cmd-run] run against it. See
+[`ocx lock`][cmd-lock] / [`ocx pull`][cmd-pull] / [`ocx exec`][cmd-run] run against it. See
 [Consent grants][in-depth-shell-consent] for the full three-grant model and
 [What consent does not cover][in-depth-shell-residual] for its honest boundary.
 
@@ -1236,7 +1236,7 @@ error: group `ci` declares tool bindings directly
    = `[group.ci]` holds only the `tools` and `env` sub-tables
 ```
 
-An unrecognized sub-table (a typo such as `[group.ci.tolos]`) is rejected the same way, naming the offending key. `[group.default]` and `[group.all]` remain reserved names and are rejected at parse regardless of their contents — see [`ocx run`][cmd-run] for the full group-keyword semantics.
+An unrecognized sub-table (a typo such as `[group.ci.tolos]`) is rejected the same way, naming the offending key. `[group.default]` and `[group.all]` remain reserved names and are rejected at parse regardless of their contents — see [`ocx exec`][cmd-run] for the full group-keyword semantics.
 
 A group also accepts an optional `lazy-mode` scalar, overriding the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder] for every tool declared under that group:
 
@@ -1317,7 +1317,7 @@ There is no interpolation in v1 — every value is literal. The `path` type is w
 
 The [`--env`][cmd-run] flag takes the same three types, written `KEY[:TYPE[:SEP]]=VALUE`, with one deliberate difference: a relative `path` value there resolves against the **current directory**, not the project root. A checked-in file must mean the same thing from any subdirectory; a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute.
 
-Two key classes are rejected everywhere `[env]` can appear — the project table, every `[group.<name>.env]`, and the [`--env`][cmd-run] flag on `ocx run`:
+Two key classes are rejected everywhere `[env]` can appear — the project table, every `[group.<name>.env]`, and the [`--env`][cmd-run] flag on `ocx exec`:
 
 - A key that is not a POSIX environment-variable name (`[A-Za-z_][A-Za-z0-9_]*`).
 - A key starting `OCX_` or `__OCX_`. Without this rejection, a checked-in `ocx.toml` could set `OCX_DEFAULT_REGISTRY`, `OCX_INDEX`, `OCX_OFFLINE`, or any other resolution-affecting variable and reconfigure how `ocx` itself resolves for every contributor who clones the repository. Rejection happens at parse for `[env]` / `[group.<name>.env]` (`ExitCode::ConfigError`, 78) and at flag-parse for `--env` (`ExitCode::UsageError`, 64) — see [`--env`][cmd-run] and [`OCX_ENV`][env-ocx-env] for the flag form and the forwarded wire key.
@@ -1402,7 +1402,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [cmd-add]: ./command-line.md#add
 [cmd-lock]: ./command-line.md#lock
 [cmd-pull]: ./command-line.md#pull
-[cmd-run]: ./command-line.md#run
+[cmd-run]: ./command-line.md#exec
 [cmd-env-root]: ./command-line.md#env-root
 [cmd-direnv-export]: ./command-line.md#direnv-export
 [cmd-package-exec]: ./command-line.md#package-exec

@@ -12,7 +12,7 @@ use clap::Subcommand;
 ///
 /// The former root commands `ocx install`, `ocx uninstall`, `ocx select`,
 /// `ocx exec`, and `ocx deselect` are moved here (C1 — handshake §2 / §7).
-/// The toolchain-tier counterparts (`ocx env`, `ocx run`) remain at root.
+/// The toolchain-tier counterparts (`ocx env`, `ocx exec`) remain at root.
 #[derive(Subcommand)]
 pub enum Package {
     /// Observe an owner-curated set of registry tags and publish the rebuilt
@@ -41,14 +41,19 @@ pub enum Package {
     Copy(super::package_copy::PackageCopy),
     /// Creates an archive from a local package directory.
     Create(super::package_create::PackageCreate),
-    /// Push a description (README + optional logo) to a package repository.
-    Describe(super::package_describe::PackageDescribe),
+    /// Publish or fetch a package repository's catalog description.
+    #[command(subcommand)]
+    Description(super::package_description::DescriptionGroup),
+    /// Deprecated spelling of `ocx package description push`; removed in 0.7.
+    #[command(name = "describe", hide = true)]
+    DeprecatedDescribe(super::package_description_push::PackageDescriptionPush),
+    /// Deprecated spelling of `ocx package description pull`; removed in 0.7.
+    #[command(name = "info", hide = true)]
+    DeprecatedInfo(super::package_description_pull::PackageDescriptionPull),
     /// Show the dependency tree for one or more installed packages.
     Deps(super::deps::Deps),
     /// Print the resolved environment variables for one or more installed packages.
     Env(super::env::Env),
-    /// Show description metadata for one or more packages.
-    Info(super::package_info::PackageInfo),
     /// Inspect one or more package references (candidates, metadata, or resolution chain).
     Inspect(super::package_inspect::PackageInspect),
     /// Install packages from a local or remote index (no `ocx.toml` touched).
@@ -70,6 +75,7 @@ pub enum Package {
     /// Verify a published package's Sigstore signature (keyless, via OCI Referrers).
     Verify(super::package_verify::PackageVerify),
     /// Runs installed packages.
+    #[command(visible_alias = "x")]
     Exec(super::exec::Exec),
     /// Remove an installed candidate for one or more packages.
     Uninstall(super::uninstall::Uninstall),
@@ -86,10 +92,17 @@ impl Package {
             Package::Cascade(cascade) => cascade.execute(context).await,
             Package::Copy(copy) => copy.execute(context).await,
             Package::Create(create) => create.execute(context).await,
-            Package::Describe(describe) => describe.execute(context).await,
+            Package::Description(description) => description.execute(context).await,
+            Package::DeprecatedDescribe(push) => {
+                super::deprecated::warn_renamed(&context, "package describe", "package description push");
+                push.execute(context).await
+            }
+            Package::DeprecatedInfo(pull) => {
+                super::deprecated::warn_renamed(&context, "package info", "package description pull");
+                pull.execute(context).await
+            }
             Package::Deps(deps) => deps.execute(context).await,
             Package::Env(env) => env.execute(context).await,
-            Package::Info(info) => info.execute(context).await,
             Package::Inspect(inspect) => inspect.execute(context).await,
             Package::Install(install) => install.execute(context).await,
             Package::Pull(pull) => pull.execute(context).await,

@@ -38,15 +38,22 @@ pub struct ContextOptions {
     /// Mutually exclusive with `--project` (both pick a project file).
     /// Resolution-affecting: forwarded to child ocx processes via
     /// `OCX_GLOBAL`. Equivalent env var: `OCX_GLOBAL`. The global
-    /// toolchain never composes into project resolution; `ocx run` and
-    /// `ocx exec` stay hermetic and never read it.
+    /// toolchain never composes into project resolution; `ocx exec` and
+    /// `ocx package exec` stay hermetic and never read it.
+    //
+    // `-g` is `--global` only here, at the root; after a subcommand `-g` is
+    // `--group` (`add.rs`, `update.rs`, `options/group_selection.rs`). The
+    // overload is deliberate and settled: position disambiguates, the same way
+    // `git -C <dir>` and `git commit -C <ref>` coexist. `--global` picks a tier
+    // and is typed once per command line; `--group` is typed interactively and
+    // keeps the short form. Do not "align" these.
     #[arg(short = 'g', long, conflicts_with = "project", default_value_t = env::flag(env::keys::OCX_GLOBAL, false))]
     pub global: bool,
 
     /// Route mutable lookups (tag list, catalog, tag->manifest) to the
     /// remote registry instead of the local index.
     ///
-    /// Pure queries (`index list`, `index catalog`, `package info`) do
+    /// Pure queries (`index list`, `index catalog`, `package description pull`) do
     /// **not** persist the result to the local index - use
     /// `ocx index update` to refresh the local index explicitly. Implies
     /// network access. Combined with `--offline` the result is

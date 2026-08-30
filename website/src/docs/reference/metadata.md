@@ -255,16 +255,16 @@ what is wrong:
 
 Refusal is scoped to *resolving* the value, not to reading the package.
 [`ocx package pull`][cmd-package-pull], [`ocx package install`][cmd-package-install],
-[`ocx package inspect`][cmd-package-inspect], [`ocx package info`][cmd-package-info],
+[`ocx package inspect`][cmd-package-inspect], [`ocx package description pull`][cmd-package-info],
 [`ocx package which`][cmd-package-which], and [`ocx package deps`][cmd-package-deps]
 on a document with an unrecognised token all succeed — none of them resolve
 `env` values. Only [`ocx package inspect`][cmd-package-inspect] actually echoes
 one, and only the declared template text, verbatim, never a resolved value
 (add `--resolve` when the reference is a multi-platform image index); `ocx
-package info` never even reads `env` — it reads only the package's
+package description pull` never even reads `env` — it reads only the package's
 `__ocx.desc` tag.
 
-[`ocx env`][cmd-env-root] / [`ocx package exec`][cmd-exec] / [`ocx run`][cmd-run],
+[`ocx env`][cmd-env-root] / [`ocx package exec`][cmd-exec] / [`ocx exec`][cmd-run],
 any environment composition, and [`ocx package create`][cmd-package-create] /
 [`ocx package push`][cmd-package-push] refuse, exit 65, naming the token. So
 does a generated **entrypoint launcher**: a refused token in a baked
@@ -903,7 +903,7 @@ An `integrations` payload gets the same interpolation engine as [`env`](#env) va
 - **`${deps.NAME.installPath}`** resolves to a direct dependency's content directory, the same as in `env`. A `${deps.NAME}` naming a dependency the package does not declare is invalid metadata and rejected at publish time, exactly like an unresolvable reference in an `env` value.
 - All three install-path bodies accept the optional **`:native`** / **`:posix`** render modifier described in [Render Modifiers](#env-interpolation-render) — `${self.installPath:posix}` is how a payload destined for a Windows-hosted VS Code `settings.json` gets forward slashes instead of backslashes.
 - **`$${installPath}`** (a doubled `$`) escapes to the literal text `${installPath}` — the only way to emit a literal `${…}` OCX would otherwise try to resolve.
-- **Every other `${...}` token is refused, not passed through.** `${workspaceFolder}`, [VS Code's `${env:VAR}`][vscode-variables], and devcontainer's own [`${localEnv:VAR}` / `${containerEnv:VAR}`][devcontainer-vars] are not in OCX's closed vocabulary. Writing one bare fails with exit 65, naming the token: refused by [`ocx package create`][cmd-package-create] / [`push`][cmd-package-push] at publish time, and again at composition ([`ocx env`][cmd-env-root] / [`ocx package exec`][cmd-exec] / [`ocx run`][cmd-run]). Read-only paths — [`pull`][cmd-package-pull], [`install`][cmd-package-install], [`inspect`][cmd-package-inspect] — echo an unrecognised token verbatim instead of refusing it. A payload destined for one of these tools escapes it instead: `$${workspaceFolder}` publishes as the literal text `${workspaceFolder}`, left for the downstream tool to resolve on its own turn.
+- **Every other `${...}` token is refused, not passed through.** `${workspaceFolder}`, [VS Code's `${env:VAR}`][vscode-variables], and devcontainer's own [`${localEnv:VAR}` / `${containerEnv:VAR}`][devcontainer-vars] are not in OCX's closed vocabulary. Writing one bare fails with exit 65, naming the token: refused by [`ocx package create`][cmd-package-create] / [`push`][cmd-package-push] at publish time, and again at composition ([`ocx env`][cmd-env-root] / [`ocx package exec`][cmd-exec] / [`ocx exec`][cmd-run]). Read-only paths — [`pull`][cmd-package-pull], [`install`][cmd-package-install], [`inspect`][cmd-package-inspect] — echo an unrecognised token verbatim instead of refusing it. A payload destined for one of these tools escapes it instead: `$${workspaceFolder}` publishes as the literal text `${workspaceFolder}`, left for the downstream tool to resolve on its own turn.
 
 ```json
 {
@@ -1124,10 +1124,10 @@ If you published packages before the visibility-default flip, their untagged env
 [cmd-package-push-layout]: ./command-line.md#package-push-layout
 [cmd-package-install]: ./command-line.md#package-install
 [cmd-package-test]: ./command-line.md#package-test
-[cmd-run]: ./command-line.md#run
+[cmd-run]: ./command-line.md#exec
 [cmd-package-pull]: ./command-line.md#package-pull
 [cmd-package-inspect]: ./command-line.md#package-inspect
-[cmd-package-info]: ./command-line.md#package-info
+[cmd-package-info]: ./command-line.md#package-description-pull
 [cmd-package-which]: ./command-line.md#which
 [cmd-package-deps]: ./command-line.md#deps
 

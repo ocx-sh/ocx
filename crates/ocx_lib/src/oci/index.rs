@@ -135,7 +135,7 @@ impl ChainMode {
 pub enum IndexOperation {
     /// Pure read. `ChainedIndex` returns the local-index result and never
     /// walks the source chain on miss. Used by `index list`,
-    /// `index catalog`, `package info`, and any other path that reports
+    /// `index catalog`, `package description pull`, and any other path that reports
     /// existing data without producing it.
     Query,
     /// Read with write-through on miss. Install/pull paths walk the source

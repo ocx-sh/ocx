@@ -107,7 +107,7 @@ for production use" should not follow the package to production. Add `--descript
 copy it along, or promote it on its own once it is right:
 
 ```sh
-ocx package describe --from staging.example.com/acme/mytool prod.example.com/acme/mytool
+ocx package description push --from staging.example.com/acme/mytool prod.example.com/acme/mytool
 ```
 
 **A copy is not a re-sign.** The signature that travels still names the identity that

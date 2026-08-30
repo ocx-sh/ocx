@@ -129,7 +129,7 @@ pub fn remove_segment(existing: &OsStr, value: &OsStr) -> OsString {
 /// is already present removes the stale occurrence and moves it to the front —
 /// "last activation wins" for lookup. This mirrors the self-contained idempotent
 /// shell snippets emitted by [`crate::shell::Shell::export_path`], so the
-/// in-process child env (`ocx run` / `ocx package exec`) and the emitted shell
+/// in-process child env (`ocx exec` / `ocx package exec`) and the emitted shell
 /// text agree on the same semantics.
 ///
 /// `OsStr`-based to match [`crate::env::Env`]'s `OsString` storage and avoid a

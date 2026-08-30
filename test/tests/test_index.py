@@ -415,7 +415,7 @@ def test_index_list_rejects_digest_bearing_identifier(
     """`ocx index list <pkg>@<digest>` is a usage error.
 
     `index list` enumerates tags; a digest narrows nothing. The error
-    message must point users to `package info` as the alternative.
+    message must point users to `package description pull` as the alternative.
     Tag-only identifiers (`<pkg>:<tag>`) stay supported — they filter the
     returned list.
     """
@@ -423,14 +423,14 @@ def test_index_list_rejects_digest_bearing_identifier(
     # Resolve the digest for the published tag via a remote query.
     json_out = ocx.json("--remote", "index", "list", "--platforms", pkg.short)
     # Use a synthetic but well-formed digest string so we don't depend on
-    # `package info` shape — only the rejection path matters here.
+    # `package description pull` shape - only the rejection path matters here.
     fake_digest = "sha256:" + ("a" * 64)
     digest_id = f"{pkg.short}@{fake_digest}"
 
     result = ocx.plain("index", "list", digest_id, check=False)
     assert result.returncode != 0, "digest-bearing identifier must exit non-zero"
     assert "does not accept digest-pinned identifiers" in result.stderr
-    assert "package info" in result.stderr
+    assert "package description pull" in result.stderr
 
     # Tag-only path still works (no regression).
     success = ocx.plain("index", "update", pkg.short)
@@ -628,7 +628,7 @@ def test_index_list_excludes_internal_tags(
     # Push a description, creating the __ocx.desc tag on the registry.
     readme = tmp_path / "README.md"
     readme.write_text("# Test\n")
-    ocx.plain("package", "describe", "--readme", str(readme), fq)
+    ocx.plain("package", "description", "push", "--readme", str(readme), fq)
 
     # Remote index: __ocx.desc must not appear.
     result = ocx.plain("--remote", "index", "list", fq)

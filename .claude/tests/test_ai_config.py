@@ -1998,8 +1998,6 @@ class TestSubsystemCliCommandsTableCoverage:
         "which": "package which",
         "package_copy": "package copy",
         "package_create": "package create",
-        "package_describe": "package describe",
-        "package_info": "package info",
         "package_inspect": "package inspect",
         "package_attest": "package attest",
         "package_pull": "package pull",
@@ -2009,6 +2007,9 @@ class TestSubsystemCliCommandsTableCoverage:
         # `cascade check` / `cascade repair` are two levels below `package`; the
         # table cell parser keeps the first two tokens, so both map to the same
         # documented head.
+        # `description push` / `description pull` nest the same way as cascade.
+        "package_description_push": "package description",
+        "package_description_pull": "package description",
         "package_cascade_check": "package cascade",
         "package_cascade_repair": "package cascade",
         "package_sign": "package sign",
@@ -2020,8 +2021,9 @@ class TestSubsystemCliCommandsTableCoverage:
         "patch_sync": "patch sync",
         "patch_test": "patch test",
         "patch_why": "patch why",
-        # Toolchain-tier `ocx env` lives in toolchain_env.rs.
+        # Toolchain-tier `ocx env` / `ocx exec` live in toolchain_{env,exec}.rs.
         "toolchain_env": "env",
+        "toolchain_exec": "exec",
         # Grouped subcommands (file stem -> "<group> <verb>").
         "index_catalog": "index catalog",
         "index_list": "index list",
@@ -2063,6 +2065,12 @@ class TestSubsystemCliCommandsTableCoverage:
         # two leaves are documented individually.
         "index_common",
         "package_cascade",
+        # `package_description.rs` = the nested `package description`
+        # dispatcher, whose two leaves are documented individually;
+        # `deprecated.rs` = the 0.6 deprecated-spelling warnings (deleted
+        # whole in 0.7), not a command.
+        "package_description",
+        "deprecated",
         # `package_sign_common.rs` = shared OIDC/signing helpers for
         # `package sign` and `package attest` (not a command).
         "package_sign_common",

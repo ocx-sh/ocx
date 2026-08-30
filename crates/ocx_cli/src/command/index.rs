@@ -10,6 +10,7 @@ pub enum Index {
     /// List available repositories in the registry
     Catalog(super::index_catalog::IndexCatalog),
     /// List available versions of a package
+    #[command(visible_alias = "ls")]
     List(super::index_list::IndexList),
     /// Refresh the local index for one or more packages
     ///

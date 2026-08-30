@@ -13,7 +13,9 @@ Thin CLI shell. Use clap at `crates/ocx_cli/src/`. One file per subcommand. Outp
 
 The CLI surface divides into two tiers. **Toolchain-tier (project-tier)** commands operate on `ocx.toml` + `ocx.lock` — the unit of work is a lock-resolved binding name. **OCI-tier (low-level)** commands operate on OCI identifiers directly and never consult `ocx.toml`. The boundary is firm: missing `ocx.toml` is a usage error (exit 64) for toolchain-tier commands; `ocx.toml` is irrelevant and never consulted by OCI-tier commands.
 
-`ocx run` is the toolchain-tier child-spawn command; `ocx package exec` is its OCI-tier counterpart. `ocx env` is the new toolchain-tier composed-env command. For the full command taxonomy, see `subsystem-cli-commands.md`.
+`ocx exec` is the toolchain-tier child-spawn command; `ocx package exec` is its OCI-tier counterpart. `ocx env` is the toolchain-tier composed-env command. For the full command taxonomy, see `subsystem-cli-commands.md`.
+
+Deprecated hidden spellings `ocx run` (→ `exec`), `ocx package describe` (→ `package description push`), and `ocx package info` (→ `package description pull`) still execute, warn once on stderr via `command/deprecated.rs`, and are removed in 0.7.
 
 **One documented OCI-tier carve-out (#98):** `ocx package verify` reads `[[trust.policy]]` from the project `ocx.toml` when the `--certificate-identity`/`--certificate-oidc-issuer` flags are omitted. The operator `config.toml` trust set is authoritative over the project `ocx.toml` (`trust::resolve_tiered` — a project policy can only add trust for scopes no operator policy governs). This is a deliberate exception to "OCI-tier never consults `ocx.toml`", scoped SOLELY to trust policy (never package resolution) — a security concern, and only fires in policy mode (no flags). ADR `adr_trust_policy.md`.
 
@@ -35,9 +37,9 @@ Operate on `ocx.toml` (CWD-walk / `--project` / `OCX_PROJECT`) or `$OCX_HOME/ocx
 `--global` is a **root flag** (before the subcommand), peer of `--project`, defined once on `ContextOptions`.
 Canonical form: `ocx --global <subcommand>`.
 - `ocx [--global] add <id>`, `ocx [--global] remove <name>`, `ocx [--global] lock`, `ocx [--global] update [-g GROUP]... [NAME...]` (bare = whole-file bump; scoped by name/group re-resolves only the named bindings via `resolve_lock_touched` and carries the rest forward verbatim — same pin-preserving primitive as `add`/`remove`; resolves live against the registry by default and never writes tag pointers — see `adr_toolchain_update_family.md`)
-- `ocx [--global] run [-g GROUP]... [--env KEY[:TYPE]=VALUE]... -- cmd` — compose toolchain env for child process only; never mutates parent shell. No `--self` (package vocabulary; the self view drops a package's own `entrypoints/` from `PATH`)
+- `ocx [--global] exec [-g GROUP]... [--env KEY[:TYPE]=VALUE]... -- cmd` (visible alias `x`) — compose toolchain env for child process only; never mutates parent shell. No `--self` (package vocabulary; the self view drops a package's own `entrypoints/` from `PATH`)
 - `ocx status` — report what `ocx.toml` + `ocx.lock` declare, with no resolution at all. Offline, no flock, no staleness gate: a missing / stale / unparseable lock is payload with exit 0, which is the whole point (every other project-tier command refuses on exactly those). Takes NO selectors — `-g` would only hide rows from a keyed object, unlike `inspect` where the selection decides what composes. Routes through `project_context::resolve_project_paths` + `ProjectConfig::from_path` + `ProjectLock::from_path`, deliberately NOT `load_project_with_lock`
-- `ocx inspect [-g GROUP]... [NAME...] [-p PLATFORM] [--resolve] [--closure] [--env KEY[:TYPE]=VALUE]...` — toolchain-tier `ocx package inspect`. Shares `api::data::package_inspect::InspectReport` verbatim (one schema, both tiers), keyed by binding instead of raw identifier, plus the project's composed `env` array. Pipeline: `select_tool_set` → `project_context::filter_by_names` → `check_duplicate_selection` → `resolve_selected_tools` → `inspect_all`, same order `ocx run` uses. Needs a current lock (78 / 65)
+- `ocx inspect [-g GROUP]... [NAME...] [-p PLATFORM] [--resolve] [--closure] [--env KEY[:TYPE]=VALUE]...` — toolchain-tier `ocx package inspect`. Shares `api::data::package_inspect::InspectReport` verbatim (one schema, both tiers), keyed by binding instead of raw identifier, plus the project's composed `env` array. Pipeline: `select_tool_set` → `project_context::filter_by_names` → `check_duplicate_selection` → `resolve_selected_tools` → `inspect_all`, same order `ocx exec` uses. Needs a current lock (78 / 65)
 - `ocx [--global] env [-g GROUP]... [--env KEY[:TYPE]=VALUE]... [--shell[=NAME]] [--ci[=PROVIDER]] [--export-file PATH] [--pull/--no-pull]` — compose toolchain env. Output format is a **context-only concern** (root `--format`, default **plain** like every command — no subcommand `--format`, handshake §3 amended 2026-05-19); `--shell[=NAME]` is the ONLY eval-safe channel; `--ci` writes to a CI sink (see below). Installs on miss by default (`options::Pull`, eager default): a present tool resolves locally with no network, only a genuine miss pulls; `--no-pull` opts out to an offline local probe (warn on stderr + omit); the global tier never installs
 
 ### `ocx shell` — carries `{allow, completion, revoke, state}`
@@ -67,7 +69,7 @@ Canonical form: `ocx --global <subcommand>`.
 **Exit-82 (`DirtyRcBlock`).** `ocx self setup` exits 82 when any shell profile contains a managed activation block that carries user edits inside the fence and `--force` was not passed. Scripts can `case $? in 82)` to detect this and re-run with `--force`.
 
 ### Removed root commands (handshake §7 — exit 64 if invoked)
-- `ocx install`, `ocx uninstall`, `ocx select`, `ocx exec`, `ocx deselect`, `ocx which`, `ocx deps` → moved to `ocx package`; ocx maps clap usage errors → EX_USAGE 64 (see `app.rs:112-119`)
+- `ocx install`, `ocx uninstall`, `ocx select`, `ocx deselect`, `ocx which`, `ocx deps` → moved to `ocx package`; ocx maps clap usage errors → EX_USAGE 64 (see `app.rs:112-119`). Root `ocx exec` is **not** on this list — the pre-handshake root `exec` that moved to `ocx package exec` is gone, but the name was reused for the toolchain-tier command renamed from `ocx run`; root `ocx exec` is live.
 - `ocx ci` → removed (the **command**). The CI-export capability returns as the `--ci[=PROVIDER]` flag on `ocx env` / `ocx package env` — see "Cross-Cutting: CI Env Export (`--ci`)" below.
 
 ## Design Rationale
@@ -88,7 +90,7 @@ CLI thin on purpose — all business logic in `ocx_lib` so other consumer reuse 
 | `app/plugin_dispatch.rs` | Git/cargo-style external subcommand dispatch; see "Cross-Cutting: Plugin Dispatch" below |
 | `command/*.rs` | One file per subcommand |
 | `command/env.rs` | Toolchain-tier composed-env command (`ocx env`) |
-| `command/run.rs` | Toolchain-tier child-spawn command (`ocx run`) |
+| `command/toolchain_exec.rs` | Toolchain-tier child-spawn command (`ocx exec`) |
 | `command/package.rs` | OCI-tier `ocx package` group dispatcher |
 | `api.rs` | `Api` facade: dispatches JSON vs plain text |
 | `api/data/*.rs` | Report data types implementing `Printable` |
@@ -165,7 +167,7 @@ env-composing commands, and **only** those seven. Never read the raw field at a 
 | Command | Tier | Why it takes the flag |
 |---|---|---|
 | `ocx env` | project | composes |
-| `ocx run` | project | composes, then spawns |
+| `ocx exec` | project | composes, then spawns |
 | `ocx pull` | project | pre-warms; a deferred tool is skipped rather than pulled |
 | `ocx direnv export` | project | composes — the `ocx.toml` tiers defer a tool with no flag typed at all, so a direnv-composed environment that ignored `lazy-mode` would differ from the `ocx env` one for the same project |
 | `ocx package env` | OCI | composes |
@@ -191,7 +193,7 @@ still applies.
 ## Cross-Cutting: `--env` Per-Invocation Override
 
 `--env KEY[:TYPE]=VALUE` is flattened from `options::EnvOverride` into **every** command that
-composes an environment, on both tiers: `run`, `env`, `direnv export` (project) and
+composes an environment, on both tiers: `exec`, `env`, `direnv export` (project) and
 `package exec`, `package env`, `package test`, `patch test` (OCI). Never read the raw `Vec<String>`
 at a call site — go through `EnvOverride::entries(cwd)`.
 
@@ -200,13 +202,13 @@ at a call site — go through `EnvOverride::entries(cwd)`.
   no project entries by construction, so they still read no `ocx.toml`.
 - **`-g` is project-tier only** (`options::GroupSelection`). Flattened onto an OCI-tier command it
   would parse and silently do nothing — there are no groups without a project file.
-- **Export/execute parity is the point.** `ocx run` never prints (it `exec`s), so `ocx env --env X`
-  must compose exactly what `ocx run --env X` executes with. Same pairing for
-  `package env` / `package exec`. Tests assert the two against one shared oracle.
+- **Export/execute parity is the point.** `ocx exec` never prints (it replaces the child process via
+  `exec`), so `ocx env --env X` must compose exactly what `ocx exec --env X` executes with. Same
+  pairing for `package env` / `package exec`. Tests assert the two against one shared oracle.
 - **A command that composes AND spawns must forward.** `set_forwarded_env(&overrides)` after
   `apply_ocx_config` (which strips a stale `OCX_ENV` first — the order is load-bearing). Without it
   a generated entrypoint launcher re-enters `ocx launcher exec`, re-applies the package's own
-  entries, and silently reverts the override. `ocx run` and `ocx package exec` both do this.
+  entries, and silently reverts the override. `ocx exec` and `ocx package exec` both do this.
 
 ## Cross-Cutting: CI Env Export (`--ci`)
 
@@ -274,13 +276,13 @@ Every command same flow:
 and the `with_command_global` seam no longer exist.
 
 Canonical invocation: `ocx --global <subcommand>` — e.g. `ocx --global add ripgrep:14`.
-Toolchain-tier commands affected: `add`, `remove`, `lock`, `update`, `pull`, `run`, `env`.
+Toolchain-tier commands affected: `add`, `remove`, `lock`, `update`, `pull`, `exec`, `env`.
 
 Strict isolation rules:
 - `--global` and `--project` together → clap `conflicts_with` conflict (exit 64 — ocx maps clap usage errors → EX_USAGE 64). No precedence guessing.
 - `check_global_project_exclusivity` (in `app/context.rs`, called from `Context::try_init`) closes env-sourced gaps (`OCX_GLOBAL` default value, `OCX_PROJECT` env) that clap `conflicts_with` cannot see.
-- `ocx run` is hermetic: without `--global`, reads only the in-effect project file; global file never consulted.
-- `ocx --global run -- cmd` composes global toolchain env for child process only; never mutates parent shell.
+- `ocx exec` is hermetic: without `--global`, reads only the in-effect project file; global file never consulted.
+- `ocx --global exec -- cmd` composes global toolchain env for child process only; never mutates parent shell.
 - `OCX_GLOBAL` is the env-var equivalent (resolution-affecting; forwarded to child ocx via `apply_ocx_config`).
 - No implicit `$OCX_HOME/ocx.toml` discovery: project resolution is explicit `--project`/`OCX_PROJECT` → CWD walk → None.
 - `ocx package install --global` → clap unknown-flag error (exit 64 — ocx maps clap usage errors → EX_USAGE 64). `--global` is NOT on any `ocx package` subcommand.

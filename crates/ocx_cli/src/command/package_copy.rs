@@ -61,7 +61,7 @@ pub struct PackageCopy {
     ///
     /// Off by default, because a description is repository-level prose rather
     /// than part of the version being promoted, and environments legitimately
-    /// carry different ones. `ocx package describe --from` copies it alone.
+    /// carry different ones. `ocx package description push --from` copies it alone.
     #[clap(long = "description")]
     description: bool,
 

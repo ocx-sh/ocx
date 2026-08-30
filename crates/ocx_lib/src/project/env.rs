@@ -179,7 +179,7 @@ impl ProjectEnv {
     ///
     /// Relative [`ModifierKind::Path`] values resolve against `project_root`
     /// (the directory holding `ocx.toml`), never the current directory —
-    /// `ocx run` from a subdirectory must see the same `PATH` as from the
+    /// `ocx exec` from a subdirectory must see the same `PATH` as from the
     /// root. Absolute values pass through untouched.
     ///
     /// Infallible: the key policy and the value grammar were already enforced
@@ -201,7 +201,7 @@ impl ProjectEnv {
                     // joining is what anchors it to the project's drive
                     // instead of leaving it dependent on the process's current
                     // drive — which is the cwd-independence this method owes
-                    // `ocx run` from a subdirectory.
+                    // `ocx exec` from a subdirectory.
                     ModifierKind::Path => project_root.join(&declared.value).to_string_lossy().into_owned(),
                 },
                 kind: declared.kind.clone(),
@@ -249,7 +249,7 @@ fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvVal
         return Err(invalid_value());
     };
     // Through `ModifierKind`'s own `FromStr` rather than a local match: the
-    // same grammar is parsed by `ocx run --env KEY:TYPE=VALUE`, and two
+    // same grammar is parsed by `ocx exec --env KEY:TYPE=VALUE`, and two
     // hand-rolled copies of one union drift. The error only supplies `found` —
     // the scope/key context that makes the message actionable is added here.
     let kind = declared_type
@@ -303,7 +303,7 @@ fn parse_env_value(scope: &str, key: &str, value: &toml::Value) -> Result<EnvVal
     // emitter reads an embedded separator as two segments and matches neither
     // against the whole operand, so the apply's dedup never fires and each
     // re-source prepends another copy — and `remove_segment` cannot take it out
-    // again. The reconciler drops such an entry, but `ocx run` / `ocx exec`
+    // again. The reconciler drops such an entry, but `ocx exec` / `ocx exec`
     // composition and the `--shell` / `direnv export` emitters never reach the
     // reconciler, so the refusal has to exist here too — independently, which is
     // the word the addendum uses. Here the author gets a scope/key message at
@@ -637,7 +637,7 @@ mod tests {
     }
 
     /// A-10, second half: the reconciler drops a path value embedding the
-    /// platform separator, but `ocx run` / `ocx exec` composition and
+    /// platform separator, but `ocx exec` / `ocx exec` composition and
     /// `ocx env --shell` / `ocx direnv export` are untouched by that drop — so
     /// the value has to be refused at the parse boundary too, where the author
     /// gets a scope/key message instead of a warn line the prompt hook discards.

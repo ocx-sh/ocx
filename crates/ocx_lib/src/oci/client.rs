@@ -1778,8 +1778,8 @@ impl Client {
     /// Uses a temporary directory to download blobs before reading them into memory.
     ///
     /// Canonical by default because the two commands that copy a description
-    /// (`package copy --description`, `package describe --from`) and the one
-    /// that merges into it (`package describe`) all *write back* what this read
+    /// (`package copy --description`, `package description push --from`) and the one
+    /// that merges into it (`package description push`) all *write back* what this read
     /// returns: a mirror's answer applied to the canonical host is a decision
     /// about a repository nobody read (invariant 5). A description served by a
     /// mirror is [`pull_description_addressed`](Self::pull_description_addressed)
@@ -6948,7 +6948,7 @@ mod tests {
         }
 
         /// The description read that `package copy --description` and
-        /// `package describe --from` write back from.
+        /// `package description push --from` write back from.
         ///
         /// Positive control: `pull_description_routes_through_mirror`, same
         /// client, same identifier, same recorded call — the only difference is

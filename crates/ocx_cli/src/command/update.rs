@@ -209,7 +209,7 @@ fn missing_lock(lock_path: &std::path::Path) -> CommandError {
 /// `names` selects every binding (the `-g GROUP` form); a non-empty `names`
 /// selects only the matching bindings. A binding name present in several
 /// in-scope groups is advanced in each of them (each against its own declared
-/// tag) — deliberate, no ambiguity error, unlike `ocx run`'s compose path.
+/// tag) — deliberate, no ambiguity error, unlike `ocx exec`'s compose path.
 ///
 /// The config map keys are the binding names, so no `binding_key` derivation
 /// is needed here.
@@ -217,7 +217,7 @@ fn missing_lock(lock_path: &std::path::Path) -> CommandError {
 /// # Errors
 ///
 /// Returns a [`CommandError`] classified [`cli::ExitCode::UsageError`] (exit
-/// 64) when a requested group is unknown (mirroring `ocx run`) or a requested
+/// 64) when a requested group is unknown (mirroring `ocx exec`) or a requested
 /// name matches no binding in scope.
 fn select_touched(
     config: &ProjectConfig,
@@ -279,7 +279,7 @@ fn select_touched(
 
     // Every explicitly requested name must have matched at least one in-scope
     // binding — otherwise the user named a binding that does not exist (or is
-    // outside the `-g` scope). Mirrors `ocx run`'s unknown-name usage error.
+    // outside the `-g` scope). Mirrors `ocx exec`'s unknown-name usage error.
     for name in names {
         if !matched.contains(name) {
             return Err(usage(format!("binding '{name}' not found in the selected groups")));

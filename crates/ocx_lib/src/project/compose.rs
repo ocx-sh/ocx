@@ -28,7 +28,7 @@ use super::error::{ProjectError, ProjectErrorKind};
 /// This is stages 4 and 5 of the composition order — appended to the entry
 /// vector after the package-composed env and the patch overlay, so a constant
 /// declared here replaces a package-declared one and a path entry lands ahead of
-/// package paths. Stage 6 (`ocx run --env`) is the caller's to append after this.
+/// package paths. Stage 6 (`ocx exec --env`) is the caller's to append after this.
 ///
 /// `groups` is the already-expanded selection list (post `all` expansion, with
 /// the empty case promoted to the default group), in `-g` order. A repeated name
@@ -38,7 +38,7 @@ use super::error::{ProjectError, ProjectErrorKind};
 /// stage 4, and there is no `[group.default]` table to read.
 ///
 /// Relative `type = "path"` values resolve against the directory holding
-/// `config_path`, never the current directory, so `ocx run` from a subdirectory
+/// `config_path`, never the current directory, so `ocx exec` from a subdirectory
 /// composes the same `PATH` as from the project root.
 pub fn project_env_entries(config: &ProjectConfig, config_path: &Path, groups: &[String]) -> Vec<Entry> {
     // A resolved `ocx.toml` path always has a parent; `.` keeps a hand-built
@@ -171,7 +171,7 @@ pub fn parse_positional(input: &str, default_registry: &str) -> Result<Positiona
 /// preserving the position of `all` in the input. Non-`all` entries pass
 /// through unchanged. Pure: no I/O, no policy beyond the literal-string match.
 ///
-/// Currently consumed by the `ocx run` command. The helper is exposed at the
+/// Currently consumed by the `ocx exec` command. The helper is exposed at the
 /// lib layer so other project-tier CLIs (`pull`, `lock`, `update`) can adopt
 /// the same `-g all` expansion without duplicating the keyword logic, and so
 /// programmatic consumers can call it directly before invoking
@@ -226,7 +226,7 @@ pub fn expand_all_keyword(groups: &[String], config: &ProjectConfig) -> Vec<Stri
 /// half of [`compose_tool_set`]: it builds the binding set and applies
 /// positional overrides, but leaves every group entry as an unresolved
 /// [`ToolSource::Locked`]. A caller that needs only a subset (e.g.
-/// `ocx run NAME`) can filter the result via [`filter_by_names`] and then
+/// `ocx exec NAME`) can filter the result via [`filter_by_names`] and then
 /// resolve just the survivors via [`resolve_selected_tools`], so a sibling that
 /// ships no host leaf for the current platform never aborts the run.
 ///
@@ -365,7 +365,7 @@ pub fn select_tool_set(
 ///
 /// The complement to [`select_tool_set`], which *detects* the condition but
 /// keeps both entries rather than reporting it. Splitting the two lets a caller
-/// narrow the selection first — `ocx run go-task` must not fail over a
+/// narrow the selection first — `ocx exec go-task` must not fail over a
 /// conflicting binding it never named — while an unfiltered caller gets the
 /// identical whole-scope error by running this immediately (see
 /// [`compose_tool_set`]).
@@ -707,7 +707,7 @@ mod tests {
 
     /// Selection must not report the conflict itself — it keeps both entries so
     /// a caller can filter the colliding binding out before validating. Without
-    /// this, `ocx run cmake` fails over a `shellcheck` it never named.
+    /// this, `ocx exec cmake` fails over a `shellcheck` it never named.
     #[test]
     fn select_keeps_both_entries_for_a_conflicting_binding() {
         let lock = lock_with(vec![

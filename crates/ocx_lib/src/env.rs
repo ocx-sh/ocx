@@ -75,7 +75,7 @@ pub mod keys {
     /// otherwise. Mirrors `OCX_MIRRORS` in forwarding semantics.
     pub const OCX_PATCHES: &str = "OCX_PATCHES";
     /// JSON envelope carrying the resolved project/group `[env]` entries plus
-    /// any `ocx run --env` overrides, forwarded so a generated entrypoint
+    /// any `ocx exec --env` overrides, forwarded so a generated entrypoint
     /// launcher's re-entry (`ocx launcher exec`) applies the same project env
     /// the parent composed.
     ///
@@ -83,7 +83,7 @@ pub mod keys {
     /// `Env` from the inherited environment, then re-applies the package's own
     /// entries on top — reverting exactly the overrides the project declared,
     /// with no signal to the user. A package that declares entrypoints
-    /// resolves *through* the launcher on the ordinary `ocx run` path, so this
+    /// resolves *through* the launcher on the ordinary `ocx exec` path, so this
     /// is the primary path, not a corner case.
     ///
     /// **Decode is untrusted input and fails closed on the whole payload.** An
@@ -422,7 +422,7 @@ impl Env {
     /// from: [`Env::new`] with the per-prompt shell reconciler's own
     /// contribution taken back out.
     ///
-    /// `ocx run -- cmd` names the environment it wants. The project toolchain
+    /// `ocx exec -- cmd` names the environment it wants. The project toolchain
     /// the reconciler happened to fold into the calling shell is not part of
     /// it, and letting it through is exactly the ambient-`PATH` pollution
     /// clean-env execution exists to prevent — ocx's own shell integration
@@ -435,7 +435,7 @@ impl Env {
     /// what it always meant.
     ///
     /// With no `__OCX_ENV_STATE` carrier — no shell integration, a CI runner,
-    /// a plain `ocx run` from an un-hooked shell — this is [`Env::new`],
+    /// a plain `ocx exec` from an un-hooked shell — this is [`Env::new`],
     /// variable for variable.
     pub fn inherited() -> Self {
         let mut env = Self::new();
@@ -589,7 +589,7 @@ impl Env {
         // resolution-affecting config field and deliberately does not live on
         // `OcxConfigView`. This half of the contract guarantees a stale
         // `OCX_ENV` — exported by a shell, or inherited from an unrelated
-        // parent `ocx run` — can never reach a child. The invocation that
+        // parent `ocx exec` — can never reach a child. The invocation that
         // genuinely has a payload writes it afterwards, through
         // [`Self::apply_child_env`].
         self.remove(keys::OCX_ENV);
@@ -1002,7 +1002,7 @@ impl crate::cli::ClassifyExitCode for ListSeparatorError {
 /// entries are read in iteration order, which is composition order.
 ///
 /// Takes an iterator rather than a slice because a caller's entries are not
-/// necessarily one contiguous `Vec` — `ocx run` composes the package set and
+/// necessarily one contiguous `Vec` — `ocx exec` composes the package set and
 /// forwards the project set as separate vectors, and agreement has to span
 /// both. Chain them: `composed.iter_mut().chain(project.iter_mut())`.
 ///
@@ -1225,7 +1225,7 @@ pub fn is_valid_env_key(key: &str) -> bool {
 /// reserves for its own resolution-affecting configuration.
 ///
 /// The single gate behind the rule that no env surface — project `[env]`,
-/// `[group.<name>.env]`, `ocx run --env`, the forwarded [`keys::OCX_ENV`]
+/// `[group.<name>.env]`, `ocx exec --env`, the forwarded [`keys::OCX_ENV`]
 /// payload, **package metadata**, and `ocx package create` — can set an `OCX_*`
 /// key. Without it a checked-in file could set `OCX_DEFAULT_REGISTRY`,
 /// `OCX_INDEX`, `OCX_MIRRORS`, `OCX_PATCHES`, `OCX_OFFLINE` or
@@ -1452,7 +1452,7 @@ fn encode_forwarded_env(entries: &[crate::package::metadata::env::entry::Entry])
 /// package entries.
 ///
 /// An absent or empty value yields an empty vector — a direct launcher
-/// invocation with no `ocx run` parent legitimately has no payload.
+/// invocation with no `ocx exec` parent legitimately has no payload.
 ///
 /// **The payload is untrusted input.** Each entry passes the same two gates the
 /// `ocx.toml` parse path applies — [`is_valid_env_key`] for the name grammar and
@@ -1719,7 +1719,7 @@ mod tests {
             .collect()
     }
 
-    /// The headline case: `ocx run` must not hand the child the toolchain the
+    /// The headline case: `ocx exec` must not hand the child the toolchain the
     /// per-prompt reconciler folded into the calling shell — while the user's
     /// own `PATH` additions and their own variables ride through untouched.
     ///
@@ -2027,7 +2027,7 @@ mod tests {
     /// author omit it, the decoder refuses a list without one, and the parent
     /// is the last process that knows what "omitted" resolved to — without
     /// this, `GODEBUG = { type = "list", value = "x" }` in `ocx.toml` would
-    /// exit 65 the moment `ocx run` went through an entrypoint launcher.
+    /// exit 65 the moment `ocx exec` went through an entrypoint launcher.
     #[test]
     fn forwarded_env_fills_in_the_effective_separator_for_a_list_without_one() {
         use crate::package::metadata::env::{entry::Entry, modifier::ModifierKind};
@@ -2130,7 +2130,7 @@ mod tests {
 
     /// An empty payload removes the key rather than writing an empty envelope,
     /// and an absent key decodes to an empty vector — a launcher invoked
-    /// directly (no `ocx run` parent) is the normal no-payload case.
+    /// directly (no `ocx exec` parent) is the normal no-payload case.
     #[test]
     fn forwarded_env_empty_payload_removes_key_and_decodes_empty() {
         let guard = crate::test::env::lock();
@@ -2153,7 +2153,7 @@ mod tests {
     }
 
     /// `apply_ocx_config` clears any inherited `OCX_ENV` so a stale shell
-    /// export — or a payload inherited from an unrelated parent `ocx run` —
+    /// export — or a payload inherited from an unrelated parent `ocx exec` —
     /// cannot leak into a child that has no project env of its own.
     #[test]
     fn apply_ocx_config_removes_stale_forwarded_env() {
@@ -2691,7 +2691,7 @@ mod tests {
     }
 
     /// Agreement has to span the caller's *whole* composition, which is not
-    /// one vector: `ocx run` composes the package entries and keeps the
+    /// one vector: `ocx exec` composes the package entries and keeps the
     /// project entries separate so it can forward only the latter. Chaining
     /// two `iter_mut()`s is the shape that has to work.
     #[test]

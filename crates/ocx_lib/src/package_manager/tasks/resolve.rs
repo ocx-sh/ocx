@@ -201,7 +201,7 @@ pub type SitePatchSet = HashMap<oci::PinnedIdentifier, CompanionOverlay>;
 /// Internal enum — no `#[non_exhaustive]` so matches stay total across the
 /// workspace (arch-principles: closed internal enum).
 pub enum EnvScope {
-    /// A project (or global) `ocx.toml` is in scope — `ocx run`, `ocx env`,
+    /// A project (or global) `ocx.toml` is in scope — `ocx exec`, `ocx env`,
     /// `ocx direnv export`, and the launcher re-entry replaying a forwarded
     /// payload.
     Project {
@@ -276,7 +276,7 @@ impl EnvScope {
 ///
 /// `debug`, never `warn`: shadowing is the *declared intent* of project `[env]`
 /// — the composition order exists precisely so a project can override what a
-/// package ships. Warning on the happy path would be noise on every `ocx run`
+/// package ships. Warning on the happy path would be noise on every `ocx exec`
 /// of a project that uses the feature as designed.
 ///
 /// Path entries are excluded because they prepend rather than replace: nothing
@@ -773,7 +773,7 @@ impl PackageManager {
     /// |---|---|
     /// | `[0 .. patch_start)` | `composer::compose` (package-composed env) |
     /// | `[patch_start .. patch_start + provenance.len())` | patch companion projections |
-    /// | the remainder | `scope`'s project / group `[env]` (+ `ocx run --env`) |
+    /// | the remainder | `scope`'s project / group `[env]` (+ `ocx exec --env`) |
     ///
     /// A companion admitted for more than one base contributes its projection
     /// **exactly once** to the middle region — the first matching admitted
@@ -933,7 +933,7 @@ impl PackageManager {
             }
         }
 
-        // Project / group `[env]` (plus any `ocx run --env`) as ordinary
+        // Project / group `[env]` (plus any `ocx exec --env`) as ordinary
         // entries, appended last: stages 4-6 of the composition order. Vector
         // position IS the precedence — `Env::apply_entries` replays the vector,
         // so a constant here replaces a package-declared one and a path entry
@@ -949,7 +949,7 @@ impl PackageManager {
         let contributed = scope.contributed_env();
         if !contributed.is_empty() {
             log_project_env_shadowing(&entries, contributed);
-            // The project `[env]` and `ocx run --env` surfaces each refuse a
+            // The project `[env]` and `ocx exec --env` surfaces each refuse a
             // reserved key at parse time, and do it as a hard error rather than
             // a skip. Re-filtering here is not that gate a second time: it is
             // what makes the resolver's own statement unconditional, so a
@@ -1110,7 +1110,7 @@ impl PackageManager {
         // launcher re-entry (AF1): a generated launcher resolves its base via
         // `install_info_from_package_root`, which mints a synthetic
         // `file-url-mode/<content-digest>` identifier with no real
-        // `registry/repository` — so `ocx run`'s forwarded opt-out (`run.rs`)
+        // `registry/repository` — so `ocx exec`'s forwarded opt-out (`toolchain_exec.rs`)
         // additionally carries the opted-out bases' content digests, and this leg
         // is what matches them. A system-required tier still applies regardless of
         // which leg matched: enforcement beats opt-out.
@@ -8052,7 +8052,7 @@ mod c036_reserved_key_gate {
     }
 
     /// C-036 — nothing leaves the resolver carrying a reserved key, including
-    /// the caller-contributed tail. The project `[env]` and `ocx run --env`
+    /// the caller-contributed tail. The project `[env]` and `ocx exec --env`
     /// surfaces each refuse these keys at parse time (a hard error); this is the
     /// resolver's own unconditional statement, so a future contributed source
     /// added without its own gate cannot reopen the hole.

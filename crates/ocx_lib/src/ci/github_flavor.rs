@@ -399,7 +399,7 @@ mod tests {
         targets.flush().unwrap();
 
         // C1a: last applied wins and lands at the front, matching
-        // `Env::add_path`'s in-process `ocx run` semantics. `/pkg2/lib` was
+        // `Env::add_path`'s in-process `ocx exec` semantics. `/pkg2/lib` was
         // written second, so it precedes `/pkg1/lib`.
         let content = read(&targets.env_file);
         assert_eq!(
@@ -426,7 +426,7 @@ mod tests {
         // C1a: last applied wins. Written order is pkg1 then pkg2, so the
         // resulting order is pkg2, pkg1, then whatever the process already
         // had — a later stage can now override an earlier one under `--ci`,
-        // exactly as it can under `ocx run`.
+        // exactly as it can under `ocx exec`.
         let content = read(&targets.env_file);
         assert_eq!(
             content,

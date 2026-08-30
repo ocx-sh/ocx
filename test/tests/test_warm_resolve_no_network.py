@@ -200,7 +200,7 @@ def _warm_commands(warm: WarmProject, *, group: str) -> list[tuple[str, ...]]:
         (*project, "add", "--group", group, warm.logical_id),
         (*project, "lock"),
         (*project, "pull"),
-        (*project, "run", "--", "hello"),
+        (*project, "exec", "--", "hello"),
         (*project, "env"),
         ("index", "list", warm.logical_id),
     ]
@@ -290,7 +290,7 @@ def test_warm_exec_and_run_succeed_with_the_index_and_the_registry_dead(
     )
 
     run_result = ocx.plain(
-        "--project", str(warm_project.project_toml), "run", "--", "hello", check=False
+        "--project", str(warm_project.project_toml), "exec", "--", "hello", check=False
     )
     assert run_result.returncode == 0, (
         f"a warm `ocx run` must not need either remote: rc={run_result.returncode}\n"

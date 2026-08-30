@@ -10,5 +10,5 @@ cd "$SCENARIO_TMP"
 ocx init
 ocx add "$PKG_KITWARE_CMAKE"
 ocx pull
-ocx run -- cmake --version
+ocx exec -- cmake --version
 # endregion cast

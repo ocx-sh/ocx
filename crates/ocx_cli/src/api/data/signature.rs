@@ -95,7 +95,7 @@ impl SignatureReport {
     /// `certificate_oidc_issuer` are read out of the Fulcio certificate this
     /// run received, so their content is the certificate authority's answer
     /// rather than ours. `identifier` reaches here as argv, which is still not
-    /// operator-authored under `ocx run` and a script-supplied identifier —
+    /// operator-authored under `ocx exec` and a script-supplied identifier —
     /// the same position `command/index_common.rs` already takes. The digests
     /// and the platform are typed values that cannot carry a control
     /// character, and are routed anyway: a filter applied per field has to be

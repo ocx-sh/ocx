@@ -21,7 +21,7 @@ container images.
 - **Project toolchains** — `ocx.toml` declares the tools a project needs and
   `ocx.lock` pins each one to a digest, so a fresh clone resolves to the exact
   same binaries.
-- **Clean environments** — `ocx run` and `ocx package exec` compose the
+- **Clean environments** — `ocx exec` and `ocx package exec` compose the
   environment for a child process only, without mutating the parent shell.
 - **Version switching** — every installed version stays addressable; selecting
   another is a symlink flip, not a reinstall.
@@ -37,7 +37,7 @@ ocx package exec cmake:4 -- cmake --version
 
 # Declare a project toolchain, then run against it
 ocx add cmake:4
-ocx run -- cmake --version
+ocx exec -- cmake --version
 ```
 
 ## Links

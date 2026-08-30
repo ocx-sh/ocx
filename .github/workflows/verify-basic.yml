@@ -48,10 +48,10 @@ jobs:
         with:
           version: '0.5.2'
       - name: Lint workflows
-        # `ocx run` composes the project toolchain (actionlint + shellcheck +
+        # `ocx exec` composes the project toolchain (actionlint + shellcheck +
         # go-task) from ocx.lock and runs the task hermetically — same gate as
         # local `task ci:actionlint`.
-        run: ocx run -- task ci:actionlint
+        run: ocx exec -- task ci:actionlint
 
   smoke:
     name: Smoke (Linux)

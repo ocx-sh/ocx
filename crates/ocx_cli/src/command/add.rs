@@ -39,7 +39,7 @@ use crate::options;
 ///
 /// Pass `--no-pull` to write only the manifest and lock without
 /// downloading; materialization is then deferred to `ocx pull` or the
-/// first `ocx run` / direnv hit.
+/// first `ocx exec` / direnv hit.
 ///
 /// `--pull` is the affirmative form of the default (redundant but
 /// accepted). Both flags use POSIX last-wins semantics (`overrides_with`):

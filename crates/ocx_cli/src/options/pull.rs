@@ -18,7 +18,7 @@ pub struct Pull {
 
     /// Skip materialization; resolve against local state only.
     /// Materialization is deferred to `ocx pull` or the first
-    /// `ocx run` / direnv hit.
+    /// `ocx exec` / direnv hit.
     #[clap(long = "no-pull", overrides_with = "pull")]
     no_pull: bool,
 }

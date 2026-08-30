@@ -210,7 +210,7 @@ def test_project_tool_shadows_global_in_project(
     assert _run_cmd(ocx, project, "pull").returncode == EXIT_SUCCESS
 
     # `ocx run` in the project resolves the PROJECT's `tool`, not the global.
-    result = _run_cmd(ocx, project, "run", "--", "tool")
+    result = _run_cmd(ocx, project, "exec", "--", "tool")
     assert result.returncode == EXIT_SUCCESS, (
         f"project run must resolve the project tool; stderr:\n{result.stderr}"
     )
@@ -271,7 +271,7 @@ def test_project_strict_isolation_global_bin_absent(
     # Bare `ocx run gonly` inside the project must fail (binding not in project).
     # This verifies project-tier exclusivity — the global tier is never consulted
     # by bare `run`, so `gonly` is genuinely out of scope.
-    result = _run_cmd(ocx, project, "run", "gonly", "--", "gonly")
+    result = _run_cmd(ocx, project, "exec", "gonly", "--", "gonly")
     assert result.returncode != EXIT_SUCCESS, (
         f"bare `ocx run gonly` inside a project must NOT resolve a global-only "
         f"tool (strict project-tier isolation — no PATH strip needed, scope is "
@@ -283,7 +283,7 @@ def test_project_strict_isolation_global_bin_absent(
     )
 
     # Project's own tool is still reachable via bare `run` (regression guard).
-    project_result = _run_cmd(ocx, project, "run", "--", "ptool")
+    project_result = _run_cmd(ocx, project, "exec", "--", "ptool")
     assert project_result.returncode == EXIT_SUCCESS, (
         f"project-tier tool must still be reachable via bare `ocx run`; "
         f"rc={project_result.returncode}\nstderr:\n{project_result.stderr}"
@@ -320,7 +320,7 @@ def test_run_is_hermetic_ignores_global(
 
     # `gonly` is only in the global file → project `run gonly` must fail with
     # a binding-not-found error (not silently fall back to the global tier).
-    result = _run_cmd(ocx, project, "run", "gonly", "--", "gonly")
+    result = _run_cmd(ocx, project, "exec", "gonly", "--", "gonly")
     assert result.returncode != EXIT_SUCCESS, (
         f"project run must NOT resolve a global-only tool (hermetic / strict "
         f"isolation); rc={result.returncode}\nstdout:\n{result.stdout}"
@@ -349,7 +349,7 @@ def test_home_ocx_toml_not_discovered_without_global(
     result = _run_cmd(
         ocx,
         empty,
-        "run",
+        "exec",
         "gonly",
         "--",
         "gonly",

@@ -1286,7 +1286,7 @@ def test_no_patches_opt_out_honored_across_launcher_in_run(
     # `ocx run -- showenv`: `showenv` resolves to the base's generated launcher on the
     # composed PATH; the launcher re-enters `ocx launcher exec` and dispatches to the
     # system `env`, dumping the launchered tool's real process env.
-    result = _run_in(ocx, project, "run", "--", "showenv")
+    result = _run_in(ocx, project, "exec", "--", "showenv")
     assert result.returncode == 0, (
         f"ocx run -- showenv must succeed; rc={result.returncode}\nstderr: {result.stderr}"
     )

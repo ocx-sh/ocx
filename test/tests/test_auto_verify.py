@@ -379,7 +379,7 @@ def test_run_is_policy_gated(
     assert lock.returncode == 0, f"lock setup failed: rc={lock.returncode}\nstderr: {lock.stderr.strip()}"
 
     result = subprocess.run(
-        [str(ocx.binary), "run", "--", "hello"],
+        [str(ocx.binary), "exec", "--", "hello"],
         cwd=project, capture_output=True, text=True, env={**ocx.env, **tuf_env},
     )
     assert result.returncode == 79, (

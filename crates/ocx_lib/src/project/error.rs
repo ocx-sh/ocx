@@ -287,7 +287,7 @@ pub enum ProjectErrorKind {
     /// whole operand, so the apply's own dedup never matches and each re-source
     /// prepends another copy. `utility::path::remove_segment` cannot take it out
     /// again either; both carry "a single directory with no `PATH_SEPARATOR`" as
-    /// a stated precondition. The reconciler drops the entry, but `ocx run`,
+    /// a stated precondition. The reconciler drops the entry, but `ocx exec`,
     /// `ocx exec`, `ocx env --shell` and `ocx direnv export` do not go through
     /// the reconciler, so the value is refused here as well — the boundary where
     /// the author sees which scope and key are wrong.

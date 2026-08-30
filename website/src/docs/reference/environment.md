@@ -67,7 +67,7 @@ You will not normally read or write this variable by hand. Two things about it a
 - **It is a deliberate exception to the private `__OCX_*` convention.** Every other `__OCX_*` variable is process-internal and never meant to be seen. This one has to cross the process boundary into your interactive shell — a child process cannot mutate its parent's environment any other way — and the moment a documented repair gesture exists for it (below), it is a user-facing contract whether or not the name looks internal.
 - **`unset __OCX_ENV_STATE` is the repair gesture** for a shell whose state has gone stale or whose carrier looks corrupted. See [Shell Integration → Repairing a stuck shell][in-depth-shell-repair] for what it costs — clearing the ledger also clears the memory of what the reconciler is allowed to restore.
 
-`is_reserved_ocx_key` already refuses this name everywhere ordinary env values are accepted — a package cannot declare it, `--env` cannot set it, and `ocx run` strips it from anything it would otherwise forward unchanged.
+`is_reserved_ocx_key` already refuses this name everywhere ordinary env values are accepted — a package cannot declare it, `--env` cannot set it, and `ocx exec` strips it from anything it would otherwise forward unchanged.
 
 ### `__OCX_ENV_PWD` {#ocx-env-pwd}
 
@@ -112,7 +112,7 @@ either way.
 
 This is **resolution-affecting**: it is forwarded to every subprocess `ocx`
 spawns via `apply_ocx_config`, so child invocations — generated launchers,
-nested `ocx run` calls — honor the same opt-in.
+nested `ocx exec` calls — honor the same opt-in.
 
 ### `OCX_ANNOUNCE_TOKEN` {#ocx-announce-token}
 
@@ -236,19 +236,19 @@ If neither is set, OCX uses `ocx.sh`.
 
 Selects the global toolchain tier — equivalent to the [`--global`][arg-global] CLI flag, but injectable via environment for CI and container setups where the command line is not controlled.
 
-When set to a [truthy value](#truthy-values), toolchain-tier commands (`add`, `remove`, `lock`, `update`, `pull`, `run`, `env`) target `$OCX_HOME/ocx.toml` instead of a discovered project file. Equivalent to passing the root flag `--global` (before the subcommand): `ocx --global add ripgrep:14`.
+When set to a [truthy value](#truthy-values), toolchain-tier commands (`add`, `remove`, `lock`, `update`, `pull`, `exec`, `env`) target `$OCX_HOME/ocx.toml` instead of a discovered project file. Equivalent to passing the root flag `--global` (before the subcommand): `ocx --global add ripgrep:14`.
 
 ```sh
 export OCX_GLOBAL=1
 ```
 
-This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx run` calls — see the same tier selection.
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx exec` calls — see the same tier selection.
 
-**No implicit fallback, for these tier-selecting commands only**: the earlier implicit `$OCX_HOME/ocx.toml` discovery (home-tier fallback) has been removed. `add`/`remove`/`lock`/`update`/`pull`/`run`/`env` target the global toolchain only when `--global` is explicitly passed or `OCX_GLOBAL` is set — absent both, they resolve against a discovered project file, never a silent home-tier fallback. This is a statement about which *file a command targets*, not about whether the global toolchain is active: the [per-prompt shell reconciler][in-depth-shell-integration] composes it into the live environment unconditionally, with neither flag set — see [`OCX_CONSENT_PATHS`](#ocx-consent-paths) above.
+**No implicit fallback, for these tier-selecting commands only**: the earlier implicit `$OCX_HOME/ocx.toml` discovery (home-tier fallback) has been removed. `add`/`remove`/`lock`/`update`/`pull`/`exec`/`env` target the global toolchain only when `--global` is explicitly passed or `OCX_GLOBAL` is set — absent both, they resolve against a discovered project file, never a silent home-tier fallback. This is a statement about which *file a command targets*, not about whether the global toolchain is active: the [per-prompt shell reconciler][in-depth-shell-integration] composes it into the live environment unconditionally, with neither flag set — see [`OCX_CONSENT_PATHS`](#ocx-consent-paths) above.
 
 `OCX_GLOBAL` and [`OCX_PROJECT`](#ocx-project) are mutually exclusive — setting both is a usage error (exit 64).
 
-**Strict isolation**: the global toolchain never composes into project-tier resolution. `ocx run` and `ocx package exec` are hermetic and never see global tools. Isolation is enforced by PATH precedence — project tools prepend before global tools when a project toolchain is active. See [Environment Composition — Strict isolation][env-composition-strict-isolation] for the full model.
+**Strict isolation**: the global toolchain never composes into project-tier resolution. `ocx exec` and `ocx package exec` are hermetic and never see global tools. Isolation is enforced by PATH precedence — project tools prepend before global tools when a project toolchain is active. See [Environment Composition — Strict isolation][env-composition-strict-isolation] for the full model.
 
 ::: warning
 This variable is mostly intended for testing.
@@ -426,7 +426,7 @@ value is either a plain string — redirecting both the `registry` and `index` r
 export OCX_MIRRORS='{"ghcr.io":"https://artifactory.example.com/ghcr-remote","index.ocx.sh":{"index":"https://artifactory.corp/ocx-index"}}'
 ```
 
-This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx run` calls — see the same mirror map.
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx exec` calls — see the same mirror map.
 
 `OCX_MIRRORS` overrides the [`[mirrors]`][config-mirrors] config key on a per-host, per-role basis. A role present in a host's `OCX_MIRRORS` entry replaces the config entry for that role only; roles and hosts absent from `OCX_MIRRORS` still come from `[mirrors]` in the config file.
 
@@ -454,7 +454,7 @@ For the full mirror semantics (replace behavior, auth, lockfile portability, int
 
 A JSON object encoding the resolved [`[patches]`][config-patches] tier. OCX serialises
 the active patch configuration into this variable and forwards it to every subprocess it
-spawns so child invocations — generated launchers, nested `ocx run` calls — apply the
+spawns so child invocations — generated launchers, nested `ocx exec` calls — apply the
 same companion overlay.
 
 ```sh
@@ -463,11 +463,11 @@ export OCX_PATCHES='{"registry":"registry.corp.example/ocx-patches","path_templa
 ```
 
 `no_patches` carries the forwarded project [per-package opt-out][patches-no-patches-scope]:
-[`ocx run`][cmd-run] injects the opted-out `registry/repository` keys plus, for each opted-out
+[`ocx exec`][cmd-run] injects the opted-out `registry/repository` keys plus, for each opted-out
 base actually resolved that run, its content digest — a generated launcher resolves its own
 base via a synthetic content-addressed identifier with no real `registry/repository`, so the
 digest is what a launcher's re-entry (`ocx launcher exec`) matches against. This lets a tool
-launched through `ocx run` honor the project's `no-patches` opt-out even after it re-enters ocx
+launched through `ocx exec` honor the project's `no-patches` opt-out even after it re-enters ocx
 through its own launcher. An empty (or absent) `no_patches` array is the byte-identical
 equivalent of no opt-out being forwarded at all.
 
@@ -502,7 +502,7 @@ A malformed `OCX_ENV` value — invalid JSON, or an entry with an unrecognized k
 
 A stale `OCX_ENV` inherited from a parent shell is removed before a child's own project/group `[env]` is applied, so it cannot leak into an unrelated invocation.
 
-**`OCX_*` and `__OCX_*` keys cannot be set from `ocx.toml`.** The project [`[env]`][config-project-env] table and every `[group.<name>.env]` reject any key starting `OCX_` or `__OCX_` at parse (exit 78); the [`ocx run --env`][cmd-run] flag rejects the same keys at flag-parse (exit 64). Without this, a checked-in file could set `OCX_DEFAULT_REGISTRY`, `OCX_INDEX`, `OCX_OFFLINE`, or any other variable in this reference and reconfigure how `ocx` itself resolves for every contributor who clones the repository — this is the same forwarding mechanism `OCX_ENV` uses above, closed at the source rather than only on decode.
+**`OCX_*` and `__OCX_*` keys cannot be set from `ocx.toml`.** The project [`[env]`][config-project-env] table and every `[group.<name>.env]` reject any key starting `OCX_` or `__OCX_` at parse (exit 78); the [`ocx exec --env`][cmd-run] flag rejects the same keys at flag-parse (exit 64). Without this, a checked-in file could set `OCX_DEFAULT_REGISTRY`, `OCX_INDEX`, `OCX_OFFLINE`, or any other variable in this reference and reconfigure how `ocx` itself resolves for every contributor who clones the repository — this is the same forwarding mechanism `OCX_ENV` uses above, closed at the source rather than only on decode.
 
 ### `OCX_MANAGED_CONFIG` {#ocx-managed-config}
 
@@ -512,7 +512,7 @@ The OCI reference for the [`[managed]`][config-managed] corporate-configuration 
 export OCX_MANAGED_CONFIG=internal.company.com/ocx-config:ci
 ```
 
-This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx run` calls — resolve the same managed tier.
+This variable is **resolution-affecting**: it is forwarded to every subprocess `ocx` spawns via `apply_ocx_config`, so child invocations — generated launchers, nested `ocx exec` calls — resolve the same managed tier.
 
 Runtime `OCX_MANAGED_CONFIG=""` is treated as unset, matching the [`OCX_CONFIG`](#ocx-config) precedent — useful when the variable is exported from a shell profile and you want to disable it for a single invocation without unsetting it.
 
@@ -658,7 +658,7 @@ This variable has no effect on non-macOS systems.
 
 ### `OCX_NO_VERIFY` {#ocx-no-verify}
 
-When set to a [truthy value](#truthy-values), OCX skips the policy-gated automatic signature verification on [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull], and on every command that auto-installs on demand — [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx run`][cmd-run], [`ocx env`][cmd-env-root], and patch discovery. Only `install` and `pull` also carry a `--verify`/`--no-verify` flag; the others opt out via this variable alone. It follows the same truthy/falsy rules as [`OCX_OFFLINE`](#ocx-offline).
+When set to a [truthy value](#truthy-values), OCX skips the policy-gated automatic signature verification on [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull], and on every command that auto-installs on demand — [`ocx package exec`][cmd-package-exec], [`ocx package env`][cmd-package-env], [`ocx exec`][cmd-run], [`ocx env`][cmd-env-root], and patch discovery. Only `install` and `pull` also carry a `--verify`/`--no-verify` flag; the others opt out via this variable alone. It follows the same truthy/falsy rules as [`OCX_OFFLINE`](#ocx-offline).
 
 By default, when a [`[[trust.policy]]`][cmd-trust-policy] covers a package being installed, OCX verifies its Sigstore signature at the metadata-first seam — after the manifest resolves, before any layer downloads — and aborts the install fail-closed if verification fails. This variable is the CI-wide opt-out. When a policy-covered package is skipped this way, OCX logs a single `WARN` per invocation so the bypass is never silent.
 
@@ -702,7 +702,7 @@ variable.
 
 ### `OCX_REMOTE` {#ocx-remote}
 
-When set to a [truthy value](#truthy-values), routes mutable lookups (tag list, catalog, tag→manifest resolution) to the remote registry instead of the local index. Pure-query commands (`ocx index list`, `ocx index catalog`, `ocx package info`) do **not** persist results to the local index — to refresh the snapshot, run [`ocx index update`][cmd-index-update] explicitly. Digest-addressed reads still consult the local index first (immutable content is safe to cache).
+When set to a [truthy value](#truthy-values), routes mutable lookups (tag list, catalog, tag→manifest resolution) to the remote registry instead of the local index. Pure-query commands (`ocx index list`, `ocx index catalog`, `ocx package description pull`) do **not** persist results to the local index — to refresh the snapshot, run [`ocx index update`][cmd-index-update] explicitly. Digest-addressed reads still consult the local index first (immutable content is safe to cache).
 
 Equivalent to passing the [`--remote`][arg-remote] flag on every invocation. See the user guide for the [routing model][indices-routing] and the [pinned-only mode][cmd-pinned-only-mode] (combined with `OCX_OFFLINE`).
 
@@ -766,7 +766,7 @@ Most CI systems (GitHub Actions, GitLab CI, Travis, etc.) set this automatically
 | [`GITLAB_CI`](#external-gitlab-ci) | [GitLab CI/CD][gitlab-ci-docs] | Provider auto-detection |
 
 ::: warning These variables are not forwarded to child `ocx` processes
-OCX's config-forwarding set propagates only `OCX_*` resolution-affecting variables to subprocesses (launchers, nested `ocx run`). The runner variables above are **not** in that set — a child `ocx` invocation will not inherit them. This is intentional: the CI sink files are runner-managed paths and must not propagate through forked environments.
+OCX's config-forwarding set propagates only `OCX_*` resolution-affecting variables to subprocesses (launchers, nested `ocx exec`). The runner variables above are **not** in that set — a child `ocx` invocation will not inherit them. This is intentional: the CI sink files are runner-managed paths and must not propagate through forked environments.
 :::
 
 ### `GITHUB_ACTIONS` {#external-github-actions}
@@ -907,7 +907,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cmd-index-update]: command-line.md#index-update
 [cmd-package-announce]: command-line.md#package-announce
 [cmd-patch-sync]: command-line.md#patch-sync
-[cmd-run]: command-line.md#run
+[cmd-run]: command-line.md#exec
 [cmd-pinned-only-mode]: command-line.md#pinned-only-mode
 [cmd-self-activate]: command-line.md#self-activate
 [cmd-self-setup]: command-line.md#self-setup

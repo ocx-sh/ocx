@@ -1135,7 +1135,7 @@ mod tests {
     /// A-10 puts a gate here **and** an independent one at the `[env]` parse
     /// boundary (`project::env::parse_env_value`, `EnvPathSeparatorInValue`,
     /// exit 65) — "independently" is the addendum's own word. Neither stands in
-    /// for the other: the parse-boundary refusal is what `ocx run`/`ocx exec`
+    /// for the other: the parse-boundary refusal is what `ocx exec`/`ocx exec`
     /// and the `--shell`/`direnv export` emitters see, and none of them reach
     /// the reconciler; this gate is what a value arriving from anywhere else
     /// meets, and it is what keeps `L ⊆ emittable(D)` true.

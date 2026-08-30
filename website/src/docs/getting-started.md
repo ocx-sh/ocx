@@ -141,7 +141,7 @@ Three commands set up the toolchain:
 
 <<< @/_scripts/getting-started/project-toolchain.sh{sh}
 
-[`ocx init`][cmd-init] writes a minimal `ocx.toml`. [`ocx add`][cmd-add] appends a binding, resolves the tag to per-platform digests, and writes `ocx.lock`. [`ocx run`][cmd-run] reads `ocx.lock` and spawns the command with the locked toolchain's environment — no manual `export` or PATH manipulation needed.
+[`ocx init`][cmd-init] writes a minimal `ocx.toml`. [`ocx add`][cmd-add] appends a binding, resolves the tag to per-platform digests, and writes `ocx.lock`. [`ocx exec`][cmd-run] reads `ocx.lock` and spawns the command with the locked toolchain's environment — no manual `export` or PATH manipulation needed.
 
 On bash, zsh, fish, PowerShell, and elvish, the toolchain lands on `PATH` automatically when you `cd` into the project — no extra setup beyond [`ocx self setup`][installation], which already wired the per-prompt hook (elvish's guard is narrower than the others' — details below). The `ocx add` above already wrote this project's [consent stamp][in-depth-shell-integration-consent], so it's ready: `cd` in and the locked tools are on `PATH` at the next prompt, `cd` out and they revert.
 
@@ -150,7 +150,7 @@ nushell and the shells with no append-safe prompt-hook point — the strict-POSI
 See [Shell Integration][in-depth-shell-integration] for the full per-shell coverage table and the consent model, and [`ocx direnv export`][cmd-direnv-export] for the export the fallback path emits.
 
 ::: tip Editor integration
-The [OCX VSCode extension][vscode-ext] (also on [Open VSX][openvsx-ext]) brings the project toolchain into your editor, so its terminal and tasks resolve the same locked binaries as [`ocx run`][cmd-run].
+The [OCX VSCode extension][vscode-ext] (also on [Open VSX][openvsx-ext]) brings the project toolchain into your editor, so its terminal and tasks resolve the same locked binaries as [`ocx exec`][cmd-run].
 :::
 
 See [Pin a project's tools][user-guide-project] in the User Guide for groups, lifecycle commands, and CI setup.
@@ -209,7 +209,7 @@ Environment variables and CLI flags always override config values. For full deta
 <!-- commands -->
 [cmd-init]: ./reference/command-line.md#init
 [cmd-add]: ./reference/command-line.md#add
-[cmd-run]: ./reference/command-line.md#run
+[cmd-run]: ./reference/command-line.md#exec
 [cmd-direnv-init]: ./reference/command-line.md#direnv-init
 [cmd-direnv-export]: ./reference/command-line.md#direnv-export
 [cmd-install]: ./reference/command-line.md#package-install

@@ -188,7 +188,7 @@ If your package declares [`entrypoints`][authoring-entry-points], consumers reac
 
 <!-- commands -->
 [cmd-exec]: ../reference/command-line.md#package-exec
-[cmd-run]: ../reference/command-line.md#run
+[cmd-run]: ../reference/command-line.md#exec
 
 <!-- configuration -->
 [config-project-env]: ../reference/configuration.md#project-config-env

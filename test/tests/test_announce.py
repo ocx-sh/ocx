@@ -185,7 +185,7 @@ def test_announce_out_writes_the_whole_entry_even_when_nothing_changed(
     make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     readme = tmp_path / "README.md"
     readme.write_text("# widget\n\nDoes widget things.\n")
-    ocx.plain("package", "describe", "--readme", str(readme), f"{ocx.registry}/{unique_repo}")
+    ocx.plain("package", "description", "push", "--readme", str(readme), f"{ocx.registry}/{unique_repo}")
     package = f"acme/{unique_repo}"
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)

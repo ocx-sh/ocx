@@ -21,7 +21,7 @@ use crate::options;
 /// `--save-readme` / `--save-logo` write a fixed filename and so require
 /// exactly one package.
 #[derive(Parser)]
-pub struct PackageInfo {
+pub struct PackageDescriptionPull {
     /// Save the README to this file or directory (single package only).
     #[clap(long)]
     save_readme: Option<PathBuf>,
@@ -35,7 +35,7 @@ pub struct PackageInfo {
     packages: Vec<options::Identifier>,
 }
 
-impl PackageInfo {
+impl PackageDescriptionPull {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifiers = options::Identifier::transform_all(self.packages.clone(), context.default_registry())?;
         options::Identifier::reject_duplicate_references(&identifiers)?;
@@ -194,18 +194,18 @@ mod tests {
 
     #[test]
     fn accepts_multiple_positionals() {
-        let cmd = PackageInfo::try_parse_from(["info", "a", "b"]).unwrap();
+        let cmd = PackageDescriptionPull::try_parse_from(["pull", "a", "b"]).unwrap();
         assert_eq!(cmd.packages.len(), 2);
     }
 
     #[test]
     fn single_positional_still_parses() {
-        let cmd = PackageInfo::try_parse_from(["info", "a"]).unwrap();
+        let cmd = PackageDescriptionPull::try_parse_from(["pull", "a"]).unwrap();
         assert_eq!(cmd.packages.len(), 1);
     }
 
     #[test]
     fn zero_positionals_is_rejected() {
-        assert!(PackageInfo::try_parse_from(["info"]).is_err());
+        assert!(PackageDescriptionPull::try_parse_from(["pull"]).is_err());
     }
 }

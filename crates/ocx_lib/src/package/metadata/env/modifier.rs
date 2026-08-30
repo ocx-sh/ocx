@@ -123,7 +123,7 @@ impl fmt::Display for ModifierKind {
 /// Carries `found` structurally rather than pre-formatting a message, so each
 /// caller can fold it into its own typed error: the `ocx.toml` parser into
 /// `ProjectErrorKind::EnvUnknownModifier` (exit 78 — a config-shape fault in a
-/// file), the `ocx run --env` parser into `cli::UsageError` (exit 64 — CLI
+/// file), the `ocx exec --env` parser into `cli::UsageError` (exit 64 — CLI
 /// misuse). One grammar, two exit codes.
 ///
 /// The remedy clause matters most to the reader who typed a type name a newer
@@ -141,7 +141,7 @@ impl FromStr for ModifierKind {
 
     /// The inverse of [`ModifierKind`]'s [`fmt::Display`], so the pair
     /// round-trips. Both spellings are consumer-authored — in a `{ type = … }`
-    /// table and in `ocx run --env KEY:TYPE=VALUE` — and a second hand-rolled
+    /// table and in `ocx exec --env KEY:TYPE=VALUE` — and a second hand-rolled
     /// match would let the two surfaces drift.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         match text {

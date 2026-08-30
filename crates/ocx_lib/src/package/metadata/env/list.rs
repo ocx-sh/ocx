@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// The separator assumed where one may be omitted.
 ///
-/// Only the human-facing surfaces (`ocx.toml`, `ocx run --env`) may omit it —
+/// Only the human-facing surfaces (`ocx.toml`, `ocx exec --env`) may omit it —
 /// and only when no other contributor to the same key established one. Package
 /// metadata is the wire, where no human is present to be told, so it must spell
 /// the separator out.
@@ -30,7 +30,7 @@ pub struct List {
     ///
     /// Required in package metadata, and refused there by `ValidMetadata`
     /// rather than by serde, so the message names the variable instead of a
-    /// field offset. Typed as optional because `ocx.toml` and `ocx run --env`
+    /// field offset. Typed as optional because `ocx.toml` and `ocx exec --env`
     /// may omit it.
     ///
     /// Deliberately no `skip_serializing_if`, unlike the tree's other optional
@@ -54,7 +54,7 @@ pub struct List {
 /// An empty separator degrades the flank match in
 /// [`append_unique`](crate::utility::list::append_unique) to a bare substring
 /// scan, which would delete text from the middle of unrelated elements. `=`
-/// is excluded because `ocx run --env KEY:list:SEP=VALUE` splits on the first
+/// is excluded because `ocx exec --env KEY:list:SEP=VALUE` splits on the first
 /// `=`, and one grammar that accepts what another cannot express is a trap.
 /// `\n` and `\r` are excluded because every export surface downstream is
 /// line-oriented — a CI env file, a shell snippet, a JSON-lines record — and a

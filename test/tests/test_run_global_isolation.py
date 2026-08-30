@@ -115,7 +115,7 @@ def test_bare_run_no_project_exits_64(
     empty.mkdir()
 
     result = _run_cmd(
-        ocx, empty, "run", "--", "echo", "hi",
+        ocx, empty, "exec", "--", "echo", "hi",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
 
@@ -154,7 +154,7 @@ def test_run_global_composes_global_toolchain_for_child(
     empty.mkdir()
 
     result = _run_cmd(
-        ocx, empty, "--global", "run", "--", "gtool",
+        ocx, empty, "--global", "exec", "--", "gtool",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
 
@@ -198,7 +198,7 @@ def test_bare_run_in_project_cannot_resolve_global_only_tool(
     assert _run_cmd(ocx, project, "pull").returncode == EXIT_SUCCESS
 
     # `gonly` is only in the global file → bare run inside project must fail.
-    result = _run_cmd(ocx, project, "run", "gonly", "--", "gonly")
+    result = _run_cmd(ocx, project, "exec", "gonly", "--", "gonly")
     assert result.returncode != EXIT_SUCCESS, (
         f"bare `ocx run` inside a project must NOT resolve a global-only tool "
         f"(strict project-tier isolation); "
@@ -242,7 +242,7 @@ def test_run_global_does_not_mutate_parent_env(
 
     # Run the child (gtool prints its binary path to stdout).
     result = _run_cmd(
-        ocx, empty, "--global", "run", "--", "gtool",
+        ocx, empty, "--global", "exec", "--", "gtool",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
     assert result.returncode == EXIT_SUCCESS, (
@@ -301,7 +301,7 @@ def test_run_produces_no_strip_subshell_output(
 
     # Path 1: bare run with no project (error path).
     bare_result = _run_cmd(
-        ocx, empty, "run", "--", "echo", "hi",
+        ocx, empty, "exec", "--", "echo", "hi",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
     assert bare_result.returncode == EXIT_USAGE, (
@@ -316,7 +316,7 @@ def test_run_produces_no_strip_subshell_output(
 
     # Path 2: --global run (success path).
     global_result = _run_cmd(
-        ocx, empty, "--global", "run", "--", "gtool",
+        ocx, empty, "--global", "exec", "--", "gtool",
         extra_env={"OCX_NO_PROJECT": "1"},
     )
     assert global_result.returncode == EXIT_SUCCESS, (

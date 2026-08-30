@@ -272,7 +272,7 @@ def test_project_env_list_entry_without_a_separator_inherits_the_package_separat
         ocx, tmp_path, "inherit", 'GODEBUG = { type = "list", value = "madvdontneed=1" }\n'
     )
 
-    result = _run_in(ocx, project, "run", "--", "env")
+    result = _run_in(ocx, project, "exec", "--", "env")
     assert result.returncode == EXIT_SUCCESS, result.stderr
     assert _dumped_value(result.stdout, "GODEBUG") == "gctrace=1,madvdontneed=1", (
         f"the project's entry must inherit the package's comma separator; stdout:\n{result.stdout}"
@@ -293,7 +293,7 @@ def test_env_flag_conflicting_separator_with_package_established_one_exits_data_
     """
     project = _make_toolchain_project_with_list_var(ocx, tmp_path, "conflict", "")
 
-    result = _run_in(ocx, project, "run", "--env", "GODEBUG:list:;=extra", "--", "env")
+    result = _run_in(ocx, project, "exec", "--env", "GODEBUG:list:;=extra", "--", "env")
     assert result.returncode == EXIT_DATA_ERR, (
         f"expected exit {EXIT_DATA_ERR} (DataError); got {result.returncode}\nstderr:\n{result.stderr}"
     )

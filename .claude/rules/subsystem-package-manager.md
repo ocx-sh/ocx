@@ -172,7 +172,7 @@ The slug is `to_slug(identifier.to_string())` — replaces all non-alphanumeric 
 
 - **Parallel** (via `JoinSet`): `pull_all`, `install_all` (all three phases), `find_all`, `find_or_install_all`, `inspect_all`, `resolve_all`; `resolve_lock`/`resolve_lock_touched` (project-tier, via `resolve_work`); `inspect`'s `--closure` closure gather (`gather_closure_nodes`, bounded to `CLOSURE_FETCH_CONCURRENCY = 8` concurrent fetches, digest-deduped frontier, results indexed for deterministic ordering)
 - **Sequential**: `find_symlink_all`, `uninstall_all`, `deselect_all`, `clean`, `select_all` (resolve phase is parallel via `find_all`; only the `current` wire-up loops sequentially) — all local-only (no per-item network), so sequential is correct
-- **CLI-layer fan-outs** (index-tagged, input order preserved): `package info` and `pull --dry-run` via `JoinSet`; `index update` and `index sync` via the shared **bounded** `buffer_unordered` in `command/index_common.rs`, which states a ≤ 512 in-flight ceiling. Any new multi-package CLI command doing per-item network work MUST fan out this way, not loop `for … { …await }` — and a catalog-sized work set MUST use the bounded form.
+- **CLI-layer fan-outs** (index-tagged, input order preserved): `package description pull` and `pull --dry-run` via `JoinSet`; `index update` and `index sync` via the shared **bounded** `buffer_unordered` in `command/index_common.rs`, which states a ≤ 512 in-flight ceiling. Any new multi-package CLI command doing per-item network work MUST fan out this way, not loop `for … { …await }` — and a catalog-sized work set MUST use the bounded form.
 
 ## Garbage Collection: canonical-path keying
 

@@ -36,7 +36,7 @@ use crate::{
 
 /// Finds a package in the object store without index resolution.
 ///
-/// The identifier must carry a digest. Returns the installed package info if
+/// The identifier must carry a digest. Returns the installed package description pull if
 /// present, or `None` if the object is absent. Also serves as defense layer 2
 /// in the concurrent pull safety model.
 ///

@@ -168,7 +168,7 @@ impl Lock {
 /// the network or the lock file. Reuses the existing project-context
 /// prologue so the staleness gate (`StaleLock` → exit 65) and missing-
 /// lock gate (`LockMissing` → exit 78) are byte-identical to what
-/// `ocx run` and `ocx pull` already enforce. Success returns exit 0.
+/// `ocx exec` and `ocx pull` already enforce. Success returns exit 0.
 async fn run_check(context: &crate::app::Context) -> anyhow::Result<ExitCode> {
     // All `ProjectContextError` variants classify at the `main.rs` boundary
     // (NoProject→64, LockMissing→78, StaleLock→65); propagate and let the

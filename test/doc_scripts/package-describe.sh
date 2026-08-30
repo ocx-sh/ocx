@@ -8,6 +8,6 @@ cd "$SCENARIO_TMP"
 # region cast
 ocx package create build -m metadata.json -o mytool-1.0.0.tar.xz -p linux/amd64
 ocx package push -i acme/mytool:1.0.0 mytool-1.0.0.tar.xz
-ocx package describe --readme README.md --title "mytool" --description "A small example tool" acme/mytool
-ocx package info acme/mytool
+ocx package description push --readme README.md --title "mytool" --description "A small example tool" acme/mytool
+ocx package description pull acme/mytool
 # endregion cast

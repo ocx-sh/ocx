@@ -10,7 +10,7 @@
 //! `-g/--group` scopes composition: omitted → the top-level `[tools]` table;
 //! `-g <group>` → only that group; `-g default -g lint` → both; `-g all` →
 //! `default` + every declared `[group.*]`. (Omitting `-g` yields the default
-//! group only, like `ocx run` — unlike `ocx pull`, which warms every group
+//! group only, like `ocx exec` — unlike `ocx pull`, which warms every group
 //! when `-g` is omitted.) The reserved names `all`/`default` are rejected as
 //! literal `[group.*]` keys at config parse time.
 //!
@@ -46,7 +46,7 @@
 //! - **project** (no `--global`) routes through `load_project_with_lock` +
 //!   `compose_tool_set`. Materialization is gated by the `--[no-]pull` pair
 //!   (`options::Pull`, eager default): the default runs the **single batched**
-//!   `find_or_install_all` over all composed identifiers (mirrors `run.rs` — a
+//!   `find_or_install_all` over all composed identifiers (mirrors `toolchain_exec.rs` — a
 //!   present lock-pinned tool resolves locally with no network; only a genuine
 //!   miss falls through to pull). `--no-pull` opts out: it probes the local
 //!   store through an offline `PackageManager` clone, warning + omitting a
@@ -268,7 +268,7 @@ impl ToolchainEnv {
         // Same parse-level class as the group check, so it runs beside it and
         // before the slower emit-channel resolution below. A relative `:path`
         // value anchors to the invocation directory, exactly as under
-        // `ocx run` — and it is resolved to an absolute value here, so an
+        // `ocx exec` — and it is resolved to an absolute value here, so an
         // emitted export line means the same thing wherever it is evaluated.
         let cwd = std::env::current_dir()
             .map_err(|error| anyhow::Error::from(error).context("failed to read the current directory"))?;
@@ -340,7 +340,7 @@ impl ToolchainEnv {
             crate::app::project_context::ensure_groups_known(self.groups.names(), &ctx.config)?;
 
             // Expand `all` in place, then promote an empty scope to the default
-            // group — identical to `ocx run` Phase C.
+            // group — identical to `ocx exec` Phase C.
             let mut expanded = expand_all_keyword(self.groups.names(), &ctx.config);
             if expanded.is_empty() {
                 expanded = vec![DEFAULT_GROUP.to_owned()];
@@ -385,9 +385,9 @@ impl ToolchainEnv {
             let infos: Vec<Arc<ocx_lib::package::install_info::InstallInfo>> = roots.roots;
             // Per-package opt-out from the in-scope project `ocx.toml`, plus
             // its `[env]`, each selected group's `[env]`, and `--env` last —
-            // stages 4-6, assembled exactly as `ocx run` assembles them.
+            // stages 4-6, assembled exactly as `ocx exec` assembles them.
             // Uniformity is structural: both append to the same entry vector,
-            // so what this command prints IS what `ocx run` applies. That
+            // so what this command prints IS what `ocx exec` applies. That
             // equivalence is the reason `--env` belongs here at all — a caller
             // that builds an argv array must be able to export the environment
             // it would otherwise execute in.
@@ -723,7 +723,7 @@ mod tests {
     }
 
     /// `--env` reaches the composition on this command too, so an exporter can
-    /// print the environment the equivalent `ocx run` would execute in. Parsing
+    /// print the environment the equivalent `ocx exec` would execute in. Parsing
     /// is `options::EnvOverride`'s own contract; this pins only the wiring.
     #[test]
     fn parses_repeatable_env_flag() {

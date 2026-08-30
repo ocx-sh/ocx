@@ -174,7 +174,7 @@ def test_offline_project_toolchain_run_succeeds_from_copied_store(
     fresh_env = {**ocx.env, "OCX_HOME": str(fresh_home), "OCX_OFFLINE": "1"}
 
     result = subprocess.run(
-        [str(ocx.binary), "run", "--", bin_name],
+        [str(ocx.binary), "exec", "--", bin_name],
         cwd=project,
         capture_output=True,
         text=True,

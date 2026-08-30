@@ -5,7 +5,7 @@ outline: deep
 
 A repository's contributors and CI runners need the same tool versions — `cmake 3.28`, `shellcheck 0.11`, `goreleaser 2.0` — without arguing over chat or curl-piping installers. Earlier reproducibility mechanisms ([digest pin][in-depth-versioning-locking], [snapshot pin][in-depth-indices-local], [bundled snapshot][in-depth-indices-bundled]) describe how a *single* invocation freezes its inputs; none of them describe what the *project itself* expects.
 
-A committed [`ocx.toml`][project-toml] plus its sibling [`ocx.lock`][project-lock] closes that gap. The pair makes "the tools this project needs" a piece of source code — reviewable in pull requests, mergeable across branches, reproducible across machines, and resolvable offline once the lock is fetched. The user-facing surface — `ocx init`, `ocx add`, `ocx lock`, `ocx pull`, `ocx run` — lives in the [project section of the user guide][user-project]. This page explains the file formats, the locking contract, the group resolution model, and what reproducibility guarantees actually ship today.
+A committed [`ocx.toml`][project-toml] plus its sibling [`ocx.lock`][project-lock] closes that gap. The pair makes "the tools this project needs" a piece of source code — reviewable in pull requests, mergeable across branches, reproducible across machines, and resolvable offline once the lock is fetched. The user-facing surface — `ocx init`, `ocx add`, `ocx lock`, `ocx pull`, `ocx exec` — lives in the [project section of the user guide][user-project]. This page explains the file formats, the locking contract, the group resolution model, and what reproducibility guarantees actually ship today.
 
 ## Declaring tools — `ocx.toml` {#toml}
 
@@ -36,7 +36,7 @@ The project file describes tools the project needs, not how a contributor's shel
 
 `ocx.toml` declares advisory tags; the registry resolves those tags to immutable digests. To make the project reproducible, [`ocx lock`][cmd-lock] resolves every tag once and writes the result to `ocx.lock` next to `ocx.toml`. Subsequent commands read the lock, never the registry, so two machines running [`ocx pull`][cmd-pull] from the same commit get the same bytes.
 
-The lock carries a `declaration_hash` over the canonicalized `ocx.toml` ([RFC 8785 JCS][rfc-8785]). When you change `ocx.toml`, the hash changes; commands that depend on the lock ([`ocx pull`][cmd-pull], [`ocx run`][cmd-run]) detect the mismatch and refuse to run with stale digests. Re-run [`ocx lock`][cmd-lock] to regenerate the file.
+The lock carries a `declaration_hash` over the canonicalized `ocx.toml` ([RFC 8785 JCS][rfc-8785]). When you change `ocx.toml`, the hash changes; commands that depend on the lock ([`ocx pull`][cmd-pull], [`ocx exec`][cmd-run]) detect the mismatch and refuse to run with stale digests. Re-run [`ocx lock`][cmd-lock] to regenerate the file.
 
 ### Lock format — per-platform leaf digests {#lock-format}
 
@@ -113,25 +113,25 @@ The two commands that intentionally advance version pins are:
 | `ocx lock` | Only when `ocx.toml` drifted (whole-file reconcile; a moving tag may advance) |
 | `ocx update` | Whole file by default; `-g GROUP` / `NAME` scopes it to a named subset (those advance, the rest stay frozen) |
 
-Groups are primarily a **composition concern** — they scope which tools `ocx run`, `ocx env`, and `ocx pull` see. `ocx lock` ignores them and always reconciles the whole file. `ocx update` is the exception: passing `-g GROUP` or a binding `NAME` advances only that subset and carries every other pin forward verbatim, just like `ocx add` and `ocx remove` do for the bindings they touch.
+Groups are primarily a **composition concern** — they scope which tools `ocx exec`, `ocx env`, and `ocx pull` see. `ocx lock` ignores them and always reconciles the whole file. `ocx update` is the exception: passing `-g GROUP` or a binding `NAME` advances only that subset and carries every other pin forward verbatim, just like `ocx add` and `ocx remove` do for the bindings they touch.
 
 ## Pulling and executing {#pull-exec}
 
-Once `ocx.lock` exists, two commands cover the bulk of day-to-day use. [`ocx pull`][cmd-pull] pre-warms the [package store][in-depth-storage-packages] from the lock without creating install symlinks — ideal for CI matrix builds and developer machines that already have a [direnv][direnv] hook in place. [`ocx run`][cmd-run] spawns a child with the project's resolved environment, treating the lock as the source of truth (project-tier counterpart to OCI-tier [`ocx package exec`][cmd-exec]).
+Once `ocx.lock` exists, two commands cover the bulk of day-to-day use. [`ocx pull`][cmd-pull] pre-warms the [package store][in-depth-storage-packages] from the lock without creating install symlinks — ideal for CI matrix builds and developer machines that already have a [direnv][direnv] hook in place. [`ocx exec`][cmd-run] spawns a child with the project's resolved environment, treating the lock as the source of truth (project-tier counterpart to OCI-tier [`ocx package exec`][cmd-exec]).
 
 Both gate on the lock's `declaration_hash`: if `ocx.toml` has changed since the lock was generated, the command exits with a structured error pointing at [`ocx lock`][cmd-lock]. There is no implicit re-resolution — the project file is the input, the lock file is the contract, and registry round-trips happen only when you ask for them.
 
 ## Running tools {#running}
 
-Once `ocx.lock` is current, [`ocx run`][cmd-run] spawns a child process whose environment is composed from the lock's resolved tool set. It is the project-tier counterpart to the OCI-tier [`ocx package exec`][cmd-exec]: the same child-spawn mechanics, but symbols are binding names from `ocx.toml` rather than OCI identifiers.
+Once `ocx.lock` is current, [`ocx exec`][cmd-run] spawns a child process whose environment is composed from the lock's resolved tool set. It is the project-tier counterpart to the OCI-tier [`ocx package exec`][cmd-exec]: the same child-spawn mechanics, but symbols are binding names from `ocx.toml` rather than OCI identifiers.
 
 ### Argument shape {#running-shape}
 
 ```shell
-ocx run [-g GROUP[,GROUP,...]]... [NAME...] -- ARGV...
+ocx exec [-g GROUP[,GROUP,...]]... [NAME...] -- ARGV...
 ```
 
-`--` is mandatory. At least one token after `--` is required. A user typing `ocx run cmake` (no `--`) receives exit 64. A user typing `ocx run -- echo hi` (no NAME) composes every binding in the default scope and executes `echo hi` in the resulting environment.
+`--` is mandatory. At least one token after `--` is required. A user typing `ocx exec cmake` (no `--`) receives exit 64. A user typing `ocx exec -- echo hi` (no NAME) composes every binding in the default scope and executes `echo hi` in the resulting environment.
 
 ### Scope semantics {#running-scope}
 
@@ -139,11 +139,11 @@ The scope controls which groups contribute to the composed environment.
 
 | Invocation | Scope |
 |---|---|
-| `ocx run -- CMD` | Default group (`[tools]`) only — matches `ocx pull` precedent |
-| `ocx run -g ci -- CMD` | `[group.ci]` only |
-| `ocx run -g ci,release -- CMD` | `[group.ci]` and `[group.release]` |
-| `ocx run -g all -- CMD` | `[tools]` + every declared `[group.*]` |
-| `ocx run cmake -- CMD` | Default scope, then filter to the `cmake` binding only |
+| `ocx exec -- CMD` | Default group (`[tools]`) only — matches `ocx pull` precedent |
+| `ocx exec -g ci -- CMD` | `[group.ci]` only |
+| `ocx exec -g ci,release -- CMD` | `[group.ci]` and `[group.release]` |
+| `ocx exec -g all -- CMD` | `[tools]` + every declared `[group.*]` |
+| `ocx exec cmake -- CMD` | Default scope, then filter to the `cmake` binding only |
 
 `-g all` is the "everything" form. Omitting `-g` does not imply everything — it means the default group. The `all` keyword is reserved: `[group.all]` in `ocx.toml` is rejected at parse time (exit 78); `ocx add --group all` is rejected at mutate time (exit 64).
 
@@ -153,7 +153,7 @@ The scope controls which groups contribute to the composed environment.
 
 This rule determines iteration order through the resolved tool set. The composer applies env entries by **prepending**, so the **last tool walked** has its PATH entries placed **first** on the resolved PATH at runtime. In other words: in `-g` argument order, **groups listed later win** PATH lookup. This matches the load-bearing prepend invariant in `composer.rs` ([source][composer-source]) — entries pushed later in iteration land first on PATH.
 
-`all` expansion inserts groups alphabetically by group name in place of `all` in the `-g` argument list, after the default group. So `ocx run -g ci,all,release` expands to `[ci, default, ci_alpha_ordered_named_groups..., release]` and then `compose_tool_set` deduplicates.
+`all` expansion inserts groups alphabetically by group name in place of `all` in the `-g` argument list, after the default group. So `ocx exec -g ci,all,release` expands to `[ci, default, ci_alpha_ordered_named_groups..., release]` and then `compose_tool_set` deduplicates.
 
 ### Project and group `[env]` {#running-project-env}
 
@@ -169,7 +169,7 @@ SOURCE_DATE_EPOCH = "0"
 SOURCE_DATE_EPOCH = "1700000000"
 ```
 
-`ocx run -g ci -- CMD` composes the project's own `[env]` (stage 4) and then `[group.ci.env]` (stage 5) — the later stage wins, so the child sees `SOURCE_DATE_EPOCH=1700000000`. This is the same later-wins rule the group-selection order above already applies to `-g ci,release`, but what "wins" means depends on the type: for `constant` entries, whichever `[env]` stage runs later replaces an earlier one for the same key; for `path` entries the later stage prepends ahead of the earlier one; for [`list`][metadata-env-list] entries the later stage appends after it instead of replacing or prepending anything — see [Append Semantics][env-composition-list] for the fold direction and the per-key separator agreement.
+`ocx exec -g ci -- CMD` composes the project's own `[env]` (stage 4) and then `[group.ci.env]` (stage 5) — the later stage wins, so the child sees `SOURCE_DATE_EPOCH=1700000000`. This is the same later-wins rule the group-selection order above already applies to `-g ci,release`, but what "wins" means depends on the type: for `constant` entries, whichever `[env]` stage runs later replaces an earlier one for the same key; for `path` entries the later stage prepends ahead of the earlier one; for [`list`][metadata-env-list] entries the later stage appends after it instead of replacing or prepending anything — see [Append Semantics][env-composition-list] for the fold direction and the per-key separator agreement.
 
 ### PATH precedence consequence {#running-path-precedence}
 
@@ -178,7 +178,7 @@ Two groups may declare different bindings whose installed packages happen to shi
 Concrete example: `[tools]` declares `cmake = "ocx.sh/kitware/cmake:3.28"` (ships `cmake`). `[group.ci]` declares `toolchain = "ocx.sh/some-toolchain:1"` (also ships a `cmake` binary). Running:
 
 ```shell
-ocx run -g default,ci -- cmake --version
+ocx exec -g default,ci -- cmake --version
 ```
 
 resolves `cmake` from `[group.ci]`'s `toolchain` — `ci` is iterated last, so its PATH entries land first on the child's PATH. Running `-g ci,default` flips the order: `default`'s `cmake` lands first instead. There is no error for this case: the two bindings are different names (`cmake` vs `toolchain`), so `compose_tool_set` composes them both; the group listed **later** in `-g` wins PATH lookup.
@@ -203,7 +203,7 @@ Exit codes 64 and 78 for clap-level failures: OCX remaps clap's default exit 2 t
 
 ### Layer purity {#running-layer-purity}
 
-`ocx run` never falls back to OCI-tier behavior. If `ocx.toml` is absent, it exits 64 rather than re-parsing the NAME arguments as OCI identifiers. This makes the behavior stable across directory changes and prevents embedding scripts from silently switching contracts.
+`ocx exec` never falls back to OCI-tier behavior. If `ocx.toml` is absent, it exits 64 rather than re-parsing the NAME arguments as OCI identifiers. This makes the behavior stable across directory changes and prevents embedding scripts from silently switching contracts.
 
 `ocx package exec` remains unchanged — it never consults `ocx.toml` even when one is present.
 
@@ -265,7 +265,7 @@ nushell and the shells with no append-safe prompt-hook point — the strict-POSI
 
 [`ocx direnv export`][cmd-direnv-export] is the [direnv][direnv] entry point. It is stateless — it emits a fresh export block on every invocation. [direnv][direnv] supplies the cache layer (one re-evaluation per `cd`, watched files re-trigger), so the export stays simple. Run [`ocx direnv init`][cmd-direnv-init] in a project directory to drop a ready-made `.envrc`, then `direnv allow`.
 
-For scripted environments and CI, call [`ocx run`][cmd-run] directly — it composes the project toolchain env and spawns the target command without any persistent shell state, on every shell including the ones the per-prompt hook already covers.
+For scripted environments and CI, call [`ocx exec`][cmd-run] directly — it composes the project toolchain env and spawns the target command without any persistent shell state, on every shell including the ones the per-prompt hook already covers.
 
 ::: tip Learn more
 [Shell Integration][in-depth-shell-integration] — the per-prompt hook, the consent grants that gate it, and [`ocx shell state`][cmd-shell-state] for diagnosing an inert shell.
@@ -278,7 +278,7 @@ A user-wide `ocx.toml` at [`$OCX_HOME`][env-ocx-home]`/ocx.toml` (default `~/.oc
 The global file uses the same [schema][schema-project] and lock semantics as a project file. The lock lives at `$OCX_HOME/ocx.lock`. Unlike the old home-tier fallback, the global toolchain is **never discovered implicitly** — the CWD walk does not activate it. You must pass `--global` or set `OCX_GLOBAL`.
 
 ::: warning Global and project tools are isolated by PATH precedence
-`ocx run` and `ocx package exec` are always hermetic: the global toolchain is never consulted during project-tier resolution. Global tools remain on `PATH` (there is no strip), but project-declared tools are **prepended** by the active hook, so they shadow any same-named global tools. See [Strict isolation][env-composition-strict-isolation] for the full model.
+`ocx exec` and `ocx package exec` are always hermetic: the global toolchain is never consulted during project-tier resolution. Global tools remain on `PATH` (there is no strip), but project-declared tools are **prepended** by the active hook, so they shadow any same-named global tools. See [Strict isolation][env-composition-strict-isolation] for the full model.
 :::
 
 For managing global tools day-to-day, see [Keep everyday tools available everywhere][user-guide-global] in the user guide. To opt out of project-tier discovery entirely for a single invocation, set [`OCX_NO_PROJECT=1`][env-no-project].
@@ -302,7 +302,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 ## See Also
 
 - [User guide → Pin a project's tools][user-project] — task-driven overview.
-- [User guide → Run tools from your project][user-run] — quick-start examples for `ocx run`.
+- [User guide → Run tools from your project][user-run] — quick-start examples for `ocx exec`.
 - [User guide → Keep everyday tools available everywhere][user-guide-global] — global toolchain use-case narrative.
 - [Environment Composition reference][env-composition-strict-isolation] — reference-level statement of the strict isolation rule.
 - [Indices In Depth][in-depth-indices] — how `ocx pull` reads the lock and where the registry round-trips happen.
@@ -336,7 +336,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 [cmd-lock]: ../reference/command-line.md#lock
 [cmd-pull]: ../reference/command-line.md#pull
 [cmd-remove]: ../reference/command-line.md#remove
-[cmd-run]: ../reference/command-line.md#run
+[cmd-run]: ../reference/command-line.md#exec
 [cmd-direnv-export]: ../reference/command-line.md#direnv-export
 [cmd-direnv-init]: ../reference/command-line.md#direnv-init
 [cmd-shell-state]: ../reference/command-line.md#shell-state
@@ -358,7 +358,7 @@ In practice, the v1 contract is sufficient for the most common reproducibility n
 
 <!-- cross-page -->
 [user-project]: ../user-guide.md#project
-[user-run]: ../user-guide.md#run
+[user-run]: ../user-guide.md#exec
 [user-guide-global]: ../user-guide.md#global-toolchain
 [env-composition-strict-isolation]: ../reference/env-composition.md#strict-isolation
 [env-composition-project-env]: ../reference/env-composition.md#project-env

@@ -106,7 +106,7 @@ pub struct ResolvedPatchConfig {
     ///
     /// Empty for a plain config-file tier — the opt-out is a project-toolchain
     /// concern ([`crate::project::ProjectConfig::no_patches_repositories`]) that
-    /// only the command layer holds. `ocx run` injects it into the forwarding
+    /// only the command layer holds. `ocx exec` injects it into the forwarding
     /// view so a generated launcher's re-entry (`ocx launcher exec`) honours the
     /// same opt-out that suppressed the parent's exported vars — closing the gap
     /// where the launcher re-injected an opted-out companion. Carried across the

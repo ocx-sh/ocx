@@ -9,5 +9,5 @@ cd "$SCENARIO_TMP"
 # region cast
 ocx init
 ocx add -g ci "$PKG_ASTRAL_SH_UV"
-ocx run -g ci -- uv --version
+ocx exec -g ci -- uv --version
 # endregion cast

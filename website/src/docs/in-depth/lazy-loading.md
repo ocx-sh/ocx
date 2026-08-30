@@ -3,9 +3,9 @@ outline: deep
 ---
 # Deferred Tools {#deferred-tools}
 
-A project toolchain can declare a dozen tools and use three of them in any given job — a monorepo's `ocx.toml` might list every compiler, linter, and formatter the team owns, while a single CI step runs `eslint` and nothing else. [`ocx env`][cmd-env-root] and [`ocx run`][cmd-run] compose the whole declared set by default, which means every tool's content downloads before the job's first command even starts.
+A project toolchain can declare a dozen tools and use three of them in any given job — a monorepo's `ocx.toml` might list every compiler, linter, and formatter the team owns, while a single CI step runs `eslint` and nothing else. [`ocx env`][cmd-env-root] and [`ocx exec`][cmd-run] compose the whole declared set by default, which means every tool's content downloads before the job's first command even starts.
 
-`lazy-mode` changes when a tool's content downloads, not what ends up composed. A tool set to `always` still lands on `PATH` immediately — its declared names resolve, `ocx package which` finds it, `ocx run <name>` sees it in scope — but the bytes behind it stay unfetched until the first invocation of one of its names. A job that never calls `eslint` never pays for it.
+`lazy-mode` changes when a tool's content downloads, not what ends up composed. A tool set to `always` still lands on `PATH` immediately — its declared names resolve, `ocx package which` finds it, `ocx exec <name>` sees it in scope — but the bytes behind it stay unfetched until the first invocation of one of its names. A job that never calls `eslint` never pays for it.
 
 ## Composing a shim {#deferred-tools-compose}
 
@@ -51,7 +51,7 @@ Once materialized, the tool's real `entrypoints/` directory outranks the shim on
 
 ### Progress during the download {#deferred-tools-report}
 
-`lazy-report` controls whether that first-invocation download renders progress. It cannot be a flag on `ocx env` or `ocx run`, because the process rendering it — `ocx launcher shim` — is a separate process the shell already exec'd into by the time any content moves; nothing survives from the composing command to tell it what to show. `lazy-report` therefore resolves independently, inside the shim process itself, from its own four-tier ladder — one tier shorter than `lazy-mode`'s, because there is no group to consult once composition is over:
+`lazy-report` controls whether that first-invocation download renders progress. It cannot be a flag on `ocx env` or `ocx exec`, because the process rendering it — `ocx launcher shim` — is a separate process the shell already exec'd into by the time any content moves; nothing survives from the composing command to tell it what to show. `lazy-report` therefore resolves independently, inside the shim process itself, from its own four-tier ladder — one tier shorter than `lazy-mode`'s, because there is no group to consult once composition is over:
 
 | Tier | Source |
 |------|--------|
@@ -75,7 +75,7 @@ Some `metadata.json` shapes only substitute cleanly once a package's content is 
 
 A shim directory is kept alive by the same lock-pinned root set that keeps an eagerly-installed package alive — [`ocx clean`][cmd-clean] regenerates a collected shim on the next compose, exactly as it would re-pull a collected package.
 
-[`ocx clean --force`][cmd-clean] is the one case where this differs from an installed package. A deferred tool has no [install symlink][fs-symlinks] pointing at it — only the lock pins reference it — and `--force`'s entire purpose is to suppress the lock-pinned root set for the run. So `--force` collects every shim directory unconditionally, the same way it already collects an unsymlinked eager package. The next `ocx env` or `ocx run` regenerates whatever shims that composition needs; nothing is lost, but the first post-`--force` invocation of a deferred tool re-materializes it from scratch.
+[`ocx clean --force`][cmd-clean] is the one case where this differs from an installed package. A deferred tool has no [install symlink][fs-symlinks] pointing at it — only the lock pins reference it — and `--force`'s entire purpose is to suppress the lock-pinned root set for the run. So `--force` collects every shim directory unconditionally, the same way it already collects an unsymlinked eager package. The next `ocx env` or `ocx exec` regenerates whatever shims that composition needs; nothing is lost, but the first post-`--force` invocation of a deferred tool re-materializes it from scratch.
 
 <!-- external -->
 [containerd]: https://containerd.io/
@@ -86,7 +86,7 @@ A shim directory is kept alive by the same lock-pinned root set that keeps an ea
 
 <!-- commands -->
 [cmd-env-root]: ../reference/command-line.md#env-root
-[cmd-run]: ../reference/command-line.md#run
+[cmd-run]: ../reference/command-line.md#exec
 [cmd-pull]: ../reference/command-line.md#pull
 [cmd-which]: ../reference/command-line.md#which
 [cmd-package-env]: ../reference/command-line.md#package-env

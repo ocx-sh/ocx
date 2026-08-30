@@ -10,5 +10,5 @@ cd "$SCENARIO_TMP"
 ocx init
 ocx add "$PKG_KITWARE_CMAKE"
 ocx add -g ci "$PKG_ASTRAL_SH_UV"
-ocx run -g all -- cmake --version
+ocx exec -g all -- cmake --version
 # endregion cast

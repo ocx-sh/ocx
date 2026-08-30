@@ -60,7 +60,7 @@ impl LauncherExec {
         // the former `--self` flag that was baked into every launcher template.
         let info = manager.install_info_from_package_root(package_dir.root()).await?;
         // Thread the project `no-patches` opt-out forwarded over `OCX_PATCHES`
-        // into env resolution. `ocx run` injects the project opt-out into the
+        // into env resolution. `ocx exec` injects the project opt-out into the
         // forwarded patch tier; here — the launcher re-entry — we decode that
         // opt-out DIRECTLY from the env (the same decoder `Context` uses for the
         // tier). Decoding at the consumption site keeps the opt-out scoped to
@@ -71,7 +71,7 @@ impl LauncherExec {
         // AF1: `install_info_from_package_root` mints a synthetic
         // `file-url-mode/<content-digest>` identifier here — packages are
         // content-shared and carry no root registry/repository (see
-        // `ResolvedPackage`) — so a repo-key never matches this base. `ocx run`
+        // `ResolvedPackage`) — so a repo-key never matches this base. `ocx exec`
         // additionally forwards each opted-out base's content digest, and the
         // resolver's opt-out check (`resolve.rs`) matches on repo-key OR digest,
         // so the digest leg is what suppresses a re-injected companion here.
@@ -84,7 +84,7 @@ impl LauncherExec {
             .map_err(anyhow::Error::new)?
             .map(|forwarded| forwarded.no_patches)
             .unwrap_or_default();
-        // Decode the project/group `[env]` (+ `ocx run --env`) the parent
+        // Decode the project/group `[env]` (+ `ocx exec --env`) the parent
         // composed, forwarded over `OCX_ENV` for the same reason as the
         // `no-patches` opt-out: this process has no `ProjectConfig` and cannot
         // re-derive them. Without the forward, `Env::new()` below inherits the
@@ -96,7 +96,7 @@ impl LauncherExec {
         // Untrusted input: `forwarded_env` fails closed on the whole payload
         // (reserved key, invalid key, unrecognized modifier kind), never
         // filtering the bad entry and keeping the rest. A direct launcher
-        // invocation with no `ocx run` parent has no payload and gets an empty
+        // invocation with no `ocx exec` parent has no payload and gets an empty
         // vector — identical to the pre-forwarding behaviour.
         let project_env = ocx_lib::env::forwarded_env().map_err(anyhow::Error::new)?;
         let mut entries = manager
@@ -112,7 +112,7 @@ impl LauncherExec {
                 &ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any),
             )
             .await?;
-        // Same per-key list-separator agreement `ocx run` and `ocx package
+        // Same per-key list-separator agreement `ocx exec` and `ocx package
         // exec` settle before applying. A launcher re-entry composes the
         // package's own entries afresh, so two contributors disagreeing on one
         // key's separator has to fail here too — otherwise the same package
@@ -176,7 +176,7 @@ impl LauncherExec {
     /// Run the resolved entrypoint with the given env.
     ///
     /// `project_env` is the validated payload decoded from `OCX_ENV` — the
-    /// project/group `[env]` (+ `ocx run --env`) already folded into `entries`
+    /// project/group `[env]` (+ `ocx exec --env`) already folded into `entries`
     /// as stages 4-6. It is deliberately NOT chained into the caller's
     /// `reconcile_list_separators` pass: the `OCX_ENV` decode gate already
     /// refuses a list entry without a settled separator, and any conflict
