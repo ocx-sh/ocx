@@ -173,6 +173,45 @@ def test_config_tier_inline_trusted_root_json_carries_the_trust_root(
     )
 
 
+def test_config_tier_trusted_root_takes_the_file_url_spelling(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """S-015 — the path form of rung 3 reads ``file://`` as well as a bare path.
+
+    ``[trust.sigstore] trusted_root`` sat three lines from ``[[trust.policy]]``
+    signers' ``key`` accepting a strictly smaller vocabulary, for no stated
+    reason (`ocx-sh/ocx#379`). One grammar now serves both.
+
+    Discriminating because the spelling has to be *consumed*: no file named
+    ``file:///…`` exists, and before the widening the value was anchored
+    verbatim against ``$OCX_HOME``. The bare-path leg is the control — same
+    file, same offline run — so a green here cannot come from a cached key or a
+    TUF fetch that would have made both legs pass regardless.
+    """
+    pkg = published_package
+    _prepare(ocx, sigstore_stack, identity_token, pkg)
+
+    root = sigstore_stack.trusted_root_json.resolve()
+    config = Path(ocx.env["OCX_HOME"]) / "config.toml"
+
+    config.write_text(f'[trust.sigstore]\ntrusted_root = "{root.as_posix()}"\n')
+    control = _verify_offline(ocx, sigstore_stack, pkg)
+    assert control.returncode == 0, (
+        f"the bare path form is the control and must verify, got "
+        f"{control.returncode}\nstderr: {control.stderr.strip()}"
+    )
+
+    config.write_text(f'[trust.sigstore]\ntrusted_root = "file://{root.as_posix()}"\n')
+    result = _verify_offline(ocx, sigstore_stack, pkg)
+    assert result.returncode == 0, (
+        f"[trust.sigstore] trusted_root must read the file:// spelling, got "
+        f"{result.returncode}\nstderr: {result.stderr.strip()}"
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Delivery — `ocx config push` inlines the path form; the fleet gets the document
 # ──────────────────────────────────────────────────────────────────────────────

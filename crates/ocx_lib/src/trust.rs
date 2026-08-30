@@ -59,6 +59,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::utility::fs::path::FileReference;
+
 use crate::log;
 use crate::oci::sign::key_ref::MAX_KEY_PEM_BYTES;
 
@@ -235,25 +237,28 @@ impl SigstoreTrust {
         }
     }
 
-    /// Rewrite a relative [`Self::trusted_root`] to be absolute against
-    /// `config_dir` — the directory of the `config.toml` that declared it.
+    /// Resolve [`Self::trusted_root`] against `config_dir` — the directory of
+    /// the `config.toml` that declared it — through the shared
+    /// [`FileReference`] grammar.
     ///
     /// Called by the config loader once per file tier, so `/etc/ocx/config.toml`
     /// and `$OCX_HOME/config.toml` each anchor their own relative paths and the
-    /// process working directory never enters into it.
+    /// process working directory never enters into it. The relative rule and
+    /// the reason it is `!has_root()` rather than `is_relative()` both live in
+    /// [`FileReference::anchored_at`]; this is the seam that applies them.
     ///
-    /// "Relative" is `!has_root()`, **not** `is_relative()`. The two agree on
-    /// Unix and part company on Windows, where a driveless `/etc/ocx/root.json`
-    /// has a root but no drive prefix and so reports itself relative. Joining
-    /// one onto `config_dir` does not merely fail to help: `Path::join` keeps
-    /// only the base's *prefix*, so the reference silently moves to the config
-    /// dir's drive (`C:/etc/ocx/root.json`). A config file travels between
-    /// platforms; a rooted reference already names one file on each of them.
+    /// **Takes `file://` as well as a bare path.** It sat three lines from
+    /// `signers[].key` accepting a strictly smaller vocabulary for no stated
+    /// reason ([ocx-sh/ocx#379](https://github.com/ocx-sh/ocx/issues/379)); one
+    /// grammar now serves both. The stored value is always the resolved path,
+    /// so every reader below this seam sees a plain absolute path and none of
+    /// them learns about the spelling.
     pub fn anchor_relative_root(&mut self, config_dir: &std::path::Path) {
-        if let Some(path) = self.trusted_root.as_ref()
-            && !path.has_root()
-        {
-            self.trusted_root = Some(config_dir.join(path));
+        if let Some(path) = self.trusted_root.as_ref() {
+            // `to_string_lossy` is exact here: the value is deserialized from a
+            // TOML string, so it is UTF-8 by construction.
+            let written = path.to_string_lossy().into_owned();
+            self.trusted_root = Some(FileReference::parse(&written).anchored_at(config_dir));
         }
     }
 }
@@ -883,17 +888,15 @@ impl TrustPolicy {
             let Ok(parsed) = crate::oci::sign::KeyRef::parse(reference) else {
                 continue;
             };
-            let Some(path) = parsed.as_path() else {
+            let Some(file) = parsed.as_file() else {
                 continue;
             };
-            // `!has_root()`, not `is_relative()` — see
-            // [`SigstoreTrust::anchor_relative_root`] for why the two part
-            // company on Windows. Here the drift costs more than a moved path:
-            // a rooted `/etc/ocx/acme.pub` that came back joined to the config
-            // directory would name a file its author never wrote.
-            if !path.has_root() {
-                matcher.key = Some(config_dir.join(path).display().to_string());
-            }
+            // One rule, in one place — [`FileReference::anchored_at`], the same
+            // seam [`SigstoreTrust::anchor_relative_root`] goes through. Here
+            // the drift it prevents costs more than a moved path: a rooted
+            // `/etc/ocx/acme.pub` that came back joined to the config directory
+            // would name a file its author never wrote.
+            matcher.key = Some(file.anchored_at(config_dir).display().to_string());
         }
     }
 }
@@ -2624,6 +2627,43 @@ future_field = "added by a newer ocx"
         assert_eq!(
             sigstore.trusted_root.as_deref(),
             Some(Path::new("/etc/ocx/sigstore/trusted-root.json"))
+        );
+    }
+
+    /// S-015 / C-083 — `[trust.sigstore] trusted_root` takes the `file://`
+    /// spelling, the one it sat three lines from `signers[].key` accepting
+    /// without it, for no stated reason (#379).
+    ///
+    /// The spelling is consumed at this seam, so no reader below the loader
+    /// learns about it: the stored value is always a plain resolved path.
+    #[test]
+    fn anchor_relative_root_takes_the_file_url_spelling() {
+        #[derive(Deserialize)]
+        struct Root {
+            trust: TrustConfig,
+        }
+
+        let parsed: Root =
+            toml::from_str("[trust.sigstore]\ntrusted_root = \"file:///opt/sigstore/trusted-root.json\"\n")
+                .expect("the file:// spelling parses");
+        let mut sigstore = parsed.trust.sigstore.expect("sigstore table");
+        sigstore.anchor_relative_root(Path::new("/etc/ocx"));
+        assert_eq!(
+            sigstore.trusted_root.as_deref(),
+            Some(Path::new("/opt/sigstore/trusted-root.json")),
+            "an absolute file:// root resolves to the path it names"
+        );
+
+        // The relative half takes the same rule a bare path does — one
+        // grammar, one anchoring seam.
+        let mut relative = SigstoreTrust {
+            trusted_root: Some(PathBuf::from("file://sigstore/trusted-root.json")),
+            ..SigstoreTrust::default()
+        };
+        relative.anchor_relative_root(Path::new("/etc/ocx"));
+        assert_eq!(
+            relative.trusted_root.as_deref(),
+            Some(Path::new("/etc/ocx").join("sigstore/trusted-root.json").as_path())
         );
     }
 

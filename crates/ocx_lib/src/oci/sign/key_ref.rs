@@ -41,6 +41,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::utility::fs::path::FileReference;
+
 /// The largest a key PEM may be, on either side of the pair.
 ///
 /// A cosign encrypted P-256 private key is under a kilobyte and an SPKI public
@@ -283,9 +285,32 @@ impl KeyRef {
         &self.rest
     }
 
-    /// The filesystem path, for [`Scheme::File`] only.
+    /// The local-file reference this names, for [`Scheme::File`] only.
+    ///
+    /// The file arm, and only the file arm, is a thin layer over the shared
+    /// [`FileReference`] grammar — one parser for `signers[].key`,
+    /// `[registries.<ns>] index` and `[trust.sigstore] trusted_root`
+    /// ([ocx-sh/ocx#379](https://github.com/ocx-sh/ocx/issues/379)). It is
+    /// [`FileReference::bare`], never `parse`: rule 1 above already consumed
+    /// `<scheme>://` and hands back `rest` **verbatim**, which is the whole
+    /// reason `file://file:x` can still name a file called `file:x`.
+    ///
+    /// [`Scheme::Env`] deliberately does not reach here — its `rest` is a
+    /// variable name holding the key PEM, not a path to one, and resolving it
+    /// as a path is how an `env://` reference would come to report "no such
+    /// file or directory" for a variable that is merely unset.
+    pub fn as_file(&self) -> Option<FileReference<'_>> {
+        (self.scheme == Scheme::File).then(|| FileReference::bare(self.rest.as_str()))
+    }
+
+    /// The filesystem path, for [`Scheme::File`] only — as written, resolved
+    /// against the process working directory if relative.
+    ///
+    /// The policy for a `--key` typed at a shell. A `key` in a `config.toml`
+    /// outlives the directory it is read from and takes the other one,
+    /// [`FileReference::anchored_at`], through [`Self::as_file`].
     pub fn as_path(&self) -> Option<&Path> {
-        (self.scheme == Scheme::File).then(|| Path::new(self.rest.as_str()))
+        self.as_file().map(|file| file.as_written())
     }
 
     /// The environment variable **name**, for [`Scheme::Env`] only.

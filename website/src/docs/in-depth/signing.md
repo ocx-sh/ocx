@@ -19,9 +19,9 @@ Signing a published package, verifying it against a pinned identity, then verify
 
 OCX verifies [Fulcio][fulcio] certificates against a trust root, and verifies the [Rekor][rekor] Signed Entry Timestamp against Rekor's public key. Against public Sigstore this needs no configuration at all — the material arrives over [TUF][sigstore-tuf]. Against a self-hosted stack it has to come from somewhere you control, and OCX resolves it through six rungs, first hit wins:
 
-1. **`--sigstore-trusted-root <PATH>`** on `ocx package verify` — a Sigstore [trusted-root][sigstore-tuf] JSON, or a directory holding `trusted_root.json`.
+1. **`--sigstore-trusted-root <PATH>`** on `ocx package verify` — a Sigstore [trusted-root][sigstore-tuf] JSON, or a directory holding `trusted_root.json`, named by a bare path or a `file://` one.
 2. **[`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root]** — the same value as an environment variable; the flag wins.
-3. **[`[trust.sigstore]`][config-trust-sigstore]** in the operator `config.toml` — `trusted_root` (a path, relative to that config file) or `trusted_root_json` (the document inlined). This is the rung a fleet uses, because a `config.toml` can itself be distributed.
+3. **[`[trust.sigstore]`][config-trust-sigstore]** in the operator `config.toml` — `trusted_root` (a bare path or a `file://` one, relative to that config file) or `trusted_root_json` (the document inlined). This is the rung a fleet uses, because a `config.toml` can itself be distributed.
 4. **`$OCX_HOME/sigstore/trusted-root.json`** — a convention path. Drop the file there and nothing needs configuring.
 5. **The trust-root cache** — a successful online verify writes the Fulcio CA, the CT log keys and the Rekor key it used to `$OCX_HOME/state/trust_root/`, so a later verify (including [`--offline`][env-offline]) reuses them. See [Offline and Air-Gapped Verification](#offline-verification).
 6. **The public-good root over TUF** — with no override, no configured root and no cache, `TrustRoot::load_embedded` fetches and verifies the [Sigstore TUF][sigstore-tuf] trust root through [sigstore-rs][sigstore-rs]'s `tough`-backed client, caching the TUF metadata under `$OCX_HOME/state/tuf/`. This is the default for packages signed against public Sigstore, and it needs network — `--offline` never reaches it.

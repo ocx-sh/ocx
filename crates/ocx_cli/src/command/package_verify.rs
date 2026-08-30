@@ -146,7 +146,7 @@ pub struct PackageVerify {
     no_cache: bool,
 
     /// Trust-root override: a Sigstore trusted-root JSON (or a directory holding
-    /// trusted_root.json).
+    /// trusted_root.json), named by a bare path or a file:// one.
     ///
     /// Supplies the Fulcio CA, the CT-log key and the pinned Rekor public key
     /// for air-gapped verification against a local trust-root mirror. No TUF

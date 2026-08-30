@@ -288,6 +288,151 @@ impl RelativePath {
     }
 }
 
+/// How a local-file reference was spelled.
+///
+/// **Two spellings, not three.** `file:<path>` with a single colon is not one
+/// of them anywhere in OCX: `adr_key_reference_grammar.md` removed it because
+/// cosign resolves that string to a file *literally named* `file:…`, so
+/// honouring it as a prefix made one value name two different files depending
+/// on which tool read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spelling {
+    /// The value is the path itself — `etc/acme.pub`, `/srv/ocx-index`.
+    Bare,
+    /// `file://<path>` — everything after the two slashes is the path,
+    /// verbatim. The only spelling that can name a path containing `://`.
+    FileUrl,
+}
+
+/// A local-file reference as an operator writes one: a bare path, or a
+/// `file://` URL.
+///
+/// One grammar behind three doors that had three hand-rolled copies of it —
+/// `[registries.<ns>] index`, `[[trust.policy]] signers[].key` / `--key`, and
+/// `[trust.sigstore] trusted_root` / `--sigstore-trusted-root`
+/// ([ocx-sh/ocx#379](https://github.com/ocx-sh/ocx/issues/379)).
+///
+/// **Borrowed and total.** Every string is one spelling or the other, so
+/// parsing cannot fail and each door keeps its own error vocabulary and exit
+/// code — `InvalidIndexUrl` (78) and `KeyRefError` (64) say different things
+/// about an empty value, and neither should have to speak through a shared one.
+///
+/// **No `as_path()`.** The three exits — [`anchored_at`](Self::anchored_at),
+/// [`absolute`](Self::absolute) and [`as_written`](Self::as_written) — each
+/// name a *resolution policy*, so a caller cannot obtain a path without saying
+/// which one it wants. That absence is the point of the type: the three doors
+/// resolve a relative reference three different ways on purpose (an `index`
+/// names a directory root joined against for many fetches, where a
+/// CWD-relative root is a real hazard; a `key` names one file beside the
+/// `config.toml` that declared it), and an unqualified accessor is how they
+/// would drift back into one rule that fits none of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileReference<'a> {
+    spelling: Spelling,
+    /// The path payload: the whole value for [`Spelling::Bare`], the text
+    /// after `file://` for [`Spelling::FileUrl`].
+    path: &'a str,
+}
+
+impl<'a> FileReference<'a> {
+    /// Reads the spelling of `value`.
+    ///
+    /// The `file://` token is matched case-insensitively, which is what the
+    /// `index` door already did — its `scheme_of` lowercases the token it
+    /// splits off, and a configured base is not more or less valid for being
+    /// shouted.
+    pub fn parse(value: &'a str) -> Self {
+        match value.split_at_checked("file://".len()) {
+            Some((prefix, path)) if prefix.eq_ignore_ascii_case("file://") => Self {
+                spelling: Spelling::FileUrl,
+                path,
+            },
+            _ => Self {
+                spelling: Spelling::Bare,
+                path: value,
+            },
+        }
+    }
+
+    /// A [`Spelling::Bare`] reference over a payload some other grammar has
+    /// already extracted — never re-split.
+    ///
+    /// `KeyRef` is the caller: it consumes `<scheme>://` itself, generically
+    /// over every backend, and hands the remainder here. Re-parsing that
+    /// remainder would break the one escape the `file://` spelling exists to
+    /// provide — `--key file://file:x` names a file called `file:x`, and by
+    /// the same rule `file://file://x` names one called `file://x`.
+    pub const fn bare(path: &'a str) -> Self {
+        Self {
+            spelling: Spelling::Bare,
+            path,
+        }
+    }
+
+    /// The spelling this reference was written in.
+    ///
+    /// Public because one door refuses a spelling rather than resolving it:
+    /// `[registries.<ns>] index` takes [`Spelling::FileUrl`] only, since a
+    /// schemeless `index = "index.corp.example"` already means
+    /// `https://index.corp.example` and must never be read as a path.
+    pub const fn spelling(&self) -> Spelling {
+        self.spelling
+    }
+
+    /// Policy: **take the path as written** — a relative one resolves against
+    /// the process working directory, like any path typed at a shell.
+    ///
+    /// The right policy for a value that arrives on the command line or in the
+    /// environment, where the caller's CWD is the frame the author had in mind.
+    /// Wrong for a value in a config file, which outlives the directory it is
+    /// read from — that is [`anchored_at`](Self::anchored_at).
+    pub fn as_written(&self) -> &'a Path {
+        Path::new(self.path)
+    }
+
+    /// Policy: **a relative path resolves against `dir`** — the directory of
+    /// the file that declared it, so the same value names the same file
+    /// regardless of the process working directory.
+    ///
+    /// "Relative" is `!has_root()`, **not** `is_relative()`. The two agree on
+    /// Unix and part company on Windows, where a driveless `/etc/ocx/root.json`
+    /// has a root but no drive prefix and so reports itself relative. Joining
+    /// one onto `dir` does not merely fail to help: `Path::join` keeps only the
+    /// base's *prefix*, so the reference silently moves to `dir`'s drive
+    /// (`C:/etc/ocx/root.json`). A config file travels between platforms; a
+    /// rooted reference already names one file on each of them.
+    pub fn anchored_at(&self, dir: &Path) -> PathBuf {
+        let path = self.as_written();
+        if path.has_root() {
+            path.to_path_buf()
+        } else {
+            dir.join(path)
+        }
+    }
+
+    /// Policy: **only an already-absolute reference is acceptable** — `None`
+    /// for anything else.
+    ///
+    /// Absolute here is the `file:///<abs>` shape: an empty authority, so the
+    /// payload begins with `/`. Tested on that byte and never through
+    /// [`Path::has_root`], because on Windows `Path::new("C:/srv/x")` reports a
+    /// root and that payload is the **authority** of `file://C:/srv/x`, not a
+    /// local tree. A configured base has to be valid or not independently of
+    /// the host that reads it.
+    ///
+    /// Trailing separators are trimmed — `file:///srv/x/` and `file:///srv/x`
+    /// name one directory — so `file:///` answers `None` rather than the
+    /// filesystem root, which names no index.
+    ///
+    /// Yields `&str` rather than `&Path` because its one caller composes the
+    /// canonical `file://<path>` URL back out of the answer, and the Windows
+    /// drive-designator rule it applies next is a byte rule too.
+    pub fn absolute(&self) -> Option<&'a str> {
+        let path = self.path.trim_end_matches('/');
+        path.starts_with('/').then_some(path)
+    }
+}
+
 /// Recursively validates that every symlink under `dir` resolves within
 /// `root` via [`crate::symlink::validate_target`].
 ///
@@ -553,6 +698,94 @@ mod tests {
                 matches!(RelativePath::parse(spec), Err(PathEscapeError::ControlCharacter)),
                 "a control character must be ControlCharacter: {spec:?}"
             );
+        }
+    }
+
+    // ── FileReference (#379) ─────────────────────────────────────────────────
+
+    /// The whole grammar, in one table: two spellings and nothing else.
+    /// `file:` with a single colon is deliberately **not** a third — it is a
+    /// bare path whose first component happens to start with `file:`, exactly
+    /// as it is to cosign (`adr_key_reference_grammar.md`).
+    #[test]
+    fn file_reference_reads_two_spellings_and_nothing_else() {
+        for (value, spelling, path) in [
+            ("etc/acme.pub", Spelling::Bare, "etc/acme.pub"),
+            ("/srv/ocx-index", Spelling::Bare, "/srv/ocx-index"),
+            ("C:\\keys\\acme.pub", Spelling::Bare, "C:\\keys\\acme.pub"),
+            ("file:etc/acme.pub", Spelling::Bare, "file:etc/acme.pub"),
+            ("awskms:us-east-1/abc", Spelling::Bare, "awskms:us-east-1/abc"),
+            ("", Spelling::Bare, ""),
+            ("file:///srv/x", Spelling::FileUrl, "/srv/x"),
+            // Case-insensitive, matching the `index` door's own `scheme_of`.
+            ("FILE:///srv/x", Spelling::FileUrl, "/srv/x"),
+            ("file://etc/acme.pub", Spelling::FileUrl, "etc/acme.pub"),
+            // The escape the spelling exists for: a path containing `://`.
+            ("file://./weird://name", Spelling::FileUrl, "./weird://name"),
+            ("file://", Spelling::FileUrl, ""),
+        ] {
+            let reference = FileReference::parse(value);
+            assert_eq!(reference.spelling(), spelling, "{value:?}");
+            assert_eq!(reference.as_written(), Path::new(path), "{value:?}");
+        }
+    }
+
+    /// `KeyRef` consumes `<scheme>://` itself and hands the remainder here, so
+    /// re-splitting it would break the one escape the `file://` spelling
+    /// provides: `--key file://file:x` names a file called `file:x`, and by the
+    /// same rule `file://file://x` names one called `file://x`.
+    #[test]
+    fn bare_never_re_splits_an_already_extracted_payload() {
+        let handed_over = FileReference::bare("file://x");
+        assert_eq!(handed_over.spelling(), Spelling::Bare);
+        assert_eq!(handed_over.as_written(), Path::new("file://x"));
+        assert_eq!(
+            FileReference::parse("file://x").as_written(),
+            Path::new("x"),
+            "`parse` is the other half of the contrast — it does split"
+        );
+    }
+
+    /// The config-file policy: a rootless reference resolves against the
+    /// directory of the file that declared it, and a rooted one already names
+    /// one file. Both spellings take the same rule (#379 / C-083).
+    #[test]
+    fn anchored_at_joins_only_a_rootless_reference() {
+        let dir = Path::new("/etc/ocx");
+        for (value, expected) in [
+            ("acme.pub", dir.join("acme.pub")),
+            ("sigstore/trusted-root.json", dir.join("sigstore/trusted-root.json")),
+            ("file://acme.pub", dir.join("acme.pub")),
+            ("/srv/keys/acme.pub", PathBuf::from("/srv/keys/acme.pub")),
+            ("file:///srv/keys/acme.pub", PathBuf::from("/srv/keys/acme.pub")),
+        ] {
+            assert_eq!(FileReference::parse(value).anchored_at(dir), expected, "{value:?}");
+        }
+    }
+
+    /// The `index` policy: an empty authority and a path that names a
+    /// directory, tested on bytes so a base is valid or not independently of
+    /// the host reading it.
+    #[test]
+    fn absolute_answers_only_for_an_empty_authority_naming_a_directory() {
+        for (value, expected) in [
+            ("file:///srv/x", Some("/srv/x")),
+            ("file:///srv/x/", Some("/srv/x")),
+            ("file:///C:/srv/x", Some("/C:/srv/x")),
+            // A bare drive survives here and is refused by the caller, which
+            // owns the reason (`/C:` resolves against Win32's per-drive CWD).
+            ("file:///C:/", Some("/C:")),
+            // Authority forms: UNC/remote, never a local tree.
+            ("file://host.example/srv/x", None),
+            ("file://srv", None),
+            // On Windows `Path::new("C:/srv/x")` reports a root; this payload
+            // is still an authority, and the answer must not depend on the OS.
+            ("file://C:/srv/x", None),
+            // Names no directory.
+            ("file:///", None),
+            ("file://", None),
+        ] {
+            assert_eq!(FileReference::parse(value).absolute(), expected, "{value:?}");
         }
     }
 }

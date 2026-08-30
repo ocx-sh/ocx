@@ -35,6 +35,7 @@ use ocx_lib::oci::sign::{KeyRef, SignError, SignErrorKind};
 use ocx_lib::oci::verify::{TrustRoot, VerifyError, VerifyErrorKind};
 use ocx_lib::package_manager::error::{PackageError, PackageErrorKind};
 use ocx_lib::trust::{self, CompiledPolicy};
+use ocx_lib::utility::fs::path::FileReference;
 
 use crate::api::data::signature::{SignatureLegReport, SignatureReport};
 
@@ -536,6 +537,25 @@ async fn project_trust_policies(
     }
 }
 
+/// Read an explicit trust-root override — `--sigstore-trusted-root` or
+/// `OCX_SIGSTORE_TRUSTED_ROOT` — in the shared local-file grammar.
+///
+/// [`FileReference::as_written`] is the policy on purpose, not
+/// `anchored_at`: a value typed at a shell or exported into the environment
+/// means what it means from the process working directory, which is what
+/// clap's `PathBuf` already did. Only a `file://` prefix is consumed, so a
+/// bare path — every value that works today — round-trips byte for byte.
+///
+/// A non-UTF-8 value carries no `file://` spelling to read (the prefix is
+/// ASCII) and is passed through untouched, so a path an `OsString` can hold
+/// and a `String` cannot is not lost at this door.
+fn explicit_trust_root_path(value: std::path::PathBuf) -> std::path::PathBuf {
+    match value.to_str() {
+        Some(written) => FileReference::parse(written).as_written().to_path_buf(),
+        None => value,
+    }
+}
+
 /// Resolve the trust root in precedence order, offline-aware.
 ///
 /// Layers flag-vs-env override resolution on the shared
@@ -546,6 +566,11 @@ async fn project_trust_policies(
 /// wins over the env; the shared ladder is the single source of truth for
 /// every rung below that (auto-verify reuses it). Any failure is tagged
 /// with the target identifier.
+///
+/// Both doors take the same two spellings `[trust.sigstore] trusted_root`
+/// reads — a bare path or a `file://` URL
+/// ([ocx-sh/ocx#379](https://github.com/ocx-sh/ocx/issues/379)) — and the rung
+/// below never learns which was written.
 pub(super) async fn resolve_trust_root(
     context: &crate::app::Context,
     identifier: &oci::Identifier,
@@ -555,7 +580,8 @@ pub(super) async fn resolve_trust_root(
 ) -> anyhow::Result<TrustRoot> {
     let explicit = trusted_root
         .map(std::path::Path::to_path_buf)
-        .or_else(|| std::env::var_os("OCX_SIGSTORE_TRUSTED_ROOT").map(std::path::PathBuf::from));
+        .or_else(|| std::env::var_os("OCX_SIGSTORE_TRUSTED_ROOT").map(std::path::PathBuf::from))
+        .map(explicit_trust_root_path);
     let home_trusted_root = ocx_lib::ConfigLoader::home_sigstore_trusted_root_path();
     ocx_lib::oci::verify::resolve_trust_root(
         explicit.as_deref(),
@@ -889,6 +915,7 @@ mod leg_exit_code_tests {
 
 #[cfg(test)]
 mod tests {
+
     //! Unit tests for [`resolve_override_token`] (C-S1-4),
     //! [`resolve_endpoint`] (the Sigstore endpoint precedence), and the
     //! attest-path error contract and `--predicate` read that moved here with
@@ -896,6 +923,36 @@ mod tests {
 
     use super::*;
     use crate::error_envelope::render_error_envelope;
+
+    /// C-083 — both explicit doors (`--sigstore-trusted-root`,
+    /// `OCX_SIGSTORE_TRUSTED_ROOT`) take the two spellings
+    /// `[trust.sigstore] trusted_root` reads, and nothing narrows: every bare
+    /// path that works today round-trips byte for byte.
+    #[test]
+    fn explicit_trust_root_takes_a_bare_path_or_a_file_url() {
+        for (written, expected) in [
+            ("/opt/sigstore/trusted-root.json", "/opt/sigstore/trusted-root.json"),
+            ("sigstore/trusted-root.json", "sigstore/trusted-root.json"),
+            (
+                "file:///opt/sigstore/trusted-root.json",
+                "/opt/sigstore/trusted-root.json",
+            ),
+            // Not anchored, unlike the config field: a value typed at a shell
+            // means what it means from the process working directory.
+            ("file://sigstore/trusted-root.json", "sigstore/trusted-root.json"),
+            // `file:` with a single colon is not a spelling anywhere in OCX.
+            (
+                "file:/opt/sigstore/trusted-root.json",
+                "file:/opt/sigstore/trusted-root.json",
+            ),
+        ] {
+            assert_eq!(
+                explicit_trust_root_path(std::path::PathBuf::from(written)),
+                std::path::PathBuf::from(expected),
+                "{written}"
+            );
+        }
+    }
 
     /// A `[trust.sigstore]` block pinning both endpoints at a self-hosted stack.
     fn self_hosted() -> ocx_lib::trust::SigstoreTrust {
