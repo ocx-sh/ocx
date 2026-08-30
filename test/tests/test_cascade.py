@@ -235,8 +235,12 @@ def test_variant_cascade_full_chain(
         try:
             fetch_manifest_from_registry(ocx.registry, unique_repo, tag)
             raise AssertionError(f"Tag '{tag}' should not exist after variant-only push")
-        except Exception:
-            pass  # Expected: tag does not exist
+        except Exception as error:  # noqa: BLE001 - generic: oras' own type for a missing tag
+            # Re-assert on the caught error, matching every other negative control
+            # in this suite. `except Exception: pass` also catches the
+            # AssertionError raised one line above, so a tag that DID exist was
+            # swallowed by the handler meant to prove it did not.
+            assert "should not exist" not in str(error)
 
 
 def test_variant_newer_cross_variant_no_overwrite(
