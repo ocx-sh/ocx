@@ -201,6 +201,18 @@ pub(super) async fn resolve_override_token(
                         SignErrorKind::IdentityTokenFilePermissive { path: path_owned, mode },
                     )));
                 }
+                // The regular-file half of `read_bounded`'s pair of guards,
+                // asked of the handle rather than re-derived from the path.
+                // `/dev/zero` reports length 0 and then yields forever, which
+                // no byte ceiling alone refuses; a FIFO blocks instead. Both
+                // pass the uid and mode checks above when the operator owns
+                // them.
+                if !meta.is_file() {
+                    return Err(anyhow::Error::new(ocx_lib::error::file_error(
+                        redacted_token_path(&path_owned),
+                        std::io::Error::other("--identity-token-file is not a regular file"),
+                    )));
+                }
                 Ok(std_file)
             })
             .await
@@ -210,10 +222,29 @@ pub(super) async fn resolve_override_token(
             // Zeroizing wraps the read buffer so the full-token cleartext is
             // scrubbed on drop, not just the trimmed copy returned below.
             let mut raw = Zeroizing::new(String::new());
-            file.read_to_string(&mut raw)
+            // The byte-ceiling half of `read_bounded`'s pair, applied to the
+            // handle the checks above validated rather than through a second
+            // `open` of the path. `read_bounded` takes a path, so calling it
+            // here would drop `O_NOFOLLOW`, reopen a name an attacker may have
+            // swapped since the uid/mode gate ran (CWE-367), and land the
+            // cleartext in an unzeroized `Vec`. `take` is the same bound over
+            // the handle: `cap + 1` is what tells "exactly at the cap" from
+            // "over it", and it stops the read rather than only the answer.
+            (&mut file)
+                .take(MAX_IDENTITY_TOKEN_BYTES + 1)
+                .read_to_string(&mut raw)
                 .await
                 .map_err(|e| ocx_lib::error::file_error(redacted_token_path(path), e))
                 .context("failed to read --identity-token-file")?;
+            if raw.len() as u64 > MAX_IDENTITY_TOKEN_BYTES {
+                return Err(anyhow::Error::new(ocx_lib::error::file_error(
+                    redacted_token_path(path),
+                    std::io::Error::other(format!(
+                        "--identity-token-file is larger than {MAX_IDENTITY_TOKEN_BYTES} bytes"
+                    )),
+                ))
+                .context("failed to read --identity-token-file"));
+            }
             return Ok(Some(Zeroizing::new(raw.trim().to_string())));
         }
     }
@@ -236,6 +267,22 @@ pub(super) async fn resolve_override_token(
     }
     Ok(None)
 }
+
+/// The largest an `--identity-token-file` may be.
+///
+/// An OIDC ID token is a compact JWS — a few kilobytes at the outside, and the
+/// providers this path talks to sit well under one. Sixty-four kibibytes is the
+/// ceiling `MAX_KEY_PEM_BYTES` already puts on the other credential file an
+/// operator names, and it exists only to bound the read of a path that was
+/// typed, not to police token shape.
+///
+/// Unix-only, like its single use site. On Windows `--identity-token-file` is
+/// refused before any read — ACL-based permission validation is unimplemented
+/// there, and the flag fails closed rather than skipping the check — so there
+/// is no read for this ceiling to bound and an ungated constant is dead code
+/// that `-D warnings` fails the build on.
+#[cfg(unix)]
+const MAX_IDENTITY_TOKEN_BYTES: u64 = 64 * 1024;
 
 /// Default public Fulcio CA endpoint.
 ///

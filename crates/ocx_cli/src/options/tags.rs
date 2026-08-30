@@ -43,6 +43,38 @@ pub struct TagsOpt {
     tags_file: Option<PathBuf>,
 }
 
+/// Read and parse a `--tags-file`, bounded at [`MAX_TAGS_FILE_BYTES`] and
+/// refusing anything that is not a regular file.
+///
+/// The one reader for this file format's *input* side, shared by [`TagsOpt`]
+/// (`sign`, `attest`) and by `package announce`, which takes its own
+/// `--tags-file` rather than flattening `TagsOpt`. Two copies of a bounded read
+/// on an operator-typed path is how one of them ends up without the bound —
+/// `read_bounded`'s own module doc records that history.
+///
+/// # Errors
+/// When the path cannot be read: missing, not a regular file, or past the cap.
+pub(crate) async fn read_tags_file(path: &std::path::Path) -> anyhow::Result<Vec<String>> {
+    // Blocking, so it goes to the pool rather than an async twin of the
+    // guard: one bounded reader, not two.
+    let target = path.to_path_buf();
+    let bytes = tokio::task::spawn_blocking(move || read_bounded(&target, MAX_TAGS_FILE_BYTES))
+        .await?
+        // One door for every way this file can be unusable — missing,
+        // a directory, or past the cap — because the frozen exit-code
+        // table already sends `--tags-file` failures to 74 and an
+        // enormous file is not a different question for the caller.
+        .map_err(|error| match error {
+            BoundedReadError::Io { source, .. } => source,
+            refusal => std::io::Error::other(refusal),
+        })
+        .map_err(|error| ocx_lib::error::file_error(path, error))
+        .with_context(|| format!("reading tags file {}", path.display()))?;
+    // The one shared parser for this file format, already used by
+    // `package announce` and `package cascade repair`.
+    Ok(crate::conventions::parse_tags_file(&bytes))
+}
+
 impl TagsOpt {
     /// Whether any sweep input was given at all.
     ///
@@ -63,24 +95,7 @@ impl TagsOpt {
     pub async fn resolve(&self) -> anyhow::Result<Vec<String>> {
         let mut resolved = self.tags.clone();
         if let Some(path) = &self.tags_file {
-            // Blocking, so it goes to the pool rather than an async twin of the
-            // guard: one bounded reader, not two.
-            let target = path.clone();
-            let bytes = tokio::task::spawn_blocking(move || read_bounded(&target, MAX_TAGS_FILE_BYTES))
-                .await?
-                // One door for every way this file can be unusable — missing,
-                // a directory, or past the cap — because the frozen exit-code
-                // table already sends `--tags-file` failures to 74 and an
-                // enormous file is not a different question for the caller.
-                .map_err(|error| match error {
-                    BoundedReadError::Io { source, .. } => source,
-                    refusal => std::io::Error::other(refusal),
-                })
-                .map_err(|error| ocx_lib::error::file_error(path, error))
-                .with_context(|| format!("reading tags file {}", path.display()))?;
-            // The one shared reader for this file format, already used by
-            // `package announce` and `package cascade repair`.
-            resolved.extend(crate::conventions::parse_tags_file(&bytes));
+            resolved.extend(read_tags_file(path).await?);
         }
         // Keep-first dedup preserving order, so a tag named by both inputs
         // stays at the position `--tags` gave it.
