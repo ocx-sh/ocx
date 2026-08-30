@@ -268,7 +268,7 @@ impl ConfigLoader {
         if crate::env::flag("OCX_NO_CONFIG", false) {
             return None;
         }
-        let ocx_home = Self::home_dir()?;
+        let ocx_home = crate::file_structure::default_ocx_root()?;
         Some(crate::file_structure::StateStore::managed_config_snapshot_path(
             &ocx_home,
         ))
@@ -1365,28 +1365,22 @@ impl ConfigLoader {
         dirs::config_dir().map(|d| d.join("ocx").join("config.toml"))
     }
 
-    /// `$OCX_HOME` directory, falling back to `~/.ocx`.
-    ///
-    /// Single resolver shared by [`Self::home_path`] (returns
-    /// `<dir>/config.toml`). Returns `None` when `OCX_HOME` is unset and
-    /// `dirs::home_dir()` cannot resolve a home directory (e.g., a service
-    /// account with no `$HOME`).
-    ///
-    /// Kept private: callers compose well-known children through one of
-    /// the named `home_*_path()` accessors above so `$OCX_HOME` path math
-    /// stays in this module. External code that needs a `$OCX_HOME`-rooted
-    /// path should add (or extend) such an accessor rather than reach for
-    /// the bare directory.
-    fn home_dir() -> Option<PathBuf> {
-        if let Some(ocx_home) = crate::env::var("OCX_HOME") {
-            return Some(PathBuf::from(ocx_home));
-        }
-        dirs::home_dir().map(|h| h.join(".ocx"))
-    }
-
     /// `$OCX_HOME/config.toml`, falling back to `~/.ocx/config.toml`.
+    ///
+    /// The directory comes from [`crate::file_structure::default_ocx_root`],
+    /// the one definition of the `$OCX_HOME` default — this module used to
+    /// carry a second one that resolved the fallback home through a different
+    /// API and could name a different directory (#381).
+    ///
+    /// `None` when `OCX_HOME` is unset and no home directory resolves (e.g. a
+    /// service account with no `$HOME`).
+    ///
+    /// Callers compose well-known children through one of the named
+    /// `home_*_path()` accessors here so `$OCX_HOME` path math stays in this
+    /// module; code needing a new `$OCX_HOME`-rooted path should add one
+    /// rather than join onto the bare directory.
     pub fn home_path() -> Option<PathBuf> {
-        Self::home_dir().map(|d| d.join("config.toml"))
+        crate::file_structure::default_ocx_root().map(|d| d.join("config.toml"))
     }
 
     /// `$OCX_HOME/sigstore/trusted-root.json`, falling back to
@@ -1398,7 +1392,7 @@ impl ConfigLoader {
     /// state the tool writes and may discard, whereas this is a durable
     /// operator-supplied asset nothing but the operator removes.
     pub fn home_sigstore_trusted_root_path() -> Option<PathBuf> {
-        Self::home_dir().map(|d| d.join("sigstore").join("trusted-root.json"))
+        crate::file_structure::default_ocx_root().map(|d| d.join("sigstore").join("trusted-root.json"))
     }
 }
 
@@ -2154,7 +2148,7 @@ mod tests {
 
     #[test]
     fn home_path_fallback_when_ocx_home_unset() {
-        // With OCX_HOME removed, home_path() falls back to `dirs::home_dir()`.
+        // With OCX_HOME removed, home_path() falls back to the shared home resolver.
         // The result is platform-dependent: Some(path ending in .ocx/config.toml)
         // when HOME is set, None otherwise. Both are valid outcomes.
         let env = crate::test::env::lock();
