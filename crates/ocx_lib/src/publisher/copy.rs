@@ -254,6 +254,15 @@ pub struct CopyOutcome {
     pub keep_tags: Vec<String>,
     /// Referrer manifests copied, summed over every platform.
     pub referrers: usize,
+    /// cosign sidecar tags carried, summed over every platform.
+    pub sidecars: usize,
+    /// Sidecar tags left untouched because the target already holds a different
+    /// manifest under them (`oci::copy::SidecarCopy`). Data rather than an
+    /// error: the leaf and every other sidecar still landed, so failing the
+    /// whole promotion here would block a legitimate re-promotion onto a target
+    /// that merely holds more signatures than the source. The caller turns a
+    /// non-empty list into a non-zero exit.
+    pub sidecar_conflicts: Vec<String>,
     pub blobs: oci::copy::BlobTransfers,
     /// True when nothing was written.
     pub dry_run: bool,
@@ -302,6 +311,8 @@ async fn run(client: &Client, request: CopyRequest<'_>) -> std::result::Result<C
     let mut copied_leaves: Vec<(oci::Platform, oci::Digest, i64)> = Vec::new();
     let mut blobs = oci::copy::BlobTransfers::default();
     let mut referrers = 0usize;
+    let mut sidecars = 0usize;
+    let mut sidecar_conflicts: Vec<String> = Vec::new();
     let mut cascade_tags: Vec<String> = Vec::new();
     let mut keep_tags: Vec<String> = Vec::new();
 
@@ -343,6 +354,8 @@ async fn run(client: &Client, request: CopyRequest<'_>) -> std::result::Result<C
         .await?;
         blobs += copied.blobs;
         referrers += copied.referrers;
+        sidecars += copied.sidecars.copied;
+        sidecar_conflicts.extend(copied.sidecars.conflicts);
         copied_leaves.push((platform.clone(), source_digest.clone(), copied.size));
     }
 
@@ -413,6 +426,8 @@ async fn run(client: &Client, request: CopyRequest<'_>) -> std::result::Result<C
         cascade_tags,
         keep_tags,
         referrers,
+        sidecars,
+        sidecar_conflicts,
         blobs,
         dry_run: request.dry_run,
     })
