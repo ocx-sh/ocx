@@ -35,7 +35,7 @@ KEY_DETAILS = "PKIX_ECDSA_P256_SHA_256"
 
 
 def run(*args: str) -> bytes:
-    result = subprocess.run(args, capture_output=True)
+    result = subprocess.run(args, capture_output=True, check=False)
     if result.returncode != 0:
         sys.exit(f"{' '.join(args)} failed: {result.stderr.decode().strip()}")
     return result.stdout

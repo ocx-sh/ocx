@@ -503,7 +503,7 @@ def test_sbom_output_dash_refuses_a_terminal(
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
             env=ocx.env,
-            text=True,
+            text=True, check=False,
         )
         os.close(follower)
         follower = None

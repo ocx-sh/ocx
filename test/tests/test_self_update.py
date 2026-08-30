@@ -137,7 +137,7 @@ def test_version_json_under_env_clear(ocx: OcxRunner) -> None:
         [str(ocx.binary), "--format", "json", "version"],
         capture_output=True,
         text=True,
-        env={"HOME": "/nonexistent"},
+        env={"HOME": "/nonexistent"}, check=False,
     )
     assert result.returncode == 0, (
         f"`ocx --format json version` must succeed under env_clear(); "
@@ -216,7 +216,7 @@ def _run_self_update_via_seam(
         [str(ocx.binary), "--format", "json", *extra_flags, "self", "update"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
 
 
@@ -473,7 +473,7 @@ def test_self_update_installs_newer_version(
         [str(ocx.binary), "--format", "json", "self", "update"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
 
     # 4. Exit code 0.
@@ -526,7 +526,7 @@ def test_self_update_installs_newer_version(
             [str(bin_ocx), "--format", "json", "version"],
             capture_output=True,
             text=True,
-            env={"PATH": "/usr/bin:/bin"},
+            env={"PATH": "/usr/bin:/bin"}, check=False,
         )
         # The stand-in trap script ignores args except the literal "--format
         # json version" match; on success its stdout should be the JSON shape.

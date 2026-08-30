@@ -36,7 +36,7 @@ def _run_cmd(ocx: OcxRunner, cwd: Path, *args: str) -> subprocess.CompletedProce
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 
@@ -244,7 +244,7 @@ def test_add_atomic_full_lockfile_rewrite(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert lock_result.returncode == EXIT_SUCCESS, (
         f"baseline ocx lock failed: {lock_result.stderr}"
@@ -556,7 +556,7 @@ def test_add_preserves_untouched_pin_when_upstream_tag_moved(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert lock_r.returncode == EXIT_SUCCESS, f"baseline lock failed: {lock_r.stderr}"
     initial_a = _leaves_for_add((project_dir / "ocx.lock").read_text(), "a")
@@ -569,7 +569,7 @@ def test_add_preserves_untouched_pin_when_upstream_tag_moved(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert refresh.returncode == EXIT_SUCCESS, refresh.stderr
 
@@ -620,7 +620,7 @@ def test_add_fails_when_toml_handedited_since_lock(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert lock_r.returncode == EXIT_SUCCESS, f"baseline lock failed: {lock_r.stderr}"
 
@@ -686,7 +686,7 @@ def test_add_with_empty_tools_lock_succeeds(
         cwd=project_dir,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert lock_r.returncode == EXIT_SUCCESS, f"baseline empty lock failed: {lock_r.stderr}"
 

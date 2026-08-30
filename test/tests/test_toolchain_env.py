@@ -61,7 +61,7 @@ def _run(
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
 
 
@@ -202,7 +202,7 @@ def test_env_root_format_json_emits_json(ocx: OcxRunner, tmp_path: Path) -> None
         cwd=project,
         capture_output=True,
         text=True,
-        env=dict(ocx.env),
+        env=dict(ocx.env), check=False,
     )
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx --format json env must succeed in a project; rc={result.returncode}\n"
@@ -246,7 +246,7 @@ def test_env_shell_bash_emits_export_lines(ocx: OcxRunner, tmp_path: Path) -> No
     bash_check = subprocess.run(
         ["bash", "-n", "-c", stdout],
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
     assert bash_check.returncode == 0, (
         f"--shell=bash output failed `bash -n` check: {bash_check.stderr}\n"
@@ -317,7 +317,7 @@ def test_env_bare_shell_undetectable_exits_64(ocx: OcxRunner, tmp_path: Path) ->
         cwd=project,
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     # Acceptable outcomes:
     # - exit 0: detection succeeded (parent process or $SHELL), export lines emitted.
@@ -433,7 +433,7 @@ def test_package_env_shell_require_equals_not_swallowed(
         cwd=tmp_path,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     # Must NOT be a clap value-validation error (which would be exit 2 or
     # 64-from-clap saying "invalid shell name").  The key assertion is that
@@ -705,7 +705,7 @@ def test_env_shell_bash_explicit_emits_export_lines(
         cwd=project,
         capture_output=True,
         text=True,
-        env=env_no_shell,
+        env=env_no_shell, check=False,
     )
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx env --shell=bash (explicit) must succeed even without $SHELL; "
@@ -1016,7 +1016,7 @@ def test_env_global_resolves_host_leaf_digest(
         cwd=empty,
         capture_output=True,
         text=True,
-        env=dict(ocx.env),
+        env=dict(ocx.env), check=False,
     )
     assert add.returncode == EXIT_SUCCESS, (
         f"add --global must succeed; rc={add.returncode}\nstderr:\n{add.stderr}"
@@ -1044,7 +1044,7 @@ def test_env_global_resolves_host_leaf_digest(
         cwd=empty,
         capture_output=True,
         text=True,
-        env=dict(ocx.env),
+        env=dict(ocx.env), check=False,
     )
     assert env_result.returncode == EXIT_SUCCESS, (
         "ocx --global env --shell=sh must exit 0 (resolves host-leaf from "
@@ -1101,7 +1101,7 @@ def _env_json_keys(ocx: OcxRunner, project: Path, *group_args: str) -> list[str]
         cwd=project,
         capture_output=True,
         text=True,
-        env=dict(ocx.env),
+        env=dict(ocx.env), check=False,
     )
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx --format json env {' '.join(group_args)} must succeed; "
@@ -1129,7 +1129,7 @@ def _global_env_json_keys(ocx: OcxRunner, cwd: Path, *group_args: str) -> list[s
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=dict(ocx.env),
+        env=dict(ocx.env), check=False,
     )
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx --global --format json env {' '.join(group_args)} must succeed; "
@@ -1232,7 +1232,7 @@ def test_env_json_integrations_ordered_across_roots(
         cwd=project,
         capture_output=True,
         text=True,
-        env=dict(ocx.env),
+        env=dict(ocx.env), check=False,
     )
     assert result.returncode == EXIT_SUCCESS, result.stderr
     data = json.loads(result.stdout)
@@ -1308,7 +1308,7 @@ def test_integrations_tier_parity_between_env_and_package_env(
             cwd=cwd,
             capture_output=True,
             text=True,
-            env=dict(ocx.env),
+            env=dict(ocx.env), check=False,
         )
         assert result.returncode == EXIT_SUCCESS, (
             f"ocx --format json {' '.join(args)} must succeed; "
@@ -1666,7 +1666,7 @@ def test_env_json_binaries_attribution_for_transitive_interface_dep(
         cwd=project,
         capture_output=True,
         text=True,
-        env=dict(ocx.env),
+        env=dict(ocx.env), check=False,
     )
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx --format json env must succeed; rc={result.returncode}\nstderr:\n{result.stderr}"

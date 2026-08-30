@@ -93,7 +93,7 @@ def _run_pull(
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
 
 
@@ -116,7 +116,7 @@ def _run_lock(
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 
@@ -884,7 +884,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert offline.returncode == EXIT_SUCCESS, (
         f"offline pull on a populated store must succeed; "
@@ -928,7 +928,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx --quiet pull failed: rc={result.returncode}\nstderr:\n{result.stderr}"
@@ -1073,7 +1073,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx --jobs 0 pull must succeed (cores convention); "
@@ -1091,7 +1091,7 @@ def test_pull_jobs_negative_rejected_at_parse(
         cwd=tmp_path,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode != EXIT_SUCCESS, (
         "ocx --jobs -1 must fail at clap parse time"
@@ -1130,7 +1130,7 @@ b = "{ocx.registry}/{repo_b}:{tag_b}"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == EXIT_SUCCESS, (
         f"ocx pull --dry-run failed: rc={result.returncode}\nstderr:\n{result.stderr}"
@@ -1186,7 +1186,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
@@ -1244,7 +1244,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert pull.returncode == EXIT_SUCCESS, (
         f"ocx pull failed: rc={pull.returncode}\nstderr:\n{pull.stderr}"
@@ -1280,7 +1280,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert dry.returncode == EXIT_SUCCESS, (
         f"ocx pull --dry-run failed: rc={dry.returncode}\nstderr:\n{dry.stderr}"
@@ -1418,7 +1418,7 @@ hello = "{ocx.registry}/{repo}:{tag}"
         cwd=project,
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode == EXIT_SUCCESS, (
         f"OCX_JOBS=1 + --jobs 4 must succeed; "
@@ -1678,7 +1678,7 @@ repository = "{bare_repo}"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result_offline.returncode == EXIT_CONFIG, (
         f"ocx --offline pull with host platform absent must also exit 78 "

@@ -104,7 +104,7 @@ def _compose(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["docker", "compose", "-f", str(COMPOSE_FILE), "--profile", "sigstore", *args],
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
 
 
@@ -152,7 +152,7 @@ def start_sigstore_stack(timeout: float = 300.0) -> None:
     done = subprocess.run(
         [sys.executable, str(_WAIT_FOR_STACK), "--timeout", str(timeout)],
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
     if done.returncode != 0:
         raise RuntimeError(

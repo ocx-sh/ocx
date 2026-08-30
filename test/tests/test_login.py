@@ -73,7 +73,7 @@ def _run_login(
         text=True,
         env=env,
         input=stdin,
-        timeout=timeout,
+        timeout=timeout, check=False,
     )
 
 
@@ -91,7 +91,7 @@ def _run_logout(
     if extra_env:
         env.update(extra_env)
     cmd = [str(ocx.binary), "logout", *args]
-    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
 
 def _read_docker_config(docker_config_dir: Path) -> dict[str, Any] | None:
@@ -476,7 +476,7 @@ def test_login_against_plain_http_registry_is_tempfail_not_rejected_credentials(
         text=True,
         env=env,
         input="tok\n",
-        timeout=40.0,
+        timeout=40.0, check=False,
     )
 
     assert result.returncode == 75, (
@@ -585,7 +585,7 @@ def test_login_json_format_emits_minimal_payload(
         "ghcr.io",
     ]
     result = subprocess.run(
-        cmd, capture_output=True, text=True, env=env, input="tok\n"
+        cmd, capture_output=True, text=True, env=env, input="tok\n", check=False
     )
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
@@ -904,7 +904,7 @@ def test_logout_json_format(ocx: OcxRunner, tmp_path: Path) -> None:
     env = dict(ocx.env)
     env["DOCKER_CONFIG"] = str(docker_config_dir)
     cmd = [str(ocx.binary), "--format", "json", "logout", "ghcr.io"]
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload == {"registry": "ghcr.io"}

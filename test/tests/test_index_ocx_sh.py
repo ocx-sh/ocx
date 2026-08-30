@@ -755,7 +755,7 @@ def test_repository_migration_preserves_logical_id_and_committed_lock(
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert lock_result.returncode == 0, f"ocx lock failed: {lock_result.stderr}"
     lock_data = tomllib.loads((project / "ocx.lock").read_text())

@@ -66,7 +66,7 @@ class TestExitCodes:
             [str(ocx.binary), "package", "install", "--not-a-real-flag", "cmake:3.28"],
             capture_output=True,
             text=True,
-            env=ocx.env,
+            env=ocx.env, check=False,
         )
         assert result.returncode == 64, (
             f"expected exit 64 (UsageError) for unknown flag, "
@@ -84,7 +84,7 @@ class TestExitCodes:
             [str(ocx.binary), "package", "install", "not:::valid:::identifier"],
             capture_output=True,
             text=True,
-            env=ocx.env,
+            env=ocx.env, check=False,
         )
         assert result.returncode == 65, (
             f"expected exit 65 (DataError) for malformed identifier, "
@@ -107,7 +107,7 @@ class TestExitCodes:
             [str(ocx.binary), "index", "update", "some/pkg"],
             capture_output=True,
             text=True,
-            env=env,
+            env=env, check=False,
         )
         assert result.returncode == 75, (
             f"expected exit 75 (TempFail) for unroutable registry, "
@@ -474,7 +474,7 @@ def test_an_operator_supplied_path_never_exits_internal(
         capture_output=True,
         text=True,
         env=ocx.env,
-        cwd=str(tmp_path),
+        cwd=str(tmp_path), check=False,
     )
 
     assert needle in result.stderr, (

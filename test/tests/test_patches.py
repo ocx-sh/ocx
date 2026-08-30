@@ -875,7 +875,7 @@ def test_patch_freeze_pins_companion_digest(
     env_frozen = dict(ocx.env)
     env_frozen["OCX_PATCH_SNAPSHOT"] = str(snapshot_path)
     cmd = [str(ocx.binary), "--format", "json", "package", "env", base_pkg.short]
-    result_frozen = subprocess.run(cmd, capture_output=True, text=True, env=env_frozen)
+    result_frozen = subprocess.run(cmd, capture_output=True, text=True, env=env_frozen, check=False)
     assert result_frozen.returncode == 0, (
         f"package env with OCX_PATCH_SNAPSHOT must succeed; got {result_frozen.returncode}\n"
         f"stderr: {result_frozen.stderr}"
@@ -909,7 +909,7 @@ def _run_in(ocx: OcxRunner, cwd: Path, *args: str) -> subprocess.CompletedProces
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 
@@ -1360,7 +1360,7 @@ def test_launcher_digest_matched_opt_out_respects_system_required(
             [str(ocx.binary), "launcher", "exec", str(pkg_root), "--", "showenv"],
             capture_output=True,
             text=True,
-            env=env,
+            env=env, check=False,
         )
 
     non_enforced = _launcher_env_dump(system_required=False)
@@ -1582,7 +1582,7 @@ def test_forwarded_opt_out_does_not_leak_into_unrelated_child_process(
         [str(ocx.binary), "package", "exec", base_pkg.short, "--", "env"],
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert result.returncode == 0, (
         f"ocx package exec must succeed; rc={result.returncode}\nstderr: {result.stderr}"
@@ -1944,7 +1944,7 @@ def test_exec_receives_companion_env_var(
         [str(ocx.binary), "package", "exec", base_pkg.short, "--", "env"],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 0, (
         f"ocx package exec ... env must succeed; got {result.returncode}\nstderr: {result.stderr}"
@@ -2648,7 +2648,7 @@ def test_relocated_ocx_home_offline_companion_env_identical(
         [str(ocx.binary), "--format", "json", "--offline", "package", "env", base_pkg.short],
         capture_output=True,
         text=True,
-        env={**ocx.env, "OCX_HOME": str(original_home)},
+        env={**ocx.env, "OCX_HOME": str(original_home)}, check=False,
     )
     assert rehome.returncode == 0, (
         f"setup: re-homing the throwaway copy's forward-refs must succeed; "
@@ -2665,7 +2665,7 @@ def test_relocated_ocx_home_offline_companion_env_identical(
         [str(ocx.binary), "--format", "json", "--offline", "package", "env", base_pkg.short],
         capture_output=True,
         text=True,
-        env=relocated_env,
+        env=relocated_env, check=False,
     )
     assert result.returncode == 0, (
         f"`ocx --offline package env` against a relocated OCX_HOME must succeed; "

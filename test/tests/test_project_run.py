@@ -93,7 +93,7 @@ def _run_cmd(
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
 
 

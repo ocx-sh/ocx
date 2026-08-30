@@ -198,7 +198,7 @@ def _reports_pinned_version(binary: Path) -> bool:
     """
     if not os.access(binary, os.X_OK):
         return False
-    probe = subprocess.run([str(binary), "version"], capture_output=True, text=True)
+    probe = subprocess.run([str(binary), "version"], capture_output=True, text=True, check=False)
     return probe.returncode == 0 and any(
         line.split(":", 1)[1].strip() == PINNED_COSIGN_VERSION
         for line in probe.stdout.splitlines()
@@ -235,14 +235,14 @@ def ensure_cosign_binary() -> Path:
     staged = _BIN_DIR / f"cosign.{os.getpid()}.partial"
     created = subprocess.run(
         ["docker", "create", "--name", container, COSIGN_IMAGE],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     if created.returncode != 0:
         raise RuntimeError(f"docker create {COSIGN_IMAGE} failed:\n{created.stdout}\n{created.stderr}")
     try:
         copied = subprocess.run(
             ["docker", "cp", f"{container}:{_IMAGE_BINARY}", str(staged)],
-            capture_output=True, text=True,
+            capture_output=True, text=True, check=False,
         )
         if copied.returncode != 0:
             raise RuntimeError(f"docker cp {_IMAGE_BINARY} failed:\n{copied.stdout}\n{copied.stderr}")
@@ -250,7 +250,9 @@ def ensure_cosign_binary() -> Path:
         staged.replace(binary)  # atomic within one filesystem
     finally:
         staged.unlink(missing_ok=True)
-        subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+        # check=False, not True: this is best-effort cleanup in a `finally`, and a
+        # raise here would replace whatever exception brought us into the block.
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False)
 
     if not _reports_pinned_version(binary):
         raise RuntimeError(

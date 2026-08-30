@@ -29,7 +29,7 @@ def _run_init(ocx: OcxRunner, cwd: Path, *extra: str) -> subprocess.CompletedPro
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 

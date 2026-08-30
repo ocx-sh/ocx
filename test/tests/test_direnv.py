@@ -57,7 +57,7 @@ def _run_direnv_init(
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 
@@ -111,7 +111,7 @@ def test_bare_direnv_defaults_to_init(ocx: OcxRunner, tmp_path: Path) -> None:
         cwd=tmp_path,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 0, (
         f"expected exit 0; got {result.returncode}\n"
@@ -143,7 +143,7 @@ def _make_locked_unpulled_project(ocx: OcxRunner, tmp_path: Path, label: str) ->
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert lock.returncode == 0, f"lock --no-pull failed: {lock.stderr}"
     return project
@@ -156,7 +156,7 @@ def _run_export(ocx: OcxRunner, cwd: Path, *extra: str) -> subprocess.CompletedP
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 
@@ -276,7 +276,7 @@ def test_direnv_export_broken_ocx_index_is_a_noop_once_installed(
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert lock.returncode == 0, f"lock failed: {lock.stderr}"
 
@@ -316,7 +316,7 @@ def test_toolchain_add_fails_cleanly_not_panic_on_broken_ocx_index(
             cwd=project,
             capture_output=True,
             text=True,
-            env=ocx.env,
+            env=ocx.env, check=False,
         )
     finally:
         del ocx.env["OCX_INDEX"]

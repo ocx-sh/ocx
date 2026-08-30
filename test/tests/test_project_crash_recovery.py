@@ -64,7 +64,7 @@ def _run_in(
     env = dict(ocx.env)
     if extra_env:
         env.update(extra_env)
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=env)
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=env, check=False)
 
 
 def _spawn_in(

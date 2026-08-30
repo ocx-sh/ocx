@@ -49,7 +49,7 @@ def _sign(ocx: OcxRunner, stack: SigstoreStack, token: Path, pkg: PackageInfo) -
     """Sign ``pkg`` against the real stack; return the JSON envelope's ``data``."""
     result = subprocess.run(
         [str(ocx.binary), "--format", "json", "package", "sign", *stack.sign_args(token), pkg.short],
-        capture_output=True, text=True, env=ocx.env,
+        capture_output=True, text=True, env=ocx.env, check=False,
     )
     assert result.returncode == 0, f"sign setup failed: {result.stderr}"
     return json.loads(result.stdout)["data"]
@@ -110,7 +110,7 @@ def _verify(
             "--certificate-oidc-issuer", issuer or stack.issuer,
             pkg.short,
         ],
-        capture_output=True, text=True, env=env,
+        capture_output=True, text=True, env=env, check=False,
     )
 
 
@@ -698,7 +698,7 @@ def _attest(
             "--identity-token-file", str(token),
             pkg.short,
         ],
-        capture_output=True, text=True, env=env or ocx.env,
+        capture_output=True, text=True, env=env or ocx.env, check=False,
     )
     assert result.returncode == 0, f"attest setup failed: {result.stderr}"
     return json.loads(result.stdout)["data"]
@@ -1033,7 +1033,7 @@ def _run_with_stdout_on_a_terminal(ocx: OcxRunner, *args: str) -> tuple[int, str
         result = subprocess.run(
             [str(ocx.binary), *args],
             stdout=secondary, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
-            env=ocx.env,
+            env=ocx.env, check=False,
         )
         # Close the write end first: the child has exited, and while any writer
         # remains open the read below would block instead of reporting EOF.
@@ -1121,7 +1121,7 @@ def test_sbom_summary_on_a_non_cyclonedx_predicate_is_partial_failure_not_a_hard
 
     result = subprocess.run(
         [str(ocx.binary), "--format", "json", *_sbom_args(sigstore_stack, pkg), "--summary"],
-        capture_output=True, text=True, env=ocx.env,
+        capture_output=True, text=True, env=ocx.env, check=False,
     )
     assert result.returncode == 0, (
         f"an unreadable document refuses its own entry, not the run, got "
@@ -1182,7 +1182,7 @@ def test_verify_without_platform_runs_against_what_resolved(
             "--certificate-oidc-issuer", "https://anywhere.example",
             published_package.short,
         ],
-        capture_output=True, text=True, env=dict(ocx.env),
+        capture_output=True, text=True, env=dict(ocx.env), check=False,
     )
     assert result.returncode != 64, (
         f"--platform must be optional; clap refused the invocation\n"
@@ -1215,7 +1215,7 @@ def _verify_flags(ocx: OcxRunner, *flags: str) -> subprocess.CompletedProcess[st
             *flags,
             "localhost:5000/never-published:1.0.0",
         ],
-        capture_output=True, text=True, env=ocx.env,
+        capture_output=True, text=True, env=ocx.env, check=False,
     )
 
 
@@ -1437,7 +1437,7 @@ def _verify_golden(
             *(["--key", str(key)] if key else []),
             reference,
         ],
-        capture_output=True, text=True, env=runner.env,
+        capture_output=True, text=True, env=runner.env, check=False,
     )
 
 

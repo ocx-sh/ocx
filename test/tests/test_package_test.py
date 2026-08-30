@@ -1055,6 +1055,7 @@ def test_output_dir_relative_path_works(
         text=True,
         env=ocx.env,
         cwd=str(tmp_path),  # cwd provides the "."-parent for "build"
+        check=False,
     )
 
     assert result.returncode == 0, (

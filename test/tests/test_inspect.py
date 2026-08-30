@@ -38,7 +38,7 @@ EXIT_CONFIG = 78
 
 def _run(ocx: OcxRunner, cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(ocx.binary), *args], cwd=cwd, capture_output=True, text=True, env=ocx.env
+        [str(ocx.binary), *args], cwd=cwd, capture_output=True, text=True, env=ocx.env, check=False
     )
 
 

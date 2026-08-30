@@ -40,7 +40,7 @@ def _sign(ocx: OcxRunner, stack: SigstoreStack, token: Path, pkg: PackageInfo) -
         [str(ocx.binary), "package", "sign", *stack.sign_args(token), pkg.short],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 0, f"sign setup failed: {result.stderr}"
 
@@ -69,7 +69,7 @@ def _verify_offline(
         ],
         capture_output=True,
         text=True,
-        env={**ocx.env, "OCX_OFFLINE": "1", **(extra_env or {})},
+        env={**ocx.env, "OCX_OFFLINE": "1", **(extra_env or {})}, check=False,
     )
 
 
@@ -91,7 +91,7 @@ def _adopt_managed(ocx: OcxRunner, ref: str) -> None:
         [str(ocx.binary), "config", "update"],
         capture_output=True,
         text=True,
-        env={**ocx.env, "OCX_MANAGED_CONFIG": ref},
+        env={**ocx.env, "OCX_MANAGED_CONFIG": ref}, check=False,
     )
     assert result.returncode == 0, f"managed-config adoption failed: {result.stderr}"
 

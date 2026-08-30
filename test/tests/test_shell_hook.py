@@ -74,7 +74,7 @@ def _run(
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
 
 
@@ -112,7 +112,7 @@ def _bash_syntax_ok(script: str) -> tuple[bool, str]:
     proc = subprocess.run(
         ["bash", "-n", "-c", script],
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
     return proc.returncode == 0, proc.stderr
 
@@ -337,7 +337,7 @@ def test_shell_hook_no_prior_applied_removed(
         cwd=tmp_path,
         capture_output=True,
         text=True,
-        env=env_no_applied,
+        env=env_no_applied, check=False,
     )
     assert result.returncode == EXIT_USAGE, (
         f"ocx shell hook must exit {EXIT_USAGE} (deleted); "
@@ -371,7 +371,7 @@ def test_shell_hook_v2_payload_removed(
 def test_shell_init_bash_removed(ocx: OcxRunner) -> None:
     """``ocx shell init --shell bash`` → exit 64 (deleted)."""
     cmd = _ocx_cmd(ocx, "shell", "init", "--shell", "bash")
-    result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env, check=False)
 
     assert result.returncode == EXIT_USAGE, (
         f"ocx shell init must exit {EXIT_USAGE} (deleted); "
@@ -385,7 +385,7 @@ def test_shell_init_bash_removed(ocx: OcxRunner) -> None:
 def test_shell_init_zsh_removed(ocx: OcxRunner) -> None:
     """``ocx shell init --shell zsh`` → exit 64 (deleted)."""
     cmd = _ocx_cmd(ocx, "shell", "init", "--shell", "zsh")
-    result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env, check=False)
     assert result.returncode == EXIT_USAGE, (
         f"ocx shell init must exit {EXIT_USAGE} (deleted); "
         f"got {result.returncode}\nstderr:\n{result.stderr}"
@@ -395,7 +395,7 @@ def test_shell_init_zsh_removed(ocx: OcxRunner) -> None:
 def test_shell_init_fish_removed(ocx: OcxRunner) -> None:
     """``ocx shell init --shell fish`` → exit 64 (deleted)."""
     cmd = _ocx_cmd(ocx, "shell", "init", "--shell", "fish")
-    result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env, check=False)
     assert result.returncode == EXIT_USAGE, (
         f"ocx shell init must exit {EXIT_USAGE} (deleted); "
         f"got {result.returncode}\nstderr:\n{result.stderr}"
@@ -405,7 +405,7 @@ def test_shell_init_fish_removed(ocx: OcxRunner) -> None:
 def test_shell_init_nushell_removed(ocx: OcxRunner) -> None:
     """``ocx shell init --shell nushell`` → exit 64 (deleted)."""
     cmd = _ocx_cmd(ocx, "shell", "init", "--shell", "nushell")
-    result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=ocx.env, check=False)
     assert result.returncode == EXIT_USAGE, (
         f"ocx shell init must exit {EXIT_USAGE} (deleted); "
         f"got {result.returncode}\nstderr:\n{result.stderr}"

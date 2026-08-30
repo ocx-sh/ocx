@@ -57,7 +57,7 @@ def _compile(destination: Path, source: str, *args: str) -> None:
     result = subprocess.run(
         ["cc", "-o", str(destination), str(source_path), *args],
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
     assert result.returncode == 0, f"cc failed to build fixture: {result.stderr}"
     source_path.unlink()

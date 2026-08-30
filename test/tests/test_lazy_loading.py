@@ -88,7 +88,7 @@ def _run(
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
-        [str(ocx.binary), *args], cwd=cwd, capture_output=True, text=True, env=env
+        [str(ocx.binary), *args], cwd=cwd, capture_output=True, text=True, env=env, check=False
     )
 
 
@@ -936,7 +936,7 @@ def test_s012_progress_report_degrades_silently_without_a_controlling_terminal(
         capture_output=True,
         text=True,
         env=_shell_env(ocx),
-        start_new_session=True,
+        start_new_session=True, check=False,
     )
 
     assert result.returncode == EXIT_SUCCESS, (
@@ -975,7 +975,7 @@ def test_s012_errors_still_reach_stderr_under_progress_reporting(
         capture_output=True,
         text=True,
         env=_shell_env(ocx, OCX_OFFLINE="1"),
-        start_new_session=True,
+        start_new_session=True, check=False,
     )
 
     assert result.returncode == EXIT_POLICY_BLOCKED, (

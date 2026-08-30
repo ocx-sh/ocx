@@ -88,7 +88,7 @@ def _run_ocx(binary: Path, ocx_home: Path, *args: str, extra_env: dict[str, str]
     if extra_env:
         env.update(extra_env)
     cmd = [str(binary), "version"]
-    return subprocess.run(cmd, capture_output=True, text=True, env=env)
+    return subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
 
 
 # ---------------------------------------------------------------------------

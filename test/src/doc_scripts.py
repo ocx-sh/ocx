@@ -630,7 +630,7 @@ def run_doc_script(
         env=script_env,
         cwd=str(cwd),
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
 
     combined_output = result.stdout + result.stderr

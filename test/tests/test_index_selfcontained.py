@@ -276,7 +276,7 @@ def test_shipped_copy_resolves_version_choice_offline_with_no_network_and_no_blo
         cwd=project,
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
     assert lock_result.returncode == 0, (
         "offline lock against a self-contained shipped copy must succeed: "

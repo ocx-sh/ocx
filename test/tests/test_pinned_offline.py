@@ -44,7 +44,7 @@ def _run(ocx: OcxRunner, *args: str, cwd: Path, extra_env: dict[str, str] | None
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=env,
+        env=env, check=False,
     )
 
 

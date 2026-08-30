@@ -73,7 +73,7 @@ def _run_lock(
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 
@@ -94,7 +94,7 @@ def _run_lock_with_project(
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
 
 
@@ -338,7 +338,7 @@ mover = "{ocx.registry}/{repo}:latest"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert refresh.returncode == EXIT_SUCCESS, refresh.stderr
 
@@ -401,7 +401,7 @@ a = "{ocx.registry}/{repo_a}:latest"
             cwd=project,
             capture_output=True,
             text=True,
-            env=ocx.env,
+            env=ocx.env, check=False,
         )
         assert refresh.returncode == EXIT_SUCCESS, refresh.stderr
     _write_ocx_toml(
@@ -1403,7 +1403,7 @@ existing = "{ocx.registry}/{repo_existing}:1.0.0"
         cwd=project,
         capture_output=True,
         text=True,
-        env={**ocx.env, "OCX_TEST_FAULT": "after_lock_write"},
+        env={**ocx.env, "OCX_TEST_FAULT": "after_lock_write"}, check=False,
     )
 
     assert failed.returncode != EXIT_SUCCESS, (
@@ -1485,7 +1485,7 @@ repository = "{fake_registry}/{repo}"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     # Pin the contract, not just "any error": offline + uncached must classify
     # as PolicyResolutionBlocked (81) or TagNotFound (79) — both prove no network
@@ -1602,7 +1602,7 @@ tool = "{ocx.registry}/{repo}:{tag}"
         cwd=project,
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert update.returncode == EXIT_SUCCESS, (
         f"update after adding platform failed: "

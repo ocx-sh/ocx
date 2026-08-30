@@ -151,7 +151,7 @@ def test_exit_code_on_offline_blocks_fetch(ocx: OcxRunner) -> None:
         [str(ocx.binary), "--offline", "package", "install", "nonexistent_spec_test_pkg:0"],
         capture_output=True,
         text=True,
-        env=ocx.env,
+        env=ocx.env, check=False,
     )
     assert result.returncode == 81, (
         f"offline fetch should exit with code 81 (PolicyBlocked), got {result.returncode}; "
