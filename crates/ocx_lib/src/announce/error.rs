@@ -227,6 +227,13 @@ impl crate::cli::ClassifyExitCode for AnnounceError {
             // named no version. `EX_USAGE` is that category, and it keeps the
             // all-reserved collapse discriminable from an unclassified crash.
             Self::NoCuratedTags { .. } => Some(crate::cli::ExitCode::UsageError),
+            // Writing the `--out` tree failed: a full disk, an `ENOTDIR`, a
+            // read-only mount. `cli/classify.rs`'s bare-`io::Error` walker
+            // special-cases only `PermissionDenied`, so every other kind lands
+            // on `Failure` (1) — indistinguishable from a crash to a release
+            // wrapper. `EX_IOERR` is the category the rest of the tool uses for
+            // an operator/environment I/O failure.
+            Self::OutputWrite { .. } => Some(crate::cli::ExitCode::IoError),
             // Every other variant falls through to `ExitCode::Failure`.
             _ => None,
         }
@@ -389,5 +396,28 @@ mod tests {
     #[test]
     fn unclassified_variant_defers_to_the_chain_walker() {
         assert_eq!(AnnounceError::ForgeRequired.classify(), None);
+    }
+
+    /// C-004/S-003 (#377): an `--out` write failure is an operator/environment
+    /// I/O problem, exit 74. `StorageFull` is the case the generic walker
+    /// cannot reach — it special-cases only `PermissionDenied`, so before this
+    /// arm existed every other kind exited 1, the crash code.
+    #[test]
+    fn output_write_classifies_as_io_error() {
+        for kind in [
+            std::io::ErrorKind::StorageFull,
+            std::io::ErrorKind::NotADirectory,
+            std::io::ErrorKind::PermissionDenied,
+        ] {
+            let error = AnnounceError::OutputWrite {
+                path: "/mnt/ro/index/root.json".to_string(),
+                source: std::io::Error::new(kind, "write failed"),
+            };
+            assert_eq!(
+                error.classify(),
+                Some(ExitCode::IoError),
+                "an --out write failure of kind {kind:?} must exit 74"
+            );
+        }
     }
 }
