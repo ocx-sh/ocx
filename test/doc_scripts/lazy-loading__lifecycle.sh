@@ -19,19 +19,15 @@ ocx package which --lazy-mode always "$PKG_KITWARE_CMAKE" "$PKG_ASTRAL_SH_UV"
 # cmake was invoked, so its shim materialized into a real package. uv was
 # composed but never invoked, so it is still a shim — proving the deferral
 # is per-tool, not an all-or-nothing property of the compose.
-cmake_kind="$(
-    ocx --format json package which --lazy-mode always "$PKG_KITWARE_CMAKE" |
-        grep -o '"kind":[[:space:]]*"[a-z]*"' | head -1
-)"
+cmake_which=$(ocx --format json package which --lazy-mode always "$PKG_KITWARE_CMAKE")
+cmake_kind=$(grep -o -m1 '"kind":[[:space:]]*"[a-z]*"' <<<"$cmake_which")
 [[ "$cmake_kind" == *package* ]] || {
     echo "ERROR: expected cmake to be materialized after invocation, got: $cmake_kind" >&2
     exit 1
 }
 
-uv_kind="$(
-    ocx --format json package which --lazy-mode always "$PKG_ASTRAL_SH_UV" |
-        grep -o '"kind":[[:space:]]*"[a-z]*"' | head -1
-)"
+uv_which=$(ocx --format json package which --lazy-mode always "$PKG_ASTRAL_SH_UV")
+uv_kind=$(grep -o -m1 '"kind":[[:space:]]*"[a-z]*"' <<<"$uv_which")
 [[ "$uv_kind" == *shim* ]] || {
     echo "ERROR: expected uv to still be a shim (never invoked), got: $uv_kind" >&2
     exit 1
