@@ -44,6 +44,6 @@
     }
   ],
   "npm": {
-    "managerFilePatterns": ["/^website/", "/^\\.github/actions/setup-ocx/"]
+    "managerFilePatterns": ["/^website/"]
   }
 }

@@ -44,14 +44,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Setup OCX
-        uses: ./.github/actions/setup-ocx
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
-          version: '0.5.2'
+          version: '0.5.8'
+          # Default-off: the action would otherwise restore
+          # $OCX_HOME/{blobs,layers,packages,tags} across runs via
+          # @actions/cache, and a restored object store is runner-executable
+          # content. Nothing here needs it; turning it on is its own change.
+          cache: false
       - name: Lint workflows
-        # `ocx run` composes the project toolchain (actionlint + shellcheck +
-        # go-task) from ocx.lock and runs the task hermetically — same gate as
-        # local `task ci:actionlint`.
-        run: ocx run -- task ci:actionlint
+        # The action activates the project from ocx.toml + ocx.lock, so the
+        # composed toolchain (actionlint + shellcheck + go-task) is already on
+        # PATH — this is byte-for-byte the local `task ci:actionlint` gate.
+        run: task ci:actionlint
 
   smoke:
     name: Smoke (Linux)
@@ -111,9 +116,15 @@ jobs:
       # they come from the same place a user's would, and this is also the only
       # leg where the emitted statements meet those shells' real parsers.
       - name: Setup OCX
-        uses: ./.github/actions/setup-ocx
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
-          version: '0.5.2'
+          version: '0.5.8'
+          # `project: ''` is the action's documented opt-out from project
+          # auto-load. This leg wants the binary and nothing else — the step
+          # below pulls three shells with `ocx --remote`, which needs no
+          # project toolchain.
+          project: ''
+          cache: false
       - name: Put the elvish, nushell and fish parity arms on PATH
         run: |
           set -euo pipefail
