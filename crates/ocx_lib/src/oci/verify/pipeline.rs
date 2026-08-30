@@ -743,12 +743,12 @@ impl VerifyPipeline {
             budget.examined();
             processed = processed.saturating_add(1);
             match Self::read_unverified_referrer(transport, ctx, budget, target, &descriptor, payload).await {
-                Ok(Some(sbom)) => found.push(sbom),
-                // A `--type` narrowing miss: this candidate is fine, it simply
-                // is not the document that was asked for. It spent a slot and
-                // records no failure, exactly as the signed scan's
-                // `TypeNarrowed` does (S-017).
-                Ok(None) => {}
+                // Every layer the referrer carries. An empty `Vec` is a `--type`
+                // narrowing miss: this candidate is fine, it simply is not the
+                // document that was asked for. It spent a slot and records no
+                // failure, exactly as the signed scan's `TypeNarrowed` does
+                // (S-017).
+                Ok(sboms) => found.extend(sboms),
                 Err(reason) => refused.push(RefusedCandidate {
                     referrer_digest: descriptor.digest.clone(),
                     reason,
@@ -792,9 +792,9 @@ impl VerifyPipeline {
         if budget.stop.is_none() {
             budget.examined();
             match Self::read_sbom_sidecar_tag(transport, ctx, budget, target).await {
-                Ok(Some(sbom)) => found.push(sbom),
-                // No tag, or a `--type` narrowing miss. Neither is a failure.
-                Ok(None) => {}
+                // Every layer the tag carries (#386). No tag, or a `--type`
+                // narrowing miss, is an empty `Vec` — neither is a failure.
+                Ok(sboms) => found.extend(sboms),
                 // `referrer_digest` is the tag's manifest digest when the read
                 // got far enough to learn it, and empty when it did not — the
                 // same convention the truncation row above uses.
@@ -807,27 +807,43 @@ impl VerifyPipeline {
         Ok((found, refused))
     }
 
-    /// Read the document behind cosign's `sha256-<hex>.sbom` sidecar tag.
+    /// Read the documents behind cosign's `sha256-<hex>.sbom` sidecar tag —
+    /// **every** layer, not the first.
     ///
-    /// `Ok(None)` covers both "the subject carries no such tag" — the
+    /// An empty `Vec` covers both "the subject carries no such tag" — the
     /// overwhelmingly common case, and a 404 says exactly that — and a `--type`
-    /// narrowing miss.
+    /// narrowing that matched nothing.
     ///
     /// The error carries the manifest digest when one was learned, because the
     /// caller has no descriptor to name the refusal with: this door is addressed
     /// by tag, and the digest only exists once the registry has answered.
     ///
-    /// Only the **first** layer is read, matching
-    /// [`Self::read_unverified_referrer`]'s rule for an attachment manifest.
-    /// Measured rather than assumed: a second `cosign attach sbom` against the
-    /// same subject *replaces* the tag's manifest, so cosign never writes a
-    /// second layer for a second document.
+    /// # Why every layer, when cosign writes one
+    ///
+    /// Measured against cosign v3.1.1, a second `cosign attach sbom` against the
+    /// same subject *replaces* the tag's manifest, so cosign itself never writes
+    /// a second layer. That is a fact about one producer, and this reader does
+    /// not get to assume its producer: the tag is generic OCI, addressed by
+    /// name, and a registry can serve any manifest under it. Reading
+    /// `layers.first()` therefore did not mean "cosign wrote one document" — it
+    /// meant every document past the first was **silently dropped** from
+    /// `ocx package sbom`, which is a collect-all report (#386).
+    ///
+    /// One layer's refusal refuses the whole tag, and deliberately: the answer
+    /// this feeds is "every document the subject carries", and a short list
+    /// presented as complete is the worse failure. That is also exactly what the
+    /// first-layer reader did when the first layer was the bad one.
+    ///
+    /// The tag spends one candidate slot however many layers it holds — it is
+    /// one manifest fetch, and the slot cap bounds discovery breadth — while
+    /// every layer's bytes are charged to the byte budget by
+    /// [`Self::read_unverified_layer`], because layers are transfer.
     async fn read_sbom_sidecar_tag(
         transport: &dyn OciTransport,
         ctx: &VerifyContext<'_>,
         budget: &mut ScanBudget,
         target: &ScanTarget,
-    ) -> Result<Option<UnverifiedSbom>, (Option<Digest>, VerifyErrorKind)> {
+    ) -> Result<Vec<UnverifiedSbom>, (Option<Digest>, VerifyErrorKind)> {
         let ScanTarget {
             image, subject_digest, ..
         } = target;
@@ -835,7 +851,7 @@ impl VerifyPipeline {
             .await
             .map_err(|kind| (None, kind))?
         else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         budget.charge(manifest_bytes.len() as u64);
 
@@ -846,18 +862,23 @@ impl VerifyPipeline {
             // bytes outright.
             let manifest: ImageManifest =
                 serde_json::from_slice(&manifest_bytes).map_err(|_| VerifyErrorKind::BundleParseFailed)?;
-            let layer = manifest.layers.first().ok_or(VerifyErrorKind::NoUsableBundle)?;
+            // A zero-layer manifest is unusable, and stays the same refusal it
+            // was when the reader took the first layer: the tag exists and holds
+            // nothing readable, which is not the same answer as "no tag".
+            if manifest.layers.is_empty() {
+                return Err(VerifyErrorKind::NoUsableBundle);
+            }
             // `Raw`: the layer *is* the document. A `.sbom` tag never carries a
             // Sigstore bundle — cosign's signed path writes a referrer, not this
             // tag — and passing `Bundle` here would ask `parse_bundle` to read an
             // SBOM.
-            Self::read_unverified_layer(
+            Self::read_every_layer(
                 transport,
                 ctx,
                 budget,
                 target,
-                referrer_digest.clone(),
-                layer,
+                &referrer_digest,
+                &manifest.layers,
                 UnverifiedPayload::Raw,
             )
             .await
@@ -878,7 +899,17 @@ impl VerifyPipeline {
     /// path, and a registry declaring one byte while streaming the cap would
     /// otherwise be charged one byte.
     ///
-    /// `Ok(None)` is a `--type` narrowing miss, not a failure — see the caller.
+    /// **Every** layer, for the reason [`Self::read_sbom_sidecar_tag`] reads
+    /// every layer of the sidecar tag: an OCI 1.1 referrer manifest is an
+    /// ordinary image manifest, whose `layers` array the spec bounds below at
+    /// one and not above, so "the payload is the first layer" was a statement
+    /// about OCX's own writer and not about the bytes a registry serves. Both
+    /// doors funnel into the same [`Self::read_unverified_layer`], so a reader
+    /// that fixed one and not the other would judge one shape two ways.
+    ///
+    /// An empty `Vec` is a `--type` narrowing miss, not a failure — see the
+    /// caller. One candidate slot per referrer however many layers it holds;
+    /// every layer's bytes are charged.
     async fn read_unverified_referrer(
         transport: &dyn OciTransport,
         ctx: &VerifyContext<'_>,
@@ -886,7 +917,7 @@ impl VerifyPipeline {
         target: &ScanTarget,
         descriptor: &crate::oci::Descriptor,
         payload: UnverifiedPayload,
-    ) -> Result<Option<UnverifiedSbom>, VerifyErrorKind> {
+    ) -> Result<Vec<UnverifiedSbom>, VerifyErrorKind> {
         let referrer_digest =
             Digest::try_from(descriptor.digest.as_str()).map_err(|e| VerifyErrorKind::Internal(Box::new(e)))?;
 
@@ -910,21 +941,62 @@ impl VerifyPipeline {
 
         let manifest: crate::oci::referrer::ReferrerManifest =
             serde_json::from_slice(&referrer_bytes).map_err(|_| VerifyErrorKind::BundleParseFailed)?;
-        let layer = manifest.layers.first().ok_or(VerifyErrorKind::NoUsableBundle)?;
-        Self::read_unverified_layer(transport, ctx, budget, target, referrer_digest, layer, payload).await
+        if manifest.layers.is_empty() {
+            return Err(VerifyErrorKind::NoUsableBundle);
+        }
+        Self::read_every_layer(
+            transport,
+            ctx,
+            budget,
+            target,
+            &referrer_digest,
+            &manifest.layers,
+            payload,
+        )
+        .await
+    }
+
+    /// Read each of one manifest's payload layers into a document, dropping the
+    /// ones `--type` narrows out.
+    ///
+    /// The shared body of the two multi-layer readers above. One layer's
+    /// refusal refuses the manifest: the pass this feeds reports *every*
+    /// document a subject carries, so a partial list returned as a complete one
+    /// is the failure worth avoiding.
+    async fn read_every_layer(
+        transport: &dyn OciTransport,
+        ctx: &VerifyContext<'_>,
+        budget: &mut ScanBudget,
+        target: &ScanTarget,
+        referrer_digest: &Digest,
+        layers: &[crate::oci::Descriptor],
+        payload: UnverifiedPayload,
+    ) -> Result<Vec<UnverifiedSbom>, VerifyErrorKind> {
+        let mut documents = Vec::with_capacity(layers.len());
+        for layer in layers {
+            if let Some(document) =
+                Self::read_unverified_layer(transport, ctx, budget, target, referrer_digest.clone(), layer, payload)
+                    .await?
+            {
+                documents.push(document);
+            }
+        }
+        Ok(documents)
     }
 
     /// Turn one already-located payload layer into an unverified document.
     ///
     /// Split out of [`Self::read_unverified_referrer`] rather than duplicated,
-    /// because the `.sbom` sidecar tag reaches the *same* layer through a
-    /// different door: an OCI 1.1 referrer is addressed by digest and parses as
-    /// a [`ReferrerManifest`](crate::oci::referrer::ReferrerManifest), while
-    /// cosign's `sha256-<hex>.sbom` manifest declares neither `artifactType` nor
-    /// `subject` and so parses only as a plain image manifest. Everything after
-    /// "here is the layer" — the media-type gate, the `--type` narrowing, the
-    /// size cap and the blob read — is one function, so the two doors cannot
-    /// drift into judging the same bytes differently.
+    /// because the `.sbom` sidecar tag reaches layers of the same *kind*
+    /// through a different door: an OCI 1.1 referrer is addressed by digest and
+    /// parses as a [`ReferrerManifest`](crate::oci::referrer::ReferrerManifest),
+    /// while cosign's `sha256-<hex>.sbom` manifest declares neither
+    /// `artifactType` nor `subject` and so parses only as a plain image
+    /// manifest. Both doors walk **all** of their manifest's layers through
+    /// [`Self::read_every_layer`], and everything after "here is the layer" —
+    /// the media-type gate, the `--type` narrowing, the size cap and the blob
+    /// read — is this one function, so the two cannot drift into judging the
+    /// same bytes differently.
     ///
     /// `Ok(None)` is a `--type` narrowing miss, not a failure.
     async fn read_unverified_layer(
@@ -6081,6 +6153,13 @@ mod tests {
         artifact_type: String,
         layer_media_type: String,
         document: Vec<u8>,
+        /// Payload layers **after** the first, appended to the manifest the
+        /// production builder wrote.
+        ///
+        /// The builder writes exactly one layer, so this is the shape it cannot
+        /// produce and a registry can serve anyway: the OCI image-manifest
+        /// schema bounds `layers` below at one and not above (C-024).
+        extra_documents: Vec<Vec<u8>>,
         /// Overrides the layer's declared size, so a cap test can lie about it
         /// the way a hostile registry would.
         declared_layer_size: Option<i64>,
@@ -6094,6 +6173,7 @@ mod tests {
                 artifact_type: media_type.to_string(),
                 layer_media_type: media_type.to_string(),
                 document: document.as_bytes().to_vec(),
+                extra_documents: Vec::new(),
                 declared_layer_size: None,
             }
         }
@@ -6110,6 +6190,7 @@ mod tests {
                 artifact_type: artifact_type.to_string(),
                 layer_media_type: layer_media_type.to_string(),
                 document: document.as_bytes().to_vec(),
+                extra_documents: Vec::new(),
                 declared_layer_size: None,
             }
         }
@@ -6127,6 +6208,7 @@ mod tests {
                 artifact_type: SIGSTORE_BUNDLE_V03.to_string(),
                 layer_media_type: crate::oci::sign::bundle::BUNDLE_V03_MEDIA_TYPE.to_string(),
                 document: serde_json::to_vec(&bundle).expect("bundle serializes"),
+                extra_documents: Vec::new(),
                 declared_layer_size: None,
             }
         }
@@ -6139,12 +6221,28 @@ mod tests {
                 artifact_type: SIGSTORE_BUNDLE_V03.to_string(),
                 layer_media_type: crate::oci::sign::bundle::BUNDLE_V03_MEDIA_TYPE.to_string(),
                 document: STUB_BUNDLE_BLOB.to_vec(),
+                extra_documents: Vec::new(),
                 declared_layer_size: None,
             }
         }
 
+        /// Hang a second payload layer off this referrer.
+        fn with_extra_document(mut self, document: &str) -> Self {
+            self.extra_documents.push(document.as_bytes().to_vec());
+            self
+        }
+
         fn document_digest(&self) -> Digest {
             crate::oci::Algorithm::Sha256.hash(&self.document)
+        }
+
+        /// The bytes this referrer serves under `digest`, across every layer it
+        /// declares.
+        fn blob_for(&self, digest: &Digest) -> Option<Vec<u8>> {
+            std::iter::once(&self.document)
+                .chain(self.extra_documents.iter())
+                .find(|body| &crate::oci::Algorithm::Sha256.hash(body) == digest)
+                .cloned()
         }
 
         /// Built through the production builder, so the fixture cannot drift
@@ -6162,9 +6260,27 @@ mod tests {
                 size: INDIRECTION_SUBJECT_MANIFEST.len() as i64,
                 ..crate::oci::Descriptor::default()
             };
-            crate::oci::referrer::ReferrerManifest::build(subject, &self.artifact_type, payload, None)
+            let built = crate::oci::referrer::ReferrerManifest::build(subject, &self.artifact_type, payload, None)
                 .to_canonical_json()
-                .expect("referrer manifest json")
+                .expect("referrer manifest json");
+            if self.extra_documents.is_empty() {
+                return built;
+            }
+            // Spliced onto the builder's own output rather than hand-written, so
+            // the extra layers differ from the real one in nothing but their
+            // digest and size.
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&built).expect("the built referrer manifest is JSON");
+            let template = manifest["layers"][0].clone();
+            let mut layers = vec![template.clone()];
+            for document in &self.extra_documents {
+                let mut layer = template.clone();
+                layer["digest"] = serde_json::json!(crate::oci::Algorithm::Sha256.hash(document).to_string());
+                layer["size"] = serde_json::json!(document.len());
+                layers.push(layer);
+            }
+            manifest["layers"] = serde_json::Value::Array(layers);
+            serde_json::to_vec(&manifest).expect("the spliced referrer manifest serializes")
         }
 
         fn descriptor(&self) -> crate::oci::Descriptor {
@@ -6179,8 +6295,8 @@ mod tests {
         }
     }
 
-    /// What the `sha256-<hex>.sbom` tag serves: one manifest and the blob its
-    /// single layer names.
+    /// What the `sha256-<hex>.sbom` tag serves: one manifest and the blob each
+    /// of its layers names.
     ///
     /// Deliberately not a [`StubReferrer`]: that type builds a *referrer*
     /// manifest, with an `artifactType` and a `subject`, and a `.sbom` sidecar
@@ -6189,7 +6305,8 @@ mod tests {
     #[derive(Clone)]
     struct StubSbomSidecar {
         manifest: Vec<u8>,
-        document: Vec<u8>,
+        /// One document per manifest layer, in manifest order.
+        documents: Vec<Vec<u8>>,
     }
 
     impl StubSbomSidecar {
@@ -6197,13 +6314,20 @@ mod tests {
             crate::oci::Algorithm::Sha256.hash(&self.manifest)
         }
 
-        /// The digest the manifest's one layer names, read out of the manifest
-        /// rather than recomputed — so a fixture whose layer digest does not
+        /// The document the manifest's layers name under `digest`, matched by
+        /// position: the digest is read out of the manifest rather than
+        /// recomputed from the body, so a fixture whose layer digest does not
         /// cover its document is served exactly as inconsistently as a registry
         /// would serve it, instead of being silently repaired here.
-        fn layer_digest(&self) -> String {
+        fn document_for(&self, digest: &str) -> Option<Vec<u8>> {
             let manifest: ImageManifest = serde_json::from_slice(&self.manifest).expect("sidecar manifest parses");
-            manifest.layers.first().expect("one layer").digest.clone()
+            let position = manifest.layers.iter().position(|layer| layer.digest == digest)?;
+            Some(
+                self.documents
+                    .get(position)
+                    .expect("the fixture serves one document per layer")
+                    .clone(),
+            )
         }
     }
 
@@ -6241,11 +6365,12 @@ mod tests {
             }
         }
 
-        /// Hang a `sha256-<hex>.sbom` sidecar off the subject.
-        fn with_sidecar(mut self, manifest: &[u8], document: &[u8]) -> Self {
+        /// Hang a `sha256-<hex>.sbom` sidecar off the subject, one document
+        /// per layer the manifest declares.
+        fn with_sidecar(mut self, manifest: &[u8], documents: &[&[u8]]) -> Self {
             self.sidecar = Some(StubSbomSidecar {
                 manifest: manifest.to_vec(),
-                document: document.to_vec(),
+                documents: documents.iter().map(|body| body.to_vec()).collect(),
             });
             self
         }
@@ -6342,16 +6467,16 @@ mod tests {
                 .expect("recorder lock")
                 .push(digest.to_string());
             if let Some(sidecar) = self.sidecar.as_ref()
-                && sidecar.layer_digest() == digest.to_string()
+                && let Some(document) = sidecar.document_for(&digest.to_string())
             {
-                return Ok(Box::new(std::io::Cursor::new(sidecar.document.clone())));
+                return Ok(Box::new(std::io::Cursor::new(document)));
             }
-            let referrer = self
+            let document = self
                 .referrers
                 .iter()
-                .find(|stub| &stub.document_digest() == digest)
+                .find_map(|stub| stub.blob_for(digest))
                 .expect("the scan only asks for blobs a listed referrer named");
-            Ok(Box::new(std::io::Cursor::new(referrer.document.clone())))
+            Ok(Box::new(std::io::Cursor::new(document)))
         }
 
         async fn pull_blob_to_file(
@@ -7369,7 +7494,7 @@ mod tests {
     /// — no referrer of any kind, so a document that comes back can only have
     /// arrived through the tag.
     fn sbom_sidecar_transport() -> SbomTransport {
-        SbomTransport::new(Vec::new()).with_sidecar(SBOM_SIDECAR_MANIFEST, SBOM_SIDECAR_DOCUMENT)
+        SbomTransport::new(Vec::new()).with_sidecar(SBOM_SIDECAR_MANIFEST, &[SBOM_SIDECAR_DOCUMENT])
     }
 
     async fn drive_sidecar_scan(
@@ -7379,6 +7504,115 @@ mod tests {
     ) -> (Result<AttestationScan, VerifyError>, SbomTransport, tempfile::TempDir) {
         let (_key, cert) = self_signed_cert();
         drive_sbom_scan_over_transport(transport, predicate_type, verification, trust_root_of(&[&cert])).await
+    }
+
+    /// **C-024.** A referrer manifest carrying two payload layers lists two
+    /// documents.
+    ///
+    /// The reader took `layers.first()` and dropped the rest. Nothing in OCI
+    /// makes that safe: the image-manifest schema bounds `layers` below at one
+    /// and not above, and a referrer manifest is an ordinary image manifest, so
+    /// "one payload layer" was a property of OCX's own writer and not of the
+    /// bytes a registry serves. Both documents are asserted by content, because
+    /// a reader that returned the first document twice would satisfy a count.
+    #[tokio::test]
+    async fn a_referrer_with_two_payload_layers_lists_both_documents() {
+        let (outcome, _transport, _state) = drive_sbom_scan(
+            vec![StubReferrer::sbom("application/vnd.cyclonedx+json", RAW_CYCLONEDX).with_extra_document(RAW_SPDX)],
+            None,
+            VerificationMode::Permissive,
+        )
+        .await;
+
+        let scan = outcome.expect("a permissive scan lists unverified documents");
+        let documents: Vec<&[u8]> = scan
+            .unverified
+            .iter()
+            .map(|listed| listed.document.as_slice())
+            .collect();
+        assert_eq!(
+            documents,
+            vec![RAW_CYCLONEDX.as_bytes(), RAW_SPDX.as_bytes()],
+            "every layer the referrer declares is a document, in manifest order",
+        );
+        // The label comes from the *layer*, and both layers carry the referrer's
+        // one media type — so the second document is reported under the type the
+        // registry served it as, not under the type its own bytes look like.
+        assert!(
+            scan.unverified
+                .iter()
+                .all(|listed| listed.predicate_type == CYCLONEDX_URI),
+            "the layer media type labels every document: {:?}",
+            scan.unverified,
+        );
+    }
+
+    /// One candidate slot, however many layers the referrer holds — the slot cap
+    /// bounds discovery breadth, and this is still one manifest fetch.
+    ///
+    /// Measured against a control rather than against a transcribed number: the
+    /// same scan over a *single*-layer referrer is the baseline, so the
+    /// assertion is "the second layer cost no slot" and not "the scan spends N",
+    /// which would drift with every unrelated door the pass opens.
+    ///
+    /// Paired with the test above so the multi-layer read cannot be paid for out
+    /// of a second candidate's allowance: a reader that spent a slot per layer
+    /// would silently halve how many *referrers* a scan can look at.
+    #[tokio::test]
+    async fn a_multi_layer_referrer_still_costs_one_candidate_slot() {
+        async fn slots_spent(referrer: StubReferrer) -> usize {
+            let mut budget = ScanBudget::new(VerifyContentMode::Attestation { predicate_type: None }.caps());
+            let transport = SbomTransport::new(vec![referrer]);
+            let client = Client::with_transport(Box::new(transport));
+            let target = ScanTarget {
+                image: "registry.example/repo:latest".parse().expect("stub reference"),
+                subject_digest: indirection_subject_digest(),
+                enclosing_index: None,
+                index_members: Vec::new(),
+            };
+            let identifier = verify_id();
+            let index = Index::from_impl(IndirectingIndex {
+                physical: identifier.clone(),
+            });
+            let (_key, cert) = self_signed_cert();
+            let trust_root = trust_root_of(&[&cert]);
+            let rekor_url = Url::parse("http://127.0.0.1:3000").expect("rekor url");
+            let temp = tempfile::TempDir::new().expect("state dir");
+            let state = StateStore::new(temp.path());
+            let ctx = VerifyContext {
+                identifier: &identifier,
+                platform: None,
+                policies: &[],
+                no_cache: true,
+                index: &index,
+                trust_root: &trust_root,
+                rekor_url: &rekor_url,
+                state: &state,
+                offline: true,
+                content: VerifyContentMode::Attestation { predicate_type: None },
+                verification: VerificationMode::Permissive,
+                signature_format: None,
+                allow_unlogged_signature: false,
+                report_all: true,
+            };
+            let (found, refused) = VerifyPipeline::scan_unverified(&client, &ctx, &target, &mut budget)
+                .await
+                .expect("the permissive pass reads the referrer");
+            assert!(refused.is_empty(), "nothing was refused: {refused:?}");
+            assert!(!found.is_empty(), "the referrer yields at least one document");
+            budget.considered
+        }
+
+        let one_layer = slots_spent(StubReferrer::sbom("application/vnd.cyclonedx+json", RAW_CYCLONEDX)).await;
+        let two_layers = slots_spent(
+            StubReferrer::sbom("application/vnd.cyclonedx+json", RAW_CYCLONEDX).with_extra_document(RAW_SPDX),
+        )
+        .await;
+
+        assert_eq!(
+            two_layers, one_layer,
+            "a referrer is one candidate slot whatever it carries: {two_layers} against {one_layer}",
+        );
     }
 
     /// **§WP5, SBOM half.** A permissive scan reaches the `sha256-<hex>.sbom`
@@ -7427,6 +7661,69 @@ mod tests {
         );
     }
 
+    /// cosign's committed `.sbom` manifest with its `layers` array replaced by
+    /// one descriptor per document — every other field, the config descriptor
+    /// included, exactly as cosign wrote it.
+    ///
+    /// Built rather than committed because no producer writes it: cosign's
+    /// second `attach sbom` *replaces* the tag's manifest. That is the point —
+    /// the tag is generic OCI, addressed by name, and the reader does not get to
+    /// assume the registry's answer came from cosign.
+    fn sbom_sidecar_manifest_of(documents: &[&[u8]]) -> Vec<u8> {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(SBOM_SIDECAR_MANIFEST).expect("cosign's sidecar manifest is JSON");
+        let template = manifest["layers"][0].clone();
+        let layers: Vec<serde_json::Value> = documents
+            .iter()
+            .map(|document| {
+                let mut layer = template.clone();
+                layer["digest"] = serde_json::json!(crate::oci::Algorithm::Sha256.hash(document).to_string());
+                layer["size"] = serde_json::json!(document.len());
+                layer
+            })
+            .collect();
+        manifest["layers"] = serde_json::Value::Array(layers);
+        serde_json::to_vec(&manifest).expect("the rebuilt sidecar manifest serializes")
+    }
+
+    /// **S-007 / C-020.** A `.sbom` tag carrying two layers lists two documents,
+    /// and neither is silently dropped.
+    ///
+    /// `ocx package sbom` is a collect-all report, so a reader that took
+    /// `layers.first()` did not mean "cosign writes one document" — it meant
+    /// every document past the first vanished from the answer with no refusal
+    /// and exit 0 (#386).
+    ///
+    /// Both documents are asserted by content: a reader that listed the first
+    /// one twice would satisfy a length check.
+    #[tokio::test]
+    async fn a_multi_layer_sbom_sidecar_tag_lists_every_document() {
+        const SECOND_DOCUMENT: &[u8] = br#"{"bomFormat":"CycloneDX","specVersion":"1.6","components":[{"name":"b"}]}"#;
+        let manifest = sbom_sidecar_manifest_of(&[SBOM_SIDECAR_DOCUMENT, SECOND_DOCUMENT]);
+        let transport =
+            SbomTransport::new(Vec::new()).with_sidecar(&manifest, &[SBOM_SIDECAR_DOCUMENT, SECOND_DOCUMENT]);
+
+        let (outcome, transport, _state) = drive_sidecar_scan(transport, None, VerificationMode::Permissive).await;
+
+        let scan = outcome.expect("the `.sbom` tag is the whole discovery story for this subject");
+        let documents: Vec<&[u8]> = scan
+            .unverified
+            .iter()
+            .map(|listed| listed.document.as_slice())
+            .collect();
+        assert_eq!(
+            documents,
+            vec![SBOM_SIDECAR_DOCUMENT, SECOND_DOCUMENT],
+            "every layer the tag declares is a document, in manifest order",
+        );
+        assert_eq!(
+            transport.pulled_blobs().len(),
+            2,
+            "one blob per layer, and no layer read twice: {:?}",
+            transport.pulled_blobs(),
+        );
+    }
+
     /// The subject that carries no `.sbom` tag is unaffected: a 404 is "no
     /// sidecar", never an error.
     ///
@@ -7463,7 +7760,8 @@ mod tests {
     #[tokio::test]
     async fn a_sidecar_document_is_listed_beside_a_referrer_not_instead_of_it() {
         let referrer = StubReferrer::sbom("application/spdx+json", RAW_SPDX);
-        let transport = SbomTransport::new(vec![referrer]).with_sidecar(SBOM_SIDECAR_MANIFEST, SBOM_SIDECAR_DOCUMENT);
+        let transport =
+            SbomTransport::new(vec![referrer]).with_sidecar(SBOM_SIDECAR_MANIFEST, &[SBOM_SIDECAR_DOCUMENT]);
 
         let (outcome, _transport, _state) = drive_sidecar_scan(transport, None, VerificationMode::Permissive).await;
 
@@ -7517,7 +7815,7 @@ mod tests {
         let mutated = String::from_utf8(SBOM_SIDECAR_MANIFEST.to_vec())
             .expect("the committed manifest is UTF-8")
             .replace("application/vnd.cyclonedx+json", "application/octet-stream");
-        let transport = SbomTransport::new(Vec::new()).with_sidecar(mutated.as_bytes(), SBOM_SIDECAR_DOCUMENT);
+        let transport = SbomTransport::new(Vec::new()).with_sidecar(mutated.as_bytes(), &[SBOM_SIDECAR_DOCUMENT]);
 
         let (outcome, transport, _state) = drive_sidecar_scan(transport, None, VerificationMode::Permissive).await;
 
