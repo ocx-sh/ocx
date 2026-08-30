@@ -20,4 +20,5 @@ ocx config push -i corp/ocx-config:user-1.4.2 ./config.toml --cascade
 
 # The push validated the payload and wrote the rolling variant tags: a host
 # tracking the floating `:user` tag syncs the new content on its next update.
-OCX_MANAGED_CONFIG="$REGISTRY/corp/ocx-config:user" ocx config update | grep -q updated
+update_report=$(OCX_MANAGED_CONFIG="$REGISTRY/corp/ocx-config:user" ocx config update)
+grep -q updated <<<"$update_report"

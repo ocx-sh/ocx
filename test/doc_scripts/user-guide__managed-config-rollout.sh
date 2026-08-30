@@ -34,4 +34,5 @@ ocx config update --resume
 
 # --resume cleared the pause and re-synced to the registry's current state.
 [ ! -f "$OCX_HOME/state/managed-config/pause.json" ]
-ocx --format json config update --check | grep -q '"status":"already_current"\|"status": "already_current"'
+check_report=$(ocx --format json config update --check)
+grep -q '"status":"already_current"\|"status": "already_current"' <<<"$check_report"
