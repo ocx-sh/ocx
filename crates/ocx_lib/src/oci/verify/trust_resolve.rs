@@ -35,6 +35,18 @@ use super::trust_cache::TrustRootCache;
 use super::trust_root::TrustRoot;
 use crate::file_structure::StateStore;
 use crate::trust::SigstoreTrust;
+use crate::utility::fs::{BoundedReadError, read_bounded};
+
+/// The largest a trusted-root JSON document may be.
+///
+/// Named here rather than inferred from the caller: the public-good
+/// `trusted_root.json` is roughly 20 KiB and a self-hosted one a few, so one
+/// mebibyte is ~50x every honest document while still refusing the
+/// `/dev/zero`-shaped read the cap exists for. It is deliberately the same
+/// ceiling `MAX_SIGSTORE_RESPONSE_BYTES` puts on the *same document* arriving
+/// over the network, so the transport an operator chose does not change how
+/// large a trust root may be.
+const MAX_TRUSTED_ROOT_BYTES: u64 = 1024 * 1024;
 
 /// Resolve the trust root from the supplied overrides, then the configured
 /// `[trust.sigstore]` material, the `$OCX_HOME` convention path, the trust-root
@@ -59,16 +71,16 @@ pub async fn resolve_trust_root(
     rekor_cache_key: &str,
     offline: bool,
 ) -> Result<TrustRoot, VerifyErrorKind> {
-    let read_err = |source: std::io::Error| {
+    let read_err = |error: BoundedReadError| {
         VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::AssetReadFailed {
-            source: Box::new(source),
+            source: Box::new(error),
         })
     };
 
     // 1+2. `--sigstore-trusted-root` / `OCX_SIGSTORE_TRUSTED_ROOT`, already collapsed.
     if let Some(path) = explicit_override {
         let json_path = trusted_root_json_path(path).await;
-        let bytes = tokio::fs::read(&json_path).await.map_err(read_err)?;
+        let bytes = read_trusted_root(&json_path).await.map_err(read_err)?;
         let root = TrustRoot::load_trusted_root_json(&bytes)?;
         return enforce_offline_rekor_key(root, offline);
     }
@@ -88,7 +100,7 @@ pub async fn resolve_trust_root(
         }
         if let Some(path) = sigstore.trusted_root.as_deref() {
             let json_path = trusted_root_json_path(path).await;
-            let bytes = tokio::fs::read(&json_path).await.map_err(read_err)?;
+            let bytes = read_trusted_root(&json_path).await.map_err(read_err)?;
             let root = TrustRoot::load_trusted_root_json(&bytes)?;
             return enforce_offline_rekor_key(root, offline);
         }
@@ -98,13 +110,20 @@ pub async fn resolve_trust_root(
     //    Absent falls through to the cache; present-but-unreadable does not,
     //    or a permission problem would masquerade as "not configured".
     if let Some(path) = home_trusted_root {
-        match tokio::fs::read(path).await {
+        match read_trusted_root(path).await {
             Ok(bytes) => {
                 let root = TrustRoot::load_trusted_root_json(&bytes)?;
                 return enforce_offline_rekor_key(root, offline);
             }
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => return Err(read_err(source)),
+            // Absence, and only absence, falls through. `TooLarge` and
+            // `NotRegularFile` refuse a file that IS there: routing either into
+            // this arm would let a present-but-unusable trust root silently
+            // downgrade to the cache and then to TUF — the same masquerade a
+            // permission error would be, arriving through a newer door. A
+            // wildcard arm here is what `BoundedReadError`'s own doc comment
+            // warns against.
+            Err(BoundedReadError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(read_err(error)),
         }
     }
 
@@ -136,6 +155,27 @@ fn enforce_offline_rekor_key(root: TrustRoot, offline: bool) -> Result<TrustRoot
         ));
     }
     Ok(root)
+}
+
+/// Read a trusted-root document, bounded at [`MAX_TRUSTED_ROOT_BYTES`] and
+/// refusing anything that is not a regular file.
+///
+/// Both guards live in [`read_bounded`], which is blocking — so it goes to the
+/// pool rather than growing an async twin of the guard: one bounded reader, not
+/// two (the `options::tags` precedent).
+///
+/// A `JoinError` becomes [`BoundedReadError::Io`] carrying `ErrorKind::Other`,
+/// never `NotFound`, so a panicking pool task can never be mistaken for an
+/// absent file by rung 4's fall-through.
+async fn read_trusted_root(path: &Path) -> Result<Vec<u8>, BoundedReadError> {
+    let target = path.to_path_buf();
+    match tokio::task::spawn_blocking(move || read_bounded(&target, MAX_TRUSTED_ROOT_BYTES)).await {
+        Ok(result) => result,
+        Err(join) => Err(BoundedReadError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(format!("trusted-root read task panicked: {join}")),
+        }),
+    }
 }
 
 /// Resolve a trusted-root override to the JSON file itself: the path as given
@@ -338,6 +378,91 @@ mod tests {
                 ))
             ),
             "[trust.sigstore] must be consulted before the convention path, got {result:?}"
+        );
+    }
+
+    /// C-010a. Rung 4's fall-through is for **absence only**.
+    ///
+    /// An absent convention file means "not configured this way" and continues
+    /// down the ladder; a file that is *there* and unusable — a directory, or
+    /// one past the cap — must not. Routing either refusal into the
+    /// fall-through would let an operator-dropped trust root silently downgrade
+    /// to the cache and then to TUF, which is the masquerade the arm exists to
+    /// prevent, arriving through the door `read_bounded` opened.
+    ///
+    /// The two outcomes are told apart by the error kind, not by success: with
+    /// nothing cached and `offline` set, falling through lands on
+    /// `OfflineTrustMaterialUnavailable`, so a refusal that produced *that*
+    /// would be indistinguishable from the absence case. Both halves are
+    /// asserted in one test so the discriminator is proved, not assumed.
+    #[tokio::test]
+    async fn rung_four_falls_through_on_absence_but_not_on_a_present_unusable_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+
+        let absent = tmp.path().join("absent-trusted-root.json");
+        let fell_through = resolve_trust_root(None, None, Some(&absent), &state, "rekor.example", true).await;
+        assert!(
+            matches!(
+                fell_through,
+                Err(VerifyErrorKind::TrustRootLoad(
+                    TrustRootLoadReason::OfflineTrustMaterialUnavailable
+                ))
+            ),
+            "an absent convention file must fall through to the cache rung, got {fell_through:?}"
+        );
+
+        let a_directory = tmp.path().join("trusted-root-is-a-directory");
+        std::fs::create_dir(&a_directory).unwrap();
+        let refused_directory = resolve_trust_root(None, None, Some(&a_directory), &state, "rekor.example", true).await;
+        assert!(
+            matches!(
+                refused_directory,
+                Err(VerifyErrorKind::TrustRootLoad(
+                    TrustRootLoadReason::AssetReadFailed { .. }
+                ))
+            ),
+            "a convention path that is not a regular file must fail, not fall through, got {refused_directory:?}"
+        );
+
+        let past_the_cap = tmp.path().join("huge-trusted-root.json");
+        std::fs::write(&past_the_cap, vec![b'x'; MAX_TRUSTED_ROOT_BYTES as usize + 1]).unwrap();
+        let refused_huge = resolve_trust_root(None, None, Some(&past_the_cap), &state, "rekor.example", true).await;
+        assert!(
+            matches!(
+                refused_huge,
+                Err(VerifyErrorKind::TrustRootLoad(
+                    TrustRootLoadReason::AssetReadFailed { .. }
+                ))
+            ),
+            "a convention file past the cap must fail, not fall through, got {refused_huge:?}"
+        );
+    }
+
+    /// C-010. The operator-typed rungs are bounded too, and the bound is what
+    /// refuses — not the JSON parser downstream of an unbounded read.
+    ///
+    /// The discriminator is the error kind: an unbounded `fs::read` of this
+    /// file succeeds and hands a megabyte of `x` to
+    /// `load_trusted_root_json`, which answers `PemParseFailed`. Only the cap
+    /// produces `AssetReadFailed`, so this assertion cannot pass on the
+    /// pre-change code.
+    #[tokio::test]
+    async fn the_explicit_override_is_refused_at_the_cap_not_by_the_parser() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = StateStore::new(tmp.path().join("state"));
+        let past_the_cap = tmp.path().join("huge-explicit.json");
+        std::fs::write(&past_the_cap, vec![b'x'; MAX_TRUSTED_ROOT_BYTES as usize + 1]).unwrap();
+
+        let result = resolve_trust_root(Some(&past_the_cap), None, None, &state, "rekor.example", false).await;
+        assert!(
+            matches!(
+                result,
+                Err(VerifyErrorKind::TrustRootLoad(
+                    TrustRootLoadReason::AssetReadFailed { .. }
+                ))
+            ),
+            "--sigstore-trusted-root past the cap must be refused by the read, got {result:?}"
         );
     }
 

@@ -6,7 +6,6 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::Context as _;
 use clap::Parser;
 use ocx_lib::forge::{ForgeKind, ForgeToken, RepoCoordinate};
 use ocx_lib::{
@@ -15,7 +14,7 @@ use ocx_lib::{
     publisher::Publisher,
 };
 
-use crate::{api::data::announce::AnnounceReport, app::CommandError, conventions, options};
+use crate::{api::data::announce::AnnounceReport, app::CommandError, options};
 
 /// The announce credential. Ambient environment variable only — never stored
 /// in the registry credential store.
@@ -127,11 +126,9 @@ impl PackageAnnounce {
         } else if self.tags_from_registry {
             TagSelection::FromRegistry
         } else if let Some(path) = &self.tags_file {
-            let bytes = tokio::fs::read(path)
-                .await
-                .map_err(|error| ocx_lib::error::file_error(path, error))
-                .with_context(|| format!("reading tags file {}", path.display()))?;
-            TagSelection::UnionFile(conventions::parse_tags_file(&bytes))
+            // The shared bounded reader, not a bare `fs::read`: this path is
+            // operator-typed, so `/dev/zero` here read until memory ran out.
+            TagSelection::UnionFile(crate::options::tags::read_tags_file(path).await?)
         } else {
             TagSelection::Replace(self.tags.clone())
         };
