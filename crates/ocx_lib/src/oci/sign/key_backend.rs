@@ -12,12 +12,16 @@
 //! Adding a backend is a new implementor plus one arm in
 //! [`Scheme::is_implemented`](super::key_ref::Scheme::is_implemented). No
 //! contract in this file moves.
+//!
+//! `file://` and `env://` share [`PemKeyBackend`]: one cosign envelope, two
+//! places to find it, and the source travels as data so the reported
+//! `signatures[].key_backend` has a single producer.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use sha2::{Digest as _, Sha256};
 
-use super::key_ref::{KeyBackendKind, MAX_KEY_PEM_BYTES, Scheme};
+use super::key_ref::{KeyBackendKind, KeyEnvError, MAX_KEY_PEM_BYTES, Scheme, read_key_env};
 use crate::log;
 use crate::utility::fs::{BoundedReadError, read_bounded};
 
@@ -123,7 +127,8 @@ pub fn key_password() -> String {
     std::env::var(crate::env::keys::OCX_KEY_PASSWORD).unwrap_or_default()
 }
 
-/// A key pair read from a file — the only [`KeyBackend`] that exists today.
+/// A key pair decrypted from a cosign PEM envelope — the only [`KeyBackend`]
+/// that exists today.
 ///
 /// Accepts cosign's own `ENCRYPTED SIGSTORE PRIVATE KEY` envelope
 /// (scrypt-wrapped ECDSA P-256), decrypted by
@@ -132,32 +137,43 @@ pub fn key_password() -> String {
 /// be owning a cryptographic wire format for no gain
 /// (`quality-core.md` §"Don't Own Non-Domain Code").
 ///
+/// **Named for the envelope, not for where it was found.** One PEM reaches this
+/// type from two schemes — `file://` and `env://` — and the decryption is
+/// identical for both, so the *source* is data on the value ([`Self::kind`])
+/// rather than two types. A second type would be two copies of the scrypt call
+/// site, and `signatures[].key_backend` would then have two producers.
+///
 /// **Key generation is deliberately absent.** `cosign generate-key-pair` defines
 /// the format and cosign ships in the OCX index, so generation would mean owning
 /// scrypt KDF parameter choice, password prompting and TTY handling for a
 /// one-time bootstrap act.
-pub struct FileKeyBackend {
+pub struct PemKeyBackend {
     signing_key: p256::ecdsa::SigningKey,
     public_key_der: Vec<u8>,
+    /// Which `--key` scheme the envelope came from. Reported verbatim as
+    /// `signatures[].key_backend`, so it is a wire value and never a guess:
+    /// only a constructor that *knows* the source may set it.
+    kind: KeyBackendKind,
 }
 
 /// Written by hand, not derived: a derived `Debug` would reach into the signing
 /// key, and a private scalar must never be one `{:?}` away from a log line.
 /// Only the public half — which is published in every bundle anyway — is shown.
-impl std::fmt::Debug for FileKeyBackend {
+impl std::fmt::Debug for PemKeyBackend {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("FileKeyBackend")
+            .debug_struct("PemKeyBackend")
+            .field("kind", &self.kind)
             .field("hint", &self.hint())
             .finish_non_exhaustive()
     }
 }
 
-impl FileKeyBackend {
+impl PemKeyBackend {
     /// Read and decrypt the private key at `path`, taking the password from
     /// `OCX_KEY_PASSWORD`.
     ///
-    /// The one env-reading entry point, so every test drives
+    /// One of the two password-reading entry points, so every test drives
     /// [`from_encrypted_pem`](Self::from_encrypted_pem) with an explicit
     /// password and never mutates the process environment.
     ///
@@ -167,7 +183,36 @@ impl FileKeyBackend {
     /// [`from_encrypted_pem`](Self::from_encrypted_pem) raises.
     pub fn open(path: &std::path::Path) -> Result<Self, KeyBackendError> {
         let pem = read_key_pem(path)?;
-        Self::from_encrypted_pem(&pem, key_password().as_bytes())
+        Self::from_encrypted_pem(&pem, key_password().as_bytes(), KeyBackendKind::File)
+    }
+
+    /// Decrypt the private key held **in** the environment variable `name`
+    /// (`--key env://NAME`), taking the password from `OCX_KEY_PASSWORD`.
+    ///
+    /// The variable carries the PEM itself, never a path to one: this is the
+    /// spelling for a runner with no writable disk, where writing the key out
+    /// to sign with it is the thing being avoided. `OCX_KEY_PASSWORD` is
+    /// unrelated and both coexist — one names the envelope, the other opens it.
+    ///
+    /// # Errors
+    ///
+    /// [`KeyBackendError::Io`] when the variable is unset or empty (the code a
+    /// missing key file gets), [`KeyBackendError::MalformedKey`] when it
+    /// exceeds [`MAX_KEY_PEM_BYTES`], and whatever
+    /// [`from_encrypted_pem`](Self::from_encrypted_pem) raises.
+    pub fn open_env(name: &str) -> Result<Self, KeyBackendError> {
+        let pem = read_key_env(name).map_err(|error| match error {
+            // Nothing to read is an I/O fault, the same class and exit code as
+            // a key file that is not there — one `--key`, one answer, whether
+            // the material was named by path or by variable.
+            KeyEnvError::Unset { .. } => {
+                KeyBackendError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, error.to_string()))
+            }
+            KeyEnvError::TooLarge { .. } => KeyBackendError::MalformedKey {
+                reason: error.to_string(),
+            },
+        })?;
+        Self::from_encrypted_pem(pem.as_bytes(), key_password().as_bytes(), KeyBackendKind::Env)
     }
 }
 
@@ -200,16 +245,20 @@ fn read_key_pem(path: &std::path::Path) -> Result<Vec<u8>, KeyBackendError> {
     })
 }
 
-impl FileKeyBackend {
+impl PemKeyBackend {
     /// Decrypt a cosign `ENCRYPTED SIGSTORE PRIVATE KEY` PEM.
     ///
     /// An empty `password` is legal — see [`key_password`].
+    ///
+    /// `kind` is the scheme the PEM came from, and it is a parameter rather
+    /// than a default because it is published as `signatures[].key_backend`: a
+    /// caller that does not know the source has no business claiming one.
     ///
     /// # Errors
     ///
     /// [`KeyBackendError::MalformedKey`] when the envelope does not decrypt
     /// under this password, or when it yields anything but an ECDSA P-256 key.
-    pub fn from_encrypted_pem(pem: &[u8], password: &[u8]) -> Result<Self, KeyBackendError> {
+    pub fn from_encrypted_pem(pem: &[u8], password: &[u8], kind: KeyBackendKind) -> Result<Self, KeyBackendError> {
         let pair =
             sigstore::crypto::signing_key::SigStoreKeyPair::from_encrypted_pem(pem, password).map_err(|error| {
                 // The frozen `MalformedKey` carries a `reason: String` and no
@@ -255,12 +304,13 @@ impl FileKeyBackend {
         Ok(Self {
             signing_key,
             public_key_der,
+            kind,
         })
     }
 }
 
 #[async_trait::async_trait]
-impl KeyBackend for FileKeyBackend {
+impl KeyBackend for PemKeyBackend {
     async fn sign_prehash(&self, digest: &[u8]) -> Result<Vec<u8>, KeyBackendError> {
         sign_prehash_p256(&self.signing_key, digest)
     }
@@ -270,13 +320,13 @@ impl KeyBackend for FileKeyBackend {
     }
 
     fn kind(&self) -> KeyBackendKind {
-        KeyBackendKind::File
+        self.kind
     }
 }
 
 /// ECDSA P-256 over an already-hashed message, DER-encoded.
 ///
-/// Shared by [`FileKeyBackend`] and the test double so the two cannot produce
+/// Shared by [`PemKeyBackend`] and the test double so the two cannot produce
 /// differently-encoded signatures — the double exists to stand in for the file
 /// backend, which it stops doing the moment its output shape diverges.
 ///
@@ -423,8 +473,12 @@ mod tests {
     /// the committed public key verifies the result.
     #[tokio::test]
     async fn a_cosign_generated_key_pair_signs_and_verifies() {
-        let backend = FileKeyBackend::from_encrypted_pem(GOLDEN_PRIVATE_KEY_PEM.as_bytes(), GOLDEN_KEY_PASSWORD)
-            .expect("the golden key decrypts under its documented password");
+        let backend = PemKeyBackend::from_encrypted_pem(
+            GOLDEN_PRIVATE_KEY_PEM.as_bytes(),
+            GOLDEN_KEY_PASSWORD,
+            KeyBackendKind::File,
+        )
+        .expect("the golden key decrypts under its documented password");
 
         let signature = backend
             .sign_prehash(&sha256(MESSAGE))
@@ -438,8 +492,12 @@ mod tests {
     /// key — otherwise the bundle would advertise a hint no verifier can match.
     #[test]
     fn the_backend_supplies_the_golden_public_key_and_its_cosign_hint() {
-        let backend = FileKeyBackend::from_encrypted_pem(GOLDEN_PRIVATE_KEY_PEM.as_bytes(), GOLDEN_KEY_PASSWORD)
-            .expect("the golden key decrypts");
+        let backend = PemKeyBackend::from_encrypted_pem(
+            GOLDEN_PRIVATE_KEY_PEM.as_bytes(),
+            GOLDEN_KEY_PASSWORD,
+            KeyBackendKind::File,
+        )
+        .expect("the golden key decrypts");
 
         let expected = p256::PublicKey::from_public_key_pem(GOLDEN_PUBLIC_KEY_PEM)
             .expect("cosign.pub is a P-256 SPKI PEM")
@@ -466,8 +524,9 @@ mod tests {
             .private_key_to_encrypted_pem(b"")
             .expect("re-wrap the same key under an empty password");
 
-        let backend = FileKeyBackend::from_encrypted_pem(wrapped_with_empty_password.as_bytes(), b"")
-            .expect("an empty password opens a key wrapped with one");
+        let backend =
+            PemKeyBackend::from_encrypted_pem(wrapped_with_empty_password.as_bytes(), b"", KeyBackendKind::File)
+                .expect("an empty password opens a key wrapped with one");
 
         let signature = backend.sign_prehash(&sha256(MESSAGE)).await.expect("signing");
         verify_with_golden_public_key(&signature).expect("still the same key, so the golden public key verifies");
@@ -478,8 +537,12 @@ mod tests {
     /// only that *something* succeeded.
     #[test]
     fn a_wrong_password_is_refused_by_name() {
-        let error = FileKeyBackend::from_encrypted_pem(GOLDEN_PRIVATE_KEY_PEM.as_bytes(), b"not-the-password")
-            .expect_err("a wrong password cannot open the envelope");
+        let error = PemKeyBackend::from_encrypted_pem(
+            GOLDEN_PRIVATE_KEY_PEM.as_bytes(),
+            b"not-the-password",
+            KeyBackendKind::File,
+        )
+        .expect_err("a wrong password cannot open the envelope");
 
         let KeyBackendError::MalformedKey { reason } = &error else {
             panic!("a wrong password is a malformed-material refusal, got {error:?}");
@@ -494,8 +557,12 @@ mod tests {
     /// difference between an actionable error and "no such file or directory".
     #[test]
     fn a_public_key_is_not_accepted_as_a_signing_key() {
-        let error = FileKeyBackend::from_encrypted_pem(GOLDEN_PUBLIC_KEY_PEM.as_bytes(), GOLDEN_KEY_PASSWORD)
-            .expect_err("a public key cannot sign");
+        let error = PemKeyBackend::from_encrypted_pem(
+            GOLDEN_PUBLIC_KEY_PEM.as_bytes(),
+            GOLDEN_KEY_PASSWORD,
+            KeyBackendKind::File,
+        )
+        .expect_err("a public key cannot sign");
         assert!(matches!(error, KeyBackendError::MalformedKey { .. }), "got {error:?}");
     }
 
@@ -555,8 +622,87 @@ mod tests {
     #[test]
     fn opening_an_absent_key_file_is_an_io_error() {
         let missing = std::env::temp_dir().join("ocx-no-such-key-file.key");
-        let error = FileKeyBackend::open(&missing).expect_err("an absent key file cannot be opened");
+        let error = PemKeyBackend::open(&missing).expect_err("an absent key file cannot be opened");
         assert!(matches!(error, KeyBackendError::Io(_)), "got {error:?}");
+    }
+
+    /// C-033: an `env://` variable that is not set refuses as an I/O fault
+    /// (exit 74) — the same class and code as the absent key *file* above, so
+    /// one `--key` mistake gets one answer whichever spelling made it.
+    ///
+    /// The message must name the variable: with no path in it, an operator has
+    /// nothing else to go on.
+    #[test]
+    fn opening_an_unset_env_key_is_an_io_error_naming_the_variable() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_SIGNING_KEY");
+        let error = PemKeyBackend::open_env("OCX_SIGNING_KEY").expect_err("an unset variable holds no key");
+        let KeyBackendError::Io(io) = &error else {
+            panic!("an absent key must be an I/O fault, got {error:?}");
+        };
+        assert_eq!(io.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            io.to_string().contains("OCX_SIGNING_KEY"),
+            "the refusal must name the variable: {io}"
+        );
+
+        env.set("OCX_SIGNING_KEY", "");
+        assert!(
+            matches!(PemKeyBackend::open_env("OCX_SIGNING_KEY"), Err(KeyBackendError::Io(_))),
+            "an empty variable holds no key either"
+        );
+    }
+
+    /// C-033: `MAX_KEY_PEM_BYTES` bounds an env-held key the way it bounds a
+    /// file, and an over-cap value is a data fault (exit 65) — matching what
+    /// `read_key_pem` answers for an over-cap file, not the I/O code above.
+    #[test]
+    fn an_oversized_env_key_is_refused_by_the_shared_cap() {
+        let env = crate::test::env::lock();
+        let cap = usize::try_from(MAX_KEY_PEM_BYTES).expect("the cap fits a usize");
+        env.set("OCX_SIGNING_KEY", "k".repeat(cap + 1));
+        let error = PemKeyBackend::open_env("OCX_SIGNING_KEY").expect_err("over the cap");
+        let KeyBackendError::MalformedKey { reason } = &error else {
+            panic!("an over-cap value is a data fault, got {error:?}");
+        };
+        assert!(
+            reason.contains("OCX_SIGNING_KEY") && reason.contains("more than"),
+            "the refusal must name the variable and the cap: {reason}"
+        );
+    }
+
+    /// C-032: the source travels on the value, so an env-sourced key reports
+    /// `env` and a file-sourced one still reports `file`. Signing is identical
+    /// — only the reported backend differs.
+    #[tokio::test]
+    async fn the_reported_backend_follows_the_source_not_the_material() {
+        let from_env = PemKeyBackend::from_encrypted_pem(
+            GOLDEN_PRIVATE_KEY_PEM.as_bytes(),
+            GOLDEN_KEY_PASSWORD,
+            KeyBackendKind::Env,
+        )
+        .expect("the golden key decrypts");
+        let from_file = PemKeyBackend::from_encrypted_pem(
+            GOLDEN_PRIVATE_KEY_PEM.as_bytes(),
+            GOLDEN_KEY_PASSWORD,
+            KeyBackendKind::File,
+        )
+        .expect("the golden key decrypts");
+
+        assert_eq!(from_env.kind(), KeyBackendKind::Env);
+        assert_eq!(from_file.kind(), KeyBackendKind::File);
+        assert_eq!(
+            from_env.hint(),
+            from_file.hint(),
+            "one key, one hint — the source must not reach the bundle's key material"
+        );
+
+        let digest = sha256(MESSAGE);
+        assert_eq!(
+            from_env.sign_prehash(&digest).await.expect("signing"),
+            from_file.sign_prehash(&digest).await.expect("signing"),
+            "RFC 6979: the same key over the same digest signs identically"
+        );
     }
 
     /// The exercised second implementation (ARCH-07). Deterministic: RFC 6979
@@ -586,11 +732,15 @@ mod tests {
     async fn the_double_and_the_file_backend_agree_on_the_signature_encoding() {
         let digest = sha256(MESSAGE);
         let from_double = StubKeyBackend::fixed().sign_prehash(&digest).await.expect("signing");
-        let from_file = FileKeyBackend::from_encrypted_pem(GOLDEN_PRIVATE_KEY_PEM.as_bytes(), GOLDEN_KEY_PASSWORD)
-            .expect("the golden key decrypts")
-            .sign_prehash(&digest)
-            .await
-            .expect("signing");
+        let from_file = PemKeyBackend::from_encrypted_pem(
+            GOLDEN_PRIVATE_KEY_PEM.as_bytes(),
+            GOLDEN_KEY_PASSWORD,
+            KeyBackendKind::File,
+        )
+        .expect("the golden key decrypts")
+        .sign_prehash(&digest)
+        .await
+        .expect("signing");
 
         for signature in [&from_double, &from_file] {
             assert_eq!(

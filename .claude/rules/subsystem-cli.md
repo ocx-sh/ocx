@@ -314,8 +314,22 @@ Exempted vars (direct `std::env::var` read is compliant, not a forwarding-rule v
 |-----|-----------|-----------|
 | `OCX_IDENTITY_TOKEN` | `command/package_sign.rs` | Short-lived OIDC bearer token for Sigstore signing |
 | `OCX_KEY_PASSWORD` | `oci/sign/key_backend.rs::key_password` | Passphrase for a cosign `ENCRYPTED SIGSTORE PRIVATE KEY`; empty is legal, so absent and empty must stay indistinguishable |
+| `OCX_SIGNING_KEY` | `oci/sign/key_backend.rs::PemKeyBackend::open_env`, `trust.rs::compile_key_reference` | The signing key PEM itself, for `--key env://OCX_SIGNING_KEY` — the most sensitive entry here, a raw private key rather than a token |
 
-Reviewers: a direct `std::env::var` read of any var listed above is compliant. Do NOT add these vars to `OcxConfigView`. If a new credential var is introduced, document it in this table in the same PR **and** add it to `ocx_lib::env::keys::CREDENTIAL_KEYS`.
+Two variables meet the bar and are **deliberately not** on the list. They are recorded so a reviewer does not read their absence as an oversight, and `ocx_lib::env::keys::CREDENTIAL_KEYS` carries the same two notes:
+
+| Var | Read site | Why it is still open |
+|-----|-----------|----------------------|
+| `OCX_ANNOUNCE_TOKEN` | `command/package_announce.rs` | **Known-open, cross-repo decision.** A forge PAT, so it meets the rule — but `ocx-mirror` announces from a plugin process and inherits it deliberately. Adding it would break that. Owner's call. |
+| `OCX_AUTH_<slug>_TOKEN` | `auth.rs::get_env_auth` | **Known-open, mechanism gap.** A name *pattern*, so a fixed `&[&str]` cannot hold it at all. `script/ocx_module.rs::is_reserved_env_key` already masks this family from Starlark **by prefix** — two credential masks, one of which handles patterns. Closing it means teaching `CREDENTIAL_KEYS` prefixes too. |
+
+Reviewers: a direct `std::env::var` read of any var listed above is compliant. Do NOT add these vars to `OcxConfigView`. If a new credential var is introduced, document it in this table in the same PR **and** add it to `ocx_lib::env::keys::CREDENTIAL_KEYS` — whose doc comment carries the membership rule and the three-edit checklist — **and** in `website/src/docs/reference/environment.md`, stating that it is never forwarded to child processes.
+
+### Secret-bearing values: the `env://` convention
+
+A flag that takes a secret takes an `env://VAR` reference to it, never the secret itself. `--key env://OCX_SIGNING_KEY` is the first instance and the general shape: a value in `argv` is visible to every process on the host, a value in a file needs a writable disk, and a variable needs neither. The reference names the variable; the variable holds the material. Adopt the same spelling for the next secret-bearing flag rather than inventing a second one.
+
+**The consequence, stated where it will be read.** `env://` accepts any variable name, and a name ocx does not know is **inherited by plugins (`ocx-<name>`) and by generated entrypoint launchers** — plugin dispatch forwards the ambient environment deliberately (trust boundary, see `app/plugin_dispatch.rs`) and can only strip the fixed `CREDENTIAL_KEYS` list. That is a real asymmetry against the spelling it replaces: `--key file:<path>` hands a child no pointer at all and the file can be `0600`. So the conventional name exists to close it — `OCX_SIGNING_KEY` is on the list and is scrubbed. An operator who picks another name still signs fine and is choosing the inheritance, knowingly; nothing warns, because nothing can tell that name from any other variable in the environment.
 
 Not forwarding is not the same as not leaking. `Command::envs` only adds and overrides, so a spawn site that inherits the ambient environment still passes an inherited credential through — the map it was removed from never had it. Every such site must either `env_clear()` or `env_remove` each `CREDENTIAL_KEYS` entry; `app/plugin_dispatch.rs` is the one that inherits deliberately and therefore removes explicitly.
 

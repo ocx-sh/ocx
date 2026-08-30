@@ -117,7 +117,7 @@ For a self-hosted Fulcio and Rekor, note that cosign 3 removed `--fulcio-url` / 
 
 A CI pipeline with an OIDC step has nothing to gain from a key: keyless is less to manage and leaves an identity-bound audit trail for free. A key pair earns its place when there is no OIDC step to detect, or when an operator wants signatures independent of any identity provider or public transparency log — a private key under their own custody, verified by the matching public key rather than by a certificate chain.
 
-`--key` takes a key reference, `[scheme://]<rest>`. A bare path, or a `file://` one, names a file — the private key (encrypted, password from `OCX_KEY_PASSWORD`) for `sign` and `attest`, the public key (a plain SPKI PEM) for `verify`. The `awskms`, `gcpkms`, `azurekms`, `hashivault` and `k8s` schemes are recognised and refused **by name** (exit 85, `unsupported_key_backend`) — not implemented yet, but reserved so a script can already branch on the vocabulary rather than guess at a future one. A reference OCX cannot parse at all — an unrecognised scheme, or nothing after it — is a usage error (exit 64, `key_reference_invalid`), a distinct code because the remedy is to fix the reference, not to wait for a backend.
+`--key` takes a key reference, `[scheme://]<rest>`. A bare path, or a `file://` one, names a file — the private key (encrypted, password from `OCX_KEY_PASSWORD`) for `sign` and `attest`, the public key (a plain SPKI PEM) for `verify`. `env://VAR` reads the same PEM out of the environment variable `VAR` itself, for a runner with no writable disk — see [`OCX_SIGNING_KEY`][env-ocx-signing-key], the one variable name OCX strips from the environment of every subprocess it spawns. The `awskms`, `gcpkms`, `azurekms`, `hashivault` and `k8s` schemes are recognised and refused **by name** (exit 85, `unsupported_key_backend`) — not implemented yet, but reserved so a script can already branch on the vocabulary rather than guess at a future one. A reference OCX cannot parse at all — an unrecognised scheme, or nothing after it — is a usage error (exit 64, `key_reference_invalid`), a distinct code because the remedy is to fix the reference, not to wait for a backend.
 
 ### The Rekor rule {#key-mode-rekor}
 
@@ -356,6 +356,7 @@ The same SSRF floor that guards registry traffic guards these endpoints: a URL i
 
 <!-- commands -->
 [cmd-package-sign]: ../reference/command-line.md#package-sign
+[env-ocx-signing-key]: ../reference/environment.md#ocx-signing-key
 [cmd-package-sign-token-precedence]: ../reference/command-line.md#package-sign
 [cmd-package-verify]: ../reference/command-line.md#package-verify
 [cmd-package-verify-attestations]: ../reference/command-line.md#package-verify-attestations

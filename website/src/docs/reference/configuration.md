@@ -660,7 +660,7 @@ treated as "trust anything".
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `key` | string | XOR with `key_pem` | A key reference, `[scheme://]<rest>` in [cosign][cosign]'s spelling — a bare path, or a `file://` one, names a file. |
+| `key` | string | XOR with `key_pem` | A key reference, `[scheme://]<rest>` in [cosign][cosign]'s spelling — a bare path, or a `file://` one, names a file; `env://VAR` holds the SPKI PEM in the environment variable `VAR`. |
 | `key_pem` | string | XOR with `key` | The public key, as a verbatim SPKI PEM block. |
 
 Exactly one of `key` / `key_pem` must be set on each key entry — both present, or both absent,
