@@ -49,8 +49,6 @@ from pathlib import Path
 
 import pytest
 
-from src.runner import OcxRunner
-
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32",
     reason="State-file path assertions use POSIX paths.",

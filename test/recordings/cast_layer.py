@@ -111,9 +111,9 @@ def _substitute_command_head(cmd: str, name: str, replacement: str) -> str:
 
 
 def maybe_record_cast(
-    meta: "DocScriptMeta",
-    provider: "StateProvider",
-    recorder: "CastRecorder",
+    meta: DocScriptMeta,
+    provider: StateProvider,
+    recorder: CastRecorder,
     casts_dir: Path,
 ) -> Path | None:
     """Optionally record a ``.cast`` file for a doc script (website:build only).
@@ -213,7 +213,7 @@ def maybe_record_cast(
 # ---------------------------------------------------------------------------
 
 
-def _extract_region_lines(meta: "DocScriptMeta") -> list[str]:
+def _extract_region_lines(meta: DocScriptMeta) -> list[str]:
     """Return the non-blank, non-comment lines inside the ``# region cast`` block.
 
     Reads ``meta.path`` and slices the lines defined by ``meta.cast_region``
@@ -244,7 +244,7 @@ def _extract_region_lines(meta: "DocScriptMeta") -> list[str]:
     return result
 
 
-def _cast_path(meta: "DocScriptMeta", casts_dir: Path) -> Path:
+def _cast_path(meta: DocScriptMeta, casts_dir: Path) -> Path:
     """Derive the output ``.cast`` path from ``meta`` (CA2).
 
     LDR 2026-05-17 (nested slug scheme — same as PT2 / ADR Decision D):
@@ -262,7 +262,7 @@ def _cast_path(meta: "DocScriptMeta", casts_dir: Path) -> Path:
     return casts_dir / f"{meta.path.stem}.cast"
 
 
-def _resolve_ocx_binary(provider: "StateProvider") -> str:
+def _resolve_ocx_binary(provider: StateProvider) -> str:
     """Extract the ``ocx`` binary token from the provider's runner, if available.
 
     The cast-layer substitutes the real binary path into ``actual_cmd`` so
@@ -290,7 +290,7 @@ def _resolve_ocx_binary(provider: "StateProvider") -> str:
 # ---------------------------------------------------------------------------
 
 __all__ = [
+    "_substitute_command_head",
     "maybe_record_cast",
     "rewrite_command",
-    "_substitute_command_head",
 ]

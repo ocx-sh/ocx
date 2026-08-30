@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from src.assertions import assert_not_exists, assert_symlink_exists
 from src.helpers import make_package, make_package_with_entrypoints
 from src.registry import fetch_platform_manifest_digest
@@ -420,7 +418,7 @@ def test_deps_tree_transitive_chain(ocx: OcxRunner, unique_repo: str, tmp_path: 
 
 def test_deps_tree_diamond_marks_repeated(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """A->{B,C}->D: second D occurrence has repeated: true."""
-    d, b, c, a = _setup_diamond(ocx, unique_repo, tmp_path)
+    d, _b, _c, a = _setup_diamond(ocx, unique_repo, tmp_path)
 
     result = ocx.json("package", "deps", a.short)
     root = result["roots"][0]
@@ -500,7 +498,7 @@ def test_deps_why_traces_path(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
 
 def test_deps_why_diamond_multiple_paths(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """A->{B,C}->D --why D returns 2 paths."""
-    d, b, c, a = _setup_diamond(ocx, unique_repo, tmp_path)
+    d, _b, _c, a = _setup_diamond(ocx, unique_repo, tmp_path)
 
     result = ocx.json("package", "deps", "--why", d.fq, a.short)
     paths = result["paths"]
@@ -509,7 +507,7 @@ def test_deps_why_diamond_multiple_paths(ocx: OcxRunner, unique_repo: str, tmp_p
 
 def test_deps_why_not_found_returns_error(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """--why nonexistent returns non-zero exit with error message."""
-    leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
+    _leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
 
     fake_fq = f"{ocx.registry}/{unique_repo}_nonexistent:1.0.0"
     result = ocx.run("package", "deps", "--why", fake_fq, app.short, check=False)
@@ -535,7 +533,7 @@ def test_deps_not_installed_fails(ocx: OcxRunner, unique_repo: str):
 
 def test_dependency_forward_refs_created(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """After install, the dependent's deps/ dir contains a forward-ref symlink."""
-    leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
+    _leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
 
     app_root = _find_package_root(ocx, app)
     deps_dir = app_root / "refs" / "deps"
@@ -549,7 +547,7 @@ def test_dependency_forward_refs_created(ocx: OcxRunner, unique_repo: str, tmp_p
 
 def test_reinstall_restores_dependency_refs(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """Uninstall+purge then reinstall recreates dependency refs."""
-    leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
+    _leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
 
     # Purge everything
     ocx.plain("package", "uninstall", "--purge", "-d", app.short)
@@ -574,7 +572,7 @@ def test_reinstall_restores_dependency_refs(ocx: OcxRunner, unique_repo: str, tm
 
 def test_clean_dry_run_reports_without_removing(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """clean --dry-run after uninstall lists collectible objects without removing."""
-    leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
+    _leaf, app = _setup_leaf_and_app(ocx, unique_repo, tmp_path)
     # Uninstall without --purge to leave orphaned objects for clean to find.
     ocx.plain("package", "uninstall", "-d", app.short)
 
@@ -658,7 +656,7 @@ def test_env_dependency_order_deps_first(ocx: OcxRunner, unique_repo: str, tmp_p
 
 def test_deps_tree_depth_limits_nesting(ocx: OcxRunner, unique_repo: str, tmp_path: Path):
     """--depth 1 shows direct deps (B) but not transitive deps (C) for A->B->C."""
-    c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
+    _c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
 
     result = ocx.json("package", "deps", "--depth", "1", a.short)
     root = result["roots"][0]
@@ -740,7 +738,7 @@ def test_exec_diamond_transitive_dep_env(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """exec on A->{B,C}->D (all exported) sees D's env vars through the diamond."""
-    d, b, c, a = _setup_diamond_public(ocx, unique_repo, tmp_path)
+    _d, _b, _c, a = _setup_diamond_public(ocx, unique_repo, tmp_path)
 
     result = ocx.plain("package", "exec", a.short, "--", "env")
     assert result.returncode == 0
@@ -755,7 +753,7 @@ def test_transitive_ref_chain_integrity(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """A->B->C: verify deps/ forward-refs at every level of the chain."""
-    c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
+    _c, _b, a = _setup_chain(ocx, unique_repo, tmp_path)
 
     a_obj = _find_package_root(ocx, a)
 
@@ -810,7 +808,7 @@ def test_clean_cascades_transitive_chain(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """Uninstall A from A->B->C chain, clean removes all three."""
-    c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
+    _c, _b, a = _setup_chain(ocx, unique_repo, tmp_path)
     assert _count_object_dirs(ocx) == 3
 
     ocx.json("package", "uninstall", "--purge", "-d", a.short)
@@ -886,7 +884,7 @@ def test_clean_protects_transitive_chain_while_installed(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """A->B->C: clean while A is installed preserves all three objects."""
-    c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
+    _c, _b, _a = _setup_chain(ocx, unique_repo, tmp_path)
     assert _count_object_dirs(ocx) == 3
 
     ocx.json("clean")
@@ -900,7 +898,7 @@ def test_clean_diamond_cascade_removes_all(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """A->{B,C}->D: uninstall A, clean removes all four objects."""
-    d, b, c, a = _setup_diamond(ocx, unique_repo, tmp_path)
+    _d, _b, _c, a = _setup_diamond(ocx, unique_repo, tmp_path)
     assert _count_object_dirs(ocx) == 4
 
     ocx.plain("package", "uninstall", "--purge", "-d", a.short)
@@ -915,7 +913,7 @@ def test_clean_dry_run_transitive_chain(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """A->B->C: uninstall A, dry-run reports all three as collectible."""
-    c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
+    _c, _b, a = _setup_chain(ocx, unique_repo, tmp_path)
 
     # Uninstall without --purge to leave all three objects as orphans.
     ocx.plain("package", "uninstall", "-d", a.short)
@@ -971,7 +969,7 @@ def test_reinstall_after_clean_restores_transitive_chain(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """A->B->C: uninstall+clean wipes store; reinstall restores all three."""
-    c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
+    _c, _b, a = _setup_chain(ocx, unique_repo, tmp_path)
     assert _count_object_dirs(ocx) == 3
 
     ocx.plain("package", "uninstall", "--purge", "-d", a.short)
@@ -989,7 +987,7 @@ def test_object_store_counts_at_each_step(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """Track object count through install → clean → purge → clean for A->B->C."""
-    c, b, a = _setup_chain(ocx, unique_repo, tmp_path)
+    _c, _b, a = _setup_chain(ocx, unique_repo, tmp_path)
 
     # After install: 3 objects (A, B, C)
     assert _count_object_dirs(ocx) == 3, "after install"
@@ -1436,7 +1434,7 @@ def test_diamond_intermediate_deps_forward_refs(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path,
 ):
     """A->{B,C}->D: both B and C should have deps/ symlinks pointing to D."""
-    d, b, c, a = _setup_diamond(ocx, unique_repo, tmp_path)
+    _d, _b, _c, _a = _setup_diamond(ocx, unique_repo, tmp_path)
 
     reg_slug = registry_dir(ocx.registry)
     b_obj = _find_object_dir(ocx, reg_slug, f"{unique_repo}_b")

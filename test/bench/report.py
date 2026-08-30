@@ -90,7 +90,7 @@ def generate_report(
     str
         Self-contained HTML with results, baselines, and scenarios metadata inlined.
     """
-    from bench.scenarios import SCALING_GROUP_ANCHORS, SCENARIOS  # noqa: PLC0415
+    from bench.scenarios import SCALING_GROUP_ANCHORS, SCENARIOS
 
     # Build scenarios metadata for the dashboard.
     scenarios_meta: list[dict[str, Any]] = [

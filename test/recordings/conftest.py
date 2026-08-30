@@ -41,13 +41,12 @@ import pytest
 # cast when discovery is incomplete) and recordings:build fails.
 _DISCOVERY_ERRORS: list[tuple[Path, str]] = []
 
+from recordings.cast_layer import _cast_path, _extract_region_lines
+from recordings.cast_recorder import CastRecorder
 from src.doc_scripts import DocScriptMeta, parse_doc_header
 from src.helpers import PROJECT_ROOT
 from src.runner import OcxRunner
 from src.state_providers import StateProvider, resolve_state
-
-from recordings.cast_layer import _cast_path, _extract_region_lines
-from recordings.cast_recorder import CastRecorder
 
 # ---------------------------------------------------------------------------
 # Paths

@@ -16,8 +16,8 @@ from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
 
 __all__ = [
     "COMPOSE_FILE",
-    "OcxRunner",
     "PROJECT_ROOT",
+    "OcxRunner",
     "PackageInfo",
     "assert_dir_exists",
     "assert_not_exists",

@@ -19,7 +19,6 @@ from src.assertions import assert_not_exists
 from src.helpers import make_package
 from src.runner import OcxRunner, registry_dir
 
-
 EXIT_SUCCESS = 0
 # BindingAlreadyExists → UsageError (64) per error.rs ClassifyExitCode
 EXIT_USAGE_ERROR = 64

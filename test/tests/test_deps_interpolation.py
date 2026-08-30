@@ -11,7 +11,6 @@ from src.helpers import make_package
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -179,7 +178,7 @@ def test_dep_install_path_with_explicit_name(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ):
     """${deps.NAME.installPath} resolves when the dep declares an explicit name."""
-    leaf, app = _push_dep_and_app(
+    _leaf, app = _push_dep_and_app(
         ocx,
         unique_repo,
         tmp_path,
@@ -203,7 +202,7 @@ def test_dep_install_path_mixed_with_install_path(
 ):
     """${installPath} and ${deps.NAME.installPath} can coexist in the same value."""
     leaf_repo = f"{unique_repo}_leaf"
-    leaf, app = _push_dep_and_app(
+    _leaf, app = _push_dep_and_app(
         ocx,
         unique_repo,
         tmp_path,

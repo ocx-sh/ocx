@@ -30,7 +30,7 @@ if str(_TEST_DIR) not in sys.path:
 @pytest.fixture(scope="session")
 def bench_scenarios():
     """Return the SCENARIOS list from bench.scenarios."""
-    from bench.scenarios import SCENARIOS  # noqa: PLC0415
+    from bench.scenarios import SCENARIOS
 
     return SCENARIOS
 
@@ -38,7 +38,7 @@ def bench_scenarios():
 @pytest.fixture(scope="session")
 def bench_compare_fn():
     """Return the compare_against_baseline pure function."""
-    from bench.compare import compare_against_baseline  # noqa: PLC0415
+    from bench.compare import compare_against_baseline
 
     return compare_against_baseline
 

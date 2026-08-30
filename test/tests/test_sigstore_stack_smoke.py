@@ -7,10 +7,8 @@ retargeted behind: if this is red, nothing downstream of it means anything.
 from __future__ import annotations
 
 import json
-
 from pathlib import Path
 
-from src.helpers import make_package
 from src.runner import OcxRunner, PackageInfo
 from tests.fixtures import adversarial
 from tests.fixtures.sigstore_stack import SigstoreStack

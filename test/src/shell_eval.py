@@ -31,7 +31,7 @@ def run_after_sourcing(
     env: dict[str, str],
     shell: str = "bash",
     shell_flags: str = "--norc",
-) -> "subprocess.CompletedProcess[str]":
+) -> subprocess.CompletedProcess[str]:
     """Run ``body`` in a non-interactive ``<shell>`` that sources ``env_export``
     first, using a temp file to avoid quoting pitfalls.
 

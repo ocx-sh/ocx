@@ -104,7 +104,7 @@ def _assert_no_diagnostics(stderr: str) -> None:
         line for line in stderr.splitlines()
         if " WARN " in line or "note:" in line.lower() or "warning:" in line.lower()
     ]
-    assert not offenders, f"expected silence, got:\n" + "\n".join(offenders)
+    assert not offenders, "expected silence, got:\n" + "\n".join(offenders)
 
 
 # ---------------------------------------------------------------------------

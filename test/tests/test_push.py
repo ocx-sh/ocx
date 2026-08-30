@@ -26,11 +26,11 @@ network either.
 from __future__ import annotations
 
 import json
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
-import urllib.error
-import urllib.request
 
 from src.helpers import make_package, resolved_metadata_path
 from src.registry import get_blob, list_referrers, referrers_fallback_tag

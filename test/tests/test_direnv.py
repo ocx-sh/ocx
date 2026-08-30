@@ -25,7 +25,6 @@ from uuid import uuid4
 from src.helpers import make_package
 from src.runner import OcxRunner, PackageInfo
 
-
 # Exit code constant - matches crates/ocx_lib/src/cli/exit_code.rs::ExitCode::ConfigError
 EXIT_CONFIG = 78
 

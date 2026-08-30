@@ -27,17 +27,19 @@ from pathlib import Path
 
 import pytest
 
-from src.doc_binding import find_inline_ocx_blocks, find_script_transclusions, unresolved_transclusions
+from src.doc_binding import (
+    find_inline_ocx_blocks,
+    find_script_transclusions,
+    unresolved_transclusions,
+)
 from src.doc_scripts import (
     SLUG_RE,
-    DocScriptMeta,
     DocScriptParseError,
     discover_doc_scripts,
     doc_scripts_export,
     parse_doc_header,
     strip_ansi,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1415,7 +1417,7 @@ class TestDE5TypedDictParity:
             )
         if type_mismatches:
             errors.append(
-                f"Type annotation mismatches:\n"
+                "Type annotation mismatches:\n"
                 + "\n".join(
                     f"  {k!r}: canonical={canon!r}, mirror={mirror!r}"
                     for k, (canon, mirror) in sorted(type_mismatches.items())
@@ -1493,7 +1495,7 @@ class _DocScriptExportEntry(TypedDict):
             )
         if type_mismatches:
             errors.append(
-                f"Type annotation mismatches:\n"
+                "Type annotation mismatches:\n"
                 + "\n".join(
                     f"  {k!r}: canonical={canon!r}, mirror={mirror!r}"
                     for k, (canon, mirror) in sorted(type_mismatches.items())

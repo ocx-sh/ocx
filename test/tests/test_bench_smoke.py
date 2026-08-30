@@ -45,7 +45,7 @@ class TestScenarioMatrix:
     def test_exactly_21_rows(self):
         from bench.scenarios import SCENARIOS
 
-        assert len(SCENARIOS) == 21, f"Expected 21 scenarios, got {len(SCENARIOS)}"  # noqa: PLR2004
+        assert len(SCENARIOS) == 21, f"Expected 21 scenarios, got {len(SCENARIOS)}"
 
     def test_unique_names(self):
         from bench.scenarios import SCENARIOS
@@ -57,19 +57,19 @@ class TestScenarioMatrix:
         from bench.scenarios import SCENARIOS
 
         floor = [s for s in SCENARIOS if s.shape == "floor"]
-        assert len(floor) == 4, f"Expected 4 floor scenarios, got {len(floor)}"  # noqa: PLR2004
+        assert len(floor) == 4, f"Expected 4 floor scenarios, got {len(floor)}"
 
     def test_shape1_count(self):
         from bench.scenarios import SCENARIOS
 
         shape1 = [s for s in SCENARIOS if s.shape == "shape1"]
-        assert len(shape1) == 15, f"Expected 15 shape1 scenarios, got {len(shape1)}"  # noqa: PLR2004
+        assert len(shape1) == 15, f"Expected 15 shape1 scenarios, got {len(shape1)}"
 
     def test_shape2_count(self):
         from bench.scenarios import SCENARIOS
 
         shape2 = [s for s in SCENARIOS if s.shape == "shape2"]
-        assert len(shape2) == 2, f"Expected 2 shape2 scenarios, got {len(shape2)}"  # noqa: PLR2004
+        assert len(shape2) == 2, f"Expected 2 shape2 scenarios, got {len(shape2)}"
 
     def test_required_scenario_names_present(self):
         from bench.scenarios import SCENARIOS
@@ -111,12 +111,12 @@ class TestScenarioMatrix:
         from bench.scenarios import SCENARIOS
 
         by_name = {s.name: s for s in SCENARIOS}
-        assert by_name["ocx_parallel_2_100mbps"].concurrency == 2  # noqa: PLR2004
-        assert by_name["ocx_parallel_4_100mbps"].concurrency == 4  # noqa: PLR2004
-        assert by_name["ocx_parallel_2_processes"].concurrency == 2  # noqa: PLR2004
-        assert by_name["ocx_parallel_4_processes"].concurrency == 4  # noqa: PLR2004
-        assert by_name["baseline_curl_parallel_2"].concurrency == 2  # noqa: PLR2004
-        assert by_name["baseline_curl_parallel_4"].concurrency == 4  # noqa: PLR2004
+        assert by_name["ocx_parallel_2_100mbps"].concurrency == 2
+        assert by_name["ocx_parallel_4_100mbps"].concurrency == 4
+        assert by_name["ocx_parallel_2_processes"].concurrency == 2
+        assert by_name["ocx_parallel_4_processes"].concurrency == 4
+        assert by_name["baseline_curl_parallel_2"].concurrency == 2
+        assert by_name["baseline_curl_parallel_4"].concurrency == 4
 
     def test_parallel_2_is_shape1(self):
         from bench.scenarios import SCENARIOS
@@ -167,15 +167,15 @@ class TestScenarioMatrix:
         from bench.scenarios import SCENARIOS
 
         sizes = {s.size_mb for s in SCENARIOS}
-        assert 5 in sizes, "5 MB scenario missing"  # noqa: PLR2004
-        assert 10 in sizes, "10 MB scenario missing"  # noqa: PLR2004
-        assert 12 in sizes, "12 MB (layer) scenario missing"  # noqa: PLR2004
+        assert 5 in sizes, "5 MB scenario missing"
+        assert 10 in sizes, "10 MB scenario missing"
+        assert 12 in sizes, "12 MB (layer) scenario missing"
 
     def test_latency_scenario_has_50ms(self):
         from bench.scenarios import SCENARIOS
 
         by_name = {s.name: s for s in SCENARIOS}
-        assert by_name["ocx_install_latency_50ms"].latency_ms == 50  # noqa: PLR2004
+        assert by_name["ocx_install_latency_50ms"].latency_ms == 50
 
     def test_unthrottled_has_zero_bandwidth(self):
         from bench.scenarios import SCENARIOS
@@ -196,7 +196,7 @@ class TestScenarioMatrix:
         anchor_names = set(SCALING_GROUP_ANCHORS.values())
         for s in SCENARIOS:
             if s.scaling_group is not None and s.name not in anchor_names:
-                assert s.process_count >= 2, (  # noqa: PLR2004
+                assert s.process_count >= 2, (
                     f"{s.name}: non-anchor scaling group member must have "
                     f"process_count >= 2, got {s.process_count}"
                 )
@@ -318,8 +318,8 @@ class TestScenarioMatrix:
 
         by_name = {s.name: s for s in SCENARIOS}
         assert by_name["ocx_layers_1"].layers == 1
-        assert by_name["ocx_layers_2"].layers == 2  # noqa: PLR2004
-        assert by_name["ocx_layers_4"].layers == 4  # noqa: PLR2004
+        assert by_name["ocx_layers_2"].layers == 2
+        assert by_name["ocx_layers_4"].layers == 4
 
     def test_layer_rows_have_same_total_payload(self):
         """All layer-scaling rows must have the same size_mb (same total payload)."""
@@ -412,11 +412,11 @@ class TestScenarioMatrix:
             "ocx_parallel_2_processes",
         }
         subset = [s for s in SCENARIOS if s.name in quick_names]
-        assert len(subset) == len(quick_names), (  # noqa: PLR2004
+        assert len(subset) == len(quick_names), (
             f"Quick scenario set incomplete: found {[s.name for s in subset]}"
         )
         total = sum(s.est_seconds for s in subset)
-        assert total < 30.0, (  # noqa: PLR2004
+        assert total < 30.0, (
             f"Quick scenario subset est {total:.1f}s exceeds 30s. "
             "Overhead budget for <60s total run is at risk."
         )
@@ -490,7 +490,7 @@ class TestScenarioMatrix:
         from bench.scenarios import SCENARIOS
 
         total = sum(s.est_seconds for s in SCENARIOS if s.suite == "small")
-        assert total < 60.0, f"small suite est {total:.1f}s >= 60s"  # noqa: PLR2004
+        assert total < 60.0, f"small suite est {total:.1f}s >= 60s"
 
     def test_large_suite_est_under_550s(self):
         """large suite (cumulative) scenario time must be ≤ 550 s."""
@@ -499,7 +499,7 @@ class TestScenarioMatrix:
         total = sum(
             s.est_seconds for s in SCENARIOS if s.suite in {"small", "medium", "large"}
         )
-        assert total <= 550.0, f"large suite (cumulative) est {total:.1f}s > 550s"  # noqa: PLR2004
+        assert total <= 550.0, f"large suite (cumulative) est {total:.1f}s > 550s"
 
     # --- Deterministic fixture names ---
 
@@ -795,7 +795,7 @@ class TestScenarioResult:
             command="ocx package install foo:1.0.0",
         )
         assert r.scenario_name == "test"
-        assert r.runs == 10  # noqa: PLR2004
+        assert r.runs == 10
 
     def test_times_defaults_to_empty_list(self):
         from bench.harness import ScenarioResult
@@ -1092,12 +1092,12 @@ class TestZScoreMath:
     def test_noise_threshold_abs_z_under_2(self):
         """|z| < 2 should be classified as noise."""
         z = self._welch_z(1.05, 0.1, 5, 1.0, 0.1, 5)
-        assert abs(z) < 2.0  # noqa: PLR2004
+        assert abs(z) < 2.0
 
     def test_real_regression_abs_z_over_2(self):
         """|z| >= 2 should flag as real signal."""
         z = self._welch_z(1.3, 0.05, 10, 1.0, 0.05, 10)
-        assert abs(z) >= 2.0  # noqa: PLR2004
+        assert abs(z) >= 2.0
 
     def test_zero_stddev_returns_zero(self):
         """If both stddevs are zero, z=0 (avoid div by zero)."""

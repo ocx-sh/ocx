@@ -94,8 +94,7 @@ def _canonical_hash(body: str) -> str:
     either matches (ocx-authored) or differs (dirty) from the body on disk.
     """
     unix = body.replace("\r\n", "\n").replace("\r", "\n")
-    if unix.endswith("\n"):
-        unix = unix[:-1]
+    unix = unix.removesuffix("\n")
     return hashlib.sha256(unix.encode()).digest()[:4].hex()
 
 

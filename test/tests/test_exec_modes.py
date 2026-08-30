@@ -11,8 +11,6 @@ Per ADR `.claude/artifacts/adr_visibility_two_axis_and_exec_modes.md`.
 
 from __future__ import annotations
 
-import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -379,7 +377,7 @@ def test_entrypoint_mirror_consumer_default_skips_redundant_bin(
     ]
     has_synth_consumer = any("entrypoints" in v for v in consumer_path_values)
     has_raw_bin_consumer = any(
-        v.endswith("/bin") or v.endswith("\\bin") for v in consumer_path_values
+        v.endswith(("/bin", "\\bin")) for v in consumer_path_values
     )
     assert has_synth_consumer, (
         f"Consumer must have synth entrypoints/ in PATH; values: {consumer_path_values}"
@@ -395,7 +393,7 @@ def test_entrypoint_mirror_consumer_default_skips_redundant_bin(
         e["value"] for e in env_self.get("entries", []) if e["key"] == "PATH"
     ]
     has_raw_bin_self = any(
-        v.endswith("/bin") or v.endswith("\\bin") for v in self_path_values
+        v.endswith(("/bin", "\\bin")) for v in self_path_values
     )
     assert has_raw_bin_self, (
         f"Self mode MUST have raw bin/ in PATH (recursion-safe); "

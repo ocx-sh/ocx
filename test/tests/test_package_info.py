@@ -1,10 +1,9 @@
 """Tests for `ocx package info` — reading description metadata."""
 
-import json
 from pathlib import Path
 from uuid import uuid4
 
-from src import OcxRunner, current_platform
+from src import OcxRunner
 from src.helpers import make_package
 
 

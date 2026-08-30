@@ -589,7 +589,7 @@ def test_transiently_unreachable_holder_survives_clean(
     proj_b.mkdir(parents=True, exist_ok=True)
 
     # B pins a package (lock → register in the symlink ledger, pull → blobs).
-    repo, tag = _setup_project_a(ocx, tmp_path, proj_b)
+    _repo, _tag = _setup_project_a(ocx, tmp_path, proj_b)
 
     ocx_home = Path(ocx.env["OCX_HOME"])
     count_before = _packages_present_count(ocx_home, ocx.registry)
@@ -903,7 +903,7 @@ def test_clean_roots_leaf_digests_from_platforms_table(
     proj_b = tmp_path / "proj-b-v2gc"
     proj_b.mkdir(parents=True, exist_ok=True)
 
-    repo, tag = _setup_project_a(ocx, tmp_path, proj_a)
+    _repo, _tag = _setup_project_a(ocx, tmp_path, proj_a)
 
     lock_text = (proj_a / "ocx.lock").read_text()
     assert "[tool.platforms]" in lock_text, (

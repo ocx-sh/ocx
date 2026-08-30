@@ -114,7 +114,7 @@ def _install_shim_entrypoint(
     exe_path = ep_dir / f"{name}.exe"
     exe_path.write_bytes(shim_bin.read_bytes())
     sidecar = ep_dir / f"{name}.shim"
-    sidecar.write_bytes(f"{pkg_root}\n".encode("utf-8"))
+    sidecar.write_bytes(f"{pkg_root}\n".encode())
     return exe_path
 
 
@@ -532,8 +532,7 @@ def test_shim_runs_without_console(shim_entrypoint: dict, tmp_path: Path) -> Non
     proc = subprocess.run(
         [str(shim_entrypoint["exe"])],
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         creationflags=detached_process,
         env=env, check=False,
     )

@@ -55,14 +55,14 @@ if str(_WEBSITE_SCRIPTS_DIR) not in sys.path:
 
 # The import below triggers the stub bodies (NotImplementedError); the module
 # itself must be importable so tests can call the functions.
-from publish_doc_scripts import (  # noqa: E402
+from publish_doc_scripts import (
     RenderError,
     _slug_to_relpath,
     _substitute_renderable,
     render_display,
 )
 
-from src.doc_scripts import substitute_renderable  # noqa: E402
+from src.doc_scripts import substitute_renderable
 
 # ---------------------------------------------------------------------------
 # Module-level skip: task / bash invocations require Linux/macOS
@@ -717,7 +717,6 @@ def test_pt7_publish_before_vitepress_independent_of_recordings() -> None:
     )
 
     cmd_texts = [text for _, text in build_cmds]
-    cmd_indices = {text: idx for idx, (lineno, text) in enumerate(build_cmds)}
 
     # Find the vitepress build command
     vitepress_idx: int | None = None
@@ -740,7 +739,7 @@ def test_pt7_publish_before_vitepress_independent_of_recordings() -> None:
     assert publish_idx is not None, (
         "PT7: publish task not found in build.cmds of website/taskfile.yml. "
         "It must appear before 'bunx vitepress build'. "
-        f"Current cmds:\n" + "\n".join(f"  [{i}] {t}" for i, t in enumerate(cmd_texts))
+        "Current cmds:\n" + "\n".join(f"  [{i}] {t}" for i, t in enumerate(cmd_texts))
     )
 
     assert publish_idx < vitepress_idx, (
@@ -1115,7 +1114,8 @@ def test_pt5_nested_foreign_file_in_owned_dir_survives(tmp_path: Path) -> None:
     )
 
     assert not owned_file.exists(), (
-        "PT5/nested/foreign: mygroup/alpha.sh (owned orphan) must be removed"
+        "PT5/nested/foreign: mygroup/alpha.sh (owned orphan) must be removed; "
+        f"rc={second.returncode}, stderr={second.stderr!r}"
     )
     assert foreign_file.exists(), (
         "PT5/nested/foreign: mygroup/foreign.txt (foreign, not in manifest) "

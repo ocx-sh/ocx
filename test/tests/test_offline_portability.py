@@ -27,7 +27,13 @@ from uuid import uuid4
 
 import pytest
 
-from src import OcxRunner, assert_symlink_exists, make_package, registry_dir, static_index
+from src import (
+    OcxRunner,
+    assert_symlink_exists,
+    make_package,
+    registry_dir,
+    static_index,
+)
 from src.registry import fetch_platform_manifest_digest
 
 # ---------------------------------------------------------------------------

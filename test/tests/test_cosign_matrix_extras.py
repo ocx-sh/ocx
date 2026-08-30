@@ -46,7 +46,6 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
 from cryptography import x509
 
 from src import registry as reg
@@ -824,7 +823,7 @@ def test_a_withheld_bundle_must_not_expose_an_expired_certificate_sidecar(
     certificate = x509.load_pem_x509_certificate(
         annotations["dev.sigstore.cosign/certificate"].encode()
     )
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
     assert certificate.not_valid_after_utc < now, (
         "this cell is only an attack if the certificate is genuinely expired; the golden "
         f"leaf is valid until {certificate.not_valid_after_utc} and it is now {now}. "

@@ -30,7 +30,7 @@ from src.helpers import env_key, make_package
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo
 
-SCENARIOS: dict[str, type["Scenario"]] = {}
+SCENARIOS: dict[str, type[Scenario]] = {}
 
 
 class Scenario:
@@ -176,7 +176,7 @@ class Scenario:
         script_path: Path,
         ocx: OcxRunner,
         tmp_path: Path,
-    ) -> "Scenario":
+    ) -> Scenario:
         """Instantiate the scenario named in the script's `# scenario:` header.
 
         If no header is present, returns a base `Scenario` (no setup).
@@ -238,12 +238,14 @@ def discover_scripts(root: Path, pattern: str = "**/*.sh") -> list[Path]:
 # Eager-import predefined scenarios so registration runs at module load.
 # Keep this at the bottom to avoid circular imports.
 # ---------------------------------------------------------------------------
-from src.scenarios import basic  # noqa: E402,F401
-from src.scenarios import diamond_deps  # noqa: E402,F401
-from src.scenarios import multi_entrypoints  # noqa: E402,F401
-from src.scenarios import multi_layer  # noqa: E402,F401
-from src.scenarios import three_level_deps  # noqa: E402,F401
-from src.scenarios import two_level_deps  # noqa: E402,F401
+from src.scenarios import (
+    basic,  # noqa: F401
+    diamond_deps,  # noqa: F401
+    multi_entrypoints,  # noqa: F401
+    multi_layer,  # noqa: F401
+    three_level_deps,  # noqa: F401
+    two_level_deps,  # noqa: F401
+)
 
 __all__ = [
     "SCENARIOS",

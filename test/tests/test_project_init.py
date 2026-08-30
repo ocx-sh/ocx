@@ -15,7 +15,6 @@ from pathlib import Path
 
 from src.runner import OcxRunner
 
-
 # Exit codes per quality-rust-exit_codes.md / error.rs ClassifyExitCode:
 # ConfigAlreadyExists → UsageError = 64
 EXIT_SUCCESS = 0

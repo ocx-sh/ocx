@@ -82,9 +82,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     registry = os.environ.get("REGISTRY", _DEFAULT_REGISTRY)
     start_registry(registry)
 
-    from src.helpers import registry_is_reachable  # noqa: PLC0415
-
-    from src.helpers import compose_up  # noqa: PLC0415
+    from src.helpers import compose_up, registry_is_reachable
 
     secondaries = (
         ("mirror-registry", os.environ.get("MIRROR_REGISTRY", _DEFAULT_MIRROR_REGISTRY)),
@@ -140,7 +138,7 @@ def mirror_registry() -> str:
 
     addr = os.environ.get("MIRROR_REGISTRY", _DEFAULT_MIRROR_REGISTRY)
 
-    from src.helpers import registry_is_reachable  # noqa: PLC0415
+    from src.helpers import registry_is_reachable
     if not registry_is_reachable(addr):
         pytest.skip(
             f"mirror registry at {addr} is not reachable; "
@@ -167,7 +165,7 @@ def target_registry() -> str:
 
     addr = os.environ.get("TARGET_REGISTRY", _DEFAULT_TARGET_REGISTRY)
 
-    from src.helpers import registry_is_reachable  # noqa: PLC0415
+    from src.helpers import registry_is_reachable
     if not registry_is_reachable(addr):
         pytest.skip(
             f"target registry at {addr} is not reachable; "
@@ -199,7 +197,7 @@ def legacy_registry() -> str:
 
     addr = os.environ.get("LEGACY_REGISTRY", _DEFAULT_MIRROR_REGISTRY)
 
-    from src.helpers import registry_is_reachable  # noqa: PLC0415
+    from src.helpers import registry_is_reachable
     if not registry_is_reachable(addr):
         pytest.skip(
             f"legacy registry:2 fixture at {addr} is not reachable; "

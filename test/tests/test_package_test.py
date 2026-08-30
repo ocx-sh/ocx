@@ -22,7 +22,6 @@ Child exit codes propagate verbatim (Unix passthrough).
 """
 from __future__ import annotations
 
-import glob
 import json
 import os
 import re
@@ -36,7 +35,6 @@ import pytest
 from src import OcxRunner, current_platform
 from src.helpers import make_package, resolved_metadata_path
 from src.runner import PackageInfo
-
 
 # ---------------------------------------------------------------------------
 # Helpers (DAMP per quality-core.md — keep tests self-contained)
@@ -542,9 +540,10 @@ def test_pulls_digest_layer_on_demand(
     import json
     import shutil
     import urllib.request
+
     from src.registry import fetch_manifest_from_registry
 
-    bundle, metadata_path, pkg_info = _make_test_package(ocx, unique_repo, tmp_path)
+    _bundle, metadata_path, pkg_info = _make_test_package(ocx, unique_repo, tmp_path)
 
     # Fetch the OCI image manifest that was pushed for this package.
     # The manifest may be an image index; look for a platform manifest child.
@@ -630,9 +629,10 @@ def test_offline_missing_digest_layer_blocks(
     import json
     import shutil
     import urllib.request
+
     from src.registry import fetch_manifest_from_registry
 
-    bundle, metadata_path, pkg_info = _make_test_package(ocx, unique_repo, tmp_path)
+    _bundle, metadata_path, pkg_info = _make_test_package(ocx, unique_repo, tmp_path)
 
     # Fetch the OCI image manifest to find the real layer digest.
     raw_manifest = fetch_manifest_from_registry(ocx.registry, pkg_info.repo, pkg_info.tag)

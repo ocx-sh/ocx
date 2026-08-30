@@ -21,7 +21,6 @@ from uuid import uuid4
 from src.helpers import env_key
 from src.runner import OcxRunner, PackageInfo
 
-
 # ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------
@@ -651,7 +650,7 @@ def resolve_state(state: str) -> StateProvider:
                 scenario:<Name>; available: <sorted families>
     """
     # Reject unqualified states (no family prefix) — EX4
-    is_qualified = state.startswith("setup:") or state.startswith("scenario:")
+    is_qualified = state.startswith(("setup:", "scenario:"))
     if not is_qualified or state not in STATE_PROVIDERS:
         available = ", ".join(f"{f}:..." for f in _AVAILABLE_FAMILIES)
         raise ValueError(

@@ -32,12 +32,11 @@ Contract reference:
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
 from uuid import uuid4
-
-import re
 
 import pytest
 
@@ -613,7 +612,6 @@ def test_sp7_two_provisions_of_setup_basic_use_distinct_prefixes(
     own UUID prefix.
     """
     from recordings.setups import SETUPS
-
     from src.state_providers import SetupAdapter
 
     # Two independent provisions — each gets its own tmp subdir.
@@ -685,7 +683,6 @@ def test_sp8_setup_adapter_work_dir_is_none_before_provision(
     Design ref: §3 SP8 — 'set only after provision() has been called'.
     """
     from recordings.setups import SETUPS
-
     from src.state_providers import SetupAdapter
 
     # Fresh instance — never provisioned
@@ -710,7 +707,6 @@ def test_sp8_setup_adapter_work_dir_is_path_after_provision(
     state_path = tmp_path / "_state"'.
     """
     from recordings.setups import SETUPS
-
     from src.state_providers import SetupAdapter
 
     provider = SetupAdapter("basic", SETUPS["basic"])
@@ -748,7 +744,6 @@ def test_sp8_scenario_adapter_work_dir_is_none_before_and_after_provision(
     (design_spec §3 SP8: 'ScenarioAdapter always returns None').
     """
     from src.scenarios import SCENARIOS
-
     from src.state_providers import ScenarioAdapter
 
     provider = ScenarioAdapter("BasicPackage", SCENARIOS["BasicPackage"])
@@ -952,7 +947,6 @@ def test_de2_declared_display_env_is_identical_before_and_after_provision(
     Design ref: design_spec_doc_command_scripts.md §6f DE2.
     """
     from recordings.setups import SETUPS
-
     from src.state_providers import SetupAdapter
 
     # Fresh instance — never provisioned

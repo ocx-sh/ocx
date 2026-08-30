@@ -20,7 +20,6 @@ from src.helpers import make_package, make_package_with_entrypoints
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo, current_platform
 
-
 # ---------------------------------------------------------------------------
 # Helpers shared by new suites
 # ---------------------------------------------------------------------------
@@ -39,7 +38,7 @@ def _dep_entry_ep(ocx: OcxRunner, pkg: PackageInfo, *, visibility: str) -> dict:
 
 def ocx_home_symlinks(ocx: OcxRunner, pkg: PackageInfo) -> Path:
     """Return the symlinks/{registry}/{repo}/ directory for the package."""
-    from src.runner import registry_dir  # noqa: PLC0415
+    from src.runner import registry_dir
     reg = registry_dir(ocx.registry)
     return Path(str(ocx.ocx_home)) / "symlinks" / reg / pkg.repo
 
@@ -488,11 +487,11 @@ def test_synthetic_entrypoints_path_emitted_after_declared_bin(
     # "entrypoints" because the test name does, so a loose substring check
     # would also match the bin/ entry.
     syn_idx = next(
-        (i for i, v in path_entries if v.endswith("/entrypoints") or v.endswith("\\entrypoints")),
+        (i for i, v in path_entries if v.endswith(("/entrypoints", "\\entrypoints"))),
         None,
     )
     bin_idx = next(
-        (i for i, v in path_entries if v.endswith("/bin") or v.endswith("\\bin")),
+        (i for i, v in path_entries if v.endswith(("/bin", "\\bin"))),
         None,
     )
 
@@ -540,7 +539,7 @@ def test_exec_dep_launcher_via_path(
         "visibility": "public",
     }
 
-    from src.helpers import make_package  # noqa: PLC0415
+    from src.helpers import make_package
     pkg_a = make_package(
         ocx,
         a_repo,
@@ -712,8 +711,8 @@ def test_install_intra_closure_collision_aborts_before_candidate_symlink(
     declarations and aborts. The aborted install must leave no candidate symlink
     behind for pkg_b — the collision is detected before the temp→final atomic move.
     """
-    from src.registry import fetch_platform_manifest_digest  # noqa: PLC0415
-    from src.runner import registry_dir  # noqa: PLC0415
+    from src.registry import fetch_platform_manifest_digest
+    from src.runner import registry_dir
 
     repo_a = f"{unique_repo}-sa"
     repo_b = f"{unique_repo}-sb"
@@ -775,8 +774,8 @@ def test_install_transitive_closure_collision_aborts_before_disk(
     across C and D and abort before the temp→final atomic move — i.e. before the
     root candidate symlink is written to disk.
     """
-    from src.registry import fetch_platform_manifest_digest  # noqa: PLC0415
-    from src.runner import registry_dir  # noqa: PLC0415
+    from src.registry import fetch_platform_manifest_digest
+    from src.runner import registry_dir
 
     repo_c = f"{unique_repo}-tc"
     repo_d = f"{unique_repo}-td"
@@ -906,7 +905,7 @@ def test_suite_a_entrypoint_collision_gated_on_interface_projection(
     does NOT enter the collision set.  ``interface`` and ``public`` edges produce
     ``has_interface()=true``; the duplicate name is caught before any disk write.
     """
-    from src.runner import registry_dir  # noqa: PLC0415
+    from src.runner import registry_dir
 
     repo_b = f"{unique_repo}_b"
 

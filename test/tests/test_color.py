@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 
-
 ANSI_ESCAPE = re.compile(r"\x1b\[")
 
 

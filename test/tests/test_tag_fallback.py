@@ -24,11 +24,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from src import OcxRunner, PackageInfo, make_package, registry_dir
 from src.registry import fetch_manifest_digest
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 

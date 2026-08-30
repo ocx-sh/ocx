@@ -25,7 +25,6 @@ from src.helpers import make_package
 from src.registry import fetch_manifest_digest, fetch_manifest_raw, put_manifest
 from src.runner import OcxRunner, PackageInfo
 
-
 # ---------------------------------------------------------------------------
 # Command helpers
 # ---------------------------------------------------------------------------
@@ -303,9 +302,8 @@ def test_j9_keep_tag_is_ignored_not_a_finding(ocx: OcxRunner, published_package:
 def _index_server() -> Iterator[static_index.StaticIndexServer]:
     import tempfile
 
-    with tempfile.TemporaryDirectory() as root:
-        with static_index.running(Path(root)) as server:
-            yield server
+    with tempfile.TemporaryDirectory() as root, static_index.running(Path(root)) as server:
+        yield server
 
 
 def _configure_index_source(ocx: OcxRunner, server: static_index.StaticIndexServer) -> None:

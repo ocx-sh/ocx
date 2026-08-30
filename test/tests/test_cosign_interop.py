@@ -29,6 +29,7 @@ from src.runner import OcxRunner, PackageInfo
 from tests.fixtures import adversarial, attestations, cosign
 from tests.fixtures.sigstore_stack import SigstoreStack
 
+
 #: `--trusted-root` below is cosign's own flag, not an ocx one. If these ever
 #: fail, the cause is upstream of the flag — do not rename or replace it.
 @pytest.fixture(scope="session")

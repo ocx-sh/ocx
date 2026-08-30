@@ -35,7 +35,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002 (stdlib signature)
+    def log_message(self, format: str, *args: object) -> None:
         pass  # quiet test output — assertions read `server.requests` instead
 
     def _reply(self, status: int, body: bytes, content_type: str) -> None:
@@ -72,10 +72,10 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         self._reply_json(404, {"errors": [{"code": "NOT_FOUND", "message": "not found", "detail": None}]})
 
-    def do_GET(self) -> None:  # noqa: N802 (stdlib API)
+    def do_GET(self) -> None:
         self._dispatch()
 
-    def do_HEAD(self) -> None:  # noqa: N802 (stdlib API)
+    def do_HEAD(self) -> None:
         self._dispatch()
 
 

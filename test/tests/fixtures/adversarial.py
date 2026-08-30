@@ -22,8 +22,9 @@ import base64
 import copy
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from src import registry as reg
 
@@ -204,7 +205,7 @@ def shift_integrated_time_outside_certificate_window(
     """
     from cryptography import x509
 
-    referrer, bundle = _bundle_of(registry, repo, subject_digest)
+    _referrer, bundle = _bundle_of(registry, repo, subject_digest)
     material = bundle["verificationMaterial"]
     leaf_b64 = (material.get("certificate") or material["x509CertificateChain"]["certificates"][0])["rawBytes"]
     not_after = x509.load_der_x509_certificate(base64.b64decode(leaf_b64)).not_valid_after_utc

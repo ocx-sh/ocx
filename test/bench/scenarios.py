@@ -635,7 +635,7 @@ SCALING_GROUP_ANCHORS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 _EXPECTED_ROWS = 21
-assert len(SCENARIOS) == _EXPECTED_ROWS, (  # noqa: PLR2004
+assert len(SCENARIOS) == _EXPECTED_ROWS, (
     f"Scenario matrix must have exactly {_EXPECTED_ROWS} rows, got {len(SCENARIOS)}"
 )
 
@@ -648,11 +648,11 @@ for _s in SCENARIOS:
     if _s.scaling_group is not None:
         anchor = SCALING_GROUP_ANCHORS.get(_s.scaling_group)
         is_anchor = anchor == _s.name
-        assert _s.process_count >= 1, (  # noqa: PLR2004
+        assert _s.process_count >= 1, (
             f"process_count must be ≥ 1 on scaling group member {_s.name!r}"
         )
         if not is_anchor:
-            assert _s.process_count >= 2, (  # noqa: PLR2004
+            assert _s.process_count >= 2, (
                 f"Non-anchor scaling group member {_s.name!r} must have "
                 f"process_count >= 2; got {_s.process_count}. "
                 "Use SCALING_GROUP_ANCHORS for the 1-process anchor."

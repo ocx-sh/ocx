@@ -43,7 +43,6 @@ from src.assertions import assert_not_exists
 from src.helpers import make_package
 from src.runner import OcxRunner, registry_dir
 
-
 EXIT_SUCCESS = 0
 EXIT_USAGE = 64        # clap unknown-arg / unknown group or name → EX_USAGE
 EXIT_DATA = 65         # scoped update on a drifted ocx.toml (StaleLockOnPartial)
@@ -1060,7 +1059,7 @@ def test_update_eager_default_materializes_new_digest(
     half locks in the no-symlink mutator invariant
     (``project_context.rs::materialize_lock`` → ``pull_all``).
     """
-    project, repo, tag_v1, tag_v2 = _two_tag_project(ocx, tmp_path)
+    project, repo, _tag_v1, tag_v2 = _two_tag_project(ocx, tmp_path)
 
     # Bump the toml to tag_v2 then update.
     _write_ocx_toml(
@@ -1091,7 +1090,7 @@ def test_update_no_pull_skips_install(
 
     Plan Phase-5 Step 3.3 contract.
     """
-    project, repo, tag_v1, tag_v2 = _two_tag_project(ocx, tmp_path)
+    project, repo, _tag_v1, tag_v2 = _two_tag_project(ocx, tmp_path)
 
     _write_ocx_toml(
         project,
@@ -1121,7 +1120,7 @@ def test_update_pull_then_no_pull_last_wins(
 
     Plan Phase-5 Step 3.3 last-wins contract for ``ocx update``.
     """
-    project, repo, tag_v1, tag_v2 = _two_tag_project(ocx, tmp_path)
+    project, repo, _tag_v1, tag_v2 = _two_tag_project(ocx, tmp_path)
 
     _write_ocx_toml(
         project,
@@ -1152,7 +1151,7 @@ def test_update_no_pull_then_pull_last_wins(
 
     Plan Phase-5 Step 3.3 last-wins contract for ``ocx update``.
     """
-    project, repo, tag_v1, tag_v2 = _two_tag_project(ocx, tmp_path)
+    project, repo, _tag_v1, tag_v2 = _two_tag_project(ocx, tmp_path)
 
     _write_ocx_toml(
         project,
