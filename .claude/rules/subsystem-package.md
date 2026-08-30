@@ -47,7 +47,7 @@ Tagged enum metadata (`Metadata::Bundle`) supports future format versions, no br
 | `cascade/graph.rs` | `ocx package cascade check`/`repair` pure fold + diff core — folds published versions into expected alias state, diffs against observed tags, plans registry rewrites; no I/O |
 | `cascade/gather.rs` | Concurrent, bounded registry tag fetch (plus, for a logical identifier, the live index root) feeding the fold above |
 | `cascade/apply.rs` | Batched, concurrent index PUTs applying a computed repair plan to the registry |
-| `tag.rs` | `Tag` enum: Latest, Internal(InternalTag), Version, Canonical, Other |
+| `tag.rs` | `Tag` enum: Latest, Internal(InternalTag), Version, LegacyKeep, Other |
 | `version.rs` | `Version` struct: semver-inspired with build + prerelease, rolling tag support |
 | `install_info.rs` | `InstallInfo`: identifier + metadata + content path |
 | `description.rs` | Package description metadata (title, description, keywords, README, logo) |
@@ -159,7 +159,7 @@ Cascade = **publisher convention** (not registry-enforced). `--cascade` automate
 - Ordering: major.minor.patch by component; prerelease < release; build sorts lexicographically
 - Build separator: `+` parses but normalizes to `_` in output (OCI forbids `+`)
 
-`Tag` enum: `Latest`, `Internal(InternalTag)`, `Version(Version)`, `Canonical(String)`, `Other(String)`.
+`Tag` enum: `Latest`, `Internal(InternalTag)`, `Version(Version)`, `LegacyKeep { algorithm, hex }`, `Other(String)`. The GC-safety keep tag is `InternalTag::Keep { algorithm, hex }` (`__ocx.keep.<alg>-<hex>`); `LegacyKeep` is the frozen `<alg>.<hex>` read arm, classified but never written.
 
 ## Quality Gate
 

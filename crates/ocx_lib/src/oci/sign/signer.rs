@@ -3,8 +3,8 @@
 
 //! [`Signer`] trait — the cryptographic half of keyless signing.
 //!
-//! A signer turns a target digest + an acquired OIDC token into a Sigstore
-//! bundle v0.3. The registry push is a separate concern owned by
+//! A signer turns an in-toto Statement + an acquired OIDC token into a
+//! Sigstore bundle v0.3. The registry push is a separate concern owned by
 //! [`pipeline::SignPipeline`](super::pipeline). This split (Architect F2) lets
 //! v2 add HSM/KMS signers without touching the push state machine, and lets
 //! tests inject a fake signer.
@@ -16,34 +16,53 @@ use p256::elliptic_curve::rand_core::OsRng;
 use p256::pkcs8::{EncodePublicKey, LineEnding};
 use url::Url;
 
-use super::bundle::{SignedBundle, SignedEnvelope, build_bundle, build_dsse_bundle};
+use super::bundle::{SignedBundle, SignedEnvelope, SigningMaterial, build_dsse_bundle};
 use super::error::SignErrorKind;
 use super::fulcio::{FulcioCertificate, FulcioClient};
 use super::oidc::OidcToken;
 use super::rekor::RekorClient;
-use crate::oci::Digest;
 use crate::oci::attest::dsse::{DsseEnvelope, DsseSignature, pae};
 use crate::oci::attest::{DSSE_PAYLOAD_TYPE, MAX_STATEMENT_PAYLOAD_BYTES};
 
-/// Produces a Sigstore bundle for a target digest.
+/// A signature over opaque bytes, plus the verification material a cosign
+/// simplesigning sidecar puts in layer annotations.
+///
+/// Every field but `signature` is optional because their absence is a **legal
+/// shape**, not malformed output (spec D5): under a key there is no certificate
+/// and no chain, and with no transparency-log upload there is no offline Rekor
+/// bundle. A reader must not treat any of them as required.
+#[derive(Debug, Clone)]
+pub struct SignedBlob {
+    /// DER-encoded ECDSA signature over `sha256(payload)`.
+    pub signature: Vec<u8>,
+    /// PEM leaf certificate. Keyless only.
+    pub certificate_pem: Option<String>,
+    /// PEM intermediate chain.
+    ///
+    /// Always `None` today, and deliberately: bundle v0.3 replaced the chain
+    /// field with a single leaf, Fulcio's intermediates come from the trust
+    /// root, and cosign v3.1.1's own `.sig` manifests carry no `/chain`
+    /// annotation either (`test/tests/fixtures/golden/simplesigning_keyless_manifest.json`).
+    /// Modelled rather than dropped so a private-CA signer with real
+    /// intermediates has somewhere to put them.
+    pub chain_pem: Option<String>,
+    /// The offline Rekor bundle for the `dev.sigstore.cosign/bundle`
+    /// annotation, when an entry was created.
+    pub rekor_bundle: Option<String>,
+    /// The Rekor log index, when a transparency record was created.
+    pub transparency_log_index: Option<u64>,
+    /// Which key model produced the signature.
+    pub key_backend: crate::oci::sign::KeyBackendKind,
+    /// The signing key's cosign hint, in key mode only.
+    pub public_key_hint: Option<String>,
+}
+
+/// Produces a Sigstore bundle over an in-toto Statement.
 ///
 /// The keyless v1 implementation is [`KeylessSigner`]; the trait exists so v2
 /// signers (KMS, private CA) reuse the same push pipeline.
 #[async_trait]
 pub trait Signer: Send + Sync {
-    /// Sign `target_digest` with the identity in `token`, returning a bundle.
-    ///
-    /// `fulcio_url` / `rekor_url` are the validated endpoints (the SSRF guard
-    /// runs at the CLI boundary). Returns the leaf error kind; the pipeline
-    /// composes it into a [`SignError`](super::SignError) with the identifier.
-    async fn sign(
-        &self,
-        target_digest: &Digest,
-        token: &OidcToken,
-        fulcio_url: &Url,
-        rekor_url: &Url,
-    ) -> Result<SignedBundle, SignErrorKind>;
-
     /// Sign an in-toto Statement as a DSSE envelope, returning a bundle.
     ///
     /// The payload type is fixed (`DSSE_PAYLOAD_TYPE`): v1 writes exactly one,
@@ -64,10 +83,59 @@ pub trait Signer: Send + Sync {
     async fn sign_dsse(
         &self,
         statement_bytes: &[u8],
-        token: &OidcToken,
+        token: Option<&OidcToken>,
         fulcio_url: &Url,
         rekor_url: &Url,
     ) -> Result<SignedBundle, SignErrorKind>;
+
+    /// Sign `payload` verbatim, returning the signature and the verification
+    /// material a cosign simplesigning sidecar carries in annotations.
+    ///
+    /// **The bytes are the message.** Unlike [`Self::sign_dsse`], which signs
+    /// `sha256(PAE(type, payload))`, this signs `sha256(payload)` — cosign's
+    /// simplesigning claim is signed as an opaque blob and its Rekor entry is a
+    /// `hashedrekord` over the same digest. A signature produced by one rule
+    /// does not verify under the other, which is why this is a separate method
+    /// rather than a flag on `sign_dsse`.
+    ///
+    /// The caller owns the payload's meaning; this signer only signs it.
+    async fn sign_blob(
+        &self,
+        payload: &[u8],
+        token: Option<&OidcToken>,
+        fulcio_url: &Url,
+        rekor_url: &Url,
+    ) -> Result<SignedBlob, SignErrorKind>;
+
+    /// Whether this signer needs an OIDC identity token.
+    ///
+    /// `true` for keyless, `false` under a key pair. The pipeline reads it to
+    /// decide whether to acquire a token at all — a key-mode run in an
+    /// air-gapped org has no issuer to ask, and spending an ambient token there
+    /// would fail a signature that needs no identity. The same answer gates the
+    /// Fulcio SSRF pre-flight: a URL that is never dialled must not have to
+    /// resolve.
+    ///
+    /// **Contract:** `sign_dsse` receives `Some` exactly when this is `true`. A
+    /// signer that answers `true` and is handed `None` must fail rather than
+    /// sign, which is what keeps the pair honest.
+    fn requires_identity_token(&self) -> bool {
+        true
+    }
+
+    /// Whether this signer will upload a transparency-log entry.
+    ///
+    /// Keyless always does — the Rekor timestamp is the only durable proof the
+    /// signature happened inside its ten-minute certificate window — so the
+    /// default is `true`. Key mode answers whether `--rekor-upload` (or
+    /// `[trust.sigstore] rekor_upload`) opted in.
+    ///
+    /// The pipeline reads it to decide whether the Rekor SSRF pre-flight runs:
+    /// an endpoint that is never dialled must not have to resolve, or an
+    /// air-gapped key-mode sign fails on DNS for a host it never contacts.
+    fn uploads_to_transparency_log(&self) -> bool {
+        true
+    }
 
     /// Static string identifying this signer kind (e.g. `keyless-fulcio`).
     fn signer_kind(&self) -> &'static str;
@@ -91,41 +159,56 @@ impl Default for KeylessSigner {
 
 #[async_trait]
 impl Signer for KeylessSigner {
-    async fn sign(
+    async fn sign_blob(
         &self,
-        target_digest: &Digest,
-        token: &OidcToken,
+        payload: &[u8],
+        token: Option<&OidcToken>,
         fulcio_url: &Url,
         rekor_url: &Url,
-    ) -> Result<SignedBundle, SignErrorKind> {
-        // 1. Ephemeral keypair + Fulcio certificate — shared with `sign_dsse`.
+    ) -> Result<SignedBlob, SignErrorKind> {
+        let token = token.ok_or(SignErrorKind::OidcTokenRejected)?;
         let identity = issue_ephemeral_certificate(token, fulcio_url).await?;
 
-        // 2. Sign the subject digest (the raw sha256 bytes of the target
-        //    manifest) with the ephemeral key.
-        let subject_raw = hex::decode(target_digest.hex()).map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
+        // `sha256(payload)`, not the PAE: cosign signs a simplesigning claim as
+        // an opaque blob and logs a `hashedrekord` over the same digest.
+        let payload_digest = sha256(payload);
         let signature: p256::ecdsa::Signature = identity
             .signing_key
-            .sign_prehash(&subject_raw)
+            .sign_prehash(&payload_digest)
             .map_err(|e| SignErrorKind::Internal(Box::new(e)))?;
         let signature_der = signature.to_der().as_bytes().to_vec();
 
-        // 3. Rekor: upload the hashedrekord entry, obtain the SET.
-        let rekor = RekorClient::new(rekor_url.clone())
-            .upload_entry(&signature_der, &identity.certificate.leaf_pem, target_digest.hex())
+        let entry = RekorClient::new(rekor_url.clone())
+            .upload_entry(
+                &signature_der,
+                &identity.certificate.leaf_pem,
+                &hex::encode(&payload_digest),
+            )
             .await?;
 
-        // 4. Assemble the Sigstore bundle v0.3.
-        build_bundle(&identity.certificate, &signature_der, &rekor, target_digest)
+        Ok(SignedBlob {
+            signature: signature_der,
+            certificate_pem: Some(identity.certificate.leaf_pem),
+            chain_pem: None,
+            transparency_log_index: Some(entry.log_index),
+            rekor_bundle: Some(super::simplesigning_write::offline_bundle(&entry)?),
+            key_backend: crate::oci::sign::KeyBackendKind::Keyless,
+            public_key_hint: None,
+        })
     }
 
     async fn sign_dsse(
         &self,
         statement_bytes: &[u8],
-        token: &OidcToken,
+        token: Option<&OidcToken>,
         fulcio_url: &Url,
         rekor_url: &Url,
     ) -> Result<SignedBundle, SignErrorKind> {
+        // The trait's contract says `Some` whenever `requires_identity_token`
+        // is true, and this signer never answers false. A `None` here is a
+        // pipeline bug, and a keyless signature without an identity is exactly
+        // what must not be produced — so it refuses rather than improvising.
+        let token = token.ok_or(SignErrorKind::OidcTokenRejected)?;
         // First, before the Fulcio round trip and long before the irreversible
         // Rekor write: a statement over the verifier's ceiling would be signed,
         // published to a permanent log, and then refused by this tool's own
@@ -147,7 +230,11 @@ impl Signer for KeylessSigner {
             .upload_dsse_entry(signed.json(), &identity.certificate.leaf_pem)
             .await?;
 
-        build_dsse_bundle(&identity.certificate, &signed, &rekor)
+        build_dsse_bundle(
+            SigningMaterial::Certificate(&identity.certificate),
+            &signed,
+            Some(&rekor),
+        )
     }
 
     fn signer_kind(&self) -> &'static str {
@@ -417,7 +504,12 @@ mod tests {
         let oversized = vec![b'x'; MAX_STATEMENT_PAYLOAD_BYTES + 1];
 
         let err = KeylessSigner::new()
-            .sign_dsse(&oversized, &OidcToken::new(EMAIL_AND_SUB.to_string()), &dead, &dead)
+            .sign_dsse(
+                &oversized,
+                Some(&OidcToken::new(EMAIL_AND_SUB.to_string())),
+                &dead,
+                &dead,
+            )
             .await
             .expect_err("an over-cap statement must not be signed");
 
@@ -440,7 +532,7 @@ mod tests {
         let at_cap = vec![b'x'; MAX_STATEMENT_PAYLOAD_BYTES];
 
         let err = KeylessSigner::new()
-            .sign_dsse(&at_cap, &OidcToken::new(EMAIL_AND_SUB.to_string()), &dead, &dead)
+            .sign_dsse(&at_cap, Some(&OidcToken::new(EMAIL_AND_SUB.to_string())), &dead, &dead)
             .await
             .expect_err("the dead endpoint fails the sign");
 

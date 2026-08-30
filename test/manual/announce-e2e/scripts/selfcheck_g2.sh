@@ -269,7 +269,7 @@ main_selfcheck() {
     new_case
     d="$(serve_object '{"index": 1}')"
     root="$(root_json "$REPO" "1.0.4=$d" "sha256.$(printf '%064d' 0)=$d")"
-    expect_fail "D7 — canonical digest alias" "canonical digest-alias tag" \
+    expect_fail "D7 — legacy keep tag" "legacy keep tag" \
         assert_no_reserved_tags "$root"
 
     new_case

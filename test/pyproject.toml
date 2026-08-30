@@ -13,6 +13,14 @@ testpaths = ["tests"]
 pythonpath = [".", "src"]
 markers = [
     "requires_tty: test requires a real TTY on stderr; skipped in capture-output environments (is_terminal() returns false in pipes)",
+    # The cosign interop matrix (WP6) contains two kinds of passing test, and a
+    # green count that cannot tell them apart is quotable as parity for a
+    # behaviour that is actually an open finding. A parity cell asserts the two
+    # tools agree; a `divergence` cell asserts they DISAGREE, and pins a defect
+    # or a security finding OCX has not fixed. Both pass today. The parity
+    # recipe is therefore `-m \"not divergence\"`, and anyone citing the matrix
+    # as evidence of cosign compatibility must use it.
+    "divergence: pins a measured ocx/cosign disagreement or an open finding, not parity; passing means the defect is still present",
 ]
 
 # Temp-dir retention: pytest keeps the last 3 runs and every test's tmp_path by

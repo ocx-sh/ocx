@@ -20,6 +20,12 @@ use super::{Algorithm, Digest, Identifier, native};
 /// uploading, so unbounded fan-out would OOM on multi-GB layers.
 const LAYER_PUSH_CONCURRENCY: usize = 4;
 
+/// Maximum length of an OCI tag, per the distribution spec's tag grammar
+/// (`[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`).
+///
+/// `push_keep_tag` refuses to write past it rather than truncating the digest.
+const MAX_OCI_TAG_LEN: usize = 128;
+
 /// Hard cap on a manifest body accepted from a registry (CWE-400).
 ///
 /// Digest verification is not a size check: a hostile registry named by an
@@ -118,7 +124,7 @@ pub use mirror_map::MirrorMap;
 /// production transport must stream (see the method's own docs).
 #[cfg(test)]
 pub(crate) use transport::push_blob_buffered;
-pub use transport::{MountOutcome, OciTransport, ProgressFn, no_progress};
+pub use transport::{MountOutcome, OciTransport, ProgressFn, ReferrersListing, no_progress};
 
 use error::ClientError;
 
@@ -134,6 +140,25 @@ pub(crate) struct SingleLayerArtifact {
     pub layer_bytes: Vec<u8>,
     /// Digest of the layer blob as declared in the manifest.
     pub layer_digest: Digest,
+}
+
+/// Derives the reference for a sibling tag in the same repository as `image`.
+///
+/// Lives here because the direct `Reference` constructors are gated to this file
+/// by `native_reference_direct_construction_restricted_to_seams`, whose scan is
+/// over source text — so this doc comment must not spell the gated form either.
+/// This is the one shape the gate does not need to catch: the registry and
+/// repository come from a reference a seam already resolved, so no host is
+/// minted and no mirror decision is bypassed — only the tag changes.
+///
+/// Used by the referrers fallback tag, which is a second tag on the very
+/// repository the subject manifest lives in.
+pub(crate) fn sibling_tag_reference(image: &native::Reference, tag: String) -> native::Reference {
+    native::Reference::with_tag(
+        image.resolve_registry().to_string(),
+        image.repository().to_string(),
+        tag,
+    )
 }
 
 /// Which host a read addresses.
@@ -680,30 +705,40 @@ impl Client {
         Ok(index_digest)
     }
 
-    // ── Canonical tag (registry-side deletion safety net) ─────────────
+    // ── Keep tag (registry-side deletion safety net) ──────────────────
 
-    /// Pushes a digest-named `sha256.<hex>` tag pointing directly at
-    /// `platform`'s entry in `merged_manifest`.
+    /// Pushes a digest-named `__ocx.keep.<algorithm>-<hex>` tag pointing
+    /// directly at `platform`'s entry in `merged_manifest`.
     ///
     /// `merged_manifest` is the just-returned merge result for
     /// `(source_identifier, platform)` from `push_package` /
     /// `push_manifest_and_merge_tags` — `platform`'s entry is expected to be
     /// present by construction. A missing entry is a no-op rather than a
-    /// hard failure: canonical tagging is a safety net layered on top of an
+    /// hard failure: keep tagging is a safety net layered on top of an
     /// already-committed push, never load-bearing for the push itself.
     ///
-    /// Returns the tag it wrote (`Some("<algorithm>.<hex>")`), or `None` on
-    /// that no-op. The caller cannot derive either: the tag is named after
-    /// the *platform manifest* digest, which the caller does not hold, and
-    /// the no-op is otherwise invisible to it.
+    /// Returns the tag it wrote (`Some("__ocx.keep.<algorithm>-<hex>")`), or
+    /// `None` on that no-op. The caller cannot derive either: the tag is named
+    /// after the *platform manifest* digest, which the caller does not hold,
+    /// and the no-op is otherwise invisible to it.
     ///
     /// Registry-side deletion safety net (`adr_index_indirection.md`
     /// Decision E): a stray delete of a rolling/cascade tag can never orphan
-    /// a digest a lock still pins, because the canonical tag names it
-    /// directly. Uses a `.` separator — OCI tags forbid `:`. The local
-    /// snapshot and lock never read or write canonical tags; this is a pure
-    /// registry-side write.
-    pub(crate) async fn push_canonical_tag(
+    /// a digest a lock still pins, because the keep tag names it directly.
+    /// Uses a `-` separator inside the reserved `__ocx.keep.` namespace —
+    /// OCI tags forbid `:`, and the bare `<algorithm>-<hex>` form is the
+    /// dist-spec referrers fallback tag, so the namespace prefix is what keeps
+    /// the two apart. The local snapshot and lock never read or write keep
+    /// tags; this is a pure registry-side write.
+    ///
+    /// # Long digests
+    ///
+    /// An OCI tag caps at 128 characters, which `__ocx.keep.sha512-<128 hex>`
+    /// exceeds at 146. Such a digest yields `Ok(None)` — nothing written.
+    /// Truncating the hex to 64 the way the referrers tag schema does would let
+    /// two distinct digests collide on one tag and silently drop a manifest's
+    /// GC protection, which is strictly worse than no tag at all.
+    pub(crate) async fn push_keep_tag(
         &self,
         source_identifier: &Identifier,
         merged_manifest: &oci::Manifest,
@@ -712,6 +747,16 @@ impl Client {
         let Some(manifest_digest) = super::manifest::platform_manifest_digest(merged_manifest, platform) else {
             return Ok(None);
         };
+
+        let (algorithm, hex) = manifest_digest.parts();
+        let tag = format!("{}{algorithm}-{hex}", InternalTag::KEEP_TAG_PREFIX);
+        if tag.len() > MAX_OCI_TAG_LEN {
+            log::debug!(
+                "Skipping keep tag for {manifest_digest}: {} chars exceeds the OCI tag cap",
+                tag.len()
+            );
+            return Ok(None);
+        }
 
         // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
         let repo_ref = source_identifier.canonical_reference();
@@ -735,8 +780,6 @@ impl Client {
             .pull_manifest_raw(&digest_ref, &[MEDIA_TYPE_OCI_IMAGE_MANIFEST])
             .await?;
 
-        let (algorithm, hex) = manifest_digest.parts();
-        let tag = format!("{algorithm}.{hex}");
         let tag_ref = source_identifier.clone_with_tag(tag.clone()).canonical_reference();
         self.transport
             .push_manifest_raw(&tag_ref, manifest_bytes, MEDIA_TYPE_OCI_IMAGE_MANIFEST)
@@ -4976,9 +5019,9 @@ mod tests {
         }
     }
 
-    // ── push_canonical_tag tests ─────────────────────────────────────
+    // ── push_keep_tag tests ──────────────────────────────────────────
 
-    mod push_canonical_tag_tests {
+    mod push_keep_tag_tests {
         use super::*;
 
         fn test_identifier(tag: &str) -> Identifier {
@@ -5012,7 +5055,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn pushes_dot_separated_sha256_tag_with_the_same_bytes() {
+        async fn pushes_namespaced_sha256_keep_tag_with_the_same_bytes() {
             let data = StubTransportData::new();
             let id = test_identifier("3.28");
             let hex = "a".repeat(64);
@@ -5021,7 +5064,7 @@ mod tests {
             // Seed the platform manifest at its digest-addressed reference,
             // exactly as `push_multi_layer_manifest` leaves it after a push —
             // bare `registry/repo@digest`, no tag (see `without_tag()` note
-            // on `push_canonical_tag`).
+            // on `push_keep_tag`).
             let manifest_bytes = b"platform manifest bytes".to_vec();
             let digest_ref = id
                 .without_tag()
@@ -5035,19 +5078,21 @@ mod tests {
             let merged = index_with_entry(&digest, platform("linux/amd64"));
 
             client
-                .push_canonical_tag(&id, &merged, &platform("linux/amd64"))
+                .push_keep_tag(&id, &merged, &platform("linux/amd64"))
                 .await
                 .unwrap();
 
-            let tag_ref = id.clone_with_tag(format!("sha256.{hex}")).canonical_reference();
+            let tag_ref = id
+                .clone_with_tag(format!("__ocx.keep.sha256-{hex}"))
+                .canonical_reference();
             let inner = data.read();
             let (pushed_bytes, _) = inner
                 .manifests
                 .get(&tag_ref.to_string())
-                .expect("canonical tag manifest not pushed");
+                .expect("keep tag manifest not pushed");
             assert_eq!(
                 pushed_bytes, &manifest_bytes,
-                "canonical tag must carry the exact platform manifest bytes"
+                "keep tag must carry the exact platform manifest bytes"
             );
         }
 
@@ -5060,7 +5105,7 @@ mod tests {
 
             // Platform not present in the merged index — no-op, not an error.
             client
-                .push_canonical_tag(&id, &merged, &platform("linux/arm64"))
+                .push_keep_tag(&id, &merged, &platform("linux/arm64"))
                 .await
                 .unwrap();
 
@@ -5076,12 +5121,12 @@ mod tests {
             // into the stub's manifest store — the pull must fail.
             let merged = index_with_entry(&format!("sha256:{}", "b".repeat(64)), platform("linux/amd64"));
 
-            let result = client.push_canonical_tag(&id, &merged, &platform("linux/amd64")).await;
+            let result = client.push_keep_tag(&id, &merged, &platform("linux/amd64")).await;
             assert!(result.is_err(), "must propagate a missing source manifest as an error");
         }
 
         #[tokio::test]
-        async fn canonical_tag_push_reports_the_tag_it_wrote() {
+        async fn keep_tag_push_reports_the_tag_it_wrote() {
             let data = StubTransportData::new();
             let id = test_identifier("3.28");
             let hex = "c".repeat(64);
@@ -5099,33 +5144,77 @@ mod tests {
             let merged = index_with_entry(&digest, platform("linux/amd64"));
 
             let written = client
-                .push_canonical_tag(&id, &merged, &platform("linux/amd64"))
+                .push_keep_tag(&id, &merged, &platform("linux/amd64"))
                 .await
                 .unwrap();
 
             assert_eq!(
                 written,
-                Some(format!("sha256.{hex}")),
+                Some(format!("__ocx.keep.sha256-{hex}")),
                 "the report must name the tag that was actually written"
             );
         }
 
         /// N-6 regression guard: the skip branch used to be indistinguishable
-        /// from a successful write, so the push report could claim a canonical
-        /// tag that never reached the registry.
+        /// from a successful write, so the push report could claim a keep tag
+        /// that never reached the registry.
         #[tokio::test]
-        async fn canonical_tag_push_reports_nothing_on_the_skip_branch() {
+        async fn keep_tag_push_reports_nothing_on_the_skip_branch() {
             let data = StubTransportData::new();
             let id = test_identifier("3.28");
             let client = stub_with_capture(&data);
             let merged = index_with_entry(&format!("sha256:{}", "a".repeat(64)), platform("linux/amd64"));
 
             let written = client
-                .push_canonical_tag(&id, &merged, &platform("linux/arm64"))
+                .push_keep_tag(&id, &merged, &platform("linux/arm64"))
                 .await
                 .unwrap();
 
             assert_eq!(written, None, "an unmatched platform must report no tag");
+        }
+
+        /// `__ocx.keep.sha512-<128 hex>` is 146 characters, past the OCI tag
+        /// cap of 128. Nothing may be written — least of all a truncated tag,
+        /// which two digests could collide on.
+        #[tokio::test]
+        async fn a_sha512_digest_writes_no_keep_tag() {
+            let data = StubTransportData::new();
+            let id = test_identifier("3.28");
+            let hex = "d".repeat(128);
+            let digest = format!("sha512:{hex}");
+
+            // Seed the platform manifest so the only thing that can stop the
+            // write is the length cap itself.
+            let digest_ref = id
+                .without_tag()
+                .clone_with_digest(oci::Digest::Sha512(hex.clone()))
+                .canonical_reference();
+            data.write()
+                .manifests
+                .insert(digest_ref.to_string(), (b"platform manifest".to_vec(), digest.clone()));
+
+            let client = stub_with_capture(&data);
+            let merged = index_with_entry(&digest, platform("linux/amd64"));
+
+            let written = client
+                .push_keep_tag(&id, &merged, &platform("linux/amd64"))
+                .await
+                .unwrap();
+
+            assert_eq!(written, None, "an over-long keep tag must report no tag");
+            assert!(
+                !data.read().manifests.keys().any(|key| key.contains("__ocx.keep")),
+                "no keep tag may reach the registry, truncated or otherwise"
+            );
+            // The refusal must cost nothing. Asserting on the manifest map
+            // instead would be vacuous — the stub's reads do not mutate it, so
+            // a cap moved below the pull leaves the map at 1 either way. The
+            // call log is the only thing that can tell the two apart.
+            assert!(
+                data.read().calls.is_empty(),
+                "the length cap must be decided before the registry is touched, got {:?}",
+                data.read().calls
+            );
         }
     }
 
@@ -7334,25 +7423,39 @@ mod tests {
 
     /// T-arch-G1b: pins the number of `native::Reference::with_*` constructions
     /// in client.rs's PRODUCTION code (everything before the `#[cfg(test)] mod
-    /// tests` boundary) to exactly the five call sites inside
+    /// tests` boundary) to exactly the six call sites inside
     /// [`Client::transport_reference`] (4 — the `with_tag_and_digest` /
-    /// `with_tag` / `with_digest` / `with_tag` match arms) plus
-    /// [`Client::transport_registry`] (1 — its single `with_tag` call), lines
-    /// ~116-159 at the time this test was written.
+    /// `with_tag` / `with_digest` / `with_tag` match arms),
+    /// [`Client::transport_registry`] (1 — its single `with_tag` call), and
+    /// [`sibling_tag_reference`] (1).
+    ///
+    /// # Amended 2026-08-29 — a third seam, of a different kind
+    ///
+    /// The original rationale said the only legitimate constructions are the
+    /// two mirror seams, because a construction is how a call site picks a
+    /// **host**. [`sibling_tag_reference`] picks none: registry and repository
+    /// are copied verbatim off a reference a seam already resolved, and only
+    /// the tag differs. It cannot bypass a mirror decision, because it takes
+    /// that decision's own output as input. The referrers fallback tag needs
+    /// exactly this — a second tag on the repository the subject already lives
+    /// in — and there is no method on `oci_spec`'s `Reference` that changes a
+    /// tag (only `clone_with_digest` exists).
     ///
     /// Update `EXPECTED_PRODUCTION_CONSTRUCTION_COUNT` ONLY when the new
-    /// construction site being added is one of the two seams themselves
-    /// (`transport_reference` / `transport_registry` growing a match arm) —
-    /// NEVER to silence a new bypass caught by
+    /// construction site is one of the seams themselves — the two mirror seams
+    /// growing a match arm, or a helper that likewise derives from an
+    /// already-resolved reference without naming a host — NEVER to silence a
+    /// new bypass caught by
     /// `native_reference_direct_construction_restricted_to_seams` above.
     ///
-    /// Traces: mirror-invariant audit 2026-07-19, gap G1.
+    /// Traces: mirror-invariant audit 2026-07-19, gap G1; amended by the
+    /// referrers fallback tag (loop A, cosign parity).
     #[test]
     fn client_rs_production_reference_construction_count_pinned_to_seams() {
         use std::fs;
         use std::path::Path;
 
-        const EXPECTED_PRODUCTION_CONSTRUCTION_COUNT: usize = 5;
+        const EXPECTED_PRODUCTION_CONSTRUCTION_COUNT: usize = 6;
 
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let this_file = Path::new(manifest_dir).join("src/oci/client.rs");
@@ -7373,6 +7476,53 @@ mod tests {
              client.rs changed from the pinned value — update EXPECTED_PRODUCTION_CONSTRUCTION_COUNT \
              only if the new site is inside transport_reference/transport_registry themselves, never \
              to silence a new bypass"
+        );
+
+        // A count alone says how many there are, never where — so the widened
+        // exception clause above ("a helper that likewise derives from an
+        // already-resolved reference") would be claimable by any future site
+        // with a plausible sentence. Locate them: every construction must sit
+        // inside one of the three named bodies, so a new one anywhere else
+        // fails here even if someone also bumps the pinned count.
+        let inside: usize = [
+            "fn sibling_tag_reference(",
+            "fn transport_reference(",
+            "fn transport_registry(",
+        ]
+        .iter()
+        .map(|signature| {
+            let start = production_source
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} must exist in client.rs production code"));
+            let body_start = production_source[start..]
+                .find('{')
+                .expect("a function signature is followed by its body")
+                + start;
+            let mut depth = 0usize;
+            let mut end = body_start;
+            for (offset, byte) in production_source[body_start..].bytes().enumerate() {
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = body_start + offset;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            production_source[body_start..=end]
+                .matches("native::Reference::with_")
+                .count()
+        })
+        .sum();
+        assert_eq!(
+            inside, actual,
+            "a `native::Reference::with_*` construction exists in client.rs outside \
+             sibling_tag_reference/transport_reference/transport_registry — the exception is for the \
+             seams themselves, not for anything that cites them"
         );
     }
 

@@ -656,7 +656,7 @@ mod tests {
     #[tokio::test]
     async fn f9_classification_keeps_versions_latest_and_a_live_variant_root() {
         let data = StubTransportData::new();
-        let canonical = format!("sha256.{}", "ab".repeat(32));
+        let keep = format!("__ocx.keep.sha256-{}", "ab".repeat(32));
         let graph_tags = ["latest", "3.28.1", "debug-3.12.5", "debug"];
         let listed = [
             "latest",
@@ -667,7 +667,7 @@ mod tests {
             "canary",
             "nightly-build",
             "__ocx.desc",
-            canonical.as_str(),
+            keep.as_str(),
         ];
         list(&data, &listed);
         for tag in graph_tags {
@@ -691,9 +691,9 @@ mod tests {
             observation.ignored_tags,
             vec![
                 "__ocx.desc".to_string(),
+                keep,
                 "canary".to_string(),
                 "nightly-build".to_string(),
-                canonical,
             ],
             "everything excluded is reported, so nothing looks silently dropped"
         );

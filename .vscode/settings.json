@@ -16,4 +16,21 @@
         "**/.pytest_cache": true,
         "**/*.pyc": true,
     },
+    // Agent worktrees under `.agents/worktrees/` are full, independent copies of
+    // this workspace. Without these excludes rust-analyzer discovers each one as
+    // another Cargo workspace and indexes it end to end -- one index is already
+    // ~4 GB resident, so three concurrent agents exhaust RAM+swap on a 32 GB
+    // machine. They are disposable scratch trees; the agent working in one runs
+    // its own cargo, and nobody edits them in this editor window.
+    "rust-analyzer.files.excludeDirs": [
+        ".agents/worktrees",
+        "target",
+    ],
+    "files.watcherExclude": {
+        "**/.agents/worktrees/**": true,
+        "**/target/**": true,
+    },
+    "search.exclude": {
+        "**/.agents/worktrees": true,
+    },
 }

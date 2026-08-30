@@ -17,6 +17,8 @@
 //! Per [`subsystem-package-manager.md`](../../../../../.claude/rules/subsystem-package-manager.md)
 //! and Spec A10 — the aggregator is `package_manager/tasks.rs`.
 
+use std::collections::BTreeSet;
+
 use url::Url;
 
 use crate::file_structure::StateStore;
@@ -62,6 +64,8 @@ pub struct SbomOptions<'a> {
     /// is applied to the **signed** predicateType after fetch-and-parse —
     /// annotations never exclude a candidate (D-e).
     pub predicate_type: Option<PredicateType>,
+    /// The cosign wire shape this run pins (`--signature-format`).
+    pub signature_format: Option<crate::oci::sign::SignatureFormat>,
 }
 
 /// Success payload returned by [`PackageManager::sbom_one`].
@@ -78,11 +82,25 @@ pub struct SbomReport {
     pub unverified: Vec<UnverifiedSbom>,
     /// Every candidate that was examined and refused, in listing order.
     pub refused: Vec<RefusedCandidate>,
+    /// Referrer digests of the documents a platform-level SBOM of the **same**
+    /// predicateType supersedes (**C-011**).
+    ///
+    /// A membership set rather than a flag on each document: nothing is dropped
+    /// or reordered, so `--format json` still lists every entry and only the
+    /// human-readable rendering collapses. Keyed on the referrer manifest digest
+    /// because that is unique per document — a referrer manifest embeds the
+    /// subject it is attached to, so the same bytes attached to two subjects are
+    /// two distinct referrers.
+    pub shadowed: BTreeSet<oci::Digest>,
 }
 
 impl PackageManager {
     /// List every verified attestation on `package` for `platform`, narrowed to
     /// `opts.predicate_type` when set.
+    ///
+    /// `platform` carries C-010's optionality, exactly as on
+    /// [`verify_one`](Self::verify_one): `None` acts on whatever the reference
+    /// resolved to, `Some(..)` narrows into an index.
     ///
     /// Read-only: routes through [`read_only_view`](Self::read_only_view) like
     /// [`verify_one`](Self::verify_one), so reading an SBOM never grows the
@@ -96,7 +114,7 @@ impl PackageManager {
     pub async fn sbom_one(
         &self,
         package: &oci::Identifier,
-        platform: &oci::Platform,
+        platform: Option<&oci::Platform>,
         opts: SbomOptions<'_>,
     ) -> Result<SbomReport, PackageError> {
         // Read-only, for the same reason `verify_one` is: reading what a
@@ -118,6 +136,28 @@ impl PackageManager {
                 predicate_type: opts.predicate_type,
             },
             verification: opts.verification,
+            signature_format: opts.signature_format,
+            // NOT inert, and deliberately `false`: since the `.att` sidecar
+            // reader landed, this reaches a consumer under
+            // `VerifyContentMode::Attestation` too, so `ocx package sbom`
+            // hard-refuses a keyless `sha256-<hex>.att` layer that carries no
+            // transparency-log evidence (exit 65). That is the contract the
+            // `.sig` door already carries and the one a keyless signature has
+            // to carry: a Fulcio leaf lives ten minutes, so with nothing
+            // logged there is no provable signing instant and the document is
+            // a stale certificate replayed. No producer writes that shape —
+            // cosign v3.1.1's `attach attestation` takes no `--certificate`,
+            // and ocx's own writer sets both annotations — so there is no
+            // legitimate flow to unblock. An operator who genuinely holds one
+            // reads it through `ocx package verify --attestation
+            // --allow-unlogged-signature`, which is where the opt-out belongs;
+            // `sbom` grows no flag for a shape nothing emits.
+            allow_unlogged_signature: false,
+            // Inert here: the attestation scan is collect-all by construction
+            // (first-match is the wrong answer to "which SBOMs does this
+            // carry"). Set anyway so the two entry points state the same
+            // intent rather than one relying on the other's default.
+            report_all: true,
         };
         let scan = VerifyPipeline::run_attestations(opts.client, context)
             .await
@@ -132,18 +172,85 @@ impl PackageManager {
 /// one place to assert against: a scan is expensive to reach through the
 /// pipeline, and this is the step that could silently lose half of it.
 fn report_from(scan: AttestationScan) -> SbomReport {
-    // Destructured, not field-read: a third field on `AttestationScan` must
+    // Destructured, not field-read: a fourth field on `AttestationScan` must
     // break this build rather than be dropped on the floor here.
     let AttestationScan {
         matches,
         unverified,
         refused,
+        platform_subject,
     } = scan;
+    let shadowed = shadowed_documents(platform_subject.as_ref(), &matches, &unverified);
     SbomReport {
         attestations: matches,
         unverified,
         refused,
+        shadowed,
     }
+}
+
+/// **C-011.** Which documents a platform-level SBOM supersedes.
+///
+/// One rule, and its scoping is the whole contract: a platform-level document
+/// shadows an index-level one **only within the same `predicateType`**. A
+/// platform CycloneDX and an index-level SPDX are not substitutes — they are
+/// different documents for different consumers — so hiding the SPDX behind the
+/// CycloneDX would be data loss wearing a preference's clothes.
+///
+/// Three things it deliberately does **not** do:
+///
+/// - It never shadows when `platform_subject` is `None`. Nothing was narrowed,
+///   so one subject was read and no document can supersede another.
+/// - It never shadows a document on the platform subject itself. Two SBOMs of
+///   one predicateType on **one** subject are both real answers — different
+///   formats, lifecycle phases, rescans — and there is no disambiguation
+///   convention beyond `org.opencontainers.image.created`, so the existing
+///   `MultipleAttestations` behaviour stands and neither shadows the other.
+/// - It never drops or reorders anything. The answer is a set the caller reads;
+///   `--format json` still lists every document, marked.
+fn shadowed_documents(
+    platform_subject: Option<&oci::Digest>,
+    matches: &[AttestationMatch],
+    unverified: &[UnverifiedSbom],
+) -> BTreeSet<oci::Digest> {
+    let Some(platform_subject) = platform_subject else {
+        return BTreeSet::new();
+    };
+    // Every document, on one vocabulary, so the two trust classes shadow each
+    // other's types symmetrically: `verify.subject_digest` is the subject the
+    // scan read the referrer from — the one `platform_subject` is comparable to
+    // — rather than the statement's own claim about itself.
+    let documents = matches
+        .iter()
+        .map(|candidate| {
+            (
+                &candidate.verify.subject_digest,
+                candidate.attestation.predicate_type.as_str(),
+                &candidate.verify.referrer_digest,
+            )
+        })
+        .chain(unverified.iter().map(|candidate| {
+            (
+                &candidate.subject_digest,
+                candidate.predicate_type.as_str(),
+                &candidate.referrer_digest,
+            )
+        }));
+
+    let (platform_level, index_level): (Vec<_>, Vec<_>) =
+        documents.partition(|(subject, ..)| *subject == platform_subject);
+    // The predicateTypes the platform manifest answers for. A type absent here
+    // shadows nothing, which is exactly how an index-level SPDX survives a
+    // platform CycloneDX.
+    let superseding: BTreeSet<&str> = platform_level
+        .into_iter()
+        .map(|(_, predicate_type, _)| predicate_type)
+        .collect();
+    index_level
+        .into_iter()
+        .filter(|(_, predicate_type, _)| superseding.contains(predicate_type))
+        .map(|(_, _, referrer_digest)| referrer_digest.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -162,7 +269,7 @@ mod tests {
     use crate::sbom::cyclonedx::summarize_cyclonedx;
 
     use super::super::verify::tests::{
-        REGISTRY, REPO, SingleTagSource, index_digest, seed_unsupported_capability, tagged_id,
+        REGISTRY, REPO, SingleTagSource, index_digest, tagged_id, transport_without_referrers,
     };
 
     /// A CycloneDX 1.6 predicate as a publisher would have signed it —
@@ -196,10 +303,15 @@ mod tests {
             verify: VerifyResult {
                 subject_digest: digest_of(b"subject"),
                 referrer_digest: digest_of(referrer.as_bytes()),
-                certificate_identity: "https://github.com/acme/widget/.github/workflows/release.yml@refs/heads/main"
-                    .to_string(),
-                certificate_oidc_issuer: "https://token.actions.githubusercontent.com".to_string(),
-                signed_at: 1_700_000_000,
+                key_backend: crate::oci::sign::KeyBackendKind::Keyless,
+                certificate_identity: Some(
+                    "https://github.com/acme/widget/.github/workflows/release.yml@refs/heads/main".to_string(),
+                ),
+                certificate_oidc_issuer: Some("https://token.actions.githubusercontent.com".to_string()),
+                signed_at: Some(1_700_000_000),
+                signature_format: crate::oci::sign::SignatureFormat::Bundle,
+                discovery_method: crate::oci::verify::DiscoveryMethod::ReferrersApi,
+                rekor_log_index: None,
             },
             attestation: attestation(predicate, predicate_type),
         }
@@ -210,6 +322,168 @@ mod tests {
             referrer_digest: referrer.to_string(),
             reason,
         }
+    }
+
+    // ── C-011 shadowing ─────────────────────────────────────────────────────
+
+    const CYCLONEDX: &str = "https://cyclonedx.org/bom";
+    const SPDX: &str = "https://spdx.dev/Document";
+
+    /// The per-platform manifest `--platform` narrowed to.
+    fn platform_subject() -> oci::Digest {
+        digest_of(b"the platform manifest")
+    }
+
+    /// The image index that manifest was reached through.
+    fn enclosing_subject() -> oci::Digest {
+        digest_of(b"the enclosing image index")
+    }
+
+    fn a_match_on(subject: &oci::Digest, referrer: &str, predicate_type: &str) -> AttestationMatch {
+        let mut candidate = a_match(referrer, CYCLONEDX_1_6, predicate_type);
+        candidate.verify.subject_digest = subject.clone();
+        candidate.attestation.subject_digest = subject.clone();
+        candidate
+    }
+
+    fn an_unverified_on(subject: &oci::Digest, referrer: &str, predicate_type: &str) -> UnverifiedSbom {
+        UnverifiedSbom {
+            referrer_digest: digest_of(referrer.as_bytes()),
+            subject_digest: subject.clone(),
+            predicate_type: predicate_type.to_string(),
+            document: CYCLONEDX_1_6.as_bytes().to_vec(),
+        }
+    }
+
+    fn scan_over(
+        platform_subject: Option<oci::Digest>,
+        matches: Vec<AttestationMatch>,
+        unverified: Vec<UnverifiedSbom>,
+    ) -> AttestationScan {
+        AttestationScan {
+            matches,
+            unverified,
+            refused: Vec::new(),
+            platform_subject,
+        }
+    }
+
+    /// The three documents S-010 puts on one package, and the one assertion the
+    /// whole contract exists for.
+    fn three_documents_across_two_subjects() -> Vec<AttestationMatch> {
+        vec![
+            a_match_on(&platform_subject(), "platform-cyclonedx", CYCLONEDX),
+            a_match_on(&enclosing_subject(), "index-cyclonedx", CYCLONEDX),
+            a_match_on(&enclosing_subject(), "index-spdx", SPDX),
+        ]
+    }
+
+    /// **S-010 / C-011.** A platform-level CycloneDX supersedes the index-level
+    /// CycloneDX and **must not touch** the index-level SPDX.
+    ///
+    /// Dropping the predicateType from the shadowing key is the whole difference
+    /// between this contract and a data-loss bug: an SPDX document is not a
+    /// substitute for a CycloneDX one, and a consumer that asked for SPDX would
+    /// be told the package carries none.
+    #[test]
+    fn a_platform_document_shadows_only_its_own_predicate_type() {
+        let report = report_from(scan_over(
+            Some(platform_subject()),
+            three_documents_across_two_subjects(),
+            Vec::new(),
+        ));
+
+        assert!(
+            report.shadowed.contains(&digest_of(b"index-cyclonedx")),
+            "the index-level CycloneDX is superseded by the platform-level one of the same type",
+        );
+        assert!(
+            !report.shadowed.contains(&digest_of(b"index-spdx")),
+            "an index-level SPDX is a different document for a different consumer; a platform \
+             CycloneDX hiding it is data loss, not a preference",
+        );
+        assert!(
+            !report.shadowed.contains(&digest_of(b"platform-cyclonedx")),
+            "the preferred document can never be its own shadow",
+        );
+        assert_eq!(
+            report.attestations.len(),
+            3,
+            "shadowing marks; it never drops or reorders, so `--format json` still carries all three",
+        );
+    }
+
+    /// **C-011 rule 3.** Nothing was narrowed, so nothing is superseded — even
+    /// with the identical document set.
+    ///
+    /// The discriminating control for the test above: the two differ **only** in
+    /// `platform_subject`, so a shadowing pass that ignored it would fail here
+    /// rather than pass both.
+    #[test]
+    fn nothing_is_shadowed_when_no_platform_was_selected() {
+        let report = report_from(scan_over(None, three_documents_across_two_subjects(), Vec::new()));
+        assert!(
+            report.shadowed.is_empty(),
+            "with no platform selected the listing reports all, grouped by subject: {:?}",
+            report.shadowed,
+        );
+    }
+
+    /// **C-011 edge.** Two documents of one predicateType on the **same**
+    /// subject shadow neither. Multiple SBOMs per package is normal — different
+    /// formats, lifecycle phases, rescans — and there is no disambiguation
+    /// convention beyond `org.opencontainers.image.created`, so the existing
+    /// `MultipleAttestations` behaviour stands.
+    #[test]
+    fn two_documents_of_one_type_on_one_subject_shadow_neither() {
+        let platform = report_from(scan_over(
+            Some(platform_subject()),
+            vec![
+                a_match_on(&platform_subject(), "first-cyclonedx", CYCLONEDX),
+                a_match_on(&platform_subject(), "second-cyclonedx", CYCLONEDX),
+            ],
+            Vec::new(),
+        ));
+        assert!(
+            platform.shadowed.is_empty(),
+            "two platform-level documents are two answers, not a preference: {:?}",
+            platform.shadowed,
+        );
+
+        let enclosing = report_from(scan_over(
+            Some(platform_subject()),
+            vec![
+                a_match_on(&enclosing_subject(), "first-cyclonedx", CYCLONEDX),
+                a_match_on(&enclosing_subject(), "second-cyclonedx", CYCLONEDX),
+            ],
+            Vec::new(),
+        ));
+        assert!(
+            enclosing.shadowed.is_empty(),
+            "the platform manifest carries no CycloneDX, so neither index-level one is superseded: {:?}",
+            enclosing.shadowed,
+        );
+    }
+
+    /// The two trust classes share one vocabulary: a permissive listing shadows
+    /// by predicateType exactly as a demanded one does. Keying only the verified
+    /// half would leave `--no-verify` rendering both copies.
+    #[test]
+    fn shadowing_reads_one_vocabulary_across_both_trust_classes() {
+        let report = report_from(scan_over(
+            Some(platform_subject()),
+            Vec::new(),
+            vec![
+                an_unverified_on(&platform_subject(), "platform-cyclonedx", CYCLONEDX),
+                an_unverified_on(&enclosing_subject(), "index-cyclonedx", CYCLONEDX),
+                an_unverified_on(&enclosing_subject(), "index-spdx", SPDX),
+            ],
+        ));
+        assert!(report.shadowed.contains(&digest_of(b"index-cyclonedx")));
+        assert!(
+            !report.shadowed.contains(&digest_of(b"index-spdx")),
+            "the predicateType scoping is the same rule on either trust class",
+        );
     }
 
     /// S-006: the listing is ALL verified attestations, in listing order —
@@ -228,6 +502,7 @@ mod tests {
                 a_refusal("sha256:aa", VerifyErrorKind::BundleParseFailed),
                 a_refusal("sha256:bb", VerifyErrorKind::MultipleSignatures { count: 2 }),
             ],
+            platform_subject: None,
         };
 
         let report = report_from(scan);
@@ -271,6 +546,7 @@ mod tests {
             matches: vec![a_match("only", CYCLONEDX_1_6, "https://cyclonedx.org/bom")],
             unverified: Vec::new(),
             refused: Vec::new(),
+            platform_subject: None,
         };
         let report = report_from(scan);
         assert_eq!(report.attestations.len(), 1);
@@ -289,6 +565,7 @@ mod tests {
             matches: vec![a_match("only", CYCLONEDX_1_6, "https://cyclonedx.org/bom")],
             unverified: Vec::new(),
             refused: Vec::new(),
+            platform_subject: None,
         });
         let predicate = report.attestations[0].attestation.predicate.get();
         assert_eq!(
@@ -355,9 +632,7 @@ mod tests {
     /// pipeline outcome a unit test can reach without live Sigstore material.
     /// (The verified-listing paths are acceptance-tested: WP10a.)
     #[tokio::test(flavor = "multi_thread")]
-    async fn sbom_one_wraps_pipeline_failures_and_never_grows_the_local_index() {
-        use crate::oci::client::test_transport::{StubTransport, StubTransportData};
-
+    async fn sbom_one_wraps_no_signatures_found_and_never_grows_the_local_index() {
         let root = TempDir::new().unwrap();
         let file_structure = FileStructure::with_root(root.path().to_path_buf());
         let index_store = file_structure.index.clone();
@@ -369,9 +644,7 @@ mod tests {
         let manager = PackageManager::new(file_structure, index, None, REGISTRY);
 
         let state = StateStore::new(root.path().join("state"));
-        seed_unsupported_capability(&state).await;
-
-        let client = oci::Client::with_transport(Box::new(StubTransport::new(StubTransportData::new())));
+        let client = oci::Client::with_transport(Box::new(transport_without_referrers()));
         let trust_root = TrustRoot::default();
         let rekor_url = Url::parse("http://127.0.0.1:3000").unwrap();
         let platform: oci::Platform = "linux/amd64".parse().unwrap();
@@ -386,18 +659,19 @@ mod tests {
             no_cache: false,
             predicate_type: None,
             verification: VerificationMode::Demand,
+            signature_format: None,
         };
 
-        match manager.sbom_one(&tagged_id(), &platform, opts).await {
+        match manager.sbom_one(&tagged_id(), Some(&platform), opts).await {
             Err(err) => match err.kind {
                 PackageErrorKind::Internal(crate::Error::Verify(verify_err)) => assert!(
-                    matches!(verify_err.kind, VerifyErrorKind::ReferrersUnsupported),
-                    "expected ReferrersUnsupported, got {:?}",
+                    matches!(verify_err.kind, VerifyErrorKind::NoSignaturesFound),
+                    "expected NoSignaturesFound, got {:?}",
                     verify_err.kind
                 ),
-                other => panic!("expected Internal(Verify(ReferrersUnsupported)), got {other:?}"),
+                other => panic!("expected Internal(Verify(NoSignaturesFound)), got {other:?}"),
             },
-            Ok(_) => panic!("no referrers support configured; sbom_one must fail closed"),
+            Ok(_) => panic!("nothing is attested here; sbom_one must fail closed"),
         }
 
         // Read-only routing: listing a package's SBOMs must not grow the

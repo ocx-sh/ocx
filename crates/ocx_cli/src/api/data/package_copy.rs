@@ -91,7 +91,7 @@ impl fmt::Display for DescriptionOutcome {
 ///
 /// JSON format:
 /// `{ "source", "target", "status", "platforms": [{ "platform", "digest",
-/// "disposition" }], "cascade_tags_written", "canonical_tags_written",
+/// "disposition" }], "cascade_tags_written", "keep_tags_written",
 /// "referrers_copied", "blobs": { "present", "mounted", "uploaded" },
 /// "description" }`.
 #[derive(Serialize)]
@@ -107,8 +107,9 @@ pub struct CopyReport {
     pub platforms: Vec<CopiedPlatformRow>,
     /// Rolling tags written in addition to the target's own tag.
     pub cascade_tags_written: Vec<String>,
-    /// Digest-named `sha256.<hex>` tags written, one per distinct manifest.
-    pub canonical_tags_written: Vec<String>,
+    /// Digest-named `__ocx.keep.<algorithm>-<hex>` tags written, one per distinct
+    /// manifest.
+    pub keep_tags_written: Vec<String>,
     /// Referrer manifests carried over — signatures, SBOMs, attestations.
     pub referrers_copied: usize,
     pub blobs: BlobSummary,
@@ -160,7 +161,7 @@ impl CopyReport {
                 })
                 .collect(),
             cascade_tags_written: outcome.cascade_tags,
-            canonical_tags_written: outcome.canonical_tags,
+            keep_tags_written: outcome.keep_tags,
             referrers_copied: outcome.referrers,
             blobs: BlobSummary {
                 present: outcome.blobs.present,
@@ -197,11 +198,11 @@ impl CopyReport {
             )
         };
         let mut line = format!(
-            "{}: {} platform(s), {cascade}, {} canonical tag(s), {} referrer(s); \
+            "{}: {} platform(s), {cascade}, {} keep tag(s), {} referrer(s); \
              blobs {} present, {} mounted, {} uploaded",
             sanitize_for_terminal(&self.target),
             self.platforms.len(),
-            self.canonical_tags_written.len(),
+            self.keep_tags_written.len(),
             self.referrers_copied,
             self.blobs.present,
             self.blobs.mounted,
@@ -287,7 +288,7 @@ mod tests {
             status,
             platforms,
             cascade_tags_written: Vec::new(),
-            canonical_tags_written: Vec::new(),
+            keep_tags_written: Vec::new(),
             referrers_copied: 0,
             blobs: BlobSummary {
                 present: 0,
@@ -412,7 +413,7 @@ mod tests {
             ],
         );
         full.cascade_tags_written = vec!["1.4".to_string(), "latest".to_string()];
-        full.canonical_tags_written = vec!["sha256.aaaa".to_string()];
+        full.keep_tags_written = vec!["__ocx.keep.sha256-aaaa".to_string()];
         full.referrers_copied = 3;
         full.blobs = BlobSummary {
             present: 5,
@@ -426,7 +427,7 @@ mod tests {
             "prod.example.com/acme/tool:1.4.2",
             "2 platform(s)",
             "cascade tags 1.4, latest",
-            "1 canonical tag(s)",
+            "1 keep tag(s)",
             "3 referrer(s)",
             "5 present",
             "2 mounted",

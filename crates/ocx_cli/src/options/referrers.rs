@@ -8,7 +8,7 @@
 /// `--referrers` / `--no-referrers` flags. Carrying them is the default:
 /// `--referrers` is the affirmative form of the default, `--no-referrers` opts
 /// out. The two use POSIX last-wins semantics (`overrides_with`), matching
-/// [`CanonicalTag`](super::CanonicalTag). Resolve with [`Referrers::enabled`] —
+/// [`KeepTag`](super::KeepTag). Resolve with [`Referrers::enabled`] —
 /// never by reading the two raw booleans at the call site.
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct Referrers {

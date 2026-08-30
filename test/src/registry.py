@@ -194,12 +194,22 @@ def push_manifest(
 
 
 def push_minimal_image(
-    registry: str, repo: str, *, payload: bytes = b"subject", insecure: bool = True
+    registry: str,
+    repo: str,
+    *,
+    payload: bytes = b"subject",
+    reference: str | None = None,
+    insecure: bool = True,
 ) -> tuple[str, int]:
     """Push a minimal OCI image manifest (empty config + one layer).
 
     Returns ``(digest, manifest_byte_size)`` — the size is the exact number of
     bytes the manifest occupies, needed to build a subject descriptor.
+
+    ``reference`` additionally tags the manifest. Digest-addressed by default,
+    which is what a subject descriptor needs; a tag is only wanted when the
+    manifest has to be *reachable by name* (an index child, or a reference a
+    command is handed).
     """
     config_digest = push_blob(registry, repo, _EMPTY_CONFIG, insecure=insecure)
     layer_digest = push_blob(registry, repo, payload, insecure=insecure)
@@ -219,7 +229,7 @@ def push_minimal_image(
             }
         ],
     }
-    digest, _ = push_manifest(registry, repo, manifest, insecure=insecure)
+    digest, _ = push_manifest(registry, repo, manifest, reference=reference, insecure=insecure)
     return digest, len(json.dumps(manifest).encode())
 
 
@@ -308,6 +318,19 @@ def delete_manifest(registry: str, repo: str, digest: str, *, insecure: bool = T
     status, body, _ = _http("DELETE", f"{scheme}://{registry}/v2/{repo}/manifests/{digest}")
     if status not in (200, 202, 204):
         raise RuntimeError(f"manifest DELETE failed ({status}) for {repo}@{digest}: {body!r}")
+
+
+def referrers_fallback_tag(subject_digest: str) -> str:
+    """The referrers tag for `subject_digest`, per the distribution spec.
+
+    *"The Referrers Tag ... MUST match the Truncated Algorithm, a `-`
+    character, and the Truncated Encoded section ... truncated to 64
+    characters."* For sha256 the truncation is a no-op; the slice is what makes
+    this agree with `package::tag::referrer_fallback_tag` for sha384 and sha512
+    too.
+    """
+    algorithm, encoded = subject_digest.split(":", 1)
+    return f"{algorithm}-{encoded[:64]}"
 
 
 def list_referrers(

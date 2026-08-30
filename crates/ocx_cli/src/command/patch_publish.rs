@@ -57,6 +57,7 @@ impl PatchPublishArgs {
         // ── Step 2: Read + validate the descriptor JSON file. ──
         let descriptor_bytes = tokio::fs::read(&self.descriptor)
             .await
+            .map_err(|error| ocx_lib::error::file_error(&self.descriptor, error))
             .with_context(|| format!("reading descriptor file {}", self.descriptor.display()))?;
         // Validate up front for a clear error before any network work.
         ocx_lib::patch::PatchDescriptor::from_json_bytes(&descriptor_bytes)

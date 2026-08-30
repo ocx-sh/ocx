@@ -286,6 +286,14 @@ Token precedence for `ocx package sign` and `ocx package attest` (highest to low
 OIDC identity tokens expire quickly (typically under 10 minutes). Do not store a token in a long-lived environment or secret manager entry — fetch a fresh token immediately before calling `ocx package sign` or `ocx package attest`.
 :::
 
+### `OCX_KEY_PASSWORD` {#ocx-key-password}
+
+The password guarding an encrypted private key — a cosign `ENCRYPTED SIGSTORE PRIVATE KEY` PEM envelope — for OCX's key-mode signing backend.
+
+Never a flag: a password in `argv` is visible to every process on the host. An **unset** variable reads as the empty password — the shape a key pair has when `cosign generate-key-pair` is answered by pressing enter twice — so leaving it unset is a real, supported case, not a distinct error. The value is not zeroized after use: it already lives in this process's environment block, so wiping a copy of it protects nothing.
+
+OCX does not generate key pairs itself. Run [`cosign generate-key-pair`][cosign] from an activated environment — cosign ships in the OCX index — to produce a `cosign.key` / `cosign.pub` pair, optionally password-protected.
+
 ### `OCX_SIGSTORE_TRUSTED_ROOT` {#ocx-sigstore-trusted-root}
 
 Path to a Sigstore [trusted-root][sigstore-tuf] JSON document — or a directory containing `trusted_root.json` — that [`ocx package verify`][cmd-package-verify] loads its trust material from. Equivalent to the `--sigstore-trusted-root` flag; the flag takes precedence when both are set.
@@ -867,6 +875,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [distroless]: https://github.com/GoogleContainerTools/distroless
 [fulcio]: https://github.com/sigstore/fulcio
 [rekor]: https://github.com/sigstore/rekor
+[cosign]: https://github.com/sigstore/cosign
 [sigstore-tuf]: https://docs.sigstore.dev/certificate_authority/overview/
 [mise]: https://mise.jdx.dev/cli/trust.html
 [git-safe-directory]: https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory

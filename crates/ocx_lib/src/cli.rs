@@ -7,12 +7,15 @@
 //! - [`LogLevel`] — granular log verbosity control via `--log-level`
 //! - [`LogSettings`] — tracing subscriber setup with `OCX_LOG` env var cascade
 //! - [`ExitCode`] — typed process exit codes aligned with BSD `sysexits.h`
+//! - [`ErrorCategory`] — the frozen `error.kind` vocabulary of the JSON error
+//!   envelope, classified from an [`ExitCode`] by a wildcard-free in-crate match
 //! - [`classify_error`] — free function mapping a [`std::error::Error`] chain to [`ExitCode`]
 
 pub mod clap;
 pub mod classify;
 mod data_interface;
 pub mod error;
+pub mod error_category;
 pub mod exit_code;
 mod human;
 mod log_level;
@@ -26,6 +29,7 @@ mod user_interface;
 pub use classify::{ClassifyErrorKind, ClassifyExitCode, classify_error};
 pub use data_interface::{Annotation, Cell, Column, DataInterface, TreeItem};
 pub use error::{MetadataResolutionError, UsageError};
+pub use error_category::ErrorCategory;
 pub use exit_code::ExitCode;
 pub use human::{human_bytes, human_instant, human_time};
 pub use log_level::LogLevel;

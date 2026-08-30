@@ -106,6 +106,7 @@ export default defineConfig({
             { text: "Deferred Tools", link: "/docs/in-depth/lazy-loading" },
             { text: "CI Integration", link: "/docs/in-depth/ci" },
             { text: "Signing", link: "/docs/in-depth/signing" },
+            { text: "cosign Parity", link: "/docs/in-depth/cosign-parity" },
             {
               text: "Self-hosted Sigstore",
               link: "/docs/in-depth/self-hosted-sigstore",

@@ -153,7 +153,7 @@ pub fn committed_tag_names(root: &Value) -> Vec<String> {
 ///
 /// This is where the reserved-tag rule applies (D7), and it applies **here**
 /// rather than at any of the caller-supplied selection sources: only after the
-/// collapse is the tag universe concrete. `--refresh` and `--tags-from-file`
+/// collapse is the tag universe concrete. `--refresh` and `--tags-file`
 /// start from the committed root, so they are carriers — neither can introduce a
 /// reserved tag, but either would re-announce one forever once it landed. A
 /// reserved tag is not a version, so it is dropped and reported, never refused:
@@ -166,8 +166,8 @@ pub fn committed_tag_names(root: &Value) -> Vec<String> {
 /// `discovered` is the one source filtered *before* the collapse, by
 /// [`list_registry_tags`], and it is filtered silently. `reserved_dropped`
 /// reports what the **caller** named that turned out not to be a version; a
-/// registry listing names nothing — canonical `sha256.<hex>` tags are pushed by
-/// default, so reporting them would drown a real drop under one line per
+/// registry listing names nothing — `__ocx.keep.<algorithm>-<hex>` tags are
+/// pushed by default, so reporting them would drown a real drop under one line per
 /// published version. A reserved tag that is nonetheless *committed* still
 /// reaches the collapse through `committed` and is still dropped and reported.
 ///
@@ -193,7 +193,7 @@ pub fn resolve_curated_tags(
     Ok(ResolvedTags { tags, reserved_dropped })
 }
 
-/// The additive merge shared by `--tags-from-file` and `--tags-from-registry`: the
+/// The additive merge shared by `--tags-file` and `--tags-from-registry`: the
 /// committed set in its on-disk order, then whatever `additions` contributes
 /// that is not already there. A committed tag is never dropped by either — only
 /// [`TagSelection::Replace`] removes.
@@ -766,10 +766,10 @@ mod tests {
         format!("sha256:{}", fill.to_string().repeat(64))
     }
 
-    /// A 64-hex `sha256.<hex>` canonical tag — reserved, and the D7 case a
-    /// default `ocx package push` writes into every repository.
-    fn canonical_tag() -> String {
-        format!("sha256.{}", "a".repeat(64))
+    /// A 64-hex `__ocx.keep.sha256-<hex>` keep tag — reserved, and the D7 case
+    /// a default `ocx package push` writes into every repository.
+    fn keep_tag() -> String {
+        format!("__ocx.keep.sha256-{}", "a".repeat(64))
     }
 
     /// A committed root Value with one already-observed tag, in canonical form.
@@ -863,14 +863,14 @@ mod tests {
     /// make announce police how a publisher tags their own repository.
     #[test]
     fn resolve_curated_tags_drops_reserved_from_replace() {
-        let canonical = canonical_tag();
+        let keep = keep_tag();
         let curated = resolve_no_discovery(
             &TagSelection::Replace(vec![
                 "__ocx.desc".into(),
                 "__ocx".into(),
                 "__ocxfoo".into(),
                 "__OCX.desc".into(),
-                canonical.clone(),
+                keep.clone(),
                 "1.2.3".into(),
             ]),
             &[],
@@ -884,7 +884,7 @@ mod tests {
                 "__ocx".to_string(),
                 "__ocxfoo".to_string(),
                 "__OCX.desc".to_string(),
-                canonical,
+                keep,
             ],
             "every reserved form is reported, in selection order"
         );
@@ -895,29 +895,23 @@ mod tests {
     /// if the filter lived at the selection sources instead of here.
     #[test]
     fn resolve_curated_tags_drops_reserved_from_refresh_carrier() {
-        let committed = vec!["1.0.0".to_string(), "__ocx.desc".to_string(), canonical_tag()];
+        let committed = vec!["1.0.0".to_string(), "__ocx.desc".to_string(), keep_tag()];
         let curated = resolve_no_discovery(&TagSelection::Refresh, &committed).unwrap();
         assert_eq!(curated.tags, vec!["1.0.0".to_string()]);
-        assert_eq!(
-            curated.reserved_dropped,
-            vec!["__ocx.desc".to_string(), canonical_tag()]
-        );
+        assert_eq!(curated.reserved_dropped, vec!["__ocx.desc".to_string(), keep_tag()]);
     }
 
-    /// `--tags-from-file` contributes additions only; the committed base arrives
+    /// `--tags-file` contributes additions only; the committed base arrives
     /// separately. Both halves pass through the one filter.
     #[test]
     fn resolve_curated_tags_drops_reserved_from_union_file() {
         let committed = vec!["1.0.0".to_string(), "__ocx.desc".to_string()];
-        let curated = resolve_no_discovery(
-            &TagSelection::UnionFile(vec![canonical_tag(), "2.0.0".into()]),
-            &committed,
-        )
-        .unwrap();
+        let curated =
+            resolve_no_discovery(&TagSelection::UnionFile(vec![keep_tag(), "2.0.0".into()]), &committed).unwrap();
         assert_eq!(curated.tags, vec!["1.0.0".to_string(), "2.0.0".to_string()]);
         assert_eq!(
             curated.reserved_dropped,
-            vec!["__ocx.desc".to_string(), canonical_tag()],
+            vec!["__ocx.desc".to_string(), keep_tag()],
             "a reserved tag is dropped whether it came from the root or the file"
         );
     }
@@ -929,11 +923,11 @@ mod tests {
     #[test]
     fn resolve_curated_tags_all_reserved_is_no_curated_tags() {
         let Err(AnnounceError::NoCuratedTags { reserved_dropped }) =
-            resolve_no_discovery(&TagSelection::Replace(vec!["__ocx.desc".into(), canonical_tag()]), &[])
+            resolve_no_discovery(&TagSelection::Replace(vec!["__ocx.desc".into(), keep_tag()]), &[])
         else {
             panic!("an entirely reserved selection resolves to nothing");
         };
-        assert_eq!(reserved_dropped, vec!["__ocx.desc".to_string(), canonical_tag()]);
+        assert_eq!(reserved_dropped, vec!["__ocx.desc".to_string(), keep_tag()]);
 
         let Err(AnnounceError::NoCuratedTags { reserved_dropped }) =
             resolve_no_discovery(&TagSelection::Refresh, &["__ocx.patch".to_string()])
@@ -1721,14 +1715,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn list_registry_tags_drops_reserved_at_the_source() {
-        // Canonical `sha256.<hex>` tags are pushed by default, so a registry
+        // `__ocx.keep.*` tags are pushed by default, so a registry
         // listing carries one per published version. They are filtered here and
         // never reported: `reserved_dropped` answers "what did the CALLER name
         // that is not a version", and a listing names nothing.
         let data = StubTransportData::new();
         data.write().tags = vec![vec![
             "1.0.0".to_string(),
-            canonical_tag(),
+            keep_tag(),
             "__ocx.desc".to_string(),
             "latest".to_string(),
         ]];

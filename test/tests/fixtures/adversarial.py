@@ -44,7 +44,7 @@ def subject_of(registry: str, repo: str, tag: str, platform: str = "linux/amd64"
     return digest, len(raw)
 
 
-def _signature_referrer(registry: str, repo: str, subject_digest: str) -> dict[str, Any]:
+def signature_referrer(registry: str, repo: str, subject_digest: str) -> dict[str, Any]:
     """The one bundle referrer attached to ``subject_digest``.
 
     Raises rather than returning ``None`` on an unexpected count: a tamper test
@@ -61,7 +61,7 @@ def _signature_referrer(registry: str, repo: str, subject_digest: str) -> dict[s
 
 def _bundle_of(registry: str, repo: str, subject_digest: str) -> tuple[dict[str, Any], dict[str, Any]]:
     """The one signature referrer's manifest descriptor and its decoded bundle."""
-    referrer = _signature_referrer(registry, repo, subject_digest)
+    referrer = signature_referrer(registry, repo, subject_digest)
     manifest = reg.get_manifest(registry, repo, referrer["digest"])
     bundle = json.loads(reg.get_blob(registry, repo, manifest["layers"][0]["digest"]))
     return referrer, bundle
@@ -126,6 +126,30 @@ def _flip_last_byte(b64: str) -> str:
     raw = bytearray(base64.b64decode(b64))
     raw[-1] ^= 0xFF
     return base64.b64encode(bytes(raw)).decode()
+
+
+def tamper_bundle_signature(registry: str, repo: str, subject_digest: str, subject_size: int) -> None:
+    """Flip a byte of the signature the bundle's DSSE envelope carries.
+
+    An image signature is a DSSE envelope since WP3, so the corrupted field is
+    ``dsseEnvelope.signatures[0].sig`` — the successor of the ``messageSignature``
+    slot cosign's pre-DSSE bundles used and the read path no longer accepts.
+    Everything else — certificate, payload, SET, Merkle proof — stays exactly as
+    the real stack produced it, so a passing test isolates the signature check.
+    Expect exit 65.
+
+    Raises on an envelope carrying anything other than one signature: a bundle
+    with none would make the flip a no-op, and one with several would leave a
+    signature the verifier could pass on.
+    """
+
+    def mutate(bundle: dict[str, Any]) -> None:
+        signatures = bundle["dsseEnvelope"]["signatures"]
+        if len(signatures) != 1:
+            raise RuntimeError(f"expected exactly 1 DSSE signature to corrupt, found {len(signatures)}")
+        signatures[0]["sig"] = _flip_last_byte(signatures[0]["sig"])
+
+    _replace_bundle(registry, repo, subject_digest, subject_size, mutate)
 
 
 def tamper_signed_entry_timestamp(registry: str, repo: str, subject_digest: str, subject_size: int) -> None:

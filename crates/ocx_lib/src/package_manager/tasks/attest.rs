@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 use crate::oci;
 use crate::oci::attest::pipeline::{AttestContext, AttestMode, AttestPipeline, AttestResult};
 use crate::oci::attest::predicate::PredicateType;
-use crate::oci::sign::{DispatchingTokenProvider, KeylessSigner, SignError, SignErrorKind};
+use crate::oci::sign::{DispatchingTokenProvider, SignError, SignErrorKind};
 use crate::package_manager::error::{PackageError, PackageErrorKind};
 
 use super::super::PackageManager;
@@ -29,6 +29,11 @@ use super::super::PackageManager;
 /// Mirrors [`SignOptions`](super::sign::SignOptions), plus the two fields
 /// attesting adds and the `offline` policy flag signing keeps at its own CLI
 /// boundary.
+///
+/// `Clone` for the same reason [`SignOptions`](super::sign::SignOptions) is: a
+/// `--tags` / `--tags-file` sweep attests N references from one parsed option
+/// set.
+#[derive(Clone)]
 pub struct AttestOptions {
     /// Fulcio CA endpoint (validated by the CLI). Default: `https://fulcio.sigstore.dev`.
     pub fulcio_url: Url,
@@ -49,6 +54,14 @@ pub struct AttestOptions {
     pub no_tty: bool,
     /// Mirrors the S1-E policy: the refusal runs before token resolution.
     pub offline: bool,
+    /// Selects key mode. `None` is keyless — see [`SignOptions::key`](super::sign::SignOptions::key).
+    pub key: Option<oci::sign::KeyRef>,
+    /// Whether a transparency-log entry is uploaded — see
+    /// [`SignOptions::rekor_upload`](super::sign::SignOptions::rekor_upload).
+    pub rekor_upload: bool,
+    /// Which cosign wire shape(s) to publish the attestation in — see
+    /// [`AttestContext::format`](crate::oci::attest::pipeline::AttestContext::format).
+    pub format: oci::sign::SignatureFormat,
 }
 
 /// Success payload returned by [`PackageManager::attest_one`].
@@ -59,8 +72,12 @@ pub struct AttestReport {
 }
 
 impl PackageManager {
-    /// Attach an in-toto attestation to `package` for `platform` by publishing
+    /// Attach an in-toto attestation to what `package` resolves to, publishing
     /// a DSSE-enveloped Sigstore bundle v0.3 referrer manifest.
+    ///
+    /// `platform` narrows exactly as it does for
+    /// [`sign_one`](Self::sign_one): `None` attests the resolved object,
+    /// `Some` narrows into an index to that child.
     ///
     /// # Errors
     ///
@@ -69,7 +86,7 @@ impl PackageManager {
     pub async fn attest_one(
         &self,
         package: &oci::Identifier,
-        platform: &oci::Platform,
+        platform: Option<&oci::Platform>,
         opts: AttestOptions,
     ) -> Result<AttestReport, PackageError> {
         // The S1-E refusal has to answer here as well as in the pipeline:
@@ -103,7 +120,8 @@ impl PackageManager {
             .require_client()
             .map_err(|e| PackageError::new(package.clone(), PackageErrorKind::Internal(e)))?;
 
-        let signer = KeylessSigner::new();
+        let signer = super::sign::build_signer(opts.key.as_ref(), opts.rekor_upload, &opts.rekor_url)
+            .map_err(|kind| map_attest_error(package.clone(), SignError::new(package.clone(), kind)))?;
         let trusted_hosts = self.index().trusted_hosts_for(package.registry()).to_vec();
         let token_provider = DispatchingTokenProvider::new(opts.identity_token, opts.no_tty, trusted_hosts);
         // Polarity: sign iff a signing identity is *visible*. An override token
@@ -113,7 +131,11 @@ impl PackageManager {
         // referrer would look attached either way. Only the total absence of
         // signing material reaches the unsigned attach, which is where both
         // verbs used to dead-end at exit 77.
-        let mode = match token_provider.has_signing_material() {
+        //
+        // Key mode short-circuits it: `--key` IS the signing material, so an
+        // attach that named a key must never degrade to an unsigned one because
+        // no OIDC identity happened to be around.
+        let mode = match opts.key.is_some() || token_provider.has_signing_material() {
             true => AttestMode::Signed,
             false => AttestMode::Unsigned,
         };
@@ -121,7 +143,8 @@ impl PackageManager {
             identifier: package,
             platform,
             mode,
-            signer: &signer,
+            format: opts.format,
+            signer: signer.as_ref(),
             token_provider: &token_provider,
             predicate_type: &opts.predicate_type,
             predicate: &predicate,
@@ -136,6 +159,48 @@ impl PackageManager {
             .await
             .map_err(|err| map_attest_error(package.clone(), err))?;
         Ok(AttestReport { result })
+    }
+}
+
+impl PackageManager {
+    /// Attach the attestation to the index each of `tags` resolves to, in the
+    /// repository `package` names.
+    ///
+    /// The index sweep [`sign_tags`](Self::sign_tags) performs, for the attest
+    /// verb: same skip rule (a tag resolving to a bare manifest is left alone),
+    /// same survive-and-continue rule, same never-`Err` contract. One predicate
+    /// is attached to every swept index — the predicate is the caller's file,
+    /// read once before the sweep starts.
+    pub async fn attest_tags(
+        &self,
+        package: &oci::Identifier,
+        tags: &[String],
+        opts: &AttestOptions,
+    ) -> Vec<super::sign::SweptTag<AttestReport>> {
+        use super::sign::{SweptOutcome, SweptTag};
+
+        let mut swept = Vec::with_capacity(tags.len());
+        for tag in tags {
+            let identifier = package.clone_with_tag(tag.clone());
+            let outcome = match self.resolves_to_index(&identifier).await {
+                Err(error) => SweptOutcome::Failed(Box::new(error)),
+                Ok(false) => {
+                    crate::log::warn!(
+                        "Skipping '{identifier}': it resolves to a single manifest, which push already signed."
+                    );
+                    SweptOutcome::SkippedBareManifest
+                }
+                Ok(true) => match self.attest_one(&identifier, None, opts.clone()).await {
+                    Ok(report) => SweptOutcome::Done(report),
+                    Err(error) => SweptOutcome::Failed(Box::new(error)),
+                },
+            };
+            swept.push(SweptTag {
+                tag: tag.clone(),
+                outcome,
+            });
+        }
+        swept
     }
 }
 
@@ -170,6 +235,9 @@ mod tests {
 
     fn options(predicate: &[u8]) -> AttestOptions {
         AttestOptions {
+            key: None,
+            rekor_upload: true,
+            format: oci::sign::SignatureFormat::Bundle,
             fulcio_url: Url::parse("http://127.0.0.1:5555").expect("fulcio url"),
             rekor_url: Url::parse("http://127.0.0.1:3000").expect("rekor url"),
             identity_token: None,
@@ -213,7 +281,7 @@ mod tests {
         let error = manager
             .attest_one(
                 &package,
-                &crate::oci::Platform::any(),
+                Some(&crate::oci::Platform::any()),
                 AttestOptions {
                     offline: true,
                     ..options(br#"{"bomFormat":"CycloneDX"}"#)
@@ -242,7 +310,7 @@ mod tests {
 
         for bytes in [b"not json at all".to_vec(), vec![0xff, 0xfe, 0xfd]] {
             let error = manager
-                .attest_one(&package, &crate::oci::Platform::any(), options(&bytes))
+                .attest_one(&package, Some(&crate::oci::Platform::any()), options(&bytes))
                 .await
                 .expect_err("a non-JSON predicate must be refused");
 

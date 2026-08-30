@@ -159,7 +159,7 @@ written.
   is such a build.
 - **The publisher's announce step passes no `--package`.**
   `ocx-e2e-publisher` `.github/workflows/e2e-publish.yml:228` invokes
-  `ocx package announce --tags-from-file … --fork … --index-repo …`, but the
+  `ocx package announce --tags-file … --fork … --index-repo …`, but the
   shipped CLI declares `--package` as `required = true`
   (`crates/ocx_cli/src/command/package_announce.rs:38`). That is a clap usage
   error, not a soft skip. Track C's repo owns the fix; the sequenced and

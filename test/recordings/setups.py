@@ -17,12 +17,14 @@ from src.helpers import (
     SIGSTORE_DIR,
     SIGSTORE_IDENTITY,
     SIGSTORE_ISSUER,
+    env_key,
     make_package,
     mint_identity_token,
     start_sigstore_stack,
 )
-from src.registry import push_raw_config_package
+from src.registry import fetch_platform_manifest_digest, push_raw_config_package
 from src.runner import OcxRunner, PackageInfo, current_platform
+from tests.fixtures.cosign import ensure_cosign_binary, signing_config
 
 
 def basic(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
@@ -713,10 +715,10 @@ def signing(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[
     (ocx.ocx_home / "config.toml").write_text(
         "[[trust.policy]]\n"
         f'scope = "{repository}"\n'
-        "\n"
-        "[trust.policy.keyless]\n"
-        f'identity = "{SIGSTORE_IDENTITY}"\n'
-        f'oidc_issuer = "{SIGSTORE_ISSUER}"\n'
+        "signers = [\n"
+        f'  {{ kind = "keyless", identity = "{SIGSTORE_IDENTITY}", '
+        f'oidc_issuer = "{SIGSTORE_ISSUER}" }},\n'
+        "]\n"
     )
 
     # user-guide/attestations reuses this same setup:signing state (CA5:
@@ -783,6 +785,120 @@ def signing(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[
     }
 
 
+def cosign_parity(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
+    """Two packages, the real Sigstore stack, and a native `cosign` on `$PATH`.
+
+    `setup:signing` proves ocx signs and ocx verifies. This state exists for the
+    other claim — that the two tools are interchangeable — so the cast has to
+    drive the *upstream* CLI, and drive it the way a reader would: a bare
+    `cosign …`. The acceptance matrix runs cosign through
+    `docker run --network host -v … ghcr.io/sigstore/cosign/cosign:<pin>`,
+    which is the right shape for a test and unusable in a recording; nobody
+    copy-pastes that. `ensure_cosign_binary()` lifts the binary out of that same
+    pinned image instead, so there is still exactly one cosign version in the
+    repo and still no download step in CI.
+
+    Prepending to `ocx.env["PATH"]` is what carries it to both consumers: the
+    drift-gate executor builds its subprocess env from `script_env()` (a copy of
+    this env), and `SetupAdapter` reports the addition through
+    `extra_bin_dirs()` so the recorder shell — spawned before `provision()` and
+    deliberately not given this PATH — gets it exported silently.
+
+    **Two packages, not one.** If cosign signed the package ocx had already
+    signed, `ocx package verify` would pass on ocx's own signature and the
+    second half of the cast would assert nothing. `acme/cosign-signed` is never
+    signed by ocx, so a green verify there can only be cosign's signature.
+
+    **The cosign references are digests, never tags** (`$MANIFEST_*`). cosign
+    resolves an image reference itself, and a package's tag resolves to its
+    *index*, where no signature lives — `ocx package sign` signs the platform
+    manifest underneath it. Handing cosign the tag fails with a discovery error,
+    which is exactly the kind of "cosign said no" a careless cast would show as
+    if it meant something.
+
+    Trust material is written into `tmp_path`, which is the directory both the
+    drift gate and the recorder `cd` to (SP8), so the cast's cosign lines name
+    `trusted_root.json` / `signing-config.json` / `identity-token` relatively
+    and stay readable. The signing config is not optional plumbing: cosign 3
+    removed `--fulcio-url`/`--rekor-url` from the signing commands, so it is the
+    only way to point `cosign sign` at a self-hosted stack.
+
+    The `[[trust.policy]]` covers both repositories with one prefix scope, which
+    is what lets the cast's `ocx package verify` line omit
+    `--certificate-identity` / `--certificate-oidc-issuer` — cosign has no such
+    policy file, so its verify line spells both, and the asymmetry on screen is
+    itself part of what the parity page documents.
+
+    Both packages are pinned to `linux/amd64` rather than the host platform so
+    the `-p` flag on screen is the same on every machine that records the cast.
+    """
+    start_sigstore_stack()
+    ocx.env["PATH"] = f"{ensure_cosign_binary()}{os.pathsep}{ocx.env['PATH']}"
+
+    fulcio = f"http://localhost:{os.environ.get('OCX_TEST_FULCIO_PORT', '5555')}"
+    rekor = f"http://localhost:{os.environ.get('OCX_TEST_REKOR_PORT', '3000')}"
+
+    # One token, two readers: `ocx package sign` takes it through the
+    # environment (no `--identity-token <VALUE>` flag exists — a token in argv
+    # is world-readable in /proc), cosign takes the file.
+    token = mint_identity_token(tmp_path / "identity-token").read_text().strip()
+
+    (ocx.ocx_home / "config.toml").write_text(
+        "[[trust.policy]]\n"
+        f'scope = "{ocx.registry}/{prefix}acme/*"\n'
+        "signers = [\n"
+        f'  {{ kind = "keyless", identity = "{SIGSTORE_IDENTITY}", '
+        f'oidc_issuer = "{SIGSTORE_ISSUER}" }},\n'
+        "]\n"
+    )
+
+    (tmp_path / "trusted_root.json").write_bytes(
+        (SIGSTORE_DIR / "trusted_root.json").read_bytes()
+    )
+    signing_config(
+        tmp_path,
+        rekor_url=rekor,
+        fulcio_url=fulcio,
+        oidc_url=SIGSTORE_ISSUER,
+        name="signing-config.json",
+    )
+
+    mytool_env = [
+        {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin",
+         "visibility": "public"},
+    ]
+    packages = {
+        name: [
+            make_package(
+                ocx, f"{prefix}{name}", "1.0.0", tmp_path, bins=["mytool"],
+                env=mytool_env, platform="linux/amd64",
+            ),
+        ]
+        for name in ("acme/ocx-signed", "acme/cosign-signed")
+    }
+
+    ocx.env.update(
+        {
+            "FULCIO": fulcio,
+            "REKOR": rekor,
+            "OCX_SIGSTORE_TRUSTED_ROOT": str(SIGSTORE_DIR),
+            "OCX_IDENTITY_TOKEN": token,
+        }
+    )
+    # `$MANIFEST_OCX_SIGNED` / `$MANIFEST_COSIGN_SIGNED` — the digest references
+    # the cast hands cosign. Resolved here, once, because the shell has no way
+    # to name a platform manifest and the region may not spell `$REGISTRY`.
+    for name, versions in packages.items():
+        pkg = versions[0]
+        digest = fetch_platform_manifest_digest(
+            ocx.registry, pkg.repo, pkg.tag, platform="linux/amd64"
+        )
+        short_name = name.split("/", 1)[1]
+        ocx.env[f"MANIFEST_{env_key(short_name)}"] = f"{ocx.registry}/{pkg.repo}@{digest}"
+
+    return packages
+
+
 def promotion(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
     """One package published to the dev registry, plus a staging and a prod one.
 
@@ -835,5 +951,6 @@ SETUPS: dict[str, SetupFn] = {
     "managed-config-onboard": managed_config_onboard,
     "managed-config-ci": managed_config_ci,
     "signing": signing,
+    "cosign-parity": cosign_parity,
     "promotion": promotion,
 }

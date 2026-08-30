@@ -9,6 +9,7 @@
 use crate::cli::{ClassifyErrorKind, ClassifyExitCode, ExitCode};
 use crate::oci::Identifier;
 use crate::oci::endpoint::UrlRejection;
+use crate::oci::sign::KeyRefError;
 
 /// Top-level verify error carrying the identifier being verified + the kind.
 ///
@@ -71,6 +72,16 @@ pub enum VerifyErrorKind {
     /// belief about supply-chain posture.
     #[error("no manifest for platform {platform}")]
     TargetNotFound { platform: String },
+
+    /// `--platform` was given but the reference resolved to a single manifest.
+    ///
+    /// Exit 79 (`NotFound`) and a slug of its own, for the reason
+    /// [`Self::TargetNotFound`] states: "this package ships no such platform"
+    /// and "this reference has no platforms to choose from" have different
+    /// remedies — drop the flag, rather than go looking for a build that was
+    /// never missing.
+    #[error("--platform {platform} was given but the reference resolved to a single manifest, not an index")]
+    TargetNotAnIndex { platform: String },
 
     /// Referrer(s) found but none has a recognized Sigstore bundle artifactType.
     ///
@@ -184,16 +195,6 @@ pub enum VerifyErrorKind {
     #[error("Rekor SET absent but TSA timestamp present (Rekor v2 transition)")]
     RekorSetAbsentTsaPresent,
 
-    /// Registry returned 404 on referrers endpoint.
-    ///
-    /// Exit 84 (`ReferrersUnsupported`). The rendered chain already leads with
-    /// the identifier, so the message itself does not repeat the registry host.
-    #[error(
-        "registry does not support the OCI Referrers API (requires OCI Distribution 1.1+); \
-         supply-chain commands are unavailable for this registry"
-    )]
-    ReferrersUnsupported,
-
     /// Rekor unavailable during verify.
     ///
     /// Exit 83. Distinct from [`Self::RekorSetInvalid`] — retry is appropriate.
@@ -262,10 +263,11 @@ pub enum VerifyErrorKind {
     )]
     NoIdentityProvided,
 
-    /// A `[[trust.policy]]` entry is malformed: no `[trust.policy.keyless]`
-    /// backend declared, an incomplete matcher (identity or issuer unset,
-    /// both or neither identity form set), or an `identity_regexp` that does
-    /// not compile.
+    /// A `[[trust.policy]]` entry is malformed: an empty or absent `signers`
+    /// array, an incomplete keyless signer (identity or issuer unset, both or
+    /// neither identity form set), an `identity_regexp` that does not compile,
+    /// or a key signer whose material is unreadable, unparseable, or names a
+    /// backend this build cannot resolve.
     ///
     /// Exit 78 (`ConfigError`).
     #[error(transparent)]
@@ -365,6 +367,21 @@ pub enum VerifyErrorKind {
     PayloadTypeUnsupported {
         /// The `payloadType` value the envelope declared.
         payload_type: String,
+    },
+
+    /// A cosign simplesigning payload's `critical.type` is not
+    /// [`SIMPLESIGNING_CLAIM_TYPE`](crate::oci::simplesigning::SIMPLESIGNING_CLAIM_TYPE).
+    ///
+    /// Exit 65 (`DataError`). `critical` is by definition the part a verifier
+    /// must understand, so a payload declaring another claim type is not an
+    /// image signature and must never be read as one — refused rather than
+    /// skipped, or a registry could relabel a signature into "none found".
+    // The {:?} interpolation is deliberate: Debug-escaping the registry-sourced
+    // string IS the CWE-150 terminal-injection protection. Do not "clean up" to {}.
+    #[error("unsupported simplesigning claim type: {claim_type:?}")]
+    SimpleSigningClaimUnsupported {
+        /// The `critical.type` value the payload declared.
+        claim_type: String,
     },
 
     /// The bundle's DSSE envelope carries other than exactly one signature.
@@ -505,6 +522,38 @@ pub enum VerifyErrorKind {
         limit: u64,
     },
 
+    /// A `--key` reference named a key backend OCX recognises but has not
+    /// implemented (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`,
+    /// `k8s://`).
+    ///
+    /// Exit 85 (`UnsupportedKeyBackend`). Verify parses `--key` on its own
+    /// path, so it reaches 85 on its own rather than borrowing the sign-side
+    /// error: one vocabulary, two taxonomies. The slug is byte-identical to
+    /// `SignErrorKind`'s so a script reads one word for one failure.
+    ///
+    /// Remediation: pass a file key, or wait for the backend. Never reported as
+    /// "no such file or directory" -- the refusal happens at the parse
+    /// boundary, before anything treats the reference as a path.
+    ///
+    /// `transparent` rather than a wrapping message: the wrapped
+    /// [`KeyRefError`] already names the scheme, and a prefix here would render
+    /// the sentence twice under `{err:#}`. Transparent forwards `source()`
+    /// *past* the value it wraps, which is harmless here -- `KeyRefError` is a
+    /// leaf with no source of its own, and `exit_code()` answers for this
+    /// variant directly instead of delegating to the chain walker.
+    #[error(transparent)]
+    UnsupportedKeyBackend(KeyRefError),
+
+    /// A `--key` reference could not be parsed: an unrecognised scheme token,
+    /// or nothing following the scheme.
+    ///
+    /// Exit 64 (`UsageError`). Remediation: fix the reference. Same
+    /// `transparent` reasoning as [`Self::UnsupportedKeyBackend`]; the two are
+    /// separate variants because their exit codes and their remedies differ,
+    /// and `From<KeyRefError>` is the single place that decides which applies.
+    #[error(transparent)]
+    KeyReferenceInvalid(KeyRefError),
+
     /// Catch-all for verify-side failures outside the codes above (index
     /// resolution, digest parse, malformed URL join).
     ///
@@ -620,6 +669,7 @@ impl ClassifyErrorKind for VerifyErrorKind {
             Self::NoSignaturesFound
             | Self::NoUsableBundle
             | Self::TargetNotFound { .. }
+            | Self::TargetNotAnIndex { .. }
             | Self::AttestationNotFound => ExitCode::NotFound,
             Self::IdentityMismatch | Self::IssuerMismatch | Self::UnsignedRejectedByPolicy => {
                 ExitCode::PermissionDenied
@@ -648,6 +698,7 @@ impl ClassifyErrorKind for VerifyErrorKind {
             | Self::BuilderMismatch { .. }
             | Self::StatementTypeUnsupported { .. }
             | Self::PayloadTypeUnsupported { .. }
+            | Self::SimpleSigningClaimUnsupported { .. }
             | Self::MultipleSignatures { .. }
             | Self::MultipleAttestations { .. }
             | Self::UnsupportedTlogEntryKind { .. }
@@ -659,12 +710,38 @@ impl ClassifyErrorKind for VerifyErrorKind {
             | Self::TooManyAttestations { .. }
             | Self::AttestationBudgetExhausted { .. } => ExitCode::DataError,
             Self::RekorSetAbsentTsaPresent | Self::TransparencyLogUnavailable => ExitCode::TransparencyLogUnavailable,
-            Self::ReferrersUnsupported => ExitCode::ReferrersUnsupported,
+            Self::UnsupportedKeyBackend(_) => ExitCode::UnsupportedKeyBackend,
+            // Before the flatten below: the same refusal through a second door.
+            Self::TrustPolicyInvalid(error) if error.names_unsupported_backend() => {
+                ExitCode::UnsupportedKeyBackend
+            }
+            // The second door again, one class over. A path key reference
+            // that cannot be read is a filesystem failure on a path the operator
+            // typed, and the `--key` sign door has always answered 74 `io_error`
+            // for it (`KeyBackendError::Io`). The flatten below answered 78
+            // `config_error` for the identical invocation — a category error:
+            // the "scope" its message names is the literal string `--key`, and
+            // no config file is involved at all.
+            Self::TrustPolicyInvalid(crate::trust::TrustPolicyError::KeyUnreadable { .. })
+            | Self::TrustPolicyInvalid(crate::trust::TrustPolicyError::KeyMalformed {
+                fault: crate::trust::KeyFault::Path,
+                ..
+            }) => ExitCode::IoError,
+            // A regular file that read fine and holds something that is not a
+            // key: the bytes are the problem, which is the 65 `ocx package sign`
+            // answers for the same file. An inline `key_pem` falls through to
+            // 78 below — there the config text itself is what is wrong.
+            Self::TrustPolicyInvalid(crate::trust::TrustPolicyError::KeyMalformed {
+                fault: crate::trust::KeyFault::FileBytes,
+                ..
+            }) => ExitCode::DataError,
             Self::TrustRootUnavailable
             | Self::TrustRootLoad(_)
             | Self::TrustPolicyInvalid(_)
             | Self::ForbiddenRegistryTarget { .. } => ExitCode::ConfigError,
-            Self::InvalidEndpointUrl { .. } | Self::NoIdentityProvided => ExitCode::UsageError,
+            Self::InvalidEndpointUrl { .. } | Self::NoIdentityProvided | Self::KeyReferenceInvalid(_) => {
+                ExitCode::UsageError
+            }
             Self::Internal(_) => ExitCode::Failure,
         }
     }
@@ -675,6 +752,7 @@ impl ClassifyErrorKind for VerifyErrorKind {
         match self {
             Self::NoSignaturesFound => "no_signatures_found",
             Self::TargetNotFound { .. } => "target_not_found",
+            Self::TargetNotAnIndex { .. } => "target_not_an_index",
             Self::NoUsableBundle => "no_usable_bundle",
             Self::CandidateLimitExhausted { .. } => "candidate_limit_exhausted",
             Self::IdentityMismatch => "identity_mismatch",
@@ -687,13 +765,22 @@ impl ClassifyErrorKind for VerifyErrorKind {
             Self::TransparencyBodyMismatch => "transparency_body_mismatch",
             Self::RekorInclusionProofAbsent => "rekor_inclusion_proof_absent",
             Self::RekorSetAbsentTsaPresent => "rekor_set_absent_tsa_present",
-            Self::ReferrersUnsupported => "referrers_unsupported",
             Self::TransparencyLogUnavailable => "transparency_log_unavailable",
             Self::BundleParseFailed => "bundle_parse_failed",
             Self::ForbiddenRegistryTarget { .. } => "forbidden_registry_target",
             Self::TrustRootUnavailable => "trust_root_unavailable",
             Self::TrustRootLoad(_) => "trust_root_load",
             Self::NoIdentityProvided => "no_identity_provided",
+            Self::TrustPolicyInvalid(error) if error.names_unsupported_backend() => "unsupported_key_backend",
+            Self::TrustPolicyInvalid(crate::trust::TrustPolicyError::KeyUnreadable { .. })
+            | Self::TrustPolicyInvalid(crate::trust::TrustPolicyError::KeyMalformed {
+                fault: crate::trust::KeyFault::Path,
+                ..
+            }) => "key_unreadable",
+            Self::TrustPolicyInvalid(crate::trust::TrustPolicyError::KeyMalformed {
+                fault: crate::trust::KeyFault::FileBytes,
+                ..
+            }) => "key_malformed",
             Self::TrustPolicyInvalid(_) => "trust_policy_invalid",
             Self::InvalidEndpointUrl { .. } => "invalid_endpoint_url",
             Self::AttestationNotFound => "attestation_not_found",
@@ -704,6 +791,7 @@ impl ClassifyErrorKind for VerifyErrorKind {
             Self::BuilderMismatch { .. } => "builder_mismatch",
             Self::StatementTypeUnsupported { .. } => "statement_type_unsupported",
             Self::PayloadTypeUnsupported { .. } => "payload_type_unsupported",
+            Self::SimpleSigningClaimUnsupported { .. } => "simple_signing_claim_unsupported",
             Self::MultipleSignatures { .. } => "multiple_signatures",
             Self::MultipleAttestations { .. } => "multiple_attestations",
             Self::UnsupportedTlogEntryKind { .. } => "unsupported_tlog_entry_kind",
@@ -714,7 +802,29 @@ impl ClassifyErrorKind for VerifyErrorKind {
             Self::AttestationPayloadTooLarge { .. } => "attestation_payload_too_large",
             Self::TooManyAttestations { .. } => "too_many_attestations",
             Self::AttestationBudgetExhausted { .. } => "attestation_budget_exhausted",
+            Self::UnsupportedKeyBackend(_) => "unsupported_key_backend",
+            Self::KeyReferenceInvalid(_) => "key_reference_invalid",
             Self::Internal(_) => "internal",
+        }
+    }
+}
+
+/// Select the verify-side variant a `--key` parse failure belongs to.
+///
+/// Byte-identical split to the sign-side twin, and deliberately duplicated
+/// rather than shared: the two taxonomies are separate enums by design, and a
+/// shared helper returning "the kind" could only do so by erasing which one.
+/// The match is exhaustive with no wildcard -- `KeyRefError` is
+/// `#[non_exhaustive]`, but that binds downstream crates only, so in the crate
+/// that defines it a new rejection reason is a compile error until it is
+/// classified here.
+impl From<KeyRefError> for VerifyErrorKind {
+    fn from(error: KeyRefError) -> Self {
+        match error {
+            KeyRefError::UnsupportedBackend { .. } => Self::UnsupportedKeyBackend(error),
+            KeyRefError::UnknownScheme { .. } | KeyRefError::Empty | KeyRefError::FileColonPrefix { .. } => {
+                Self::KeyReferenceInvalid(error)
+            }
         }
     }
 }
@@ -743,6 +853,9 @@ mod tests {
             VerifyErrorKind::NoSignaturesFound,
             VerifyErrorKind::NoUsableBundle,
             VerifyErrorKind::TargetNotFound {
+                platform: "linux/amd64".into(),
+            },
+            VerifyErrorKind::TargetNotAnIndex {
                 platform: "linux/amd64".into(),
             },
         ] {
@@ -828,14 +941,6 @@ mod tests {
     }
 
     #[test]
-    fn referrers_unsupported_maps_to_referrers_unsupported() {
-        assert_eq!(
-            VerifyErrorKind::ReferrersUnsupported.exit_code(),
-            ExitCode::ReferrersUnsupported,
-        );
-    }
-
-    #[test]
     fn trust_root_unavailable_maps_to_config_error() {
         assert_eq!(VerifyErrorKind::TrustRootUnavailable.exit_code(), ExitCode::ConfigError);
     }
@@ -854,6 +959,96 @@ mod tests {
             scope: "ghcr.io/acme/*".into(),
         });
         assert_eq!(kind.exit_code(), ExitCode::ConfigError);
+    }
+
+    /// `--key awskms://alias/release` and `key = "awskms://alias/release"` in a
+    /// `[[trust.policy]]` signer are one refusal through two doors: both build
+    /// [`KeyRefError::UnsupportedBackend`]. The flag door has always answered 85
+    /// `unsupported_key_backend`; the config door flattened onto 78
+    /// `config_error`, telling a fleet script "your config is malformed" for a
+    /// backend that is simply not built yet.
+    ///
+    /// The second half is the discriminator, and the reason both halves live in
+    /// one test: a trust-policy refusal that is NOT the backend verdict must
+    /// still be 78 `trust_policy_invalid`, or the guard has reclassified the
+    /// whole family instead of carving out one case.
+    #[test]
+    fn an_unsupported_key_backend_named_in_a_trust_policy_maps_to_85_not_78() {
+        let kms = VerifyErrorKind::TrustPolicyInvalid(crate::trust::TrustPolicyError::KeyReferenceInvalid {
+            scope: "ghcr.io/acme/*".into(),
+            source: KeyRefError::UnsupportedBackend {
+                scheme: crate::oci::sign::Scheme::AwsKms,
+            },
+        });
+        assert_eq!(
+            kms.exit_code(),
+            ExitCode::UnsupportedKeyBackend,
+            "the same 85 the `--key awskms://…` door already answers"
+        );
+        assert_eq!(kms.kind_detail(), "unsupported_key_backend");
+
+        let unrelated = VerifyErrorKind::TrustPolicyInvalid(crate::trust::TrustPolicyError::IssuerUnset {
+            scope: "ghcr.io/acme/*".into(),
+        });
+        assert_eq!(
+            unrelated.exit_code(),
+            ExitCode::ConfigError,
+            "a trust-policy error that is not the backend verdict stays 78"
+        );
+        assert_eq!(unrelated.kind_detail(), "trust_policy_invalid");
+    }
+
+    /// `--key /nope` is one refusal through two doors, exactly as the
+    /// backend case above: sign reads the same reference through
+    /// `KeyBackendError::Io` and exits 74 `io_error`, while verify read it
+    /// through `read_key_file` and flattened onto 78 `config_error`. Same flag,
+    /// same value, two codes — and 78 is a category error here, because the
+    /// "scope" the message names is the literal string `--key`, not a file.
+    ///
+    /// All four rows together, because each is only meaningful against the
+    /// others: a classifier that answered one code for the whole key family
+    /// would satisfy any one of them alone. One rule, keyed on *what* was
+    /// unusable and never on which command asked — the path, the file's bytes,
+    /// or the config text.
+    #[test]
+    fn a_key_failure_is_classified_by_what_was_unusable() {
+        use crate::trust::{KeyFault, TrustPolicyError};
+
+        let malformed = |fault| {
+            VerifyErrorKind::TrustPolicyInvalid(TrustPolicyError::KeyMalformed {
+                scope: "--key".into(),
+                reason: "not a PEM-encoded public key".into(),
+                fault,
+            })
+        };
+
+        let unreadable = VerifyErrorKind::TrustPolicyInvalid(TrustPolicyError::KeyUnreadable {
+            scope: "--key".into(),
+            path: std::path::PathBuf::from("/nope"),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        });
+        assert_eq!(
+            unreadable.exit_code(),
+            ExitCode::IoError,
+            "the same 74 `ocx package sign --key /nope` already answers"
+        );
+        assert_eq!(unreadable.kind_detail(), "key_unreadable");
+
+        // A directory, or a character device: the path named something that is
+        // not a readable regular file, which is the same 74 `--config` already
+        // promises for a path that "exists but cannot be read".
+        assert_eq!(malformed(KeyFault::Path).exit_code(), ExitCode::IoError);
+        assert_eq!(malformed(KeyFault::Path).kind_detail(), "key_unreadable");
+
+        // A regular file read in full whose bytes are not a key — 65, what sign
+        // answers for the same file.
+        assert_eq!(malformed(KeyFault::FileBytes).exit_code(), ExitCode::DataError);
+        assert_eq!(malformed(KeyFault::FileBytes).kind_detail(), "key_malformed");
+
+        // An inline `key_pem`: no path and no file, so the config text is the
+        // thing that is wrong and 78 stays right.
+        assert_eq!(malformed(KeyFault::ConfigText).exit_code(), ExitCode::ConfigError);
+        assert_eq!(malformed(KeyFault::ConfigText).kind_detail(), "trust_policy_invalid");
     }
 
     #[test]
@@ -893,7 +1088,6 @@ mod tests {
             VerifyErrorKind::CertChainInvalid,
             VerifyErrorKind::SignatureInvalid,
             VerifyErrorKind::RekorSetInvalid,
-            VerifyErrorKind::ReferrersUnsupported,
             VerifyErrorKind::BundleParseFailed,
             VerifyErrorKind::TrustRootUnavailable,
         ] {
@@ -1081,12 +1275,87 @@ mod tests {
     }
 
     #[test]
+    fn key_ref_unsupported_scheme_exits_85_with_its_own_category() {
+        // T-16 / C-015, the verify twin. Verify parses `--key` on its own path,
+        // so it must reach 85 without borrowing the sign-side error -- which is
+        // exactly what this asserts, end to end through the production chain:
+        // real parser, real `From` impl, real `classify()`, real
+        // `from_exit_code`.
+        //
+        // The serialized category is asserted, not just the number. An arm
+        // rewritten to `ErrorCategory::Internal` still exits 85 while the
+        // envelope says `"internal"`, and a test that checked only the number
+        // would pass through that.
+        use crate::cli::ErrorCategory;
+        use crate::oci::sign::KeyRef;
+
+        let rejected = KeyRef::parse("awskms://alias/release").expect_err("awskms has no implementation");
+        let error = VerifyError::new(id(), VerifyErrorKind::from(rejected));
+
+        let exit = error.classify().expect("an unsupported backend classifies itself");
+        assert_eq!(exit, ExitCode::UnsupportedKeyBackend);
+        assert_eq!(exit as u8, 85, "the number is what `case $? in 85)` matches");
+        assert_eq!(error.kind.kind_detail(), "unsupported_key_backend");
+
+        let category = ErrorCategory::from_exit_code(exit);
+        assert_eq!(
+            serde_json::to_string(&category).expect("ErrorCategory serializes"),
+            "\"unsupported_key_backend\"",
+            "envelope error.kind must be the dedicated category, never \"internal\""
+        );
+
+        // E-04: the rendered chain names the backend, and never reads as a
+        // missing file.
+        let rendered = format!("{:#}", anyhow::Error::new(error));
+        assert!(
+            rendered.contains("awskms"),
+            "the message must name the scheme: {rendered}"
+        );
+        assert!(
+            !rendered.contains("No such file"),
+            "a recognised backend must never be reported as a missing path: {rendered}"
+        );
+    }
+
+    #[test]
+    fn key_reference_that_is_not_a_backend_is_a_usage_error() {
+        // The other half of the `From` split. Same two codes, same two slugs as
+        // the sign side -- one vocabulary, two taxonomies.
+        use crate::oci::sign::KeyRef;
+
+        for value in ["vault://secret/cosign", "file:"] {
+            let kind = VerifyErrorKind::from(KeyRef::parse(value).expect_err("not a usable key reference"));
+            assert_eq!(kind.exit_code(), ExitCode::UsageError, "value: {value}");
+            assert_eq!(kind.kind_detail(), "key_reference_invalid", "value: {value}");
+        }
+    }
+
+    #[test]
+    fn key_reference_slugs_match_the_sign_side_exactly() {
+        // The invariant that makes `error.kind` readable by a script that does
+        // not know which verb failed. Asserted against the sign-side function
+        // rather than against a literal, so the two can never drift apart while
+        // both still "pass their own table".
+        use crate::oci::sign::{KeyRef, SignErrorKind};
+
+        for value in ["awskms://alias/release", "vault://secret/cosign"] {
+            let rejection = || KeyRef::parse(value).expect_err("not a usable key reference");
+            assert_eq!(
+                VerifyErrorKind::from(rejection()).kind_detail(),
+                SignErrorKind::from(rejection()).kind_detail(),
+                "one failure must read as one word on both paths: {value}"
+            );
+        }
+    }
+
+    #[test]
     fn kind_detail_values_are_stable() {
         // C-S1-1 frozen contract: these strings ship in JSON envelopes and consumer
         // scripts dispatch on them. A rename or typo here is a user-visible breaking
         // change. The exhaustive match in `kind_detail()` ensures a new variant forces
         // a new arm there; this table ensures the *string value* for each arm is pinned.
         use crate::oci::endpoint::UrlRejection;
+        use crate::oci::sign::Scheme;
         use VerifyErrorKind::*;
 
         // Construct one representative instance per variant.
@@ -1097,6 +1366,12 @@ mod tests {
             (
                 "target_not_found",
                 TargetNotFound {
+                    platform: "linux/amd64".into(),
+                },
+            ),
+            (
+                "target_not_an_index",
+                TargetNotAnIndex {
                     platform: "linux/amd64".into(),
                 },
             ),
@@ -1112,7 +1387,6 @@ mod tests {
             ("transparency_body_mismatch", TransparencyBodyMismatch),
             ("rekor_inclusion_proof_absent", RekorInclusionProofAbsent),
             ("rekor_set_absent_tsa_present", RekorSetAbsentTsaPresent),
-            ("referrers_unsupported", ReferrersUnsupported),
             ("transparency_log_unavailable", TransparencyLogUnavailable),
             ("bundle_parse_failed", BundleParseFailed),
             (
@@ -1183,6 +1457,12 @@ mod tests {
                     payload_type: "application/json".into(),
                 },
             ),
+            (
+                "simple_signing_claim_unsupported",
+                SimpleSigningClaimUnsupported {
+                    claim_type: "cosign container image attestation".into(),
+                },
+            ),
             ("multiple_signatures", MultipleSignatures { count: 2 }),
             (
                 "multiple_attestations",
@@ -1232,6 +1512,11 @@ mod tests {
                 "attestation_budget_exhausted",
                 AttestationBudgetExhausted { limit: 65_536 },
             ),
+            (
+                "unsupported_key_backend",
+                UnsupportedKeyBackend(KeyRefError::UnsupportedBackend { scheme: Scheme::AwsKms }),
+            ),
+            ("key_reference_invalid", KeyReferenceInvalid(KeyRefError::Empty)),
             ("internal", Internal(Box::new(std::io::Error::other("test")))),
         ];
 
@@ -1245,7 +1530,7 @@ mod tests {
         // all. Closing that gap needs variant enumeration.
         assert_eq!(
             pairs.len(),
-            42,
+            45,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
 

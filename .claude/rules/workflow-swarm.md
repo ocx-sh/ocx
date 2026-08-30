@@ -230,6 +230,47 @@ Plans MUST be parallel-capable by design when work packages (WPs) are file-disjo
 - Run `cargo check` after **every** merge — catches cross-file interactions per-file verify misses
 - Remove the worktree after its WP merges
 
+### Memory budget — build parallelism, not worktree count
+
+Parallel worktrees are **not** the problem and must not be given up. The
+measured cause of two OOM kills on a 32-core / 31 GB + 32 GB-swap machine was
+**unbounded per-build parallelism, multiplied by concurrent worktrees**:
+
+- `cargo` defaults `jobs` to the core count, so one cold build spawns ~32 rustc
+  processes, with codegen and linking as the memory-hungry phases.
+- `nextest` defaults to one test thread per core; `pytest -n auto` likewise.
+- Three worktrees each doing that concurrently is ~96 rustc processes.
+
+Language servers were the *suspected* cause and largely exonerated by
+measurement: Serena starts **one MCP server per Claude session, not per
+worktree**, and starts rust-analyzer lazily on first Rust symbol call — three
+concurrent worktrees ran against a single rust-analyzer (~3.6 GB). Do not
+"fix" memory by disabling semantic tooling; it is ~87% of one server's cost and
+the highest-value tool in this repo.
+
+The repo bounds the real cause in committed config:
+
+- `.cargo/config.toml` — `jobs = 4` caps concurrent rustc **per build**, so N
+  worktrees cost 4N, not 32N. CI overrides via `CARGO_BUILD_JOBS`.
+- `.config/nextest.toml` — `test-threads = 8`; the `ci` profile keeps
+  `num-cpus` (dedicated runner, no siblings).
+- `.serena/project.yml` and `.vscode/settings.json` exclude `.agents/worktrees`
+  so nothing indexes a scratch tree as a second workspace root.
+
+Orchestrator rules that follow:
+
+- **Keep running work packages in parallel.** With `jobs = 4`, three concurrent
+  worktrees peak around a dozen rustc processes — comfortable here.
+- **Stagger the cold builds** rather than starting every loop's `task verify` at
+  the same instant; the peak is what kills, not the average.
+- **Do not raise the caps** to make one loop faster. The caps are what make
+  parallelism safe.
+- Collapse a worktree once its work merges — whoever creates one removes it.
+- If a session dies with no completion record, suspect OOM before suspecting the
+  agent: checkpoint-commit every worktree's uncommitted work **first**, then
+  diagnose. A rescue commit is titled `Checkpoint:` and must be rewritten into
+  Conventional Commits before the branch lands.
+
 ### Plan Requirements
 
 Plans must define per WP: name, owned files (disjoint across concurrently-running WPs), size, dependencies, base tip, merge order. See `swarm-plan` "Parallelization" and `plan.template.md`.

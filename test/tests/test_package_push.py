@@ -1,270 +1,301 @@
-"""§3.2 S2: Acceptance tests for `ocx package push --cascade --format json`.
+"""Acceptance tests for the `ocx package push --format json` report.
 
-These tests verify the JSON output shape of the push command against a live
-registry:2 fixture. They are NOT part of the Phase 3 "all tests fail against
-stubs" gate — they exercise shipping infrastructure (registry push) with the
-new JSON output which is currently unimplemented (PushReport::print_plain is
-stubbed). Tests that fail with NotImplementedError or non-zero exit codes are
-caught and marked as expected Phase 3 failures.
+Every test here pushes a real bundle to the live registry fixture and asserts
+on the parsed report, so each one needs a registry. The report is a wire
+contract: `ocx-mirror pipeline push` keys its go/no-go bookkeeping off
+`status` and records `cascade_tags_written` in its run summary, and
+`platform_digests` is the signing input a later `push --sign` covers.
 
-Per design spec §3.2 cases:
-- Printable::print_json emits parseable JSON with manifest_digest, cascade_tags_written, status fields
-- Schema: cascade_tags_written is array of strings; empty array for non-cascade push
-- status is "pushed" / "skipped_existing" (lowercase snake_case)
-- Acceptance: --cascade push against registry:2 emits JSON with all three fields
-- Acceptance: non-cascade push emits same shape with cascade_tags_written: []
+No test in this module may gate an assertion on the exit code of the command
+under test. Six of them once did — `if result.returncode != 0: pytest.skip(...)`
+— and skipped on a malformed command line for as long as they existed, so the
+whole report contract went unasserted while reporting green.
 """
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
 
-from src.helpers import make_package
+from src.helpers import make_package, resolved_metadata_path
 from src.registry import fetch_manifest_digest, fetch_platform_manifest_digest, make_client
-from src.runner import OcxRunner, PackageInfo
+from src.runner import OcxRunner, current_platform
 
 
 # ---------------------------------------------------------------------------
-# §3.2 Unit-level: JSON schema validation (no registry required)
+# Shared: build one bundle, push it, hand back the `--format json` report.
 # ---------------------------------------------------------------------------
+
+
+def _push_json(
+    ocx: OcxRunner,
+    repo: str,
+    tag: str,
+    tmp_path: Path,
+    *,
+    platform: str,
+    cascade: bool = False,
+    extra_push_args: list[str] | None = None,
+) -> dict:
+    """Create a one-layer bundle for ``platform`` and push it, returning the
+    ``--format json`` report.
+
+    ``make_package`` pushes through ``ocx.plain`` and so discards the report;
+    every test in this module asserts on the report itself, which is why the
+    create/push pair is spelled out here rather than reused.
+
+    Creation is skipped when the bundle is already on disk, so calling this
+    twice with identical arguments pushes the *same* bundle — which is what a
+    re-push assertion needs. The guard is required, not merely convenient:
+    ``ocx package create`` refuses an existing ``-o`` without ``--force``
+    (``package_create.rs``), so a second unguarded call would abort before
+    reaching the push.
+    """
+    stem = f"{repo.replace('/', '_')}-{platform.replace('/', '-')}-{tag}"
+    bundle = tmp_path / f"{stem}.tar.xz"
+
+    if not bundle.exists():
+        layer_dir = tmp_path / f"content-{stem}"
+        (layer_dir / "bin").mkdir(parents=True)
+        (layer_dir / "bin" / "hello").write_text(f"#!/bin/sh\necho {stem}\n")
+
+        metadata_path = tmp_path / f"{stem}-metadata-in.json"
+        metadata_path.write_text(json.dumps({
+            "type": "bundle",
+            "version": 1,
+            "env": [
+                {"key": "PATH", "type": "path", "required": True, "value": "${installPath}/bin"},
+            ],
+        }))
+
+        ocx.plain(
+            "package", "create", "-m", str(metadata_path), "-o", str(bundle),
+            "-p", platform, str(layer_dir),
+        )
+
+    args = ["package", "push", "-p", platform, "-m", str(resolved_metadata_path(bundle))]
+    if cascade:
+        args.append("--cascade")
+    args += extra_push_args or []
+    args += ["-i", f"{ocx.registry}/{repo}:{tag}", str(bundle)]
+    return ocx.json(*args)
+
+
+# ---------------------------------------------------------------------------
+# The `--format json` push report contract.
+#
+# `identifier`, `status`, `manifest_digest`, `cascade_tags_written` and
+# `keep_tags_written` are what `ocx-mirror pipeline push` parses;
+# `platform_digests` is the signing input a later `push --sign` covers. Every
+# test below pushes for real and asserts against what the registry serves.
+# ---------------------------------------------------------------------------
+
+#: The exact key set of a push report with no `--sbom` (`attestation` and an
+#: empty `platform_digests` are both `skip_serializing_if`-omitted).
+_REPORT_KEYS = {
+    "identifier",
+    "status",
+    "manifest_digest",
+    "cascade_tags_written",
+    "keep_tags_written",
+    "layers",
+    "platform_digests",
+}
+
+
+def _expected_platform_digests(ocx: OcxRunner, repo: str, tag: str, platform: str) -> dict:
+    """What `platform_digests` must be for a single-platform push of ``tag``:
+    the platform manifest the registry actually serves, keyed by platform."""
+    return {platform: fetch_platform_manifest_digest(ocx.registry, repo, tag, platform=platform)}
 
 
 def test_push_report_json_schema_has_required_fields(
-    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """§3.2: push --cascade --format json emits all three required fields.
+    """The report carries exactly `_REPORT_KEYS` — no key missing, none added.
 
-    Gate: manifest_digest, cascade_tags_written, status all present.
-    Acceptable Phase 3 failure: command exits non-zero if print_json is
-    unimplemented (PushReport::print_plain stub) — caught below.
+    A closed set rather than membership checks: `ocx-mirror pipeline push`
+    parses this document, so a key appearing is as much a contract change as
+    one vanishing, and only the closed form catches the first.
     """
-    pkg = published_package
-    # Re-push the same package so we can observe the push output
-    # Using a bundle already in the registry; second push = skipped_existing
-    result = ocx.run(
-        "package",
-        "push",
-        "--cascade",
-        "--format",
-        "json",
-        "-i",
-        pkg.fq,
-        check=False,
-    )
-    if result.returncode != 0:
-        # Expected: print_plain is unimplemented, command exits with error.
-        # Design spec §3.2 gate: compile + fail (not assert wrong shape).
-        pytest.skip(
-            f"ocx package push --format json not yet implemented "
-            f"(rc={result.returncode}). Phase 3 expected failure."
-        )
-        return
+    plat = current_platform()
+    report = _push_json(ocx, unique_repo, "1.0.0", tmp_path, platform=plat)
 
-    output = json.loads(result.stdout)
-    assert "manifest_digest" in output, "manifest_digest field required"
-    assert "cascade_tags_written" in output, "cascade_tags_written field required"
-    assert "status" in output, "status field required"
+    assert set(report) == _REPORT_KEYS, report
+    assert report["platform_digests"] == _expected_platform_digests(
+        ocx, unique_repo, "1.0.0", plat
+    ), report
 
 
 def test_push_report_cascade_tags_written_is_array(
-    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """§3.2: cascade_tags_written is an array of strings."""
-    pkg = published_package
-    result = ocx.run(
-        "package",
-        "push",
-        "--cascade",
-        "--format",
-        "json",
-        "-i",
-        pkg.fq,
-        check=False,
-    )
-    if result.returncode != 0:
-        pytest.skip("ocx package push --format json not yet implemented (Phase 3)")
-        return
+    """`cascade_tags_written` is the list of rolling tags the push really wrote.
 
-    output = json.loads(result.stdout)
-    assert isinstance(output["cascade_tags_written"], list), (
-        "cascade_tags_written must be a JSON array"
-    )
-    for tag in output["cascade_tags_written"]:
-        assert isinstance(tag, str), f"All cascade tags must be strings, got: {type(tag)}"
+    Checked against the registry's own tag list, not merely type-checked: a
+    report that named tags it never wrote, or omitted ones it did, is what a
+    downstream announce would act on.
+    """
+    plat = current_platform()
+    report = _push_json(ocx, unique_repo, "3.28.1", tmp_path, platform=plat, cascade=True)
+
+    written = report["cascade_tags_written"]
+    assert isinstance(written, list), f"cascade_tags_written must be an array, got {written!r}"
+
+    in_registry = set(make_client(ocx.registry).get_tags(f"{ocx.registry}/{unique_repo}"))
+    rolling = {tag for tag in in_registry if not tag.startswith("__ocx")} - {"3.28.1"}
+    assert rolling, f"a cascade push of 3.28.1 must write rolling tags; registry has {in_registry}"
+    # Element type is pinned by the comparison above: every member of `rolling`
+    # is a `str` from `get_tags`, and no other JSON scalar compares equal to one.
+    assert set(written) == rolling, f"reported {written}, registry holds {sorted(in_registry)}"
+
+    assert report["platform_digests"] == _expected_platform_digests(
+        ocx, unique_repo, "3.28.1", plat
+    ), report
 
 
-def test_push_report_status_snake_case(
-    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+def test_push_report_platform_digest_is_no_tag_index(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """§3.2: status field is lowercase snake_case ('pushed' or 'skipped_existing')."""
-    pkg = published_package
-    result = ocx.run(
-        "package",
-        "push",
-        "--cascade",
-        "--format",
-        "json",
-        "-i",
-        pkg.fq,
-        check=False,
-    )
-    if result.returncode != 0:
-        pytest.skip("ocx package push --format json not yet implemented (Phase 3)")
-        return
+    """The reported platform digest equals the index digest of no tag this push
+    wrote — not the version tag's, not any rolling tag's.
 
-    output = json.loads(result.stdout)
-    status = output["status"]
-    assert status in ("pushed", "skipped_existing"), (
-        f"status must be 'pushed' or 'skipped_existing', got: {status!r}"
+    Every one of those indexes is rewritten by the next platform merge, which
+    is exactly what a signature must not be pinned to. `status` is asserted
+    here too: it is the constant `"pushed"` that `ocx-mirror` keys its go/no-go
+    off, and the command has no `skipped_existing` state.
+    """
+    plat = current_platform()
+    report = _push_json(ocx, unique_repo, "3.28.1", tmp_path, platform=plat, cascade=True)
+
+    assert report["status"] == "pushed", report
+
+    platform_digest = report["platform_digests"][plat]
+    assert report["cascade_tags_written"], (
+        f"a cascade push of 3.28.1 must write rolling tags; report={report}"
+    )
+    tag_indexes = {
+        tag: fetch_manifest_digest(ocx.registry, unique_repo, tag)
+        for tag in ["3.28.1", *report["cascade_tags_written"]]
+    }
+    assert platform_digest not in tag_indexes.values(), (
+        f"platform digest {platform_digest} is a tag's index digest: {tag_indexes}"
     )
 
 
 def test_push_report_non_cascade_has_empty_cascade_tags(
-    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """§3.2: Non-cascade push emits cascade_tags_written: [] (empty array)."""
-    pkg = published_package
-    # Push WITHOUT --cascade
-    result = ocx.run(
-        "package",
-        "push",
-        "--format",
-        "json",
-        "-i",
-        pkg.fq,
-        check=False,
-    )
-    if result.returncode != 0:
-        pytest.skip("ocx package push --format json not yet implemented (Phase 3)")
-        return
+    """A push without `--cascade` writes no rolling tag, still writes its keep
+    tag, and still reports its platform digest — the three are independent."""
+    plat = current_platform()
+    report = _push_json(ocx, unique_repo, "1.0.0", tmp_path, platform=plat)
 
-    output = json.loads(result.stdout)
-    assert output["cascade_tags_written"] == [], (
+    assert report["cascade_tags_written"] == [], (
         "Non-cascade push must emit cascade_tags_written: [] (empty array)"
     )
+    assert report["keep_tags_written"], "the keep tag is on by default"
+    assert report["platform_digests"] == _expected_platform_digests(
+        ocx, unique_repo, "1.0.0", plat
+    ), report
 
 
-def test_push_report_skipped_existing_status_on_repush(
-    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+def test_push_report_repush_reports_the_same_platform_digest(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """§3.2: Re-pushing same package → status = 'skipped_existing'."""
-    pkg = published_package
-    # First push already done by published_package fixture.
-    # Second push of same version → skipped_existing
-    result = ocx.run(
-        "package",
-        "push",
-        "--cascade",
-        "--format",
-        "json",
-        "-i",
-        pkg.fq,
-        check=False,
-    )
-    if result.returncode != 0:
-        pytest.skip("ocx package push --format json not yet implemented (Phase 3)")
-        return
+    """Pushing the identical bundle twice reports `pushed` both times and the
+    same platform digest.
 
-    output = json.loads(result.stdout)
-    # If the package is already in registry, status must be skipped_existing
-    # (it was pushed by published_package fixture first)
-    assert output["status"] in ("pushed", "skipped_existing"), (
-        f"Status must be pushed or skipped_existing, got: {output['status']!r}"
-    )
+    The manifest is content-addressed, so nothing about the second run may move
+    it. Both sides are anchored to what the registry serves — comparing the two
+    reports to each other alone would survive any uniform defect.
+    """
+    plat = current_platform()
+    first = _push_json(ocx, unique_repo, "1.0.0", tmp_path, platform=plat)
+    second = _push_json(ocx, unique_repo, "1.0.0", tmp_path, platform=plat)
+    expected = _expected_platform_digests(ocx, unique_repo, "1.0.0", plat)
+
+    assert first["status"] == "pushed" and second["status"] == "pushed", (first, second)
+    assert first["platform_digests"] == expected, first
+    assert second["platform_digests"] == expected, second
 
 
-def test_push_report_manifest_digest_sha256_format(
-    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+def test_push_report_cascade_with_no_keep_tag_still_reports_platform_digests(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """§3.2: manifest_digest starts with 'sha256:' and has correct format."""
-    pkg = published_package
-    result = ocx.run(
-        "package",
-        "push",
-        "--cascade",
-        "--format",
-        "json",
-        "-i",
-        pkg.fq,
-        check=False,
-    )
-    if result.returncode != 0:
-        pytest.skip("ocx package push --format json not yet implemented (Phase 3)")
-        return
+    """`--cascade` and `--no-keep-tag` in one push: rolling tags written, no
+    keep tag written, platform digests reported in full.
 
-    output = json.loads(result.stdout)
-    digest = output["manifest_digest"]
-    assert digest.startswith("sha256:"), (
-        f"manifest_digest must start with 'sha256:', got: {digest!r}"
+    All three are independent, and `platform_digests` in particular cannot be
+    derived from the keep tags this push deliberately does not write.
+    """
+    plat = current_platform()
+    report = _push_json(
+        ocx, unique_repo, "3.28.1", tmp_path,
+        platform=plat, cascade=True, extra_push_args=["--no-keep-tag"],
     )
-    # sha256: followed by 64 hex chars
-    hex_part = digest[len("sha256:"):]
-    assert len(hex_part) == 64, (
-        f"sha256 digest must be 64 hex chars, got {len(hex_part)}: {hex_part}"
-    )
-    assert all(c in "0123456789abcdef" for c in hex_part), (
-        f"sha256 digest must be lowercase hex, got: {hex_part}"
-    )
+
+    assert report["keep_tags_written"] == [], report
+    assert report["cascade_tags_written"], "a cascade push must still write rolling tags"
+    assert report["platform_digests"] == _expected_platform_digests(
+        ocx, unique_repo, "3.28.1", plat
+    ), report
 
 
 # ---------------------------------------------------------------------------
-# Canonical tag — adr_index_indirection.md Decision E
+# Keep tag — adr_index_indirection.md Decision E
 #
-# `--[no-]canonical-tag`, default ON: after each platform manifest is
-# pushed, additionally push a `sha256.<hex>` tag pointing directly at it
-# (registry-side deletion safety net — a stray rolling/cascade tag delete
+# `--[no-]keep-tag`, default ON: after each platform manifest is pushed,
+# additionally push an `__ocx.keep.<algorithm>-<hex>` tag pointing directly at
+# it (registry-side deletion safety net — a stray rolling/cascade tag delete
 # can never orphan a digest a lock still pins).
 # ---------------------------------------------------------------------------
 
 
-def test_push_default_creates_canonical_sha256_tag(
-    ocx: OcxRunner, unique_repo: str, tmp_path: Path
-) -> None:
-    """Default `ocx package push` (no flag) pushes the `sha256.<hex>` tag."""
+def test_push_default_creates_keep_tag(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> None:
+    """Default `ocx package push` (no flag) pushes the keep tag."""
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
 
     platform_digest = fetch_platform_manifest_digest(
         ocx.registry, pkg.repo, pkg.tag, platform=pkg.platform
     )
-    canonical_tag = "sha256." + platform_digest.removeprefix("sha256:")
+    keep_tag = "__ocx.keep." + platform_digest.replace(":", "-")
 
-    canonical_digest = fetch_manifest_digest(ocx.registry, pkg.repo, canonical_tag)
-    assert canonical_digest == platform_digest, (
-        f"canonical tag {canonical_tag!r} must point at the platform manifest "
-        f"digest {platform_digest!r}, got {canonical_digest!r}"
+    keep_digest = fetch_manifest_digest(ocx.registry, pkg.repo, keep_tag)
+    assert keep_digest == platform_digest, (
+        f"keep tag {keep_tag!r} must point at the platform manifest "
+        f"digest {platform_digest!r}, got {keep_digest!r}"
     )
 
 
-def test_push_no_canonical_tag_suppresses_the_extra_tag(
+def test_push_no_keep_tag_suppresses_the_extra_tag(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """`--no-canonical-tag` must not push the `sha256.<hex>` tag."""
+    """`--no-keep-tag` must not push the keep tag."""
     pkg = make_package(
         ocx,
         unique_repo,
         "1.0.0",
         tmp_path,
         cascade=False,
-        extra_push_args=["--no-canonical-tag"],
+        extra_push_args=["--no-keep-tag"],
     )
 
     platform_digest = fetch_platform_manifest_digest(
         ocx.registry, pkg.repo, pkg.tag, platform=pkg.platform
     )
-    canonical_tag = "sha256." + platform_digest.removeprefix("sha256:")
+    keep_tag = "__ocx.keep." + platform_digest.replace(":", "-")
 
     with pytest.raises(RuntimeError):
-        fetch_manifest_digest(ocx.registry, pkg.repo, canonical_tag)
+        fetch_manifest_digest(ocx.registry, pkg.repo, keep_tag)
 
 
 def test_push_cascade_tags_only_the_pushed_platform_once(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     """`--cascade` merges the platform into every rolling tag, but the
-    canonical tag is pushed exactly once — for the platform manifest this
+    keep tag is pushed exactly once — for the platform manifest this
     invocation actually pushed, never retroactively for tags or platforms
     already sitting in the registry.
     """
@@ -273,10 +304,87 @@ def test_push_cascade_tags_only_the_pushed_platform_once(
     platform_digest = fetch_platform_manifest_digest(
         ocx.registry, pkg.repo, pkg.tag, platform=pkg.platform
     )
-    canonical_tag = "sha256." + platform_digest.removeprefix("sha256:")
+    keep_tag = "__ocx.keep." + platform_digest.replace(":", "-")
 
     tags = make_client(ocx.registry).get_tags(f"{ocx.registry}/{pkg.repo}")
-    canonical_tags = [t for t in tags if t.startswith("sha256.")]
-    assert canonical_tags == [canonical_tag], (
-        f"expected exactly one canonical tag {canonical_tag!r}, got {canonical_tags}"
+    keep_tags = [t for t in tags if t.startswith("__ocx.keep.")]
+    assert keep_tags == [keep_tag], f"expected exactly one keep tag {keep_tag!r}, got {keep_tags}"
+
+
+# ---------------------------------------------------------------------------
+# `platform_digests` — the per-platform manifest digests a push landed on.
+#
+# `manifest_digest` names the tag's image index, which is rewritten by the next
+# platform merge. `platform_digests` names the immutable platform manifests, so
+# it is what a signature can cover — and it is independent of `--keep-tag`.
+# ---------------------------------------------------------------------------
+
+
+def test_push_report_platform_digest_is_the_manifest_not_the_index(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """S-001: a single-platform push reports one `platform_digests` entry, keyed
+    by the canonical platform string, whose value is the platform manifest's
+    digest — not the index digest `manifest_digest` already carries."""
+    plat = current_platform()
+    report = _push_json(ocx, unique_repo, "1.0.0", tmp_path, platform=plat)
+
+    expected = fetch_platform_manifest_digest(
+        ocx.registry, unique_repo, "1.0.0", platform=plat
     )
+    assert report["platform_digests"] == {plat: expected}, report
+    assert report["platform_digests"][plat] != report["manifest_digest"], (
+        "the platform manifest digest must differ from the index digest"
+    )
+
+
+def test_push_report_platform_digests_distinguish_two_platforms_on_one_tag(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """S-002: two `--cascade` pushes onto one tag each report their own platform
+    manifest, never the shared index.
+
+    Two platforms are what makes this discriminating: under one platform the
+    index and the manifest are still distinct values, but nothing distinguishes
+    "the manifest of the platform this push landed" from "some manifest".
+    """
+    amd = _push_json(
+        ocx, unique_repo, "3.28.1", tmp_path, platform="linux/amd64", cascade=True
+    )
+    arm = _push_json(
+        ocx, unique_repo, "3.28.1", tmp_path, platform="linux/arm64", cascade=True
+    )
+
+    assert list(amd["platform_digests"]) == ["linux/amd64"], amd
+    assert list(arm["platform_digests"]) == ["linux/arm64"], arm
+
+    amd_digest = amd["platform_digests"]["linux/amd64"]
+    arm_digest = arm["platform_digests"]["linux/arm64"]
+    assert amd_digest != arm_digest, "distinct platforms have distinct manifests"
+    assert arm_digest != arm["manifest_digest"], (
+        "the second push must report its platform manifest, not the merged index"
+    )
+
+    for plat, reported in (("linux/amd64", amd_digest), ("linux/arm64", arm_digest)):
+        assert reported == fetch_platform_manifest_digest(
+            ocx.registry, unique_repo, "3.28.1", platform=plat
+        ), f"{plat} digest must match what the registry serves"
+
+
+def test_push_report_platform_digests_survive_no_keep_tag(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """S-003: `--no-keep-tag` writes no keep tag and still reports every
+    platform digest — the two are independent, so a report derived from the
+    keep tags would be empty here."""
+    plat = current_platform()
+    report = _push_json(
+        ocx, unique_repo, "1.0.0", tmp_path,
+        platform=plat, extra_push_args=["--no-keep-tag"],
+    )
+
+    assert report["keep_tags_written"] == [], report
+    expected = fetch_platform_manifest_digest(
+        ocx.registry, unique_repo, "1.0.0", platform=plat
+    )
+    assert report["platform_digests"] == {plat: expected}, report

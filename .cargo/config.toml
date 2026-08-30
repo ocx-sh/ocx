@@ -1,0 +1,17 @@
+# Bound peak RAM so parallel agent work packages stay safe.
+#
+# This repo is developed with several agents at once, each in its own git
+# worktree under `.agents/worktrees/`. Cargo defaults `jobs` to the core count
+# (32 here), so one cold build alone spawns ~32 rustc processes -- and three
+# concurrent worktrees spawn ~96. Codegen and linking are the memory-hungry
+# phases, so that peak, not the average, is what exhausted RAM+swap and killed
+# two orchestrator sessions.
+#
+# Capping jobs makes N concurrent worktrees cost 4N rustc rather than 32N, which
+# is what KEEPS parallel execution viable. Do not raise this to speed up a single
+# build: the cap is the thing that lets the other loops run at all.
+#
+# CI has one workspace and a dedicated runner: override with `CARGO_BUILD_JOBS`
+# (the env var wins over this file) rather than editing it.
+[build]
+jobs = 4

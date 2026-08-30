@@ -79,6 +79,18 @@ pub enum ExitCode {
     /// referrers index. The operation cannot proceed — discovery fails hard rather
     /// than silently returning empty results. OCX-specific.
     ReferrersUnsupported = 84,
+    /// A key reference named a key backend OCX recognises but does not
+    /// implement (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`,
+    /// `k8s://`). Distinct from `NotFound` (79) and `IoError` (74): the reference
+    /// is well-formed and the backend is real, it simply has no implementation
+    /// here. OCX-specific; scripts can branch on it before any backend exists.
+    ///
+    /// Three doors, one code: `--key`, a `key = "…"` signer in a matched
+    /// `[[trust.policy]]`, and a managed-config payload carrying one. Each
+    /// flattened onto 78 `config_error` at some point, which is the reading
+    /// this code exists to prevent — "not built yet" is not "your config is
+    /// wrong", and only one of them is fixed by editing the config.
+    UnsupportedKeyBackend = 85,
 }
 
 impl From<ExitCode> for std::process::ExitCode {
@@ -187,6 +199,13 @@ mod tests {
     fn exit_code_referrers_unsupported_is_84() {
         // Tool-specific; registry lacks OCI 1.1 referrers — no fallback.
         assert_eq!(ExitCode::ReferrersUnsupported as u8, 84);
+    }
+
+    #[test]
+    fn exit_code_unsupported_key_backend_is_85() {
+        // Tool-specific; canonical source is design_spec_cosign_parity.md
+        // section "Exit codes". 85 is the first free slot above 84.
+        assert_eq!(ExitCode::UnsupportedKeyBackend as u8, 85);
     }
 
     #[test]

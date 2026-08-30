@@ -152,7 +152,7 @@ ocx package copy --to prod.example.com --dry-run staging.example.com/acme/mytool
 
 The preview stops at the per-platform disposition, though. With `--cascade`, the rolling
 tags that would move at the target are not computed under `--dry-run`, and neither is the
-`sha256.<hex>` canonical tag that `--canonical-tag` (the default) would write — both are
+`__ocx.keep.<algorithm>-<hex>` keep tag that `--keep-tag` (the default) would write — both are
 decided in the second phase of a copy, which `--dry-run` never runs. A pipeline gating on
 `--dry-run --format json` sees empty tag arrays regardless of `--cascade`; that is a
 dry-run limitation, not a report that nothing would move.

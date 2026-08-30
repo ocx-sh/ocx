@@ -472,7 +472,7 @@ def make_package(
         genuinely claim-less (pre-ADR / legacy-shaped) fixture package.
     extra_push_args:
         Extra flags appended to the ``ocx package push`` invocation (e.g.
-        ``["--no-canonical-tag"]``), after ``-n``/``--cascade`` and before
+        ``["--no-keep-tag"]``), after ``-n``/``--cascade`` and before
         ``-i``.
     integrations:
         Sets the metadata sidecar's ``integrations`` map (namespace ->

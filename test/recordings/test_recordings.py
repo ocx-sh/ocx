@@ -169,6 +169,14 @@ def test_record(
     (install_bin / ocx_binary.name).symlink_to(ocx_binary)
     recorder.silent_setup(f"export PATH={shlex.quote(str(install_bin))}:$PATH")
 
+    # Same problem for a third-party tool the script drives as itself (the
+    # cosign-parity cast types a bare `cosign …`): the provider materialised it
+    # during provision(), but this shell was spawned from `ocx.env` before that
+    # ran and the projection below drops PATH. Silent, because a reader has the
+    # tool installed the normal way — the cast must not teach them ours.
+    for extra_bin in provider.extra_bin_dirs():
+        recorder.silent_setup(f"export PATH={shlex.quote(str(extra_bin))}:$PATH")
+
     # Inject the StateProvider env projection into the persistent PTY shell so
     # `$PKG_*` / `$REPO_*` / `$SCENARIO_TMP` etc. resolve in replayed commands
     # exactly as they do in the drift-gate subprocess (one script, `$PKG_*`

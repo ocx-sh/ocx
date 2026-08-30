@@ -48,6 +48,7 @@ use x509_cert::Certificate;
 use x509_cert::time::Time;
 
 use super::error::VerifyErrorKind;
+use super::signing_instant::SigningInstant;
 
 /// The canonical payload a Rekor v1 Signed Entry Timestamp is computed over.
 ///
@@ -146,16 +147,24 @@ pub(super) fn verify_inclusion(
 /// Takes the already-parsed leaf: `parse_certificate` runs once in
 /// `verify_one_referrer`, so the window checked here is the window the identity
 /// check read, not a second parse that could disagree.
+///
+/// The instant arrives as a [`SigningInstant`] rather than a bare `i64` so no
+/// caller can hand it the wall clock: a Fulcio certificate is short-lived by
+/// design, and "is this valid *now*" refuses every keyless signature older than
+/// its ten-minute window. See `super::signing_instant` for the whole rule,
+/// including why the no-transparency-log case is legal and supplies its own
+/// instant.
 pub(super) fn verify_integrated_time_within_certificate(
-    integrated_time: i64,
+    signed_at: SigningInstant,
     leaf: &Certificate,
 ) -> Result<(), VerifyErrorKind> {
+    let signed_at = signed_at.epoch_seconds();
     let validity = &leaf.tbs_certificate.validity;
     let not_before = unix_seconds(validity.not_before);
     let not_after = unix_seconds(validity.not_after);
-    if integrated_time < not_before || integrated_time > not_after {
+    if signed_at < not_before || signed_at > not_after {
         return Err(VerifyErrorKind::CertificateValidityWindow {
-            integrated_time: rfc3339_utc(integrated_time),
+            integrated_time: rfc3339_utc(signed_at),
             not_before: rfc3339_utc(not_before),
             not_after: rfc3339_utc(not_after),
         });
@@ -198,6 +207,12 @@ fn rfc3339_utc(epoch_seconds: i64) -> String {
 ///   -not_before 260101000000Z -not_after 260101001000Z | base64 -w0`
 const FIXTURE_CERT_DER_BASE64: &str = "MIIBjjCCATOgAwIBAgIUXDerMK9Jof8dxErPo1pTx55fDskwCgYIKoZIzj0EAwIwHDEaMBgGA1UEAwwRb2N4LXJvdzEzLWZpeHR1cmUwHhcNMjYwMTAxMDAwMDAwWhcNMjYwMTAxMDAxMDAwWjAcMRowGAYDVQQDDBFvY3gtcm93MTMtZml4dHVyZTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABFi6Pl8zq1kkrEGV8nr66Trdd7QM0BKnLL0JHXFlZ3rSSW16yLZV7td8RAo0Mqo/VApbH7TeA/bXmByIGzn+8mijUzBRMB0GA1UdDgQWBBQf1NnnrXUcU+VMImU74mm+zuysXjAfBgNVHSMEGDAWgBQf1NnnrXUcU+VMImU74mm+zuysXjAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0kAMEYCIQC+ZkSuPm9qPlJ4GftxDoyvXgo6yKt9zdSrfmsewd+B+gIhAMFZQ7iOfDmrNir7vXT5fXAn6XmS/PCOesmjsnFa9ywB";
 
+/// G0's keyless golden bundle, verbatim. Its Fulcio certificate expired ten
+/// minutes after capture, which is what makes it the regression fixture for
+/// "validity anchors to signing time" — see `super::signing_instant`.
+#[cfg(test)]
+const GOLDEN_KEYLESS_BUNDLE: &str = include_str!("../../../../../test/tests/fixtures/golden/keyless_bundle.json");
+
 /// DER bytes of [`FIXTURE_CERT_DER_BASE64`].
 #[cfg(test)]
 pub(super) fn fixture_certificate_der() -> Vec<u8> {
@@ -235,7 +250,8 @@ mod tests {
     #[test]
     fn an_integrated_time_inside_the_window_verifies() {
         let cert = fixture_certificate();
-        let verdict = verify_integrated_time_within_certificate(NOT_BEFORE + 300, &cert);
+        let verdict =
+            verify_integrated_time_within_certificate(SigningInstant::TransparencyLog(NOT_BEFORE + 300), &cert);
         assert!(verdict.is_ok(), "{verdict:?}");
     }
 
@@ -245,7 +261,7 @@ mod tests {
     #[test]
     fn an_integrated_time_exactly_at_not_before_verifies() {
         let cert = fixture_certificate();
-        let verdict = verify_integrated_time_within_certificate(NOT_BEFORE, &cert);
+        let verdict = verify_integrated_time_within_certificate(SigningInstant::TransparencyLog(NOT_BEFORE), &cert);
         assert!(verdict.is_ok(), "notBefore is inclusive: {verdict:?}");
     }
 
@@ -253,7 +269,7 @@ mod tests {
     #[test]
     fn an_integrated_time_exactly_at_not_after_verifies() {
         let cert = fixture_certificate();
-        let verdict = verify_integrated_time_within_certificate(NOT_AFTER, &cert);
+        let verdict = verify_integrated_time_within_certificate(SigningInstant::TransparencyLog(NOT_AFTER), &cert);
         assert!(verdict.is_ok(), "notAfter is inclusive: {verdict:?}");
     }
 
@@ -263,7 +279,7 @@ mod tests {
     #[test]
     fn an_integrated_time_one_second_before_the_window_is_refused() {
         let cert = fixture_certificate();
-        let verdict = verify_integrated_time_within_certificate(NOT_BEFORE - 1, &cert);
+        let verdict = verify_integrated_time_within_certificate(SigningInstant::TransparencyLog(NOT_BEFORE - 1), &cert);
         assert!(
             matches!(verdict, Err(VerifyErrorKind::CertificateValidityWindow { .. })),
             "{verdict:?}"
@@ -277,7 +293,7 @@ mod tests {
     #[test]
     fn an_integrated_time_one_second_after_the_window_is_refused_naming_the_window() {
         let cert = fixture_certificate();
-        let verdict = verify_integrated_time_within_certificate(NOT_AFTER + 1, &cert);
+        let verdict = verify_integrated_time_within_certificate(SigningInstant::TransparencyLog(NOT_AFTER + 1), &cert);
         let Err(VerifyErrorKind::CertificateValidityWindow {
             integrated_time,
             not_before,
@@ -291,6 +307,69 @@ mod tests {
         assert_eq!(not_after, "2026-01-01T00:10:00Z");
     }
 
+    /// The G0 keyless golden fixture, end to end: the real Fulcio certificate
+    /// and the real `integratedTime` that signed against it.
+    ///
+    /// This is the trap the type exists for. The fixture's window is ten
+    /// minutes wide (`2026-08-29T02:07:54Z .. 02:17:54Z`) and long gone, so a
+    /// check reading the clock refuses a legitimately signed artifact. Both
+    /// halves are asserted against the *same* certificate: the entry's own
+    /// instant verifies, and an instant a day past `notAfter` is refused. One
+    /// alone proves nothing — an always-Ok guard passes the first, an
+    /// always-Err guard passes the second, and only the pair shows the verdict
+    /// tracks the instant it was handed.
+    #[test]
+    fn the_golden_keyless_certificate_verifies_at_its_logged_instant_and_is_refused_later() {
+        use x509_cert::der::Decode as _;
+
+        let bundle: serde_json::Value =
+            serde_json::from_str(GOLDEN_KEYLESS_BUNDLE).expect("the golden keyless bundle is JSON");
+        let material = &bundle["verificationMaterial"];
+        let leaf_der = base64::engine::general_purpose::STANDARD
+            .decode(
+                material["certificate"]["rawBytes"]
+                    .as_str()
+                    .expect("the bundle carries a leaf certificate"),
+            )
+            .expect("the leaf certificate is base64");
+        let cert = Certificate::from_der(&leaf_der).expect("the leaf certificate is valid X.509");
+        // protobuf JSON renders an int64 as a string.
+        let integrated_time: i64 = material["tlogEntries"][0]["integratedTime"]
+            .as_str()
+            .expect("the bundle carries a tlog entry")
+            .parse()
+            .expect("integratedTime is an integer");
+
+        // Pin the window the two assertions below depend on, so a regenerated
+        // fixture moves the goalposts loudly instead of silently.
+        let validity = &cert.tbs_certificate.validity;
+        let not_before = i64::try_from(validity.not_before.to_unix_duration().as_secs()).expect("fits i64");
+        let not_after = i64::try_from(validity.not_after.to_unix_duration().as_secs()).expect("fits i64");
+        assert_eq!(rfc3339_utc(not_before), "2026-08-29T02:07:54Z");
+        assert_eq!(rfc3339_utc(not_after), "2026-08-29T02:17:54Z");
+        assert!(
+            (not_before..=not_after).contains(&integrated_time),
+            "the fixture was signed inside its own window"
+        );
+
+        let at_signing_time =
+            verify_integrated_time_within_certificate(SigningInstant::TransparencyLog(integrated_time), &cert);
+        assert!(
+            at_signing_time.is_ok(),
+            "an expired Fulcio certificate still verifies at its logged signing time: {at_signing_time:?}"
+        );
+
+        // A day past expiry — what a clock read would produce for this fixture,
+        // and (since the `CallerSupplied` variant was deleted) reachable only as
+        // a logged instant, which is the shape the guard now takes.
+        let long_after =
+            verify_integrated_time_within_certificate(SigningInstant::TransparencyLog(not_after + 86_400), &cert);
+        assert!(
+            matches!(long_after, Err(VerifyErrorKind::CertificateValidityWindow { .. })),
+            "an instant past notAfter must be refused: {long_after:?}"
+        );
+    }
+
     /// A bundle carrying no `integratedTime` decodes it as protobuf's zero, and
     /// `BundleParts` widens that to `0`. Epoch zero is outside every real
     /// certificate window, so absence fails closed through the ordinary
@@ -298,7 +377,7 @@ mod tests {
     #[test]
     fn a_missing_integrated_time_reads_as_epoch_zero_and_is_refused() {
         let cert = fixture_certificate();
-        let verdict = verify_integrated_time_within_certificate(0, &cert);
+        let verdict = verify_integrated_time_within_certificate(SigningInstant::TransparencyLog(0), &cert);
         assert!(
             matches!(verdict, Err(VerifyErrorKind::CertificateValidityWindow { .. })),
             "an absent integratedTime must not verify: {verdict:?}"

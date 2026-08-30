@@ -15,7 +15,8 @@ pub trait IndexImpl: Send + Sync {
     ///
     /// Implementations return the source's tags as recorded; reserved tags
     /// ([`Tag::is_reserved`](crate::package::tag::Tag::is_reserved) — the
-    /// `__ocx` namespace and `sha256.<hex>` digest aliases) are filtered
+    /// `__ocx` namespace, which carries the keep tag, plus the frozen legacy
+    /// `sha256.<hex>` keep tags) are filtered
     /// once, in [`Index::list_tags`](super::Index::list_tags).
     async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>>;
 

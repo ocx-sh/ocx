@@ -62,7 +62,7 @@ impl AliasTag {
     /// bare tag alone cannot say whether it is a track root: `debug` is the
     /// `debug` track's root only next to a `debug-…` sibling, and is otherwise
     /// an arbitrary tag someone pushed. Reserved tags — the `__ocx` namespace
-    /// and canonical `sha256.<hex>` aliases — and anything else that is not a
+    /// and keep tags — and anything else that is not a
     /// version return `None`, which is what puts them in `ignored_tags`.
     pub fn parse(tag: &str, variants: &[String]) -> Option<Self> {
         match Tag::from(tag.to_string()) {
@@ -118,7 +118,7 @@ pub struct TagGraphObservation {
     pub logical: Option<oci::Identifier>,
     /// Every version-ish tag the registry holds, with the body behind it.
     pub tags: BTreeMap<AliasTag, ObservedTag>,
-    /// Tags deliberately not part of the graph — canonical `sha256.<hex>`
+    /// Tags deliberately not part of the graph — keep tags
     /// tags, `__ocx.*` internals, and anything that is not a version.
     /// Reported so a user can see nothing was silently dropped.
     pub ignored_tags: Vec<String>,

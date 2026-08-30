@@ -213,7 +213,7 @@ def test_a_concurrent_announce_is_unioned_not_clobbered(
     client's claim stale. The client must re-read the winning head, re-resolve
     its curated universe against it, and retry.
 
-    The curation is `--tags-from-file` (additive union) on purpose. Under
+    The curation is `--tags-file` (additive union) on purpose. Under
     `--tags` the loser's tag list IS the universe, so a committed tag it does not
     name is dropped by contract and the assertion could not tell a correct drop
     from a clobber. Union makes the winner's tag something that MUST survive.
@@ -243,7 +243,7 @@ def test_a_concurrent_announce_is_unioned_not_clobbered(
         fake_forge,
         "--package",
         package,
-        "--tags-from-file",
+        "--tags-file",
         str(tags_file),
         "--fork",
         FORK_FULL,

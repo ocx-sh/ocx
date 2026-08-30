@@ -587,7 +587,7 @@ To export environment variables into CI runtime files (e.g. `$GITHUB_PATH` / `$G
 
 Skip that step and the packages stay invisible outside your own config. Months of `ocx package push` to a private `ghcr.io` repository leave a registry full of correctly built packages and zero outside install-ability: nobody can resolve `<ns>/<pkg>` because nothing points at it. [winget-pkgs][winget-pkgs] solves the equivalent "make my thing discoverable" problem with a review-gated pull request against a central manifest repository — a publisher submits a manifest, an [automated pipeline validates it and tests the installer][winget-submit], and a moderator approves the merge; only then does the package show up in the catalogue `winget` resolves from.
 
-OCX takes the same shape, minus the manifest-authoring step. [`ocx package push --announce-file <path>`][cmd-package-push] records which tags this push should announce, then [`ocx package announce --fork <repository>`][cmd-package-announce] opens an ordinary pull request — from the publisher's own forge account — against the [public index repository][index-repo]. It is the same trust model as any open-source contribution: no index-side credential is ever required. `OCX_ANNOUNCE_TOKEN` authenticates to the forge to open that request and nothing else: it is read from the environment only, never from a stored credential, and it never reaches the [`~/.docker/config.json` that `ocx login` writes][authentication-storing]. Announcing and registry authentication are two separate trust boundaries with two separate credentials.
+OCX takes the same shape, minus the manifest-authoring step. [`ocx package push --tags-file <path>`][cmd-package-push] records which tags this push should announce, then [`ocx package announce --fork <repository>`][cmd-package-announce] opens an ordinary pull request — from the publisher's own forge account — against the [public index repository][index-repo]. It is the same trust model as any open-source contribution: no index-side credential is ever required. `OCX_ANNOUNCE_TOKEN` authenticates to the forge to open that request and nothing else: it is read from the environment only, never from a stored credential, and it never reaches the [`~/.docker/config.json` that `ocx login` writes][authentication-storing]. Announcing and registry authentication are two separate trust boundaries with two separate credentials.
 
 The index does not have to be on GitHub. `announce` speaks **GitHub and GitLab**, each on its public host and on self-hosted instances, and on GitLab it opens a merge request instead of a pull request. Name the host in `--index-repo` (`gitlab.com/acme/index`), and for a self-hosted instance add `--forge github` or `--forge gitlab` — a hostname says nothing about which forge runs behind it, so OCX asks rather than guessing where to send your credential. Nested GitLab group paths work as written: `--index-repo gitlab.example.com/acme/platform/tooling/index`. Everything else on this page — curation, yanking, the unchanged short-circuit — reads the same on either forge.
 
@@ -600,7 +600,7 @@ Two one-time steps happen on the [index site][index-ocx-sh] itself, before the f
 
 ### Announcing from CI {#publish-announcing-from-ci}
 
-Most publishers already have a release workflow that builds and uploads binaries; slotting announce into it is additive, not a rewrite. The [copy-paste GitHub Actions snippet][index-announce-ci-snippet] on the index site shows where `push --announce-file` and `announce` go relative to your existing build steps, plus the `OCX_ANNOUNCE_TOKEN` secret wiring for both a classic-PAT and a machine-account setup. The snippet lives there, not here, so it stays in sync with the index bot's own contract instead of drifting out of two copies.
+Most publishers already have a release workflow that builds and uploads binaries; slotting announce into it is additive, not a rewrite. The [copy-paste GitHub Actions snippet][index-announce-ci-snippet] on the index site shows where `push --tags-file` and `announce` go relative to your existing build steps, plus the `OCX_ANNOUNCE_TOKEN` secret wiring for both a classic-PAT and a machine-account setup. The snippet lives there, not here, so it stays in sync with the index bot's own contract instead of drifting out of two copies.
 
 ### What your consumers need {#publish-consumer-prerequisite}
 
@@ -1054,12 +1054,17 @@ A [`[[trust.policy]]`][config-trust] entry declares the accepted signer once, fo
 [[trust.policy]]
 scope = "ghcr.io/acme/*"
 
-[trust.policy.keyless]
-identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 
 Declare it in a `config.toml` tier (system, user, or `$OCX_HOME`) or in the project's `ocx.toml`, and `ocx package verify` resolves the identity automatically — no identity flags needed for any package under `ghcr.io/acme/` (the trust-root requirement from [above](#supply-chain-verification) still applies):
+
+::: warning `signers` is ANY-of — adding an entry widens acceptance
+A policy's `signers` array can hold more than one entry, keyless or key-mode, and any one of them is enough to verify a signature. Adding an entry never narrows a policy — it is one more way in, not a stricter check. See [Signers][config-trust-signers] in the configuration reference for the full mechanics, including `kind = "key"` signers.
+:::
 
 ```shell
 ocx package verify -p linux/amd64 --sigstore-trusted-root /etc/ocx/trusted_root.json ghcr.io/acme/tool:1.0
@@ -1073,9 +1078,10 @@ A scope can also name several patterns and carve some back out, which is what yo
 [[trust.policy]]
 scope = { include = ["ghcr.io/acme/*"], exclude = ["ghcr.io/acme/experimental/*"] }
 
-[trust.policy.keyless]
-identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 
 An empty (or omitted) `include` is a catch-all, so `exclude` on its own governs the whole fleet minus the listed subtrees. An excluded package is not *denied* — it is simply not covered by this policy, so it installs unverified unless another policy covers it. See [Scope matching][config-trust-scope] for the full rule.
@@ -1088,20 +1094,22 @@ When the signing workflow moves (a renamed workflow file, a new repository, a ro
 [[trust.policy]]
 scope = "ghcr.io/acme/*"
 
-[trust.policy.keyless]
-identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 
 [[trust.policy]]
 scope = "ghcr.io/acme/*"
 
-[trust.policy.keyless]
-identity    = "https://github.com/acme/tool/.github/workflows/release-v2.yml@refs/heads/main"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "https://github.com/acme/tool/.github/workflows/release-v2.yml@refs/heads/main",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 
 ::: tip Learn more
-[Signing In Depth][in-depth-signing] — trust root mechanics, OCI 1.1 referrers hard-fail policy, Sigstore bundle storage, slice boundaries, and offline semantics.
+[Signing In Depth][in-depth-signing] — trust root mechanics, how a referrer is published, Sigstore bundle storage, slice boundaries, and offline semantics.
 [Configuration reference → `[[trust.policy]]`][config-trust] — full schema, scope matching (including `include`/`exclude`), most-specific-wins resolution, and operator-vs-project tier precedence.
 [`package sign` reference][cmd-package-sign] and [`package verify` reference][cmd-package-verify] — flags, exit codes, and CI examples.
 :::
@@ -1365,6 +1373,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [config-unknown-keys]: ./reference/configuration.md#unknown-keys
 [config-trust]: ./reference/configuration.md#keys-trust
 [config-trust-scope]: ./reference/configuration.md#keys-trust-scope
+[config-trust-signers]: ./reference/configuration.md#keys-trust-signers
 [env-mirrors]: ./reference/environment.md#ocx-mirrors
 [env-ocx-managed-config]: ./reference/environment.md#ocx-managed-config
 [env-composition-strict-isolation]: ./reference/env-composition.md#strict-isolation

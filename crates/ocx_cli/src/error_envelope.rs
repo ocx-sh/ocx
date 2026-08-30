@@ -33,7 +33,7 @@
 //! emitted: [`render_error_envelope`] always leaves it `None`, so it is omitted
 //! from real output. Consumers must treat it as optional.
 
-use ocx_lib::cli::{ClassifyErrorKind, ExitCode};
+use ocx_lib::cli::{ClassifyErrorKind, ErrorCategory, ExitCode};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -50,69 +50,6 @@ use std::collections::BTreeMap;
 /// unchanged) is exactly that case: the old slug never shipped in a
 /// release, so version 1 is still the contract.
 pub const ENVELOPE_SCHEMA_VERSION: u32 = 1;
-
-/// Frozen error-category set (ADR C-S1-1). Matches `error.kind` values listed
-/// in the ADR's `error_kind` inventory — the serialized lowercase form is
-/// the stable contract consumers pattern-match on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ErrorCategory {
-    UsageError,
-    ConfigError,
-    DataError,
-    AuthError,
-    PermissionDenied,
-    NotFound,
-    Unavailable,
-    TempFail,
-    TransparencyLogUnavailable,
-    ReferrersUnsupported,
-    IoError,
-    Internal,
-}
-
-impl ErrorCategory {
-    /// Total function mapping every [`ExitCode`] to an [`ErrorCategory`].
-    ///
-    /// [`ExitCode`] is `#[non_exhaustive]` and lives in `ocx_lib`, so the `_`
-    /// wildcard is mandatory here and the compiler emits **no** warning when a
-    /// new variant appears — it silently serializes as `internal`, and deleting
-    /// an existing arm is equally silent. The only guard is
-    /// `error_category_total_over_exit_codes`, which carries a row per
-    /// [`ExitCode`]; a new variant needs both an arm here and a row there.
-    ///
-    /// Success codes (`Success = 0`, `Failure = 1`) are nonsensical for an error
-    /// envelope and map to [`Self::Internal`] as a fail-safe: emitting an error
-    /// envelope on exit-code 0 would itself be a bug, and an envelope with
-    /// `kind=internal` is a readable trap. `PolicyBlocked` maps to
-    /// `PermissionDenied` — it is a deliberate policy rejection, not a network fault.
-    pub fn from_exit_code(code: ExitCode) -> Self {
-        match code {
-            ExitCode::Success | ExitCode::Failure => Self::Internal,
-            ExitCode::UsageError => Self::UsageError,
-            ExitCode::DataError => Self::DataError,
-            ExitCode::Unavailable => Self::Unavailable,
-            ExitCode::IoError => Self::IoError,
-            ExitCode::TempFail => Self::TempFail,
-            ExitCode::PermissionDenied => Self::PermissionDenied,
-            ExitCode::ConfigError => Self::ConfigError,
-            ExitCode::NotFound => Self::NotFound,
-            ExitCode::AuthError => Self::AuthError,
-            ExitCode::PolicyBlocked => Self::PermissionDenied,
-            // Same genus as `PolicyBlocked`: a deliberate refusal to act (the
-            // managed RC block carries user edits and `--force` was absent), not
-            // a malformed config. `ConfigError` would erase that distinction,
-            // which exit 82 exists to draw.
-            ExitCode::DirtyRcBlock => Self::PermissionDenied,
-            ExitCode::TransparencyLogUnavailable => Self::TransparencyLogUnavailable,
-            ExitCode::ReferrersUnsupported => Self::ReferrersUnsupported,
-            // Wildcard required by `#[non_exhaustive]` on ExitCode (cross-crate match).
-            // Any future variant added to ExitCode should get an explicit arm above;
-            // falling through here is a bug signal, not a stable contract.
-            _ => Self::Internal,
-        }
-    }
-}
 
 /// Error-branch JSON envelope.
 ///
@@ -173,6 +110,23 @@ impl<'a, T: Serialize> SuccessEnvelope<'a, T> {
             schema_version: ENVELOPE_SCHEMA_VERSION,
             command,
             exit_code: 0,
+            data,
+        }
+    }
+
+    /// Wrap `data` in an envelope reporting `exit_code`.
+    ///
+    /// For the one shape a plain success envelope cannot describe: a command
+    /// that produced a report **and** is about to exit non-zero, because part
+    /// of its work landed and part did not (`ocx package sign
+    /// --signature-format both`). The report is that run's only stdout
+    /// document, so hard-coding 0 here would put a `"exit_code":0` in front of
+    /// a consumer whose `$?` says 75.
+    pub fn with_exit_code(command: &'a str, data: &'a T, exit_code: ExitCode) -> Self {
+        Self {
+            schema_version: ENVELOPE_SCHEMA_VERSION,
+            command,
+            exit_code: exit_code as u8,
             data,
         }
     }
@@ -298,10 +252,27 @@ fn collect_detail(err: &(dyn std::error::Error + 'static)) -> Option<&'static st
 ///
 /// Success envelopes hard-code `exit_code = 0` — any command that wants to
 /// exit with a non-zero "success-ish" code (e.g. "nothing to do" for an idle
-/// operation) should return that code directly through [`ExitCode`] rather
+/// operation) should return that code directly through
+/// [`ExitCode`](ocx_lib::cli::ExitCode) rather
 /// than layering a success envelope on top.
 pub fn render_success_envelope<T: Serialize>(command: &str, data: &T) -> anyhow::Result<String> {
     let envelope = SuccessEnvelope::new(command, data);
+    Ok(serde_json::to_string(&envelope)?)
+}
+
+/// Render the same envelope, reporting `exit_code` instead of assuming 0.
+///
+/// See [`SuccessEnvelope::with_exit_code`] for the one case that needs it.
+///
+/// # Errors
+///
+/// Propagates a [`serde_json`] serialization failure.
+pub fn render_envelope_with_exit_code<T: Serialize>(
+    command: &str,
+    data: &T,
+    exit_code: ExitCode,
+) -> anyhow::Result<String> {
+    let envelope = SuccessEnvelope::with_exit_code(command, data, exit_code);
     Ok(serde_json::to_string(&envelope)?)
 }
 
@@ -321,33 +292,6 @@ mod tests {
         // `transparency_log_unavailable` moved an enumerated value consumers
         // match on, which this module's own bump rule calls a shape change.
         assert_eq!(ENVELOPE_SCHEMA_VERSION, 1);
-    }
-
-    #[test]
-    fn error_category_serializes_snake_case() {
-        // Every frozen variant must serialize to the snake_case form documented
-        // in the ADR error_kind inventory.
-        let cases = [
-            (ErrorCategory::UsageError, "\"usage_error\""),
-            (ErrorCategory::ConfigError, "\"config_error\""),
-            (ErrorCategory::DataError, "\"data_error\""),
-            (ErrorCategory::AuthError, "\"auth_error\""),
-            (ErrorCategory::PermissionDenied, "\"permission_denied\""),
-            (ErrorCategory::NotFound, "\"not_found\""),
-            (ErrorCategory::Unavailable, "\"unavailable\""),
-            (ErrorCategory::TempFail, "\"temp_fail\""),
-            (
-                ErrorCategory::TransparencyLogUnavailable,
-                "\"transparency_log_unavailable\"",
-            ),
-            (ErrorCategory::ReferrersUnsupported, "\"referrers_unsupported\""),
-            (ErrorCategory::IoError, "\"io_error\""),
-            (ErrorCategory::Internal, "\"internal\""),
-        ];
-        for (variant, expected) in cases {
-            let actual = serde_json::to_string(&variant).unwrap();
-            assert_eq!(actual, expected, "variant {variant:?} serialization mismatch");
-        }
     }
 
     #[test]
@@ -570,6 +514,53 @@ mod tests {
     }
 
     #[test]
+    fn render_error_envelope_classifies_sign_unsupported_key_backend() {
+        // The last link of the exit-85 chain, which the library-side test
+        // cannot reach: `render_error_envelope` is what a `--format json`
+        // consumer actually reads, and it derives `error.kind` through
+        // `classify_error` -> `ErrorCategory::from_exit_code`.
+        //
+        // Both assertions are load-bearing, and the second is the one that
+        // discriminates: map the 85 arm to `ErrorCategory::Internal` and the
+        // envelope still says `"exit_code": 85` while `error.kind` silently
+        // becomes `"internal"`. A code-only assertion passes through exactly
+        // the failure the dedicated category exists to prevent.
+        let id = ocx_lib::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let rejected = ocx_lib::oci::sign::KeyRef::parse("awskms://alias/release")
+            .expect_err("awskms is recognised but unimplemented");
+        let inner = ocx_lib::oci::sign::SignError::new(id, ocx_lib::oci::sign::SignErrorKind::from(rejected));
+        let err = anyhow::Error::from(inner);
+        let json = render_error_envelope("package sign", &err).expect("render ok");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed["exit_code"], 85);
+        assert_eq!(
+            parsed["error"]["kind"], "unsupported_key_backend",
+            "the envelope must name the dedicated category, never `internal`: {json}"
+        );
+        assert_eq!(parsed["error"]["detail"], "unsupported_key_backend");
+    }
+
+    #[test]
+    fn render_error_envelope_classifies_verify_unsupported_key_backend() {
+        // Verify parses `--key` on its own path, so the same reference must
+        // reach the same envelope through `VerifyErrorKind`. One vocabulary,
+        // two taxonomies: a script reads one word for one failure.
+        let id = ocx_lib::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
+        let rejected = ocx_lib::oci::sign::KeyRef::parse("awskms://alias/release")
+            .expect_err("awskms is recognised but unimplemented");
+        let inner = ocx_lib::oci::verify::VerifyError::new(id, ocx_lib::oci::verify::VerifyErrorKind::from(rejected));
+        let err = anyhow::Error::from(inner);
+        let json = render_error_envelope("package verify", &err).expect("render ok");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed["exit_code"], 85);
+        assert_eq!(
+            parsed["error"]["kind"], "unsupported_key_backend",
+            "the envelope must name the dedicated category, never `internal`: {json}"
+        );
+        assert_eq!(parsed["error"]["detail"], "unsupported_key_backend");
+    }
+
+    #[test]
     fn envelope_detail_populated_for_offline_sign_refused() {
         // C-S1-1 frozen contract: `envelope.error.detail` carries the snake_case
         // discriminant of the inner `SignErrorKind`. Previously hard-coded to
@@ -597,56 +588,6 @@ mod tests {
         assert_eq!(parsed["exit_code"], 77);
         assert_eq!(parsed["error"]["kind"], "permission_denied");
         assert_eq!(parsed["error"]["detail"], "identity_mismatch");
-    }
-
-    #[test]
-    fn error_category_total_over_exit_codes() {
-        // Not a spot-check: `from_exit_code` cannot be exhaustive (`ExitCode` is
-        // `#[non_exhaustive]` and cross-crate), so a deleted arm compiles clean,
-        // passes clippy, and silently downgrades a real code to `internal`. This
-        // table is the whole guard, so it carries every `ExitCode`.
-        //
-        // Two rows cannot discriminate and are listed for completeness only:
-        // `Success` and `Failure` map to `Internal` deliberately, which is also
-        // where the wildcard lands. Every other row reds if its arm goes missing.
-        let cases = [
-            (ExitCode::Success, ErrorCategory::Internal),
-            (ExitCode::Failure, ErrorCategory::Internal),
-            (ExitCode::UsageError, ErrorCategory::UsageError),
-            (ExitCode::DataError, ErrorCategory::DataError),
-            (ExitCode::Unavailable, ErrorCategory::Unavailable),
-            (ExitCode::IoError, ErrorCategory::IoError),
-            (ExitCode::TempFail, ErrorCategory::TempFail),
-            (ExitCode::PermissionDenied, ErrorCategory::PermissionDenied),
-            (ExitCode::ConfigError, ErrorCategory::ConfigError),
-            (ExitCode::NotFound, ErrorCategory::NotFound),
-            (ExitCode::AuthError, ErrorCategory::AuthError),
-            (ExitCode::PolicyBlocked, ErrorCategory::PermissionDenied),
-            (ExitCode::DirtyRcBlock, ErrorCategory::PermissionDenied),
-            (
-                ExitCode::TransparencyLogUnavailable,
-                ErrorCategory::TransparencyLogUnavailable,
-            ),
-            (ExitCode::ReferrersUnsupported, ErrorCategory::ReferrersUnsupported),
-        ];
-        // What this count pins, exactly: a row deleted from the table above.
-        // It cannot force a row for a *new* `ExitCode` variant -- `cases` is an
-        // array literal, so `len()` is a compile-time constant and an author
-        // adding a variant can bump both sides together. The per-row assertions
-        // below are the real guard for the rows that exist.
-        assert_eq!(
-            cases.len(),
-            15,
-            "a row was removed from the table above; restore it rather than lowering this count"
-        );
-        for (code, expected) in cases {
-            assert_eq!(
-                ErrorCategory::from_exit_code(code),
-                expected,
-                "exit code {} lost its arm in from_exit_code",
-                code as u8,
-            );
-        }
     }
 
     #[test]

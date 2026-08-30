@@ -1,0 +1,1 @@
+{"critical":{"identity":{"docker-reference":"localhost:5000/golden/simplesigning-keyless"},"image":{"docker-manifest-digest":"sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe"},"type":"cosign container image attestation"},"optional":null}

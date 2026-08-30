@@ -139,7 +139,7 @@ impl Printable for PackageCascadeCheck {
         data.print_table(&headers[first..], &columns[first..]);
 
         // `check` never writes, so index staleness it found is always the
-        // announce hop's to fix - the repair-side `--tags-from-file` form has
+        // announce hop's to fix - the repair-side `--tags-file` form has
         // no file to name here. The local copy is a second hop after that:
         // announcing publishes the index, it does not sync this machine's.
         for report in &self.reports {

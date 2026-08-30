@@ -4,8 +4,11 @@
 
 `adr_oci_index_only_dispatch.md` D7: a reserved tag is not a version. Two
 families are reserved — the `__ocx` namespace (prefix-based and
-case-insensitive, so `__ocx`, `__ocxfoo` and `__OCX.desc` all match) and the
-digest-alias form `<algorithm>.<hex>` — and the rule is one implementation,
+case-insensitive, so `__ocx`, `__ocxfoo`, `__OCX.desc` and the keep tag
+`__ocx.keep.<algorithm>-<hex>` all match) and the frozen legacy keep-tag form
+`<algorithm>.<hex>` — plus the OCI referrers tag-schema fallback index
+`<algorithm>-<encoded truncated to 64>` and the cosign `.sig` / `.att` /
+`.sbom` sidecars parked beside it. The rule is one implementation,
 `Tag::is_reserved` (`crates/ocx_lib/src/package/tag.rs`).
 
 Two surfaces enforce it, and they fail differently, so both live here rather
@@ -17,14 +20,14 @@ than beside their command:
   collapse in `announce::pipeline::resolve_curated_tags`, so it must hold for
   every one of the three curation sources — `--tags`, `--refresh` and a tags
   file. Filtering only `--tags` is the exact three-sources failure D7 exists
-  to prevent: `--refresh` and `--tags-from-file` start from the committed root, so
+  to prevent: `--refresh` and `--tags-file` start from the committed root, so
   neither can introduce a reserved tag but either would re-announce one
   forever once it landed.
 - **`ocx index list`** OMITS them from every listing. There are three filter
   sites — `Index::list_tags` (`oci/index.rs`), `LocalIndex::list_tags`
   (`oci/index/local_index.rs`) and `OciIndex::list_tags`
-  (`oci/index/oci_index.rs`) — and the third is the one a canonical
-  `sha256.<hex>` tag actually enters a derived index through.
+  (`oci/index/oci_index.rs`) — and the third is the one a keep tag actually
+  enters a derived index through.
 """
 from __future__ import annotations
 
@@ -47,13 +50,33 @@ from src.helpers import make_package
 from src.registry import fetch_manifest_raw, fetch_platform_manifest_digest
 from src.runner import OcxRunner
 
-# The five reserved forms the rule has to cover, spelled out rather than
-# generated: `__ocx.desc` (a real internal tag), `__ocx` (the bare namespace,
-# no separator), `__ocxfoo` (no separator, arbitrary suffix), `__OCX.desc`
-# (case-insensitive) and a `sha256.<64 hex>` digest alias. A prefix check of
-# `"__ocx."` misses three of them; `Tag::from` alone misses the last.
-_DIGEST_ALIAS = "sha256." + "a" * 64
-RESERVED_FORMS = ["__ocx.desc", "__ocx", "__ocxfoo", "__OCX.desc", _DIGEST_ALIAS]
+# The reserved forms the rule has to cover, spelled out rather than generated:
+# `__ocx.desc` (a real internal tag), `__ocx` (the bare namespace, no
+# separator), `__ocxfoo` (no separator, arbitrary suffix), `__OCX.desc`
+# (case-insensitive), a keep tag (the form `ocx package push` writes) and the
+# frozen legacy keep-tag form OCX no longer writes but published repositories
+# still carry. A prefix check of `"__ocx."` misses three of them; `Tag::from`
+# alone misses the last.
+_LEGACY_KEEP = "sha256." + "a" * 64
+_KEEP = "__ocx.keep.sha256-" + "a" * 64
+# The OCI referrers tag-schema fallback index, and the cosign sidecar suffixes
+# parked beside it. The encoded section is truncated to 64 characters for EVERY
+# algorithm, so the sha512 form below is the tag a registry actually uses — the
+# untruncated spelling is not a tag anything writes.
+_FALLBACK = "sha256-" + "a" * 64
+_FALLBACK_SHA512 = "sha512-" + "a" * 64
+_SIDECAR_SBOM = "sha256-" + "a" * 64 + ".sbom"
+RESERVED_FORMS = [
+    "__ocx.desc",
+    "__ocx",
+    "__ocxfoo",
+    "__OCX.desc",
+    _KEEP,
+    _LEGACY_KEEP,
+    _FALLBACK,
+    _FALLBACK_SHA512,
+    _SIDECAR_SBOM,
+]
 
 
 def _seed_root_with_tags(fake_forge: FakeForge, package: str, physical: str, tags: dict[str, dict]) -> None:
@@ -133,7 +156,7 @@ def test_announce_refresh_drops_a_reserved_tag_already_in_the_committed_root(
         fake_forge,
         package,
         physical,
-        {"1.2.3": _committed_entry(), "__ocx.desc": _committed_entry(), _DIGEST_ALIAS: _committed_entry()},
+        {"1.2.3": _committed_entry(), "__ocx.desc": _committed_entry(), _LEGACY_KEEP: _committed_entry()},
     )
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
 
@@ -141,7 +164,7 @@ def test_announce_refresh_drops_a_reserved_tag_already_in_the_committed_root(
         ocx, fake_forge, "--package", package, "--refresh", "--out", str(tmp_path / "out")
     )
 
-    assert sorted(report["reserved_tags_dropped"]) == sorted(["__ocx.desc", _DIGEST_ALIAS])
+    assert sorted(report["reserved_tags_dropped"]) == sorted(["__ocx.desc", _LEGACY_KEEP])
     root = json.loads((tmp_path / "out" / "p" / f"{package}.json").read_bytes())
     assert list(root["tags"]) == ["1.2.3"], (
         f"a refresh must drop the committed reserved entries, got {list(root['tags'])}"
@@ -151,8 +174,8 @@ def test_announce_refresh_drops_a_reserved_tag_already_in_the_committed_root(
 def test_announce_tags_file_drops_a_reserved_tag_from_the_file(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    """Source 3 of 3 — a tags file (`--tags-from-file`, the file
-    `ocx package push --announce-file` writes). The union is committed ∪ file;
+    """Source 3 of 3 — a tags file (`--tags-file`, the file
+    `ocx package push --tags-file` writes). The union is committed ∪ file;
     the drop applies to the union, so a reserved name is filtered whichever
     side it entered from.
     """
@@ -166,13 +189,13 @@ def test_announce_tags_file_drops_a_reserved_tag_from_the_file(
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
 
     tags_file = tmp_path / "announce-tags.txt"
-    tags_file.write_text(f"2.0.0,{_DIGEST_ALIAS}")
+    tags_file.write_text(f"2.0.0,{_LEGACY_KEEP}")
 
     report = announce_json(
-        ocx, fake_forge, "--package", package, "--tags-from-file", str(tags_file), "--out", str(tmp_path / "out")
+        ocx, fake_forge, "--package", package, "--tags-file", str(tags_file), "--out", str(tmp_path / "out")
     )
 
-    assert sorted(report["reserved_tags_dropped"]) == sorted(["__ocxfoo", _DIGEST_ALIAS]), (
+    assert sorted(report["reserved_tags_dropped"]) == sorted(["__ocxfoo", _LEGACY_KEEP]), (
         "a reserved name must be dropped whether it came from the committed root or the file"
     )
     root = json.loads((tmp_path / "out" / "p" / f"{package}.json").read_bytes())
@@ -253,8 +276,8 @@ def test_index_list_omits_every_reserved_form_local_and_remote(
     LOCAL index (`Index::list_tags` over `LocalIndex::list_tags`) and from a
     `--remote` read (`Index::list_tags` over `OciIndex::list_tags`).
 
-    `OciIndex::list_tags` is the load-bearing one: it is where a canonical
-    `sha256.<hex>` tag actually enters a derived index, and it seeds the tag
+    `OciIndex::list_tags` is the load-bearing one: it is where a keep tag
+    actually enters a derived index, and it seeds the tag
     cache — a missed filter there poisons the cache rather than merely
     printing an extra line.
 
@@ -264,13 +287,13 @@ def test_index_list_omits_every_reserved_form_local_and_remote(
     pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     _publish_reserved_tags(ocx, pkg.repo, "1.0.0")
 
-    # The canonical tag `ocx package push` writes by default is itself a
-    # reserved form and is genuinely on the registry — assert it is there so
-    # the omission below is about a tag that exists.
+    # The keep tag `ocx package push` writes by default is itself a reserved
+    # form and is genuinely on the registry — assert it is there so the
+    # omission below is about a tag that exists.
     leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, "1.0.0")
-    canonical_tag = leaf_digest.replace(":", ".")
+    keep_tag = "__ocx.keep." + leaf_digest.replace(":", "-")
     published = requests.get(f"http://{ocx.registry}/v2/{pkg.repo}/tags/list", timeout=10).json()["tags"]
-    for form in [*RESERVED_FORMS, canonical_tag]:
+    for form in [*RESERVED_FORMS, keep_tag]:
         assert form in published, f"precondition: {form} must be published, got {published}"
 
     remote = ocx.plain("--remote", "index", "list", pkg.repo)
@@ -279,8 +302,64 @@ def test_index_list_omits_every_reserved_form_local_and_remote(
 
     for listing, label in ((remote.stdout, "--remote index list"), (local.stdout, "index list")):
         assert "1.0.0" in listing, f"{label} must list the real version — otherwise this proves nothing"
-        for form in [*RESERVED_FORMS, canonical_tag]:
+        for form in [*RESERVED_FORMS, keep_tag]:
             assert form not in listing, f"{label} must omit the reserved tag {form}; got:\n{listing}"
         # `__OCX.desc` differs from `__ocx.desc` only by case; assert the
         # case-insensitive family is gone wholesale rather than form by form.
         assert "__ocx" not in listing.lower(), f"{label} must omit the whole __ocx namespace; got:\n{listing}"
+
+
+def test_index_list_omits_the_keep_tag(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> None:
+    """Arm 1 of 2 — the form `ocx package push` writes today.
+
+    `__ocx.keep.<algorithm>-<hex>` is reserved by the `__ocx` namespace, so
+    this test reds when that namespace check breaks and stays green when the
+    frozen legacy arm does. Deliberately separate from
+    `test_index_list_omits_the_legacy_keep_tag`: the two arms are defended by
+    different guards, and one test covering both could not tell them apart.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+
+    leaf_digest = fetch_platform_manifest_digest(ocx.registry, pkg.repo, "1.0.0")
+    keep_tag = "__ocx.keep." + leaf_digest.replace(":", "-")
+    published = requests.get(f"http://{ocx.registry}/v2/{pkg.repo}/tags/list", timeout=10).json()["tags"]
+    assert keep_tag in published, f"precondition: push must write {keep_tag}, got {published}"
+
+    remote = ocx.plain("--remote", "index", "list", pkg.repo)
+    ocx.plain("index", "update", pkg.repo)
+    local = ocx.plain("index", "list", pkg.repo)
+
+    for listing, label in ((remote.stdout, "--remote index list"), (local.stdout, "index list")):
+        assert "1.0.0" in listing, f"{label} must list the real version — otherwise this proves nothing"
+        assert keep_tag not in listing, f"{label} must omit the keep tag {keep_tag}; got:\n{listing}"
+
+
+def test_index_list_omits_the_legacy_keep_tag(ocx: OcxRunner, unique_repo: str, tmp_path: Path) -> None:
+    """Arm 2 of 2 — the frozen legacy `<algorithm>.<hex>` form.
+
+    OCX never writes it any more, so the tag is published straight through the
+    registry API. It is reserved by `Tag::LegacyKeep`, not by the `__ocx`
+    namespace, so this test reds when that arm breaks and stays green when the
+    namespace check does.
+    """
+    pkg = make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+
+    body, _digest = fetch_manifest_raw(ocx.registry, pkg.repo, "1.0.0")
+    requests.put(
+        f"http://{ocx.registry}/v2/{pkg.repo}/manifests/{_LEGACY_KEEP}",
+        data=body,
+        headers={"Content-Type": "application/vnd.oci.image.index.v1+json"},
+        timeout=10,
+    ).raise_for_status()
+    published = requests.get(f"http://{ocx.registry}/v2/{pkg.repo}/tags/list", timeout=10).json()["tags"]
+    assert _LEGACY_KEEP in published, f"precondition: {_LEGACY_KEEP} must be published, got {published}"
+
+    remote = ocx.plain("--remote", "index", "list", pkg.repo)
+    ocx.plain("index", "update", pkg.repo)
+    local = ocx.plain("index", "list", pkg.repo)
+
+    for listing, label in ((remote.stdout, "--remote index list"), (local.stdout, "index list")):
+        assert "1.0.0" in listing, f"{label} must list the real version — otherwise this proves nothing"
+        assert _LEGACY_KEEP not in listing, (
+            f"{label} must omit the legacy keep tag {_LEGACY_KEEP}; got:\n{listing}"
+        )

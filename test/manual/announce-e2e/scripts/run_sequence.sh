@@ -274,11 +274,11 @@ assert_bytes_identical() {
 }
 
 # (g2) E2a, D7: no reserved tag class reaches the index. Free — the pilot
-# repository genuinely carries both classes, since push_canonical_tag is
+# repository genuinely carries both classes, since push_keep_tag is
 # default-on and the publisher's `Describe package` step writes __ocx.desc.
 #
 # This does NOT prove the filter fired. The publisher announces via
-# --announce-file, which under D7 never carries a canonical tag, so a clean
+# --tags-file, which under D7 never carries a keep tag, so a clean
 # root is consistent with no filter at all. E2a is a regression tripwire; E2b
 # and the local acceptance cases are the proof. README.md says the same.
 assert_no_reserved_tags() {
@@ -299,7 +299,7 @@ assert_no_reserved_tags() {
             ocx_fail "the served root carries reserved internal tag $tag — D7: announce drops __ocx*, case-insensitively"
         fi
         if [[ $tag =~ ^sha256\.[0-9a-f]{64}$ ]]; then
-            ocx_fail "the served root carries canonical digest-alias tag $tag — D7: announce drops sha256.<hex>"
+            ocx_fail "the served root carries legacy keep tag $tag — D7: announce drops sha256.<hex>"
         fi
     done
     ocx_done "(g2) no reserved tag class reached the root over ${#tags[@]} tags (D7)"

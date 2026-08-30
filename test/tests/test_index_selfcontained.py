@@ -8,8 +8,8 @@ Covers:
    isolate from content install (ADR DR1).
 2. Dispatch-only writes: a multi-platform tag persists exactly one dispatch
    object (the image index itself, byte-identical to the registry); a
-   single-platform tag (a bare Image manifest, e.g. a canonical
-   `sha256.<hex>` tag) persists zero.
+   single-platform tag (a bare Image manifest, e.g. an
+   `__ocx.keep.<algorithm>-<hex>` tag) persists zero.
 3. Every persisted `o/<algo>/<hex>.json` object satisfies
    `sha256(bytes) == <hex>` (the `.json`-suffixed filename strips to the
    hex digest).
@@ -149,8 +149,8 @@ def test_dispatch_object_count_multi_platform_one_single_platform_zero(
 
     Every OCX-published tag is an image index by construction
     (`Client::push_manifest_and_merge_tags`), so the "single-platform tag"
-    case is realized by the registry-side-deletion-safety-net canonical
-    `sha256.<hex>` tag (`Client::push_canonical_tag`), which points DIRECTLY
+    case is realized by the registry-side-deletion-safety-net keep tag
+    (`Client::push_keep_tag`), which points DIRECTLY
     at the bare platform manifest — a real, product-reachable single-platform
     tag shape, not a synthetic one.
 
@@ -179,14 +179,14 @@ def test_dispatch_object_count_multi_platform_one_single_platform_zero(
         "the persisted object is the registry's index digest and content"
     )
 
-    # Single-platform (canonical `sha256.<hex>`) tag: zero dispatch objects,
-    # and no root entry either.
+    # Single-platform (`__ocx.keep.<algorithm>-<hex>`) tag: zero dispatch
+    # objects, and no root entry either.
     algo, leaf_hex = leaf_digest.split(":", 1)
-    canonical_tag = f"{algo}.{leaf_hex}"
+    keep_tag = f"__ocx.keep.{algo}-{leaf_hex}"
     index_dir2 = tmp_path / "index_dir_single"
     index_dir2.mkdir()
     refused = ocx.plain(
-        "--index", str(index_dir2), "index", "update", f"{pkg.repo}:{canonical_tag}", check=False
+        "--index", str(index_dir2), "index", "update", f"{pkg.repo}:{keep_tag}", check=False
     )
 
     assert refused.returncode == 79, (

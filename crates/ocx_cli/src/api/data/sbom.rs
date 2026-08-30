@@ -112,10 +112,40 @@ pub struct SbomEntry {
     /// the registry served bytes and said what they are. The three fields
     /// below are then absent rather than empty.
     pub verified: bool,
+    /// `true` when a platform-level SBOM of the **same predicateType**
+    /// supersedes this index-level one. A shadowed entry stays listed under
+    /// `--format json`; only the human default collapses to the preferred one.
+    ///
+    /// Emitted unconditionally, unlike the optional fields below and unlike
+    /// `VerificationReport::signatures`: `false` is a *true* statement here —
+    /// nothing supersedes this document — where an omitted-while-empty array
+    /// would be a claim that we had looked. A consumer can therefore branch on
+    /// the key without first testing for its presence.
+    pub shadowed: bool,
     /// The target digest. Proven bound by the signed Statement when
     /// [`Self::verified`]; claimed by the referrer otherwise.
     pub subject_digest: String,
-    /// Digest of the OCI referrer manifest carrying the document.
+    /// What carried the document — and **not always a manifest**. Almost
+    /// always the OCI referrer manifest's digest; the **layer** blob's digest
+    /// in exactly one case, a verified attestation read off a cosign
+    /// `sha256-<hex>.att` sidecar tag, where one layer is one document and the
+    /// manifest digest would name all of them at once. A consumer that
+    /// addresses it as `GET /v2/<name>/manifests/<digest>` therefore 404s on
+    /// that case.
+    ///
+    /// Narrower than the verify side's rule, and for a structural reason: an
+    /// SBOM scan runs under `VerifyContentMode::Attestation`, which leaves
+    /// `discover_simplesigning` false, so the `.sig` sidecar door — the one
+    /// that reports a layer digest while claiming `referrers_api`, because it
+    /// inherits the *listing's* discovery method — is never opened here. The
+    /// only layer digest reachable is the `.att` reader's, and that door is
+    /// tag-addressed by construction.
+    ///
+    /// This row carries neither `signature_format` nor `discovery_method`, so
+    /// there is nothing here to branch on: a consumer that must address the
+    /// digest reads the same subject through
+    /// `ocx package verify --attestation --format json`, whose `signatures[]`
+    /// rows carry the discriminator.
     pub referrer_digest: String,
     /// Certificate SAN (identity) embedded in the Fulcio cert.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -229,14 +259,25 @@ impl SbomListingReport {
     /// per field has to be re-argued for every field added later, and the
     /// neutralization is identity on hex, on an ISO-8601 stamp and on an
     /// ordinary URI — pinned by `ordinary_values_pass_through_verbatim`.
-    fn plain_rows(&self) -> [Vec<String>; 3] {
+    fn plain_rows(&self) -> [Vec<String>; 4] {
         let mut kind = Vec::new();
         let mut subject = Vec::new();
+        let mut referrer = Vec::new();
         let mut detail = Vec::new();
 
-        for entry in &self.entries {
+        // C-011: the human-readable default is the one rendering that collapses.
+        // A shadowed document is superseded, not absent — `--format json` still
+        // carries it, marked — so an operator reading a table gets the document
+        // that wins and a script still gets the whole picture.
+        //
+        // The rows arrive already grouped by subject (the scan reads one subject
+        // to completion before the next), which is what makes the short subject
+        // digest a legend rather than a column to sort by: adjacent rows sharing
+        // one value say "these describe the same object" at a glance.
+        for entry in self.entries.iter().filter(|entry| !entry.shadowed) {
             kind.push(sanitize_for_terminal(&entry.predicate_type));
-            subject.push(sanitize_for_terminal(&entry.referrer_digest));
+            subject.push(sanitize_for_terminal(&short_digest(&entry.subject_digest)));
+            referrer.push(sanitize_for_terminal(&entry.referrer_digest));
             detail.push(sanitize_for_terminal(&entry.describe_plain()));
         }
 
@@ -246,17 +287,28 @@ impl SbomListingReport {
         // keeps every one.
         for refusal in self.refused.iter().take(MAX_PLAIN_REFUSALS) {
             kind.push("refused".to_string());
-            subject.push(sanitize_for_terminal(&refusal.referrer_digest));
+            subject.push(String::new());
+            referrer.push(sanitize_for_terminal(&refusal.referrer_digest));
             detail.push(sanitize_for_terminal(&refusal.reason));
         }
         if let Some(hidden) = self.refused.len().checked_sub(MAX_PLAIN_REFUSALS).filter(|n| *n > 0) {
             kind.push(String::new());
             subject.push(String::new());
+            referrer.push(String::new());
             detail.push(format!("... and {hidden} more (see --json)"));
         }
 
-        [kind, subject, detail]
+        [kind, subject, referrer, detail]
     }
+}
+
+/// A wire digest string in its canonical short form (`sha256:` + 12 hex).
+///
+/// Short because the plain-format budget allows a full 71-column digest at most
+/// once per view, and `Referrer` already spends it. Falls back to the verbatim
+/// string when the value does not parse — the row still has to render.
+fn short_digest(digest: &str) -> String {
+    ocx_lib::oci::Digest::try_from(digest).map_or_else(|_| digest.to_string(), |parsed| parsed.to_short_string())
 }
 
 impl SbomEntry {
@@ -302,7 +354,7 @@ impl SbomEntry {
 
 impl Printable for SbomListingReport {
     fn print_plain(&self, data: &ocx_lib::cli::DataInterface) {
-        let columns: [Column; 3] = ["Type".into(), "Referrer".into(), "Detail".into()];
+        let columns: [Column; 4] = ["Type".into(), "Subject".into(), "Referrer".into(), "Detail".into()];
         let rows = self
             .plain_rows()
             .map(|column| column.into_iter().map(Cell::from).collect::<Vec<_>>());
@@ -329,6 +381,7 @@ mod tests {
         SbomEntry {
             predicate_type: "https://cyclonedx.org/bom".into(),
             verified: true,
+            shadowed: false,
             subject_digest: "sha256:aaaa".into(),
             referrer_digest: "sha256:bbbb".into(),
             certificate_identity: Some(identity.into()),
@@ -343,6 +396,7 @@ mod tests {
         SbomEntry {
             predicate_type: "https://cyclonedx.org/bom".into(),
             verified: false,
+            shadowed: false,
             subject_digest: "sha256:aaaa".into(),
             referrer_digest: referrer_digest.into(),
             certificate_identity: None,
@@ -377,7 +431,7 @@ mod tests {
             "the two counts must partition the entries, not overlap or leak",
         );
 
-        let [_, _, detail] = report.plain_rows();
+        let [_, _, _, detail] = report.plain_rows();
         assert!(
             detail[0].contains("signer@example.com"),
             "the verified row still names its signer: {detail:?}"
@@ -403,6 +457,110 @@ mod tests {
         assert_eq!(signed["verified"], true);
         assert_eq!(signed["certificate_identity"], "signer@example.com");
         assert_eq!(signed["signed_at"], "2026-08-19T10:00:00Z");
+    }
+
+    /// T-20. `shadowed` is emitted on **every** entry, verified or not.
+    ///
+    /// The mirror image of `VerificationReport`'s `signatures`, and
+    /// deliberately so: an always-`false` boolean is a true statement (nothing
+    /// supersedes this document), whereas an always-empty array would claim a
+    /// search that never ran. A `skip_serializing_if` added here reds this.
+    ///
+    /// The second half pins that the key tracks the field rather than being a
+    /// constant, so a predicate that merely happened to answer "keep" for
+    /// `false` cannot pass.
+    #[test]
+    fn sbom_entry_json_shape_always_carries_shadowed() {
+        for entry in [entry("you@example.com"), unverified_entry("sha256:cccc")] {
+            let verified = entry.verified;
+            let json = serde_json::to_value(entry).expect("serialize");
+            let object = json.as_object().expect("entry serializes as an object");
+            assert!(
+                object.contains_key("shadowed"),
+                "`shadowed` must be present on every entry (verified={verified}): {json}"
+            );
+            assert_eq!(json["shadowed"], false);
+        }
+
+        let shadowed = SbomEntry {
+            shadowed: true,
+            ..entry("you@example.com")
+        };
+        let json = serde_json::to_value(shadowed).expect("serialize");
+        assert_eq!(json["shadowed"], true, "the key must track the field: {json}");
+    }
+
+    /// **C-011 rule 2.** A shadowed document stays in `--format json`, marked;
+    /// only the human-readable default collapses to the preferred one.
+    ///
+    /// The two halves are one test on purpose: dropping a shadowed entry from
+    /// the report — instead of marking it — would satisfy the plain half alone,
+    /// and a renderer that ignored `shadowed` would satisfy the JSON half alone.
+    #[test]
+    fn a_shadowed_document_leaves_the_table_and_stays_in_json() {
+        let superseded = SbomEntry {
+            shadowed: true,
+            referrer_digest: "sha256:dddd".into(),
+            ..entry("you@example.com")
+        };
+        let report = SbomListingReport::new(
+            ListingVerification::Verified,
+            vec![entry("you@example.com"), superseded],
+            Vec::new(),
+        );
+
+        let json = crate::error_envelope::render_success_envelope("package sbom", &report).expect("render");
+        assert!(
+            json.contains("sha256:dddd"),
+            "a consumer that asked for machine output gets the full picture: {json}"
+        );
+        assert!(
+            json.contains(r#""referrer_digest":"sha256:dddd","certificate_identity""#)
+                || json.contains(r#""shadowed":true"#),
+            "the superseded entry must be marked, not silently identical to the preferred one: {json}"
+        );
+
+        let out = rendered(&report);
+        assert!(
+            !out.contains("sha256:dddd"),
+            "the human default collapses to the preferred document: {out:?}"
+        );
+        assert!(
+            out.contains("sha256:bbbb"),
+            "positive control — the preferred document still renders, so the assertion above \
+             cannot pass on an empty table: {out:?}"
+        );
+        assert_eq!(
+            (report.summary.total, report.summary.verified),
+            (2, 2),
+            "shadowing is a rendering decision; both documents were still found",
+        );
+    }
+
+    /// **C-011 rule 3.** With no platform selected the listing spans whatever
+    /// subjects were read, so each row names its own — short, because the
+    /// plain-format budget already spends its one full digest on `Referrer`.
+    #[test]
+    fn the_plain_table_names_each_rows_subject_in_short_form() {
+        let subject = format!("sha256:{}", "ab".repeat(32));
+        let report = SbomListingReport::new(
+            ListingVerification::Verified,
+            vec![SbomEntry {
+                subject_digest: subject.clone(),
+                ..entry("you@example.com")
+            }],
+            Vec::new(),
+        );
+        let [_, rendered_subject, ..] = report.plain_rows();
+        assert_eq!(
+            rendered_subject,
+            vec!["sha256:abababababab".to_string()],
+            "the subject column carries the short form, not the 71-column one",
+        );
+        assert_ne!(
+            rendered_subject[0], subject,
+            "the full digest is 71 columns and `Referrer` already spends the one this view allows",
+        );
     }
 
     fn refusal(digest: &str, reason: &str) -> RefusedEntry {
@@ -469,7 +627,7 @@ mod tests {
             concat!(
                 r#"{"schema_version":1,"command":"package sbom","exit_code":0,"data":{"#,
                 r#""summary":{"status":"partial_failure","verification":"verified","exit_code":0,"total":2,"verified":1,"unverified":0,"refused":1},"#,
-                r#""entries":[{"predicate_type":"https://cyclonedx.org/bom","verified":true,"subject_digest":"sha256:aaaa","#,
+                r#""entries":[{"predicate_type":"https://cyclonedx.org/bom","verified":true,"shadowed":false,"subject_digest":"sha256:aaaa","#,
                 r#""referrer_digest":"sha256:bbbb","certificate_identity":"you@example.com","#,
                 r#""certificate_oidc_issuer":"https://token.actions.githubusercontent.com","#,
                 r#""signed_at":"2026-08-19T10:00:00Z"}],"#,
@@ -619,13 +777,14 @@ mod tests {
     /// which no behavioural assertion above catches for a field added later.
     ///
     /// Not a count: the count form is satisfiable by two sanitizer calls on one
-    /// column paying for a third column with none. These are the three columns
+    /// column paying for a third column with none. These are the four columns
     /// `plain_rows` builds, named individually.
     #[test]
     fn every_plain_column_is_neutralized() {
         let body = module_code();
         for call in [
             "sanitize_for_terminal(&entry.predicate_type)",
+            "sanitize_for_terminal(&short_digest(&entry.subject_digest))",
             "sanitize_for_terminal(&entry.referrer_digest)",
             "sanitize_for_terminal(&entry.describe_plain())",
             "sanitize_for_terminal(&refusal.referrer_digest)",

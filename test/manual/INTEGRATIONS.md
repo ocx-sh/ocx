@@ -588,8 +588,8 @@ ocx config push -i localhost:5000/corp/ocx-config:1.0.0 site-config.toml
 ```
 
 ```
-Identifier                            Digest                             Tags  Canonical Tags  Layers
-localhost:5000/corp/ocx-config:1.0.0  sha256:aa4e4c5c1691ab…                    0               mounted=0,uploaded=1,verified=0
+Identifier                            Digest                             Tags  Keep Tags  Layers
+localhost:5000/corp/ocx-config:1.0.0  sha256:aa4e4c5c1691ab…                    0          mounted=0,uploaded=1,verified=0
 ```
 
 With the local `config.toml` stripped to a bare comment — no `[patches]`, no

@@ -276,18 +276,16 @@ def test_j8_json_key_sets_are_stable(ocx: OcxRunner, published_package: PackageI
     assert set(repair_payload["entries"][0].keys()) == {"announce_tags", "outcomes", "planned", "report"}
 
 
-def test_j9_canonical_digest_tag_is_ignored_not_a_finding(
-    ocx: OcxRunner, published_package: PackageInfo
-) -> None:
-    """The canonical `sha256.<hex>` tag every push leaves behind (default-on
-    `--canonical-tag`) is reported in `ignored_tags`, never as a row.
+def test_j9_keep_tag_is_ignored_not_a_finding(ocx: OcxRunner, published_package: PackageInfo) -> None:
+    """The `__ocx.keep.<algorithm>-<hex>` tag every push leaves behind
+    (default-on `--keep-tag`) is reported in `ignored_tags`, never as a row.
     """
     result = _check(ocx, published_package.repo)
     assert result.returncode == 0
     report = _reports(result)[0]
-    assert report["ignored_tags"], "the default canonical-tag push leaves one behind"
-    assert all(re.fullmatch(r"sha256\.[0-9a-f]{64}", tag) for tag in report["ignored_tags"])
-    assert not any(row["tag"].startswith("sha256.") for row in report["rows"])
+    assert report["ignored_tags"], "the default keep-tag push leaves one behind"
+    assert all(re.fullmatch(r"__ocx\.keep\.sha256-[0-9a-f]{64}", tag) for tag in report["ignored_tags"])
+    assert not any(row["tag"].startswith("__ocx.keep.") for row in report["rows"])
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +444,7 @@ def test_j13_announce_tags_rejects_a_multi_package_run(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     """One `--announce-tags` file holds one bare list of tag names, and
-    `announce --tags-from-file` takes one `--package`. Two packages in one
+    `announce --tags-file` takes one `--package`. Two packages in one
     run would hand the follow-up a list it must attribute to a single
     package, so the flag is a usage error there — and nothing is written.
     """
@@ -471,7 +469,7 @@ def test_j13_announce_tags_rejects_a_multi_package_run(
     assert accepted.returncode == 0
     assert sorted(line for line in tags_path.read_text().splitlines() if line) == ["1", "1.0", "latest"]
     assert "ocx package announce" in accepted.stdout
-    assert "--tags-from-file" in accepted.stdout, "a run that moved tags names the file to hand the follow-up"
+    assert "--tags-file" in accepted.stdout, "a run that moved tags names the file to hand the follow-up"
 
     # Without the flag, a multi-package run is ordinary work.
     both = _repair(ocx, unique_repo, other_repo)

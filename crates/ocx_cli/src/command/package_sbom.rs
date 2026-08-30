@@ -57,9 +57,14 @@ use crate::options;
 /// List the SBOM attestations a published package carries, verified or not.
 #[derive(Parser, Clone)]
 pub struct PackageSbom {
-    /// Target platform (single-platform manifest under an image index).
-    #[clap(short = 'p', long = "platform", required = true, value_name = "PLATFORM")]
-    platform: oci::Platform,
+    /// Narrow into one platform of an image index.
+    ///
+    /// Omit it to act on whatever the reference resolves to: an index is then
+    /// the subject itself, which is where cosign puts a multi-platform tag's
+    /// signature. Given against a reference that resolves to a single manifest,
+    /// there is nothing to narrow and the command fails.
+    #[clap(short = 'p', long = "platform", value_name = "PLATFORM")]
+    platform: Option<oci::Platform>,
 
     /// Write the SBOM document to PATH ("-" for stdout).
     ///
@@ -90,24 +95,39 @@ pub struct PackageSbom {
     /// Optional when a `[trust.policy]` whose scope covers the target supplies
     /// the identity; when given, this flag and `--certificate-oidc-issuer`
     /// override any policy. The two flags are used together; supplying one
-    /// without the other is an error.
+    /// without the other is an error. Not usable with `--key`: a key signature
+    /// carries no certificate, so there is no SAN to match.
     #[clap(
         long = "certificate-identity",
         value_name = "IDENTITY",
-        requires = "certificate_oidc_issuer"
+        requires = "certificate_oidc_issuer",
+        conflicts_with = "key"
     )]
     certificate_identity: Option<String>,
 
     /// Expected certificate OIDC issuer (exact match).
     ///
     /// Optional when a matching `[trust.policy]` supplies the issuer; used
-    /// together with `--certificate-identity` to override any policy.
+    /// together with `--certificate-identity` to override any policy. Not
+    /// usable with `--key`, which names a public key rather than an issuer.
     #[clap(
         long = "certificate-oidc-issuer",
         value_name = "URL",
-        requires = "certificate_identity"
+        requires = "certificate_identity",
+        conflicts_with = "key"
     )]
     certificate_oidc_issuer: Option<String>,
+
+    /// Verify against a pinned public key instead of a Fulcio certificate.
+    ///
+    /// The key is a plain SPKI PEM — the public half only. No password is read
+    /// and no decryption happens: `OCX_KEY_PASSWORD` belongs to signing.
+    #[clap(flatten)]
+    key: options::key::KeyOpt,
+
+    /// Which cosign wire shape to accept.
+    #[clap(flatten)]
+    signature_format: options::signature_format::SignatureFormatOpt,
 
     /// Trust-root override: a Sigstore trusted-root JSON (or a directory holding
     /// trusted_root.json).
@@ -164,6 +184,22 @@ impl PackageSbom {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let identifier = self.identifier.with_domain(context.default_registry())?;
 
+        // D9's format pin, resolved and refused at the invocation boundary:
+        // `--signature-format both` names two shapes, and a verification result
+        // cannot say "either of these satisfied me", so it is a usage error (64)
+        // rather than a silent pick — before any network request rather than
+        // after one. The resolved pin then decides *discovery*: the shape it
+        // does not name is never looked for.
+        let signature_format = self.signature_format.pin().map_err(cli::UsageError::from)?;
+
+        // Parsed before any request, so `--key awskms://alias/release` names its
+        // unimplemented backend (exit 85) instead of being read as a filename
+        // and reported as a missing file.
+        let key = self
+            .key
+            .reference()
+            .map_err(|error| VerifyError::new(identifier.clone(), VerifyErrorKind::from(error)))?;
+
         // SSRF hardening (CWE-918): validate the user-supplied endpoint at the
         // boundary before it becomes an HTTP client target. Precedence, guard
         // and refusal kind are the shared ladder's — the same one `verify`
@@ -184,7 +220,7 @@ impl PackageSbom {
 
         let client = context.verify_client();
         let offline = context.is_offline();
-        let (verification, policies) = self.mode(&context, &identifier).await?;
+        let (verification, policies) = self.mode(&context, &identifier, key.as_ref()).await?;
 
         // Neither is resolved under `Permissive`, and that is the gap fix, not
         // an optimization: `resolve_policies` refuses an invocation with no
@@ -222,6 +258,7 @@ impl PackageSbom {
             no_cache: self.no_cache,
             predicate_type: self.predicate_type.clone(),
             verification,
+            signature_format,
         };
         // The unwrap is load-bearing, not ceremony: `PackageError` omits
         // `#[source]` on its `kind`, so without re-rooting the chain on the
@@ -229,7 +266,7 @@ impl PackageSbom {
         // own code. Pinned by `each_verify_kind_keeps_its_own_exit_code`.
         let report = context
             .manager()
-            .sbom_one(&identifier, &self.platform, options)
+            .sbom_one(&identifier, self.platform.as_ref(), options)
             .await
             .map_err(package_sign_common::verify_error_into_anyhow)?;
 
@@ -248,7 +285,13 @@ impl PackageSbom {
                 write_predicate(&destination, selected.document()).await?;
             }
             None => {
-                let listing = self.listing(verification, report.attestations, report.unverified, report.refused);
+                let listing = self.listing(
+                    verification,
+                    report.attestations,
+                    report.unverified,
+                    report.refused,
+                    &report.shadowed,
+                );
                 context.api().report(&listing)?;
             }
         }
@@ -267,6 +310,9 @@ impl PackageSbom {
     /// - `--verify` → demand, through the strict resolution, so demanding
     ///   verification with nothing to verify against is still the usage error
     ///   it has always been.
+    /// - `--key` → demand against that one public key, short-circuiting every
+    ///   keyless matcher. Combined with `--no-verify` it is a usage error, for
+    ///   the reason the certificate flags already are.
     /// - neither → the invocation decides. Identity flags, or a
     ///   `[trust.policy]` covering the target, mean verification was asked
     ///   for. Neither means there is nothing to verify against, and refusing
@@ -281,9 +327,21 @@ impl PackageSbom {
         &self,
         context: &crate::app::Context,
         identifier: &oci::Identifier,
+        key: Option<&ocx_lib::oci::sign::KeyRef>,
     ) -> anyhow::Result<(VerificationMode, Vec<CompiledPolicy>)> {
         let requested = self.verification.requested();
         if requested == Some(VerificationMode::Permissive) {
+            // The refusal `--no-verify` already carries for the certificate
+            // flags, extended to `--key` from here rather than from the frozen
+            // option group. Naming a key while asking for no cryptography is
+            // the same contradiction, and the alternative is worse than a
+            // usage error: the key would be accepted and silently never used.
+            if key.is_some() {
+                return Err(cli::UsageError::new(
+                    "--no-verify cannot be combined with --key: it names a key nothing would check",
+                )
+                .into());
+            }
             return Ok((VerificationMode::Permissive, Vec::new()));
         }
         let policies = package_sign_common::resolve_policies_lenient(
@@ -291,6 +349,7 @@ impl PackageSbom {
             identifier,
             self.certificate_identity.as_deref(),
             self.certificate_oidc_issuer.as_deref(),
+            key,
         )
         .await?;
         match resolve_mode(requested, policies.is_empty()) {
@@ -315,6 +374,7 @@ impl PackageSbom {
         attestations: Vec<AttestationMatch>,
         unverified: Vec<UnverifiedSbom>,
         refused: Vec<RefusedCandidate>,
+        shadowed: &BTreeSet<oci::Digest>,
     ) -> SbomListingReport {
         let mut entries = Vec::with_capacity(attestations.len() + unverified.len());
         let mut refusals: Vec<RefusedEntry> = refused
@@ -327,6 +387,7 @@ impl PackageSbom {
             .collect();
 
         for candidate in attestations {
+            let is_shadowed = shadowed.contains(&candidate.verify.referrer_digest);
             let referrer_digest = candidate.verify.referrer_digest.to_string();
             let summary = match self.summary_for(
                 &candidate.attestation.predicate_type,
@@ -342,11 +403,12 @@ impl PackageSbom {
             entries.push(SbomEntry {
                 predicate_type: candidate.attestation.predicate_type,
                 verified: true,
+                shadowed: is_shadowed,
                 subject_digest: candidate.attestation.subject_digest.to_string(),
                 referrer_digest,
-                certificate_identity: Some(candidate.verify.certificate_identity),
-                certificate_oidc_issuer: Some(candidate.verify.certificate_oidc_issuer),
-                signed_at: Some(package_sign_common::iso8601(candidate.verify.signed_at)),
+                certificate_identity: candidate.verify.certificate_identity,
+                certificate_oidc_issuer: candidate.verify.certificate_oidc_issuer,
+                signed_at: candidate.verify.signed_at.map(package_sign_common::iso8601),
                 summary,
             });
         }
@@ -355,6 +417,7 @@ impl PackageSbom {
         // channel: `--summary` reads a document, and whether anyone signed it
         // says nothing about whether it parses.
         for candidate in unverified {
+            let is_shadowed = shadowed.contains(&candidate.referrer_digest);
             let referrer_digest = candidate.referrer_digest.to_string();
             let summary = match self.summary_for(&candidate.predicate_type, &candidate.document, &referrer_digest) {
                 Ok(summary) => summary,
@@ -366,6 +429,7 @@ impl PackageSbom {
             entries.push(SbomEntry {
                 predicate_type: candidate.predicate_type,
                 verified: false,
+                shadowed: is_shadowed,
                 subject_digest: candidate.subject_digest.to_string(),
                 referrer_digest,
                 certificate_identity: None,
@@ -618,7 +682,9 @@ fn summarize(predicate_type: &str, document: &[u8]) -> Result<SbomSummaryOut, St
 async fn write_predicate(destination: &OutputDestination, bytes: &[u8]) -> anyhow::Result<()> {
     match destination {
         OutputDestination::Stdout => write_stream(&mut tokio::io::stdout(), bytes).await?,
-        OutputDestination::File(path) => tokio::fs::write(path, bytes).await?,
+        OutputDestination::File(path) => tokio::fs::write(path, bytes)
+            .await
+            .map_err(|error| ocx_lib::error::file_error(path, error))?,
     }
     Ok(())
 }
@@ -736,7 +802,13 @@ mod tests {
             },
         ];
 
-        let report = command(&[]).listing(VerificationMode::Demand, Vec::new(), Vec::new(), refused);
+        let report = command(&[]).listing(
+            VerificationMode::Demand,
+            Vec::new(),
+            Vec::new(),
+            refused,
+            &BTreeSet::new(),
+        );
         let slugs: Vec<&str> = report.refused.iter().map(|entry| entry.reason_kind).collect();
 
         assert_eq!(slugs, ["identity_mismatch", "bundle_parse_failed"]);
@@ -913,6 +985,7 @@ mod tests {
             vec![attestation_match_carrying("b", "https://cyclonedx.org/bom", CYCLONEDX)],
             Vec::new(),
             Vec::new(),
+            &BTreeSet::new(),
         );
         assert_eq!(demanded.summary.verified, 1);
         assert_eq!(demanded.summary.unverified, 0);
@@ -931,6 +1004,7 @@ mod tests {
             Vec::new(),
             vec![unverified_sbom("c", "https://cyclonedx.org/bom", CYCLONEDX)],
             Vec::new(),
+            &BTreeSet::new(),
         );
         assert_eq!(permissive.summary.verified, 0);
         assert_eq!(permissive.summary.unverified, 1);
@@ -1046,6 +1120,7 @@ mod tests {
                 unverified_sbom("c", "https://spdx.dev/Document", SPDX),
             ],
             Vec::new(),
+            &BTreeSet::new(),
         );
 
         assert_eq!(listing.entries.len(), 1, "the readable document is still listed");
@@ -1130,9 +1205,13 @@ mod tests {
             verify: ocx_lib::oci::verify::VerifyResult {
                 subject_digest: digest("a"),
                 referrer_digest: digest(referrer_hex),
-                certificate_identity: "you@example.com".into(),
-                certificate_oidc_issuer: "https://token.actions.githubusercontent.com".into(),
-                signed_at: 1_755_597_600,
+                key_backend: ocx_lib::oci::sign::KeyBackendKind::Keyless,
+                certificate_identity: Some("you@example.com".into()),
+                certificate_oidc_issuer: Some("https://token.actions.githubusercontent.com".into()),
+                signed_at: Some(1_755_597_600),
+                signature_format: ocx_lib::oci::sign::SignatureFormat::Bundle,
+                discovery_method: ocx_lib::oci::verify::DiscoveryMethod::ReferrersApi,
+                rekor_log_index: None,
             },
             attestation: ocx_lib::oci::verify::VerifiedAttestation {
                 predicate_type: predicate_type.into(),
@@ -1299,6 +1378,7 @@ mod tests {
             ],
             Vec::new(),
             Vec::new(),
+            &BTreeSet::new(),
         );
 
         assert_eq!(
@@ -1344,6 +1424,7 @@ mod tests {
             vec![attestation_match_carrying("c", "https://spdx.dev/Document", SPDX)],
             Vec::new(),
             Vec::new(),
+            &BTreeSet::new(),
         );
 
         assert_eq!(listing.entries.len(), 1);
@@ -1367,6 +1448,7 @@ mod tests {
                 referrer_digest: format!("sha256:{}", "d".repeat(64)),
                 reason: VerifyErrorKind::MultipleSignatures { count: 2 },
             }],
+            &BTreeSet::new(),
         );
 
         assert!(listing.entries.is_empty());
@@ -1376,6 +1458,56 @@ mod tests {
             slugs,
             vec!["multiple_signatures", "sbom_summary_failed"],
             "the pipeline's refusals come first and keep their own slugs",
+        );
+    }
+
+    /// **C-011.** The library's shadow set reaches the entry it names, on both
+    /// trust classes, and marks nothing else.
+    ///
+    /// The set is keyed on the referrer manifest digest, which is where a
+    /// transposition would land: a lookup against the *subject* digest instead
+    /// would mark every row on one subject, and a lookup against the wrong
+    /// candidate's digest would mark the preferred document.
+    #[test]
+    fn the_shadow_set_marks_the_document_it_names_and_no_other() {
+        let superseded = attestation_match_carrying("b", "https://cyclonedx.org/bom", CYCLONEDX);
+        let shadowed = BTreeSet::from([superseded.verify.referrer_digest.clone()]);
+
+        let listing = command(&[]).listing(
+            VerificationMode::Demand,
+            vec![
+                superseded,
+                attestation_match_carrying("c", "https://spdx.dev/Document", SPDX),
+            ],
+            Vec::new(),
+            Vec::new(),
+            &shadowed,
+        );
+        let marked: Vec<bool> = listing.entries.iter().map(|entry| entry.shadowed).collect();
+        assert_eq!(
+            marked,
+            vec![true, false],
+            "only the named referrer is marked; a subject-keyed lookup would mark both",
+        );
+
+        let unverified = unverified_sbom("b", "https://cyclonedx.org/bom", CYCLONEDX);
+        let shadowed = BTreeSet::from([unverified.referrer_digest.clone()]);
+        let permissive = command(&[]).listing(
+            VerificationMode::Permissive,
+            Vec::new(),
+            vec![unverified, unverified_sbom("c", "https://spdx.dev/Document", SPDX)],
+            Vec::new(),
+            &shadowed,
+        );
+        assert_eq!(
+            permissive
+                .entries
+                .iter()
+                .map(|entry| entry.shadowed)
+                .collect::<Vec<bool>>(),
+            vec![true, false],
+            "the unsigned half reads the same set; marking only the verified half would leave \
+             --no-verify rendering both copies",
         );
     }
 

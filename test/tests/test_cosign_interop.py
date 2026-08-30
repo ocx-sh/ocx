@@ -6,11 +6,14 @@ same local Fulcio and Rekor, so a pass means the two implementations agree on
 the certificate chain, the message signature, and the transparency-log entry —
 not merely that both parse the same JSON.
 
-Discovery is deliberately out of scope. ocx publishes its signature through the
-OCI 1.1 Referrers API and has no `sha256-<hex>.sig` tag-schema fallback; cosign
-3.x has only the tag schema. That divergence is a documented ocx decision, so
-these tests hand each tool the bundle directly rather than asserting a
-cross-tool registry lookup that cannot succeed by design.
+These five tests are the payload-agreement layer, not the discovery layer: each
+hands the bundle to its consumer as a file — `--bundle` on a cosign blob
+command, a referrer pushed straight into the registry for ocx — so a pass
+proves the two implementations agree on the bytes of a signature, independent
+of how either one would have found it. `test_cosign_matrix_*.py` is where
+discovery is asserted: it drives `cosign verify <ref>` and `ocx package verify`
+against real registries, across the referrers-API and fallback-tag paths
+measured in `analysis_cosign_interop_probes.md`.
 """
 
 from __future__ import annotations
@@ -109,7 +112,7 @@ def test_cosign_verifies_a_bundle_ocx_produced(
     )
 
 
-def test_ocx_verifies_a_bundle_cosign_produced(
+def test_ocx_refuses_a_cosign_blob_signature_bundle(
     ocx: OcxRunner,
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
@@ -117,11 +120,58 @@ def test_ocx_verifies_a_bundle_cosign_produced(
     cosign_image: str,
     tmp_path: Path,
 ) -> None:
-    """`ocx package verify` accepts a signature cosign 3.x produced.
+    """`ocx package verify` refuses a `cosign sign-blob` bundle — decision D2.
 
-    cosign signs the subject manifest bytes as a blob and its bundle is attached
-    as an ordinary referrer, which is the shape ocx discovers. Nothing about the
-    bundle is rewritten on the way in.
+    `sign-blob` emits a `messageSignature` bundle: a raw signature over the
+    blob's digest, carrying no statement about *what* was signed. An ocx image
+    signature is a DSSE in-toto Statement whose predicateType is
+    `https://sigstore.dev/cosign/sign/v1` and whose subject binds the manifest
+    digest — the shape `cosign sign` writes against a registry. Decision D2 of
+    `design_spec_cosign_parity.md` deleted `messageSignature` from the read path
+    as well as the write path, so a bundle that carries one is no longer a
+    usable candidate and the ANY-of scan ends with nothing to report.
+
+    This test still runs cosign, still pushes the bundle as a real
+    `SIGSTORE_BUNDLE_V03` referrer and still makes ocx read it back out of the
+    registry — only the expected verdict changed, from acceptance to a refusal
+    naming its cause.
+
+    The meta-plan's criterion for this file — "the existing 5 blob-level tests
+    stay and keep passing" — is met in letter: this test stays, and it passes.
+    Its spirit, that ocx verifies cosign *blob* signatures, was retired by D2,
+    which deleted `messageSignature` from the read path along with the write
+    path. That retirement is correct, and this test's own inversion is the
+    evidence for it: the criterion's premise was that registry-level discovery
+    was impossible, so handing a bundle over as a file was the only testable
+    contract — probe P3 falsified that premise (`cosign verify <ref>` reads the
+    Referrers API, the OCI fallback tag, and the `.sig` sidecar), and a
+    criterion satisfied by a test that asserts the opposite of what it meant is
+    not a criterion. `test_cosign_matrix_*.py` carries the replacement: 14 of
+    the 16 image-level cells and all 4 attest cells assert parity, and each
+    demonstrated its own refusal on a corrupted signature it proved landed.
+
+    The other two are the reason the replacement is a criterion and not a
+    slogan. M-13 and M-14 — a keyless ocx sidecar that ocx accepts and cosign
+    refuses — are **inverted**, named for what they measure rather than for
+    what was wanted. They pass by asserting the break, and they red on the day
+    it is fixed, at which point they become the parity cells they were meant to
+    be. M-03 and M-04 (an ocx key-mode bundle read by cosign) were a third such
+    pair until the write side stopped emitting
+    `dsseEnvelope.signatures[0].keyid` — cosign omits that member in key mode
+    as in keyless, and its DSSE verifier matches candidates on it, so every ocx
+    key-mode signature was filtered out before any cryptography ran. Those two
+    are parity cells again.
+
+    M-13/M-14 carried the `divergence` marker, with the two downgrade cells,
+    while ocx accepted a keyless sidecar cosign refuses for want of a
+    transparency-log entry. All four are parity cells now and no test in the
+    matrix carries the marker; it stays registered because the honest way to
+    cite this matrix as compatibility evidence is a recipe that can still
+    exclude a disclosure, and the next one should be marked rather than
+    counted.
+
+    This test and its four siblings stay as the payload-agreement layer
+    underneath that matrix, not as its discovery evidence.
     """
     digest, size, subject_bytes = _subject(ocx, published_package)
 
@@ -165,13 +215,24 @@ def test_ocx_verifies_a_bundle_cosign_produced(
         payload=bundle,
     )
 
+    assert "messageSignature" in json.loads(bundle), (
+        "cosign wrote something other than a blob-signature bundle; the refusal "
+        "below would then be about a different shape"
+    )
+
     verified = ocx.run(
         "package", "verify", *sigstore_stack.verify_args(), published_package.short, check=False
     )
-    assert verified.returncode == 0, (
-        f"ocx rejected a cosign-produced bundle\n"
-        f"stdout: {verified.stdout}\nstderr: {verified.stderr}\n"
-        f"bundle: {json.loads(bundle).keys()}"
+    assert verified.returncode == 79, (
+        f"expected exit 79 (NotFound), got {verified.returncode}\n"
+        f"stdout: {verified.stdout}\nstderr: {verified.stderr}"
+    )
+    # 79 alone cannot tell "the referrer carried no usable bundle" from "the
+    # push never landed": both are NotFound. The slug is what pins the cause.
+    envelope = json.loads(verified.stdout)
+    assert envelope["error"]["detail"] == "no_signatures_found", (
+        f"the blob bundle must be skipped as unusable, not fail for another "
+        f"reason; got {envelope['error']}"
     )
 
 
@@ -203,10 +264,11 @@ def test_cosign_verifies_an_attestation_ocx_produced(
     attestation is attached to this manifest and not another — unasserted.
 
     `verify-blob-attestation` rather than `verify-attestation` for the same
-    reason the signature tests use the blob commands: ocx publishes through the
-    OCI 1.1 Referrers API and cosign 3.x discovers only through its own
-    `sha256-<hex>.sig` tag schema, so discovery is out of scope by design and
-    the bundle is handed over directly.
+    reason the signature tests use the blob commands: this test asserts payload
+    agreement, handing cosign the bundle as a file rather than asking it to
+    find it on a registry. The image-level counterpart — `cosign
+    verify-attestation` resolving the referrer itself, both directions, both
+    registries — is `test_cosign_matrix_attest.py`'s A-01..A-04.
     """
     predicate = tmp_path / "sbom.cdx.json"
     predicate.write_bytes(attestations.PRETTY_CYCLONEDX_PATH.read_bytes())

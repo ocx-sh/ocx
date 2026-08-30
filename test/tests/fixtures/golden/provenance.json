@@ -1,0 +1,136 @@
+{
+  "_note": "Provenance for every fixture in this directory. One file rather than a sidecar each: the cosign image, the stack and the date are common to all of them, and repeating them eleven times would be eleven things to update. Regenerate with `uv run python3 tests/fixtures/golden/generate.py --regenerate` from `test/`.",
+  "cosign": {
+    "image": "ghcr.io/sigstore/cosign/cosign:v3.1.1",
+    "resolved_digest": "sha256:6bbe0d281d955c79f85b325f0f7e651c1bcab5a4fa4ad4903d74955178a3b2eb"
+  },
+  "stack": {
+    "referrers_registry": "localhost:5000 (zot, OCI 1.1 Referrers API)",
+    "fallback_registry": "localhost:5001 (registry:2, no Referrers API)",
+    "fulcio": "http://localhost:5555",
+    "rekor": "http://localhost:3000",
+    "oidc": "http://localhost:5556/dex (dex)",
+    "trusted_root": "test/sigstore/trusted_root.json",
+    "note": "All four services are the local `sigstore` compose profile. No public-good Sigstore service is contacted, and no material from one appears in any fixture \u2014 self_check() fails on a single hit for the public-good Rekor hostname anywhere in this directory."
+  },
+  "generated": "2026-08-29",
+  "subject": {
+    "payload": "ocx-golden-subject",
+    "note": "Every fixture signs the same minimal OCI image (empty config, one layer holding the payload above), so all six subject digests match and a diff across a re-capture shows only what cosign genuinely varies."
+  },
+  "known_gaps": [
+    "cosign v3.1.1 `attach signature --rekor-response` writes no `dev.sigstore.cosign/bundle` annotation: the flag parses its input (garbage JSON exits 1) but the result never reaches the layer. Verified against the Rekor API response map and the legacy RekorBundle shape, with and without --certificate. Offline tlog material for the legacy shape is consequently not capturable with this cosign; use the *_bundle.json fixtures for it.",
+    "cosign v3.1.1 cannot write a KEYLESS `sha256-<hex>.att` sidecar: `attach attestation` accepts only --attestation (no --certificate/--chain), and `attest` no longer writes the tag at all -- it writes an OCI 1.1 referrer typed application/vnd.dev.sigstore.bundle.v0.3+json. The committed `.att` fixture is therefore key-mode, where the DSSE envelope carries its own signature and needs no annotation; ocx's keyless `.att` arm is covered by a Rust unit test built from the cosign-authored keyless_bundle.json instead.",
+    "a `sha256-<hex>.sbom` sidecar is unsigned BY CONSTRUCTION: `cosign attach sbom` writes the document as the layer and signs nothing (it prints \"Attaching SBOMs this way does not sign them\"), and no cosign command signs that tag afterwards. The fixture therefore carries no signature, no certificate and no Rekor material, and ocx lists it verified:false in permissive mode and refuses it (unsigned_rejected_by_policy, exit 77) in demand mode."
+  ],
+  "fixtures": {
+    "keyless_referrer_manifest.json": {
+      "what": "the OCI 1.1 referrer cosign wrote for a keyless image signature",
+      "source": "localhost:5000/golden/keyless, fetched by digest",
+      "served_digest": "sha256:dbc868f27d35caf42bb03a15186d76dc62f99f1cdd835538fc33a13e7758bdd2",
+      "subject_digest": "sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "command": "cosign sign --allow-http-registry --signing-config signing-config-keyless.json --trusted-root trusted_root.json --yes --identity-token <identity-token-file> localhost:5000/golden/keyless@sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "form": "pretty-printed (2-space); registry served compact bytes"
+    },
+    "keyless_bundle.json": {
+      "what": "the Sigstore bundle that referrer points at (keyless mode)",
+      "source": "localhost:5000/golden/keyless blob sha256:c8b7fb7f0f2cc30b7ab911d753fb6f4e43f41500ef2907e96d31916bf7b5c805",
+      "served_digest": "sha256:c8b7fb7f0f2cc30b7ab911d753fb6f4e43f41500ef2907e96d31916bf7b5c805",
+      "subject_digest": "sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "command": "(the layer of the manifest above)",
+      "form": "pretty-printed (2-space); registry served compact bytes"
+    },
+    "key_referrer_manifest.json": {
+      "what": "the OCI 1.1 referrer cosign wrote for a key image signature",
+      "source": "localhost:5000/golden/key, fetched by digest",
+      "served_digest": "sha256:535271fde57f69747450e0b51b474e276cc836ace0032c1f8a23721023dd0533",
+      "subject_digest": "sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "command": "cosign sign --allow-http-registry --signing-config signing-config-key.json --trusted-root trusted_root.json --yes --key keys/cosign.key localhost:5000/golden/key@sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "form": "pretty-printed (2-space); registry served compact bytes"
+    },
+    "key_bundle.json": {
+      "what": "the Sigstore bundle that referrer points at (key mode)",
+      "source": "localhost:5000/golden/key blob sha256:0fdb670f58c0e05da030fbad68b9a944e4699bfc0523a21bf5a6a8b2c45a8b25",
+      "served_digest": "sha256:0fdb670f58c0e05da030fbad68b9a944e4699bfc0523a21bf5a6a8b2c45a8b25",
+      "subject_digest": "sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "command": "(the layer of the manifest above)",
+      "form": "pretty-printed (2-space); registry served compact bytes"
+    },
+    "fallback_index.json": {
+      "what": "the referrers index cosign writes under the `sha256-<hex>` tag when the registry has no Referrers API. cosign#4641 evidence: the child descriptor keeps `artifactType` but LOSES all three annotations the same cosign puts on a real referrer (`dev.sigstore.bundle.content`, `dev.sigstore.bundle.predicateType`, `org.opencontainers.image.created`), so a consumer that filters referrers by annotation finds nothing here.",
+      "source": "localhost:5001/golden/fallback:sha256-47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe (registry:2, no Referrers API)",
+      "served_digest": "sha256:e9731034d92589b838a910ae4e8e018c1b3699653d54e6e1fa7b01ee0559c39f",
+      "subject_digest": "sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "command": "cosign sign --allow-http-registry --key keys/cosign.key --signing-config signing-config-key.json --trusted-root trusted_root.json --yes localhost:5001/golden/fallback@sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "form": "pretty-printed (2-space); registry served compact bytes"
+    },
+    "simplesigning_keyless_manifest.json": {
+      "what": "the legacy `sha256-<hex>.sig` manifest, keyless mode",
+      "source": "localhost:5000/golden/simplesigning-keyless:sha256-47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe.sig",
+      "served_digest": "sha256:53cfdd29eda50f97646850f7bfc2c7d820c2e086cd7d306d09a8ed432aa4d520",
+      "subject_digest": "sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "command": "cosign generate --allow-http-registry localhost:5000/golden/simplesigning-keyless@sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe > claim.json ; cosign sign-blob --signing-config signing-config-keyless.json --trusted-root trusted_root.json --bundle blob-bundle-keyless.json --yes --identity-token <identity-token-file> claim.json ; cosign attach signature --allow-http-registry --payload claim.json --signature signature.b64 --certificate certificate.pem localhost:5000/golden/simplesigning-keyless@sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "form": "pretty-printed (2-space); registry served compact bytes",
+      "gap": "cosign v3.1.1 `attach signature --rekor-response` writes no `dev.sigstore.cosign/bundle` annotation: the flag parses its input (garbage JSON exits 1) but the result never reaches the layer. Verified against the Rekor API response map and the legacy RekorBundle shape, with and without --certificate. Offline tlog material for the legacy shape is consequently not capturable with this cosign; use the *_bundle.json fixtures for it."
+    },
+    "simplesigning_keyless_payload.json": {
+      "what": "the simplesigning claim the manifest's single layer holds",
+      "source": "localhost:5000/golden/simplesigning-keyless blob sha256:2f047101812d1670ef948b1375c7196a95ed98c760c0d8b25707057b296cb2a0",
+      "served_digest": "sha256:2f047101812d1670ef948b1375c7196a95ed98c760c0d8b25707057b296cb2a0",
+      "subject_digest": "sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "command": "cosign generate --allow-http-registry localhost:5000/golden/simplesigning-keyless@sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "form": "VERBATIM \u2014 these are the signed bytes; the layer digest is over them"
+    },
+    "simplesigning_key_manifest.json": {
+      "what": "the legacy `sha256-<hex>.sig` manifest, key mode",
+      "source": "localhost:5000/golden/simplesigning-key:sha256-47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe.sig",
+      "served_digest": "sha256:a50fddf2e58a8e423ddbc99445af982b36779ee376d910f5df1eddb77b28740c",
+      "subject_digest": "sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "command": "cosign generate --allow-http-registry localhost:5000/golden/simplesigning-key@sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe > claim.json ; cosign sign-blob --signing-config signing-config-key.json --trusted-root trusted_root.json --bundle blob-bundle-key.json --yes --key keys/cosign.key claim.json ; cosign attach signature --allow-http-registry --payload claim.json --signature signature.b64 localhost:5000/golden/simplesigning-key@sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "form": "pretty-printed (2-space); registry served compact bytes",
+      "gap": "cosign v3.1.1 `attach signature --rekor-response` writes no `dev.sigstore.cosign/bundle` annotation: the flag parses its input (garbage JSON exits 1) but the result never reaches the layer. Verified against the Rekor API response map and the legacy RekorBundle shape, with and without --certificate. Offline tlog material for the legacy shape is consequently not capturable with this cosign; use the *_bundle.json fixtures for it."
+    },
+    "simplesigning_key_payload.json": {
+      "what": "the simplesigning claim the manifest's single layer holds",
+      "source": "localhost:5000/golden/simplesigning-key blob sha256:aa6570c4e3552cb3703459bf157f721c088393dbe84e7fc005235e824c0d90e1",
+      "served_digest": "sha256:aa6570c4e3552cb3703459bf157f721c088393dbe84e7fc005235e824c0d90e1",
+      "subject_digest": "sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "command": "cosign generate --allow-http-registry localhost:5000/golden/simplesigning-key@sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "form": "VERBATIM \u2014 these are the signed bytes; the layer digest is over them"
+    },
+    "attestation_sidecar_key_manifest.json": {
+      "what": "the legacy `sha256-<hex>.att` manifest, key mode",
+      "source": "localhost:5000/golden/attestation-sidecar-key:sha256-47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe.att",
+      "served_digest": "sha256:c470d9819fe76d512fa0d79d3a5b289c0d2fb83739530159bd449284b5dc386c",
+      "subject_digest": "sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "command": "cosign attest-blob --key keys/cosign.key --signing-config signing-config-key.json --trusted-root trusted_root.json --predicate predicate.cdx.json --type cyclonedx --bundle att-blob-bundle.json --yes subject.manifest ; cosign attach attestation --allow-http-registry --attestation attestation.json localhost:5000/golden/attestation-sidecar-key@sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "form": "pretty-printed (2-space); registry served compact bytes",
+      "gap": "cosign v3.1.1 cannot write a KEYLESS `sha256-<hex>.att` sidecar: `attach attestation` accepts only --attestation (no --certificate/--chain), and `attest` no longer writes the tag at all -- it writes an OCI 1.1 referrer typed application/vnd.dev.sigstore.bundle.v0.3+json. The committed `.att` fixture is therefore key-mode, where the DSSE envelope carries its own signature and needs no annotation; ocx's keyless `.att` arm is covered by a Rust unit test built from the cosign-authored keyless_bundle.json instead."
+    },
+    "attestation_sidecar_key_envelope.json": {
+      "what": "the DSSE envelope the manifest's single layer holds",
+      "source": "localhost:5000/golden/attestation-sidecar-key blob sha256:5f2de89a45a6986c693ebd5bd685ae8583beea889fbc663e9fadc2e591cbf7bb",
+      "served_digest": "sha256:5f2de89a45a6986c693ebd5bd685ae8583beea889fbc663e9fadc2e591cbf7bb",
+      "subject_digest": "sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "command": "cosign attest-blob --key keys/cosign.key --signing-config signing-config-key.json --trusted-root trusted_root.json --predicate predicate.cdx.json --type cyclonedx --bundle att-blob-bundle.json --yes subject.manifest",
+      "form": "VERBATIM -- the layer digest is over these bytes"
+    },
+    "sbom_sidecar_manifest.json": {
+      "what": "the legacy `sha256-<hex>.sbom` manifest",
+      "source": "localhost:5000/golden/sbom-sidecar:sha256-47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe.sbom",
+      "served_digest": "sha256:1a5ba6a95418cdcffacd44b5d7370aa8e7e375335ead5bc22458eef814b63b3f",
+      "subject_digest": "sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "command": "cosign attach sbom --allow-http-registry --sbom sbom.cdx.json --type cyclonedx localhost:5000/golden/sbom-sidecar@sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "form": "pretty-printed (2-space); registry served compact bytes",
+      "gap": "a `sha256-<hex>.sbom` sidecar is unsigned BY CONSTRUCTION: `cosign attach sbom` writes the document as the layer and signs nothing (it prints \"Attaching SBOMs this way does not sign them\"), and no cosign command signs that tag afterwards. The fixture therefore carries no signature, no certificate and no Rekor material, and ocx lists it verified:false in permissive mode and refuses it (unsigned_rejected_by_policy, exit 77) in demand mode."
+    },
+    "sbom_sidecar_document.json": {
+      "what": "the CycloneDX document the manifest's single layer holds",
+      "source": "localhost:5000/golden/sbom-sidecar blob sha256:2f4735a8dc10478c57d963a9ef2e5b3f45ffbfa5106f9ddd065cba87f2baf71e",
+      "served_digest": "sha256:2f4735a8dc10478c57d963a9ef2e5b3f45ffbfa5106f9ddd065cba87f2baf71e",
+      "subject_digest": "sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "command": "cosign attach sbom --allow-http-registry --sbom sbom.cdx.json --type cyclonedx localhost:5000/golden/sbom-sidecar@sha256:47f8439476b73b7e7bb389322dd6d5c6eef89efc61c86bfef8bade66774b36fe",
+      "form": "VERBATIM -- the layer digest is over these bytes"
+    }
+  }
+}

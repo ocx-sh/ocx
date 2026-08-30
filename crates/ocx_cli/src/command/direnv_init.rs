@@ -44,7 +44,9 @@ impl DirenvInit {
             )
             .into());
         }
-        tokio::fs::write(&envrc, ENVRC_CONTENT).await?;
+        tokio::fs::write(&envrc, ENVRC_CONTENT)
+            .await
+            .map_err(|error| ocx_lib::error::file_error(&envrc, error))?;
         context
             .ui()
             .success(format!("Wrote {}; run `direnv allow` to activate.", envrc.display()));

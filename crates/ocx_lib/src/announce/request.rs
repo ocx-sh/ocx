@@ -14,7 +14,7 @@ pub enum TagSelection {
     /// `--tags`: the given list **is** the universe. A committed tag absent from
     /// the list is dropped (reference-impl replace semantics).
     Replace(Vec<String>),
-    /// `--tags-from-file`: additive union of the file's tags with the committed root
+    /// `--tags-file`: additive union of the file's tags with the committed root
     /// — deletion only ever happens via [`Replace`](TagSelection::Replace).
     UnionFile(Vec<String>),
     /// `--refresh`: re-observe every tag already in the committed root (catches
@@ -123,7 +123,8 @@ pub struct AnnounceOutcome {
     /// committed root already recorded it, or the package publishes none.
     pub desc_status: AnnounceStatus,
     /// Reserved tags dropped from the curated set (D7) — the OCX-internal
-    /// `__ocx` namespace and `<algorithm>.<hex>` canonical tags. Dropping them
+    /// `__ocx` namespace (which carries the keep tag) and the frozen legacy
+    /// `<algorithm>.<hex>` keep tags. Dropping them
     /// is not a failure, so they are reported here rather than refused; empty
     /// when the selection carried none.
     pub reserved_tags_dropped: Vec<String>,

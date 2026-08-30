@@ -388,6 +388,33 @@ mod tests {
         assert!(cap.is_fresh());
     }
 
+    /// The probe asks the Referrers API and nothing else.
+    ///
+    /// `OciTransport` now carries `list_referrers_with_fallback`, whose whole
+    /// job is to answer "no signatures" where `list_referrers` answers
+    /// "unsupported". Repointing the probe at it would make every registry
+    /// probe `Supported` and destroy the write-side capability verdict the sign
+    /// path gates on — a one-line change with no other test standing in its way
+    /// until a fallback-only registry is signed against in production.
+    ///
+    /// This reds two ways: the verdict flips to `Supported`, and the sibling's
+    /// default body reaches `ProbeStub::pull_manifest_raw`, which is
+    /// `unimplemented!()`.
+    #[tokio::test]
+    async fn probe_reads_the_referrers_api_and_never_the_fallback_tag() {
+        let transport = ProbeStub::unsupported();
+
+        let cap = ReferrersApiCapability::probe(&transport, &probe_image("test.example"), &zero_digest())
+            .await
+            .expect("probe must not error when the endpoint is absent");
+
+        assert_eq!(
+            cap.supported,
+            ReferrersSupport::Unsupported,
+            "a registry with no Referrers API is Unsupported however readable its fallback tag is"
+        );
+    }
+
     #[tokio::test]
     async fn probe_200_returns_supported() {
         let transport = ProbeStub::supported();
@@ -409,10 +436,11 @@ mod tests {
     /// acceptance criterion: "cached capability is used on subsequent
     /// invocations ... no second probe request").
     ///
-    /// Mirrors the exact decision both `SignPipeline::ensure_referrers_supported`
-    /// and `VerifyPipeline::list_signature_referrers` make:
-    /// `from_cache().ok().flatten().filter(is_fresh)` then `Some(hit) => hit,
-    /// None => probe(...)`. The transport here errors on any `list_referrers`
+    /// Mirrors the exact decision `SignPipeline::ensure_referrers_supported` and
+    /// its `AttestPipeline` twin make: `from_cache().ok().flatten().filter(is_fresh)`
+    /// then `Some(hit) => hit, None => probe(...)`. (`VerifyPipeline` made it too
+    /// until D-1 replaced its gate with `list_referrers_with_fallback`, which asks
+    /// no capability question.) The transport here errors on any `list_referrers`
     /// call, so if this short-circuit ever regresses (probe runs despite a
     /// fresh cache), the `.expect()` below panics instead of the test
     /// silently passing.

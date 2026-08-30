@@ -49,7 +49,8 @@ pub struct AnnounceReport {
     /// The relative paths written under the `--out` directory.
     pub written_paths: Vec<String>,
     /// Tags dropped from the curated set because they are reserved: the
-    /// OCX-internal `__ocx` namespace and `<algorithm>.<hex>` canonical tags.
+    /// OCX-internal `__ocx` namespace (which carries the keep tag) and the
+    /// frozen legacy `<algorithm>.<hex>` keep tags.
     /// Neither names a version, so announce drops them and reports them here
     /// rather than failing the run.
     pub reserved_tags_dropped: Vec<String>,
@@ -179,7 +180,10 @@ mod tests {
     #[test]
     fn dropped_reserved_tags_are_reported_on_a_successful_run() {
         let outcome = AnnounceOutcome {
-            reserved_tags_dropped: vec!["__ocx.desc".to_string(), format!("sha256.{}", "a".repeat(64))],
+            reserved_tags_dropped: vec![
+                "__ocx.desc".to_string(),
+                format!("__ocx.keep.sha256-{}", "a".repeat(64)),
+            ],
             ..outcome_updated()
         };
         let report = AnnounceReport::from_outcome(outcome);

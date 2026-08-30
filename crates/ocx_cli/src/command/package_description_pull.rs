@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use anyhow::Context as _;
 use clap::Parser;
 use ocx_lib::{log, oci, package::description::Description, publisher::Publisher};
 
@@ -148,11 +149,13 @@ impl PackageDescriptionPull {
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await
-                    .map_err(|e| anyhow::anyhow!("failed to create directory {}: {e}", parent.display()))?;
+                    .map_err(|e| ocx_lib::error::file_error(parent, e))
+                    .with_context(|| format!("failed to create directory {}", parent.display()))?;
             }
             tokio::fs::write(&path, &desc.readme)
                 .await
-                .map_err(|e| anyhow::anyhow!("failed to write README to {}: {e}", path.display()))?;
+                .map_err(|e| ocx_lib::error::file_error(&path, e))
+                .with_context(|| format!("failed to write README to {}", path.display()))?;
         }
 
         if let (Some(save_path), Some(logo)) = (&self.save_logo, &desc.logo) {
@@ -161,11 +164,13 @@ impl PackageDescriptionPull {
             if let Some(parent) = path.parent() {
                 tokio::fs::create_dir_all(parent)
                     .await
-                    .map_err(|e| anyhow::anyhow!("failed to create directory {}: {e}", parent.display()))?;
+                    .map_err(|e| ocx_lib::error::file_error(parent, e))
+                    .with_context(|| format!("failed to create directory {}", parent.display()))?;
             }
             tokio::fs::write(&path, &logo.data)
                 .await
-                .map_err(|e| anyhow::anyhow!("failed to write logo to {}: {e}", path.display()))?;
+                .map_err(|e| ocx_lib::error::file_error(&path, e))
+                .with_context(|| format!("failed to write logo to {}", path.display()))?;
         }
 
         Ok(())

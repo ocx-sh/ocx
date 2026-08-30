@@ -121,6 +121,21 @@ class StateProvider(Protocol):
         """
         ...
 
+    def extra_bin_dirs(self) -> tuple[Path, ...]:
+        """Directories this state put on the runner's ``PATH`` during provision.
+
+        A state whose script drives a third-party tool (the cosign-parity cast
+        drives a bare ``cosign``) materialises that binary in ``provision()``
+        and prepends its directory to ``ocx.env["PATH"]``, which is all the
+        drift-gate executor needs — it builds the subprocess env from
+        ``script_env()``. The *recorder* shell cannot be reached that way: it is
+        spawned from ``ocx.env`` before ``provision()`` runs, and
+        ``test_record`` filters ``PATH`` out of the projection it exports (it
+        would clobber the shell's own). This is the seam that carries those
+        directories across; empty for every state that adds none.
+        """
+        ...
+
     def provision(self, ocx: OcxRunner, tmp_path: Path) -> None:
         """Perform all registry pushes required by this state.
 
@@ -191,6 +206,24 @@ def _build_display_maps(
     return sanitize_map, repo_map
 
 
+def _path_additions(before: str, after: str) -> tuple[Path, ...]:
+    """Entries present in PATH string *after* but not in *before*, in order.
+
+    A setup function that needs a third-party binary on `$PATH` prepends to
+    `ocx.env["PATH"]` — the one channel that already reaches the drift gate,
+    since `script_env()` copies that env wholesale. Diffing the string across
+    the call is how the adapter learns what was added without the setup
+    function having to report it through a return value only one state would
+    ever use.
+    """
+    known = set(before.split(os.pathsep))
+    return tuple(
+        Path(entry)
+        for entry in after.split(os.pathsep)
+        if entry and entry not in known
+    )
+
+
 # ---------------------------------------------------------------------------
 # Declared display-env surface (DE2 — Living Design Record shape)
 # ---------------------------------------------------------------------------
@@ -259,6 +292,10 @@ DECLARED_PACKAGES: dict[str, dict[str, str]] = {
     },
     "setup:signing": {
         "acme/mytool": "acme/mytool:1.0.0",
+    },
+    "setup:cosign-parity": {
+        "acme/ocx-signed": "acme/ocx-signed:1.0.0",
+        "acme/cosign-signed": "acme/cosign-signed:1.0.0",
     },
     "setup:promotion": {
         "acme/mytool": "acme/mytool:1.4.2",
@@ -366,6 +403,7 @@ class SetupAdapter:
         self._tmp_path: Path | None = None
         self.work_dir: Path | None = None
         """Actual directory passed to the SETUPS function (SP8).  Set after provision()."""
+        self._extra_bin_dirs: tuple[Path, ...] = ()
 
     def script_env(self) -> dict[str, str]:
         """Return the Scenario-style env projection (SP3).
@@ -386,6 +424,10 @@ class SetupAdapter:
         been called first.
         """
         return _build_display_maps(self.packages)
+
+    def extra_bin_dirs(self) -> tuple[Path, ...]:
+        """Directories the setup function prepended to ``ocx.env["PATH"]``."""
+        return self._extra_bin_dirs
 
     def declared_display_env(self) -> dict[str, str]:
         """Return the **static** zero-I/O display-env projection (DE2/DE4).
@@ -430,7 +472,9 @@ class SetupAdapter:
         prefix = f"t_{uuid4().hex[:8]}_"
         state_path = tmp_path / "_state"
         state_path.mkdir(parents=True, exist_ok=True)
+        path_before = ocx.env.get("PATH", "")
         raw: dict[str, list[PackageInfo]] = fn(ocx, state_path, prefix)  # type: ignore[call-arg]
+        self._extra_bin_dirs = _path_additions(path_before, ocx.env.get("PATH", ""))
         # Pick the first (primary) version for each display name — matches
         # the legacy recordings suite which iterates all versions but uses
         # index 0 as the canonical entry for sanitise_map / repo_map.
@@ -511,6 +555,10 @@ class ScenarioAdapter:
         been called first.
         """
         return _build_display_maps(self.packages)
+
+    def extra_bin_dirs(self) -> tuple[Path, ...]:
+        """Always empty: a scenario never touches ``ocx.env["PATH"]``."""
+        return ()
 
     def declared_display_env(self) -> dict[str, str]:
         """Return the **static** zero-I/O display-env projection (DE2/DE4).
