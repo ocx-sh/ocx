@@ -36,6 +36,9 @@ use sigstore::bundle::verify::policy::{PolicyResult, VerificationPolicy};
 use sigstore::rekor::apis::configuration::Configuration as RekorConfiguration;
 use url::Url;
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use super::attestation_sidecar;
 use super::discovery::DiscoveryMethod;
 use super::dsse::{self, VerifiedAttestation, VerifiedEnvelope};
@@ -1551,6 +1554,10 @@ impl VerifyPipeline {
         // caller can report them.
         let mut refused: Vec<RefusedCandidate> = Vec::new();
         let mut matches: Vec<(VerifyResult, Option<VerifiedAttestation>)> = Vec::new();
+        // One memo for every door this scan opens (#374, #319). Born here
+        // because "per run" is what bounds it: a longer-lived cache would
+        // outlive the trust root its answers were resolved against.
+        let rekor_keys = RekorKeyMemo::default();
         // D6's dedup set. A `Vec` rather than a hash set on purpose:
         // `MAX_SIGNATURE_CANDIDATES` bounds it at single digits, so the linear
         // scan is cheaper than hashing signature bytes.
@@ -1611,6 +1618,7 @@ impl VerifyPipeline {
                 image,
                 via,
                 budget,
+                &rekor_keys,
             )
             .await
             {
@@ -1669,10 +1677,22 @@ impl VerifyPipeline {
         // only bundle is an attestation while a perfectly good signature sidecar
         // sits beside it.
         if discover_simplesigning && matches.is_empty() && refused.is_empty() {
-            let (sidecar, examined) =
-                Self::scan_simplesigning(transport, ctx, &verifier, target, sidecar_referrers, via, budget).await?;
+            let (sidecar, examined) = Self::scan_simplesigning(
+                transport,
+                ctx,
+                &verifier,
+                target,
+                sidecar_referrers,
+                via,
+                budget,
+                &rekor_keys,
+            )
+            .await?;
             total_candidates = total_candidates.saturating_add(examined);
             refused.extend(sidecar.refused);
+            if !sidecar.verified.is_empty() {
+                cache_sidecar_trust_material(ctx, &rekor_keys).await;
+            }
             for signature in sidecar.verified {
                 let key = signature.dedup_key();
                 if seen.contains(&key) {
@@ -1759,6 +1779,7 @@ impl VerifyPipeline {
                 rekor_url: ctx.rekor_url,
                 offline: ctx.offline,
                 allow_unlogged: ctx.allow_unlogged_signature,
+                rekor_keys: rekor_keys.clone(),
             };
             if let Some(sidecar) = attestation_sidecar::read_attestation_sidecar_tag(
                 transport,
@@ -1773,6 +1794,9 @@ impl VerifyPipeline {
             {
                 examined_anything = true;
                 budget.charge(sidecar.bytes_read);
+                if !sidecar.matches.is_empty() {
+                    cache_sidecar_trust_material(ctx, &rekor_keys).await;
+                }
                 // The reader walks its own layers under its own caps, so a bound
                 // that stopped it can never show up in this budget's counters.
                 // Carried across so `finish_scan`'s fail-closed attestation arm
@@ -1818,6 +1842,10 @@ impl VerifyPipeline {
     /// A sidecar reachable through *both* doors yields the same layer digest and
     /// the same signature bytes twice; the caller's dedup pass is what makes it
     /// one row of `signatures[]` (S-009).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "both sidecar doors, their shared budget, and the run-scoped Rekor key memo"
+    )]
     async fn scan_simplesigning(
         transport: &dyn OciTransport,
         ctx: &VerifyContext<'_>,
@@ -1826,6 +1854,7 @@ impl VerifyPipeline {
         referrers: Vec<crate::oci::Descriptor>,
         via: DiscoveryMethod,
         budget: &mut ScanBudget,
+        rekor_keys: &RekorKeyMemo,
     ) -> Result<(SidecarScan, usize), VerifyErrorKind> {
         let ScanTarget {
             image, subject_digest, ..
@@ -1842,6 +1871,7 @@ impl VerifyPipeline {
             rekor_url: ctx.rekor_url,
             offline: ctx.offline,
             allow_unlogged: ctx.allow_unlogged_signature,
+            rekor_keys: rekor_keys.clone(),
         };
 
         // Door 1 — the OCI 1.1 referrer. Its `via` is the listing's, so a
@@ -2002,6 +2032,7 @@ impl VerifyPipeline {
         image: &native::Reference,
         via: DiscoveryMethod,
         budget: &mut ScanBudget,
+        rekor_keys: &RekorKeyMemo,
     ) -> Result<CandidateOutcome, VerifyErrorKind> {
         let referrer_digest =
             Digest::try_from(descriptor.digest.as_str()).map_err(|e| VerifyErrorKind::Internal(Box::new(e)))?;
@@ -2205,7 +2236,7 @@ impl VerifyPipeline {
                 // trust root when present (offline-capable, closes the TOFU hole),
                 // otherwise fetched online. Returns the key PEM used, so a successful
                 // online run can cache the trust material for later offline verifies.
-                let rekor_key_pem = verify_rekor_set(ctx, &tlog).await?;
+                let rekor_key_pem = verify_rekor_set(ctx, &tlog, rekor_keys).await?;
                 // Recorded only after the SET and the inclusion proof passed, so
                 // a reported log index is always one the log itself vouched for.
                 rekor_log_index = Some(tlog.log_index);
@@ -2323,7 +2354,7 @@ impl VerifyPipeline {
                 // never how hard what exists is looked at.
                 let signed_at = match tlog {
                     Some(entry) => {
-                        let rekor_key_pem = verify_rekor_set(ctx, &entry).await?;
+                        let rekor_key_pem = verify_rekor_set(ctx, &entry, rekor_keys).await?;
                         rekor_log_index = Some(entry.log_index);
                         dsse::verify_tlog_binding(
                             &entry.canonicalized_body,
@@ -2345,11 +2376,14 @@ impl VerifyPipeline {
                 dsse::enforce_builder_pin(&matched_policies, &envelope.attestation)?;
 
                 VerifiedSigner {
-                    // `Scheme::File` is the only backend `Scheme::is_implemented`
-                    // admits, so every `PolicyBackend::Key` that can reach this
-                    // point was compiled from a local PEM. A KMS backend landing
-                    // here must widen this, which is why it names the scheme
-                    // rather than saying "key".
+                    // Every `Scheme` `Scheme::is_implemented` admits reaches
+                    // `compile_key_reference` as raw PEM bytes — `file://` off
+                    // disk, `env://` out of the environment — so a
+                    // `PolicyBackend::Key` arriving here was compiled from a
+                    // local PEM whichever door it came through. A KMS backend,
+                    // which is a *remote* key rather than another way to spell a
+                    // local one, must widen this; that is why the field names the
+                    // backend rather than saying "key".
                     key_backend: KeyBackendKind::File,
                     certificate_identity: None,
                     certificate_oidc_issuer: None,
@@ -2613,7 +2647,9 @@ impl BundleParts {
 /// mandatory. Both are computed by `sigstore-rs` in [`tlog`] — no signature,
 /// hash-chain or checkpoint parsing lives here.
 ///
-/// Key source, in order:
+/// Key source is [`RekorKeyMemo::resolve`]'s ladder, in order:
+/// 0. **Already resolved this run** — the memo, keyed on this entry's own
+///    `logId`, so N candidates cost one resolution and not N (#374, #319).
 /// 1. **Pinned** — the trust root carries a Rekor public key (from a TUF root or
 ///    the trust-root cache). Used with no network; this is the offline path and
 ///    the fix for #194's trust-on-first-use Rekor-key fetch.
@@ -2622,8 +2658,14 @@ impl BundleParts {
 ///    is the defensive backstop.)
 /// 3. **Online, unpinned** — TOFU-fetch from `--rekor-url/api/v1/log/publicKey`
 ///    (the prior behavior), and return it so the caller can cache it.
-async fn verify_rekor_set(ctx: &VerifyContext<'_>, entry: &BundleTlog) -> Result<String, VerifyErrorKind> {
-    let pem = resolve_rekor_public_key_pem(ctx.trust_root, ctx.rekor_url, ctx.offline, &entry.log_id_hex).await?;
+async fn verify_rekor_set(
+    ctx: &VerifyContext<'_>,
+    entry: &BundleTlog,
+    rekor_keys: &RekorKeyMemo,
+) -> Result<String, VerifyErrorKind> {
+    let pem = rekor_keys
+        .resolve(ctx.trust_root, ctx.rekor_url, ctx.offline, &entry.log_id_hex)
+        .await?;
     let key = tlog::rekor_key(&pem)?;
     tlog::verify_set(
         &key,
@@ -2643,28 +2685,98 @@ async fn verify_rekor_set(ctx: &VerifyContext<'_>, entry: &BundleTlog) -> Result
     Ok(pem)
 }
 
-/// The Rekor public key PEM for `log_id_hex`: pinned trust material first, an
-/// online fetch second, and nothing at all when the run is offline.
+/// The Rekor log public keys this verify run has already resolved, keyed on the
+/// entry's `logId` hex.
 ///
-/// Split out of [`verify_rekor_set`] because the cosign sidecar path needs the
-/// same three-rung resolution for the `dev.sigstore.cosign/bundle` annotation
-/// and must not grow a second, subtly different ladder — in particular one that
-/// forgets the offline refusal and reaches for the network anyway.
+/// One run resolves the key many times over: once per simplesigning layer of a
+/// cosign sidecar (#374) and once per candidate on the bundle path (#319).
+/// Unpinned, each of those was its own `/api/v1/log/publicKey` fetch.
 ///
-/// # Errors
+/// **Keyed on `log_id_hex`, and that is the whole security of it.** The log id
+/// arrives from an untrusted sidecar manifest, and
+/// [`TrustRoot::rekor_public_key_pem_for`] answers *per log* — a trust root
+/// carrying two logs across a rotation returns a different key for each. A memo
+/// keyed on nothing would hand the first entry's key to every later one, so an
+/// entry from the second log would have its SET checked against the first
+/// log's key. That is precisely the confusion
+/// `the_rekor_key_is_selectable_by_log_id_and_falls_back_when_unknown` pins out
+/// of the selector, re-introduced one layer above it.
 ///
-/// [`VerifyErrorKind::TransparencyLogUnavailable`] when the trust root pins no
-/// key for this log and either the run is offline or the fetch fails.
-pub(super) async fn resolve_rekor_public_key_pem(
-    trust_root: &TrustRoot,
-    rekor_url: &Url,
-    offline: bool,
-    log_id_hex: &str,
-) -> Result<String, VerifyErrorKind> {
-    match trust_root.rekor_public_key_pem_for(log_id_hex) {
-        Some(pinned) => Ok(pinned),
-        None if offline => Err(VerifyErrorKind::TransparencyLogUnavailable),
-        None => fetch_rekor_public_key_pem(rekor_url).await,
+/// **Successes only.** A transient Rekor 5xx while resolving candidate 1 must
+/// not decide candidate 2: this scan is ANY-of — "one verified signature is the
+/// ANY-of answer" — and a cached `Err` would promote one flaky fetch into a
+/// whole-scan refusal.
+///
+/// Cheap to clone, and a clone is the *same* memo: the copy
+/// [`SidecarVerification`](super::simplesigning_read::SidecarVerification)
+/// carries and the one the bundle path holds share one map, so the two doors
+/// onto a subject do not each pay for their own resolution.
+#[derive(Clone, Default)]
+pub struct RekorKeyMemo {
+    /// `logId` hex → PEM.
+    ///
+    /// A `std::sync::Mutex`, and the guard is never held across an `.await`:
+    /// the fetch runs with the lock released, so two tasks racing the same cold
+    /// log id both fetch and the second insert wins — one wasted request, never
+    /// a deadlock.
+    resolved: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl RekorKeyMemo {
+    /// The Rekor public key PEM for `log_id_hex`: this run's memo first, then
+    /// pinned trust material, then an online fetch, and nothing at all when the
+    /// run is offline.
+    ///
+    /// Shared with the cosign sidecar path rather than duplicated, so the
+    /// `dev.sigstore.cosign/bundle` annotation cannot grow a second, subtly
+    /// different ladder — in particular one that forgets the offline refusal and
+    /// reaches for the network anyway.
+    ///
+    /// The memo is consulted ahead of the trust root, which costs nothing: the
+    /// answer is a function of `log_id_hex` and the run's trust root, and the
+    /// trust root does not change mid-run.
+    ///
+    /// # Errors
+    ///
+    /// [`VerifyErrorKind::TransparencyLogUnavailable`] when the trust root pins
+    /// no key for this log and either the run is offline or the fetch fails.
+    pub(super) async fn resolve(
+        &self,
+        trust_root: &TrustRoot,
+        rekor_url: &Url,
+        offline: bool,
+        log_id_hex: &str,
+    ) -> Result<String, VerifyErrorKind> {
+        if let Some(memoized) = self.lock().get(log_id_hex).cloned() {
+            return Ok(memoized);
+        }
+        let pem = match trust_root.rekor_public_key_pem_for(log_id_hex) {
+            Some(pinned) => pinned,
+            None if offline => return Err(VerifyErrorKind::TransparencyLogUnavailable),
+            None => fetch_rekor_public_key_pem(rekor_url).await?,
+        };
+        self.lock().insert(log_id_hex.to_owned(), pem.clone());
+        Ok(pem)
+    }
+
+    /// The one Rekor log key this run resolved, when it resolved exactly one.
+    ///
+    /// The trust-root cache holds a single key per Rekor authority
+    /// ([`super::trust_cache::cache_key_for_rekor`]), so a run that legitimately
+    /// read entries from two logs has no single answer to write there — and
+    /// writing either would hand a later offline verify the wrong one. `None`
+    /// then, and the cache keeps whatever it already had.
+    fn single_key(&self) -> Option<String> {
+        let resolved = self.lock();
+        let mut keys = resolved.values();
+        match (keys.next(), keys.next()) {
+            (Some(only), None) => Some(only.clone()),
+            _ => None,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+        self.resolved.lock().expect("rekor key memo lock")
     }
 }
 
@@ -3185,6 +3297,26 @@ fn failure_rank(kind: &VerifyErrorKind) -> u8 {
         VerifyErrorKind::TransparencyLogUnavailable | VerifyErrorKind::RekorSetAbsentTsaPresent => 3,
         VerifyErrorKind::BundleParseFailed | VerifyErrorKind::NoUsableBundle => 2,
         _ => 1,
+    }
+}
+
+/// Cache the trust material a **simplesigning** verify used, at the exits the
+/// bundle path caches at (#374).
+///
+/// The bundle path has the PEM in hand when a candidate verifies and caches it
+/// right there. A sidecar layer resolves its log key several frames down, inside
+/// `simplesigning_read::logged_entry`, and nothing it returns carries the key
+/// back out — so the run's memo is what the key is read from instead.
+///
+/// Silent on a run that resolved no key at all (a key-mode sidecar uploads
+/// nothing to Rekor, so there is none) and on one that resolved two — see
+/// [`RekorKeyMemo::single_key`] for why the second case must not guess.
+async fn cache_sidecar_trust_material(ctx: &VerifyContext<'_>, rekor_keys: &RekorKeyMemo) {
+    if ctx.offline {
+        return;
+    }
+    if let Some(pem) = rekor_keys.single_key() {
+        cache_trust_material(ctx, pem).await;
     }
 }
 
@@ -3803,6 +3935,7 @@ mod tests {
                 &image,
                 crate::oci::verify::DiscoveryMethod::ReferrersApi,
                 budget,
+                &RekorKeyMemo::default(),
             )
             .await
         };
@@ -5194,6 +5327,7 @@ mod tests {
                 &image,
                 crate::oci::verify::DiscoveryMethod::ReferrersApi,
                 &mut budget,
+                &RekorKeyMemo::default(),
             )
             .await
         };
@@ -5381,6 +5515,7 @@ mod tests {
             &image,
             crate::oci::verify::DiscoveryMethod::ReferrersApi,
             &mut budget,
+            &RekorKeyMemo::default(),
         )
         .await;
 
@@ -5593,6 +5728,7 @@ mod tests {
             &image,
             crate::oci::verify::DiscoveryMethod::ReferrersApi,
             &mut budget,
+            &RekorKeyMemo::default(),
         )
         .await
     }
@@ -5793,6 +5929,7 @@ mod tests {
             &image,
             crate::oci::verify::DiscoveryMethod::ReferrersApi,
             &mut budget,
+            &RekorKeyMemo::default(),
         )
         .await;
 
@@ -5871,6 +6008,7 @@ mod tests {
                 &image,
                 crate::oci::verify::DiscoveryMethod::ReferrersApi,
                 &mut budget,
+                &RekorKeyMemo::default(),
             )
             .await;
             let error = verdict.expect_err("an over-cap bundle layer is never verified");
@@ -7794,6 +7932,525 @@ mod tests {
                 .expect("an attestation run carries the document")
                 .predicate_type,
             "https://cyclonedx.org/bom",
+        );
+    }
+
+    // ── C-022: the run's Rekor log-key memo ────────────────────────────────
+
+    /// **C-022, the trust half.** Two logs, two pinned keys, and the memo
+    /// answers each log id with its own.
+    ///
+    /// `log_id_hex` arrives from an untrusted sidecar manifest, and
+    /// [`TrustRoot::rekor_public_key_pem_for`] answers *per log* — so a memo
+    /// keyed on nothing would hand the first entry's key to every entry after
+    /// it, and a rotated trust root's second log would have its SET checked
+    /// against the first log's key. That is the confusion
+    /// `the_rekor_key_is_selectable_by_log_id_and_falls_back_when_unknown` pins
+    /// out of the selector, re-introduced one layer above it.
+    ///
+    /// Offline throughout, so no assertion here can be satisfied by a network
+    /// round trip: both answers are pinned material, and the claim is that they
+    /// are *different* answers.
+    #[tokio::test]
+    async fn the_rekor_memo_answers_each_log_id_with_its_own_key() {
+        let trust_root = TrustRoot::from_material(
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::from([
+                ("aa".to_string(), vec![1_u8, 1, 1]),
+                ("bb".to_string(), vec![2_u8, 2, 2]),
+            ]),
+        );
+        let rekor_url = Url::parse("http://127.0.0.1:3000").expect("rekor url");
+        let memo = RekorKeyMemo::default();
+        let pem_of = |der: &[u8]| pem::encode(&pem::Pem::new("PUBLIC KEY", der.to_vec()));
+
+        let first = memo
+            .resolve(&trust_root, &rekor_url, true, "aa")
+            .await
+            .expect("the first log's key is pinned");
+        let second = memo
+            .resolve(&trust_root, &rekor_url, true, "bb")
+            .await
+            .expect("the second log's key is pinned");
+
+        assert_eq!(first, pem_of(&[1, 1, 1]), "the first log resolves to its own key");
+        assert_eq!(
+            second,
+            pem_of(&[2, 2, 2]),
+            "the second log must resolve to the SECOND log's key -- an unkeyed memo answers with the first's",
+        );
+        assert_eq!(
+            memo.resolve(&trust_root, &rekor_url, true, "aa")
+                .await
+                .expect("the first log is still pinned"),
+            first,
+            "a second look at the first log is unchanged by the second log's resolution",
+        );
+    }
+
+    /// **C-022, the refetch half (#374, #319).** One log id is fetched once,
+    /// however many candidates ask for it.
+    ///
+    /// Every simplesigning layer of a cosign sidecar and every candidate on the
+    /// bundle path resolved the log key independently, so an unpinned run made
+    /// one `/api/v1/log/publicKey` request per entry.
+    ///
+    /// The stub log answers and counts. `Connection: close` on every response
+    /// makes one connection one request, so the counter cannot be confused by
+    /// keep-alive.
+    #[tokio::test]
+    async fn one_log_id_is_fetched_once_however_many_candidates_ask() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+
+        const STUB_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\nc3R1Yg==\n-----END PUBLIC KEY-----\n";
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind the rekor stub");
+        let addr = listener.local_addr().expect("the rekor stub has an address");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let served = Arc::clone(&hits);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                served.fetch_add(1, Ordering::SeqCst);
+                let mut scratch = [0_u8; 2048];
+                let _ = socket.read(&mut scratch).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{STUB_KEY_PEM}",
+                    STUB_KEY_PEM.len(),
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        // No Rekor key at all: `rekor_public_key_pem_for` falls back to the
+        // first key and there is none, so every unmemoized resolution is a
+        // fetch. A trust root that pins ANY key would never reach the network
+        // and the counter could not go red.
+        let trust_root = TrustRoot::from_material(
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        );
+        let rekor_url = Url::parse(&format!("http://{addr}/")).expect("the rekor stub url parses");
+        let memo = RekorKeyMemo::default();
+
+        for _ in 0..4 {
+            assert_eq!(
+                memo.resolve(&trust_root, &rekor_url, false, "aa")
+                    .await
+                    .expect("the stub log serves its key"),
+                STUB_KEY_PEM,
+                "every candidate gets the same key",
+            );
+        }
+
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "four candidates, one fetch -- without the memo this is four (#374, #319)",
+        );
+    }
+
+    /// A failed resolution is **not** cached: the next candidate tries again.
+    ///
+    /// The ANY-of half of C-022. One transient Rekor 5xx while resolving
+    /// candidate 1 must not decide candidate 2, or a flaky fetch is promoted
+    /// into a whole-scan refusal. The stub refuses once and then serves, so a
+    /// memo that cached the `Err` leaves the second call refused.
+    #[tokio::test]
+    async fn a_failed_rekor_resolution_is_not_memoized() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+
+        const STUB_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\nc3R1Yg==\n-----END PUBLIC KEY-----\n";
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind the rekor stub");
+        let addr = listener.local_addr().expect("the rekor stub has an address");
+        let answered = Arc::new(AtomicUsize::new(0));
+        let served = Arc::clone(&answered);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let first = served.fetch_add(1, Ordering::SeqCst) == 0;
+                let mut scratch = [0_u8; 2048];
+                let _ = socket.read(&mut scratch).await;
+                let response = if first {
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{STUB_KEY_PEM}",
+                        STUB_KEY_PEM.len(),
+                    )
+                };
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let trust_root = TrustRoot::from_material(
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        );
+        let rekor_url = Url::parse(&format!("http://{addr}/")).expect("the rekor stub url parses");
+        let memo = RekorKeyMemo::default();
+
+        let refused = memo.resolve(&trust_root, &rekor_url, false, "aa").await;
+        assert!(
+            matches!(refused, Err(VerifyErrorKind::TransparencyLogUnavailable)),
+            "the log was down for the first candidate: {refused:?}",
+        );
+        assert_eq!(
+            memo.resolve(&trust_root, &rekor_url, false, "aa")
+                .await
+                .expect("the log is up again for the second candidate"),
+            STUB_KEY_PEM,
+            "a cached Err would refuse every later candidate off one transient fault",
+        );
+    }
+
+    // ── C-023: a sidecar verify populates the offline trust cache ──────────
+
+    /// **C-023, the mechanism.** The one Rekor key a sidecar verify resolved is
+    /// written to the trust-root cache, and nothing is written when there is no
+    /// single key to write.
+    ///
+    /// Three states off one helper, because each alone is satisfied by a wrong
+    /// implementation: "always writes" passes the first, "never writes" passes
+    /// the last two.
+    #[tokio::test]
+    async fn a_sidecar_verify_caches_the_one_rekor_key_it_resolved() {
+        async fn cached_pem(offline: bool, log_ids: &[&str]) -> Option<String> {
+            let trust_root = TrustRoot::from_material(
+                Vec::new(),
+                std::collections::BTreeMap::new(),
+                std::collections::BTreeMap::from([
+                    ("aa".to_string(), vec![1_u8, 1, 1]),
+                    ("bb".to_string(), vec![2_u8, 2, 2]),
+                ]),
+            );
+            let identifier = verify_id();
+            let index = Index::from_impl(IndirectingIndex {
+                physical: identifier.clone(),
+            });
+            let rekor_url = Url::parse("http://127.0.0.1:3000").expect("rekor url");
+            let temp = tempfile::TempDir::new().expect("state dir");
+            let state = StateStore::new(temp.path());
+            let ctx = VerifyContext {
+                identifier: &identifier,
+                platform: None,
+                policies: &[],
+                no_cache: true,
+                index: &index,
+                trust_root: &trust_root,
+                rekor_url: &rekor_url,
+                state: &state,
+                offline,
+                content: VerifyContentMode::Signature,
+                verification: VerificationMode::Demand,
+                signature_format: None,
+                allow_unlogged_signature: false,
+                report_all: false,
+            };
+
+            let memo = RekorKeyMemo::default();
+            for log_id in log_ids {
+                // Resolved offline whatever the run's posture: these are pinned
+                // keys, so the resolution itself never reaches a network and the
+                // only thing `offline` decides here is whether the cache is
+                // written.
+                memo.resolve(&trust_root, &rekor_url, true, log_id)
+                    .await
+                    .expect("the log is pinned");
+            }
+
+            cache_sidecar_trust_material(&ctx, &memo).await;
+
+            TrustRootCache::from_cache(
+                &crate::oci::verify::trust_cache::cache_key_for_rekor(&rekor_url),
+                &state,
+            )
+            .await
+            .expect("the cache reads")
+            .and_then(|entry| entry.rekor_public_key_pem)
+        }
+
+        let pem_of = |der: &[u8]| pem::encode(&pem::Pem::new("PUBLIC KEY", der.to_vec()));
+        assert_eq!(
+            cached_pem(false, &["aa"]).await.as_deref(),
+            Some(pem_of(&[1, 1, 1]).as_str()),
+            "the key the verify used is what a later offline verify needs",
+        );
+        assert_eq!(
+            cached_pem(false, &[]).await,
+            None,
+            "a key-mode sidecar resolves no log key, so there is nothing to cache",
+        );
+        assert_eq!(
+            cached_pem(false, &["aa", "bb"]).await,
+            None,
+            "two logs, one cache slot: guessing would hand a later offline verify the wrong key",
+        );
+        assert_eq!(
+            cached_pem(true, &["aa"]).await,
+            None,
+            "an offline run learned nothing online and writes nothing",
+        );
+    }
+
+    /// The golden keyless bundle's own DSSE envelope, re-serialized as the layer
+    /// body an `.att` sidecar carries.
+    fn golden_dsse_envelope() -> Vec<u8> {
+        let bundle: serde_json::Value =
+            serde_json::from_str(GOLDEN_KEYLESS_BUNDLE).expect("the golden keyless bundle is JSON");
+        serde_json::to_vec(
+            bundle
+                .get("dsseEnvelope")
+                .expect("a keyless bundle carries a DSSE envelope"),
+        )
+        .expect("the envelope re-serializes")
+    }
+
+    /// The golden keyless bundle's own Fulcio leaf, PEM-encoded the way the
+    /// `dev.sigstore.cosign/certificate` annotation carries it.
+    fn golden_leaf_pem() -> String {
+        use base64::Engine as _;
+
+        let bundle: serde_json::Value =
+            serde_json::from_str(GOLDEN_KEYLESS_BUNDLE).expect("the golden keyless bundle is JSON");
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(
+                bundle
+                    .pointer("/verificationMaterial/certificate/rawBytes")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("a keyless bundle carries a certificate"),
+            )
+            .expect("rawBytes is base64");
+        pem::encode(&pem::Pem::new("CERTIFICATE", der))
+    }
+
+    /// The golden bundle's own `tlogEntries[0]`, re-spelled as cosign's offline
+    /// `dev.sigstore.cosign/bundle` annotation.
+    ///
+    /// Nothing is minted: the body, the instant, the log index, the log id and
+    /// the Signed Entry Timestamp are all read out of the committed capture, so
+    /// the SET this sidecar carries is one the committed trust root's Rekor key
+    /// actually verifies.
+    fn golden_offline_bundle_annotation() -> String {
+        use base64::Engine as _;
+
+        let base64 = base64::engine::general_purpose::STANDARD;
+        let bundle: serde_json::Value =
+            serde_json::from_str(GOLDEN_KEYLESS_BUNDLE).expect("the golden keyless bundle is JSON");
+        let entry = &bundle["verificationMaterial"]["tlogEntries"][0];
+        let number = |field: &str| -> i64 {
+            entry[field]
+                .as_str()
+                .expect("the entry field is a JSON string")
+                .parse()
+                .expect("the entry field is an integer")
+        };
+        let log_id = base64
+            .decode(entry["logId"]["keyId"].as_str().expect("the entry names a log"))
+            .expect("the log id is base64");
+        serde_json::json!({
+            "SignedEntryTimestamp": entry["inclusionPromise"]["signedEntryTimestamp"],
+            "Payload": {
+                "body": entry["canonicalizedBody"],
+                "integratedTime": number("integratedTime"),
+                "logIndex": number("logIndex"),
+                "logID": hex::encode(log_id),
+            }
+        })
+        .to_string()
+    }
+
+    /// The keyless `.att` sidecar layer cosign 2.x wrote: the golden bundle's
+    /// own envelope as the layer body, its own Fulcio leaf as the certificate
+    /// annotation, and its own transparency-log entry as the bundle annotation.
+    ///
+    /// The same construction `attestation_sidecar`'s tests use, repeated here
+    /// rather than shared: a test fixture that reaches across module boundaries
+    /// couples two suites that are meant to fail independently.
+    fn keyless_att_sidecar() -> (String, Vec<u8>) {
+        use crate::oci::referrer::media_types::{
+            ANNOTATION_COSIGN_BUNDLE, ANNOTATION_COSIGN_CERTIFICATE, DSSE_ENVELOPE_MEDIA_TYPE,
+        };
+
+        let envelope = golden_dsse_envelope();
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "size": 0,
+                "digest": crate::oci::Algorithm::Sha256.hash(b"").to_string(),
+            },
+            "layers": [{
+                "mediaType": DSSE_ENVELOPE_MEDIA_TYPE,
+                "size": envelope.len(),
+                "digest": crate::oci::Algorithm::Sha256.hash(&envelope).to_string(),
+                "annotations": {
+                    ANNOTATION_COSIGN_CERTIFICATE: golden_leaf_pem(),
+                    ANNOTATION_COSIGN_BUNDLE: golden_offline_bundle_annotation(),
+                },
+            }],
+        });
+        (manifest.to_string(), envelope)
+    }
+
+    /// [`drive_scan_in_mode`], but **online** and keeping the state directory,
+    /// so a test can read back what the scan wrote into the trust-root cache.
+    async fn drive_scan_online(
+        data: crate::oci::client::test_transport::StubTransportData,
+        subject_digest: &Digest,
+        policies: &[crate::trust::CompiledPolicy],
+        trust_root: &TrustRoot,
+        content: VerifyContentMode,
+    ) -> (Result<ScanOutcome, VerifyErrorKind>, tempfile::TempDir, Url) {
+        use crate::oci::client::test_transport::StubTransport;
+
+        let client = Client::with_transport(Box::new(StubTransport::new(data)));
+        let image: native::Reference = SCAN_IMAGE.parse().expect("stub reference");
+        let identifier = verify_id();
+        let index = Index::from_impl(IndirectingIndex {
+            physical: identifier.clone(),
+        });
+        // Never dialled: the committed trust root pins this stack's Rekor key,
+        // so the resolution is answered from trust material and the URL is only
+        // the cache key.
+        let rekor_url = Url::parse("http://127.0.0.1:3000").expect("rekor url");
+        let temp = tempfile::TempDir::new().expect("state dir");
+        let outcome = {
+            let state = StateStore::new(temp.path());
+            let ctx = VerifyContext {
+                identifier: &identifier,
+                platform: None,
+                policies,
+                no_cache: true,
+                index: &index,
+                trust_root,
+                rekor_url: &rekor_url,
+                state: &state,
+                offline: false,
+                content: content.clone(),
+                verification: VerificationMode::Demand,
+                signature_format: None,
+                allow_unlogged_signature: false,
+                report_all: true,
+            };
+            let target = ScanTarget {
+                image,
+                subject_digest: subject_digest.clone(),
+                enclosing_index: None,
+                index_members: Vec::new(),
+            };
+            let mut budget = ScanBudget::new(content.caps());
+            VerifyPipeline::scan(&client, &ctx, &target, ScanArity::All, &mut budget).await
+        };
+        (outcome, temp, rekor_url)
+    }
+
+    /// **C-023 / S-008, the wiring.** A keyless sidecar verify populates
+    /// `state/trust_root/<authority>.json`, so the next `--offline` verify of
+    /// the same subject has the material it needs.
+    ///
+    /// The bundle path has always cached here; the sidecar doors never did,
+    /// because the log key is resolved several frames down in
+    /// `simplesigning_read::logged_entry` and nothing it returns carries the key
+    /// back out (#374). The mechanism is asserted by
+    /// `a_sidecar_verify_caches_the_one_rekor_key_it_resolved`; what this adds
+    /// is that a real scan reaches it — a test of the helper alone stays green
+    /// with the call site deleted.
+    ///
+    /// The cached key is compared against the trust root's own pinned key rather
+    /// than a transcription, so a cache written from the wrong material reds.
+    #[tokio::test]
+    async fn a_keyless_sidecar_verify_writes_the_offline_trust_cache() {
+        use crate::oci::client::sibling_tag_reference;
+        use crate::oci::client::test_transport::StubTransportData;
+
+        let subject = crate::oci::Algorithm::Sha256.hash(GOLDEN_SUBJECT_MANIFEST.as_bytes());
+        let (manifest, envelope) = keyless_att_sidecar();
+        let image: native::Reference = SCAN_IMAGE.parse().expect("stub reference");
+        let layer = {
+            let parsed: crate::oci::ImageManifest =
+                serde_json::from_str(&manifest).expect("the keyless `.att` manifest parses");
+            parsed.layers.first().expect("one layer").clone()
+        };
+        let data = StubTransportData::new();
+        {
+            let mut inner = data.write();
+            inner.blobs.insert(layer.digest.clone(), envelope.clone());
+            let tag_ref = sibling_tag_reference(
+                &image,
+                super::simplesigning_read::sidecar_tag(&subject, SidecarKind::Attestation),
+            );
+            inner.manifests.insert(
+                tag_ref.to_string(),
+                (manifest.as_bytes().to_vec(), layer.digest.clone()),
+            );
+            let pinned = image.clone_with_digest(subject.to_string());
+            inner.manifests.insert(
+                pinned.to_string(),
+                (GOLDEN_SUBJECT_MANIFEST.as_bytes().to_vec(), subject.to_string()),
+            );
+        }
+
+        let trust_root =
+            TrustRoot::load_trusted_root_json(GOLDEN_TRUSTED_ROOT.as_bytes()).expect("the committed trust root loads");
+        let policies = [crate::trust::CompiledPolicy {
+            builder: None,
+            backends: vec![crate::trust::PolicyBackend::Keyless(crate::trust::CompiledKeyless {
+                identity: crate::trust::IdentityRule::Exact(GOLDEN_IDENTITY.to_string()),
+                issuer: GOLDEN_ISSUER.to_string(),
+            })],
+        }];
+
+        let (outcome, temp, rekor_url) = drive_scan_online(
+            data,
+            &subject,
+            &policies,
+            &trust_root,
+            VerifyContentMode::Attestation { predicate_type: None },
+        )
+        .await;
+
+        let scan = outcome.expect("the keyless `.att` sidecar verifies against the committed trust root");
+        assert_eq!(scan.matches.len(), 1, "one attestation: {:?}", scan.refused);
+
+        let state = StateStore::new(temp.path());
+        let cached = TrustRootCache::from_cache(
+            &crate::oci::verify::trust_cache::cache_key_for_rekor(&rekor_url),
+            &state,
+        )
+        .await
+        .expect("the cache reads")
+        .expect("a sidecar verify leaves the trust material behind for the next offline run");
+        let bundle: serde_json::Value =
+            serde_json::from_str(GOLDEN_KEYLESS_BUNDLE).expect("the golden keyless bundle is JSON");
+        let log_id = {
+            use base64::Engine as _;
+            hex::encode(
+                base64::engine::general_purpose::STANDARD
+                    .decode(
+                        bundle["verificationMaterial"]["tlogEntries"][0]["logId"]["keyId"]
+                            .as_str()
+                            .expect("the entry names a log"),
+                    )
+                    .expect("the log id is base64"),
+            )
+        };
+        assert_eq!(
+            cached.rekor_public_key_pem,
+            trust_root.rekor_public_key_pem_for(&log_id),
+            "the cached key must be the one this verify resolved for this log",
+        );
+        assert_eq!(
+            cached.fulcio_der_certs,
+            trust_root.der_certs().to_vec(),
+            "the Fulcio anchors travel with it, or the offline verify has no chain to build",
         );
     }
 
