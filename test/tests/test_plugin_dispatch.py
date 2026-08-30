@@ -514,3 +514,89 @@ def test_bare_help_prints_top_level(ocx: OcxRunner) -> None:
     assert "package" in combined, (
         f"expected built-in 'package' in top-level help; got {combined!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Credential exemption — S-025
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def credential_probe_dir(tmp_path: Path) -> Path:
+    """Stage ``ocx-credprobe``: a plugin that reports what it inherited.
+
+    Its own fixture rather than a line added to ``plugin_bin_dir``: the probe
+    must dump *every* credential name plus one ordinary variable, and folding
+    that into the shared fixture would make eight unrelated tests depend on the
+    credential list.
+    """
+    body = textwrap.dedent(
+        """\
+        #!/usr/bin/env bash
+        # ocx-credprobe — reports which credential vars reached a plugin.
+        echo "SIGNING_KEY:${OCX_SIGNING_KEY:-<absent>}"
+        echo "KEY_PASSWORD:${OCX_KEY_PASSWORD:-<absent>}"
+        echo "IDENTITY_TOKEN:${OCX_IDENTITY_TOKEN:-<absent>}"
+        echo "ORDINARY:${OCX_CREDPROBE_CONTROL:-<absent>}"
+        """
+    )
+    script_path = tmp_path / "ocx-credprobe"
+    script_path.write_text(body)
+    script_path.chmod(
+        script_path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH
+    )
+    return tmp_path
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="bash plugin scripts require POSIX shell")
+def test_plugin_never_inherits_a_credential_variable(
+    ocx: OcxRunner, credential_probe_dir: Path
+) -> None:
+    """S-025: ``OCX_SIGNING_KEY`` does not reach a dispatched ``ocx-<plugin>``.
+
+    A plugin is third-party code and inherits the ambient environment on
+    purpose (trust boundary, ``app/plugin_dispatch.rs``), so ``Command::envs``
+    dropping a key from the composed map is not enough — the removal has to be
+    an explicit ``env_remove`` for every ``CREDENTIAL_KEYS`` entry. This drives
+    that through the real binary with all three set in the parent env.
+
+    ``OCX_SIGNING_KEY`` is the one that matters here: it holds a raw private
+    key PEM rather than a short-lived token, and ``--key file:<path>`` — the
+    spelling ``env://`` replaces — hands a plugin no pointer at all.
+
+    ``ORDINARY`` is the positive control, and it is what makes the three
+    absences evidence. Without it, a plugin that failed to launch, or one that
+    inherited nothing whatsoever, would report every credential absent and pass
+    for entirely the wrong reason.
+    """
+    secret = "-----BEGIN ENCRYPTED SIGSTORE PRIVATE KEY-----\nnot-a-real-key\n"
+    result = _run_ocx(
+        ocx,
+        "credprobe",
+        extra_path_dir=credential_probe_dir,
+        extra_env={
+            "OCX_SIGNING_KEY": secret,
+            "OCX_KEY_PASSWORD": "probe-password",
+            "OCX_IDENTITY_TOKEN": "probe-token",
+            "OCX_CREDPROBE_CONTROL": "inherited",
+        },
+    )
+    assert result.returncode == 0, (
+        f"the probe plugin must run; exit {result.returncode}\n"
+        f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+    )
+    lines = dict(
+        line.split(":", 1) for line in result.stdout.splitlines() if ":" in line
+    )
+    assert lines.get("ORDINARY") == "inherited", (
+        "positive control: a plugin inherits the ambient environment, so the "
+        "absences below mean the credentials were removed rather than that "
+        f"nothing was passed at all; got {result.stdout!r}"
+    )
+    for name in ("SIGNING_KEY", "KEY_PASSWORD", "IDENTITY_TOKEN"):
+        assert lines.get(name) == "<absent>", (
+            f"OCX_{name} reached the plugin; got {result.stdout!r}"
+        )
+    assert secret.strip() not in result.stdout, (
+        "the key material itself must not appear anywhere in the plugin's output"
+    )

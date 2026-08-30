@@ -20,10 +20,16 @@ pub struct KeyOpt {
     /// Sign or verify with a key pair instead of keyless Sigstore.
     ///
     /// Takes a key reference, `[scheme://]<rest>`. A bare path, or a `file://`
-    /// one, names a file. The `awskms`, `gcpkms`, `azurekms`, `hashivault`
-    /// and `k8s` schemes are recognised and rejected by name. Leave it unset to
-    /// sign or verify keyless. The password for an encrypted private key is
-    /// read from `OCX_KEY_PASSWORD`.
+    /// one, names a file. `env://VAR` reads the key PEM out of the environment
+    /// variable `VAR` itself -- the variable holds the key, not a path to it --
+    /// for a runner with no writable disk. The `awskms`, `gcpkms`, `azurekms`,
+    /// `hashivault` and `k8s` schemes are recognised and rejected by name.
+    /// Leave it unset to sign or verify keyless. The password for an encrypted
+    /// private key is read from `OCX_KEY_PASSWORD`.
+    ///
+    /// Name the variable `OCX_SIGNING_KEY` unless you have a reason not to:
+    /// that one is stripped from every child process ocx spawns, and a name
+    /// ocx does not know is inherited by plugins and generated launchers.
     #[clap(long = "key", value_name = "REF")]
     key: Option<String>,
 }
@@ -76,7 +82,7 @@ impl KeyOpt {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser as _;
+    use clap::{CommandFactory as _, Parser as _};
     use ocx_lib::oci::sign::Scheme;
 
     use super::*;
@@ -128,6 +134,54 @@ mod tests {
         // `is_key_mode` answers without parsing, so a bad reference still reads
         // as key mode -- the parse error is reported once, by `reference`.
         assert!(parse(&["--key", "awskms://alias/release"]).is_key_mode());
+    }
+
+    /// C-034: every scheme is described the way it actually behaves -- an
+    /// implemented one by the spelling that reaches it, an unimplemented one
+    /// as a bare name in the rejected list.
+    ///
+    /// Nothing compiler-enforces this: `Scheme` gaining a variant, or one
+    /// flipping to implemented, changes no string in this file. The loop
+    /// derives from `Scheme::SPELLINGS` and `is_implemented`, so a scheme that
+    /// changes status reds here instead of shipping help that contradicts the
+    /// parser -- Block-tier per `quality-cli-help.md`.
+    #[test]
+    fn the_help_describes_every_scheme_the_way_the_parser_treats_it() {
+        let rendered = Harness::command().render_long_help().to_string();
+        assert!(
+            rendered.contains("recognised and rejected by name"),
+            "the help must still say which schemes are refused: {rendered}"
+        );
+        for spelling in Scheme::SPELLINGS {
+            let scheme = Scheme::parse(spelling).expect("every spelling parses back");
+            let bare = format!("`{spelling}`");
+            if scheme.is_implemented() {
+                assert!(
+                    rendered.contains(&format!("{spelling}://")),
+                    "`{spelling}` is implemented, so the help must show how to write it: {rendered}"
+                );
+                assert!(
+                    !rendered.contains(&bare),
+                    "`{spelling}` is implemented and must not sit in the rejected list: {rendered}"
+                );
+            } else {
+                assert!(
+                    rendered.contains(&bare),
+                    "`{spelling}` is not implemented and must be named as rejected: {rendered}"
+                );
+            }
+        }
+    }
+
+    /// C-030/C-034: `--key env://VAR` reaches the library grammar as an env
+    /// reference, so the flag and the parser agree on what the spelling means.
+    #[test]
+    fn an_env_reference_parses_through_the_library_grammar() {
+        let opt = parse(&["--key", "env://OCX_SIGNING_KEY"]);
+        assert!(opt.is_key_mode());
+        let key = opt.reference().expect("env:// must not be refused").expect("some");
+        assert_eq!(key.scheme(), Scheme::Env);
+        assert_eq!(key.as_env_var(), Some("OCX_SIGNING_KEY"));
     }
 
     /// The frozen arg id, proved the way a consumer will actually depend on it.

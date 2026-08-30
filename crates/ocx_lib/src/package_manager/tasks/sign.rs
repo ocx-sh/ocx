@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 use std::sync::Arc;
 
 use crate::oci::index::IndexOperation;
-use crate::oci::sign::key_backend::FileKeyBackend;
+use crate::oci::sign::key_backend::PemKeyBackend;
 use crate::oci::sign::{
     DispatchingTokenProvider, KeySigner, KeylessSigner, SignContext, SignError, SignPipeline, Signer,
 };
@@ -315,13 +315,17 @@ pub(super) fn build_signer(
     let Some(key) = key else {
         return Ok(Box::new(KeylessSigner::new()));
     };
-    // `KeyRef::as_path` is `Some` for `Scheme::File` alone; every other
-    // recognised scheme is a backend OCX has not built, and it is refused by
-    // name here rather than as "no such file or directory".
-    let path = key
-        .as_path()
-        .ok_or(crate::oci::sign::KeyBackendError::Unsupported { scheme: key.scheme() })?;
-    let backend = FileKeyBackend::open(path)?;
+    // One accessor per implemented scheme, and both are `Some` for exactly
+    // one: a reference that answers neither is a backend OCX has not built,
+    // and it is refused by name here rather than as "no such file or
+    // directory" — or, worse for `env://`, as a file named after a variable.
+    let backend = if let Some(path) = key.as_path() {
+        PemKeyBackend::open(path)?
+    } else if let Some(variable) = key.as_env_var() {
+        PemKeyBackend::open_env(variable)?
+    } else {
+        return Err(crate::oci::sign::KeyBackendError::Unsupported { scheme: key.scheme() }.into());
+    };
     // The URL travels only when it will be dialled, so the signer's own
     // `uploads_to_transparency_log` cannot disagree with what the pipeline
     // guards.

@@ -1060,11 +1060,34 @@ fn compile_key_reference(
     // A recognised-but-unimplemented backend must say so by name. Reading its
     // `rest` as a filename is how `awskms://alias/release` becomes "no such file
     // or directory", which sends the operator to the wrong problem entirely.
-    let path = key.as_path().ok_or_else(|| TrustPolicyError::KeyReferenceInvalid {
+    if let Some(path) = key.as_path() {
+        return read_key_file(path, scope).and_then(|pem| parse_verification_key(&pem, scope, KeyFault::FileBytes));
+    }
+    if let Some(variable) = key.as_env_var() {
+        // The same three rules the signing half applies (`read_key_env`), and
+        // the same two exit codes: nothing there is 74, something there that
+        // no key can be is 65. A `key = "env://VAR"` in a policy that answered
+        // differently from `--key env://VAR` would be the sign/verify drift
+        // the shared reader exists to prevent.
+        let pem = crate::oci::sign::key_ref::read_key_env(variable).map_err(|error| {
+            use crate::oci::sign::key_ref::KeyEnvError;
+
+            let (reason, fault) = match &error {
+                KeyEnvError::Unset { .. } => (format!("absent: {error}"), KeyFault::Path),
+                KeyEnvError::TooLarge { .. } => (format!("unusable: {error}"), KeyFault::FileBytes),
+            };
+            TrustPolicyError::KeyMalformed {
+                scope: scope.to_owned(),
+                reason,
+                fault,
+            }
+        })?;
+        return parse_verification_key(pem.as_bytes(), scope, KeyFault::FileBytes);
+    }
+    Err(TrustPolicyError::KeyReferenceInvalid {
         scope: scope.to_owned(),
         source: crate::oci::sign::KeyRefError::UnsupportedBackend { scheme: key.scheme() },
-    })?;
-    read_key_file(path, scope).and_then(|pem| parse_verification_key(&pem, scope, KeyFault::FileBytes))
+    })
 }
 
 /// Read a public-key PEM, bounded and refusing anything that is not a regular
@@ -3137,6 +3160,61 @@ signers = [
         assert!(matches!(compiled.backends.as_slice(), [PolicyBackend::Key(_)]));
     }
 
+    /// C-031, verify half: `env://VAR` compiles to a verification key from the
+    /// variable's own bytes, with no file anywhere.
+    ///
+    /// The same reference grammar the `--key` flag parses, so a policy and a
+    /// flag naming one variable resolve to one key.
+    #[test]
+    fn an_env_key_reference_compiles_from_the_variable() {
+        let env = crate::test::env::lock();
+        env.set("OCX_TEST_POLICY_KEY", GOLDEN_PUBLIC_KEY_PEM);
+
+        let reference = crate::oci::sign::KeyRef::parse("env://OCX_TEST_POLICY_KEY").expect("env:// parses");
+        compile_key_reference(&reference, "ghcr.io/acme/*").expect("the variable holds an SPKI PEM");
+    }
+
+    /// C-033, verify half: unset and over-cap answer with the **same two exit
+    /// classes the signing half answers**, so one bad `env://` gets one verdict
+    /// whichever verb reads it.
+    ///
+    /// `KeyFault::Path` is 74 (`io_error`) and `KeyFault::FileBytes` is 65
+    /// (`data_error`) — the codes a missing and an over-cap key *file* already
+    /// produce. Both messages name the variable, which is all an operator has
+    /// to go on when there is no path in the refusal.
+    #[test]
+    fn an_env_key_reference_refuses_unset_and_oversized_values_by_name() {
+        let env = crate::test::env::lock();
+        let reference = crate::oci::sign::KeyRef::parse("env://OCX_TEST_POLICY_KEY").expect("env:// parses");
+
+        env.remove("OCX_TEST_POLICY_KEY");
+        let unset = compile_key_reference(&reference, "ghcr.io/acme/*").expect_err("an unset variable holds no key");
+        let TrustPolicyError::KeyMalformed { reason, fault, .. } = &unset else {
+            panic!("got {unset:?}");
+        };
+        assert_eq!(*fault, KeyFault::Path, "nothing to read is the I/O class: {reason}");
+        assert!(
+            reason.contains("OCX_TEST_POLICY_KEY"),
+            "the refusal must name it: {reason}"
+        );
+
+        let cap = usize::try_from(MAX_KEY_PEM_BYTES).expect("the cap fits a usize");
+        env.set("OCX_TEST_POLICY_KEY", "k".repeat(cap + 1));
+        let oversized = compile_key_reference(&reference, "ghcr.io/acme/*").expect_err("over the cap");
+        let TrustPolicyError::KeyMalformed { reason, fault, .. } = &oversized else {
+            panic!("got {oversized:?}");
+        };
+        assert_eq!(
+            *fault,
+            KeyFault::FileBytes,
+            "an over-cap value is a data fault: {reason}"
+        );
+        assert!(
+            reason.contains("OCX_TEST_POLICY_KEY"),
+            "the refusal must name it: {reason}"
+        );
+    }
+
     /// **A `KeyRef` can never name an unimplemented backend**, and that is what
     /// makes the two `--key` and `signers` paths agree: `KeyRef::parse` refuses
     /// a recognised-but-unimplemented scheme up front, so
@@ -3145,9 +3223,15 @@ signers = [
     /// calls the same parser — see
     /// `an_unimplemented_key_backend_is_refused_by_name_not_as_a_missing_file`.
     ///
-    /// This is why `compile_key_reference`'s `as_path()` arm is unreachable
-    /// rather than merely unlikely: every `KeyRef` that exists is a file
-    /// reference. It stays as the fail-closed answer, never a fall-through.
+    /// This is why `compile_key_reference`'s trailing `UnsupportedBackend`
+    /// answer is unreachable rather than merely unlikely: every `KeyRef` that
+    /// exists resolves through one of the accessors above it. It stays as the
+    /// fail-closed answer, never a fall-through.
+    ///
+    /// C-031 widened "one accessor" from `as_path` alone to `as_path` **xor**
+    /// `as_env_var`. The exclusivity is the load-bearing half: two accessors
+    /// answering for one reference would make the branch order decide what a
+    /// `--key` value means.
     #[test]
     fn a_key_reference_naming_an_unimplemented_backend_never_becomes_a_key_ref() {
         let error = crate::oci::sign::KeyRef::parse("gcpkms://projects/p/locations/l/keyRings/r/cryptoKeys/k")
@@ -3164,9 +3248,10 @@ signers = [
         for scheme in crate::oci::sign::Scheme::SPELLINGS {
             let reference = format!("{scheme}://whatever");
             if let Ok(parsed) = crate::oci::sign::KeyRef::parse(&reference) {
-                assert!(
-                    parsed.as_path().is_some(),
-                    "`{reference}` parsed, so it must be a file reference — the unreachable arm in \
+                let answered = usize::from(parsed.as_path().is_some()) + usize::from(parsed.as_env_var().is_some());
+                assert_eq!(
+                    answered, 1,
+                    "`{reference}` parsed, so exactly one accessor must answer for it — the unreachable arm in \
                      `compile_key_reference` depends on exactly this"
                 );
             }

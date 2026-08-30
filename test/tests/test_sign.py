@@ -717,6 +717,100 @@ def test_sign_with_a_cosign_key_reports_a_key_backend_and_writes_no_certificate(
     )
 
 
+def test_sign_with_an_env_held_key_reports_the_env_backend(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+) -> None:
+    """S-009: ``--key env://OCX_SIGNING_KEY`` signs, and the report says ``env``.
+
+    The variable carries the PEM itself, so the same golden key that the
+    ``file`` test above reads off disk is passed through the environment here
+    instead — one key, two references, and the only thing that may differ is
+    the reported backend. ``public_key_hint`` is asserted equal to the file
+    run's on purpose: a hint that moved with the reference would mean the
+    source reached the bundle's key material, which no verifier would match.
+    """
+    pkg = published_package
+    key = Path(__file__).parent / "fixtures" / "golden" / "keys" / "cosign.key"
+    env = {
+        **ocx.env,
+        "OCX_KEY_PASSWORD": "ocxtest",
+        "OCX_SIGNING_KEY": key.read_text(),
+    }
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "--format", "json",
+            "package", "sign",
+            "--platform", current_platform(),
+            "--key", "env://OCX_SIGNING_KEY",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)["data"]
+    assert data["key_backend"] == "env", (
+        "the reported backend must name the reference that produced the "
+        "signature, not the envelope it happens to share with a file key"
+    )
+    assert data["signer"] == "env", "signer must not still say keyless-fulcio under a key"
+    assert data["public_key_hint"], "a key-mode signature reports the key's cosign hint"
+    assert data["certificate_identity"] == "", "there is no certificate to take an identity from"
+
+    bundle = json.loads(get_blob(ocx.registry, pkg.repo, bundle_payload_digest(data)))
+    material = bundle["verificationMaterial"]
+    assert material["publicKey"]["hint"] == data["public_key_hint"]
+    assert "certificate" not in material, "a key-mode bundle carries no Fulcio leaf"
+
+
+def test_sign_with_an_unset_env_key_names_the_variable(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+) -> None:
+    """S-010: ``--key env://UNSET`` refuses with a message naming the variable.
+
+    Exit 74 (``io_error``) — the same code ``--key <missing file>`` answers, so
+    a wrapper branching on the exit code does not have to learn a second one
+    for the second spelling of "the key is not where you said".
+
+    With no path in the reference there is nothing else for an operator to go
+    on, which is why the variable name in the message is the assertion and not
+    merely a nicety.
+    """
+    pkg = published_package
+    variable = "OCX_TEST_UNSET_SIGNING_KEY"
+    env = {key: value for key, value in ocx.env.items() if key != variable}
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "--format", "json",
+            "package", "sign",
+            "--platform", current_platform(),
+            "--key", f"env://{variable}",
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert result.returncode == 74, (
+        f"an unset key variable is an I/O fault, like a missing key file; "
+        f"got {result.returncode}: {result.stdout}{result.stderr}"
+    )
+    envelope = json.loads(result.stdout)
+    message = envelope["error"]["message"]
+    assert variable in message, f"the refusal must name the variable: {message}"
+    assert "no such file" not in message.lower(), (
+        "an env reference names no file, so the refusal must not send the "
+        "operator to their filesystem"
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Credential exemption — OCX_IDENTITY_TOKEN must not leak to child processes
 # ──────────────────────────────────────────────────────────────────────────────

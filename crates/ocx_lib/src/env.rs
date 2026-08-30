@@ -159,12 +159,83 @@ pub mod keys {
     /// credential exemption table in `subsystem-cli.md`.
     pub const OCX_KEY_PASSWORD: &str = "OCX_KEY_PASSWORD";
 
-    /// Bearer-credential env vars that `apply_ocx_config` must actively scrub
-    /// from a child env. Forwarding these to every subprocess would broaden
-    /// the attack surface — the CLI command that needs the token reads it
-    /// once via `std::env::var` and never propagates it. See the credential
-    /// exemption table in `subsystem-cli.md`.
-    pub const CREDENTIAL_KEYS: &[&str] = &[OCX_IDENTITY_TOKEN, OCX_KEY_PASSWORD];
+    /// The signing key PEM itself, for `--key env://OCX_SIGNING_KEY`, read once
+    /// by `oci::sign::key_backend::PemKeyBackend::open_env` (and on the verify
+    /// side by `trust::compile_key_reference`).
+    ///
+    /// The **value is the key**, not a path to one — the spelling for a runner
+    /// with no writable disk, where writing the key out in order to sign with
+    /// it is the thing being avoided. [`OCX_KEY_PASSWORD`] is unrelated and the
+    /// two coexist: one names the envelope, the other opens it.
+    ///
+    /// The most sensitive member of [`CREDENTIAL_KEYS`] — a raw private key
+    /// rather than a short-lived token. `env://` accepts **any** variable name,
+    /// and a name ocx does not know cannot be scrubbed; this is the
+    /// conventional one, so the documented case is covered. Choosing another
+    /// name still works and is still inherited by plugins — the operator's
+    /// knowing call, made once, not a silent default.
+    pub const OCX_SIGNING_KEY: &str = "OCX_SIGNING_KEY";
+
+    /// Every env var that carries a **bearer credential** — the single source
+    /// of truth for that property, and the set `apply_ocx_config` scrubs from
+    /// any child env.
+    ///
+    /// # Membership rule
+    ///
+    /// A variable belongs here when possessing its value is enough to act as
+    /// the operator: a token, a passphrase, a private key. Not "sensitive" in
+    /// the vague sense — a registry hostname is configuration, and
+    /// `OCX_CONSENT_PATHS` is policy. If holding the string authenticates you,
+    /// it is a credential.
+    ///
+    /// # Adding one
+    ///
+    /// Three edits, in the same change, or the set is a lie somewhere:
+    ///
+    /// 1. Add the constant here and list it below.
+    /// 2. Add its row to the credential exemption table in
+    ///    `.claude/rules/subsystem-cli.md` (the reviewer-facing list).
+    /// 3. Document it in `website/src/docs/reference/environment.md`, stating
+    ///    that it is never forwarded to child processes (the user-facing list).
+    ///
+    /// # Members
+    ///
+    /// | Variable | Carries | Read at |
+    /// |---|---|---|
+    /// | [`OCX_IDENTITY_TOKEN`] | Short-lived OIDC bearer token | the shared sign/attest token resolver |
+    /// | [`OCX_KEY_PASSWORD`] | Passphrase for an encrypted signing key | `oci::sign::key_backend::key_password` |
+    /// | [`OCX_SIGNING_KEY`] | The signing key PEM itself | `oci::sign::key_backend::PemKeyBackend::open_env` |
+    ///
+    /// # Known non-members
+    ///
+    /// Two variables satisfy the membership rule above and are **deliberately
+    /// not** in the set. Recorded here so the next contributor does not
+    /// re-derive the analysis, or add one without seeing what it costs.
+    ///
+    /// - `OCX_ANNOUNCE_TOKEN` (read in `command/package_announce.rs`) — a forge
+    ///   personal access token, so holding it authenticates you. **Open: a
+    ///   cross-repo decision, not an oversight.** `ocx-mirror` announces from a
+    ///   plugin process, and a plugin inherits the ambient environment, so
+    ///   adding this entry would stop that working. The owner's call.
+    /// - `OCX_AUTH_<slug>_TOKEN` (read by `crate::auth::get_env_auth`) — a name
+    ///   *pattern*, not a name, so a `&[&str]` structurally cannot hold it. **Open: a gap
+    ///   in the mechanism, not a missing row.** The repo already solves this
+    ///   shape once — `script::ocx_module::is_reserved_env_key` masks the whole
+    ///   `OCX_AUTH_` family from Starlark by prefix — so there are two
+    ///   credential masks and only one of them handles patterns. Closing it
+    ///   means teaching this one prefixes too. Same shape as `env://` under an
+    ///   operator-chosen name: what ocx cannot name, it cannot scrub.
+    ///
+    /// # Why a set at all
+    ///
+    /// Forwarding a credential to every subprocess broadens the attack surface
+    /// for no gain: the one command that needs it reads it directly. But *not
+    /// forwarding* is not *not leaking* — `Command::envs` only adds and
+    /// overrides, so a spawn site that inherits the ambient environment passes
+    /// an inherited credential straight through. Every such site must
+    /// `env_clear()` or `env_remove` each entry here; `app/plugin_dispatch.rs`
+    /// is the one that inherits deliberately and therefore removes explicitly.
+    pub const CREDENTIAL_KEYS: &[&str] = &[OCX_IDENTITY_TOKEN, OCX_KEY_PASSWORD, OCX_SIGNING_KEY];
 }
 
 /// Resolution-affecting policy snapshot, taken from the running ocx's parsed
@@ -2987,6 +3058,21 @@ mod tests {
         assert!(env.get(keys::OCX_REMOTE).is_none(), "stale OCX_REMOTE must be cleared");
         assert!(env.get(keys::OCX_CONFIG).is_none(), "stale OCX_CONFIG must be cleared");
         assert!(env.get(keys::OCX_INDEX).is_none(), "stale OCX_INDEX must be cleared");
+    }
+
+    /// C-036: the conventional `env://` key variable is on the credential list.
+    ///
+    /// The scrub test below iterates `CREDENTIAL_KEYS`, so it would stay green
+    /// with this entry removed — it would simply test one variable fewer. The
+    /// membership is therefore asserted by name: an `env://OCX_SIGNING_KEY`
+    /// that a plugin can read is a raw private key handed to third-party code,
+    /// which `--key file:<path>` never does.
+    #[test]
+    fn the_conventional_signing_key_variable_is_a_credential() {
+        assert!(
+            keys::CREDENTIAL_KEYS.contains(&keys::OCX_SIGNING_KEY),
+            "OCX_SIGNING_KEY holds a private key PEM and must be scrubbed from every child env"
+        );
     }
 
     #[test]

@@ -272,7 +272,7 @@ OIDC identity token for [`ocx package sign`][cmd-package-sign] and [`ocx package
 
 The value must be a short-lived JWT issued by a supported OIDC provider (GitHub Actions, GitLab CI, CircleCI, etc.). The token is consumed once and never logged or written to disk.
 
-**NOT forwarded to subprocess children.** OCX reads `OCX_IDENTITY_TOKEN` directly via `std::env::var` inside the shared sign/attest token resolver and never places it in a child process environment via `OcxConfigView`. Security rationale: OIDC tokens are short-lived bearer credentials — forwarding them into every subprocess child env would broaden the attack surface unnecessarily.
+**Never forwarded to child processes.** OCX reads `OCX_IDENTITY_TOKEN` directly inside the shared sign/attest token resolver, never places it in a child process environment via `OcxConfigView`, and strips it from every subprocess it spawns, plugins (`ocx-<name>`) included. Security rationale: OIDC tokens are short-lived bearer credentials — forwarding them into every subprocess child env would broaden the attack surface unnecessarily.
 
 Token precedence for `ocx package sign` and `ocx package attest` (highest to lowest):
 
@@ -292,7 +292,29 @@ The password guarding an encrypted private key — a cosign `ENCRYPTED SIGSTORE 
 
 Never a flag: a password in `argv` is visible to every process on the host. An **unset** variable reads as the empty password — the shape a key pair has when `cosign generate-key-pair` is answered by pressing enter twice — so leaving it unset is a real, supported case, not a distinct error. The value is not zeroized after use: it already lives in this process's environment block, so wiping a copy of it protects nothing.
 
+**Never forwarded to child processes.** OCX reads this variable directly and strips it from the environment of every subprocess it spawns, plugins (`ocx-<name>`) included.
+
+It opens the key; it never names one. Pair it with `--key <path>` or with [`OCX_SIGNING_KEY`](#ocx-signing-key) — the two are unrelated and coexist.
+
 OCX does not generate key pairs itself. Run [`cosign generate-key-pair`][cosign] from an activated environment — cosign ships in the OCX index — to produce a `cosign.key` / `cosign.pub` pair, optionally password-protected.
+
+### `OCX_SIGNING_KEY` {#ocx-signing-key}
+
+The signing key itself, for `--key env://OCX_SIGNING_KEY`. The variable holds the PEM — a cosign `ENCRYPTED SIGSTORE PRIVATE KEY` envelope when signing, an SPKI public key when a `[[trust.policy]]` signer names it — never a path to a file holding one.
+
+This is the spelling for a runner with no writable disk, or one where writing the key out in order to sign with it is the thing being avoided. Unset or empty is refused with exit `74` naming the variable, the same code a missing key *file* gets; a value larger than 64 KiB is refused with exit `65`, the same cap a key file has.
+
+```sh
+export OCX_SIGNING_KEY="$(cat cosign.key)"
+export OCX_KEY_PASSWORD='…'
+ocx package sign --key env://OCX_SIGNING_KEY ocx.sh/acme/tool:1.0.0
+```
+
+**Never forwarded to child processes.** OCX reads this variable directly and strips it from the environment of every subprocess it spawns, plugins (`ocx-<name>`) included.
+
+::: warning Any other variable name is inherited
+`env://` accepts any variable name, and only this one is on OCX's credential list. A key in `MY_KEY` is passed straight through to every plugin and generated launcher OCX spawns, because nothing distinguishes that name from any other variable in the environment. Use `OCX_SIGNING_KEY` unless you have a specific reason not to.
+:::
 
 ### `OCX_SIGSTORE_TRUSTED_ROOT` {#ocx-sigstore-trusted-root}
 
