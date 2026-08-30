@@ -3,12 +3,12 @@
 ## Status
 
 - **Plan:** plan_issue_sweep_2026-08-30
-- **Active phase:** 1 — Wave 1 execution
-- **Step:** /hex-execute → Stub
-- **Last update:** 2026-08-30 (dispatched, after c96b23dd: feat(sign): sign, attest and verify packages compatibly with cosign)
-- **State:** executing
+- **Active phase:** complete — all 10 work packages merged
+- **Step:** finalized
+- **Last update:** 2026-08-31 (landed on main as ced7e76e via PR #390; all 17 issues closed)
+- **State:** done
 - **Tier:** medium
-- **Next:** `/hex-execute .claude/artifacts/plan_issue_sweep_2026-08-30.md`
+- **Next:** none — plan complete
 
 ---
 
