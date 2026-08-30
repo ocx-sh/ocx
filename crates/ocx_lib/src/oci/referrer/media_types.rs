@@ -37,6 +37,50 @@ pub const SBOM_SPDX_TEXT: &str = "text/spdx";
 /// layer typed outside it; the attach path picks one entry per `--type`.
 pub const SBOM_ARTIFACT_TYPES: &[&str] = &[SBOM_CYCLONEDX, SBOM_SPDX_JSON, SBOM_SPDX_TEXT];
 
+// ── cosign's own SBOM layer spellings ─────────────────────────────────
+//
+// The three constants above are what OCX *writes*; these two are what cosign
+// v3.1.1 writes and OCX must therefore *read*. The two sets are deliberately
+// not unified: widening what OCX emits would change a wire format for no
+// reason, while refusing to read cosign's spelling would leave the parity
+// reader blind to cosign's own default output.
+//
+// Measured, `cosign attach sbom --sbom DOC --type T [--input-format F]`, from
+// the `mediaType [...]` cosign prints for the layer it uploads:
+//
+//   type=spdx      format=json (auto for .json)  -> `text/spdx+json`
+//   type=spdx      format=text                   -> `text/spdx`          (SBOM_SPDX_TEXT)
+//   type=cyclonedx format=json (auto)            -> `application/vnd.cyclonedx+json` (SBOM_CYCLONEDX)
+//   type=cyclonedx format=xml                    -> `application/vnd.cyclonedx+xml`
+//   type=syft      format=json                   -> `application/vnd.syft+json`
+//
+// `application/spdx+json` — OCX's own SPDX-JSON spelling — is *not* in that
+// table, and `--type spdx` is cosign's default, so `text/spdx+json` is the
+// single most likely `.sbom` layer type in the wild.
+//
+// syft is absent on purpose rather than forgotten: there is no in-toto
+// predicateType URI for syft's native format, so it has nothing to be labelled
+// with and is refused by name (`sbom_media_type_unsupported`) rather than
+// listed under a URI nobody claimed.
+
+/// SPDX in its JSON serialization, as `cosign attach sbom --type spdx` types it.
+///
+/// Not [`SBOM_SPDX_JSON`]: cosign derives this from its own `text/spdx` by
+/// appending `+json` rather than from the registered `application/spdx+json`.
+/// Both name the same document, and [`sbom_predicate_type_uri`] maps them to
+/// one predicateType.
+///
+/// [`sbom_predicate_type_uri`]: crate::oci::attest::predicate::sbom_predicate_type_uri
+pub const COSIGN_SBOM_SPDX_JSON: &str = "text/spdx+json";
+
+/// CycloneDX in its XML serialization, as `cosign attach sbom --type cyclonedx
+/// --input-format xml` types it.
+///
+/// Listed and labelled like any other CycloneDX document. Not summarizable:
+/// `crate::sbom` parses CycloneDX **JSON** only, the same asymmetry
+/// `adr_sbom_attestations.md` D2 records for SPDX.
+pub const COSIGN_SBOM_CYCLONEDX_XML: &str = "application/vnd.cyclonedx+xml";
+
 /// Empty OCI config media type per the empty-descriptor convention
 /// (OCI image spec §"Guidelines for Empty Descriptors").
 pub const EMPTY_CONFIG: &str = "application/vnd.oci.empty.v1+json";
@@ -85,5 +129,63 @@ pub(crate) const ANNOTATION_BUNDLE_PREDICATE_TYPE: &str = "dev.sigstore.bundle.p
 /// listing, without fetching the blob.
 pub(crate) const BUNDLE_CONTENT_DSSE: &str = "dsse-envelope";
 
-/// [`ANNOTATION_BUNDLE_CONTENT`] value for a signature bundle.
-pub(crate) const BUNDLE_CONTENT_MESSAGE_SIGNATURE: &str = "message-signature";
+// ── cosign sidecar wire types ─────────────────────────────────────────
+//
+// The legacy `sha256-<hex>.sig` / `.att` / `.sbom` tag schema, which cosign
+// 3.x still reads and which registries without the Referrers API still hand
+// out. Measured against cosign v3.1.1; see the commit body for the commands.
+
+/// Layer media type of a cosign simplesigning payload — the claim in
+/// [`crate::oci::simplesigning`].
+pub const SIMPLESIGNING_MEDIA_TYPE: &str = "application/vnd.dev.cosign.simplesigning.v1+json";
+
+/// `artifactType` of a cosign signature referrer under the OCI 1.1 scheme.
+///
+/// Not what cosign 3.1.1's own `sign` writes — with a signing config in play
+/// that path always emits [`SIGSTORE_BUNDLE_V03`]. This is the value from
+/// cosign's SIGNATURE_SPEC, produced by the same
+/// `application/vnd.dev.cosign.artifact.%s.v1+json` template whose `sbom`
+/// instantiation was captured from a live registry.
+pub const COSIGN_SIG_ARTIFACT_TYPE: &str = "application/vnd.dev.cosign.artifact.sig.v1+json";
+
+/// `artifactType` of a cosign SBOM referrer under the OCI 1.1 scheme.
+///
+/// Measured: `COSIGN_EXPERIMENTAL=1 cosign attach sbom
+/// --registry-referrers-mode oci-1-1` writes exactly this on the referrer
+/// descriptor, while the layer keeps the SBOM's own type
+/// ([`SBOM_CYCLONEDX`] and friends).
+pub const COSIGN_SBOM_ARTIFACT_TYPE: &str = "application/vnd.dev.cosign.artifact.sbom.v1+json";
+
+/// Layer media type of a DSSE envelope carried by a `.att` sidecar.
+///
+/// Measured, and the reason there is no third `artifactType` constant beside
+/// the two above: cosign v3.1.1's `attach attestation` writes a
+/// `sha256-<hex>.att` manifest whose one layer is typed this and which declares
+/// **neither** `artifactType` **nor** `subject`, while `cosign attest` writes a
+/// [`SIGSTORE_BUNDLE_V03`] referrer — the same type a signature referrer
+/// carries. cosign publishes no attestation artifact type, so `.att` is a
+/// tag-only shape; see `crate::oci::verify::attestation_sidecar`.
+pub const DSSE_ENVELOPE_MEDIA_TYPE: &str = "application/vnd.dsse.envelope.v1+json";
+
+// ── cosign sidecar annotations ────────────────────────────────────────
+//
+// The namespaces differ between the signature key and the rest. That is
+// cosign's actual wire shape — measured in G0's golden fixtures and in the
+// v3.1.1 binary's own string table — not a typo. Unifying them silently
+// breaks interop with every signature cosign ever wrote.
+
+/// Base64 signature over the simplesigning payload. Namespace
+/// `dev.cosignproject.cosign` — note it differs from the three below.
+pub const ANNOTATION_COSIGN_SIGNATURE: &str = "dev.cosignproject.cosign/signature";
+
+/// PEM leaf certificate. Keyless only; its absence under a key is a legal
+/// shape, not malformed input.
+pub const ANNOTATION_COSIGN_CERTIFICATE: &str = "dev.sigstore.cosign/certificate";
+
+/// PEM intermediate chain (keyless only).
+pub const ANNOTATION_COSIGN_CHAIN: &str = "dev.sigstore.cosign/chain";
+
+/// Offline Rekor bundle. Absent under `--no-rekor-upload`, and absent from
+/// everything cosign v3.1.1 `attach signature` writes (see `generate.py`'s
+/// `REKOR_RESPONSE_GAP`).
+pub const ANNOTATION_COSIGN_BUNDLE: &str = "dev.sigstore.cosign/bundle";

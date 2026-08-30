@@ -660,13 +660,20 @@ impl OciTransport for NativeTransport {
         self.push_manifest_raw(&target, manifest_bytes.to_vec(), media_type)
             .await?;
 
+        // `artifactType` and the annotations are read back out of the bytes just
+        // pushed rather than left `None`. They are what the referrers fallback
+        // index has to carry (`append_referrer_fallback_index`, OCI tag-schema
+        // write step 5), and a descriptor without them is the exact defect
+        // sigstore/cosign#4641 reports in cosign's own fallback write.
+        let (artifact_type, annotations) = super::transport::referrer_descriptor_facets(manifest_bytes);
+
         Ok(oci::Descriptor {
             media_type: media_type.to_string(),
             digest: expected_digest,
             size: expected_size,
             urls: None,
-            artifact_type: None,
-            annotations: None,
+            artifact_type,
+            annotations,
         })
     }
 
@@ -678,10 +685,14 @@ impl OciTransport for NativeTransport {
     ) -> Result<Vec<oci::Descriptor>> {
         let target = image.clone_with_digest(subject_digest.to_string());
         // Native-only referrers lookup: a 404 on `/v2/<name>/referrers/<digest>`
-        // means the registry lacks the OCI 1.1 Referrers API — surfaced as
-        // `None` here and mapped to `ReferrersUnsupported` (exit 84), NOT
-        // silently swallowed into an empty list (which would misreport as
-        // "no signatures found", exit 79). See `pull_referrers_native`.
+        // is a *capability verdict* — `ReferrersUnsupported` — and not the
+        // read-side answer. Readers go through `list_referrers_with_fallback`,
+        // which reads that verdict as "try the OCI referrers tag schema" and
+        // reports an empty listing as "no signatures found"; only callers that
+        // want the verdict itself — `ReferrersApiCapability::probe`, the sign
+        // path — let it reach exit 84. Surfacing the 404 instead of swallowing
+        // it into an empty list here is what keeps those two readings apart.
+        // See `pull_referrers_native`.
         match self
             .client
             .pull_referrers_native(&target, artifact_type)

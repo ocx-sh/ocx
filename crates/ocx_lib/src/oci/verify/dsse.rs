@@ -227,6 +227,37 @@ pub(super) fn verify_tlog_binding(
     Ok(())
 }
 
+/// Whether this envelope carries cosign's **image-signature** Statement.
+///
+/// cosign v3 signs an image with a DSSE in-toto Statement whose predicate is
+/// empty and whose `predicateType` is
+/// [`COSIGN_SIGN_PREDICATE_TYPE`][crate::oci::attest::COSIGN_SIGN_PREDICATE_TYPE],
+/// so the bundle's `content` oneof no longer separates a signature from an
+/// attestation — this predicateType is what does.
+///
+/// **Tolerant on purpose.** It decides which *question* a candidate answers,
+/// never whether the candidate is well-formed: an unreadable payload is simply
+/// "not an image signature", which routes it to the attestation question, where
+/// [`verify_envelope`] gives it the precise refusal it has earned. Answering
+/// "malformed" here would turn every broken attestation into a non-consuming
+/// skip and lose the report entirely.
+///
+/// The strict reading still happens — [`verify_envelope`] parses the same field
+/// through [`statement::parse`], with its `_type` allowlist — so this probe is
+/// a router, not the gate.
+pub(super) fn is_cosign_image_signature(envelope: &sigstore_protobuf_specs::io::intoto::Envelope) -> bool {
+    /// The one field the routing decision reads. Tolerant of everything else,
+    /// the same way [`TlogKind`] probes a rekor body before its spec.
+    #[derive(Deserialize)]
+    struct PredicateTypeProbe {
+        #[serde(rename = "predicateType")]
+        predicate_type: String,
+    }
+
+    serde_json::from_slice::<PredicateTypeProbe>(&envelope.payload)
+        .is_ok_and(|probe| probe.predicate_type == crate::oci::attest::COSIGN_SIGN_PREDICATE_TYPE)
+}
+
 /// The `kind`/`apiVersion` probe, read before the spec (DATA-FMT-02's shape).
 #[derive(Deserialize)]
 struct TlogKind {

@@ -298,10 +298,10 @@ OCX exposes a stable, typed exit-code taxonomy so scripts can discriminate failu
 
 Most package tools return 0 on success and 1 on any failure. That forces downstream scripts to either ignore the error category or grep stderr — both are fragile. A CI wrapper cannot distinguish "registry unreachable, retry in 30 seconds" from "package not found, fail the build" without parsing error text that can change.
 
-OCX aligns with BSD [sysexits.h][sysexits-manpage] (codes 64–78) for the standard failure categories, and reserves 79–84 for OCX-specific cases. The numeric values are stable across releases — `case $?` works.
+OCX aligns with BSD [sysexits.h][sysexits-manpage] (codes 64–78) for the standard failure categories, and reserves 79–85 for OCX-specific cases. The numeric values are stable across releases — `case $?` works.
 
 :::info
-The sysexits.h convention originates in BSD Unix and is documented at [man.freebsd.org][sysexits-manpage]. It assigns semantic meaning to exit codes 64–78, leaving 79–127 free for tool-specific use. OCX occupies 79–84.
+The sysexits.h convention originates in BSD Unix and is documented at [man.freebsd.org][sysexits-manpage]. It assigns semantic meaning to exit codes 64–78, leaving 79–127 free for tool-specific use. OCX occupies 79–85.
 :::
 
 | Code | Name | Mnemonic | When used | Recovery |
@@ -314,13 +314,14 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 | 74 | IoError | EX_IOERR | I/O error: filesystem permission denied, disk full, read/write failure | Check filesystem permissions and free space |
 | 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: registry connect failure or timeout, 429, 502, 503, 504, rate limit, transient network, or a layer blob that arrived short of its manifest-declared size | Retry with backoff |
 | 77 | PermissionDenied | EX_NOPERM | Insufficient permissions: filesystem EPERM, offline sign refused, OIDC pre-check failed | Adjust filesystem permissions, or drop `--offline` to sign |
-| 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure, trust root unavailable, a matched [`[[trust.policy]]`][config-trust] entry is malformed | Inspect the config file at the printed path |
+| 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure, trust root unavailable, a matched [`[[trust.policy]]`][config-trust] entry is malformed. Three carve-outs from that last one, each keyed on what was actually unusable: an unreadable or non-regular `key` path is 74, a key file whose bytes are not a key is 65, and an unimplemented key backend is 85. An inline `key_pem` that is not a key stays here — config text is what is wrong | Inspect the config file at the printed path |
 | 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent, no signatures found for target | Pin a different version or correct the path |
 | 80 | AuthError | OCX | Authentication failure: registry 401 or 403, missing credentials, Fulcio OIDC token rejected | Refresh or set registry credentials |
 | 81 | PolicyBlocked | OCX | A deliberate local policy (`--offline` or `--frozen`) refused a network or resolution operation — not a fault. Includes an unpinned-tag resolve that the policy forbade | Loosen the flag, or populate the local index first with `ocx index update` — itself run without the flag |
 | 82 | DirtyRcBlock | OCX | A managed shell-integration block carried user edits and `ocx self setup` ran without `--force`; the block was left untouched. Distinct from ConfigError (78): the content is valid but intentionally user-modified | Re-run with `--force`, or edit the block manually and re-run |
 | 83 | TransparencyLogUnavailable | OCX | Rekor transparency log unreachable during sign or verify (5xx/timeout, or SET absent with only TSA present) | Retry later; check Rekor endpoint |
-| 84 | ReferrersUnsupported | OCX | Registry does not implement the OCI Referrers API — sign and verify require OCI 1.1 referrers support | Use a registry with OCI 1.1 referrers support |
+| 84 | ReferrersUnsupported | OCX | Registry cannot hold a referrer — `sign` and `attest` also try the tag-schema fallback index first; `push` and `copy --referrers` require the API itself. Write path only; the read path lands on 79 instead | Use a registry with OCI 1.1 referrers support |
+| 85 | UnsupportedKeyBackend | OCX | A key reference named a KMS backend OCX recognises but has not implemented (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://`). Reachable from `--key`, from a `key = "…"` signer in a matched [`[[trust.policy]]`][config-trust], and from a managed-config payload carrying one. Distinct from 79 and 74: the reference is well-formed and the backend is real, it simply has no implementation here | Use a file key, or wait for the backend |
 
 **75 means the same command may succeed if run again; 69 does not.** That distinction is what makes automated retry safe: a wrapper loops on 75 and stops on 69, without parsing a single line of stderr. The per-command tables below still name 69 as "registry unreachable" — those rows exit 75 instead whenever the failure is transient (the connect never completed, the request timed out, or the registry answered 429/502/503/504).
 
@@ -339,7 +340,8 @@ case $? in
     81) echo "policy blocked (offline/frozen); loosen the flag or update the index" ;;
     82) echo "managed shell rc block left dirty; rerun with --force" ;;
     83) echo "Rekor unavailable; retry signing or verification later" ;;
-    84) echo "registry lacks OCI referrers support; use a compatible registry" ;;
+    84) echo "publish couldn't write a referrer; registry serves no referrers store" ;;
+    85) echo "key backend recognised but not implemented; use a file key" ;;
     *)  echo "unexpected failure (exit $?)"; exit 1 ;;
 esac
 ```
@@ -2230,7 +2232,7 @@ The `VERSION` positional applies to the `ocx.sh/ocx/cli` identifier as a suffix.
 | Digest only | `sha256:ab12…` | Fetches by content digest; `version` field omitted from JSON output. |
 | Tag + digest | `0.9.2@sha256:ab12…` | Resolves tag, cross-checks digest (immutability assertion), fails closed on mismatch (exit 65). |
 
-sha256 (64 hex chars) is the standard OCI digest algorithm; sha384 (96 hex chars) and sha512 (128 hex chars) are also accepted. Hex digits must be lowercase for all three algorithms — uppercase letters are rejected with exit 64.
+sha256 (64 hex chars) is the standard OCI digest algorithm; sha384 (96 hex chars) and sha512 (128 hex chars) are also accepted — except by [`package sign`][cmd-package-sign] and [`package attest`][cmd-package-attest], which refuse a non-sha256 subject with exit 65 (`subject_digest_unsupported`) because cosign artifacts address their subject by sha256 alone. Hex digits must be lowercase for all three algorithms — uppercase letters are rejected with exit 64.
 
 Tag characters are restricted: the first character must match `[a-zA-Z0-9_]`; subsequent characters must match `[a-zA-Z0-9._-]`; maximum 128 characters. The `+` character is accepted in tag strings and normalized to `_` internally (the `adr_version_build_separator.md` convention).
 
@@ -2683,12 +2685,12 @@ Every run also observes the package description published by [`ocx package descr
 
 Publishing tags for a package that has no entry in the index yet is out of scope for `announce` — a first-time claim goes through a manual pull request against the index repository.
 
-A tag that is not a version — the OCX-internal `__ocx` namespace, or a canonical `sha256.<hex>` tag from [`--canonical-tag`][cmd-package-push] — is dropped from the curated set rather than failing the run, and reported in the JSON report's `reserved_tags_dropped`. The one exception: `--tags-from-registry` filters a reserved tag out of its listing silently, before it reaches that report, since canonical tags are pushed by default and reporting one per published version would drown a real drop. A reserved tag already committed in the index root is still reported, from any mode. A curated set that resolves to nothing but reserved tags exits 64.
+A tag that is not a version — the OCX-internal `__ocx` namespace, which carries the keep tag from [`--keep-tag`][cmd-package-push], or the frozen legacy `sha256.<hex>` keep tag — is dropped from the curated set rather than failing the run, and reported in the JSON report's `reserved_tags_dropped`. The one exception: `--tags-from-registry` filters a reserved tag out of its listing silently, before it reaches that report, since keep tags are pushed by default and reporting one per published version would drown a real drop. A reserved tag already committed in the index root is still reported, from any mode. A curated set that resolves to nothing but reserved tags exits 64.
 
 **Usage**
 
 ```shell
-ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-file <PATH> | --tags-from-registry | --refresh) [--out <DIRECTORY> | --fork <REPOSITORY>] [OPTIONS]
+ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-file <PATH> | --tags-from-registry | --refresh) [--out <DIRECTORY> | --fork <REPOSITORY>] [OPTIONS]
 ```
 
 **Options**
@@ -2696,8 +2698,8 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-f
 | Name | Description | Default |
 |------|-------------|---------|
 | `--package <NAMESPACE>/<NAME>` | Package to announce, e.g. `acme/widget` (required). | — |
-| `--tags <TAGS>` | Comma-separated tag list that replaces the currently-committed curated set. A committed tag not named here is dropped. Mutually exclusive with `--tags-from-file`/`--tags-from-registry`/`--refresh`; exactly one is required. | — |
-| `--tags-from-file <PATH>` | Add the tags in this file (comma- or newline-separated) to the already-committed curated set. Never removes a committed tag. | — |
+| `--tags <TAGS>` | Comma-separated tag list that replaces the currently-committed curated set. A committed tag not named here is dropped. Mutually exclusive with `--tags-file`/`--tags-from-registry`/`--refresh`; exactly one is required. | — |
+| `--tags-file <PATH>` | Add the tags in this file (comma- or newline-separated) to the already-committed curated set. Never removes a committed tag. | — |
 | `--tags-from-registry` | Add every tag the package's registry repository currently holds to the already-committed curated set. Never removes a committed tag; a yanked tag stays yanked. Reserved tags are filtered out of the listing before the union. | — |
 | `--refresh` | Re-observe every already-committed tag, picking up a digest that moved (e.g. `latest`) without changing which tags are curated. | — |
 | `--out <DIRECTORY>` | Write the rebuilt index entry under this directory instead of opening a pull request. Written on every run, including one that changes nothing. Mutually exclusive with `--fork`, and the one mode that needs no credential. | — |
@@ -2713,6 +2715,7 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-f
 
 | Condition | Exit code |
 |---|---|
+| An I/O error reading `--tags-file` — missing file, permission denied, or the symlink refusal. `error.kind` is `io_error` with **no** `error.detail`; a script must branch on `error.kind` for this one | 74 |
 | A curated tag's physical host resolves to a private, loopback, link-local, or metadata address — add it to that namespace's [`trusted_hosts`][config-registries-trusted-hosts] to allow | 78 |
 | Any mode other than `--out` run without [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] set, the token was rejected (401/403), or — without `--fork` — the token cannot push to `--index-repo`. The last is checked before anything is written and names the repository and the missing permission | 80 |
 | The physical registry could not be resolved (DNS failure), or the forge is unreachable or returned a 5xx | 69 |
@@ -2743,11 +2746,11 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-from-f
 `status` and `desc_status` are each `unchanged` or `updated`; `desc_status` reports the package description separately from the tags. `pull_request_url`/`pull_request_number`/`fork` are always `null` for `--out`; otherwise `pull_request_url`/`pull_request_number` are `null` only when the run made no pull request, so an unchanged run that ensured one still reports it, and `fork` is `null` whenever `--fork` was not given. `written_paths` lists the files written under `--out` — the whole entry on every run, `unchanged` included — and stays empty in every mode that opens a pull request. `reserved_tags_dropped` names the tags this run dropped for not being a version — always an array, empty rather than absent — except a reserved tag `--tags-from-registry` observed straight from the registry listing, which never enters it (see above).
 
 ::: tip
-[`ocx package push --announce-file`][cmd-package-push] appends the tag it just pushed (and any cascade tags) to a file in the same comma/newline format `--tags-from-file` reads, so a publish pipeline can feed one straight into the other:
+[`ocx package push --tags-file`][cmd-package-push] appends the tag it just pushed (and any cascade tags) to a file in the same comma/newline format `--tags-file` reads, so a publish pipeline can feed one straight into the other:
 
 ```shell
-ocx package push -i acme/widget:1.2.3 -c --announce-file tags.txt widget.tar.xz
-ocx package announce --package acme/widget --tags-from-file tags.txt --fork myuser/index
+ocx package push -i acme/widget:1.2.3 -c --tags-file tags.txt widget.tar.xz
+ocx package announce --package acme/widget --tags-file tags.txt --fork myuser/index
 ```
 
 Announce to a GitLab index, opening a merge request from a fork:
@@ -2812,7 +2815,7 @@ ocx package cascade check <IDENTIFIER>...
 |---|---|
 | Every alias in scope matches the fold-expected state — nothing to report | 0 |
 | At least one finding: a stale or missing alias entry, a duplicate entry shadowing another for the same platform, an orphaned tag, or (logical identifiers only) an index root behind the registry | 65 |
-| A digest-pinned identifier, or any tag that does not name a node in the version graph — junk, a reserved or canonical `sha256.<hex>` tag, a bare variant name, or a version nothing published (`:9.99`) | 64 |
+| A digest-pinned identifier, or any tag that does not name a node in the version graph — junk, a reserved tag such as a keep tag, a bare variant name, or a version nothing published (`:9.99`) | 64 |
 
 **JSON report**
 
@@ -2850,7 +2853,7 @@ ocx package cascade check <IDENTIFIER>...
       "index_findings": [
         { "finding": "stale", "tag": "3.28", "committed": "sha256:cccc…", "live": "sha256:bbbb…" }
       ],
-      "ignored_tags": ["sha256.aaaa1111"],
+      "ignored_tags": ["__ocx.keep.sha256-aaaa1111"],
       "unrepairable": []
     }
   ]
@@ -2867,14 +2870,14 @@ Identifier forms and scope selection are identical to [`cascade check`](#package
 
 For each broken alias, `repair` rebuilds the whole platform index entry from the same fold `check` diffs against, preserving every observed entry the fold does not itself supersede — an [OCI annotation][oci-annotations] already on the index, a non-platform entry like an attestation, or an orphaned alias tag whose child manifest still exists on the registry. An orphan is preserved while its child is resolvable and dropped only once it provably is not: before writing, every referenced platform manifest is checked to still exist, and a missing one is dropped **only if every entry naming that digest is an orphan slot**. If the same digest also backs a slot the fold expects (a manifest shared across two platforms, a Rosetta-style alias) or an entry with no platform at all (an annotation or attestation), the **whole alias** is refused instead (reported, not silently skipped) rather than quietly losing content, while every other alias in the run still writes. Writes are batched — nothing reaches the registry until the whole run's plan is built — and proceed concurrently per tag. After each write, `repair` re-reads the tag it just wrote and warns (does not fail) if the digest disagrees with what was pushed, which is evidence of a concurrent publisher racing the same tag rather than something `repair` can safely resolve — the write itself still landed, so the outcome is reported `raced` only when nothing was written at all (the tag moved between this run's read and its write), never when the write landed but a read-back disagreed. There is no [conditional-request][mdn-if-match] guard on the write itself — avoid running `repair` against a repository with a publish in flight.
 
-`repair` only ever touches the **registry** side of the tag graph — reaching the public [index][in-depth-indices] with the fix is a second, separate hop through [`ocx package announce`][cmd-package-announce]. `--announce-tags <PATH>` writes one bare alias-tag name per line, in the same comma/newline format [`--tags-from-file`][cmd-package-announce] reads, so a pipeline can chain the two directly:
+`repair` only ever touches the **registry** side of the tag graph — reaching the public [index][in-depth-indices] with the fix is a second, separate hop through [`ocx package announce`][cmd-package-announce]. `--announce-tags <PATH>` writes one bare alias-tag name per line, in the same comma/newline format [`--tags-file`][cmd-package-announce] reads, so a pipeline can chain the two directly:
 
 ```shell
 ocx package cascade repair --announce-tags tags.txt acme/cmake
-ocx package announce --package acme/cmake --tags-from-file tags.txt --fork myuser/index
+ocx package announce --package acme/cmake --tags-file tags.txt --fork myuser/index
 ```
 
-The flag accepts **exactly one package per invocation** (usage error, exit 64, nothing written) — the follow-up `announce --package` names a single package, and a second package's tags landing in the same flat file would give it no way to tell whose they were. What a real run records is exactly the tags whose write **landed**: any alias a `raced`, `refused`, or `failed` outcome moved is left out, since announcing it would commit a digest this run never wrote. Landed tags are unioned with every tag an index-staleness finding names — the one class of drift a repair cannot close itself, announced even when the same run wrote nothing at all — so one file still covers both hops. `--dry-run` writes nothing to the registry, so its file records the whole computed plan instead — every tag it *would* repair — since that is the only content a preview has to report. Either way the file is written on every run, including one that changes nothing (an empty file) — a workflow can always feed it into `--tags-from-file` unconditionally, the same way [`ocx package push --announce-file`][cmd-package-push] chains into `announce`. `--tags-from-file`'s union semantics matter here: it never drops an already-committed tag, and it adds a tag that was never committed at all — an alias `repair` had to create from scratch — so one follow-up command covers a re-pointed alias and a brand-new one alike. When a run found index staleness on a logical identifier but had nothing of its own to repair, warming a particular machine's local copy is [`ocx index update`][cmd-index-update]'s job, not `repair`'s or `announce`'s — the report names that third hop when it applies.
+The flag accepts **exactly one package per invocation** (usage error, exit 64, nothing written) — the follow-up `announce --package` names a single package, and a second package's tags landing in the same flat file would give it no way to tell whose they were. What a real run records is exactly the tags whose write **landed**: any alias a `raced`, `refused`, or `failed` outcome moved is left out, since announcing it would commit a digest this run never wrote. Landed tags are unioned with every tag an index-staleness finding names — the one class of drift a repair cannot close itself, announced even when the same run wrote nothing at all — so one file still covers both hops. `--dry-run` writes nothing to the registry, so its file records the whole computed plan instead — every tag it *would* repair — since that is the only content a preview has to report. Either way the file is written on every run, including one that changes nothing (an empty file) — a workflow can always feed it into `--tags-file` unconditionally, the same way [`ocx package push --tags-file`][cmd-package-push] chains into `announce`. `--tags-file`'s union semantics matter here: it never drops an already-committed tag, and it adds a tag that was never committed at all — an alias `repair` had to create from scratch — so one follow-up command covers a re-pointed alias and a brand-new one alike. When a run found index staleness on a logical identifier but had nothing of its own to repair, warming a particular machine's local copy is [`ocx index update`][cmd-index-update]'s job, not `repair`'s or `announce`'s — the report names that third hop when it applies.
 
 **Usage**
 
@@ -2891,7 +2894,7 @@ ocx package cascade repair [OPTIONS] <IDENTIFIER>...
 | Name | Description | Default |
 |---|---|---|
 | `--dry-run` | Compute and report the repair plan without writing to the registry. | off |
-| `--announce-tags <PATH>` | Write this run's alias-tag handoff to [`ocx package announce --tags-from-file`][cmd-package-announce], one bare tag per line. One package per invocation only — a second package's tags in the same file has no owner to attribute them to (usage error, exit 64, nothing written). A real run records the tags whose write landed, unioned with any tag an index-staleness finding names; `--dry-run` records its whole computed plan instead. Written on every run; empty when there is nothing to hand off. | — |
+| `--announce-tags <PATH>` | Write this run's alias-tag handoff to [`ocx package announce --tags-file`][cmd-package-announce], one bare tag per line. One package per invocation only — a second package's tags in the same file has no owner to attribute them to (usage error, exit 64, nothing written). A real run records the tags whose write landed, unioned with any tag an index-staleness finding names; `--dry-run` records its whole computed plan instead. Written on every run; empty when there is nothing to hand off. | — |
 | `-h`, `--help` | Print help information. | — |
 
 **Exit codes**
@@ -2901,7 +2904,8 @@ ocx package cascade repair [OPTIONS] <IDENTIFIER>...
 | Every registry write this run attempted succeeded (an index-staleness finding from a logical identifier may remain — that is `announce`'s job, not a failure here) | 0 |
 | At least one finding remains after the run — a write failed, an alias raced by a concurrent publisher before it could write (rerun the repair), or an alias could not be repaired without new content (its only remaining reference to a needed platform manifest is gone, or repairing it would leave the index empty) | 65 |
 | `--dry-run` computed a non-empty plan — a preview that still names repairs is not a clean run, even though nothing was written | 65 |
-| A digest-pinned identifier, or any tag that does not name a node in the version graph — junk, a reserved or canonical `sha256.<hex>` tag, a bare variant name, or a version nothing published (`:9.99`) | 64 |
+| A digest-pinned identifier, or any tag that does not name a node in the version graph — junk, a reserved tag such as a keep tag, a bare variant name, or a version nothing published (`:9.99`) | 64 |
+| An I/O error reading `--announce-tags` — missing file, permission denied, or the symlink refusal. `error.kind` is `io_error` with **no** `error.detail`; a script must branch on `error.kind` for this one | 74 |
 
 **JSON report**
 
@@ -3251,10 +3255,14 @@ ocx package push [OPTIONS] <LAYERS>...
 - `-c`, `--cascade`: Cascade rolling releases. When set, pushing `kitware/cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`kitware/cmake:3.28.1`, `kitware/cmake:3.28`, `kitware/cmake:3`, and `kitware/cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided (all layers are digest references, or the layer list is empty).
 - `--build-timestamp [<FORMAT>]`: Append a UTC build-metadata segment to the published tag. `datetime` (default when flag passed bare) appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`, `none` is a no-op. The identifier's tag must already be `X.Y.Z` (optionally with a variant prefix or pre-release suffix) and must not already carry build metadata. Use this in continuous-deploy pipelines that publish rolling pre-release versions like `dev.ocx.sh/ocx/cli:0.3.0-dev_20260514120000`. The wire-format tag uses `_` (OCI tags forbid `+`); semver `+` is accepted on input and normalized. When the flag is omitted entirely, no build-metadata segment is appended. Passing `--build-timestamp=none` is the explicit equivalent.
-- `--canonical-tag` / `--no-canonical-tag`: `--canonical-tag` (default) also pushes a digest-named `sha256.<hex>` tag for each platform manifest pushed in this invocation; `--no-canonical-tag` skips it. This is a pure registry-side deletion safety net — a stray tag delete cannot orphan a digest still referenced by a lock, since the canonical tag itself keeps the manifest reachable. It has no effect on [`index.ocx.sh`][in-depth-indices-public] resolution, which ignores canonical tags entirely.
-- `--announce-file <PATH>`: After a successful push, append the pushed tag and any cascade tags to this file (creating it if absent), so [`ocx package announce --tags-from-file`][cmd-package-announce] can pick them up. This is a scratch file for one pipeline run, not a persistent list — a stale file left over from an earlier run could re-add a tag that was deliberately dropped from a later announce.
+- `--keep-tag` / `--no-keep-tag`: `--keep-tag` (default) also pushes a digest-named `__ocx.keep.<algorithm>-<hex>` tag for each platform manifest pushed in this invocation; `--no-keep-tag` skips it. This is a pure registry-side deletion safety net — a stray tag delete cannot orphan a digest still referenced by a lock, since the keep tag itself keeps the manifest reachable. A digest whose keep tag would exceed the OCI 128-character tag limit (`sha512`, at 146) gets none, rather than a truncated one two digests could collide on. It has no effect on [`index.ocx.sh`][in-depth-indices-public] resolution, which ignores keep tags entirely.
+- `--tags-file <PATH>`: After a successful push, append the pushed tag and any cascade tags to this file (creating it if absent), so [`ocx package announce --tags-file`][cmd-package-announce] can pick them up. This is a scratch file for one pipeline run, not a persistent list — a stale file left over from an earlier run could re-add a tag that was deliberately dropped from a later announce.
 - `--annotation <KEY=VALUE>`: Record an [OCI annotation][oci-annotations] on the published [image index][oci-image-index]. Repeatable; see [Annotations](#package-push-annotations) below.
 - `--sbom <PATH>`: Attach the file at `PATH` as a CycloneDX SBOM on the manifest this push just wrote — sugar for running [`ocx package attest --type cyclonedx`][cmd-package-attest] against the pushed digest immediately afterward, including its polarity: a signing identity visible in the environment (an identity-token override, or an ambient CI platform) means a signed [DSSE][dsse] attestation; nothing visible means the SBOM is attached raw, typed by its own media type, with no signature at all. See [Attestations][ug-attestations-attach] for when each shape applies. The predicate is read and every offline/policy check runs *before* the push itself; a refusal there means nothing is uploaded. A failure *after* the push (Fulcio, Rekor, or the referrer write) does not roll the push back — the push report is printed first, and only then does the attest failure become the process's exit code. See [`attest`][cmd-package-attest] for the predicate-type vocabulary, the identity-token precedence, and the size limit.
+- `--sign`: Sign each platform manifest this push writes, inline, immediately after each is pushed. Opt-in — a push without it signs nothing. The signature covers the platform manifest, whose digest is final the moment it is pushed, never the image index, whose digest is rewritten every time another platform merges into it — sign the index afterward with [`ocx package sign --tags-file`][cmd-package-sign], using the file `--tags-file` wrote. Keyless by default; `--key` selects a key pair instead. A push that lands and then fails to sign is not rolled back: the push report is still emitted, with the per-platform signing outcome recorded, and the signing failure decides the exit code.
+- `--signature-format <FORMAT>`: Signature wire format for `--sign`, and for the inline signing `--sbom` performs: `bundle` (default), `simplesigning`, or `both` — see [`sign`][cmd-package-sign] for what each writes. A usage error (exit 64) without `--sign` or `--sbom`.
+- `--key <REF>`: Sign with a key pair instead of keyless Sigstore, for `--sign` and for the `--sbom` attach. Same key-reference grammar as [`sign`][cmd-package-sign]. A usage error (exit 64) without `--sign` or `--sbom`.
+- `--rekor-upload` / `--no-rekor-upload`: Whether the signature `--sign` or `--sbom` produces is recorded in the [Rekor][rekor] transparency log. Keyless signatures are always recorded — `--no-rekor-upload` alongside keyless is a usage error (exit 64, `rekor_upload_required_for_keyless`). Under `--key`, recording is off by default; `--rekor-upload` opts in, or set `rekor_upload = true` under `[trust.sigstore]` in `config.toml` to opt a fleet in. A usage error (exit 64) without `--sign` or `--sbom`. See [The Rekor rule][signing-key-mode-rekor] for why the defaults differ from cosign's.
 - `-h`, `--help`: Print help information.
 
 ::: tip Layer reuse
@@ -3802,11 +3810,11 @@ ocx package copy [OPTIONS] <SOURCE>
 - `-i`, `--identifier <IDENTIFIER>`: The full target reference, for when the repository path or the tag changes too. Required when `<SOURCE>` names a digest — a digest carries no tag for `--to` to preserve.
 - `-p`, `--platform <PLATFORM>`: Repeatable. Against a tag it *filters* the source index; omit it to copy every platform the source offers. Against a digest it *declares* the platform, and exactly one is required. See [Platforms][reference-platforms] for the grammar.
 - `-c`, `--cascade`: Also re-point the rolling ancestors (`1.4`, `1`, `latest`) at the target. The blocker checks read the target's tag list, so promoting `1.4.1` into a production registry that already publishes `1.4.2` leaves `1.4` where it is.
-- `--canonical-tag` / `--no-canonical-tag`: `--canonical-tag` (default) also writes a digest-named `sha256.<hex>` tag for each copied platform manifest at the target — the same registry-side deletion safety net [`push`](#package-push) writes.
-- `--referrers` / `--no-referrers`: `--referrers` (default) also copies everything anchored to each manifest — signatures, SBOMs, attestations — following referrer chains recursively. Requires the [OCI Referrers API][oci-referrers-spec] at the target; a registry without it exits 84 rather than accepting a referrer manifest it will never list. `--no-referrers` promotes the package alone.
+- `--keep-tag` / `--no-keep-tag`: `--keep-tag` (default) also writes a digest-named `__ocx.keep.<algorithm>-<hex>` tag for each copied platform manifest at the target — the same registry-side deletion safety net [`push`](#package-push) writes.
+- `--referrers` / `--no-referrers`: `--referrers` (default) also copies everything anchored to each manifest — signatures, SBOMs, attestations — following referrer chains recursively. Requires the [OCI Referrers API][oci-referrers-spec] at the target; a registry without it exits 84 rather than accepting a referrer manifest it will never list. `--no-referrers` promotes the package alone. `--referrers` copies **referrer-attached** signatures only: a cosign simplesigning signature published to a `sha256-<hex>.sig` or `.att` sidecar tag is an ordinary tag, not a referrer, and is not carried by `copy` — re-sign at the destination if the target needs one.
 - `--description`: Also copy the repository description (README, logo, catalog annotations) from the `__ocx.desc` tag. Off by default — a description is repository-level prose rather than part of the version being promoted, and environments legitimately carry different ones. [`ocx package description push --from`](#package-description-push) copies it on its own.
 - `--annotation <KEY=VALUE>`: Record an [OCI annotation][oci-annotations] on the target's image index. Repeatable, same semantics as [`push`](#package-push-annotations). Platform manifests are never annotated — that would change their digest, which is the one thing a copy must not do.
-- `--dry-run`: Report what would be copied and write nothing. The preview covers only the per-platform disposition below — a `--cascade` or `--canonical-tag` promotion's rolling-tag and canonical-tag moves are never computed under `--dry-run`, so those fields report empty regardless of what a real run would write. See **Output** below.
+- `--dry-run`: Report what would be copied and write nothing. The preview covers only the per-platform disposition below — a `--cascade` or `--keep-tag` promotion's rolling-tag and keep-tag moves are never computed under `--dry-run`, so those fields report empty regardless of what a real run would write. See **Output** below.
 - `-h`, `--help`: Print help information.
 
 **Output**
@@ -3826,9 +3834,9 @@ The `Digest` column means two things, and the `Result` column says which: on an 
 
 Under `--dry-run` the two write results read `would add` and `would replace` in the table. The JSON `disposition` keeps `added` / `replaced` either way — the top-level `status` (`copied` or `planned`) is what a script branches on.
 
-The tags written, the blob traffic and the description outcome go to stderr as one status line, leaving stdout to the table. `--format json` carries all of it: `cascade_tags_written`, `canonical_tags_written`, `referrers_copied`, `blobs` (`present` / `mounted` / `uploaded`), and `description` — `copied`, `absent` when the source publishes none, `skipped-dry-run`, or `null` when `--description` was not passed.
+The tags written, the blob traffic and the description outcome go to stderr as one status line, leaving stdout to the table. `--format json` carries all of it: `cascade_tags_written`, `keep_tags_written`, `referrers_copied`, `blobs` (`present` / `mounted` / `uploaded`), and `description` — `copied`, `absent` when the source publishes none, `skipped-dry-run`, or `null` when `--description` was not passed.
 
-Under `--dry-run` both `cascade_tags_written` and `canonical_tags_written` are always empty, whatever `--cascade` and `--canonical-tag` say: the tag phase is the part a dry run does not run.
+Under `--dry-run` both `cascade_tags_written` and `keep_tags_written` are always empty, whatever `--cascade` and `--keep-tag` say: the tag phase is the part a dry run does not run.
 
 **Exit codes**
 
@@ -3885,6 +3893,7 @@ At least one of the above metadata options must be provided, or `--from`.
 | `--from` combined with `--readme`, `--logo`, `--title`, `--description`, or `--keywords` | 64 |
 | Neither `--from` nor any metadata option given | 1 |
 | `--from <SOURCE>` names a repository with no published description (or whose `__ocx.desc` tag does not resolve — the two are indistinguishable at this point) | 79 |
+| An I/O error reading `--readme` — missing file, permission denied, or the symlink refusal. `error.kind` is `io_error` with **no** `error.detail`; a script must branch on `error.kind` for this one | 74 |
 | A `--logo` file's bytes do not match the format its extension names | 65 |
 | `--offline` is set | 81 |
 | Authentication fails | 80 |
@@ -3893,14 +3902,14 @@ The "nothing to update" case exits `1` (`Failure`) rather than a more specific c
 
 #### `sign` {#package-sign}
 
-Publishes a [Sigstore][sigstore] keyless signature for a package manifest as an [OCI Referrers][oci-referrers-spec] artifact. The signing flow uses an ephemeral ECDSA P-256 keypair: [Fulcio][fulcio] issues a short-lived certificate binding the key to your OIDC identity, the manifest digest is signed, and the entry is logged to [Rekor][rekor]. The resulting [Sigstore bundle v0.3][sigstore-bundle] is pushed to the registry as a referrer of the target manifest, discoverable and verifiable by `ocx package verify`. [`cosign verify`][cosign] does not discover it — cosign finds signatures only through its own tag schema, and OCX publishes and reads only through the Referrers API, by design — but the bundle itself is a standard Sigstore bundle either tool can read; see [cosign Interoperability][signing-cosign-interop] in the signing guide.
+Publishes a [Sigstore][sigstore] signature for a package manifest — keyless by default, or under `--key` — as an [OCI Referrers][oci-referrers-spec] artifact. Keyless, the signing flow uses an ephemeral ECDSA P-256 keypair: [Fulcio][fulcio] issues a short-lived certificate binding the key to your OIDC identity, the manifest digest is signed, and the entry is logged to [Rekor][rekor]. The resulting [Sigstore bundle v0.3][sigstore-bundle] is pushed to the registry as a referrer of the target manifest by default, discoverable and verifiable by `ocx package verify`. [`cosign verify`][cosign] discovers the default `bundle` publish directly — through the Referrers API where the registry has one, and through the fallback index where it does not. `--signature-format simplesigning` (or `both`) additionally writes the cosign `sha256-<hex>.sig` sidecar tag, for a consumer that reads only that shape; see [cosign Parity][signing-cosign-interop] in the signing guide.
 
 Signing requires network access — `--offline` is rejected with exit 77.
 
 **Usage**
 
 ```shell
-ocx package sign [OPTIONS] --platform <PLATFORM> <IDENTIFIER>
+ocx package sign [OPTIONS] <IDENTIFIER>
 ```
 
 **Arguments**
@@ -3911,13 +3920,62 @@ ocx package sign [OPTIONS] --platform <PLATFORM> <IDENTIFIER>
 
 | Name | Short | Default | Purpose |
 |------|-------|---------|---------|
-| `--platform` | `-p` | *(required)* | Target platform — selects the single-platform manifest under the image index to sign |
+| `--platform` | `-p` | *(the resolved object)* | Narrow into one platform of an image index. Omit it to act on whatever the reference resolves to — an index is then the subject itself, which is where cosign puts a multi-platform tag's signature. Given against a reference that resolves to a single manifest, there is nothing to narrow and the command fails |
 | `--fulcio-url` | — | (`[trust.sigstore].fulcio_url`, else `https://fulcio.sigstore.dev`) | [Fulcio][fulcio] CA endpoint (override for private deployments) |
 | `--rekor-url` | — | (`[trust.sigstore].rekor_url`, else `https://rekor.sigstore.dev`) | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
 | `--identity-token-file` | — | — | Read the OIDC identity token from this file (highest precedence). File must be owner-readable only (`chmod 600`); world- or group-readable files are rejected with exit 77 (`IdentityTokenFilePermissive`). File must be **owned by the effective user** (uid match required); a foreign-owned file with mode `0600` is still rejected with exit 77 (CWE-732). Symlinks are not followed; a symlink at the supplied path is rejected with exit 77 (CWE-367 mitigation). **Windows:** permission validation is not implemented; use `--identity-token-stdin` or [`OCX_IDENTITY_TOKEN`][env-identity-token] instead (the command exits 77 if `--identity-token-file` is used on Windows). |
 | `--identity-token-stdin` | — | — | Read the OIDC identity token from stdin (second precedence). Mutually exclusive with `--identity-token-file` |
 | `--no-tty` | — | `false` | Suppress the interactive browser OAuth fallback; ambient token detection must succeed or an override flag must supply a token |
 | `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
+| `--signature-format <FORMAT>` | — | `bundle` | Signature wire format: `bundle` writes an OCI 1.1 referrer carrying a Sigstore bundle; `simplesigning` writes the cosign `sha256-<hex>.sig` sidecar tag instead; `both` writes each of them |
+| `--key <REF>` | — | *(keyless)* | Sign with a key pair instead of keyless Sigstore — see [Keyless or a Key][signing-key-mode]. Takes a key reference, `[scheme://]<rest>`: a bare path, or a `file://` one, names a file holding the private key, encrypted-password read from `OCX_KEY_PASSWORD`. The `awskms`, `gcpkms`, `azurekms`, `hashivault` and `k8s` schemes are recognised and rejected by name (exit 85, `unsupported_key_backend`), never read as filenames. A reference that cannot be parsed at all is a usage error (exit 64, `key_reference_invalid`) |
+| `--rekor-upload` | — | *(on for keyless)* | Record the signature in the [Rekor][rekor] transparency log. Keyless signatures are always recorded, so this only has an effect alongside `--key`, where uploading is off by default |
+| `--no-rekor-upload` | — | *(off for `--key`)* | Skip the Rekor entry. Only valid alongside `--key` — a keyless signature must be recorded, since its Fulcio certificate is valid for about ten minutes and the log entry's timestamp is the only lasting proof the signature was made while it was; given without `--key` this is a usage error (exit 64, `rekor_upload_required_for_keyless`). See [The Rekor rule][signing-key-mode-rekor] |
+| `--tags <TAG,...>` | — | — | Sweep these tags instead of acting on the reference alone. Repeatable, and accepts a comma-separated list. Each tag is signed as the index it resolves to, in the repository the identifier names. Refused alongside `--platform` (exit 64) |
+| `--tags-file <PATH>` | — | — | Read the sweep's tags from a file, one per line or comma-separated — the same file [`ocx package push --tags-file`][cmd-package-push] writes and [`ocx package announce`][cmd-package-announce] reads. Unioned with `--tags` when both are given. Refused alongside `--platform` (exit 64) |
+
+**Sweeping the indices a publish left behind**
+
+`push` signs each platform manifest inline, and those digests are final the moment
+they land. An image index digest is not: it is rebuilt on every platform merge, so
+it is only final once the last platform is in. `--tags` and `--tags-file` exist to
+sweep those indices up afterwards — `push` records each tag it wrote, and a later
+`ocx package sign --tags-file tags.txt <identifier>` signs the index each of those
+tags now resolves to. The manifests underneath are already signed and are not
+revisited, which is why `--platform` is refused alongside either flag.
+
+```shell
+ocx package push registry.example/widget:1.2.3 -c --tags-file tags.txt widget.tar.xz
+ocx package sign --tags-file tags.txt registry.example/widget:1.2.3
+```
+
+A swept tag that resolves to a single manifest is **skipped with a warning**, not an
+error: `push` already signed it, and a tag list mixing single-platform and
+multi-platform packages is the normal case for a repository publishing both. The
+sweep **continues past a per-tag failure** and exits non-zero at the end with every
+failure listed — aborting at the first failure of twenty would leave you with no
+idea which of the remaining nineteen succeeded. When every failure shares one exit
+code the sweep returns that code; a mix returns `1`.
+
+Under `--format json` a swept run emits one document listing every tag:
+
+```json
+{
+  "schema_version": 1,
+  "command": "package sign",
+  "exit_code": 79,
+  "data": {
+    "tags": [
+      { "tag": "1.2.3", "status": "completed", "report": { "subject_digest": "sha256:<64-hex>" } },
+      { "tag": "1.2", "status": "skipped" },
+      { "tag": "latest", "status": "failed", "kind": "target_not_found", "message": "no manifest for platform any" }
+    ]
+  }
+}
+```
+
+Each `report` is the single-reference document described under **JSON output** below,
+verbatim — a consumer parses a swept run with the same code, one level down.
 
 **Token precedence**
 
@@ -3941,15 +3999,22 @@ Never pass a raw token on the command line — it would appear in shell history 
 |------|-----------|
 | 0 | Signature published successfully |
 | 64 | `InvalidEndpointUrl` — malformed `--fulcio-url` or `--rekor-url` (must be `https://`, or `http://` on loopback only; no credentials, no unsupported schemes) |
+| 64 | `KeyReferenceInvalid` — `--key` could not be parsed at all: an unrecognised scheme token, or nothing following the scheme |
+| 64 | `RekorUploadRequiredForKeyless` — `--no-rekor-upload` was given without `--key`: a keyless signature must be recorded in Rekor, because a Fulcio certificate is valid for about ten minutes and the log entry's timestamp is the only lasting proof the signature was made while it was |
 | 65 | `RekorSetMalformed` — Rekor returned the log entry but its Signed Entry Timestamp could not be extracted or parsed |
+| 65 | `SubjectDigestUnsupported` — the reference resolves to a subject addressed by `sha384` or `sha512`. cosign artifacts address their subject by `sha256` alone: the in-toto Statement binds on `sha256`, and the sidecar tag truncates the digest to 64 characters, so two subjects sharing a prefix would share one tag. Refused before anything is published or logged to Rekor, rather than at verify time after a permanent transparency-log entry has been burned |
+| 65 | `KeyBackend` — a `--key <path>` reference names a file that was read in full but whose bytes are not a key this backend accepts, or that exceeds the size cap. `error.detail` is `key_backend` |
+| 74 | An I/O error reading `--identity-token-file`, `--tags-file`, or a `--key <path>` reference — missing file, permission denied, or the symlink refusal. `error.kind` is `io_error`; `error.detail` is **absent** for `--identity-token-file`/`--tags-file` (a script must branch on `error.kind` for those two), but `key_backend` for the `--key <path>` door — the same door [`verify`](#package-verify) answers with `key_unreadable` |
 | 77 | `OidcPreCheckFailed` — OIDC pre-check rejected the token (missing scopes, audience mismatch, expired) |
 | 77 | `OfflineSignRefused` — `--offline` is incompatible with `package sign`; Fulcio + Rekor are hard dependencies |
 | 77 | `IdentityTokenFilePermissive` — `--identity-token-file` is readable by group/other (must be `0600` or tighter) |
 | 78 | Fulcio rejected the certificate signing request as malformed |
 | 79 | `TargetNotFound` — no manifest for the requested `--platform` under the target image index |
+| 79 | `TargetNotAnIndex` — `--platform` was given but the reference resolved to a single manifest, not an index. A distinct `error.detail` (`target_not_an_index`) from `target_not_found` because the remedy differs: drop the flag, rather than go looking for a build that was never missing |
 | 80 | Fulcio rejected the OIDC token (issuer mismatch, expired, wrong audience) |
 | 83 | Rekor transparency log unavailable at time of signing, or it returned a log entry with no usable Merkle inclusion proof |
-| 84 | Registry does not support the OCI Referrers API |
+| 84 | Registry serves neither the OCI Referrers API nor a writable fallback index |
+| 85 | `UnsupportedKeyBackend` — `--key` named a key backend OCX recognises but has not implemented (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://`). Decided at the parse boundary, before the reference is treated as a filename, so an unimplemented backend never surfaces as a missing file |
 
 **JSON output** (`--format json`)
 
@@ -3963,12 +4028,19 @@ On success, `ocx package sign` emits a C-S1-1 success envelope. The top-level sh
   "data": {
     "identifier": "registry.example/pkg:1.0",
     "subject_digest": "sha256:<64-hex>",
-    "bundle_digest": "sha256:<64-hex>",
-    "referrer_digest": "sha256:<64-hex>",
+    "legs": [
+      {
+        "format": "bundle",
+        "payload_digest": "sha256:<64-hex>",
+        "manifest_digest": "sha256:<64-hex>"
+      }
+    ],
     "platform": "linux/amd64",
     "signer": "keyless-fulcio",
     "certificate_identity": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
-    "certificate_oidc_issuer": "https://token.actions.githubusercontent.com"
+    "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
+    "key_backend": "keyless",
+    "transparency_log_index": 42
   }
 }
 ```
@@ -3979,14 +4051,23 @@ On success, `ocx package sign` emits a C-S1-1 success envelope. The top-level sh
 |-------|------|-------------|
 | `identifier` | string | Identifier argument passed to the command |
 | `subject_digest` | string (`sha256:...`) | Digest of the manifest that was signed |
-| `bundle_digest` | string (`sha256:...`) | SHA-256 of the Sigstore bundle v0.3 blob (the referrer layer content) |
-| `referrer_digest` | string (`sha256:...`) | SHA-256 of the OCI referrer manifest wrapping the bundle |
-| `platform` | string | Platform that was signed (e.g. `"linux/amd64"`) |
-| `signer` | string | Signing mechanism; always `"keyless-fulcio"` in Slice 1 |
+| `legs` | array | One entry per wire shape written or attempted, in write order — two entries under `--signature-format both` |
+| `platform` | string | Platform that was signed (e.g. `"linux/amd64"`), or `"any"` when `--platform` was omitted and the run signed whatever the reference resolved to |
+| `signer` | string | Signing mechanism: `"keyless-fulcio"`, or the key backend's own slug under `--key` |
 | `certificate_identity` | string | SAN from the Fulcio-issued certificate |
 | `certificate_oidc_issuer` | string | OIDC issuer URL from the Fulcio-issued certificate |
+| `key_backend` | string | `keyless`, `file`, or a key-backend scheme (`awskms`, `gcpkms`, `azurekms`, `hashivault`, `k8s`) |
+| `public_key_hint` | string | The signing key's cosign hint. Present only under `--key` |
+| `transparency_log_index` | number \| null | [Rekor][rekor] log index. **Always present, `null` included** — under `--key` with no `--rekor-upload`, a missing record is a legal outcome the operator must be able to see rather than infer from an absent field |
 
-Note: `bundle_digest` and `referrer_digest` are distinct. `bundle_digest` covers the protobuf blob that [Rekor][rekor] includes in its transparency log; `referrer_digest` identifies the OCI manifest returned by the Referrers API.
+`data.legs[]` rows:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `format` | string | `bundle` or `simplesigning` — which wire shape this row describes |
+| `payload_digest` | string (`sha256:...`) | Digest of the signed payload blob — the Sigstore bundle under `bundle`, the simplesigning claim under `simplesigning`. Absent when the leg failed |
+| `manifest_digest` | string (`sha256:...`) | Digest of the manifest the payload hangs from — the OCI referrer under `bundle`, the `sha256-<hex>.sig` sidecar under `simplesigning`. Absent when the leg failed |
+| `error` | string | Why the leg failed. Present exactly when the leg did not land — a `--signature-format both` run reports one failed leg alongside one that succeeded rather than hiding the success behind the failure |
 
 On error, `ocx package sign` emits a C-S1-1 error envelope. The `error.detail` field (when present) is a snake_case discriminant for programmatic matching:
 
@@ -4017,13 +4098,20 @@ On error, `ocx package sign` emits a C-S1-1 error envelope. The `error.detail` f
 | `fulcio_unavailable` | 75 | Fulcio could not be reached, or answered 429 or 5xx — a transient outage, safe to retry |
 | `transparency_log_unavailable` | 83 | Rekor transparency log unavailable at time of signing, or it returned a log entry with no usable Merkle inclusion proof — publishing that bundle would produce a signature OCX itself refuses to verify |
 | `rekor_set_malformed` | 65 | Rekor returned the entry but the SET could not be extracted or parsed |
-| `referrers_unsupported` | 84 | Registry does not implement the OCI Referrers API |
+| `referrers_unsupported` | 84 | Registry serves neither the OCI Referrers API nor a writable fallback index |
 | `target_not_found` | 79 | No manifest for the requested `--platform` under the target image index |
+| `target_not_an_index` | 79 | `--platform` was given but the reference resolved to a single manifest, not an index — drop the flag, rather than go looking for a build that was never missing |
+| `subject_digest_unsupported` | 65 | The reference resolves to a subject addressed by `sha384` or `sha512`; cosign artifacts address their subject by `sha256` alone. Refused before anything is published or logged to Rekor, rather than at verify time after a permanent transparency-log entry has been burned |
 | `oidc_pre_check_failed` | 77 | OIDC pre-check failed client-side before the token was sent to Fulcio |
 | `forbidden_registry_target` | 78 | The target registry is refused by policy before any signing call is made |
 | `offline_sign_refused` | 77 | `--offline` is incompatible with `package sign` |
 | `identity_token_file_permissive` | 77 | Token file has permissive permissions, wrong owner, or is a symlink |
 | `invalid_endpoint_url` | 64 | Malformed `--fulcio-url` or `--rekor-url` |
+| `unsupported_key_backend` | 85 | `--key` named a key backend OCX recognises but has not implemented (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://`). Decided at the parse boundary, so it is never reported as a missing file |
+| `key_backend` | 74 | A `--key <path>` reference names a file that could not be read — missing, permission denied, a directory or device node rather than a regular file, or another I/O failure. The single detail every `KeyBackendError` variant collapses to; `unsupported_key_backend` above is the separate parse-time refusal |
+| `key_backend` | 65 | A `--key <path>` reference names a file that was read in full but whose bytes are not a key this backend accepts, or that exceeds the size cap |
+| `key_reference_invalid` | 64 | `--key` could not be parsed at all: an unrecognised scheme token, or nothing following the scheme. Separate from `unsupported_key_backend` because the remedy is to fix the reference, not to wait for a backend |
+| `rekor_upload_required_for_keyless` | 64 | `--no-rekor-upload` was given without `--key`; a keyless signature must be recorded in Rekor for the reason above |
 | `internal` | 1 | Unexpected internal error |
 
 **Example — CI keyless signing with GitHub Actions ambient OIDC**
@@ -4046,10 +4134,12 @@ Verifies a [Sigstore][sigstore] keyless signature attached to a package manifest
 
 `--certificate-identity` and `--certificate-oidc-issuer` are optional — but only when a [`[[trust.policy]]`][config-trust] scope covers the target (see [Identity resolution](#package-verify-identity) below). Keyless verification is meaningless without an identity from one source or the other.
 
+A **keyless cosign sidecar** — `sha256-<hex>.sig`, or `sha256-<hex>.att` under [`--attestation`](#package-verify) — needs transparency-log evidence of its own: its layer must carry a `dev.sigstore.cosign/bundle` annotation, whose SET is verified against the log's public key and whose logged body must bind to that signature or envelope. Both shapes are held to the same gate. A [Fulcio][fulcio] certificate is valid for about ten minutes, so without an entry nothing shows the signature was made while it was live and an expired certificate stays acceptable indefinitely — the sidecar is refused (65, `signature_invalid`). `cosign attach signature` writes no such annotation, so cosign refuses its own output here too and needs `--insecure-ignore-tlog`; `ocx package sign --signature-format simplesigning` does write one. [`--allow-unlogged-signature`](#package-verify) is the opt-out for air-gapped CI.
+
 **Usage**
 
 ```shell
-ocx package verify [OPTIONS] --platform <PLATFORM> \
+ocx package verify [OPTIONS] \
   [--certificate-identity <IDENTITY> --certificate-oidc-issuer <URL>] \
   <IDENTIFIER>
 ```
@@ -4062,11 +4152,14 @@ ocx package verify [OPTIONS] --platform <PLATFORM> \
 
 | Name | Short | Default | Purpose |
 |------|-------|---------|---------|
-| `--platform` | `-p` | *(required)* | Target platform — selects the single-platform manifest under the image index |
+| `--platform` | `-p` | *(the resolved object)* | Narrow into one platform of an image index. Omit it to act on whatever the reference resolves to — an index is then the subject itself, which is where cosign puts a multi-platform tag's signature. Given against a reference that resolves to a single manifest, there is nothing to narrow and the command fails |
 | `--certificate-identity` | — | *(policy-resolved)* | Expected certificate SAN (Subject Alternative Name), exact match. Optional when a [`[[trust.policy]]`][config-trust] scope covers the target; when given, overrides any policy and requires `--certificate-oidc-issuer` too. Examples: `you@example.com`, `https://github.com/org/repo/.github/workflows/build.yml@refs/heads/main` |
 | `--certificate-oidc-issuer` | — | *(policy-resolved)* | Expected OIDC issuer URL, exact match. Used together with `--certificate-identity` — passing one without the other is a usage error. Examples: `https://github.com/login/oauth`, `https://token.actions.githubusercontent.com` |
+| `--key <REF>` | — | *(keyless)* | Verify against a pinned public key instead of a Fulcio certificate. Takes a key reference, `[scheme://]<rest>`: a bare path, or a `file://` one, names a file holding a plain SPKI PEM — the public half only, so no password is read and `OCX_KEY_PASSWORD` belongs to signing. The `awskms`, `gcpkms`, `azurekms`, `hashivault` and `k8s` schemes are recognised and rejected **by name** (exit 85), never read as filenames. Conflicts with `--certificate-identity` / `--certificate-oidc-issuer`: a key signature carries no certificate, so there is no SAN to match |
+| `--signature-format <FORMAT>` | — | *(bundle, then sidecar)* | Pin which cosign wire shape to accept: `bundle` (an OCI 1.1 referrer carrying a Sigstore bundle) or `simplesigning` (the cosign sidecar tag — `sha256-<hex>.sig`, or `sha256-<hex>.att` under `--attestation`). The pin decides **discovery**, not what is ignored afterwards — the shape it does not name is never looked for, so `--signature-format simplesigning` against a subject carrying only a bundle answers 79. Unset, verify prefers a bundle and falls back to a sidecar only when the bundle shape is **absent**; a bundle that was fetched and refused fails closed with its own exit code rather than promoting the sidecar. `both` is a write-side value: a verification result cannot say "either of these satisfied me", so it is a usage error here (exit 64) |
 | `--rekor-url` | — | (`[trust.sigstore].rekor_url`, else `https://rekor.sigstore.dev`) | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
 | `--sigstore-trusted-root` | — | *(public-good root over TUF)* | Path to a Sigstore [trusted-root][sigstore-tuf] JSON (or a directory holding `trusted_root.json`) — supplies the [Fulcio][fulcio] CA, the certificate-transparency log keys and the pinned [Rekor][rekor] public key together, so no Rekor-key fetch is needed. Equivalent env var: [`OCX_SIGSTORE_TRUSTED_ROOT`][env-sigstore-trusted-root]; the flag wins. Highest rung of the trust-root ladder — see [Self-hosted Sigstore][in-depth-self-hosted-sigstore] for the config-driven alternatives. Required for [`--offline`](#arg-offline) verify unless another rung already supplies a pinned Rekor key |
+| `--allow-unlogged-signature` | — | `false` | Accept a keyless cosign sidecar — `sha256-<hex>.sig` or `sha256-<hex>.att` — that carries no `dev.sigstore.cosign/bundle` annotation. Without an entry there is no proof the signature was made while its short-lived [Fulcio][fulcio] certificate was valid, so verify refuses that shape (65, `signature_invalid`) — this is the counterpart to cosign's `--insecure-ignore-tlog` and, like it, accepts a signature nothing timestamps, including one whose certificate has since expired. For air-gapped CI. Inert elsewhere: a bundle's transparency evidence stays mandatory under keyless and optional under `--key` |
 | `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
 | `--attestation` | — | `false` | Verify an in-toto attestation instead of a signature — same referrer discovery, trust-root and identity pipeline, a different referrer content type. See [Verifying attestations][cmd-package-verify-attestations] below |
 | `--type` | — | *(any type)* | Restrict attestation verification to one [predicate type][cmd-package-attest]. Requires `--attestation` — used alone it is a usage error (exit 64) |
@@ -4094,14 +4187,16 @@ A Fulcio certificate embeds a Signed Certificate Timestamp that the verifier che
 | 64 | `UsageError` — malformed `--rekor-url` (must be `https://`, or `http://` on loopback only; no credentials, no userinfo) |
 | 64 | `NoIdentityProvided` — neither `--certificate-identity` nor `--certificate-oidc-issuer` was given and no [`[[trust.policy]]`][config-trust] scope covers the target (a lone flag is instead rejected at parse time as a bare usage error, with no envelope) |
 | 65 | Data integrity failure: signature invalid, subject digest mismatch, certificate chain invalid, Rekor SET invalid (bundle tampered), Rekor transparency-log body does not bind to the bundle (spliced SET), the signature candidate examination cap was reached before a valid signature was found, or bundle parse failed. In `--attestation` mode, also: predicate type mismatch, a missing or weak-digest subject, an unrecognized in-toto statement or DSSE payload type, a SLSA provenance builder mismatch, more than one matching attestation with no `--type` to disambiguate, or the attestation exceeded its size or byte-budget limit |
+| 74 | `IoError` — the key file a `--key <path>` reference (or a matched [`[[trust.policy]]`][config-trust] signer's `key`) names could not be read. Also a path that is not a readable regular file — a directory, a device — the same 74 [`--config`](#arg-config) answers for one. The same code [`sign`](#package-sign) answers for the same reference, so the flag means one thing on both sides |
+| 65 | `key_malformed` — a key file was read in full and its bytes are not an SPKI public key. The path was fine, the material was not, which is why this is not the 74 above; an inline `key_pem` in a config document that is not a key is 78 instead, since there the config text itself is what is wrong |
 | 77 | Certificate identity or OIDC issuer mismatch |
 | 78 | Trust root unavailable or failed to load — includes [`--offline`](#arg-offline) verify with no pinned Rekor key available (no `--sigstore-trusted-root`, no configured trust root, and no fresh trust-root cache entry); the message names the remedy |
-| 78 | `TrustPolicyInvalid` — the [`[[trust.policy]]`][config-trust] entry matched for this target sets both `identity` and `identity_regexp`, sets neither, or its `identity_regexp` fails to compile |
+| 78 | `TrustPolicyInvalid` — the [`[[trust.policy]]`][config-trust] entry matched for this target sets both `identity` and `identity_regexp`, sets neither, or its `identity_regexp` fails to compile. Applies the same whether the matched entry came from the operator `config.toml` tier or a project `ocx.toml`'s fallback policies — the two tiers share this validation |
 | 78 | `ForbiddenRegistryTarget` — the target registry is refused by policy before any verification is attempted |
-| 79 | No signatures found for target, no usable Sigstore bundle among referrers, or no manifest for the requested `--platform` under the target image index. In `--attestation` mode: no attestation found for the target (`attestation_not_found`) |
+| 79 | No signatures found for target, no usable Sigstore bundle among referrers, or no manifest for the requested `--platform` under the target image index. A registry serving neither the OCI Referrers API nor a fallback referrers tag lands here too — verify reads both, so "nothing found" is the verdict rather than a capability refusal. In `--attestation` mode: no attestation found for the target (`attestation_not_found`) |
 | 80 | Registry authentication failed while fetching referrers |
 | 83 | Rekor unavailable, or SET absent with only TSA timestamp present (Rekor v2 transition) |
-| 84 | Registry does not support the OCI Referrers API |
+| 85 | `UnsupportedKeyBackend` — a key reference named a key backend OCX recognises but has not implemented — from `--key`, or from a `key = "…"` signer in a matched [`[[trust.policy]]`][config-trust], which reach the same refusal through different doors and answer it with the same code — (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://`). Decided at the parse boundary, before the reference is treated as a filename, so an unimplemented backend never surfaces as a missing file. A reference OCX cannot parse at all is exit 64 instead (`key_reference_invalid`) |
 
 ::: tip Automatic verification on install and pull
 When a [`[[trust.policy]]`][config-trust] entry covers a package, [`ocx package install`][cmd-package-install] and [`ocx package pull`][cmd-package-pull] verify it automatically before any layer downloads — see the auto-verify contract under [`install`](#package-install) below and [Verify by default][guide-auto-verify] in the user guide. Run `ocx package verify` directly to check a signature by hand, verify a package outside every policy's scope, or verify without installing.
@@ -4121,7 +4216,27 @@ On success, `ocx package verify` emits a success envelope wrapping the flat veri
     "referrer_digest": "sha256:<64-hex>",
     "certificate_identity": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
     "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
-    "signed_at": "2026-04-19T12:00:00Z"
+    "signed_at": "2026-04-19T12:00:00Z",
+    "signatures": [
+      {
+        "signature_format": "bundle",
+        "discovery_method": "referrers_api",
+        "key_backend": "keyless",
+        "referrer_digest": "sha256:<64-hex>",
+        "certificate_identity": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
+        "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
+        "signed_at": "2026-04-19T12:00:00Z",
+        "rekor_log_index": 42
+      },
+      {
+        "signature_format": "simplesigning",
+        "discovery_method": "sidecar_tag",
+        "key_backend": "keyless",
+        "referrer_digest": "sha256:<64-hex>",
+        "certificate_identity": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
+        "certificate_oidc_issuer": "https://token.actions.githubusercontent.com"
+      }
+    ]
   }
 }
 ```
@@ -4135,6 +4250,20 @@ On success, `ocx package verify` emits a success envelope wrapping the flat veri
 | `certificate_identity` | string | Subject Alternative Name (identity) read back from the Fulcio cert |
 | `certificate_oidc_issuer` | string | OIDC issuer URL read back from the Fulcio cert |
 | `signed_at` | string (ISO-8601) | [Rekor][rekor] integrated time of the signature entry |
+| `signatures` | array | Every signature the subject carries, merged across all discovery shapes. **Absent while empty** — never `[]`, which would read as "we looked and found none" about a command that only succeeds when it found one. The first row is the verdict, and the five flat fields above describe that same signature |
+
+`data.signatures[]` rows:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `signature_format` | string | `bundle` or `simplesigning` — which cosign wire shape carried this signature |
+| `discovery_method` | string | `referrers_api`, `fallback_tag`, or `sidecar_tag` — which discovery door it came through. A candidate reached through the mutable fallback tag is a weaker provenance claim than one the registry itself computed, so the report says which |
+| `key_backend` | string | `keyless`, `file`, or a key-backend scheme (`awskms`, `gcpkms`, `azurekms`, `hashivault`, `k8s`) |
+| `referrer_digest` | string (`sha256:...`) | Digest of the referrer manifest carrying it — or, for a sidecar, of the payload **layer**, since one layer is one signature and the manifest digest would name all of them at once |
+| `certificate_identity` | string | Certificate SAN. **Absent** under a key, which carries no certificate — a legal shape, not malformed input |
+| `certificate_oidc_issuer` | string | Certificate OIDC issuer. **Absent** under a key, for the same reason |
+| `signed_at` | string (ISO-8601) | [Rekor][rekor] `integratedTime`. **Absent** when no transparency record backs this row — a key signature never uploaded to Rekor, or a simplesigning sidecar, which carries no transparency evidence at all |
+| `rekor_log_index` | number | [Rekor][rekor] log index; the deduplication key when present. **Absent** in exactly the cases `signed_at` is |
 
 On error, `ocx package verify` emits a C-S1-1 error envelope. The `error.detail` field is a snake_case discriminant for programmatic matching:
 
@@ -4159,20 +4288,20 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 
 | `detail` value | Exit | Meaning |
 |----------------|------|---------|
-| `no_signatures_found` | 79 | No referrers found for the target manifest; publisher has not signed this platform |
+| `no_signatures_found` | 79 | No referrers found for the target manifest — neither through the OCI Referrers API nor under the fallback referrers tag; publisher has not signed this platform |
 | `target_not_found` | 79 | No manifest for the requested `--platform` under the target image index |
+| `target_not_an_index` | 79 | `--platform` was given but the reference resolved to a single manifest, not an index. A distinct slug from `target_not_found` because the remedy differs: drop the flag, rather than go looking for a build that was never missing |
 | `no_usable_bundle` | 79 | Referrers found but none has a recognized Sigstore bundle artifact type |
 | `candidate_limit_exhausted` | 65 | The signature candidate examination cap was reached with unexamined referrers remaining and none of the examined candidates passed; the operator must reduce the referrer count or raise the cap |
 | `identity_mismatch` | 77 | Certificate SAN does not satisfy the expected identity, whether supplied via `--certificate-identity` or resolved from a [`[[trust.policy]]`][config-trust] entry |
 | `issuer_mismatch` | 77 | Certificate OIDC issuer does not match the expected issuer, whether supplied via `--certificate-oidc-issuer` or resolved from a [`[[trust.policy]]`][config-trust] entry |
 | `cert_chain_invalid` | 65 | Certificate chain does not verify against the supplied trust root |
-| `signature_invalid` | 65 | Signature does not verify over the subject manifest digest |
+| `signature_invalid` | 65 | Signature does not verify over the subject manifest digest; also a key-mode signature no trusted key accepts, and a keyless cosign sidecar carrying no transparency-log entry (see [`--allow-unlogged-signature`](#package-verify)) |
 | `subject_digest_mismatch` | 65 | The bundle's signed digest does not match the target manifest's digest |
 | `rekor_set_invalid` | 65 | Rekor SET does not verify (bundle tampered) |
-| `transparency_body_mismatch` | 65 | Rekor transparency-log entry body does not bind to the bundle — a previously-valid SET/body spliced onto a different subject |
+| `transparency_body_mismatch` | 65 | Rekor transparency-log entry body does not bind to the bundle, or to the cosign sidecar's signature — a previously-valid SET/body spliced onto a different subject |
 | `rekor_inclusion_proof_absent` | 65 | Bundle carries a Rekor inclusion promise but no Merkle inclusion proof. The promise alone is not evidence the entry was published in a signed tree, so verification refuses it. Re-sign against a transparency log that returns an inclusion proof |
 | `rekor_set_absent_tsa_present` | 83 | Rekor SET absent but RFC 3161 TSA timestamp present (Rekor v2 transition) |
-| `referrers_unsupported` | 84 | Registry does not implement the OCI Referrers API |
 | `transparency_log_unavailable` | 83 | Rekor transparency log unavailable during verify |
 | `bundle_parse_failed` | 65 | Bundle is not valid Sigstore bundle v0.3 or is corrupted JSON |
 | `trust_root_unavailable` | 78 | Embedded TUF trust root asset not present in this build (Slice 1) |
@@ -4180,6 +4309,7 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 | `forbidden_registry_target` | 78 | The target registry is refused by policy before any verification is attempted |
 | `no_identity_provided` | 64 | No identity to verify against: both certificate flags omitted and no [`[[trust.policy]]`][config-trust] scope matched the target. (A lone flag is a clap parse error — still exit 64, but with no envelope and no `detail`.) |
 | `trust_policy_invalid` | 78 | A matched [`[[trust.policy]]`][config-trust] entry is malformed — identity XOR violation, or an `identity_regexp` that does not compile |
+| `key_unreadable` | 74 | The key file a path reference names could not be read — missing, permission denied, not a regular file, or another I/O failure. Byte-identical outcome to [`package sign`](#package-sign)'s 74 for the same `--key <path>`, so one flag with one value cannot mean two things depending on the verb. Reaches here from `--key` and from a `key` path signer in a matched [`[[trust.policy]]`][config-trust] entry alike |
 | `invalid_endpoint_url` | 64 | Malformed `--rekor-url` |
 | `attestation_not_found` | 79 | No attestation referrer found for the target (`--attestation` mode) |
 | `predicate_type_mismatch` | 65 | The `--type` given does not match any verified attestation's `predicateType` |
@@ -4189,6 +4319,7 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 | `builder_mismatch` | 65 | The attestation's SLSA provenance `builder.id` does not match the pinned `builder` in a [`[[trust.policy]]`][config-trust] entry |
 | `statement_type_unsupported` | 65 | The DSSE payload's `_type` is not a recognized [in-toto][in-toto] Statement type |
 | `payload_type_unsupported` | 65 | The [DSSE][dsse] envelope's `payloadType` is not `application/vnd.in-toto+json` |
+| `simple_signing_claim_unsupported` | 65 | A cosign simplesigning payload declares a `critical.type` other than `cosign container image signature`. `critical` is by definition the part a verifier must understand, so a payload declaring another claim type is refused rather than skipped — skipping would let a registry relabel a signature into "none found" |
 | `multiple_attestations` | 65 | More than one verified attestation candidate for the target and no `--type` narrowed it to one; the message names every candidate's referrer digest and every distinct predicate type in the set, so `--type` has a value to take — and says outright when a single shared type means `--type` cannot narrow further |
 | `unsupported_tlog_entry_kind` | 65 | The Rekor transparency-log entry kind is neither `hashedrekord` nor `dsse` |
 | `tlog_binding_mismatch` | 65 | The transparency-log entry does not bind to the DSSE envelope actually being verified |
@@ -4196,6 +4327,9 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 | `attestation_payload_too_large` | 65 | The DSSE payload inside a verified attestation exceeds its size limit |
 | `too_many_attestations` | 65 | More attestation candidates exist for the target than the examination cap allows |
 | `attestation_budget_exhausted` | 65 | The cumulative byte budget across all examined attestation candidates was exhausted before a match was found |
+| `unsupported_key_backend` | 85 | a key reference named a key backend OCX recognises but has not implemented — from `--key`, or from a `key = "…"` signer in a matched [`[[trust.policy]]`][config-trust], which reach the same refusal through different doors and answer it with the same code — (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://`). Decided at the parse boundary, so it is never reported as a missing file. Byte-identical spelling to [`package sign`](#package-sign)'s, so one word covers one failure on both sides |
+| `key_malformed` | 65 | A key file read in full whose bytes are not an SPKI public key. Distinct from `key_unreadable` (74) because the path was usable and the material was not, and from `trust_policy_invalid` (78) because a file is not config text — an inline `key_pem` that is not a key stays 78 |
+| `key_reference_invalid` | 64 | `--key` could not be parsed at all: an unrecognised scheme token, or nothing following the scheme. Separate from `unsupported_key_backend` because the remedy is to fix the reference, not to wait for a backend |
 | `internal` | 1 | Unexpected internal error |
 
 #### Verifying attestations {#package-verify-attestations}
@@ -4224,9 +4358,10 @@ With no trust root from any rung of the ladder and no fresh trust-root cache ent
 [[trust.policy]]
 scope = "registry.example/pkg"
 
-[trust.policy.keyless]
-identity    = "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 
 ```shell
@@ -4250,7 +4385,7 @@ Attesting requires registry access regardless of shape — `--offline` is reject
 **Usage**
 
 ```shell
-ocx package attest [OPTIONS] --predicate <PATH> --type <TYPE> --platform <PLATFORM> <IDENTIFIER>
+ocx package attest [OPTIONS] --predicate <PATH> --type <TYPE> <IDENTIFIER>
 ```
 
 **Arguments**
@@ -4263,13 +4398,21 @@ ocx package attest [OPTIONS] --predicate <PATH> --type <TYPE> --platform <PLATFO
 |------|-------|---------|---------|
 | `--predicate <PATH>` | — | *(required)* | Path to the predicate file — the document the Statement wraps verbatim. Bounded to 15 MiB; a larger file is refused (exit 65, `predicate_too_large`) rather than truncated. The path must not be a symlink — it is opened with `O_NOFOLLOW` on Unix, and a symlink is refused, along with any other I/O error reading the file (exit 74 — see the exit-codes table below) |
 | `--type <TYPE>` | — | *(required)* | The predicate's type. One of the cosign-compatible aliases — `cyclonedx`, `spdx`, `spdxjson`, `slsaprovenance1`, `link`, `vuln`, `openvex`, `custom` — or any absolute predicate-type URI, stored byte-exact. `slsaprovenance` and `slsaprovenance02` are recognized aliases but both resolve to SLSA provenance v0.2, which `attest` refuses before any network call (exit 64, `provenance_version_unsupported`) — pass `slsaprovenance1` instead. `custom` wraps the predicate bytes in cosign's `{Data, Timestamp}` envelope before signing; every other alias resolves to its canonical `predicateType` URI and signs the predicate bytes as given |
-| `--platform` | `-p` | *(required)* | Target platform — selects the single-platform manifest under the image index to attest |
+| `--platform` | `-p` | *(the resolved object)* | Narrow into one platform of an image index. Omit it to act on whatever the reference resolves to — an index is then the subject itself, which is where cosign puts a multi-platform tag's signature. Given against a reference that resolves to a single manifest, there is nothing to narrow and the command fails |
 | `--fulcio-url` | — | (`[trust.sigstore].fulcio_url`, else `https://fulcio.sigstore.dev`) | [Fulcio][fulcio] CA endpoint (override for private deployments) |
 | `--rekor-url` | — | (`[trust.sigstore].rekor_url`, else `https://rekor.sigstore.dev`) | [Rekor][rekor] transparency-log endpoint (override for private deployments) |
 | `--identity-token-file <PATH>` | — | — | Read the OIDC identity token from this file. Same permission, ownership and symlink checks as [`sign`][cmd-package-sign] |
 | `--identity-token-stdin` | — | — | Read the OIDC identity token from stdin. Mutually exclusive with `--identity-token-file` |
 | `--no-tty` | — | `false` | Suppress the interactive browser OAuth fallback |
 | `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
+| `--signature-format <FORMAT>` | — | `bundle` | Which cosign wire shape to publish the attestation in. `bundle` writes the OCI 1.1 referrer described above; `simplesigning` writes cosign's `sha256-<hex>.att` sidecar tag instead, whose layer is the bare [DSSE][dsse] envelope typed `application/vnd.dsse.envelope.v1+json` with the certificate and Rekor bundle in layer annotations; `both` writes each. It selects where the attestation is *published*, never how many times it is signed: one envelope is signed once and published in every shape asked for, so `both` costs one certificate and one log entry. Re-attesting a subject **appends** a layer to the sidecar rather than replacing it. An attach with no signing identity at all has no envelope to put in a sidecar and refuses `simplesigning`/`both` (exit 64, `sidecar_requires_signature`) rather than quietly writing the bundle shape. No `sha256-<hex>.sbom` tag is ever written — that is `cosign attach sbom`'s *unsigned* convention, and a signed SBOM is an attestation, so it lands on `.att` |
+| `--key <REF>` | — | *(keyless)* | Sign with a key pair instead of keyless Sigstore. Same key-reference grammar as [`sign`][cmd-package-sign]; the `awskms`, `gcpkms`, `azurekms`, `hashivault` and `k8s` schemes are recognised and rejected by name (exit 85, `unsupported_key_backend`); a reference that cannot be parsed at all is a usage error (exit 64, `key_reference_invalid`) |
+| `--rekor-upload` | — | *(on for keyless)* | Record the signature in the [Rekor][rekor] transparency log. Keyless signatures are always recorded, so this only has an effect alongside `--key`, where uploading is off by default |
+| `--no-rekor-upload` | — | *(off for `--key`)* | Skip the Rekor entry. Only valid alongside `--key`; given without it, exit 64 (`rekor_upload_required_for_keyless`). See [The Rekor rule][signing-key-mode-rekor] |
+| `--tags <TAG,...>` | — | — | Sweep these tags instead of acting on the reference alone. Repeatable, and accepts a comma-separated list. Each tag is attested as the index it resolves to, in the repository the identifier names. Refused alongside `--platform` (exit 64) |
+| `--tags-file <PATH>` | — | — | Read the sweep's tags from a file, one per line or comma-separated — the same file [`ocx package push --tags-file`][cmd-package-push] writes and [`ocx package announce`][cmd-package-announce] reads. Unioned with `--tags` when both are given. Refused alongside `--platform` (exit 64) |
+
+The sweep behaves exactly as it does for [`sign`][cmd-package-sign] — same skip rule for a tag resolving to a single manifest, same continue-past-a-failure rule, same aggregated document under `--format json` (with `"command": "package attest"`).
 
 Token precedence and the ambient-CI detection order are identical to [`sign`][cmd-package-sign] — neither command has a `--identity-token` value flag; only file, stdin, an environment variable, and ambient CI detection.
 
@@ -4285,17 +4428,24 @@ Token precedence and the ambient-CI detection order are identical to [`sign`][cm
 | 64 | `InvalidEndpointUrl` — malformed `--fulcio-url` or `--rekor-url` |
 | 64 | `ProvenanceVersionUnsupported` — `--type` resolved to a SLSA provenance predicate below v1.0 (`slsaprovenance` or `slsaprovenance02`); pass `--type slsaprovenance1` |
 | 64 | `UnsignedTypeUnsupported` — no signing identity is visible and `--type` did not resolve to one of the three SBOM media types; supply an identity to attach it signed, or use a `cyclonedx`/`spdx`/`spdxjson` type |
+| 64 | `SidecarRequiresSignature` — `--signature-format simplesigning` or `both` was given for an attach with no signing identity; an `.att` sidecar layer *is* a signed DSSE envelope, so supply an identity or a key, or drop the flag |
+| 64 | `KeyReferenceInvalid` — `--key` could not be parsed at all: an unrecognised scheme token, or nothing following the scheme |
+| 64 | `RekorUploadRequiredForKeyless` — `--no-rekor-upload` was given without `--key`: a keyless signature must be recorded in Rekor, because a Fulcio certificate is valid for about ten minutes and the log entry's timestamp is the only lasting proof the signature was made while it was |
 | 65 | `PredicateTooLarge` — the `--predicate` file exceeds 15 MiB |
 | 65 | `RekorSetMalformed` — Rekor returned the log entry but its Signed Entry Timestamp could not be extracted or parsed |
 | 65 | `PredicateNotJson` — the `--predicate` file did not parse as JSON |
-| 74 | An I/O error reading `--predicate` — missing file, permission denied, or the symlink refusal. `error.kind` is `io_error` with **no** `error.detail`; a script must branch on `error.kind` for this one |
+| 65 | `SubjectDigestUnsupported` — the reference resolves to a subject addressed by `sha384` or `sha512`. cosign artifacts address their subject by `sha256` alone: the in-toto Statement binds on `sha256`, and the sidecar tag truncates the digest to 64 characters, so two subjects sharing a prefix would share one tag. Refused before anything is published or logged to Rekor, rather than at verify time after a permanent transparency-log entry has been burned |
+| 65 | `KeyBackend` — a `--key <path>` reference names a file that was read in full but whose bytes are not a key this backend accepts, or that exceeds the size cap. `error.detail` is `key_backend` |
+| 74 | An I/O error reading `--predicate`, `--tags-file`, or a `--key <path>` reference — missing file, permission denied, or the symlink refusal. `error.kind` is `io_error`; `error.detail` is **absent** for `--predicate`/`--tags-file` (a script must branch on `error.kind` for those two), but `key_backend` for the `--key <path>` door — the same door [`verify`](#package-verify) answers with `key_unreadable` |
 | 75 | `FulcioUnavailable` — Fulcio could not be reached, or answered 429 or 5xx; a transient outage, safe to retry |
 | 77 | `OidcPreCheckFailed`, `OfflineAttestRefused` (`--offline` is incompatible with `attest`; checked first), or `IdentityTokenFilePermissive` |
 | 78 | Fulcio rejected the certificate signing request as malformed |
 | 79 | `TargetNotFound` — no manifest for the requested `--platform` under the target image index |
+| 79 | `TargetNotAnIndex` — `--platform` was given but the reference resolved to a single manifest, not an index. A distinct `error.detail` (`target_not_an_index`) from `target_not_found` because the remedy differs: drop the flag, rather than go looking for a build that was never missing |
 | 80 | Fulcio rejected the OIDC token |
 | 83 | Rekor transparency log unavailable, or it returned a log entry with no usable Merkle inclusion proof |
-| 84 | Registry does not support the OCI Referrers API |
+| 84 | Registry serves neither the OCI Referrers API nor a writable fallback index |
+| 85 | `UnsupportedKeyBackend` — `--key` named a key backend OCX recognises but has not implemented (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://`). Decided at the parse boundary, before the reference is treated as a filename |
 
 **JSON output** (`--format json`)
 
@@ -4315,12 +4465,14 @@ On success, `ocx package attest` emits a success envelope. Signed:
     "referrer_digest": "sha256:<64-hex>",
     "signed": true,
     "certificate_identity": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
-    "certificate_oidc_issuer": "https://token.actions.githubusercontent.com"
+    "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
+    "key_backend": "keyless",
+    "transparency_log_index": 42
   }
 }
 ```
 
-Unsigned — no signing identity was visible, so the three certificate fields are omitted (never emitted empty) and `bundle_digest` is the SBOM document's own digest rather than a Sigstore bundle's:
+Unsigned — no signing identity was visible, so the three certificate fields and `key_backend`/`public_key_hint` are omitted (never emitted empty), `bundle_digest` is the SBOM document's own digest rather than a Sigstore bundle's, and `transparency_log_index` is `null` since no key model was involved at all:
 
 ```json
 {
@@ -4334,10 +4486,15 @@ Unsigned — no signing identity was visible, so the three certificate fields ar
     "predicate_type": "https://spdx.dev/Document",
     "bundle_digest": "sha256:<64-hex>",
     "referrer_digest": "sha256:<64-hex>",
-    "signed": false
+    "signed": false,
+    "transparency_log_index": null
   }
 }
 ```
+
+`key_backend` (`keyless`, `file`, or a key-backend scheme) and `public_key_hint` (the signing key's cosign hint, key mode only) are present on every signed attach, keyless included; `transparency_log_index` is **always present, `null` included** — under `--key` with no `--rekor-upload`, a missing record is a legal outcome the operator must see rather than infer from an absent field.
+
+`bundle_digest` and `referrer_digest` describe the OCI 1.1 referrer, so both are omitted under `--signature-format simplesigning`, which publishes only the sidecar; `sidecar_digest` — the `sha256-<hex>.att` manifest — appears only when a sidecar was written. An invocation that does not pass `--signature-format` sees exactly the keys shown above.
 
 `predicate_type` echoes the **resolved** `predicateType` URI actually written into the Statement (signed) or declared as the referrer's `artifactType` (unsigned) — for the cosign-alias spellings this differs from the `--type` value you passed (e.g. `--type cyclonedx` resolves to `https://cyclonedx.org/bom`); a literal URI passed to `--type` is echoed unchanged.
 
@@ -4354,8 +4511,10 @@ On error, `ocx package attest` emits the same envelope shape as [`sign`][cmd-pac
 | `fulcio_unavailable` | 75 | Fulcio could not be reached, or answered 429 or 5xx — a transient outage, safe to retry |
 | `oidc_token_rejected` | 80 | Fulcio rejected the OIDC token |
 | `transparency_log_unavailable` | 83 | Rekor transparency log unavailable, or returned an entry with no usable Merkle inclusion proof |
-| `referrers_unsupported` | 84 | Registry does not implement the OCI Referrers API |
+| `referrers_unsupported` | 84 | Registry serves neither the OCI Referrers API nor a writable fallback index |
 | `target_not_found` | 79 | No manifest for the requested `--platform` under the target image index |
+| `target_not_an_index` | 79 | `--platform` was given but the reference resolved to a single manifest, not an index — drop the flag, rather than go looking for a build that was never missing |
+| `subject_digest_unsupported` | 65 | The reference resolves to a subject addressed by `sha384` or `sha512`; cosign artifacts address their subject by `sha256` alone. Refused before anything is published or logged to Rekor, rather than at verify time after a permanent transparency-log entry has been burned |
 | `oidc_pre_check_failed` | 77 | OIDC pre-check failed client-side before the token was sent to Fulcio |
 | `offline_attest_refused` | 77 | `--offline` is incompatible with `package attest` |
 | `identity_token_file_permissive` | 77 | Token file has permissive permissions, wrong owner, or is a symlink |
@@ -4363,6 +4522,12 @@ On error, `ocx package attest` emits the same envelope shape as [`sign`][cmd-pac
 | `invalid_endpoint_url` | 64 | Malformed `--fulcio-url` or `--rekor-url` |
 | `provenance_version_unsupported` | 64 | `--type` resolved to a SLSA provenance predicate below v1.0; pass `--type slsaprovenance1` |
 | `unsigned_type_unsupported` | 64 | No signing identity is visible and `--type` did not resolve to a CycloneDX or SPDX predicate |
+| `sidecar_requires_signature` | 64 | `--signature-format simplesigning` or `both` was given for an attach with no signing identity to build a DSSE envelope from |
+| `unsupported_key_backend` | 85 | `--key` named a key backend OCX recognises but has not implemented (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://`). Decided at the parse boundary, so it is never reported as a missing file |
+| `key_backend` | 74 | A `--key <path>` reference names a file that could not be read — missing, permission denied, a directory or device node rather than a regular file, or another I/O failure. The single detail every `KeyBackendError` variant collapses to; `unsupported_key_backend` above is the separate parse-time refusal |
+| `key_backend` | 65 | A `--key <path>` reference names a file that was read in full but whose bytes are not a key this backend accepts, or that exceeds the size cap |
+| `key_reference_invalid` | 64 | `--key` could not be parsed at all: an unrecognised scheme token, or nothing following the scheme |
+| `rekor_upload_required_for_keyless` | 64 | `--no-rekor-upload` was given without `--key`; a keyless signature must be recorded in Rekor for the reason above |
 | `internal` | 1 | Unexpected internal error |
 
 **Human-readable output** (default format) states the trust class outright rather than leaving it to be inferred from missing rows — a `Signature` field reads `signed` or `unsigned (attached without an identity)`, and the three certificate rows are present only when signed.
@@ -4383,7 +4548,9 @@ The same ambient GitHub Actions OIDC token [`sign`][cmd-package-sign] picks up a
 
 #### `sbom` {#package-sbom}
 
-Lists, or extracts, the SBOM attestations a package manifest carries — the read-side counterpart to [`attest`][cmd-package-attest]. A manifest can carry two kinds: a **signed** attestation, a [DSSE][dsse] bundle with a Fulcio certificate and a Rekor entry behind it, and an **unsigned** attach, a raw referrer with no signature over it at all.
+Lists, or extracts, the SBOM attestations a package manifest carries — the read-side counterpart to [`attest`][cmd-package-attest]. A manifest can carry two kinds: a **signed** attestation, a [DSSE][dsse] bundle with a Fulcio certificate and a Rekor entry behind it, and an **unsigned** attach, with no signature over it at all.
+
+An unsigned attach arrives by one of two routes, and both list identically. A **referrer** — what `oras attach` and `COSIGN_EXPERIMENTAL=1 cosign attach sbom --registry-referrers-mode oci-1-1` write — is found by the Referrers API. The cosign `sha256-<hex>.sbom` **sidecar tag** is not: its manifest declares neither `artifactType` nor `subject`, so no listing reaches it and it is read by tag, exactly as `.sig` and `.att` are on the [`verify`][cmd-package-verify] side. In both cases the payload layer's own media type is the only claim about the document, so it is both the gate and the label — a layer typed outside the SBOM set is refused (65, `sbom_media_type_unsupported`) rather than listed as an SBOM.
 
 Which of the two you get back, and whether anything is checked, is decided per invocation by one of two modes:
 
@@ -4397,7 +4564,7 @@ An unverified entry is never dressed up as a verified one. It carries `verified:
 **Usage**
 
 ```shell
-ocx package sbom [OPTIONS] --platform <PLATFORM> <IDENTIFIER>
+ocx package sbom [OPTIONS] <IDENTIFIER>
 ```
 
 **Arguments**
@@ -4408,11 +4575,13 @@ ocx package sbom [OPTIONS] --platform <PLATFORM> <IDENTIFIER>
 
 | Name | Short | Default | Purpose |
 |------|-------|---------|---------|
-| `--platform` | `-p` | *(required)* | Target platform — selects the single-platform manifest under the image index |
+| `--platform` | `-p` | *(the resolved object)* | Narrow into one platform of an image index. Omit it to act on whatever the reference resolves to — an index is then the subject itself, which is where cosign puts a multi-platform tag's signature. Given against a reference that resolves to a single manifest, there is nothing to narrow and the command fails |
 | `--type <TYPE>` | — | *(any type)* | Restrict to one [predicate type][cmd-package-attest] |
 | `--output <PATH\|->` | `-o` | — | Write the matched predicate's bytes, byte-exact as the publisher wrote them, to `PATH`, or to stdout with `-`. Refuses more than one matching attestation (exit 65, `multiple_attestations`) — naming every candidate's referrer digest and every distinct predicate type in the set, since there is no correct one to pick silently. Under `--no-verify` the document was not checked, so one warning line naming the referrer digest goes to stderr; the written bytes are unaffected. `-` refuses a TTY destination (exit 64) — piped bytes are not something a terminal should render raw |
 | `--summary` | — | `false` | Augments the listing rather than replacing it: each plain-text row's Detail column gains component-count context (spec version, component count, top-level component name); each JSON entry gains a `summary` object, which also carries `serial_number` — a JSON-only field, never shown in the plain-text form. Restricted to `specVersion` 1.5-1.7; any other predicate type or an out-of-range CycloneDX version refuses **that entry** — it moves to `refused` with `reason_kind` `sbom_summary_failed`, naming the version it read and the `--type cyclonedx` remedy — never a silently empty summary and never the whole listing, so one unreadable document among five costs you that one |
 | `--certificate-identity` / `--certificate-oidc-issuer` | — | *(policy-resolved)* | Same identity-resolution rule as [`verify`][cmd-package-verify] |
+| `--key <REF>` | — | *(keyless)* | Verify against a pinned public key instead of a Fulcio certificate — same reference grammar, same exit-85 refusal of an unimplemented backend, and the same conflict with the two certificate flags as [`verify`][cmd-package-verify]. Additionally refused with `--no-verify` (exit 64): it names a key nothing would check |
+| `--signature-format <FORMAT>` | — | *(bundle, then sidecar)* | Pin which cosign wire shape to accept, `bundle` or `simplesigning`; the pin decides discovery. Same rule as [`verify`][cmd-package-verify], `both` included — a usage error on the read side. It does **not** narrow the unsigned listing: an attached SBOM is not a signature, so it has no wire format to pin, and a `--no-verify` run reports the same documents under either value |
 | `--sigstore-trusted-root` | — | *(public-good root over TUF)* | Same as [`verify`][cmd-package-verify] |
 | `--rekor-url` | — | (`[trust.sigstore].rekor_url`, else `https://rekor.sigstore.dev`) | [Rekor][rekor] transparency-log endpoint |
 | `--no-cache` | — | `false` | Bypass the per-registry referrers-capability cache for this invocation |
@@ -4423,14 +4592,17 @@ ocx package sbom [OPTIONS] --platform <PLATFORM> <IDENTIFIER>
 
 **Exit codes**
 
-Shares [`verify`][cmd-package-verify]'s exit-code taxonomy under `--verify` — 79 when nothing verifies, 65 for any data-integrity failure, 78 for a trust-root or policy problem, 83/84 for Rekor/Referrers unavailability. Under `--no-verify` the trust-material codes — 78 (trust root or policy), 77 (identity), 83 (Rekor), and the 65 signature classes — are unreachable, because no trust material is consulted; 84 remains reachable (the referrers capability is still probed), and so does 64 for an invalid `--rekor-url`, which is validated before the mode is resolved. Four `sbom`-specific additions:
+Shares [`verify`][cmd-package-verify]'s exit-code taxonomy under `--verify` — 79 when nothing verifies, 65 for any data-integrity failure, 78 for a trust-root or policy problem, 83 for Rekor unavailability. Exit 84 is not reachable from `sbom` at all: a registry serving no OCI Referrers API is read through the fallback referrers tag, so a registry with neither is "nothing found" (79), never a capability refusal. 84 belongs to the signing side — [`sign`](#package-sign) and [`attest`](#package-attest), which must *write* a referrer. Under `--no-verify` the trust-material codes — 78 (trust root or policy), 77 (identity), 83 (Rekor), and the 65 signature classes — are unreachable, because no trust material is consulted; 64 for an invalid `--rekor-url` stays reachable either way, since it is validated before the mode is resolved. Seven `sbom`-specific additions:
 
 | Code | Condition |
 |------|-----------|
 | 77 | `unsigned_rejected_by_policy` — an unsigned attach was found and this run demands a signature. Listed in `refused` when a signed attestation was also found; when unsigned attachments are all the subject carries, the refusal is promoted to the command's own error. `--no-verify` lists the same document instead |
 | 65 | `MultipleAttestations` under `--output` — more than one attestation matches and none was named by `--type` |
 | 65 | `sbom_media_type_unsupported` — a raw referrer's payload layer declares a media type outside the SBOM set. Reachable under `--no-verify` only, since `--verify` refuses raw referrers before reading them. Listed in `refused` when the scan found anything else on the subject; when it is the only candidate, the refusal is promoted to the command's own error |
+| 65 | `key_malformed` — a `--key <path>` reference names a file that was read in full but whose bytes are not an SPKI public key. Shared with [`verify`][cmd-package-verify] |
 | 64 | `--output -` requested on a TTY, or `--summary` combined with `--output`. `--no-verify` combined with a certificate flag is a clap parse error, no envelope. `no_identity_provided` — `--verify` demanded with no identity source to verify against: no certificate flags and no matching [`[[trust.policy]]`][config-trust] |
+| 85 | `unsupported_key_backend` — a key reference named a key backend OCX recognises but has not implemented — from `--key`, or from a `key = "…"` signer in a matched [`[[trust.policy]]`][config-trust], which reach the same refusal through different doors and answer it with the same code — (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://`). Decided at the parse boundary — before any request and before the verification mode is resolved — so it is never reported as a missing file. A reference OCX cannot parse at all is exit 64 instead (`key_reference_invalid`) |
+| 74 | An I/O error reading `--output` — missing file, permission denied, or the symlink refusal. `error.kind` is `io_error` with **no** `error.detail`; a script must branch on `error.kind` for this one. Also `key_unreadable`, shared with [`verify`][cmd-package-verify]: the key file a `--key <path>` reference names could not be read |
 
 A scan that finds nothing at all — no signed attestation and no unsigned attach — is `AttestationNotFound` (79), the same as an unqualified [`verify --attestation`][cmd-package-verify-attestations] with no matching referrer. Under `--summary` an empty `entries` array is reachable at exit 0 — every document refused the summariser, so each one is reported in `refused` with `summary.status` `partial_failure`. The distinction is what was found, not what was listed: 79 means nothing at all was found, exit 0 with empty `entries` means every candidate was found but none could be read.
 
@@ -4459,6 +4631,7 @@ A verifying run (`--verify`, or an identity source resolving) over a manifest ca
       {
         "predicate_type": "https://cyclonedx.org/bom",
         "verified": true,
+        "shadowed": false,
         "subject_digest": "sha256:<64-hex>",
         "referrer_digest": "sha256:<64-hex>",
         "certificate_identity": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
@@ -4488,6 +4661,7 @@ The same manifest under `--no-verify`, which checks nothing and reads the bundle
     {
       "predicate_type": "https://cyclonedx.org/bom",
       "verified": false,
+      "shadowed": false,
       "subject_digest": "sha256:<64-hex>",
       "referrer_digest": "sha256:<64-hex>"
     }
@@ -4515,6 +4689,7 @@ A manifest carrying a signed attestation *and* a raw unsigned attach, read under
     {
       "predicate_type": "https://cyclonedx.org/bom",
       "verified": true,
+      "shadowed": false,
       "subject_digest": "sha256:<64-hex>",
       "referrer_digest": "sha256:<64-hex>",
       "certificate_identity": "https://github.com/org/repo/.github/workflows/release.yml@refs/heads/main",
@@ -4535,6 +4710,14 @@ A manifest carrying a signed attestation *and* a raw unsigned attach, read under
 When the unsigned attach is the *only* candidate on the subject, there is nothing for the refusal to sit beside — it is promoted to the command's own top-level error instead of a `refused` row, exit 77.
 
 Every entry carries `predicate_type`, `verified`, `subject_digest` and `referrer_digest`. `certificate_identity`, `certificate_oidc_issuer` and `signed_at` are present only when `verified: true` — omitted, not `null`, on an unverified entry, so an empty identity is never mistaken for a rendering failure. `summary.verified` and `summary.unverified` partition `entries`; `summary.total` is `verified + unverified + refused`.
+
+**Which subject a document is attached to, and what shadows what.** An SBOM can sit on the image index or on a platform manifest, and both at once. Per-platform is preferred — dependencies genuinely differ per architecture, so one index-level SBOM is a lie for a multi-arch package — so with `--platform` given the command reads the platform manifest *and* the index behind it, and every document from both lands in `entries`, each naming its own `subject_digest`.
+
+A platform-level SBOM then supersedes an index-level one **only within the same `predicate_type`**. A platform CycloneDX never hides an index-level SPDX: they are different documents for different consumers, not substitutes, and a consumer asking for SPDX would otherwise be told the package carries none. A superseded document stays in `--format json` with `shadowed: true` — the machine channel always gets the full picture — while the plain-text table collapses to the one that wins. `shadowed` is emitted on every entry, `false` included: nothing supersedes this document is a true statement, so a script can branch on the key without first testing for it.
+
+Two documents of one `predicate_type` on the **same** subject shadow neither. Multiple SBOMs per package is normal — different formats, different lifecycle phases, rescans — and there is no disambiguation convention beyond `org.opencontainers.image.created`, so both are listed and policy decides. With no `--platform` nothing is narrowed, one subject is read, and nothing is ever `shadowed`.
+
+**`--summary` is CycloneDX-only, and deliberately narrower than the rest of the command.** Discovery and verification are format-agnostic — the payload is opaque bytes — so an SPDX SBOM attaches, signs, verifies and lists exactly like a CycloneDX one. Only the summariser is format-specific: it parses CycloneDX 1.5-1.7 and nothing else. The asymmetry is by design, not a gap waiting to be filled, and it costs one entry rather than the listing: an SPDX document under `--summary` moves to `refused` with `reason_kind` `sbom_summary_failed`, and every CycloneDX document beside it still reports. Drop `--summary`, or narrow with `--type cyclonedx`, to list an SPDX document cleanly.
 
 A scan that examined and rejected candidates reports them in `refused`, never silently — `summary.status` is `partial_failure` whenever `refused` is non-empty, `success` otherwise. Plain-format listings truncate `refused` to the first 20 with a `... and N more (see --json)` trailer; `--json` is never truncated. Each `refused` entry carries `reason` (prose) and `reason_kind` (a frozen slug, e.g. `unsigned_rejected_by_policy`, `multiple_attestations`, `bundle_parse_failed`, `sbom_media_type_unsupported`) — scripts branch on `reason_kind`, never on `reason`. The verify pipeline's own refusals come first; a `--summary` document that could not be read follows them with `reason_kind` `sbom_summary_failed`, which is deliberately outside that slug set: the document was found (verified or not), and only the reading of its payload failed.
 
@@ -4954,6 +5137,7 @@ ocx patch publish --descriptor <FILE> [--global | <BASE-ID>]
 | 64 | No patch registry available — pass `--registry <HOST/PATH>`, configure a `[patches]` tier, or set `OCX_PATCHES` before publishing. |
 | 65 | Descriptor JSON is malformed or the version is unsupported. |
 | 69 | Registry unreachable. |
+| 74 | An I/O error reading `--descriptor` — missing file, permission denied, or the symlink refusal. `error.kind` is `io_error` with **no** `error.detail`; a script must branch on `error.kind` for this one. |
 | 81 | `--offline` blocked the publish — `patch publish` requires network access. |
 
 #### `patch test` {#patch-test}
@@ -5002,6 +5186,7 @@ ocx patch test --descriptor <FILE> [OPTIONS] <BASE-ID> [-- COMMAND [ARGS...]]
 | *(child's exit code)* | With a trailing command, the child's exit code is forwarded unchanged — a command that exits 7 makes `patch test` exit 7. |
 | 64 | No patch registry available — pass `--registry <HOST/PATH>`, configure a `[patches]` tier, or set `OCX_PATCHES` before testing; a `--companion-archive` metadata sidecar has no `identifier` field; or its `identifier` does not match a companion the descriptor names for the base (naming the nearest entry it found). |
 | 65 | Descriptor JSON is malformed or the version is unsupported; or two contributors to one env key declared conflicting list separators (see [Separator agreement][env-composition-list-separator]). |
+| 74 | An I/O error reading `--descriptor` — missing file, permission denied, or the symlink refusal. `error.kind` is `io_error` with **no** `error.detail`; a script must branch on `error.kind` for this one. |
 | 81 | `--offline` blocked resolving the base or a required companion. |
 | *other* | A required companion could not be resolved; the exit code reflects the underlying cause — see [Exit codes][exit-codes] (e.g. 79 not found, 69 registry unreachable, 80 authentication failure). |
 
@@ -5456,6 +5641,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 [signing-offline]: ../in-depth/signing.md#offline-verification
 [signing-deferred]: ../in-depth/signing.md#deferred-future-work
 [signing-cosign-interop]: ../in-depth/signing.md#cosign-interop
+[signing-key-mode]: ../in-depth/signing.md#key-mode
+[signing-key-mode-rekor]: ../in-depth/signing.md#key-mode-rekor
 [in-depth-self-hosted-sigstore]: ../in-depth/self-hosted-sigstore.md
 [in-depth-shell-integration]: ../in-depth/shell-integration.md
 [in-depth-shell-integration-commands]: ../in-depth/shell-integration.md#commands

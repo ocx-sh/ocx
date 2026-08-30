@@ -149,12 +149,22 @@ pub mod keys {
     /// [`CREDENTIAL_KEYS`] and the credential exemption table in `subsystem-cli.md`.
     pub const OCX_IDENTITY_TOKEN: &str = "OCX_IDENTITY_TOKEN";
 
+    /// Password for an encrypted signing key, read once by the file key backend
+    /// (`oci::sign::key_backend::key_password`). Never a flag — a password in
+    /// `argv` is visible to every process on the host.
+    ///
+    /// A bearer credential in exactly the sense [`OCX_IDENTITY_TOKEN`] is: only
+    /// the signing path needs it, so it is read directly via `std::env::var` and
+    /// never forwarded to child processes — see [`CREDENTIAL_KEYS`] and the
+    /// credential exemption table in `subsystem-cli.md`.
+    pub const OCX_KEY_PASSWORD: &str = "OCX_KEY_PASSWORD";
+
     /// Bearer-credential env vars that `apply_ocx_config` must actively scrub
     /// from a child env. Forwarding these to every subprocess would broaden
     /// the attack surface — the CLI command that needs the token reads it
     /// once via `std::env::var` and never propagates it. See the credential
     /// exemption table in `subsystem-cli.md`.
-    pub const CREDENTIAL_KEYS: &[&str] = &[OCX_IDENTITY_TOKEN];
+    pub const CREDENTIAL_KEYS: &[&str] = &[OCX_IDENTITY_TOKEN, OCX_KEY_PASSWORD];
 }
 
 /// Resolution-affecting policy snapshot, taken from the running ocx's parsed

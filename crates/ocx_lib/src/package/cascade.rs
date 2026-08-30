@@ -245,31 +245,56 @@ pub async fn resolve_cascade_tags(
     Ok((tags, is_latest))
 }
 
+/// What one cascade push landed.
+///
+/// A named struct rather than a tuple because two of its five members are
+/// digests and two are tag-shaped: as unlabelled positionals, a swapped pair
+/// type-checks silently — and [`platform_digest`](Self::platform_digest) is a
+/// signing input, where the wrong digest means signing the wrong object.
+/// [`PushOutcome`](crate::publisher::PushOutcome) in the sibling module is the
+/// precedent.
+#[derive(Debug)]
+pub struct CascadePushOutcome {
+    /// Digest of the primary tag's image index after this platform merged in.
+    pub index_digest: oci::Digest,
+    /// The rolling tags this push cascaded to, most-specific first.
+    pub cascade_tags: Vec<String>,
+    /// The digest-named keep tag written, or `None` when `keep_tag` was
+    /// `false` or the merged index carried no entry for this platform.
+    pub keep_tag: Option<String>,
+    /// The platform manifest digest this push landed on, whatever `keep_tag`
+    /// was — read from the same merged-index descriptor
+    /// [`Client::push_keep_tag`](crate::oci::Client) reads, so the two can
+    /// never disagree and no second lookup is issued.
+    ///
+    /// `None` only when the merged index carries no entry for this platform:
+    /// the row is omitted rather than faked, matching `keep_tag`.
+    pub platform_digest: Option<oci::Digest>,
+    /// Layer-push counts for this platform's push.
+    pub layer_counts: oci::LayerCounts,
+}
+
 /// Pushes a package to its primary tag, then merges the platform entry
 /// into each cascade tag sequentially (most-specific → least-specific
 /// for partial-failure safety).
 ///
-/// When `canonical_tag` is `true`, the just-pushed platform manifest also
-/// gets a digest-named `sha256.<hex>` tag (`adr_index_indirection.md`
+/// When `keep_tag` is `true`, the just-pushed platform manifest also
+/// gets a digest-named `__ocx.keep.<algorithm>-<hex>` tag (`adr_index_indirection.md`
 /// Decision E) — looked up once from the primary tag's merged index, so a
 /// cascade never retags a pre-existing entry for a platform this call did
 /// not push.
 ///
 /// `annotations` land on the primary tag's index and on every cascade tag's
 /// index alike.
-///
-/// Returns the pushed index digest, the cascade tags, the canonical tag that
-/// was written (`None` when `canonical_tag` is `false`, or when the merged
-/// index carries no entry for this platform), and the layer-push counts.
 pub async fn push_with_cascade(
     client: &oci::Client,
     package_info: package::info::Info,
     layers: &[crate::publisher::LayerRef],
     other_versions: BTreeSet<Version>,
     version: &Version,
-    canonical_tag: bool,
+    keep_tag: bool,
     annotations: &BTreeMap<String, String>,
-) -> Result<(oci::Digest, Vec<String>, Option<String>, oci::LayerCounts)> {
+) -> Result<CascadePushOutcome> {
     let (cascade_tags, _) = resolve_cascade_tags(
         client,
         &package_info.identifier,
@@ -283,19 +308,26 @@ pub async fn push_with_cascade(
         .push_manifest_and_merge_tags(&package_info, layers, &cascade_tags, annotations)
         .await?;
 
-    let canonical_tag_written = if canonical_tag {
+    let merged = oci::Manifest::ImageIndex(index);
+    // Hoisted out of the `keep_tag` branch: the platform digest is a signing
+    // input and must be reported under `--no-keep-tag` as well.
+    let platform_digest = oci::manifest::platform_manifest_digest(&merged, &package_info.platform);
+
+    let keep_tag_written = if keep_tag {
         client
-            .push_canonical_tag(
-                &package_info.identifier,
-                &oci::Manifest::ImageIndex(index),
-                &package_info.platform,
-            )
+            .push_keep_tag(&package_info.identifier, &merged, &package_info.platform)
             .await?
     } else {
         None
     };
 
-    Ok((manifest_digest, cascade_tags, canonical_tag_written, layer_counts))
+    Ok(CascadePushOutcome {
+        index_digest: manifest_digest,
+        cascade_tags,
+        keep_tag: keep_tag_written,
+        platform_digest,
+        layer_counts,
+    })
 }
 
 /// Checks blockers sequentially, returning `true` on first platform match.
@@ -1128,7 +1160,7 @@ mod tests {
             assert!(is_latest);
         }
 
-        // ── push_with_cascade canonical-tag gating ────────────────
+        // ── push_with_cascade keep-tag gating ────────────────
 
         fn test_info(tag: &str, platform_str: &str) -> package::info::Info {
             use package::metadata::{
@@ -1153,7 +1185,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn canonical_tag_true_tags_only_the_pushed_platform() {
+        async fn keep_tag_true_tags_only_the_pushed_platform() {
             let data = StubTransportData::new();
             data.write().capture_pushes = true;
             let client = test_client(&data);
@@ -1165,27 +1197,31 @@ mod tests {
             let info = test_info("3.28.1", "linux/amd64");
             let version = Version::new_patch(3, 28, 1);
 
-            let (_, _, canonical_tag_written, _) =
-                push_with_cascade(&client, info, &[], BTreeSet::new(), &version, true, &BTreeMap::new())
-                    .await
-                    .expect("cascade push succeeds");
+            let outcome = push_with_cascade(&client, info, &[], BTreeSet::new(), &version, true, &BTreeMap::new())
+                .await
+                .expect("cascade push succeeds");
+            let keep_tag_written = outcome.keep_tag;
 
             let inner = data.read();
-            let canonical_tags: Vec<&String> = inner.manifests.keys().filter(|key| key.contains(":sha256.")).collect();
+            let keep_tags: Vec<&String> = inner
+                .manifests
+                .keys()
+                .filter(|key| key.contains(":__ocx.keep."))
+                .collect();
             assert_eq!(
-                canonical_tags.len(),
+                keep_tags.len(),
                 1,
-                "exactly one canonical tag must be pushed, for the platform this call pushed: {canonical_tags:?}"
+                "exactly one keep tag must be pushed, for the platform this call pushed: {keep_tags:?}"
             );
-            let reported = canonical_tag_written.expect("the cascade push must report the canonical tag it wrote");
+            let reported = keep_tag_written.expect("the cascade push must report the keep tag it wrote");
             assert!(
-                canonical_tags[0].ends_with(&format!(":{reported}")),
-                "the reported tag must be the one on the wire: reported {reported}, wire {canonical_tags:?}"
+                keep_tags[0].ends_with(&format!(":{reported}")),
+                "the reported tag must be the one on the wire: reported {reported}, wire {keep_tags:?}"
             );
         }
 
         #[tokio::test]
-        async fn canonical_tag_false_pushes_no_extra_tag() {
+        async fn keep_tag_false_pushes_no_extra_tag() {
             let data = StubTransportData::new();
             data.write().capture_pushes = true;
             let client = test_client(&data);
@@ -1193,16 +1229,26 @@ mod tests {
             let info = test_info("3.28.1", "linux/amd64");
             let version = Version::new_patch(3, 28, 1);
 
-            let (_, _, canonical_tag_written, _) =
-                push_with_cascade(&client, info, &[], BTreeSet::new(), &version, false, &BTreeMap::new())
-                    .await
-                    .expect("cascade push succeeds");
+            let outcome = push_with_cascade(&client, info, &[], BTreeSet::new(), &version, false, &BTreeMap::new())
+                .await
+                .expect("cascade push succeeds");
 
-            assert_eq!(canonical_tag_written, None, "canonical_tag=false must report no tag");
+            assert_eq!(outcome.keep_tag, None, "keep_tag=false must report no tag");
+            // The independence claim, at the seam that could break it: the
+            // platform digest is looked up outside the `keep_tag` branch, so
+            // `--no-keep-tag` still reports it. Deriving it from the keep tag
+            // would make this `None`.
+            let platform_digest = outcome
+                .platform_digest
+                .expect("the platform digest must be reported with keep tagging off");
+            assert_ne!(
+                platform_digest, outcome.index_digest,
+                "the platform manifest digest must not be the index digest"
+            );
             let inner = data.read();
             assert!(
-                inner.manifests.keys().all(|key| !key.contains(":sha256.")),
-                "canonical_tag=false must not push the extra tag: {:?}",
+                inner.manifests.keys().all(|key| !key.contains(":__ocx.keep.")),
+                "keep_tag=false must not push the extra tag: {:?}",
                 inner.manifests.keys().collect::<Vec<_>>()
             );
         }

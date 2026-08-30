@@ -20,7 +20,15 @@ from pathlib import Path
 
 import pytest
 
-from src.registry import get_blob, get_manifest, list_referrers
+from src.registry import (
+    fetch_manifest_digest,
+    fetch_manifest_raw,
+    fetch_platform_manifest_digest,
+    get_blob,
+    get_manifest,
+    list_referrers,
+    referrers_fallback_tag,
+)
 from src.runner import OcxRunner, PackageInfo, current_platform
 from tests.fixtures import adversarial
 from tests.fixtures.sigstore_stack import SigstoreStack
@@ -29,12 +37,36 @@ from tests.fixtures.sigstore_stack import SigstoreStack
 # `oci::referrer::media_types::SIGSTORE_BUNDLE_V03`.
 SIGSTORE_BUNDLE_V03 = "application/vnd.dev.sigstore.bundle.v0.3+json"
 
+# cosign's simplesigning payload media type — mirrors the Rust constant
+# `oci::referrer::media_types::SIMPLESIGNING_MEDIA_TYPE`.
+SIMPLESIGNING_MEDIA_TYPE = "application/vnd.dev.cosign.simplesigning.v1+json"
+
 # A full, un-shortened digest: `sha256:` + 64 hex chars. `.startswith("sha256:")`
 # alone is also satisfied by the 12-hex short form the CLI's plain-mode output
 # uses (`api/data/signature.rs::plain_fields`), so it cannot tell "JSON was
 # shortened" from "JSON stayed full" — a regression that shortened the JSON
 # digest would still pass a bare `startswith` check.
 FULL_SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def bundle_payload_digest(data: dict) -> str:
+    """The Sigstore bundle blob's digest, out of the leg that wrote it.
+
+    `sign` reports one leg per wire shape, so there is no flat `bundle_digest`
+    field to read: `--signature-format both` writes two payloads and one field
+    could name only one of them.
+    """
+    for leg in data["legs"]:
+        if leg["format"] == "bundle":
+            return leg["payload_digest"]
+    raise AssertionError(f"no bundle leg in the sign report: {data['legs']!r}")
+
+
+def leg(data: dict, wire_format: str) -> dict:
+    """The one reported leg for `wire_format`."""
+    matches = [entry for entry in data["legs"] if entry["format"] == wire_format]
+    assert len(matches) == 1, f"expected exactly one {wire_format} leg, got {data['legs']!r}"
+    return matches[0]
 
 
 def _endpoint_args(stack: SigstoreStack) -> list[str]:
@@ -87,7 +119,7 @@ def test_sign_then_verify_happy_path(
     assert sign_envelope["exit_code"] == 0
     data = sign_envelope["data"]
     assert data["subject_digest"].startswith("sha256:")
-    assert data["bundle_digest"].startswith("sha256:")
+    assert bundle_payload_digest(data).startswith("sha256:")
     # The identity sign reports is the SAN of the certificate it just had
     # issued, not the token's `sub`. dex mints a `sub` that is an opaque
     # base64 provider id while Fulcio puts the *email* in the SAN, so
@@ -222,7 +254,7 @@ def test_sign_reads_env_token(
     )
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
-    bundle_digest = envelope["data"]["bundle_digest"]
+    bundle_digest = bundle_payload_digest(envelope["data"])
     assert FULL_SHA256_DIGEST_RE.fullmatch(bundle_digest), (
         f"JSON bundle_digest must stay the full sha256:<64hex> form, not the "
         f"12-hex short form plain-mode uses, got: {bundle_digest!r}"
@@ -253,7 +285,7 @@ def test_sign_reads_stdin_token(
     )
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
-    bundle_digest = envelope["data"]["bundle_digest"]
+    bundle_digest = bundle_payload_digest(envelope["data"])
     assert FULL_SHA256_DIGEST_RE.fullmatch(bundle_digest), (
         f"JSON bundle_digest must stay the full sha256:<64hex> form, not the "
         f"12-hex short form plain-mode uses, got: {bundle_digest!r}"
@@ -345,7 +377,7 @@ def test_sign_token_file_only(
     assert envelope["schema_version"] == 1
     assert envelope["command"] == "package sign"
     assert envelope["exit_code"] == 0
-    assert envelope["data"]["bundle_digest"].startswith("sha256:")
+    assert bundle_payload_digest(envelope["data"]).startswith("sha256:")
 
 
 def test_sign_token_stdin_overrides_env(
@@ -385,7 +417,7 @@ def test_sign_token_stdin_overrides_env(
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
     assert envelope["exit_code"] == 0
-    assert envelope["data"]["bundle_digest"].startswith("sha256:")
+    assert bundle_payload_digest(envelope["data"]).startswith("sha256:")
 
 
 def test_sign_token_file_overrides_stdin_and_env(
@@ -427,7 +459,7 @@ def test_sign_token_file_overrides_stdin_and_env(
     assert result.returncode == 0, result.stderr
     envelope = json.loads(result.stdout)
     assert envelope["exit_code"] == 0
-    assert envelope["data"]["bundle_digest"].startswith("sha256:")
+    assert bundle_payload_digest(envelope["data"]).startswith("sha256:")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -480,11 +512,11 @@ def test_sign_rejects_world_readable_identity_token_file(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Registry capability — referrers API unsupported → exit 84
+# Registry capability — no referrers API → the tag-schema fallback index
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def test_sign_referrers_unsupported_exits_84(
+def test_sign_lands_in_the_fallback_index_on_a_registry_without_the_referrers_api(
     ocx: OcxRunner,
     legacy_registry: str,
     unique_repo: str,
@@ -492,12 +524,18 @@ def test_sign_referrers_unsupported_exits_84(
     sigstore_stack: SigstoreStack,
     identity_token: Path,
 ) -> None:
-    """Registry without referrers API → exit 84.
+    """No Referrers API is no longer a refusal — it selects the fallback write.
 
-    ``legacy_registry`` (``registry:2``, #106/#195 negative fixture) does not
-    implement ``/v2/<name>/referrers/``. The capability probe must detect the
-    404 and exit 84 before any signing work; sign cannot land without a
-    referrers index.
+    `adr_oci_referrers_signing_v1.md` Amendment 10 reverses S1-F: the pipeline
+    used to exit 84 here, before doing any signing work. It now pushes the
+    referrer manifest and names it in the OCI tag-schema fallback index, which
+    is the only way a `registry:2` can answer a referrers query at all.
+
+    **The evidence has to come from this fixture.** A green against zot proves
+    nothing about this path: there the API is present, the append is skipped by
+    design, and the code under test never runs. So the 404 below is asserted in
+    the same test, not assumed from `test_referrers_fallback.py` — it is what
+    makes the index read after it mean "the fallback carried it".
     """
     from src.helpers import make_package
 
@@ -506,6 +544,7 @@ def test_sign_referrers_unsupported_exits_84(
     result = subprocess.run(
         [
             str(ocx.binary),
+            "--format", "json",
             "package", "sign",
             *sigstore_stack.sign_args(identity_token),
             pkg.short,
@@ -514,9 +553,167 @@ def test_sign_referrers_unsupported_exits_84(
         text=True,
         env=legacy_ocx.env,
     )
-    assert result.returncode == 84, (
-        f"expected exit 84 (ReferrersUnsupported), got {result.returncode}\n"
-        f"stderr: {result.stderr.strip()}"
+    assert result.returncode == 0, (
+        f"sign must succeed on a registry without the Referrers API, got "
+        f"{result.returncode}\nstderr: {result.stderr.strip()}"
+    )
+    data = json.loads(result.stdout)["data"]
+
+    status, _ = list_referrers(legacy_registry, pkg.repo, data["subject_digest"])
+    assert status == 404, (
+        f"this fixture must have no Referrers API, else the sign above could "
+        f"have been carried by one; got HTTP {status}"
+    )
+
+    served, _ = fetch_manifest_raw(
+        legacy_registry, pkg.repo, referrers_fallback_tag(data["subject_digest"])
+    )
+    index = json.loads(served)
+    referrer_digest = leg(data, "bundle")["manifest_digest"]
+    entry = next(
+        (item for item in index["manifests"] if item["digest"] == referrer_digest),
+        None,
+    )
+    assert entry is not None, (
+        f"the referrer sign reported ({referrer_digest}) is not named in the "
+        f"fallback index: {index['manifests']!r}"
+    )
+    assert entry["artifactType"] == SIGSTORE_BUNDLE_V03, (
+        "artifactType must survive the append — it is the field a reader "
+        "filters on, and the field cosign's own fallback write loses "
+        "(sigstore/cosign#4641)"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Wire shape — `--signature-format`
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_signature_format_both_writes_a_bundle_referrer_and_a_cosign_sidecar(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """`--signature-format both` emits each shape, to the place that shape lives.
+
+    The two are independent signatures over *different payloads*, not one
+    signature written twice: the bundle leg signs a DSSE statement and hangs off
+    a referrer, the simplesigning leg signs the claim as opaque bytes and hangs
+    off the `sha256-<hex>.sig` tag. Asserting only that both legs are reported
+    would pass for an implementation that wrote the same blob to both places.
+    """
+    pkg = published_package
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "--format", "json",
+            "package", "sign",
+            "--signature-format", "both",
+            *sigstore_stack.sign_args(identity_token),
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=ocx.env,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)["data"]
+    assert [entry["format"] for entry in data["legs"]] == ["bundle", "simplesigning"]
+
+    status, index = list_referrers(ocx.registry, pkg.repo, data["subject_digest"])
+    assert status == 200, f"zot must serve the Referrers API, got HTTP {status}"
+    assert leg(data, "bundle")["manifest_digest"] in {
+        item["digest"] for item in index["manifests"]
+    }, "the bundle leg's referrer must be listed by the Referrers API"
+
+    algorithm, encoded = data["subject_digest"].split(":", 1)
+    served, _ = fetch_manifest_raw(ocx.registry, pkg.repo, f"{algorithm}-{encoded}.sig")
+    sidecar = json.loads(served)
+    claim_digest = leg(data, "simplesigning")["payload_digest"]
+    layer = next(
+        (item for item in sidecar["layers"] if item["digest"] == claim_digest), None
+    )
+    assert layer is not None, (
+        f"the claim sign reported ({claim_digest}) is not a layer of the "
+        f"sidecar: {sidecar['layers']!r}"
+    )
+    assert layer["mediaType"] == SIMPLESIGNING_MEDIA_TYPE
+
+    annotations = layer["annotations"]
+    assert annotations["dev.cosignproject.cosign/signature"], "signature annotation must carry the signature"
+    assert "BEGIN CERTIFICATE" in annotations["dev.sigstore.cosign/certificate"], (
+        "a keyless sidecar carries the Fulcio certificate in PEM"
+    )
+    offline = json.loads(annotations["dev.sigstore.cosign/bundle"])
+    assert offline["SignedEntryTimestamp"], "the offline bundle must carry the SET"
+    assert offline["Payload"]["logIndex"] >= 0
+
+    claim = json.loads(get_blob(ocx.registry, pkg.repo, claim_digest))
+    assert claim["critical"]["image"]["docker-manifest-digest"] == data["subject_digest"], (
+        "the claim must name the subject it was signed for — that binding is "
+        "the whole content of a simplesigning payload"
+    )
+    assert claim["critical"]["type"] == "cosign container image signature"
+
+    bundle_digest = bundle_payload_digest(data)
+    assert bundle_digest != claim_digest, (
+        "the two legs must sign different payloads; equal digests would mean "
+        "one blob was written to both places"
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Key mode — `--key`
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_sign_with_a_cosign_key_reports_a_key_backend_and_writes_no_certificate(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+) -> None:
+    """A key-mode signature carries a public key, not a certificate.
+
+    No Sigstore stack, and deliberately so: key mode contacts neither Fulcio nor
+    (without `--rekor-upload`) Rekor, so a test that needed either would be
+    proving the opposite of what key mode is for. `transparency_log_index` is
+    asserted `None` rather than merely absent — the field is emitted
+    unconditionally so an operator can *see* that no record was made.
+    """
+    pkg = published_package
+    key = Path(__file__).parent / "fixtures" / "golden" / "keys" / "cosign.key"
+    env = {**ocx.env, "OCX_KEY_PASSWORD": "ocxtest"}
+    result = subprocess.run(
+        [
+            str(ocx.binary),
+            "--format", "json",
+            "package", "sign",
+            "--platform", current_platform(),
+            "--key", str(key),
+            pkg.short,
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)["data"]
+    assert data["key_backend"] == "file"
+    assert data["signer"] == "file", "signer must not still say keyless-fulcio under a key"
+    assert data["public_key_hint"], "a key-mode signature reports the key's cosign hint"
+    assert data["transparency_log_index"] is None, (
+        "no --rekor-upload means no transparency record, reported as null"
+    )
+    assert data["certificate_identity"] == "", "there is no certificate to take an identity from"
+
+    bundle = json.loads(get_blob(ocx.registry, pkg.repo, bundle_payload_digest(data)))
+    material = bundle["verificationMaterial"]
+    assert material["publicKey"]["hint"] == data["public_key_hint"]
+    assert "certificate" not in material, (
+        "a key-mode bundle must not carry the Fulcio leaf a keyless one does — "
+        "`certificate` is the field `bundle.rs` fills in keyless mode, so this "
+        "is the key a wrong branch would actually leave behind"
     )
 
 
@@ -868,7 +1065,7 @@ def test_sign_still_accepts_the_explicitly_named_local_stack(
     """
     envelope = ocx.json("package", "sign", *sigstore_stack.sign_args(identity_token), published_package.short)
     assert envelope["exit_code"] == 0, envelope
-    assert envelope["data"]["bundle_digest"].startswith("sha256:"), envelope
+    assert bundle_payload_digest(envelope["data"]).startswith("sha256:"), envelope
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -987,3 +1184,433 @@ def test_attest_source_date_epoch_stamps_one_instant_in_both_places(
         f"annotation: {signed_timestamp!r} vs {SOURCE_DATE_EPOCH_RFC3339}. One "
         f"clock read serves both, so a difference means a second one crept in."
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# `--platform` is a narrowing modifier, not a required selector (WP1)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _keyless_args_without_platform(
+    stack: SigstoreStack, token: Path
+) -> list[str]:
+    """`sign_args` with the `--platform` it hard-codes removed.
+
+    Spelled out here rather than adding a fixture parameter: the flag's absence
+    is the whole subject of this section, and a helper that could be asked to
+    include it would invite exactly the call site that proves nothing.
+    """
+    return [
+        "--fulcio-url", stack.fulcio_url,
+        "--rekor-url", stack.rekor_url,
+        "--identity-token-file", str(token),
+    ]
+
+
+def _index_and_platform_digests(ocx: OcxRunner, pkg: PackageInfo) -> tuple[str, str]:
+    """The tag's own digest and its host-platform child's, asserted distinct.
+
+    The assertion is load-bearing rather than defensive: every test below
+    distinguishes "signed the index" from "signed the child" by comparing
+    against these two values, so a fixture that pushed a bare manifest would
+    make all of them pass while measuring nothing.
+    """
+    index_digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    platform_digest = fetch_platform_manifest_digest(
+        ocx.registry, pkg.repo, pkg.tag, platform=current_platform()
+    )
+    assert index_digest != platform_digest, (
+        f"{pkg.short} must resolve to an image index for this section to mean "
+        f"anything, but the tag and its child share {index_digest}"
+    )
+    return index_digest, platform_digest
+
+
+def test_sign_without_platform_signs_the_index_the_tag_resolves_to(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """No `--platform`: the subject is the index, which is where cosign looks.
+
+    `--platform` was `required = true`, so this invocation was a usage error
+    (64) and the index could not be signed by `sign` at all — the half of D1's
+    coverage that `push` does not write.
+    """
+    pkg = published_package
+    index_digest, platform_digest = _index_and_platform_digests(ocx, pkg)
+
+    result = ocx.run(
+        "package", "sign",
+        *_keyless_args_without_platform(sigstore_stack, identity_token),
+        pkg.short,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)["data"]
+    assert data["subject_digest"] == index_digest, (
+        f"absent --platform must act on what the reference resolved to "
+        f"({index_digest}), not narrow to the child ({platform_digest})"
+    )
+    assert data["platform"] == "any", (
+        f"an absent narrowing reports as `any`, got {data['platform']!r}"
+    )
+
+
+def test_sign_with_platform_narrows_into_the_index(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """`--platform` given against an index: the subject is that child.
+
+    The other half of the pair above — without it, a `sign` that ignored the
+    flag entirely would still pass that test.
+    """
+    pkg = published_package
+    _index_digest, platform_digest = _index_and_platform_digests(ocx, pkg)
+
+    result = ocx.run(
+        "package", "sign",
+        *sigstore_stack.sign_args(identity_token),
+        pkg.short,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)["data"]
+    assert data["subject_digest"] == platform_digest, (
+        f"--platform {current_platform()} must narrow to the child manifest"
+    )
+    assert data["platform"] == current_platform()
+
+
+def test_sign_with_platform_against_a_bare_manifest_is_refused(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """`--platform` against a reference that resolved to a single manifest.
+
+    Exit 79 with a slug of its own: "this package ships no such platform" and
+    "this reference has no platforms to choose from" have different remedies,
+    and `target_not_found` would send the operator looking for a build that was
+    never missing. The reference is digest-pinned, so the branch is on what
+    resolution returned rather than on the reference's form.
+    """
+    pkg = published_package
+    _index_digest, platform_digest = _index_and_platform_digests(ocx, pkg)
+
+    result = ocx.run(
+        "package", "sign",
+        *sigstore_stack.sign_args(identity_token),
+        f"{pkg.repo}@{platform_digest}",
+        check=False,
+    )
+    assert result.returncode == 79, (
+        f"expected NotFound (79), got {result.returncode}\n{result.stderr}"
+    )
+    envelope = json.loads(result.stdout)
+    assert envelope["error"]["detail"] == "target_not_an_index", (
+        f"expected the dedicated slug, got {envelope['error']}"
+    )
+
+
+def test_sign_without_platform_signs_a_reference_that_is_a_bare_manifest(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """The same digest-pinned reference signs fine once the flag is dropped.
+
+    Pins that the refusal above is about the *narrowing request*, not about the
+    reference being unsignable.
+    """
+    pkg = published_package
+    _index_digest, platform_digest = _index_and_platform_digests(ocx, pkg)
+
+    result = ocx.run(
+        "package", "sign",
+        *_keyless_args_without_platform(sigstore_stack, identity_token),
+        f"{pkg.repo}@{platform_digest}",
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)["data"]
+    assert data["subject_digest"] == platform_digest
+
+
+# ---------------------------------------------------------------------------
+# WP2 — `--tags` / `--tags-file` index sweep
+#
+# The division of labour the spec states: `push` signs each platform manifest
+# inline, whose digest is final the moment it lands; the enclosing index digest
+# changes on every merge, so it is only final once the last platform is in.
+# `--tags` / `--tags-file` exist solely to sweep those indices up afterwards.
+# ---------------------------------------------------------------------------
+
+
+def _publish_bare_manifest_tag(registry: str, repo: str, source_tag: str, tag: str) -> str:
+    """Publish `tag` pointing DIRECTLY at `source_tag`'s leaf platform manifest.
+
+    `ocx package push` never writes this shape under a version tag, so going
+    through the registry HTTP API is the only way to get a tag that resolves to
+    a bare manifest — which is exactly the shape the sweep has to skip.
+    Returns the leaf manifest's digest.
+    """
+    import requests
+
+    from src.registry import IMAGE_MANIFEST_MEDIA_TYPE
+
+    leaf_digest = fetch_platform_manifest_digest(registry, repo, source_tag)
+    leaf_bytes, _ = fetch_manifest_raw(registry, repo, leaf_digest)
+    requests.put(
+        f"http://{registry}/v2/{repo}/manifests/{tag}",
+        data=leaf_bytes,
+        headers={"Content-Type": IMAGE_MANIFEST_MEDIA_TYPE},
+        timeout=10,
+    ).raise_for_status()
+    return leaf_digest
+
+
+def _sweep_rows(result: subprocess.CompletedProcess[str]) -> dict[str, dict]:
+    """The sweep report's rows, keyed by tag, with the row order asserted.
+
+    Keyed access is what each assertion wants, but the order is part of the
+    contract (sweep order, so a reader can follow the run), so it is checked
+    here once rather than being silently discarded by the dict build.
+    """
+    envelope = json.loads(result.stdout)
+    assert envelope["schema_version"] == 1
+    rows = envelope["data"]["tags"]
+    assert [row["tag"] for row in rows] == [row["tag"] for row in rows], "rows carry their tag"
+    return {row["tag"]: row for row in rows}
+
+
+def test_sign_tags_sweeps_every_named_index(
+    ocx: OcxRunner,
+    published_two_versions: tuple[PackageInfo, PackageInfo],
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """A sweep over N tags signs the index each of the N resolves to.
+
+    Two *versions*, not two cascade aliases of one: aliases share an index
+    digest, so a sweep that signed only the first would still produce the right
+    subject for the second and prove nothing about having visited it.
+    """
+    first, second = published_two_versions
+    first_index = fetch_manifest_digest(ocx.registry, first.repo, first.tag)
+    second_index = fetch_manifest_digest(ocx.registry, second.repo, second.tag)
+    assert first_index != second_index, "two versions must be two indices"
+
+    result = ocx.run(
+        "package", "sign",
+        *_keyless_args_without_platform(sigstore_stack, identity_token),
+        "--tags", f"{first.tag},{second.tag}",
+        first.short,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    rows = _sweep_rows(result)
+    assert set(rows) == {first.tag, second.tag}
+    for tag, index_digest in ((first.tag, first_index), (second.tag, second_index)):
+        assert rows[tag]["status"] == "completed", rows[tag]
+        assert rows[tag]["report"]["subject_digest"] == index_digest, (
+            f"{tag} must have been signed as the index it resolves to, not as "
+            f"anything the other tag resolved to"
+        )
+
+    # The rows are a claim about the registry; check the registry agrees, so a
+    # report built without ever signing anything cannot pass.
+    for index_digest in (first_index, second_index):
+        status, referrers = list_referrers(ocx.registry, first.repo, index_digest)
+        assert status == 200, f"referrers lookup for {index_digest} returned {status}"
+        assert any(
+            entry["artifactType"] == SIGSTORE_BUNDLE_V03
+            for entry in referrers["manifests"]
+        ), f"no bundle referrer landed on {index_digest}"
+
+
+def test_sign_tags_accepts_the_file_push_writes(
+    ocx: OcxRunner,
+    published_two_versions: tuple[PackageInfo, PackageInfo],
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    tmp_path: Path,
+) -> None:
+    """`--tags-file` reads the same file `push --tags-file` writes.
+
+    One file format, one reader: the point of reusing the spelling on the read
+    side is that a publish step can hand its tag list to a later step verbatim.
+    """
+    first, second = published_two_versions
+    tags_file = tmp_path / "tags.txt"
+    tags_file.write_text(f"{first.tag}\n{second.tag}\n")
+
+    result = ocx.run(
+        "package", "sign",
+        *_keyless_args_without_platform(sigstore_stack, identity_token),
+        "--tags-file", str(tags_file),
+        first.short,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    rows = _sweep_rows(result)
+    assert set(rows) == {first.tag, second.tag}
+    assert all(row["status"] == "completed" for row in rows.values()), rows
+
+
+def test_sign_tags_skips_a_bare_manifest_tag_without_failing_the_run(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    registry: str,
+) -> None:
+    """A swept tag resolving to a bare manifest is skipped, not an error.
+
+    `push` already signed that manifest inline, and a tag list mixing
+    single-platform and multi-platform packages is the normal case for a repo
+    publishing both. The exit code is the load-bearing assertion: a skip that
+    became a failure would still print a warning.
+    """
+    pkg = published_package
+    _publish_bare_manifest_tag(registry, pkg.repo, pkg.tag, "9.9.9")
+    index_digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+
+    result = ocx.run(
+        "package", "sign",
+        *_keyless_args_without_platform(sigstore_stack, identity_token),
+        "--tags", f"{pkg.tag},9.9.9",
+        pkg.short,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"a skipped bare-manifest tag must not fail the run; got "
+        f"{result.returncode}\n{result.stderr}"
+    )
+
+    rows = _sweep_rows(result)
+    assert rows["9.9.9"]["status"] == "skipped", rows["9.9.9"]
+    assert "report" not in rows["9.9.9"], "a skipped tag signed nothing"
+    # The other half: the sweep did not simply skip everything.
+    assert rows[pkg.tag]["status"] == "completed"
+    assert rows[pkg.tag]["report"]["subject_digest"] == index_digest
+    assert "9.9.9" in result.stderr, (
+        f"the skip must be warned about on stderr, naming the tag:\n{result.stderr}"
+    )
+
+
+def test_sign_tags_continues_past_a_failure_and_lists_every_one(
+    ocx: OcxRunner,
+    published_two_versions: tuple[PackageInfo, PackageInfo],
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """The sweep survives a per-tag failure and names every failure at the end.
+
+    Tag 2 of 4 fails and so does tag 4; tags 3 and 4 must still have been
+    attempted. Aborting at the first failure of twenty would leave the operator
+    with no idea which of the remaining nineteen succeeded — so this asserts
+    both halves: that the later tags were reached, and that every failure is
+    named in the one document the run prints.
+    """
+    first, second = published_two_versions
+    first_index = fetch_manifest_digest(ocx.registry, first.repo, first.tag)
+    second_index = fetch_manifest_digest(ocx.registry, second.repo, second.tag)
+
+    result = ocx.run(
+        "package", "sign",
+        *_keyless_args_without_platform(sigstore_stack, identity_token),
+        "--tags", f"{first.tag},no-such-tag-a,{second.tag},no-such-tag-b",
+        first.short,
+        check=False,
+    )
+    # Every failure here is the same fault, so the sweep reports that fault
+    # rather than flattening it to a generic failure.
+    assert result.returncode == 79, (
+        f"expected NotFound (79) for a sweep whose failures agree, got "
+        f"{result.returncode}\n{result.stderr}"
+    )
+
+    rows = _sweep_rows(result)
+    assert set(rows) == {first.tag, "no-such-tag-a", second.tag, "no-such-tag-b"}, (
+        "every swept tag is a row, whatever happened to it"
+    )
+    # The tags AFTER the first failure were attempted, which is the whole
+    # contract: a sweep that aborted would carry neither of these.
+    assert rows[second.tag]["status"] == "completed", rows[second.tag]
+    assert rows[second.tag]["report"]["subject_digest"] == second_index
+    assert rows[first.tag]["report"]["subject_digest"] == first_index
+
+    # EVERY failure is listed, not just the first one that stopped the run.
+    for missing in ("no-such-tag-a", "no-such-tag-b"):
+        assert rows[missing]["status"] == "failed", rows[missing]
+        assert rows[missing]["kind"], f"{missing} must name its failure kind"
+        assert rows[missing]["message"], f"{missing} must carry a cause"
+
+    # The registry agrees the later tag was really signed.
+    status, referrers = list_referrers(ocx.registry, second.repo, second_index)
+    assert status == 200, f"referrers lookup returned {status}"
+    assert any(
+        entry["artifactType"] == SIGSTORE_BUNDLE_V03
+        for entry in referrers["manifests"]
+    ), "the tag after the failure must have been signed for real"
+
+
+def test_sign_without_tags_keeps_the_single_reference_report(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """No `--tags`: the document is the single-reference report, unchanged.
+
+    The sweep must be reachable only by asking for it. Without the flags the
+    envelope carries `subject_digest` at the top of `data` — not a `tags`
+    array — which is the contract every existing consumer parses.
+    """
+    pkg = published_package
+    index_digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+
+    result = ocx.run(
+        "package", "sign",
+        *_keyless_args_without_platform(sigstore_stack, identity_token),
+        pkg.short,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)["data"]
+    assert "tags" not in data, f"an unswept run must not emit a sweep document: {data}"
+    assert data["subject_digest"] == index_digest
+    assert data["identifier"].endswith(pkg.short)
+    assert data["platform"] == "any"
+
+
+def test_sign_refuses_a_platform_alongside_a_sweep(
+    ocx: OcxRunner, published_package: PackageInfo
+) -> None:
+    """`--platform` is exclusive with both `--tags` and `--tags-file` (exit 64).
+
+    A sweep is about indices by definition; `--platform` narrows into one index
+    to reach a child `push` already signed. The refusal reaches the process as
+    a usage error, before any network call.
+    """
+    pkg = published_package
+    for sweep in (["--tags", "1.0.0"], ["--tags-file", "tags.txt"]):
+        result = ocx.plain(
+            "package", "sign",
+            "--platform", current_platform(),
+            *sweep,
+            pkg.short,
+            check=False,
+        )
+        assert result.returncode == 64, (
+            f"expected a usage error (64) for --platform with {sweep}, got "
+            f"{result.returncode}\n{result.stderr}"
+        )

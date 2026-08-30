@@ -282,7 +282,8 @@ impl Index {
 
     /// List all tags available for the given identifier.
     ///
-    /// Reserved tags — the `__ocx` namespace and `sha256.<hex>` digest aliases
+    /// Reserved tags — the `__ocx` namespace (keep tags included) and the
+    /// frozen legacy `sha256.<hex>` keep tags
     /// ([`Tag::is_reserved`]) — are automatically filtered out. Returns `None`
     /// when the package is not known to this index.
     pub async fn list_tags(&self, identifier: &oci::Identifier) -> Result<Option<Vec<String>>> {
@@ -1521,7 +1522,7 @@ mod tests {
                 "latest".to_string(),
                 "__ocx.desc".to_string(),
                 "__OCX.future".to_string(),
-                format!("sha256.{}", "a".repeat(64)),
+                format!("__ocx.keep.sha256-{}", "a".repeat(64)),
             ]))
         }
         async fn fetch_manifest(&self, _: &Identifier, _: IndexOperation) -> crate::Result<Option<(Digest, Manifest)>> {

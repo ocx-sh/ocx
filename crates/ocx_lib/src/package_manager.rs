@@ -297,7 +297,7 @@ pub use tasks::resolve::{
     SitePatchRoots,
 };
 pub use tasks::sbom::{SbomOptions, SbomReport};
-pub use tasks::sign::{SignOptions, SignReport};
+pub use tasks::sign::{SignOptions, SignReport, SweptOutcome, SweptTag};
 pub use tasks::update_check::{SelfUpdateResult, SkippedReason, TagProbe, UpdateCheckResult};
 pub use tasks::verify::{VerifyOptions, VerifyReport};
 

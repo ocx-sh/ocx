@@ -23,7 +23,7 @@ use serde_json::value::RawValue;
 
 use crate::oci::Digest;
 use crate::oci::attest::predicate::PredicateType;
-use crate::oci::attest::{ACCEPTED_STATEMENT_TYPES, STATEMENT_TYPE_WRITTEN};
+use crate::oci::attest::{ACCEPTED_STATEMENT_TYPES, COSIGN_SIGN_PREDICATE_TYPE, STATEMENT_TYPE_WRITTEN};
 use crate::oci::sign::SignErrorKind;
 use crate::oci::verify::VerifyErrorKind;
 
@@ -95,6 +95,14 @@ struct WireStatement {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Subject {
     /// Informational only — [`Self::digest`] is the sole binding (checklist row 4).
+    ///
+    /// Optional on the read path because in-toto v1's ResourceDescriptor makes
+    /// it optional, and cosign's own image-signature Statement omits it
+    /// entirely (`golden/keyless_bundle.json`). Required here it would refuse
+    /// every cosign-written signature at the parse, before the binding that
+    /// actually decides anything ran. Serialization is unaffected — the sign
+    /// side always names its subject.
+    #[serde(default)]
     pub name: String,
     /// Algorithm-keyed digest set, e.g. `{"sha256": "<hex, no prefix>"}`.
     pub digest: BTreeMap<String, String>,
@@ -125,6 +133,38 @@ pub(crate) fn build(
             .map_err(|error| SignErrorKind::Internal(Box::new(error)))?,
     })
 }
+
+/// Builds the in-toto Statement a cosign **image signature** carries.
+///
+/// Not [`build`]: an image signature has no predicate document and no
+/// timestamp, so there is nothing to wrap and no clock to read. Its
+/// `predicateType` is [`COSIGN_SIGN_PREDICATE_TYPE`] and its predicate is the
+/// literal `{}` — the shape cosign v3.1.1 writes, captured in
+/// `test/tests/fixtures/golden/keyless_bundle.json`.
+///
+/// `subject_name` is informational (checklist row 4); the digest is the sole
+/// binding, and it is what a cosign verifier matches the artifact against.
+pub(crate) fn build_image_signature(subject_name: &str, subject_digest: &Digest) -> Statement {
+    let (algorithm, hex) = subject_digest.parts();
+    Statement {
+        statement_type: STATEMENT_TYPE_WRITTEN.to_owned(),
+        subject: vec![Subject {
+            name: subject_name.to_owned(),
+            digest: BTreeMap::from([(algorithm.to_owned(), hex.to_owned())]),
+        }],
+        predicate_type: COSIGN_SIGN_PREDICATE_TYPE.to_owned(),
+        // The empty predicate. `expect` states the invariant: a literal `{}`
+        // cannot fail to parse as JSON.
+        predicate: serde_json::value::RawValue::from_string(EMPTY_PREDICATE.to_owned()).expect("`{}` is valid JSON"),
+    }
+}
+
+/// The predicate document a cosign image-signature Statement carries.
+///
+/// A named constant so a red/green mutation has a value to change without
+/// leaving a `use` unused — a mutation that kills the build instead of the test
+/// proves nothing about the test.
+const EMPTY_PREDICATE: &str = "{}";
 
 /// Parses a verified payload.
 ///

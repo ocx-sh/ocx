@@ -237,7 +237,7 @@ jobs:
           # owning organization, so the announce branch is pushed to the index
           # directly. It still lands as a pull request, which is what the index's
           # governance gate and its refresh/new-package labelling run on.
-          # `package announce` and `push --announce-file` shipped together, so
+          # `package announce` and `push --tags-file` shipped together, so
           # one probe answers for both. It has to gate the PUSH flag too: an
           # older ocx rejects an unknown flag with exit 64, which would fail the
           # publish itself rather than just skipping the announce. That is
@@ -274,7 +274,7 @@ jobs:
             echo "==> Announcing ${repo_path} into ocx-sh/index"
             ocx package announce \
               --package "${repo_path}" \
-              --tags-from-file "$tags_file" \
+              --tags-file "$tags_file" \
               --index-repo ocx-sh/index
           }
 
@@ -298,7 +298,7 @@ jobs:
             # tags it moved) here; the announce below curates them in one call.
             announce_tags="$(mktemp)"
             announce_flag=()
-            (( announce_supported )) && announce_flag=(--announce-file "$announce_tags")
+            (( announce_supported )) && announce_flag=(--tags-file "$announce_tags")
 
             for target in "${TARGETS[@]}"; do
               platform="${PLATFORM_MAP[$target]:-}"

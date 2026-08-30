@@ -53,21 +53,25 @@ Each cache file is a JSON object with four fields:
 
 The cache is advisory and fail-open: a missing or corrupt file triggers a fresh probe; the probe result then overwrites the file atomically (temp-file rename, mode `0600` on Unix). Entries are valid for **6 hours** (`TTL_SECS = 6 * 3600`); after that, the next sign or verify invocation re-probes automatically. Pass `--no-cache` to bypass the cache for a single invocation.
 
-## OCI 1.1 Referrers Hard-Fail Policy {#referrers-hard-fail}
+## Publishing a Referrer {#referrers-write}
 
-OCX does not implement a fallback to the [cosign][cosign] tag scheme (`sha256-<digest>.sig`). When a registry does not implement the Referrers API — the `GET /v2/{repo}/referrers/{digest}` endpoint returns HTTP 404 (or a `NOT_FOUND` / `NAME_UNKNOWN` error envelope) — the sign and verify operations fail hard with exit 84 (`ReferrersUnsupported`). Any other registry error (an auth failure, a 5xx, a transport error) surfaces under its own exit code, not as `ReferrersUnsupported`.
+A signature is an OCI referrer of the manifest it signs, and the distribution spec gives a registry two ways to hold one: the OCI 1.1 Referrers API (`GET /v2/{repo}/referrers/{digest}`), or the `sha256-<digest>` tag-schema fallback index defined for registries that do not implement it.
 
-This is an explicit design choice: a silent fallback would let signatures be published to a registry that cannot guarantee their discoverability, or let a verification path succeed against a stale or unreachable fallback tag. Hard-fail makes the dependency on OCI 1.1 explicit so operators know exactly which registries are compatible.
+OCX writes through whichever the registry offers. Where the API is present, the referrer manifest is pushed and the registry indexes it. Where it is absent — the endpoint answers HTTP 404, or a `NOT_FOUND` / `NAME_UNKNOWN` envelope — OCX pushes the same referrer manifest and names it in the fallback index itself. Signing succeeds either way, and `ocx package verify` reads both shapes with no flag.
 
-:::info Which registries support OCI 1.1 Referrers?
+Exit 84 (`ReferrersUnsupported`) is reserved for a registry that offers neither: no Referrers API, **and** a fallback-index write it refused. Only a registry that understood the document and declined it earns that code — an auth failure, a 429 or a 5xx keeps its own exit code, because for those a rerun is the right move and for 84 it never is.
 
-OCX `package sign` / `package verify` require OCI Distribution Spec v1.1 Referrers API. As of May 2026:
+:::info Which registries implement OCI 1.1 Referrers?
 
-- **Supported:** [Zot][zot], [Harbor][harbor] 2.9+, JFrog Artifactory 7.90+ (including `ocx.sh`), Amazon ECR, Azure ACR, Google Artifact Registry, Red Hat Quay 3.12+.
-- **Not supported (exit 84):** CNCF Distribution `registry:2` / `registry:3` (no Referrers API — it serves only the tag-schema fallback, which OCX does not use), [GHCR][ghcr] (GitHub Container Registry), [Docker Hub][docker-hub]. Use a registry from the supported list for signed packages.
+The list decides how a signature is discovered, not whether it can be published. As of May 2026:
 
-This is by design — OCX never writes legacy `sha256-<digest>.sig` fallback tags (ADR S1-F). The hard error gives operators a clear "change registry" signal rather than silent downgrade.
+- **Referrers API:** [Zot][zot], [Harbor][harbor] 2.9+, JFrog Artifactory 7.90+ (including `ocx.sh`), Amazon ECR, Azure ACR, Google Artifact Registry, Red Hat Quay 3.12+.
+- **Fallback index:** CNCF Distribution `registry:2` / `registry:3`, [GHCR][ghcr] (GitHub Container Registry), [Docker Hub][docker-hub].
+
+Prefer the first list where you can, and treat it as a threat-model difference rather than a compatibility one: the fallback index is an ordinary mutable tag that anyone with push access to the repository can rewrite, which a registry-maintained Referrers response is not.
 :::
+
+The `sha256-<digest>.sig` sidecar [cosign][cosign] writes is a third shape, and a separate choice from either of the above — `--signature-format simplesigning` (or `both`) publishes it explicitly, on any registry. See [cosign Parity][in-depth-cosign-parity].
 
 ## Sigstore Bundle Format and Storage {#bundle-storage}
 
@@ -83,11 +87,13 @@ The blob is not referenced by any candidate or current symlink — it is found v
 
 ## cosign Interoperability {#cosign-interop}
 
-OCX bundles are ordinary Sigstore bundles, and [cosign][cosign] reads and writes the same document. Two things bound how far that goes.
+OCX bundles are ordinary Sigstore bundles, and [cosign][cosign] reads and writes the same document. This section covers the version floor and the two rules that decide whether a given artifact crosses between the tools; the command-by-command matrix, the deliberate divergences and the evidence behind them live on [cosign Parity][in-depth-cosign-parity].
 
 **cosign 3.0 or newer is required, and pre-3.0 compatibility is deliberately not offered.** Bundle v0.3's single-`certificate` profile is what cosign 3.x enforces; earlier cosign versions expect the v0.2 `x509CertificateChain` shape. OCX emits only the v0.3 shape. The verify path still *reads* both, so a bundle published by an older OCX keeps verifying.
 
-**Discovery does not interoperate, by design.** `cosign verify` finds signatures only through its own tag schema (`sha256-<digest>.sig`); OCX publishes and reads them only through the [Referrers API][oci-referrers-spec] and writes no fallback tag ([hard-fail policy](#referrers-hard-fail)). Neither tool sees the other's signatures by pointing it at a registry reference.
+**Discovery needs no opt-in in either direction.** `cosign verify` discovers a default-format `bundle` signature that `ocx package sign` published — through the [Referrers API][oci-referrers-spec] on a registry that has one, and through the `sha256-<digest>` fallback index on a registry that does not. `ocx package verify` likewise reads the Referrers API, the fallback index and cosign's `sha256-<digest>.sig` sidecar without a flag — and, under `--attestation`, the `sha256-<digest>.att` sidecar too. `--signature-format simplesigning` (or `both`) exists to *also* write the older sidecar shape — for a consumer that reads only that — not to make cosign find the signature. One thing does have to be right: cosign must be given the platform manifest's digest, since a package tag resolves to its index, where no signature lives. See [cosign Parity][in-depth-cosign-parity].
+
+**A keyless sidecar needs its transparency-log entry.** A `sha256-<digest>.sig` or `sha256-<digest>.att` layer carries its verification material in annotations, and for a keyless signature `dev.sigstore.cosign/bundle` — the offline [Rekor][rekor] entry — is required: `ocx package verify` checks its Signed Entry Timestamp against the log's public key, binds the logged body to that signature or envelope, and takes the certificate's validity window from the entry's `integratedTime`. A [Fulcio][fulcio] certificate is valid for roughly ten minutes, so without an entry nothing shows the signature was made while it was live, and either shape is refused (exit 65, `signature_invalid`) — the two are held to one gate, not two. `ocx package sign` writes the annotation; `cosign attach signature` does not, which is why `cosign verify` refuses its own sidecars too unless given `--insecure-ignore-tlog`. `ocx package verify --allow-unlogged-signature` is the equivalent opt-out, for air-gapped CI where the entry could not be fetched or was never written.
 
 What does interoperate is the bundle itself. Both directions are covered by OCX's acceptance suite, run against the same local Fulcio and Rekor:
 
@@ -104,6 +110,23 @@ cosign verify-blob \
 In the other direction, a bundle from `cosign sign-blob --bundle` pushed as a referrer of the subject manifest verifies under `ocx package verify` unchanged.
 
 For a self-hosted Fulcio and Rekor, note that cosign 3 removed `--fulcio-url` / `--rekor-url` from its signing commands: the endpoints come from a signing config instead (`cosign signing-config create --out signing-config.json`, then `--signing-config`). `sign-blob` also needs `--trusted-root`, because it verifies the Rekor entry it just created before writing the bundle.
+
+## Keyless or a Key {#key-mode}
+
+`sign`, `verify` and `attest` support two signing models. Everything above this section describes keyless: no key to generate, store, or rotate, because [Fulcio][fulcio] issues a certificate against your OIDC identity for each signature. `--key <REF>` swaps that model for an ordinary key pair — the one [cosign][cosign] calls `cosign sign --key`.
+
+A CI pipeline with an OIDC step has nothing to gain from a key: keyless is less to manage and leaves an identity-bound audit trail for free. A key pair earns its place when there is no OIDC step to detect, or when an operator wants signatures independent of any identity provider or public transparency log — a private key under their own custody, verified by the matching public key rather than by a certificate chain.
+
+`--key` takes a key reference, `[scheme://]<rest>`. A bare path, or a `file://` one, names a file — the private key (encrypted, password from `OCX_KEY_PASSWORD`) for `sign` and `attest`, the public key (a plain SPKI PEM) for `verify`. The `awskms`, `gcpkms`, `azurekms`, `hashivault` and `k8s` schemes are recognised and refused **by name** (exit 85, `unsupported_key_backend`) — not implemented yet, but reserved so a script can already branch on the vocabulary rather than guess at a future one. A reference OCX cannot parse at all — an unrecognised scheme, or nothing after it — is a usage error (exit 64, `key_reference_invalid`), a distinct code because the remedy is to fix the reference, not to wait for a backend.
+
+### The Rekor rule {#key-mode-rekor}
+
+Keyless and key-mode diverge on one thing: whether the signature is recorded in [Rekor][rekor].
+
+- **Keyless** — always recorded, and `--no-rekor-upload` here is a usage error (exit 64, `rekor_upload_required_for_keyless`) rather than a silent no-op. A Fulcio certificate is valid for about ten minutes; the Rekor timestamp is the only lasting proof the signature happened inside that window, so skipping it would leave a signature nothing can attest actually ran while the certificate was live.
+- **A key** — off by default. Pass `--rekor-upload` to record it, or set `rekor_upload = true` under `[trust.sigstore]` in `config.toml` to opt a fleet in once — that config key applies to key mode only, since keyless recording is not optional in the first place.
+
+This is a deliberate divergence from [cosign][cosign], which uploads to Rekor by default under `cosign sign --key` too. `rekor_url` defaults to the *public* Rekor either way, so an on-by-default key path would publish the digest and signer identity of a private artifact to a world-readable log the first time `ocx package sign --key` ran — the opposite of what reaching for a private key pair over keyless usually means.
 
 ## Identity Matching {#identity-matching}
 
@@ -168,9 +191,10 @@ Passing `--certificate-identity` and `--certificate-oidc-issuer` on every verify
 [[trust.policy]]
 scope = "acme/mytool"
 
-[trust.policy.keyless]
-identity    = "ocx-test@example.com"
-oidc_issuer = "http://dex:5556/dex"
+signers = [
+  { kind = "keyless", identity = "ocx-test@example.com",
+                      oidc_issuer = "http://dex:5556/dex" },
+]
 ```
 
 The issuer here is the address **inside** the compose network, not the one the host dials — the token's `iss` claim names the URL its issuer answered at when Fulcio validated it. OCX only ever compares that string; it never dials the issuer, so the two do not have to agree.
@@ -248,7 +272,7 @@ Reading an attestation back is two commands, not one, because "does this verify"
 - **Rekor v1 only.** [sigstore-rs][sigstore-rs] 0.14 ships no Rekor v2 (tiles) client, so OCX targets Rekor v1 transparency-log entries — `hashedrekord` for signatures, `dsse` for attestations. A bundle from a Rekor v2 instance carries an RFC 3161 TSA timestamp instead of a SET; OCX rejects it with exit 83 (`TransparencyLogUnavailable`) rather than treating it as unsigned. Tracked as [#107][gh-107].
 
   This is a dated dependency, not a static gap: it holds only while the log you sign against speaks v1. The moment an instance — the public-good deployment or your own — serves v2, every **new** signature or attestation it issues verifies as exit 83 here, and entries already in a v1 log keep verifying. Treat a planned Rekor upgrade as a blocking prerequisite on [#107][gh-107], and pin the Rekor URL you verify against rather than following an instance through a migration.
-- **Discovery does not interoperate with cosign** — see [cosign Interoperability](#cosign-interop).
+- **An attached `.sbom` sidecar can be listed but never verified.** OCX reads all three cosign sidecar tags — `sha256-<digest>.sig`, `.att` and `.sbom` — but the third is unsigned by construction: `cosign attach sbom` writes the document and signs nothing, and no cosign command signs that tag afterwards. So [`ocx package sbom --no-verify`][cmd-package-sbom] lists it `verified: false` and `--verify` refuses it (`unsigned_rejected_by_policy`, exit 77). This is a property of the shape rather than a limitation of the reader: a signed SBOM is an attestation. See [Attached SBOMs][in-depth-cosign-parity].
 
 :::tip Automatic verification at install time
 Everything above describes the standalone `ocx package verify` command. Once a [`[[trust.policy]]`][config-trust] covers a package, [`install`][cmd-package-install], [`pull`][cmd-package-pull], and every command that auto-installs on demand run the same check automatically — see [Verify by default][guide-auto-verify] in the user guide. That gate has its own scope limitations, distinct from the cryptographic ones above: a covered root's transitive dependencies are verified only if a policy also covers each dependency's own `registry/repository` scope, and the automatic check reads the operator `config.toml` tier only — a project `ocx.toml` policy never gates it.
@@ -301,7 +325,9 @@ The same SSRF floor that guards registry traffic guards these endpoints: a URL i
 - [`package sign` reference][cmd-package-sign] — flags, token-source precedence, exit codes, CI example
 - [`package verify` reference][cmd-package-verify] — flags, identity matching options, exit codes
 - [Configuration reference → `[[trust.policy]]`][config-trust] — schema, scope matching, most-specific-wins resolution, operator-vs-project tier precedence
-- [cosign Interoperability](#cosign-interop) — the cosign 3.0 floor and what does and does not interoperate
+- [cosign Parity][in-depth-cosign-parity] — the full interop matrix in both directions, the deliberate divergences, and what backs each claim
+- [cosign Interoperability](#cosign-interop) — the cosign 3.0 floor and the blob-level commands
+- [Keyless or a Key](#key-mode) — `--key`, the key-reference grammar, and [the Rekor rule](#key-mode-rekor)
 - [Deferred to Future Work](#deferred-future-work) — Rekor v2 ([#107][gh-107])
 <!-- external -->
 [sigstore]: https://www.sigstore.dev/
@@ -350,6 +376,7 @@ The same SSRF floor that guards registry traffic guards these endpoints: a URL i
 [env-sigstore-trusted-root]: ../reference/environment.md#ocx-sigstore-trusted-root
 [config-trust-sigstore]: ../reference/configuration.md#keys-trust-sigstore
 [in-depth-self-hosted-sigstore]: ./self-hosted-sigstore.md
+[in-depth-cosign-parity]: ./cosign-parity.md
 [env-offline]: ../reference/environment.md#ocx-offline
 
 <!-- user guide -->

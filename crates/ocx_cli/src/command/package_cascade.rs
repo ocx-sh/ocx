@@ -280,9 +280,12 @@ mod tests {
     }
 
     #[test]
-    fn a_canonical_digest_tag_is_a_usage_error() {
-        let error = group_requests(vec![identifier("acme/cmake:sha256.aaaa1111")])
-            .expect_err("a canonical tag is reserved, never a graph node");
+    fn a_keep_tag_is_a_usage_error() {
+        let error = group_requests(vec![identifier(&format!(
+            "acme/cmake:__ocx.keep.sha256-{}",
+            "a".repeat(64)
+        ))])
+        .expect_err("a keep tag is reserved, never a graph node");
 
         assert_eq!(exit_code(&error), OcxExitCode::UsageError);
     }

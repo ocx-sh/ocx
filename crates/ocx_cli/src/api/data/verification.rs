@@ -6,15 +6,83 @@
 //! Renders the verified subject + referrer digests and the certificate identity
 //! and issuer that the signature attests. The flat shape is the slice-1
 //! acceptance contract (`test/tests/test_verify.py`): a single verified
-//! signature per invocation. A future multi-signature slice can add a
-//! `signatures[]` array without breaking these top-level fields.
+//! signature per invocation, and those top-level fields stay exactly as they
+//! are. The multi-signature slice arrives beside them as [`SignatureEntry`]
+//! rows under `signatures`, which is **absent** until a discovery pipeline
+//! populates it — an array that always rendered `[]` would claim we looked.
 
 use ocx_lib::cli::Cell;
 use ocx_lib::oci;
+use ocx_lib::oci::sign::{KeyBackendKind, SignatureFormat};
+use ocx_lib::oci::verify::DiscoveryMethod;
 use serde::Serialize;
 
 use crate::api::Printable;
 use crate::api::data::sanitize_for_terminal;
+
+/// One discovered, verified signature.
+///
+/// The per-signature view of what the flat [`VerificationReport`] fields
+/// describe for a single signature, plus the three things only a
+/// multi-signature listing has to state: which wire shape carried it, how it
+/// was found, and what produced it. The enum-valued fields reuse the library
+/// vocabularies verbatim (`SignatureFormat`, `DiscoveryMethod`,
+/// `KeyBackendKind`), so their frozen serde slugs are the wire spelling here
+/// and one word cannot mean two things across the two crates.
+///
+/// # Rendering these rows in plain text requires `sanitize_for_terminal`
+///
+/// [`certificate_identity`](Self::certificate_identity) and
+/// [`certificate_oidc_issuer`](Self::certificate_oidc_issuer) are read out of a
+/// Fulcio certificate carried in a bundle a **registry** served, so they are
+/// attacker input by construction — the same reason
+/// `VerificationReport::plain_fields` routes its flat certificate fields
+/// through [`sanitize_for_terminal`]. Nothing here is exposed today: this array
+/// is JSON-only, and `serde_json` escapes C0 controls. The moment a row of this
+/// struct reaches a plain-text table, **every** value in that row MUST go
+/// through [`sanitize_for_terminal`] first — per field, not per row, and
+/// including the typed ones, for the reason `plain_fields` states: a filter
+/// applied selectively has to be re-argued for every field added later, and the
+/// neutralization is identity on a digest, a slug and an ISO-8601 stamp.
+/// Without it a SAN embedding `\x1b]52;c;<b64>\x07` sets the operator's
+/// clipboard (CWE-150).
+#[derive(Debug, Serialize)]
+pub struct SignatureEntry {
+    /// Which cosign wire shape carried this signature.
+    pub signature_format: SignatureFormat,
+    /// How the signature was found.
+    pub discovery_method: DiscoveryMethod,
+    /// What produced it: `keyless`, `file`, or a key-backend scheme.
+    pub key_backend: KeyBackendKind,
+    /// Digest of the referrer manifest or sidecar layer carrying it.
+    pub referrer_digest: oci::Digest,
+    /// Certificate SAN (identity) embedded in the Fulcio cert. Absent under a
+    /// key — a legal shape, not malformed input. Registry-served, so it is
+    /// attacker input: see the struct note before rendering it in plain text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate_identity: Option<String>,
+    /// Certificate OIDC issuer embedded in the Fulcio cert. Absent under a key.
+    /// Registry-served, so it is attacker input: see the struct note before
+    /// rendering it in plain text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate_oidc_issuer: Option<String>,
+    /// Rekor `integratedTime`, ISO-8601 UTC.
+    ///
+    /// **Certificate validity is judged against this instant, never against
+    /// wall-clock now.** A Fulcio certificate is valid for about ten minutes;
+    /// the transparency-log timestamp is the only proof the signature happened
+    /// inside that window. A keyless fixture captured today carries a
+    /// certificate that has already expired — a wall-clock check makes it, and
+    /// every keyless fixture after it, rot within the hour.
+    ///
+    /// Absent when no transparency record exists (key mode without a Rekor
+    /// upload), which is legal and must be visible rather than inferred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_at: Option<String>,
+    /// Rekor log index, the dedup key when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rekor_log_index: Option<u64>,
+}
 
 /// Summary of a successful Sigstore verification.
 ///
@@ -25,12 +93,23 @@ use crate::api::data::sanitize_for_terminal;
 /// row only once per view. Both stay full in JSON.
 ///
 /// JSON format: `{ subject_digest, referrer_digest, certificate_identity,
-/// certificate_oidc_issuer, signed_at }`.
+/// certificate_oidc_issuer, signed_at }`, plus `signatures` once a discovery
+/// pipeline populates it.
 #[derive(Serialize)]
 pub struct VerificationReport {
     /// Digest of the subject manifest whose signature was verified.
     pub subject_digest: oci::Digest,
-    /// Digest of the OCI referrer manifest carrying the verified bundle.
+    /// What carried the verified signature — **not always a manifest**.
+    ///
+    /// The OCI referrer manifest's digest for a Sigstore bundle; the **layer**
+    /// blob's digest for a cosign simplesigning signature, whichever door found
+    /// it, because there one layer is one signature and the manifest digest
+    /// would name all of them at once. The discriminator is
+    /// `signatures[].signature_format`, never the discovery method — a
+    /// simplesigning sidecar reached through the Referrers API reports a layer
+    /// digest while `discovery_method` reads `referrers_api`. So this is
+    /// addressable as `GET /v2/<name>/manifests/<digest>` only under
+    /// `signature_format == "bundle"`.
     pub referrer_digest: oci::Digest,
     /// Certificate SAN (identity) embedded in the Fulcio cert.
     pub certificate_identity: String,
@@ -38,10 +117,23 @@ pub struct VerificationReport {
     pub certificate_oidc_issuer: String,
     /// Rekor integrated time (ISO-8601 UTC) of the signature entry.
     pub signed_at: String,
+    /// Every signature discovered for the subject.
+    ///
+    /// **Absent** while empty, rather than rendered as `[]`: a key that always
+    /// renders an empty array is a wire promise of behaviour that does not
+    /// exist — a consumer reading `"signatures": []` learns "we looked and
+    /// found none", which is not what happened. Contrast `sbom[].shadowed`,
+    /// which is emitted unconditionally because `false` there is a true
+    /// statement.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub signatures: Vec<SignatureEntry>,
 }
 
 impl VerificationReport {
     /// Construct a verification report.
+    ///
+    /// `signatures` starts empty and is therefore omitted from JSON; a
+    /// discovery pipeline fills it in place, so no call site changes.
     pub fn new(
         subject_digest: oci::Digest,
         referrer_digest: oci::Digest,
@@ -55,6 +147,7 @@ impl VerificationReport {
             certificate_identity,
             certificate_oidc_issuer,
             signed_at,
+            signatures: Vec::new(),
         }
     }
 }
@@ -161,6 +254,118 @@ mod tests {
         assert_eq!(data["certificate_identity"], "test-signer@example.com");
         assert_eq!(data["certificate_oidc_issuer"], "https://fake-oidc.test");
         assert!(parsed.get("error").is_none(), "success branch must not carry error");
+    }
+
+    fn sample_signature() -> SignatureEntry {
+        SignatureEntry {
+            signature_format: SignatureFormat::Bundle,
+            discovery_method: DiscoveryMethod::ReferrersApi,
+            key_backend: KeyBackendKind::Keyless,
+            referrer_digest: ocx_lib::oci::Digest::Sha256("b".repeat(64)),
+            certificate_identity: Some("test-signer@example.com".into()),
+            certificate_oidc_issuer: Some("https://fake-oidc.test".into()),
+            signed_at: Some("2026-04-19T12:00:00Z".into()),
+            rekor_log_index: Some(42),
+        }
+    }
+
+    /// T-19. `signatures` is **absent** from the serialized object while empty
+    /// — not `null`, not `[]`.
+    ///
+    /// The positive half is what makes the negative one evidence: a report that
+    /// carries a row must emit the key, or this test would also pass on a
+    /// `signatures` field that had been deleted outright, or on one whose
+    /// `skip_serializing_if` predicate always answered "skip".
+    #[test]
+    fn verification_report_json_omits_signatures_while_empty() {
+        let empty = sample_report();
+        let value = serde_json::to_value(&empty).expect("serialize");
+        let object = value.as_object().expect("report serializes as an object");
+        assert!(
+            !object.contains_key("signatures"),
+            "an empty `signatures` must be absent, not `[]` or `null`: {value}"
+        );
+
+        let mut populated = sample_report();
+        populated.signatures.push(sample_signature());
+        let value = serde_json::to_value(&populated).expect("serialize");
+        let signatures = value
+            .get("signatures")
+            .and_then(|v| v.as_array())
+            .expect("a populated `signatures` must be present");
+        assert_eq!(signatures.len(), 1);
+    }
+
+    /// The per-signature row spells its three vocabularies with the library's
+    /// frozen serde slugs, and omits the optional fields it does not carry.
+    #[test]
+    fn signature_entry_json_shape() {
+        let value = serde_json::to_value(sample_signature()).expect("serialize");
+        assert_eq!(value["signature_format"], "bundle");
+        assert_eq!(value["discovery_method"], "referrers_api");
+        assert_eq!(value["key_backend"], "keyless");
+        assert_eq!(value["referrer_digest"], format!("sha256:{}", "b".repeat(64)));
+        assert_eq!(value["certificate_identity"], "test-signer@example.com");
+        assert_eq!(value["signed_at"], "2026-04-19T12:00:00Z");
+        assert_eq!(value["rekor_log_index"], 42);
+
+        // Key mode carries no certificate and, without a Rekor upload, no
+        // transparency record: those keys are absent rather than null, so a
+        // consumer distinguishes "not applicable" from "failed to render".
+        let key_mode = SignatureEntry {
+            key_backend: KeyBackendKind::File,
+            certificate_identity: None,
+            certificate_oidc_issuer: None,
+            signed_at: None,
+            rekor_log_index: None,
+            ..sample_signature()
+        };
+        let value = serde_json::to_value(key_mode).expect("serialize");
+        let object = value.as_object().expect("entry serializes as an object");
+        assert_eq!(value["key_backend"], "file");
+        for absent in [
+            "certificate_identity",
+            "certificate_oidc_issuer",
+            "signed_at",
+            "rekor_log_index",
+        ] {
+            assert!(!object.contains_key(absent), "{absent} must be absent, not null");
+        }
+    }
+
+    /// `signatures[]` is **JSON-only** — the whole CWE-150 answer, and smaller
+    /// and stricter than wiring a sanitizer.
+    ///
+    /// A registry-served SAN can embed `\x1b]52;c;<b64>\x07` and set the
+    /// operator's clipboard, so the struct note requires *every* field of a row
+    /// — the typed ones included — to pass `sanitize_for_terminal` the moment a
+    /// row reaches a plain-text table. Not rendering it at all is what makes
+    /// that requirement vacuous today. Pinned behaviourally: adding rows to the
+    /// plain table reds this rather than silently shipping unsanitized
+    /// registry-controlled bytes to a terminal.
+    #[test]
+    fn plain_output_never_renders_the_signatures_array() {
+        let bare = sample_report();
+        let mut populated = sample_report();
+        populated.signatures.push(sample_signature());
+        populated.signatures.push(SignatureEntry {
+            certificate_identity: Some("\u{1b}]52;c;cGF5bG9hZA==\u{7}".into()),
+            ..sample_signature()
+        });
+
+        assert_eq!(
+            bare.plain_fields().len(),
+            populated.plain_fields().len(),
+            "a signature row must not add a plain-mode field",
+        );
+        assert_eq!(
+            bare.plain_fields(),
+            populated.plain_fields(),
+            "the plain table must be identical whether or not signatures[] carries rows",
+        );
+        // And the hostile row really is in the report — otherwise the equality
+        // above would be comparing two empty arrays and proving nothing.
+        assert_eq!(populated.signatures.len(), 2);
     }
 
     /// `print_plain` shortens `referrer_digest` to 12 hex (only `subject_digest`

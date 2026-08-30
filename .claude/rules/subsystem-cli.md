@@ -123,6 +123,11 @@ output sink), e.g. `--export-file`. Existing convention: `--metadata`, `--readme
 distinguishing a local resource from a registry identifier belongs in the domain word itself
 (`--companion-archive`), not tacked on as a `-file` suffix.
 
+**One exception: a shared file with two ends.** A `-file` flag may also *read* the file another
+OCX command wrote, when both ends deliberately carry one spelling — `push --tags-file` writes the
+tag list that `announce --tags-file` and `sign --tags-file` read. The symmetry is the point: two
+names for one file is the worse failure, so the writer's spelling wins on the read side too.
+
 ## `--shell` Flag Convention
 
 `--shell` is declared as `Option<Option<Shell>>` with clap `num_args=0..=1, require_equals=true, default_missing_value=…` (pattern from `package_push.rs`):
@@ -308,8 +313,11 @@ Exempted vars (direct `std::env::var` read is compliant, not a forwarding-rule v
 | Var | Read site | Rationale |
 |-----|-----------|-----------|
 | `OCX_IDENTITY_TOKEN` | `command/package_sign.rs` | Short-lived OIDC bearer token for Sigstore signing |
+| `OCX_KEY_PASSWORD` | `oci/sign/key_backend.rs::key_password` | Passphrase for a cosign `ENCRYPTED SIGSTORE PRIVATE KEY`; empty is legal, so absent and empty must stay indistinguishable |
 
-Reviewers: a direct `std::env::var` read of any var listed above is compliant. Do NOT add these vars to `OcxConfigView`. If a new credential var is introduced, document it in this table in the same PR.
+Reviewers: a direct `std::env::var` read of any var listed above is compliant. Do NOT add these vars to `OcxConfigView`. If a new credential var is introduced, document it in this table in the same PR **and** add it to `ocx_lib::env::keys::CREDENTIAL_KEYS`.
+
+Not forwarding is not the same as not leaking. `Command::envs` only adds and overrides, so a spawn site that inherits the ambient environment still passes an inherited credential through — the map it was removed from never had it. Every such site must either `env_clear()` or `env_remove` each `CREDENTIAL_KEYS` entry; `app/plugin_dispatch.rs` is the one that inherits deliberately and therefore removes explicitly.
 
 ## Quality Gate
 

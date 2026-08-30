@@ -175,9 +175,10 @@ ocx package sign -p linux/amd64 \
 [[trust.policy]]
 scope = "registry.corp.example/acme"
 
-[trust.policy.keyless]
-identity    = "https://github.com/acme/mytool/.github/workflows/release.yml@refs/tags/v1.0.0"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "https://github.com/acme/mytool/.github/workflows/release.yml@refs/tags/v1.0.0",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 
 Pinning an exact tag ref means every release needs a policy edit. The usual shape is a regexp over the ref, with the workflow path fixed:
@@ -186,9 +187,10 @@ Pinning an exact tag ref means every release needs a policy edit. The usual shap
 [[trust.policy]]
 scope = "registry.corp.example/acme"
 
-[trust.policy.keyless]
-identity_regexp = "https://github\\.com/acme/mytool/\\.github/workflows/release\\.yml@refs/tags/v.*"
-oidc_issuer     = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity_regexp = "https://github\\.com/acme/mytool/\\.github/workflows/release\\.yml@refs/tags/v.*",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 
 **GitLab self-managed.** The identity is the CI config file at a ref; note GitLab's doubled slash between project path and config path:
@@ -197,9 +199,10 @@ oidc_issuer     = "https://token.actions.githubusercontent.com"
 [[trust.policy]]
 scope = "registry.corp.example/acme"
 
-[trust.policy.keyless]
-identity_regexp = "https://gitlab\\.corp\\.example/acme/mytool//\\.gitlab-ci\\.yml@refs/tags/v.*"
-oidc_issuer     = "https://gitlab.corp.example"
+signers = [
+  { kind = "keyless", identity_regexp = "https://gitlab\\.corp\\.example/acme/mytool//\\.gitlab-ci\\.yml@refs/tags/v.*",
+                      oidc_issuer = "https://gitlab.corp.example" },
+]
 ```
 
 **Generic OIDC.** A human or a service account, identified by email:
@@ -208,9 +211,10 @@ oidc_issuer     = "https://gitlab.corp.example"
 [[trust.policy]]
 scope = "registry.corp.example/acme"
 
-[trust.policy.keyless]
-identity    = "release-bot@corp.example"
-oidc_issuer = "https://sso.corp.example"
+signers = [
+  { kind = "keyless", identity = "release-bot@corp.example",
+                      oidc_issuer = "https://sso.corp.example" },
+]
 ```
 
 `oidc_issuer` is always compared byte-for-byte — it is never dialled, so it does not have to be an address the verifying machine can reach. `identity_regexp` is wrapped as `\A(?:…)\z` before it is compiled, so it must match the **entire** SAN and you never write the anchors yourself — a pattern that looks like a substring match is a full match.
@@ -221,7 +225,7 @@ A regexp that matches more than you meant is not a slightly loose config. It is 
 
 ```toml
 # Every project on the instance. Anyone who can create one can sign your packages.
-identity_regexp = "https://gitlab\\.corp\\.example/.*"
+{ kind = "keyless", identity_regexp = "https://gitlab\\.corp\\.example/.*", oidc_issuer = "..." }
 ```
 
 Under that policy, an engineer who creates `gitlab.corp.example/anyone/scratch` and pushes a `.gitlab-ci.yml` gets a certificate that satisfies it. The signature is genuine, Rekor logged it, and OCX accepts it — because you said that identity was trusted.

@@ -177,8 +177,8 @@ pub struct CopyRequest<'a> {
     pub platforms: Vec<oci::Platform>,
     /// Recompute rolling tags (`3.28`, `3`, `latest`) against the target.
     pub cascade: bool,
-    /// Write the digest-named `sha256.<hex>` deletion safety net.
-    pub canonical_tag: bool,
+    /// Write the digest-named `__ocx.keep.<algorithm>-<hex>` deletion safety net.
+    pub keep_tag: bool,
     /// Carry signatures, SBOMs and everything else anchored to each leaf.
     pub referrers: bool,
     /// Index-level annotations to merge into every tag this copy touches.
@@ -249,8 +249,9 @@ pub struct CopyOutcome {
     pub platforms: Vec<CopiedPlatform>,
     /// Rolling tags written in addition to the target's own tag.
     pub cascade_tags: Vec<String>,
-    /// Digest-named `sha256.<hex>` tags written, deduped by manifest digest.
-    pub canonical_tags: Vec<String>,
+    /// Digest-named `__ocx.keep.<algorithm>-<hex>` tags written, deduped by manifest
+    /// digest.
+    pub keep_tags: Vec<String>,
     /// Referrer manifests copied, summed over every platform.
     pub referrers: usize,
     pub blobs: oci::copy::BlobTransfers,
@@ -302,7 +303,7 @@ async fn run(client: &Client, request: CopyRequest<'_>) -> std::result::Result<C
     let mut blobs = oci::copy::BlobTransfers::default();
     let mut referrers = 0usize;
     let mut cascade_tags: Vec<String> = Vec::new();
-    let mut canonical_tags: Vec<String> = Vec::new();
+    let mut keep_tags: Vec<String> = Vec::new();
 
     for (platform, source_digest) in &source_leaves {
         let disposition = match lookup(&target_entries, platform) {
@@ -368,7 +369,7 @@ async fn run(client: &Client, request: CopyRequest<'_>) -> std::result::Result<C
             // `cascade_tags` is exactly this list's tail — deriving both from
             // one value is what stops the tags reported from drifting away from
             // the tags written. The primary leads because only its merged index
-            // is a subject a canonical tag may be derived from.
+            // is a subject a keep tag may be derived from.
             let merge_tags: Vec<String> = std::iter::once(primary.clone())
                 .chain(target_tags(client, &request, platform).await?)
                 .collect();
@@ -393,14 +394,14 @@ async fn run(client: &Client, request: CopyRequest<'_>) -> std::result::Result<C
                     primary_index = Some(merged);
                 }
             }
-            if request.canonical_tag
+            if request.keep_tag
                 && let Some(index) = primary_index
                 && let Some(tag) = client
-                    .push_canonical_tag(request.target, &oci::Manifest::ImageIndex(index), platform)
+                    .push_keep_tag(request.target, &oci::Manifest::ImageIndex(index), platform)
                     .await?
-                && !canonical_tags.contains(&tag)
+                && !keep_tags.contains(&tag)
             {
-                canonical_tags.push(tag);
+                keep_tags.push(tag);
             }
         }
     }
@@ -410,7 +411,7 @@ async fn run(client: &Client, request: CopyRequest<'_>) -> std::result::Result<C
         target: request.target.clone(),
         platforms: rows,
         cascade_tags,
-        canonical_tags,
+        keep_tags,
         referrers,
         blobs,
         dry_run: request.dry_run,
@@ -713,7 +714,7 @@ mod tests {
             target,
             platforms: Vec::new(),
             cascade: false,
-            canonical_tag: false,
+            keep_tag: false,
             referrers: false,
             annotations,
             dry_run: false,
@@ -1233,17 +1234,17 @@ mod tests {
     }
 
     /// One leaf manifest named by two platforms survives as two entries, and
-    /// earns exactly one canonical tag.
+    /// earns exactly one keep tag.
     ///
     /// A publisher produces this whenever one build is valid on both platforms,
     /// and a dedup pass produces it from two byte-identical builds. The two
     /// halves fail in opposite directions: an index keyed by digest would
-    /// collapse the platforms and silently drop one, while a canonical tag
+    /// collapse the platforms and silently drop one, while a keep tag
     /// derived per platform rather than per manifest would push the same bytes
-    /// under the same `sha256.<hex>` name twice and report two tags for one
+    /// under the same `__ocx.keep.<algorithm>-<hex>` name twice and report two tags for one
     /// artifact.
     #[tokio::test]
-    async fn two_platforms_sharing_one_leaf_survive_as_two_entries_and_one_canonical_tag() {
+    async fn two_platforms_sharing_one_leaf_survive_as_two_entries_and_one_keep_tag() {
         let data = StubTransportData::new();
         let source = identifier("dev.example.com", "3.28.1");
         let target = identifier("prod.example.com", "3.28.1");
@@ -1267,7 +1268,7 @@ mod tests {
         data.write().capture_pushes = true;
 
         let mut req = request(&source, &target, &annotations);
-        req.canonical_tag = true;
+        req.keep_tag = true;
         let outcome = publisher_for(&data).copy(req).await.expect("copy");
 
         let mut platforms: Vec<String> = outcome.platforms.iter().map(|row| row.platform.to_string()).collect();
@@ -1280,9 +1281,9 @@ mod tests {
 
         let (algorithm, hex) = leaf.parts();
         assert_eq!(
-            outcome.canonical_tags,
-            vec![format!("{algorithm}.{hex}")],
-            "one manifest earns one canonical tag however many platforms name it"
+            outcome.keep_tags,
+            vec![format!("__ocx.keep.{algorithm}-{hex}")],
+            "one manifest earns one keep tag however many platforms name it"
         );
 
         // The target's own tag has to end up carrying both, or the promotion
@@ -1424,7 +1425,7 @@ mod tests {
     /// plan its rolling tags still uploads everything before saying so.
     ///
     /// Note the ordering the code actually implements, which the plan states
-    /// backwards: the canonical `sha256.<hex>` tag is written in phase 2, after
+    /// backwards: the `__ocx.keep.<algorithm>-<hex>` tag is written in phase 2, after
     /// the primary index merge it is derived from, not alongside the leaf in
     /// phase 1. It cannot be earlier — its subject is the merged index.
     #[tokio::test]
@@ -1476,7 +1477,7 @@ mod tests {
 
         let mut req = request(&source, &target, &annotations);
         req.cascade = true;
-        req.canonical_tag = true;
+        req.keep_tag = true;
         req.referrers = true;
         let error = publisher_for(&data)
             .copy(req)
@@ -1496,7 +1497,7 @@ mod tests {
             "the referrer must already be at the target"
         );
 
-        // Phase 2 never started: no tag moved, and no canonical tag was minted.
+        // Phase 2 never started: no tag moved, and no keep tag was minted.
         assert_eq!(
             data.read().manifests.get(&canonical(&target).to_string()),
             Some(&untouched),

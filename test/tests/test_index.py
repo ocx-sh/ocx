@@ -36,7 +36,7 @@ def _publish_bare_manifest_tag(registry: str, repo: str, source_tag: str, tag: s
     manifest, straight through the registry HTTP API.
 
     `ocx package push` never writes this shape under a version tag, and the
-    canonical `sha256.<hex>` tag it does write is *also* reserved — so a tag
+    keep tag it does write is *also* reserved — so a tag
     that is a bare manifest and nothing else is the only way to exercise the
     bare-manifest rule (D2) in isolation from the reserved-name rule (D7).
     Returns the leaf manifest's digest.

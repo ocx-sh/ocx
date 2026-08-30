@@ -106,7 +106,15 @@ impl PackageCreate {
             None => self.infer_filename(identifier.as_ref()).into(),
         };
 
-        if tokio::fs::try_exists(&output).await? && !self.force {
+        // Typed like every other `--output` touch in this command. The bare
+        // `?` here was the one the class sweep missed: an `--output` whose
+        // parent is a regular file answers ENOTDIR, and an untyped `io::Error`
+        // has no rung in the downcast ladder, so an operator's bad path exited
+        // 1 `internal` before `create_dir_all` below ever typed anything.
+        let exists = tokio::fs::try_exists(&output)
+            .await
+            .map_err(|error| ocx_lib::error::file_error(&output, error))?;
+        if exists && !self.force {
             anyhow::bail!(
                 "output file {} already exists; use --force to overwrite",
                 output.display()
@@ -184,7 +192,9 @@ impl PackageCreate {
         };
 
         if let Some(parent) = output.parent() {
-            tokio::fs::create_dir_all(parent).await?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|error| ocx_lib::error::file_error(parent, error))?;
         }
         let compression_options =
             compression::CompressionOptions::from_level(self.compression_level.into()).with_threads(self.threads);

@@ -535,10 +535,12 @@ Extends `quality-rust-exit_codes.md`'s `ExitCode` enum. Values below 64 are shel
 | 78 | `ConfigError` | `EX_CONFIG` | **NEW-SEMANTIC:** Fulcio 4xx non-401/403 (malformed CSR etc.) **OR** trust-policy parse error (reserved for v2 TOML). Exit 78 used for "the config we built is bad before even hitting the wire" | File a bug if Fulcio rejects; fix trust-policy TOML (v2) |
 | 79 | `NotFound` | — | Referrer list empty (no signatures found for target); reserved for v2 "trust-policy file path not found" | Publisher hasn't signed yet; specify correct path |
 | 80 | `AuthError` | — | Registry 401; Fulcio 401 (OIDC token rejected) | Refresh registry creds; refresh OIDC token; check issuer URL |
-| 81 | `OfflineBlocked` | — | Deliberate `--offline` policy denial on read-side ops. Never used for sign (sign with `--offline` routes to `PermissionDenied = 77` per S1-E). Network 5xx routes to `Unavailable = 69`, not this code. | Drop `--offline` or run online |
-| 82 | `RekorUnavailable` | — | **NEW:** Rekor (transparency log) unavailable OR `VerifyErrorKind::RekorSetAbsentTsaPresent` (Rekor v2 transition — see Risks). Distinct from registry 5xx. Fulcio succeeded but Rekor could not be reached or SET could not be validated. | Retry later (Rekor outage); check sigstore status page; if persistent, bundle may be Rekor-v2-only (see Risks — full v2 support deferred until sigstore-rs ships a v2 client) |
-| 83 | `ReferrersUnsupported` | — | **NEW:** Registry does not implement the OCI Referrers API and has no fallback-tag referrers index. `ocx package sign` refuses to write (S1-F ban on fallback tags on push); `ocx verify` cannot discover the referrer to verify. Hard error by design (D4) — no silent degradation. | Use a registry implementing OCI Distribution Spec v1.1 Referrers API (ocx.sh default; ghcr.io; Harbor 2.5+; etc.). GHCR/Docker Hub status tracked in `research_oci_referrers_2026.md`. |
+| 81 | `PolicyBlocked` | — | Deliberate `--offline` policy denial on read-side ops. Never used for sign (sign with `--offline` routes to `PermissionDenied = 77` per S1-E). Network 5xx routes to `Unavailable = 69`, not this code. | Drop `--offline` or run online |
+| 83 | `TransparencyLogUnavailable` | — | **NEW:** Rekor (transparency log) unavailable OR `VerifyErrorKind::RekorSetAbsentTsaPresent` (Rekor v2 transition — see Risks). Distinct from registry 5xx. Fulcio succeeded but Rekor could not be reached or SET could not be validated. | Retry later (Rekor outage); check sigstore status page; if persistent, bundle may be Rekor-v2-only (see Risks — full v2 support deferred until sigstore-rs ships a v2 client) |
+| 84 | `ReferrersUnsupported` | — | **NEW:** The registry has no referrers path the operation can use — no Referrers API, and either a fallback-index write the registry declined or a fallback index this client's own caps refuse to grow. **Amendment 10 reversed the S1-F ban this row used to state**: the tag-schema fallback is read and written, and a read that finds neither API nor tag is 79 (no signatures), never 84. Hard error by design (D4) — no silent degradation. | Use a registry implementing OCI Distribution Spec v1.1 Referrers API (ocx.sh default; ghcr.io; Harbor 2.5+; etc.). GHCR/Docker Hub status tracked in `research_oci_referrers_2026.md`. |
 | 1 | `Failure` | — | Fall-through for unclassified errors | File a bug with `--log-level=debug` output |
+
+**The enum is the contract, not this table.** `crates/ocx_lib/src/cli/exit_code.rs` is where the numbers live, and `ErrorCategory::from_exit_code` is an exhaustive in-crate match, so a new code cannot ship without a category. Rows above were corrected against it on 2026-08-29 (82 is `DirtyRcBlock`, which this ADR never used; the transparency-log code is 83 and the referrers code is 84).
 
 **Rule**: Every new `PackageErrorKind::*` variant added in Slice 1 ships with a test asserting its exit-code classification.
 
@@ -1055,3 +1057,250 @@ Failure at any step short-circuits with the appropriate typed error → exit cod
 - [Cosign](https://github.com/sigstore/cosign) — reference implementation for wire-format interoperability
 - [sigstore-rs 0.13](https://docs.rs/sigstore/0.13.0/sigstore/) — pinned signing library
 - [`ci-id` crate](https://docs.rs/ci-id/) — ambient OIDC detection
+
+---
+
+## Amendment 10 — S1-F reversed: OCX reads and writes the referrers fallback tag (2026-08-29)
+
+**Status:** supersedes Decision S1-F. Landed by loop A of the cosign-parity
+initiative (`design_spec_cosign_parity.md` WP1/WP2, `meta-plan_cosign_parity.md`).
+
+### What changed
+
+S1-F said the fallback tag is *"never written on push. No `.sig` tag, no index
+stub."* That is reversed. OCX now reads the OCI referrers tag-schema index at
+`<algorithm>-<encoded truncated to 64>` when a registry has no Referrers API, and
+appends its own referrer descriptor to it.
+
+The v1 reasoning was that the hard error would *"force registries to adopt
+Referrers API rather than papering over the gap"*. Two years on, GHCR and Docker
+Hub — the two adoption targets S1-F named — still do not serve it, and cosign
+interoperates with them through this exact tag. Refusing it no longer pressures
+anyone; it only means an OCX signature is invisible on the registries most users
+have. Bidirectional cosign parity ([#356](https://github.com/ocx-sh/ocx/issues/356))
+makes the fallback a requirement, not a concession.
+
+### The enforcement S1-F claimed never existed
+
+S1-F asserted: *"the `TestTransport` records every `PUT /manifests/<tag>` call,
+and the test fails if a tag of shape `sha256-<hex>.sig` or `sha256-<hex>.att`
+appears in the recorded tape."*
+
+There is no `TestTransport` in the repository, and there never was. Four
+`RecordingTransport`s exist (`oci/verify/pipeline.rs`, `oci/attest/pipeline.rs`,
+`oci/client.rs`, `oci/sign/pipeline.rs`); three record `"<method>:<registry>"`,
+carrying no tag at all, and the sign and attest doubles leave `push_manifest_raw`
+as `unimplemented!()` — so a fallback write would have *panicked* rather than been
+recorded and shape-checked.
+
+The ban itself was real: no code path called it. The *check* was an unchecked
+green for its entire life — a check whose passing state was indistinguishable
+from its never having run. Its replacement is written in the positive, which is
+the form that can only pass by doing the thing:
+`the_fallback_write_lands_at_the_spec_tag_with_artifact_type_and_annotations`
+(`oci/client/transport.rs`) asserts a manifest PUT **did** land at the
+spec-derived tag, carrying `artifactType` and annotations.
+
+Worth a sweep: this ADR is unlikely to be the only decision whose stated
+enforcement was never built.
+
+### Decisions carried in
+
+**D3 — exit 84 narrowed to the write path.** `ExitCode::ReferrersUnsupported`
+(84) stays, and keeps meaning a capability is absent: *the Referrers API is
+absent **and** the registry declined to hold the fallback index*. On the read
+path, no API and no fallback tag is now **no signatures found** (79), never 84 —
+once a fallback index is readable, an absent Referrers API is no longer by itself
+a read failure.
+
+Retry exhaustion is **not** 84. Nothing was refused — every PUT returned `Ok` and
+the writer lost a race — and a rerun converges, so it is `RegistryTransient`
+(75), matching this repository's 75-vs-69 contract and the variant's own doc
+(*"the endpoint simply is not served — a rerun can never change that"*, which is
+the opposite of what exhaustion is). A credential failure on the same PUT keeps
+77: a token problem is not a missing capability.
+
+**D4 — optimistic read-back with bounded retry.** Read, append, write, read back,
+retry. The read-back checks for **this call's own descriptor**, not for a
+successful PUT: a clobbered write returns `Ok` and silently drops the descriptor,
+and only re-reading catches it.
+
+**No fairness guarantee, and the earlier draft of this amendment claimed one.**
+It said each round retires at least one racing writer, so N writers finish
+within N rounds. That is false: surviving your own PUT and surviving until your
+own read-back are different events. With three writers, W3's PUT can land
+between W1's failed read-back and W1's re-read, leaving W1 to overwrite W3 from
+a stale base — no writer converges that round, and the argument's induction step
+does not exist. Two writers is the case that *is* provable, and it is the case
+the test pins. Beyond it the loop is optimistic: it converges with high
+probability at realistic fan-out, and otherwise fails loudly and retryably (75)
+rather than dropping a descriptor. That property, not a round bound, is what
+makes `MAX_FALLBACK_ATTEMPTS = 5` tolerable.
+
+Proven both ways rather than asserted: `two_writers_racing_one_fallback_index_both_land`
+scripts the interleave (A reads, B reads, B writes, A clobbers, B's read-back
+observes the clobber) and both descriptors are present afterwards; deleting the
+read-back, or weakening it to "the PUT returned `Ok`", turns it red. An unscripted
+two-writer test passes without the retry, because B verifies before the clobber
+lands — which is exactly why the third gate exists.
+
+### Two spec facts the design record had wrong
+
+**The fallback tag is truncated to 64 encoded characters for every algorithm**,
+not spelled at the digest's full length. For sha256 that is a no-op; for sha384
+and sha512 it is not, and two subjects sharing a 64-character prefix share one
+referrers tag. The spec accepts that collision. `package/tag.rs::referrer_fallback_tag`
+is the one place the tag is spelled, and `is_referrer_fallback_tag` was widened to
+match — it previously failed to reserve a real sha384/sha512 fallback tag.
+
+**The spec does mention conditional requests** — twice, as a `MAY` for
+"registries that support ETag conditions". It defines no precondition mechanism
+of its own (there is no `If-Match` semantics for manifest PUT anywhere in it), and
+it names the hazard directly: *"multiple clients could attempt to update the tag
+simultaneously resulting in race conditions and data loss. Protection against
+race conditions is the responsibility of clients and end users."* So D4's
+optimistic loop stands, and this ADR does not claim the spec forbids what it
+merely declines to define.
+
+### What OCX gets right that the reference implementation does not
+
+OCI tag-schema write step 5 is a MUST: the appended descriptor carries the pushed
+manifest's `artifactType` (falling back to the config descriptor's `mediaType`)
+and **all** its annotations. cosign delegates its whole fallback write to
+go-containerregistry's `commitSubjectReferrers`, which sets neither —
+[sigstore/cosign#4641](https://github.com/sigstore/cosign/issues/4641), open,
+with both proposed upstream fixes stalled. The lost update is likewise an open,
+unfixed bug there ([go-containerregistry#2205](https://github.com/google/go-containerregistry/issues/2205),
+a live `// TODO: use conditional requests to avoid race conditions`), and
+`oras-go`'s merge pool only serialises one client against itself.
+
+### The residual attack surface this reversal accepts
+
+A fallback index is a mutable tag, not a registry-computed answer. Anyone with
+push access to the repository authors it. Recorded rather than glossed:
+
+- **Signature suppression costs one PUT.** An empty index at the tag hides every
+  signature for a subject. Verify fails closed (79) and auto-verify aborts the
+  install, so this is denial, never a forged pass — but the Referrers API has no
+  equivalent, and S1-F's fail-closed posture is what is being traded away.
+  Whether the fallback should be enabled for `sign` and refused for `verify` is
+  an open asymmetry this amendment does not settle.
+- **Candidate starvation is cheaper here.** `MAX_SIGNATURE_CANDIDATES = 8`,
+  ANY-of, ordered by digest; eight mined descriptors starve a real signature.
+  Already possible through the Referrers API by pushing eight manifests with a
+  `subject`; the tag reduces it to one write.
+- **A re-append never repairs an entry another tool wrote badly.** `AlreadyPresent`
+  dedupes on the descriptor digest alone, so an entry cosign authored for the
+  same manifest — carrying neither `artifactType` nor annotations, per
+  [sigstore/cosign#4641](https://github.com/sigstore/cosign/issues/4641) — is
+  matched, and OCX returns without pushing. The correct facets OCX computed are
+  dropped, and the subject keeps a listing that no `artifactType` filter can
+  reach. Deliberate for now: digest identity is what makes the append idempotent
+  and the read-back ambiguity benign, and rewriting a sibling tool's entry means
+  re-publishing a document OCX did not author. Deferred, not settled.
+- **A transient 404 substitutes a different source.** The fork's
+  `pull_referrers_native` returns `Ok(None)` for "the endpoint does not exist"
+  and "this request 404'd" alike, so a one-off 404 on a registry that *does*
+  implement the API reads the attacker-writable tag instead. Gating on the
+  cached capability verdict would need the probe threaded into the transport,
+  and the verdict itself derives from a 404 — so there is no cheaper signal to
+  gate on. (Other clients share the shape; that is context, not a defence.)
+- **A manifest GET has no byte bound at all.** `read_body_bounded` exists in the
+  fork but has exactly one call site, on the native referrers endpoint; every
+  tag-addressed manifest read — index roots and `merge_platform_into_index`
+  included — is a bare `res.bytes()`. The fallback read applies a 4 MiB check and
+  a 4096-descriptor cap **after** the read, which bounds what is parsed and
+  re-published, not what is allocated. The real fix is a `limit` threaded into
+  the fork's `_pull_manifest_raw`; it is a pre-existing, repo-wide gap and wants
+  its own change.
+- **Only the read had caps until the write grew its own.** The first cut applied
+  `MAX_FALLBACK_INDEX_BYTES` and `MAX_FALLBACK_DESCRIPTORS` on the read alone, so
+  an index seeded at the ceiling — 4096 compact entries, or one entry carrying a
+  4 MiB annotation — would be appended to, pushed, and then refused by every
+  later read, OCX's own read-back first. Nothing in OCX can shrink a tag, so that
+  is permanent suppression for the subject, written under OCX's credentials by
+  OCX itself. The residue after the mitigation below: a repository whose index is
+  already at the ceiling cannot be signed through the fallback at all — denial,
+  not forgery, and it fails loudly.
+
+Three mitigations are in the code rather than in this list: a refused read
+**aborts** the append instead of degrading to an empty index (otherwise OCX
+performs the suppression attack itself, against every sibling signature, under
+its own credentials); the written document is **constructed, never echoed** —
+fresh header, entries re-emitted field by field from values that passed
+validation; and both caps are checked **before** the PUT, on the serialised
+bytes as well as the entry count, so OCX cannot author a document its own reader
+will refuse. That refusal is `ReferrersUnsupported` (84): nothing is transient,
+and the remedy 84 already names — a registry that serves the Referrers API — is
+the correct one, since the API carries no such ceiling. The byte check is what
+covers the third entry vector, an unbounded `annotations` map lifted from a
+source registry on the `copy.rs` path, where one entry can exceed 4 MiB alone.
+
+### Handoff to the loops that remove the gates (C-009)
+
+Loop A ships the primitive with **no production caller**. `-D dead-code` cannot
+fire on a `pub` trait method in a library crate, so nothing in the build will
+notice if the wiring never happens — the same unchecked green this amendment
+indicts S1-F for. The wiring is therefore named here rather than implied:
+
+| Loop | Gate to remove | Calls to switch |
+|---|---|---|
+| C (sign) | the capability gate in `oci/sign/pipeline.rs:266-298` | the sign path's referrer write → `append_referrer_fallback_index` |
+| C (attest) | the second, byte-identical gate in `oci/attest/pipeline.rs:482-513` | the attest referrer write at `oci/attest/pipeline.rs:470` → `append_referrer_fallback_index` |
+| D (verify) | `ensure_referrers_supported` in `oci/verify/pipeline.rs:1365-1404` | `list_referrers` at `oci/verify/pipeline.rs:471`, `:740`, `:1349` → `list_referrers_with_fallback` |
+
+**The attest row is not a footnote.** `oci/attest/pipeline.rs` carries its own copy of the sign
+gate — same `match capability.supported { Supported => Ok(()), Unsupported =>
+Err(SignErrorKind::ReferrersUnsupported) }` — and its own `push_referrer_manifest`. A fallback
+index is per-subject and type-agnostic, so wiring `sign` and not `attest` leaves `ocx package
+attest` refused on exactly the registries `sign` just started working on, with nothing in the
+build to notice.
+
+**`oci/copy.rs` is deliberately out of scope for C and D.** Its two producers —
+`ensure_target_serves_referrers` (`:275`, a probe of the promotion *target*) and the source-side
+`list_referrers` (`:456`) — are a registry-to-registry promotion, not a sign or a verify.
+Promoting referrers through a fallback tag means writing a mutable index on the target on the
+publisher's behalf, which is a decision this amendment does not make. Named here so a later
+reader can tell "out of scope" from "overlooked".
+
+Two requirements travel with those call sites:
+
+- **The append takes the canonical write reference.** `sibling_tag_reference`
+  propagates whatever host it is handed, so `image` must come from
+  `Client::transport_write_reference`, never a mirrored read reference — a
+  mirror is read-only, and deciding on one host while writing to another is the
+  CWE-345/367 class `oci/client.rs` already documents at its addressing seams.
+- **Three exit-84 messages become false the moment a gate is removed.**
+  `oci/sign/error.rs:111`, `oci/verify/error.rs:193` and the three exit-code
+  tables in `website/src/docs/reference/command-line.md` all say the registry
+  "does not support the OCI Referrers API". That is true while the gates stand
+  and false the moment the fallback answers, because 84 will then mean the
+  fallback was refused too. The client-layer message
+  (`ClientError::ReferrersUnsupported`) was already narrowed to the verdict the
+  five raise sites share; these three are the command-layer twins and belong to
+  whichever loop removes the gate above them.
+- **A green suite on a Referrers-API-present registry proves nothing here.** The
+  fallback path is unreachable when the API answers. The evidence has to come
+  from the API-absent registry — `registry:2` on port 5001, the `legacy_registry`
+  fixture.
+
+Paste this at each deletion site, so the rationale sits where the gate used to:
+
+```rust
+// The Unsupported verdict no longer refuses the operation: the OCI referrers
+// tag-schema fallback (`list_referrers_with_fallback` /
+// `append_referrer_fallback_index`) serves a registry without the Referrers
+// API. See `adr_oci_referrers_signing_v1.md`, Amendment 10 — the fallback
+// index is a mutable tag anyone with push access authors, and the residual
+// attack surface that reverses S1-F is recorded there.
+```
+
+### What still fails closed after this amendment
+
+`oci/verify/pipeline.rs`'s `ensure_referrers_supported` and the matching gate in
+`oci/sign/pipeline.rs` still refuse an `Unsupported` capability verdict, so **no
+user-visible behaviour changed when this landed**. `list_referrers` is untouched
+and still answers the capability question by raising `ReferrersUnsupported`; the
+fallback arrived as a separate `list_referrers_with_fallback`. Removing those two
+gates is the sign and verify wiring's job, and this section records what each was
+protecting so neither is deleted blind.

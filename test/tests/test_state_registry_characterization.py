@@ -56,11 +56,12 @@ from src.scenarios import SCENARIOS, Scenario
 
 
 def test_setups_registry_has_all_expected_keys() -> None:
-    """SETUPS must contain the 13 canonical setup names."""
+    """SETUPS must contain the 14 canonical setup names."""
     expected = {
         "basic", "multi-version", "full-catalog", "variants", "dependencies",
         "deps-visibility", "publisher", "patches-consumer", "patches-maintainer",
         "managed-config-onboard", "managed-config-ci", "signing", "promotion",
+        "cosign-parity",
     }
     assert set(SETUPS.keys()) == expected, (
         f"SETUPS keys changed — adapter contract broken.\n"

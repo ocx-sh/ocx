@@ -52,7 +52,7 @@ pub struct PackageCopy {
     // struct's* own field docs, so anything written here reaches nobody and the
     // struct's text reaches the user (`quality-cli-help.md`, render source).
     #[clap(flatten)]
-    canonical_tag: options::CanonicalTag,
+    keep_tag: options::KeepTag,
 
     #[clap(flatten)]
     referrers: options::Referrers,
@@ -144,7 +144,7 @@ impl PackageCopy {
                 target: &target,
                 platforms: self.platform.clone(),
                 cascade: self.cascade,
-                canonical_tag: self.canonical_tag.enabled(),
+                keep_tag: self.keep_tag.enabled(),
                 referrers: self.referrers.enabled(),
                 annotations: &annotations,
                 dry_run: self.dry_run,

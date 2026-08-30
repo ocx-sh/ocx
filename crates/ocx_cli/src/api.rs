@@ -35,7 +35,7 @@ pub struct Api {
     /// Set once a report has actually been printed to stdout. Shared across
     /// clones so the app-level error-envelope wrapper can tell "this failure
     /// already produced the command's stdout document" (report-then-fail
-    /// commands like `package push --announce-file`) from "stdout is empty and
+    /// commands like `package push --tags-file`) from "stdout is empty and
     /// the envelope is the document" — stdout must carry exactly one JSON
     /// document either way.
     reported: std::sync::Arc<std::sync::atomic::AtomicBool>,

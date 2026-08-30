@@ -120,21 +120,22 @@ def _policy_block(
     identity_regexp: str | None = None,
     builder: str | None = None,
 ) -> str:
-    """Render one ``[[trust.policy]]`` TOML block with its nested keyless matcher.
+    """Render one ``[[trust.policy]]`` TOML block with a single keyless signer.
 
-    ``builder`` is a top-level sibling of ``scope`` -- NOT nested under
-    ``[trust.policy.keyless]`` -- per ``trust.rs``'s
+    ``builder`` is a top-level sibling of ``scope`` -- NOT a member of the
+    signer entry -- per ``trust.rs``'s
     ``builder_is_a_backend_independent_sibling_of_scope`` fixture (#103).
     """
     lines = ["[[trust.policy]]", f'scope = "{scope}"']
     if builder is not None:
         lines.append(f'builder = "{builder}"')
-    lines += ["", "[trust.policy.keyless]"]
+    entry = ['kind = "keyless"']
     if identity is not None:
-        lines.append(f'identity = "{identity}"')
+        entry.append(f'identity = "{identity}"')
     if identity_regexp is not None:
-        lines.append(f'identity_regexp = "{identity_regexp}"')
-    lines.append(f'oidc_issuer = "{oidc_issuer}"')
+        entry.append(f'identity_regexp = "{identity_regexp}"')
+    entry.append(f'oidc_issuer = "{oidc_issuer}"')
+    lines.append("signers = [{ " + ", ".join(entry) + " }]")
     return "\n".join(lines) + "\n"
 
 
@@ -514,11 +515,11 @@ def test_add_then_remove_preserves_trust_policy_section(
     trust_section = (
         "[[trust.policy]]\n"
         f'scope = "{scope}"\n'
-        "\n"
-        "[trust.policy.keyless]\n"
         "# pinned deliberately, do not relax\n"
-        'identity = "release-bot@example.com"\n'
-        'oidc_issuer = "https://accounts.example.com"\n'
+        "signers = [\n"
+        '  { kind = "keyless", identity = "release-bot@example.com", '
+        'oidc_issuer = "https://accounts.example.com" },\n'
+        "]\n"
     )
     body = f"[tools]\n\n{trust_section}"
     project_dir = tmp_path / "proj"

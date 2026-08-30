@@ -38,6 +38,7 @@ pub mod self_update;
 pub mod shell_state;
 pub mod signature;
 pub mod status;
+pub mod sweep;
 pub mod tag;
 pub mod verification;
 pub mod version;

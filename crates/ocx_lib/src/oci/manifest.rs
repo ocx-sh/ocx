@@ -94,7 +94,7 @@ pub fn has_platform(manifest: &Manifest, platform: &Platform) -> bool {
 /// Returns the digest of the manifest entry for the given platform, if present.
 ///
 /// Complements [`has_platform`] (existence only) by extracting the pinned
-/// digest, so a caller (e.g. the canonical-tag push,
+/// digest, so a caller (e.g. the keep-tag push,
 /// `adr_index_indirection.md` Decision E) can address that exact platform
 /// manifest without re-deriving it from the layers/metadata that produced it.
 pub fn platform_manifest_digest(manifest: &Manifest, platform: &Platform) -> Option<Digest> {

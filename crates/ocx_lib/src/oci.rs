@@ -68,6 +68,16 @@ pub use manifest_builder::{ManifestArtifacts, ManifestBuilder};
 
 pub mod referrer;
 
+// The cosign simplesigning claim — the payload a `sha256-<hex>.sig` sidecar
+// layer carries. A peer of `referrer`, not a child of `sign`: verify reads it
+// too, and it is a wire format in its own right.
+pub mod simplesigning;
+
+// The `--platform` optionality rule sign, attest and verify share. A peer of
+// all three: a pure decision over a resolution outcome, deliberately holding no
+// I/O, so the one rule cannot fork three ways.
+pub mod resolve_target;
+
 // Shared Sigstore endpoint URL validation (`UrlRejection`, `validate_sigstore_url`).
 // Lifted here as a peer of `sign`/`verify` so verify does not depend on sign for a
 // primitive both use (ADR `adr_oci_referrers_signing_v1.md` Amendment 2).

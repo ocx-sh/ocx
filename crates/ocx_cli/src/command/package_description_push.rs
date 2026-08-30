@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
+use anyhow::Context as _;
 use clap::Parser;
 use ocx_lib::{log, oci, oci::client::error::ClientError, package, package::tag::InternalTag, publisher::Publisher};
 
@@ -85,8 +86,10 @@ impl PackageDescriptionPush {
         // Build the merged description.
         let (readme, frontmatter) = match &self.readme {
             Some(path) => {
-                let data = std::fs::read(path)
-                    .map_err(|e| anyhow::anyhow!("failed to read README at {}: {e}", path.display()))?;
+                let data = tokio::fs::read(path)
+                    .await
+                    .map_err(|e| ocx_lib::error::file_error(path, e))
+                    .with_context(|| format!("failed to read README at {}", path.display()))?;
                 let text = std::str::from_utf8(&data).map_err(|e| anyhow::anyhow!("README is not valid UTF-8: {e}"))?;
                 let parsed = package::description::parse_readme(text);
                 (parsed.body, parsed.frontmatter)

@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 mod assemble;
+mod bounded_read;
 mod dir_walker;
 mod drop_file;
 mod empty_or_absent;
@@ -17,6 +18,7 @@ pub use assemble::{
     AssemblyError, AssemblyStats, LayerPlacement, assemble_from_layer, assemble_from_layers,
     assemble_from_layers_with_layouts,
 };
+pub use bounded_read::{BoundedReadError, read_bounded};
 pub use dir_walker::{DirWalker, WalkDecision};
 pub use drop_file::DropFile;
 pub use empty_or_absent::{EmptyOrAbsentError, ensure_empty_or_absent};

@@ -184,6 +184,14 @@ fn build_plugin_command(
     // tolerates an empty argv defensively (the caller guarantees argv[0]).
     cmd.args(argv.get(1..).unwrap_or(&[]));
     cmd.envs(env);
+    // `envs` only adds and overrides, so dropping a key from the map cannot
+    // unset one this process inherited — and a plugin is third-party code. The
+    // ambient environment is forwarded deliberately (see above), but a bearer
+    // credential never is: `apply_ocx_config` removed these from the map, and
+    // this is what makes the removal reach the child.
+    for credential in ocx_lib::env::keys::CREDENTIAL_KEYS {
+        cmd.env_remove(credential);
+    }
 
     Ok(cmd)
 }
@@ -234,6 +242,34 @@ mod tests {
         let argv = osvec(&["mirror"]);
         let cmd = build_plugin_command(Path::new("/usr/bin/ocx-mirror"), &argv, &opts()).unwrap();
         assert_eq!(cmd.as_std().get_args().count(), 0);
+    }
+
+    /// A plugin is third-party code launched with the **full** ambient
+    /// environment, so the one thing that must not ride along is a bearer
+    /// credential. `Command::envs` only adds and overrides — dropping a key
+    /// from the map cannot unset one this process inherited — so the removal
+    /// has to be an explicit `env_remove`, which surfaces here as a `None`
+    /// value in `get_envs()`.
+    #[test]
+    fn plugin_command_unsets_every_credential_key() {
+        let argv = osvec(&["mirror"]);
+        let cmd = build_plugin_command(Path::new("/usr/bin/ocx-mirror"), &argv, &opts()).unwrap();
+        let removed: Vec<_> = cmd
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !ocx_lib::env::keys::CREDENTIAL_KEYS.is_empty(),
+            "an empty credential list would make the loop below vacuous"
+        );
+        for credential in ocx_lib::env::keys::CREDENTIAL_KEYS {
+            assert!(
+                removed.iter().any(|key| key == credential),
+                "{credential} reaches the plugin; removed = {removed:?}"
+            );
+        }
     }
 
     /// Regression: the not-found hint uses the three-segment OCI registry form

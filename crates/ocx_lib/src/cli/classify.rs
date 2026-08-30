@@ -783,13 +783,6 @@ mod tests {
     }
 
     #[test]
-    fn verify_error_referrers_unsupported_maps_to_referrers_unsupported() {
-        let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
-        let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::ReferrersUnsupported);
-        assert_eq!(classify(err), ExitCode::ReferrersUnsupported);
-    }
-
-    #[test]
     fn verify_error_trust_root_unavailable_maps_to_config_error() {
         let id = crate::oci::Identifier::parse("registry.example/pkg:1.0").unwrap();
         let err = crate::oci::verify::VerifyError::new(id, crate::oci::verify::VerifyErrorKind::TrustRootUnavailable);

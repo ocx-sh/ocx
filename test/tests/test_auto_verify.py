@@ -46,8 +46,8 @@ def _write_operator_policy(ocx: OcxRunner, scope: str, identity: str, issuer: st
     """Write a `[[trust.policy]]` into `$OCX_HOME/config.toml` (operator tier)."""
     config = ocx.ocx_home / "config.toml"
     config.write_text(
-        f'[[trust.policy]]\nscope = "{scope}"\n\n'
-        f'[trust.policy.keyless]\nidentity = "{identity}"\noidc_issuer = "{issuer}"\n'
+        f'[[trust.policy]]\nscope = "{scope}"\n'
+        f'signers = [{{ kind = "keyless", identity = "{identity}", oidc_issuer = "{issuer}" }}]\n'
     )
 
 

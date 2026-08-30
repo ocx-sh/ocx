@@ -466,7 +466,10 @@ fn a15_an_empty_package_has_no_aliases() {
 fn a16_a_package_of_only_ignorable_tags_has_no_aliases() {
     let observation = Graph::new()
         .index("__ocx.desc", vec![entry("linux/amd64", "d1")])
-        .index(&format!("sha256.{}", "a".repeat(64)), vec![entry("linux/amd64", "d1")])
+        .index(
+            &format!("__ocx.keep.sha256-{}", "a".repeat(64)),
+            vec![entry("linux/amd64", "d1")],
+        )
         .index("nightly", vec![entry("linux/amd64", "d1")])
         .build();
     assert!(observation.tags.is_empty(), "{:?}", observation.tags.keys());
@@ -1032,18 +1035,18 @@ fn c8_platform_less_entries_are_never_reported_as_orphans() {
 }
 
 #[test]
-fn c9_a_canonical_digest_tag_is_ignored() {
-    let canonical = format!("sha256.{}", "b".repeat(64));
+fn c9_a_keep_tag_is_ignored() {
+    let keep = format!("__ocx.keep.sha256-{}", "b".repeat(64));
     let observation = Graph::new()
         .index("1.0.0", vec![entry("linux/amd64", "image")])
         .index("1.0", vec![entry("linux/amd64", "image")])
         .index("1", vec![entry("linux/amd64", "image")])
         .index("latest", vec![entry("linux/amd64", "image")])
-        .index(&canonical, vec![entry("linux/amd64", "image")])
+        .index(&keep, vec![entry("linux/amd64", "image")])
         .build();
 
     let report = check(&observation);
-    assert_eq!(report.ignored_tags, [canonical]);
+    assert_eq!(report.ignored_tags, [keep]);
     assert!(!report.has_findings(), "{:?}", findings(&report));
 }
 
@@ -1517,11 +1520,11 @@ fn d10_a_tag_that_is_not_a_version_is_refused() {
 }
 
 #[test]
-fn d11_a_canonical_digest_tag_is_refused() {
-    let canonical = format!("sha256.{}", "a".repeat(64));
-    let error = scope_request(&identifier().clone_with_tag(&canonical)).expect_err("must refuse");
+fn d11_a_keep_tag_is_refused() {
+    let keep = format!("__ocx.keep.sha256-{}", "a".repeat(64));
+    let error = scope_request(&identifier().clone_with_tag(&keep)).expect_err("must refuse");
     assert!(
-        matches!(&error, ScopeError::NotAVersionTag(refused) if refused == &canonical),
+        matches!(&error, ScopeError::NotAVersionTag(refused) if refused == &keep),
         "{error:?}"
     );
 }

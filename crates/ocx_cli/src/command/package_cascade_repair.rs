@@ -24,7 +24,7 @@ use crate::options;
 ///
 /// Repairing the registry does not update the public index. Pass
 /// `--announce-tags PATH` to record the tags this run moved, then hand that
-/// file to `ocx package announce --tags-from-file PATH`.
+/// file to `ocx package announce --tags-file PATH`.
 ///
 /// Exits 0 when every attempted write succeeded, 65 when a finding remains
 /// (including a tag that cannot be fixed without publishing new content), and
@@ -37,7 +37,7 @@ pub struct PackageCascadeRepair {
     dry_run: bool,
 
     /// Write the rolling tags this run moved or created to this file, one per
-    /// line, for `ocx package announce --tags-from-file`. Takes one package
+    /// line, for `ocx package announce --tags-file`. Takes one package
     /// per run, since the file names no package and `announce` publishes it
     /// against one. Written on a dry run too, holding the whole plan it would
     /// have repaired; empty when nothing changed.
@@ -53,7 +53,7 @@ impl PackageCascadeRepair {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let audits = super::package_cascade::audit_all(&context, &self.packages).await?;
 
-        // `announce --tags-from-file` takes one `--package`, and the file it
+        // `announce --tags-file` takes one `--package`, and the file it
         // reads is a bare list of tag names. Two packages' tags in one file
         // would be announced against whichever package the follow-up names,
         // moving the other's index entries to digests it never published.
@@ -104,10 +104,11 @@ impl PackageCascadeRepair {
 
         if let Some(path) = &self.announce_tags {
             // Written on every run, empty included: a workflow that chains
-            // into `announce --tags-from-file` unconditionally must find a
+            // into `announce --tags-file` unconditionally must find a
             // file there whether or not this run had anything to move.
             tokio::fs::write(path, announce_tags_body(&report.entries))
                 .await
+                .map_err(|error| ocx_lib::error::file_error(path, error))
                 .with_context(|| format!("writing announce tags to {}", path.display()))?;
         }
 

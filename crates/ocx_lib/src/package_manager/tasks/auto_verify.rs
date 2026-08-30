@@ -156,9 +156,13 @@ impl PackageManager {
     /// or when required trust material is unavailable (exit 78).
     ///
     /// `resolved` is the platform-selected leaf digest (`ResolvedChain.pinned`),
-    /// so verification runs against `Platform::any()` — the leaf is already a
-    /// flat manifest, and re-selecting it with the concrete platform would
-    /// strict-equality-fail against the leaf's advertised `any()`.
+    /// so verification narrows into nothing (`platform: None`) — the leaf is
+    /// already a flat manifest and the selection has already happened. This is
+    /// the same target the pre-C-010 `Platform::any()` argument produced: `any`
+    /// was how "do not narrow" had to be spelled while the parameter was
+    /// mandatory, and it worked only because a flat manifest advertises `any()`
+    /// back. `None` says it directly, and keeps saying it if the leaf ever
+    /// stops advertising `any()`.
     pub async fn maybe_auto_verify(&self, resolved: &oci::Identifier) -> Result<(), PackageErrorKind> {
         let Some(auto_verify) = self.auto_verify() else {
             return Ok(());
@@ -248,8 +252,21 @@ impl PackageManager {
             // carry": attestations do not participate (S-015). A subject whose
             // referrers are all attestations still fails closed here.
             content: VerifyContentMode::Signature,
+            // No flag reaches the install hot path, so discovery keeps D9's
+            // default: prefer a bundle, fall back to a sidecar only when the
+            // bundle shape is absent — and never onto a keyless sidecar with no
+            // transparency-log evidence, which the same absence of a flag keeps
+            // refused. An install-time gate is the last place to widen what
+            // counts as signed.
+            signature_format: None,
+            allow_unlogged_signature: false,
+            // Q3. This hook renders no report, so it stays ANY-of first-match
+            // and pays crypto for exactly one candidate. `true` here would run
+            // full verification over every candidate the caps allow on every
+            // install of every policy-covered package, for output nobody reads.
+            report_all: false,
         };
-        self.verify_one(resolved, &oci::Platform::any(), options)
+        self.verify_one(resolved, None, options)
             .await
             .map_err(|error| error.kind)?;
 
@@ -291,11 +308,11 @@ mod tests {
         TrustPolicy {
             scope: Some(crate::trust::ScopeSpec::Prefix(format!("{REGISTRY}/{REPO}"))),
             builder: None,
-            keyless: Some(crate::trust::KeylessMatcher {
+            signers: vec![crate::trust::SignerSpec::Keyless(crate::trust::KeylessMatcher {
                 identity: Some("you@example.com".into()),
                 identity_regexp: None,
                 oidc_issuer: Some("https://example.com".into()),
-            }),
+            })],
             system_locked: false,
         }
     }
@@ -365,5 +382,267 @@ mod tests {
             ),
             other => panic!("expected Internal(Verify(InvalidEndpointUrl)), got {other:?}"),
         }
+    }
+
+    // ── Q3: the install hot path stays ANY-of first-match ────────────────────
+
+    /// The golden captures, reused from `oci::verify::pipeline`'s own tests: two
+    /// genuinely different signatures over one subject, one keyless and one
+    /// key-mode, verifiable offline against the committed trust root.
+    const GOLDEN_KEYLESS_BUNDLE: &str = include_str!("../../../../../test/tests/fixtures/golden/keyless_bundle.json");
+    const GOLDEN_KEY_BUNDLE: &str = include_str!("../../../../../test/tests/fixtures/golden/key_bundle.json");
+    const GOLDEN_KEYLESS_REFERRER: &str =
+        include_str!("../../../../../test/tests/fixtures/golden/keyless_referrer_manifest.json");
+    const GOLDEN_KEY_REFERRER: &str =
+        include_str!("../../../../../test/tests/fixtures/golden/key_referrer_manifest.json");
+    const GOLDEN_PUBLIC_KEY_PEM: &str = include_str!("../../../../../test/tests/fixtures/golden/keys/cosign.pub");
+    const GOLDEN_TRUSTED_ROOT: &str = include_str!("../../../../../test/sigstore/trusted_root.json");
+    const GOLDEN_SUBJECT_MANIFEST: &str = concat!(
+        r#"{"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "#,
+        r#""config": {"mediaType": "application/vnd.oci.empty.v1+json", "#,
+        r#""digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a", "size": 2}, "#,
+        r#""layers": [{"mediaType": "application/octet-stream", "#,
+        r#""digest": "sha256:ee88d8a4c22bbe871bcee1c56bcc02377e249363600edcaf096ad7a5a862149f", "size": 18}]}"#,
+    );
+    const GOLDEN_IDENTITY: &str = "ocx-test@example.com";
+    const GOLDEN_ISSUER: &str = "http://dex:5556/dex";
+
+    fn referrer_annotation(manifest_json: &str) -> String {
+        let manifest: serde_json::Value = serde_json::from_str(manifest_json).expect("referrer manifest is JSON");
+        manifest["annotations"]["dev.sigstore.bundle.predicateType"]
+            .as_str()
+            .expect("the capture carries the predicateType annotation")
+            .to_owned()
+    }
+
+    /// An index that resolves the target straight to the golden subject digest,
+    /// with no physical rewrite — the smallest thing `resolve_target` accepts.
+    #[derive(Clone)]
+    struct GoldenSubjectIndex {
+        digest: oci::Digest,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::oci::index::IndexImpl for GoldenSubjectIndex {
+        async fn list_repositories(&self, _: &str) -> crate::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &oci::Identifier) -> crate::Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(
+            &self,
+            _: &oci::Identifier,
+            _: crate::oci::index::IndexOperation,
+        ) -> crate::Result<Option<(oci::Digest, oci::Manifest)>> {
+            Ok(Some((
+                self.digest.clone(),
+                oci::Manifest::Image(crate::oci::ImageManifest::default()),
+            )))
+        }
+        async fn fetch_manifest_digest(
+            &self,
+            _: &oci::Identifier,
+            _: crate::oci::index::IndexOperation,
+        ) -> crate::Result<Option<oci::Digest>> {
+            Ok(Some(self.digest.clone()))
+        }
+        async fn fetch_blob(&self, _: &oci::PinnedIdentifier) -> crate::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn box_clone(&self) -> Box<dyn crate::oci::index::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    /// **Q3.** Auto-verify runs on the install hot path and renders no report,
+    /// so it must stay ANY-of first-match: exactly one candidate is fetched and
+    /// verified, however many the subject carries.
+    ///
+    /// Observed through the transport, not through a flag: the subject here
+    /// carries **two** signatures cosign really wrote, both verifiable under the
+    /// one policy below. A `report_all` auto-verify would pull the second
+    /// referrer manifest and pay full crypto on it for output nobody reads.
+    ///
+    /// The control is the same fixture driven through `verify_one` with
+    /// `report_all: true`, which does pull it — without that half, a seed that
+    /// only ever produced one candidate would satisfy this vacuously.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn auto_verify_examines_one_candidate_however_many_the_subject_carries() {
+        use crate::oci::client::test_transport::{StubTransport, StubTransportData, referrers_key};
+        use crate::oci::index::{ChainMode, Index, LocalConfig, LocalIndex};
+
+        let subject_bytes = GOLDEN_SUBJECT_MANIFEST.as_bytes();
+        let subject = crate::oci::Algorithm::Sha256.hash(subject_bytes);
+        let target = oci::Identifier::new_registry(REPO, REGISTRY).clone_with_digest(subject.clone());
+
+        let seed = || {
+            let data = StubTransportData::new();
+            // Parsed, never direct-constructed: the constructors are seam-only
+            // (T-arch-G1), and this is the same reference `transport_reference`
+            // hands the pipeline for this target.
+            let image: oci::native::Reference = format!("{REGISTRY}/{REPO}@{subject}")
+                .parse()
+                .expect("the golden subject reference parses");
+            {
+                let mut inner = data.write();
+                inner
+                    .manifests
+                    .insert(image.to_string(), (subject_bytes.to_vec(), subject.to_string()));
+                for (bundle_json, referrer_json) in [
+                    (GOLDEN_KEYLESS_BUNDLE, GOLDEN_KEYLESS_REFERRER),
+                    (GOLDEN_KEY_BUNDLE, GOLDEN_KEY_REFERRER),
+                ] {
+                    let blob = bundle_json.as_bytes().to_vec();
+                    let blob_digest = crate::oci::Algorithm::Sha256.hash(&blob);
+                    let manifest = crate::oci::referrer::ReferrerManifest::build(
+                        crate::oci::Descriptor {
+                            media_type: crate::oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                            digest: subject.to_string(),
+                            size: subject_bytes.len() as i64,
+                            ..crate::oci::Descriptor::default()
+                        },
+                        crate::oci::referrer::media_types::SIGSTORE_BUNDLE_V03,
+                        crate::oci::Descriptor {
+                            media_type: crate::oci::referrer::media_types::SIGSTORE_BUNDLE_V03.to_string(),
+                            digest: blob_digest.to_string(),
+                            size: blob.len() as i64,
+                            ..crate::oci::Descriptor::default()
+                        },
+                        Some(std::collections::BTreeMap::from([(
+                            "dev.sigstore.bundle.predicateType".to_string(),
+                            referrer_annotation(referrer_json),
+                        )])),
+                    );
+                    let bytes = manifest.to_canonical_json().expect("referrer manifest serializes");
+                    let digest = crate::oci::Algorithm::Sha256.hash(&bytes);
+                    inner.blobs.insert(blob_digest.to_string(), blob);
+                    inner.manifests.insert(
+                        image.clone_with_digest(digest.to_string()).to_string(),
+                        (bytes.clone(), digest.to_string()),
+                    );
+                    inner
+                        .referrers
+                        .entry(referrers_key(&image, &subject))
+                        .or_default()
+                        .push(crate::oci::Descriptor {
+                            media_type: crate::oci::OCI_IMAGE_MEDIA_TYPE.to_string(),
+                            digest: digest.to_string(),
+                            size: bytes.len() as i64,
+                            ..crate::oci::Descriptor::default()
+                        });
+                }
+            }
+            data
+        };
+
+        let root = TempDir::new().unwrap();
+        let trusted_root_path = root.path().join("trusted_root.json");
+        std::fs::write(&trusted_root_path, GOLDEN_TRUSTED_ROOT).unwrap();
+
+        let policy = TrustPolicy {
+            scope: Some(crate::trust::ScopeSpec::Prefix(format!("{REGISTRY}/{REPO}"))),
+            builder: None,
+            signers: vec![
+                crate::trust::SignerSpec::Keyless(crate::trust::KeylessMatcher {
+                    identity: Some(GOLDEN_IDENTITY.into()),
+                    identity_regexp: None,
+                    oidc_issuer: Some(GOLDEN_ISSUER.into()),
+                }),
+                crate::trust::SignerSpec::Key(crate::trust::KeyMatcher {
+                    key: None,
+                    key_pem: Some(GOLDEN_PUBLIC_KEY_PEM.to_string()),
+                }),
+            ],
+            system_locked: false,
+        };
+
+        let build_manager = |data: StubTransportData| {
+            let file_structure = FileStructure::with_root(root.path().to_path_buf());
+            let index = Index::from_chained(
+                LocalIndex::new(LocalConfig {
+                    index_store: file_structure.index.clone(),
+                }),
+                vec![Index::from_impl(GoldenSubjectIndex {
+                    digest: subject.clone(),
+                })],
+                ChainMode::Default,
+            );
+            let auto_verify = AutoVerify::new(AutoVerifyInput {
+                operator_policies: vec![policy.clone()],
+                project_policies: Vec::new(),
+                registry_client: oci::Client::with_transport(Box::new(StubTransport::new(data))),
+                rekor_url: Url::parse("http://127.0.0.1:3000").unwrap(),
+                // The trust services are never dialled: the committed root pins
+                // the Rekor key, which is what makes this test hermetic.
+                offline: true,
+                state: StateStore::new(root.path().join("state")),
+                trusted_root_env: Some(trusted_root_path.clone()),
+                sigstore_trust: None,
+                home_trusted_root: None,
+                user_opted_out: false,
+            });
+            PackageManager::new(file_structure, index, None, REGISTRY).with_auto_verify(Some(auto_verify))
+        };
+
+        fn manifest_pulls(data: &StubTransportData) -> usize {
+            data.read()
+                .calls
+                .iter()
+                .filter(|call| *call == "pull_manifest_raw")
+                .count()
+        }
+
+        let hot_path = seed();
+        build_manager(hot_path.clone())
+            .maybe_auto_verify(&target)
+            .await
+            .expect("the subject is signed by a covered identity");
+        // One subject manifest + exactly one referrer manifest.
+        assert_eq!(
+            manifest_pulls(&hot_path),
+            2,
+            "auto-verify must stop at the first candidate that passes, got: {:?}",
+            hot_path.read().calls,
+        );
+
+        // The control: the same two candidates under `report_all` do get
+        // examined, so the count above is a property of the arity and not of a
+        // seed that could only ever produce one candidate.
+        let reporting = seed();
+        let manager = build_manager(reporting.clone());
+        let state = StateStore::new(root.path().join("state"));
+        let trust_root = crate::oci::verify::TrustRoot::load_trusted_root_json(GOLDEN_TRUSTED_ROOT.as_bytes())
+            .expect("the committed trust root loads");
+        let policies = crate::trust::resolve_tiered(&[policy], &[], &format!("{REGISTRY}/{REPO}")).unwrap();
+        let rekor_url = Url::parse("http://127.0.0.1:3000").unwrap();
+        let client = oci::Client::with_transport(Box::new(StubTransport::new(reporting.clone())));
+        let report = manager
+            .verify_one(
+                &target,
+                None,
+                VerifyOptions {
+                    policies: &policies,
+                    client: &client,
+                    trust_root: &trust_root,
+                    rekor_url: &rekor_url,
+                    offline: true,
+                    state: &state,
+                    no_cache: false,
+                    content: VerifyContentMode::Signature,
+                    signature_format: None,
+                    allow_unlogged_signature: false,
+                    report_all: true,
+                },
+            )
+            .await
+            .expect("both golden signatures verify");
+        assert_eq!(report.signatures.len(), 2, "report_all lists both signatures");
+        assert_eq!(
+            manifest_pulls(&reporting),
+            3,
+            "report_all must pull both referrer manifests, got: {:?}",
+            reporting.read().calls,
+        );
     }
 }

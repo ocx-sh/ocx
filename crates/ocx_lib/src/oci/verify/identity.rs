@@ -89,21 +89,118 @@ pub fn matching_policies<'a>(
     let mut matched = Vec::new();
     let mut any_identity_matched = false;
     for policy in policies {
-        // Irrefutable while `Keyless` is the only backend, and deliberately
-        // written as a destructure rather than an accessor: a key-based backend
-        // must break this function, which matches a Fulcio certificate and
-        // could not verify a key signature by falling through.
-        let PolicyBackend::Keyless(keyless) = &policy.backend;
-        let identity_ok = san.as_deref().is_some_and(|san| keyless.identity.matches(san));
-        let issuer_ok = issuer.as_deref() == Some(keyless.issuer.as_str());
-        if identity_ok && issuer_ok {
+        // A policy's `backends` are an ANY-of set, so one satisfied keyless
+        // signer admits the policy. A `Key` backend contributes nothing here and
+        // must not: this function matches a Fulcio certificate, and a key
+        // signature carries none — so a policy whose signers are all
+        // `kind = "key"` never matches a keyless artifact, which is spec D5's
+        // rule falling out of the type rather than being restated.
+        //
+        // Exhaustive on purpose: a third `PolicyBackend` variant has to break
+        // this match rather than silently fall through as "not a keyless match".
+        let mut policy_matched = false;
+        for backend in &policy.backends {
+            let keyless = match backend {
+                PolicyBackend::Keyless(keyless) => keyless,
+                PolicyBackend::Key(_) => continue,
+            };
+            let identity_ok = san.as_deref().is_some_and(|san| keyless.identity.matches(san));
+            any_identity_matched |= identity_ok;
+            policy_matched |= identity_ok && issuer.as_deref() == Some(keyless.issuer.as_str());
+        }
+        if policy_matched {
             matched.push(policy);
         }
-        any_identity_matched |= identity_ok;
     }
     if matched.is_empty() {
         return Err(if any_identity_matched {
             VerifyErrorKind::IssuerMismatch
+        } else {
+            VerifyErrorKind::IdentityMismatch
+        });
+    }
+    Ok(matched)
+}
+
+/// Verify a signature against an ANY-of set of compiled trust policies,
+/// returning every policy whose pinned public key produced it.
+///
+/// The key-mode twin of [`matching_policies`], and a separate function rather
+/// than a branch inside it on purpose: that one is handed a certificate, this
+/// one a message and a signature, and one function taking both would have to
+/// accept a call shape in which half its arguments mean nothing.
+///
+/// `message` is the bytes the signature covers, and never the base64 text of
+/// them. Which bytes those are is the caller's wire shape, not a constant: the
+/// DSSE Pre-Authentication Encoding ([`crate::oci::attest::dsse::pae`]) on the
+/// bundle path, and the raw simplesigning payload exactly as the registry
+/// served it on the sidecar path — cosign signs those bytes directly, with no
+/// PAE wrapper around them.
+///
+/// # Which refusal, and why it is not the identity one
+///
+/// A signature no policy key verifies is either "signed by a key nobody here
+/// trusts" or "trusted key, tampered signature". A verifier holding only public
+/// keys cannot distinguish them — both are `verify_signature` returning an error
+/// for every key it has. Both therefore land on
+/// [`VerifyErrorKind::SignatureInvalid`] (exit 65), whose rendering ("signature
+/// verification failed") is the one sentence true of both readings: at least one
+/// trusted key was tried and none accepted these bytes.
+///
+/// [`VerifyErrorKind::IdentityMismatch`] (exit 77) was the older answer and was
+/// wrong twice over. It renders as "certificate identity mismatch" on a path
+/// that carries no certificate and reads no identity, so it names material that
+/// does not exist; and it hides a bad signature from every caller scripting 65
+/// as "this artifact did not verify", handing them a permissions code they
+/// cannot act on.
+///
+/// # The one case that IS about identity
+///
+/// A policy set carrying no [`PolicyBackend::Key`] at all — every signer is
+/// `kind = "keyless"` — never even reaches `verify_signature`. Nothing was
+/// measured about the signature there, so reporting it invalid would assert a
+/// corruption never observed; the refusal is
+/// [`VerifyErrorKind::IdentityMismatch`], which is the honest verdict: this
+/// artifact is key-signed and nobody here trusts a key. That is spec D5's
+/// direction for a certificate ([`matching_policies`]) mirrored, and it is
+/// decided on the policy set rather than on the verification outcome so the two
+/// answers cannot blur into one.
+///
+/// # Errors
+///
+/// [`VerifyErrorKind::SignatureInvalid`] when at least one policy key was tried
+/// and none verified the signature; [`VerifyErrorKind::IdentityMismatch`] when
+/// the policy set names no key at all. Never any other kind: there is no
+/// material here that could be malformed in a way worth a distinct code.
+pub(crate) fn matching_key_policies<'a>(
+    message: &[u8],
+    signature: &[u8],
+    policies: &'a [crate::trust::CompiledPolicy],
+) -> Result<Vec<&'a crate::trust::CompiledPolicy>, VerifyErrorKind> {
+    let mut matched = Vec::new();
+    let mut any_key_tried = false;
+    for policy in policies {
+        // Exhaustive for the same reason the sibling function's match is: a
+        // third `PolicyBackend` variant must break this match rather than
+        // silently fall through as "not a key match".
+        let mut policy_matched = false;
+        for backend in &policy.backends {
+            let key = match backend {
+                PolicyBackend::Key(key) => key,
+                PolicyBackend::Keyless(_) => continue,
+            };
+            any_key_tried = true;
+            policy_matched |= key
+                .verify_signature(sigstore::crypto::Signature::Raw(signature), message)
+                .is_ok();
+        }
+        if policy_matched {
+            matched.push(policy);
+        }
+    }
+    if matched.is_empty() {
+        return Err(if any_key_tried {
+            VerifyErrorKind::SignatureInvalid
         } else {
             VerifyErrorKind::IdentityMismatch
         });
@@ -176,5 +273,157 @@ mod tests {
         let parsed =
             x509_cert::der::asn1::Utf8StringRef::from_der(V2_DER).expect("the v2 (.1.8) encoding is a DER UTF8String");
         assert_eq!(parsed.as_str(), "http://dex:5556/dex");
+    }
+
+    // ── Backend sets (WP9a) ──────────────────────────────────────────────────
+
+    /// The real Fulcio leaf G0 captured: SAN `ocx-test@example.com`, issuer
+    /// `http://dex:5556/dex`. Used rather than a synthesized certificate so the
+    /// assertions below are about policy matching, not about cert construction.
+    const GOLDEN_KEYLESS_BUNDLE: &str = include_str!("../../../../../test/tests/fixtures/golden/keyless_bundle.json");
+    const GOLDEN_IDENTITY: &str = "ocx-test@example.com";
+    const GOLDEN_ISSUER: &str = "http://dex:5556/dex";
+
+    fn golden_leaf_der() -> Vec<u8> {
+        use base64::Engine as _;
+
+        let bundle: serde_json::Value =
+            serde_json::from_str(GOLDEN_KEYLESS_BUNDLE).expect("the golden keyless bundle is JSON");
+        base64::engine::general_purpose::STANDARD
+            .decode(
+                bundle["verificationMaterial"]["certificate"]["rawBytes"]
+                    .as_str()
+                    .expect("the bundle carries a leaf certificate"),
+            )
+            .expect("the leaf certificate is base64")
+    }
+
+    /// A compiled key backend over the golden public key — the artifact-side
+    /// half a certificate can never satisfy.
+    fn key_backend() -> crate::trust::PolicyBackend {
+        const GOLDEN_PUBLIC_KEY_PEM: &str = include_str!("../../../../../test/tests/fixtures/golden/keys/cosign.pub");
+        crate::trust::PolicyBackend::Key(
+            sigstore::crypto::CosignVerificationKey::try_from_pem(GOLDEN_PUBLIC_KEY_PEM.as_bytes())
+                .expect("cosign.pub is an SPKI PEM"),
+        )
+    }
+
+    fn keyless_backend(identity: &str, issuer: &str) -> crate::trust::PolicyBackend {
+        crate::trust::PolicyBackend::Keyless(crate::trust::CompiledKeyless {
+            identity: crate::trust::IdentityRule::Exact(identity.to_string()),
+            issuer: issuer.to_string(),
+        })
+    }
+
+    /// **Spec D5, falling out of the type rather than being restated.** A policy
+    /// whose signers are all `kind = "key"` names nobody who signs with a
+    /// certificate, so a keyless artifact must not match it — a key backend
+    /// contributes nothing here and must never be read as "no objection".
+    #[test]
+    fn a_key_only_policy_never_matches_a_certificate() {
+        let policies = [crate::trust::CompiledPolicy {
+            builder: None,
+            backends: vec![key_backend()],
+        }];
+        let error = matching_policies(&golden_leaf_der(), &policies)
+            .expect_err("a key signer cannot admit a keyless signature");
+        assert!(matches!(error, VerifyErrorKind::IdentityMismatch), "got {error:?}");
+    }
+
+    /// The mixed policy is the migration shape, and its keyless half must still
+    /// admit a keyless artifact — otherwise adding a key signer would *narrow*
+    /// acceptance, which is the opposite of what an ANY-of set does.
+    #[test]
+    fn a_mixed_policy_matches_on_its_keyless_half() {
+        let policies = [crate::trust::CompiledPolicy {
+            builder: None,
+            backends: vec![key_backend(), keyless_backend(GOLDEN_IDENTITY, GOLDEN_ISSUER)],
+        }];
+        let matched = matching_policies(&golden_leaf_der(), &policies).expect("the keyless signer matches");
+        assert_eq!(matched.len(), 1);
+    }
+
+    /// Adding a signer widens: a policy whose *second* keyless entry matches is
+    /// admitted, even though its first does not. A first-entry-only reading
+    /// would silently drop every rotation window.
+    #[test]
+    fn a_later_signer_in_the_set_can_admit_the_policy() {
+        let policies = [crate::trust::CompiledPolicy {
+            builder: None,
+            backends: vec![
+                keyless_backend("someone-else@example.com", GOLDEN_ISSUER),
+                keyless_backend(GOLDEN_IDENTITY, GOLDEN_ISSUER),
+            ],
+        }];
+        assert_eq!(
+            matching_policies(&golden_leaf_der(), &policies)
+                .expect("the second signer matches")
+                .len(),
+            1
+        );
+    }
+
+    /// The two refusals still have to be told apart across a backend *set*: a
+    /// matching identity under the wrong issuer is `IssuerMismatch`, an
+    /// unmatched identity is `IdentityMismatch`. Collapsing them would lose the
+    /// only signal that says "your policy is right, the issuer moved".
+    #[test]
+    fn identity_and_issuer_mismatches_stay_distinguishable_across_a_set() {
+        let wrong_issuer = [crate::trust::CompiledPolicy {
+            builder: None,
+            backends: vec![
+                key_backend(),
+                keyless_backend(GOLDEN_IDENTITY, "https://elsewhere.example"),
+            ],
+        }];
+        assert!(matches!(
+            matching_policies(&golden_leaf_der(), &wrong_issuer),
+            Err(VerifyErrorKind::IssuerMismatch)
+        ));
+
+        let wrong_identity = [crate::trust::CompiledPolicy {
+            builder: None,
+            backends: vec![keyless_backend("nobody@example.com", GOLDEN_ISSUER)],
+        }];
+        assert!(matches!(
+            matching_policies(&golden_leaf_der(), &wrong_identity),
+            Err(VerifyErrorKind::IdentityMismatch)
+        ));
+    }
+
+    /// The key-mode refusal is about the **signature**, not about an identity
+    /// this path never reads. A trusted key was tried and did not accept these
+    /// bytes, which is exit 65 — "certificate identity mismatch" would name
+    /// material a key signature does not carry, and would hide a bad signature
+    /// from every caller scripting 65.
+    ///
+    /// Asserted beside its sibling below rather than alone: the two arms are
+    /// one decision, and a test for either one on its own passes just as well
+    /// against a function that always answers that arm.
+    #[test]
+    fn a_tried_key_that_does_not_verify_is_a_signature_failure() {
+        let policies = [crate::trust::CompiledPolicy {
+            builder: None,
+            backends: vec![key_backend()],
+        }];
+        let error = matching_key_policies(b"the signed message", b"not a signature", &policies)
+            .expect_err("a garbage signature verifies under no key");
+        assert!(matches!(error, VerifyErrorKind::SignatureInvalid), "got {error:?}");
+    }
+
+    /// Spec D5 in the key direction: a policy set naming only keyless signers
+    /// never reaches `verify_signature`, so nothing was measured about the
+    /// signature and calling it invalid would assert a corruption never
+    /// observed. The verdict is the identity one, and it is decided on the
+    /// policy set rather than on a verification outcome.
+    #[test]
+    fn a_keyless_only_policy_set_refuses_a_key_signature_as_an_identity_mismatch() {
+        let policies = [crate::trust::CompiledPolicy {
+            builder: None,
+            backends: vec![keyless_backend(GOLDEN_IDENTITY, GOLDEN_ISSUER)],
+        }];
+        let error = matching_key_policies(b"the signed message", b"not a signature", &policies)
+            .expect_err("a keyless-only policy admits no key signature");
+        assert!(matches!(error, VerifyErrorKind::IdentityMismatch), "got {error:?}");
     }
 }

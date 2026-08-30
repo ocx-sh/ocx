@@ -165,7 +165,7 @@ mod tests {
     use crate::oci::client::test_transport::{StubTransport, StubTransportData};
 
     /// D7 at the DERIVED listing boundary. This is the site where a
-    /// `sha256.<hex>` tag actually enters — `ocx package push` writes one per
+    /// `__ocx.keep.<algorithm>-<hex>` tag actually enters — `ocx package push` writes one per
     /// platform manifest by default — and it also seeds the tag cache, so a
     /// missed filter here poisons the cache for the rest of the invocation.
     #[tokio::test]
@@ -176,7 +176,7 @@ mod tests {
             "latest".to_string(),
             "__ocx.desc".to_string(),
             "__OCX.future".to_string(),
-            format!("sha256.{}", "a".repeat(64)),
+            format!("__ocx.keep.sha256-{}", "a".repeat(64)),
         ]];
         let index = OciIndex::new(OciIndexConfig {
             client: oci::Client::with_transport(Box::new(StubTransport::new(data))),

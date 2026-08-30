@@ -31,10 +31,12 @@ use ocx_lib::Error as LibError;
 use ocx_lib::oci;
 use ocx_lib::oci::attest::MAX_PREDICATE_FILE_BYTES;
 use ocx_lib::oci::endpoint::{Url, validate_sigstore_url};
-use ocx_lib::oci::sign::{SignError, SignErrorKind};
+use ocx_lib::oci::sign::{KeyRef, SignError, SignErrorKind};
 use ocx_lib::oci::verify::{TrustRoot, VerifyError, VerifyErrorKind};
 use ocx_lib::package_manager::error::{PackageError, PackageErrorKind};
 use ocx_lib::trust::{self, CompiledPolicy};
+
+use crate::api::data::signature::{SignatureLegReport, SignatureReport};
 
 /// Refuse a sign-side operation when the run is offline.
 ///
@@ -54,6 +56,21 @@ pub(super) fn refuse_when_offline(
         return Err(anyhow::Error::from(SignError::new(identifier.clone(), kind)));
     }
     Ok(())
+}
+
+/// The basename of a credential path, for an error message.
+///
+/// `--identity-token-file` names a secret's location, and the full path leaks
+/// through stderr, the JSON error envelope and any log sink (CWE-209).
+/// [`SignErrorKind::IdentityTokenFilePermissive`] already renders only this
+/// half, and the I/O failures beside it must not render more — which is why
+/// the reads in [`resolve_override_token`] are typed through `file_error` with
+/// *this* rather than with the path itself. Typing them at all is what turns an
+/// operator's typo into exit 74 instead of exit 1 `internal`.
+#[cfg(unix)]
+fn redacted_token_path(path: &std::path::Path) -> std::path::PathBuf {
+    path.file_name()
+        .map_or_else(|| std::path::PathBuf::from("<redacted>"), std::path::PathBuf::from)
 }
 
 /// Resolve the override OIDC token per C-S1-4 precedence.
@@ -150,10 +167,19 @@ pub(super) async fn resolve_override_token(
                                 },
                             ))
                         } else {
-                            anyhow::Error::new(e).context("failed to open --identity-token-file")
+                            // Typed, so an operator's typo exits 74 rather than
+                            // falling through the downcast ladder to exit 1
+                            // `internal` — a missing token file reported as a bug
+                            // in ocx. The basename only: the CWE-209 note above is
+                            // not relaxed, it is honoured by what is handed in.
+                            anyhow::Error::new(ocx_lib::error::file_error(redacted_token_path(&path_owned), e))
+                                .context("failed to open --identity-token-file")
                         }
                     })?;
-                let meta = std_file.metadata().context("failed to stat --identity-token-file")?;
+                let meta = std_file
+                    .metadata()
+                    .map_err(|e| ocx_lib::error::file_error(redacted_token_path(&path_owned), e))
+                    .context("failed to stat --identity-token-file")?;
                 // CWE-732: reject token files not owned by the effective
                 // user. A file writable by another uid could have been
                 // swapped to malicious content even with 0600 perms (e.g.
@@ -186,6 +212,7 @@ pub(super) async fn resolve_override_token(
             let mut raw = Zeroizing::new(String::new());
             file.read_to_string(&mut raw)
                 .await
+                .map_err(|e| ocx_lib::error::file_error(redacted_token_path(path), e))
                 .context("failed to read --identity-token-file")?;
             return Ok(Some(Zeroizing::new(raw.trim().to_string())));
         }
@@ -349,14 +376,25 @@ pub(super) fn iso8601(epoch_secs: u64) -> String {
 /// authoritative; the project `ocx.toml` only adds trust where the operator
 /// has not governed the scope (see [`trust::resolve_tiered`]). A malformed
 /// matched policy → [`VerifyErrorKind::TrustPolicyInvalid`] (exit 78); no
-/// matching policy → [`VerifyErrorKind::NoIdentityProvided`] (exit 64).
+/// matching policy → [`VerifyErrorKind::NoIdentityProvided`] (exit 64). The
+/// one carve-out is a signer whose `key` names a file that cannot be read: that is a
+/// filesystem failure on an operator-supplied path, so it exits 74 `io_error`
+/// like the `--key` sign door, not 78.
+///
+/// Key mode (`key`) short-circuits both: a `--key` reference names the one
+/// public key that may have signed, so no keyless matcher is consulted. The
+/// parameter is inert here — every caller passes `None`, and loop D supplies
+/// it from [`KeyOpt::reference`](crate::options::key::KeyOpt::reference) in
+/// its own command files, so this shared leaf is not edited again.
 pub(super) async fn resolve_policies(
     context: &crate::app::Context,
     identifier: &oci::Identifier,
     certificate_identity: Option<&str>,
     certificate_oidc_issuer: Option<&str>,
+    key: Option<&KeyRef>,
 ) -> anyhow::Result<Vec<CompiledPolicy>> {
-    let compiled = resolve_policies_lenient(context, identifier, certificate_identity, certificate_oidc_issuer).await?;
+    let compiled =
+        resolve_policies_lenient(context, identifier, certificate_identity, certificate_oidc_issuer, key).await?;
     if compiled.is_empty() {
         return Err(VerifyError::new(identifier.clone(), VerifyErrorKind::NoIdentityProvided).into());
     }
@@ -373,18 +411,34 @@ pub(super) async fn resolve_policies(
 /// "you demanded verification and named nothing to verify against" (exit 64).
 /// One resolution, two readings — the alternative is a second copy of the
 /// tiered-precedence walk that drifts on the first fix.
+///
+/// `key` never widens the empty set the split is about: key mode returns
+/// exactly one policy or an error, so both readings stay reachable only
+/// through the keyless path they were written for.
 pub(super) async fn resolve_policies_lenient(
     context: &crate::app::Context,
     identifier: &oci::Identifier,
     certificate_identity: Option<&str>,
     certificate_oidc_issuer: Option<&str>,
+    key: Option<&KeyRef>,
 ) -> anyhow::Result<Vec<CompiledPolicy>> {
+    // Key mode pins a single public key and never consults a keyless matcher,
+    // so it decides ahead of the flag pair. The keyless certificate flags are
+    // refused by clap (`conflicts_with = "key"`) on each command that carries
+    // both groups, so reaching here with a key *and* a flag pair is not a
+    // reachable invocation.
+    if let Some(key) = key {
+        let policy = trust::compile_key_signer(key)
+            .map_err(|kind| VerifyError::new(identifier.clone(), VerifyErrorKind::from(kind)))?;
+        return Ok(vec![policy]);
+    }
+
     if let (Some(identity), Some(issuer)) = (certificate_identity, certificate_oidc_issuer) {
         return Ok(vec![CompiledPolicy::exact(identity.to_owned(), issuer.to_owned())]);
     }
 
     let target = format!("{}/{}", identifier.registry(), identifier.repository());
-    let project_policies = project_trust_policies(context).await?;
+    let project_policies = project_trust_policies(context, identifier).await?;
     // Operator tier (config.toml) is authoritative; the project ocx.toml
     // only adds trust for scopes the operator has not governed.
     trust::resolve_tiered(context.config_trust_policies(), &project_policies, &target)
@@ -395,7 +449,10 @@ pub(super) async fn resolve_policies_lenient(
 /// when no project file resolves). This is the deliberate OCI-tier carve-out
 /// for a security concern — verify reads `[[trust.policy]]` from `ocx.toml`,
 /// which OCI-tier commands otherwise never consult (see `adr_trust_policy.md`).
-async fn project_trust_policies(context: &crate::app::Context) -> anyhow::Result<Vec<trust::TrustPolicy>> {
+async fn project_trust_policies(
+    context: &crate::app::Context,
+    identifier: &oci::Identifier,
+) -> anyhow::Result<Vec<trust::TrustPolicy>> {
     // A missing/inaccessible CWD is non-fatal: `ProjectConfig::resolve` still
     // honors an explicit `--project` / `OCX_PROJECT`, and with no project file
     // resolved the trust-policy set is simply empty (flag-mode verify works).
@@ -415,8 +472,18 @@ async fn project_trust_policies(context: &crate::app::Context) -> anyhow::Result
             // matters here (the OCI-tier carve-out is scoped to trust policy).
             let text = tokio::fs::read_to_string(&config_path)
                 .await
+                .map_err(|error| ocx_lib::error::file_error(&config_path, error))
                 .with_context(|| format!("reading project config `{}` for trust policies", config_path.display()))?;
-            Ok(trust::policies_from_ocx_toml(&text)?)
+            // Anchored on the project file's own directory, like every other
+            // tier: a relative key path must name the same file whether
+            // verify runs from the project root or a subdirectory.
+            let config_dir = config_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+            // Mapped, never bubbled: `TrustPolicyError` has no rung in the
+            // downcast ladder, so a bare `?` here exits 1 `internal` for an
+            // operator's malformed `ocx.toml`. The same wrapper every other
+            // trust-policy refusal on this path already goes through.
+            trust::policies_from_ocx_toml(&text, config_dir)
+                .map_err(|kind| VerifyError::new(identifier.clone(), VerifyErrorKind::TrustPolicyInvalid(kind)).into())
         }
         None => Ok(Vec::new()),
     }
@@ -597,13 +664,27 @@ async fn open_predicate(path: &Path) -> anyhow::Result<tokio::fs::File> {
 /// rendered, so the value a script reads here is the value it reads there —
 /// two spellings of one failure is exactly what CLI-04 exists to stop.
 pub(super) fn failed_outcome(err: &anyhow::Error) -> crate::api::data::push::AttestationOutcome {
-    let envelope = crate::error_envelope::render_error_envelope("package attest", err)
+    crate::api::data::push::AttestationOutcome::Failed {
+        kind: error_slug("package attest", err),
+        // Registry-sourced names and tags reach an error chain verbatim
+        // (CWE-150), and this string is rendered to a terminal.
+        message: crate::api::data::sanitize_for_terminal(&format!("{err:#}")),
+    }
+}
+
+/// The slug the JSON error envelope would give `err`, for a report that has to
+/// name a failure it survived.
+///
+/// `error.detail` is the per-variant slug and `error.kind` the frozen category
+/// it rolls up to; `detail` is absent for errors outside the sign/verify
+/// taxonomy, and the category is then the most specific thing there is. Lifting
+/// it out of the rendered envelope rather than re-deriving it is the point:
+/// two spellings of one failure is exactly what CLI-04 exists to stop, and a
+/// `--tags` sweep reports per-tag failures the envelope never gets to render.
+pub(super) fn error_slug(command: &str, err: &anyhow::Error) -> String {
+    crate::error_envelope::render_error_envelope(command, err)
         .ok()
-        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok());
-    // `detail` is the per-variant slug and `kind` the frozen category it rolls
-    // up to; `detail` is absent for errors outside the sign/verify taxonomy,
-    // and the category is then the most specific thing there is.
-    let kind = envelope
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
         .as_ref()
         .and_then(|value| {
             value["error"]["detail"]
@@ -611,12 +692,46 @@ pub(super) fn failed_outcome(err: &anyhow::Error) -> crate::api::data::push::Att
                 .or_else(|| value["error"]["kind"].as_str())
         })
         .unwrap_or("failure")
-        .to_owned();
-    crate::api::data::push::AttestationOutcome::Failed {
-        kind,
-        // Registry-sourced names and tags reach an error chain verbatim
-        // (CWE-150), and this string is rendered to a terminal.
-        message: crate::api::data::sanitize_for_terminal(&format!("{err:#}")),
+        .to_owned()
+}
+
+/// The frozen `error.kind` category a leg failure rolls up to, as the wire
+/// spells it.
+///
+/// A failed *leg* never reaches the error envelope — its run returned `Ok` —
+/// so there is no rendered `error.detail` to lift. The category is then the
+/// most specific thing there is, and it is the same fallback
+/// [`error_slug`] takes for errors outside the sign and verify taxonomies, so
+/// a sweep's rows carry one vocabulary either way.
+pub(super) fn category_slug(code: ocx_lib::cli::ExitCode) -> String {
+    serde_json::to_value(ocx_lib::cli::ErrorCategory::from_exit_code(code))
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "failure".to_string())
+}
+
+/// The exit code a `--tags` / `--tags-file` sweep returns.
+///
+/// * No failure -> `Success`.
+/// * Every failure the same code -> that code. A twenty-tag sweep that hit one
+///   fault (every tag 401, say) is scriptably that one fault, and flattening it
+///   to a generic failure would throw away the only thing `case $?` could act
+///   on.
+/// * A mix -> `Failure`. There is no true single answer, and picking the first
+///   or the worst would claim a fault class the run did not have. `Failure` is
+///   defined as "use only when no specific code applies", which is exactly the
+///   state a mixed sweep is in. The per-tag codes stay readable in the report.
+///
+/// No new [`ExitCode`](ocx_lib::cli::ExitCode) variant: every answer here is
+/// one a script already knows.
+pub(super) fn sweep_exit_code(failures: &[ocx_lib::cli::ExitCode]) -> ocx_lib::cli::ExitCode {
+    let mut codes = failures.iter();
+    let Some(first) = codes.next() else {
+        return ocx_lib::cli::ExitCode::Success;
+    };
+    match codes.all(|code| code == first) {
+        true => *first,
+        false => ocx_lib::cli::ExitCode::Failure,
     }
 }
 
@@ -635,6 +750,93 @@ pub(super) fn attest_error_into_anyhow(err: PackageError) -> anyhow::Error {
     match err.kind {
         PackageErrorKind::Internal(LibError::Sign(sign_error)) => anyhow::Error::new(*sign_error),
         kind => anyhow::Error::new(kind),
+    }
+}
+
+/// Build the per-reference report from one pipeline result.
+///
+/// Shared by the single-reference path and the sweep, so a swept tag's row
+/// carries the same document a single run prints — the sweep aggregates the
+/// existing report rather than modelling a second one.
+pub(super) fn signature_report(
+    identifier: &oci::Identifier,
+    platform: Option<&oci::Platform>,
+    result: ocx_lib::oci::sign::SignResult,
+) -> SignatureReport {
+    let legs = result
+        .legs
+        .iter()
+        .map(|leg| match &leg.outcome {
+            Ok(digests) => SignatureLegReport {
+                format: leg.format,
+                payload_digest: Some(digests.payload_digest.clone()),
+                manifest_digest: Some(digests.manifest_digest.clone()),
+                error: None,
+            },
+            Err(error) => SignatureLegReport {
+                format: leg.format,
+                payload_digest: None,
+                manifest_digest: None,
+                error: Some(error.to_string()),
+            },
+        })
+        .collect();
+
+    SignatureReport::new(
+        identifier.to_string(),
+        result.subject_digest,
+        legs,
+        platform,
+        result.certificate_identity,
+        result.certificate_oidc_issuer,
+    )
+    .with_key_model(result.key_backend, result.public_key_hint)
+    .with_transparency_log(result.transparency_log_index)
+}
+
+/// The exit code one failed leg deserves, walking an `Internal` cause exactly
+/// the way [`SignError::classify`](ocx_lib::oci::sign::SignError::classify) does for a whole-run failure.
+///
+/// `SignErrorKind::exit_code` answers `Failure` (1) for `Internal`, and every
+/// registry fault reaches a leg wrapped in `Internal` (`referrers::map_client_error`
+/// keeps the `ClientError` intact under it rather than flattening it). Reading
+/// the kind directly would exit 1 for a 503 that exits 75 when it fails the run
+/// as a whole — the same fault, two codes, decided by how many legs it hit.
+pub(super) fn leg_exit_code(kind: &ocx_lib::oci::sign::SignErrorKind) -> ocx_lib::cli::ExitCode {
+    match kind {
+        ocx_lib::oci::sign::SignErrorKind::Internal(cause) => ocx_lib::cli::classify_error(cause.as_ref()),
+        other => ocx_lib::cli::ClassifyErrorKind::exit_code(other),
+    }
+}
+
+#[cfg(test)]
+mod leg_exit_code_tests {
+    use super::leg_exit_code;
+    use ocx_lib::cli::ExitCode;
+    use ocx_lib::oci::client::error::ClientError;
+    use ocx_lib::oci::sign::SignErrorKind;
+
+    /// A leg that failed on a registry fault must exit the way the same fault
+    /// exits when it fails the whole run.
+    ///
+    /// `SignErrorKind::exit_code` answers `Failure` (1) for `Internal`, which is
+    /// how every registry fault reaches a leg — `referrers::map_client_error`
+    /// keeps the `ClientError` intact under it rather than flattening it. Read
+    /// directly, a 503 that fails one leg would exit 1 and a 503 that fails both
+    /// would exit 75: the same fault, two codes, decided by arithmetic on legs.
+    #[test]
+    fn a_failed_leg_takes_the_exit_code_of_the_cause_it_wraps() {
+        let transient = SignErrorKind::Internal(Box::new(ClientError::RegistryTransient("503".into())));
+        assert_eq!(leg_exit_code(&transient), ExitCode::TempFail);
+    }
+
+    /// A kind that classifies itself still answers for itself.
+    #[test]
+    fn a_leg_failing_on_a_sign_side_kind_keeps_that_kinds_code() {
+        assert_eq!(
+            leg_exit_code(&SignErrorKind::ReferrersUnsupported),
+            ExitCode::ReferrersUnsupported
+        );
     }
 }
 
@@ -1185,5 +1387,68 @@ mod tests {
         };
         let parsed = envelope(&err);
         assert_eq!(parsed["exit_code"], 74, "envelope was {parsed}");
+    }
+}
+
+#[cfg(test)]
+mod sweep_exit_code_tests {
+    //! Which code a partially-failed `--tags` / `--tags-file` sweep returns.
+
+    use super::sweep_exit_code;
+    use ocx_lib::cli::ExitCode;
+
+    /// Nothing failed, so nothing is reported as failing. The sweep's own
+    /// skips (a tag resolving to a bare manifest) never reach here — they are
+    /// not failures.
+    #[test]
+    fn a_sweep_with_no_failures_succeeds() {
+        assert_eq!(sweep_exit_code(&[]), ExitCode::Success);
+    }
+
+    /// One fault across twenty tags stays scriptable as that one fault.
+    /// Flattening it to `Failure` would throw away the only thing `case $?`
+    /// could act on.
+    #[test]
+    fn failures_that_agree_keep_their_own_code() {
+        assert_eq!(sweep_exit_code(&[ExitCode::AuthError]), ExitCode::AuthError);
+        assert_eq!(
+            sweep_exit_code(&[ExitCode::NotFound, ExitCode::NotFound, ExitCode::NotFound]),
+            ExitCode::NotFound,
+        );
+    }
+
+    /// A mix has no true single answer. Picking the first, or the worst, would
+    /// claim a fault class the run did not have; `Failure` is defined as "use
+    /// only when no specific code applies", which is exactly this state.
+    #[test]
+    fn failures_that_disagree_fall_back_to_the_generic_failure() {
+        assert_eq!(
+            sweep_exit_code(&[ExitCode::NotFound, ExitCode::AuthError]),
+            ExitCode::Failure,
+        );
+        // Order does not decide it: neither the first nor the last wins.
+        assert_eq!(
+            sweep_exit_code(&[ExitCode::AuthError, ExitCode::NotFound]),
+            ExitCode::Failure,
+        );
+        // Nor does a majority.
+        assert_eq!(
+            sweep_exit_code(&[ExitCode::NotFound, ExitCode::NotFound, ExitCode::TempFail]),
+            ExitCode::Failure,
+        );
+    }
+
+    /// The slug a leg failure carries is the wire spelling of its category, so
+    /// a sweep's rows read in the same vocabulary as an error envelope.
+    #[test]
+    fn a_leg_failures_slug_is_the_wire_spelling_of_its_category() {
+        assert_eq!(super::category_slug(ExitCode::AuthError), "auth_error");
+        assert_eq!(
+            super::category_slug(ExitCode::ReferrersUnsupported),
+            "referrers_unsupported"
+        );
+        // `Failure` has no category of its own; it rolls up to `internal`,
+        // which is what the envelope would print for it too.
+        assert_eq!(super::category_slug(ExitCode::Failure), "internal");
     }
 }

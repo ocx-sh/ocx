@@ -1,6 +1,35 @@
+# Cap concurrent test binaries so a unit-test run cannot become the memory
+# spike that a parallel-agent session cannot absorb. Each test binary in this
+# workspace is large, and nextest's default (one thread per core) multiplies
+# that by the core count -- on a many-core, 32 GB machine that is the wrong
+# side of the trade.
+#
+# CI overrides with `NEXTEST_TEST_THREADS` or `--test-threads`.
+[profile.default]
+test-threads = 8
+
 [profile.ci]
 default-filter = "all()"
 fail-fast = false
+# CI gets a dedicated runner and no sibling worktrees, so let it use the box.
+test-threads = "num-cpus"
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# The `live_*` shell tests each spawn a real `pwsh`, and concurrent .NET
+# process starts corrupt each other's assembly loading on this box: the loader
+# aborts with SIGABRT on a mangled name (`PublicKeyToken=b0<garbage>` for
+# System.Collections.Specialized). Serialising just these keeps a green run
+# green -- 31/31 pass at `--test-threads=1`, 4 fail at 8. The rest of the suite
+# keeps the profile's thread count.
+[test-groups.live-shell]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'test(shell::tests::live_)'
+test-group = 'live-shell'
+
+[[profile.ci.overrides]]
+filter = 'test(shell::tests::live_)'
+test-group = 'live-shell'

@@ -158,6 +158,7 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
     // ── Step 1: Read + validate the descriptor file. ──
     let descriptor_bytes = tokio::fs::read(&args.descriptor)
         .await
+        .map_err(|error| ocx_lib::error::file_error(&args.descriptor, error))
         .with_context(|| format!("reading descriptor file {}", args.descriptor.display()))?;
     let descriptor = ocx_lib::patch::PatchDescriptor::from_json_bytes(&descriptor_bytes)
         .with_context(|| format!("validating patch descriptor file {}", args.descriptor.display()))?;
@@ -344,10 +345,7 @@ async fn materialize_companions(
             .await
             .map_err(|error| ocx_lib::error::file_error(&metadata_path, error))
             .with_context(|| format!("reading companion metadata from {}", metadata_path.display()))?;
-        let metadata = package::metadata::ValidMetadata::try_from(
-            serde_json::from_slice::<package::metadata::Metadata>(&metadata_bytes)
-                .with_context(|| format!("parsing companion metadata from {}", metadata_path.display()))?,
-        )?;
+        let metadata = parse_companion_metadata(&metadata_path, &metadata_bytes)?;
         let identifier = ocx_lib::oci::Identifier::parse_with_default_registry(
             metadata_identifier_or_error(&metadata_path, &metadata_bytes)?.as_str(),
             manager.default_registry(),
@@ -487,6 +485,25 @@ fn listed_companions(companions: &[ocx_lib::patch::CompanionEntry]) -> String {
     }
 }
 
+/// Parse the `Metadata` struct a companion archive's sibling file carries.
+///
+/// Sibling of [`metadata_identifier_or_error`] over the same bytes, and the one
+/// the companion branch reaches **first** — so this, not the identifier
+/// extraction, is where a maintainer's malformed JSON actually exits.
+fn parse_companion_metadata(
+    metadata_path: &std::path::Path,
+    metadata_bytes: &[u8],
+) -> anyhow::Result<package::metadata::ValidMetadata> {
+    // Typed before `with_context`: a bare `serde_json::Error` is the chain tail,
+    // and the classifier's downcast ladder has no rung for it — an operator's
+    // trailing comma exits 1 `internal` and reads as an ocx bug. 65, the same
+    // code the identical read gets through `SerdeExt::read_json` elsewhere.
+    let metadata = serde_json::from_slice::<package::metadata::Metadata>(metadata_bytes)
+        .map_err(ocx_lib::Error::from)
+        .with_context(|| format!("parsing companion metadata from {}", metadata_path.display()))?;
+    Ok(package::metadata::ValidMetadata::try_from(metadata)?)
+}
+
 /// Extract the `identifier` field a maintainer set in a companion metadata file.
 ///
 /// The package-test convention requires the identifier on the CLI; for patch
@@ -494,7 +511,10 @@ fn listed_companions(companions: &[ocx_lib::patch::CompanionEntry]) -> String {
 /// `identifier` key. Absent → a clear usage error. Takes the already-read
 /// metadata bytes so the sibling is read only once per companion.
 fn metadata_identifier_or_error(metadata_path: &std::path::Path, metadata_bytes: &[u8]) -> anyhow::Result<String> {
+    // Typed for the same reason as the `Metadata` parse of these same bytes:
+    // an untyped `serde_json::Error` reaches the envelope as exit 1.
     let value: serde_json::Value = serde_json::from_slice(metadata_bytes)
+        .map_err(ocx_lib::Error::from)
         .with_context(|| format!("parsing companion metadata {}", metadata_path.display()))?;
     value
         .get("identifier")
@@ -511,6 +531,51 @@ fn metadata_identifier_or_error(metadata_path: &std::path::Path, metadata_bytes:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A malformed companion metadata file is the operator's typo, not an ocx
+    /// bug — so it must never reach the envelope as exit 1 `internal`.
+    ///
+    /// The read of these bytes is already typed to 74; the parse two lines
+    /// later was not, and `with_context` leaves `serde_json::Error` as the
+    /// chain tail. `classify_error`'s ladder has no rung for a foreign serde
+    /// type, so the walker found nothing and landed on `Failure`.
+    ///
+    /// The second half is the discriminator: the well-formed-but-incomplete
+    /// file must still be 64, or the typing has swallowed the usage error that
+    /// tells an operator which field is missing.
+    #[test]
+    fn a_malformed_companion_metadata_file_is_65_not_1() {
+        use ocx_lib::cli::ExitCode;
+
+        let path = std::path::Path::new("/tmp/companion.metadata.json");
+        let malformed = metadata_identifier_or_error(path, b"{\"identifier\": \"a/b:1\",}")
+            .expect_err("a trailing comma is not JSON");
+        assert_eq!(
+            ocx_lib::cli::classify_error(malformed.as_ref()),
+            ExitCode::DataError,
+            "an operator's malformed JSON is 65, the same code `SerdeExt::read_json` answers"
+        );
+
+        let no_identifier =
+            metadata_identifier_or_error(path, b"{}").expect_err("metadata with no identifier is refused");
+        assert_eq!(
+            ocx_lib::cli::classify_error(no_identifier.as_ref()),
+            ExitCode::UsageError,
+            "a well-formed file missing the field stays the usage error that names it"
+        );
+
+        // The reachable half. `metadata_identifier_or_error` runs strictly
+        // AFTER this parse and over the same bytes, so a trailing comma has
+        // already failed here — the two assertions above can never observe
+        // whether this site is still typed.
+        let malformed_struct =
+            parse_companion_metadata(path, b"{\"identifier\": \"a/b:1\",}").expect_err("a trailing comma is not JSON");
+        assert_eq!(
+            ocx_lib::cli::classify_error(malformed_struct.as_ref()),
+            ExitCode::DataError,
+            "the parse the companion branch actually exits through is 65, not 1"
+        );
+    }
 
     // --- Clap surface: --descriptor rename (C9) ---
 

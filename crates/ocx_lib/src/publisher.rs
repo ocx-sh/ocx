@@ -57,15 +57,31 @@ pub struct PushOutcome {
     /// (e.g. `3.28`, `3`, `latest`). Empty for a non-cascade push. For a
     /// multi-platform fan-out this is the ordered union across platforms.
     pub cascade_tags: Vec<String>,
-    /// Digest-named `sha256.<hex>` tags written by this push, in push order,
+    /// Digest-named `__ocx.keep.<algorithm>-<hex>` tags written by this push, in push order,
     /// deduped: one per *distinct platform manifest*, not one per `Info`. The
     /// tag names the platform manifest's digest, and that manifest is the
     /// metadata config blob plus the layers — the platform field is not part
     /// of it. Two platforms built from identical metadata over identical
     /// layers (a noarch bundle, a Rosetta alias) therefore share one manifest,
-    /// hence one tag. Empty under `--no-canonical-tag`, and empty for any
+    /// hence one tag. Empty under `--no-keep-tag`, and empty for any
     /// platform whose entry the merged index did not carry.
-    pub canonical_tags: Vec<String>,
+    pub keep_tags: Vec<String>,
+    /// The platform manifest digest each pushed platform landed on, in push
+    /// order. **Independent of keep tagging** — this is `push --sign`'s inline
+    /// signing input, so it is populated under `--no-keep-tag` exactly as it
+    /// is with the keep tag on.
+    ///
+    /// Never the index digest: [`manifest_digest`](Self::manifest_digest)
+    /// names the tag's image index, which is rewritten on every platform
+    /// merge, while a signature has to name the immutable object it covers.
+    ///
+    /// Two platforms built from identical metadata over identical layers share
+    /// one manifest and therefore one digest; the list keys on platform, so
+    /// both rows appear carrying the same value. A platform whose entry the
+    /// merged index did not carry is **omitted**, never faked — the same rule
+    /// [`keep_tags`](Self::keep_tags) already follows, and from the same
+    /// descriptor lookup.
+    pub platform_digests: Vec<(oci::Platform, oci::Digest)>,
     /// Counts of layer-push outcomes (mounted/uploaded/verified), summed over
     /// every platform this push fanned out to. Layer blobs only — the config
     /// blob and manifest are not layers and are excluded. An `uploaded` count
@@ -80,13 +96,15 @@ impl PushOutcome {
     pub fn new(
         manifest_digest: oci::Digest,
         cascade_tags: Vec<String>,
-        canonical_tags: Vec<String>,
+        keep_tags: Vec<String>,
+        platform_digests: Vec<(oci::Platform, oci::Digest)>,
         layer_counts: oci::LayerCounts,
     ) -> Self {
         Self {
             manifest_digest,
             cascade_tags,
-            canonical_tags,
+            keep_tags,
+            platform_digests,
             layer_counts,
         }
     }
@@ -124,9 +142,9 @@ impl Publisher {
     /// same tag). Errors if the tag does not parse, lacks `X.Y.Z` form, or
     /// already carries build metadata.
     ///
-    /// When `canonical_tag` is `true` (the default from `ocx package push`),
+    /// When `keep_tag` is `true` (the default from `ocx package push`),
     /// each pushed platform manifest additionally gets a digest-named
-    /// `sha256.<hex>` tag pointing directly at it — a pure registry-side
+    /// `__ocx.keep.<algorithm>-<hex>` tag pointing directly at it — a pure registry-side
     /// deletion safety net (`adr_index_indirection.md` Decision E). Applies
     /// only to the platform manifest pushed by this call, never to
     /// pre-existing entries the merge picks up from the registry.
@@ -139,12 +157,13 @@ impl Publisher {
         infos: Vec<Info>,
         layers: &[LayerRef],
         build_meta: Option<&str>,
-        canonical_tag: bool,
+        keep_tag: bool,
         annotations: &BTreeMap<String, String>,
     ) -> Result<PushOutcome> {
         let infos = apply_build_meta_all(infos, build_meta)?;
         let mut manifest_digest: Option<oci::Digest> = None;
-        let mut canonical_tags: Vec<String> = Vec::new();
+        let mut keep_tags: Vec<String> = Vec::new();
+        let mut platform_digests: Vec<(oci::Platform, oci::Digest)> = Vec::new();
         let mut layer_counts = oci::LayerCounts::default();
         for info in infos {
             log::info!(
@@ -156,21 +175,25 @@ impl Publisher {
             let platform = info.platform.clone();
             let (digest, manifest, counts) = self.client.push_package(info, layers, annotations).await?;
             layer_counts += counts;
-            if canonical_tag
-                && let Some(tag) = self
-                    .client
-                    .push_canonical_tag(&identifier, &manifest, &platform)
-                    .await?
-                && !canonical_tags.contains(&tag)
+            // Hoisted out of the keep-tag branch on purpose: this is the same
+            // descriptor `push_keep_tag` reads, and `platform_digests` has to
+            // be there under `--no-keep-tag` too.
+            if let Some(platform_digest) = oci::manifest::platform_manifest_digest(&manifest, &platform) {
+                platform_digests.push((platform.clone(), platform_digest));
+            }
+            if keep_tag
+                && let Some(tag) = self.client.push_keep_tag(&identifier, &manifest, &platform).await?
+                && !keep_tags.contains(&tag)
             {
-                canonical_tags.push(tag);
+                keep_tags.push(tag);
             }
             manifest_digest = Some(digest);
         }
         Ok(PushOutcome {
             manifest_digest: manifest_digest.ok_or(crate::package::error::Error::EmptyPushSet)?,
             cascade_tags: Vec::new(),
-            canonical_tags,
+            keep_tags,
+            platform_digests,
             layer_counts,
         })
     }
@@ -182,7 +205,7 @@ impl Publisher {
     /// used to compute which rolling tags each platform's push should update
     /// (cascade blocker checks are platform-aware). The same `build_meta`
     /// semantics as [`Self::push`] apply. The outcome's `cascade_tags` is the
-    /// ordered union across platforms. `canonical_tag` and `annotations` have
+    /// ordered union across platforms. `keep_tag` and `annotations` have
     /// the same meaning as in [`Self::push`].
     pub async fn push_cascade(
         &self,
@@ -190,13 +213,14 @@ impl Publisher {
         layers: &[LayerRef],
         existing_versions: BTreeSet<Version>,
         build_meta: Option<&str>,
-        canonical_tag: bool,
+        keep_tag: bool,
         annotations: &BTreeMap<String, String>,
     ) -> Result<PushOutcome> {
         let infos = apply_build_meta_all(infos, build_meta)?;
         let mut manifest_digest: Option<oci::Digest> = None;
         let mut cascade_tags: Vec<String> = Vec::new();
-        let mut canonical_tags: Vec<String> = Vec::new();
+        let mut keep_tags: Vec<String> = Vec::new();
+        let mut platform_digests: Vec<(oci::Platform, oci::Digest)> = Vec::new();
         let mut layer_counts = oci::LayerCounts::default();
         for info in infos {
             log::info!(
@@ -207,33 +231,38 @@ impl Publisher {
             let version = Version::parse(info.identifier.tag_or_latest()).ok_or_else(|| {
                 crate::package::error::Error::VersionInvalid(info.identifier.tag_or_latest().to_string())
             })?;
-            let (digest, tags, canonical, counts) = package::cascade::push_with_cascade(
+            let platform = info.platform.clone();
+            let outcome = package::cascade::push_with_cascade(
                 &self.client,
                 info,
                 layers,
                 existing_versions.clone(),
                 &version,
-                canonical_tag,
+                keep_tag,
                 annotations,
             )
             .await?;
-            manifest_digest = Some(digest);
-            layer_counts += counts;
-            for tag in tags {
+            manifest_digest = Some(outcome.index_digest);
+            layer_counts += outcome.layer_counts;
+            for tag in outcome.cascade_tags {
                 if !cascade_tags.contains(&tag) {
                     cascade_tags.push(tag);
                 }
             }
-            if let Some(tag) = canonical
-                && !canonical_tags.contains(&tag)
+            if let Some(tag) = outcome.keep_tag
+                && !keep_tags.contains(&tag)
             {
-                canonical_tags.push(tag);
+                keep_tags.push(tag);
+            }
+            if let Some(platform_digest) = outcome.platform_digest {
+                platform_digests.push((platform, platform_digest));
             }
         }
         Ok(PushOutcome {
             manifest_digest: manifest_digest.ok_or(crate::package::error::Error::EmptyPushSet)?,
             cascade_tags,
-            canonical_tags,
+            keep_tags,
+            platform_digests,
             layer_counts,
         })
     }
@@ -465,10 +494,10 @@ mod tests {
         );
     }
 
-    // ── canonical_tag gating — adr_index_indirection.md Decision E ───────
+    // ── keep_tag gating — adr_index_indirection.md Decision E ───────
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn canonical_tag_true_pushes_the_sha256_dot_hex_tag() {
+    async fn keep_tag_true_pushes_the_sha256_dot_hex_tag() {
         use crate::oci::client::test_transport::{StubTransport, StubTransportData};
 
         let data = StubTransportData::new();
@@ -481,13 +510,16 @@ mod tests {
             .expect("push succeeds");
 
         assert_eq!(
-            outcome.canonical_tags.len(),
+            outcome.keep_tags.len(),
             1,
-            "canonical_tag=true must report exactly one written tag: {:?}",
-            outcome.canonical_tags
+            "keep_tag=true must report exactly one written tag: {:?}",
+            outcome.keep_tags
         );
-        let reported = &outcome.canonical_tags[0];
-        assert!(reported.starts_with("sha256."), "unexpected tag shape: {reported}");
+        let reported = &outcome.keep_tags[0];
+        assert!(
+            reported.starts_with("__ocx.keep.sha256-"),
+            "unexpected tag shape: {reported}"
+        );
         let inner = data.read();
         assert!(
             inner.manifests.keys().any(|key| key.ends_with(&format!(":{reported}"))),
@@ -497,7 +529,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn fan_out_reports_one_canonical_tag_per_platform_in_push_order() {
+    async fn fan_out_reports_one_keep_tag_per_platform_in_push_order() {
         use crate::oci::client::test_transport::{StubTransport, StubTransportData};
 
         let data = StubTransportData::new();
@@ -506,10 +538,10 @@ mod tests {
 
         let mut mac = test_info("1.0.0");
         mac.platform = "darwin/arm64".parse().expect("platform parses");
-        // The canonical tag names the *platform manifest* digest, and that
+        // The keep tag names the *platform manifest* digest, and that
         // manifest is the metadata config blob plus the layers — neither of
         // which the platform field touches. Two platforms carrying identical
-        // metadata therefore share one digest and one canonical tag (a Rosetta
+        // metadata therefore share one digest and one keep tag (a Rosetta
         // alias is the real-world case). Diverge the metadata so this fan-out
         // produces the two distinct manifests the assertion is about.
         let Metadata::Bundle(ref mut bundle) = mac.metadata;
@@ -521,17 +553,17 @@ mod tests {
             .expect("fan-out push succeeds");
 
         assert_eq!(
-            outcome.canonical_tags.len(),
+            outcome.keep_tags.len(),
             2,
-            "a two-platform fan-out writes one canonical tag per distinct platform manifest: {:?}",
-            outcome.canonical_tags
+            "a two-platform fan-out writes one keep tag per distinct platform manifest: {:?}",
+            outcome.keep_tags
         );
         assert_ne!(
-            outcome.canonical_tags[0], outcome.canonical_tags[1],
+            outcome.keep_tags[0], outcome.keep_tags[1],
             "each platform manifest has its own digest"
         );
         let inner = data.read();
-        for tag in &outcome.canonical_tags {
+        for tag in &outcome.keep_tags {
             assert!(
                 inner.manifests.keys().any(|key| key.ends_with(&format!(":{tag}"))),
                 "reported tag {tag} missing from the wire: {:?}",
@@ -541,7 +573,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn platforms_sharing_one_manifest_report_a_single_canonical_tag() {
+    async fn platforms_sharing_one_manifest_report_a_single_keep_tag() {
         use crate::oci::client::test_transport::{StubTransport, StubTransportData};
 
         let data = StubTransportData::new();
@@ -551,7 +583,7 @@ mod tests {
         // Identical metadata, identical (empty) layers, two platforms — the
         // real-world Rosetta-alias / noarch-bundle shape. Both index entries
         // point at the same leaf manifest, so both platforms yield the same
-        // canonical tag and the report must carry it once.
+        // keep tag and the report must carry it once.
         let mut alias = test_info("1.0.0");
         alias.platform = "darwin/arm64".parse().expect("platform parses");
 
@@ -561,10 +593,10 @@ mod tests {
             .expect("fan-out push succeeds");
 
         assert_eq!(
-            outcome.canonical_tags.len(),
+            outcome.keep_tags.len(),
             1,
-            "platforms sharing one manifest digest share one canonical tag: {:?}",
-            outcome.canonical_tags
+            "platforms sharing one manifest digest share one keep tag: {:?}",
+            outcome.keep_tags
         );
     }
 
@@ -605,15 +637,15 @@ mod tests {
             "a 1.0.0 cascade push writes rolling tags"
         );
         assert_eq!(
-            outcome.canonical_tags.len(),
+            outcome.keep_tags.len(),
             1,
-            "platforms sharing one manifest digest share one canonical tag: {:?}",
-            outcome.canonical_tags
+            "platforms sharing one manifest digest share one keep tag: {:?}",
+            outcome.keep_tags
         );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn canonical_tag_false_skips_the_extra_tag_push() {
+    async fn keep_tag_false_skips_the_extra_tag_push() {
         use crate::oci::client::test_transport::{StubTransport, StubTransportData};
 
         let data = StubTransportData::new();
@@ -626,14 +658,14 @@ mod tests {
             .expect("push succeeds");
 
         assert!(
-            outcome.canonical_tags.is_empty(),
-            "canonical_tag=false must report no tags: {:?}",
-            outcome.canonical_tags
+            outcome.keep_tags.is_empty(),
+            "keep_tag=false must report no tags: {:?}",
+            outcome.keep_tags
         );
         let inner = data.read();
         assert!(
-            inner.manifests.keys().all(|key| !key.contains(":sha256.")),
-            "canonical_tag=false must not push the extra tag: {:?}",
+            inner.manifests.keys().all(|key| !key.contains(":__ocx.keep.")),
+            "keep_tag=false must not push the extra tag: {:?}",
             inner.manifests.keys().collect::<Vec<_>>()
         );
     }

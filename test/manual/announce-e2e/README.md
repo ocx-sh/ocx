@@ -225,13 +225,13 @@ nobody constrained could otherwise serve the committed bytes straight back and
 turn the gate green.
 
 **E2a — reserved tags never reach the index.** The served root's `tags` carry
-no key matching `__ocx*` (case-insensitive) or `sha256.<64hex>` (D7). Free,
-because the pilot repository genuinely carries both classes:
-`push_canonical_tag` is default-on, and the publisher's `Describe package` step
-writes `__ocx.desc`.
+no key matching `__ocx*` (case-insensitive) or the frozen legacy
+`sha256.<64hex>` keep tag (D7). Free, because the pilot repository genuinely
+carries both classes: `push_keep_tag` is default-on, and the publisher's
+`Describe package` step writes `__ocx.desc`.
 
-**What E2a does not prove.** The publisher announces via `--announce-file`,
-which under D7 never carries a canonical tag — so a clean root is consistent
+**What E2a does not prove.** The publisher announces via `--tags-file`,
+which under D7 never carries a keep tag — so a clean root is consistent
 with **no filter at all**. E2a is a cheap regression tripwire. E2b (the index
 repo's reconcile sweep) and the local acceptance cases are the proof that the
 filter fired. Do not read a green E2a as more than it is.
@@ -306,7 +306,7 @@ then asserts the second announce **updated** the same pull request rather than
 opening a second one, and that its committed tag set is a superset of both
 runs' tags.
 
-Both runs use `--tags-from-file`, which adds to the committed curated set. `--tags`
+Both runs use `--tags-file`, which adds to the committed curated set. `--tags`
 *replaces* it, so run #2 would drop tag-a and the scenario would prove nothing.
 
 Needs `OCX_ANNOUNCE_TOKEN`.

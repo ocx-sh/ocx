@@ -25,7 +25,7 @@ const OCX_ANNOUNCE_TOKEN: &str = "OCX_ANNOUNCE_TOKEN";
 /// mutually-exclusive-and-exactly-one rule is a single list: a fifth mode added
 /// to one attribute but not the other would compile, and the gap would only
 /// show as a flag silently accepted alongside `--tags`.
-const TAG_SELECTION_SIBLINGS_OF_TAGS: [&str; 3] = ["tags_from_file", "tags_from_registry", "refresh"];
+const TAG_SELECTION_SIBLINGS_OF_TAGS: [&str; 3] = ["tags_file", "tags_from_registry", "refresh"];
 
 /// Observe an owner-curated set of registry tags and publish the rebuilt
 /// package entry into the index.
@@ -47,8 +47,9 @@ pub struct PackageAnnounce {
 
     /// Replace the curated tag set with this comma-separated list. A
     /// currently-committed tag that is not named here is dropped. So is a
-    /// reserved tag named here: a canonical `sha256.<hex>` tag or an `__ocx`
-    /// one is not a version, so the run still succeeds and reports the drops.
+    /// reserved tag named here: an `__ocx` tag (the keep tag included) or a
+    /// legacy `sha256.<hex>` one is not a version, so the run still succeeds
+    /// and reports the drops.
     #[clap(
         long = "tags",
         value_name = "TAGS",
@@ -61,8 +62,8 @@ pub struct PackageAnnounce {
     /// Add the tags listed in this file to the already-committed curated set.
     /// The file holds comma- or newline-separated tag names. Never removes a
     /// committed tag; use `--tags` for that.
-    #[clap(long = "tags-from-file", value_name = "PATH", conflicts_with_all = ["refresh", "tags_from_registry"])]
-    tags_from_file: Option<PathBuf>,
+    #[clap(long = "tags-file", value_name = "PATH", conflicts_with_all = ["refresh", "tags_from_registry"])]
+    tags_file: Option<PathBuf>,
 
     /// Add every tag the package's registry repository currently holds to the
     /// already-committed curated set. Use it to announce versions that were
@@ -125,9 +126,10 @@ impl PackageAnnounce {
             TagSelection::Refresh
         } else if self.tags_from_registry {
             TagSelection::FromRegistry
-        } else if let Some(path) = &self.tags_from_file {
+        } else if let Some(path) = &self.tags_file {
             let bytes = tokio::fs::read(path)
                 .await
+                .map_err(|error| ocx_lib::error::file_error(path, error))
                 .with_context(|| format!("reading tags file {}", path.display()))?;
             TagSelection::UnionFile(conventions::parse_tags_file(&bytes))
         } else {
@@ -293,7 +295,7 @@ mod tests {
     /// The four tag-selection modes, in the argv form each is given.
     const TAG_SELECTION_ARGV: [&[&str]; 4] = [
         &["--tags", "1.0.0"],
-        &["--tags-from-file", "tags.txt"],
+        &["--tags-file", "tags.txt"],
         &["--tags-from-registry"],
         &["--refresh"],
     ];

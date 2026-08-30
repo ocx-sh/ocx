@@ -397,42 +397,43 @@ def test_dry_run_leaves_the_targets_existing_index_byte_for_byte_unchanged(
 
 
 # ---------------------------------------------------------------------------
-# Canonical tags
+# Keep tags
 # ---------------------------------------------------------------------------
 
 
-def test_canonical_tag_default_writes_a_digest_named_tag(
+def test_keep_tag_default_writes_a_digest_named_tag(
     ocx: OcxRunner, target_registry: str, unique_repo: str, tmp_path: Path
 ) -> None:
-    """A plain copy also writes a `sha256.<hex>` tag pointing at the copied
-    leaf digest by default (`--canonical-tag` is the affirmative spelling of
-    the default), so a pin can still resolve after the mutable tag moves on.
-    Paired with the `--no-canonical-tag` suppression test below, which proves
-    the tag comes from this flag rather than merely from copying at all."""
+    """A plain copy also writes an `__ocx.keep.<algorithm>-<hex>` tag pointing
+    at the copied leaf digest by default (`--keep-tag` is the affirmative
+    spelling of the default), so a pin can still resolve after the mutable tag
+    moves on. Paired with the `--no-keep-tag` suppression test below, which
+    proves the tag comes from this flag rather than merely from copying at
+    all."""
     package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
     result = _copy(ocx, target_registry, "--to", target_registry, package.short)
     assert result.returncode == 0, result.stderr
 
     target_digest = fetch_platform_manifest_digest(target_registry, package.repo, package.tag)
-    canonical_tag = target_digest.replace(":", ".")
-    assert json.loads(result.stdout)["canonical_tags_written"] == [canonical_tag]
-    assert _target_has_tag(target_registry, package.repo, canonical_tag)
+    keep_tag = "__ocx.keep." + target_digest.replace(":", "-")
+    assert json.loads(result.stdout)["keep_tags_written"] == [keep_tag]
+    assert _target_has_tag(target_registry, package.repo, keep_tag)
 
 
-def test_no_canonical_tag_suppresses_it(
+def test_no_keep_tag_suppresses_it(
     ocx: OcxRunner, target_registry: str, unique_repo: str, tmp_path: Path
 ) -> None:
     package = make_package(ocx, unique_repo, "1.0.0", tmp_path)
 
-    result = _copy(ocx, target_registry, "--to", target_registry, "--no-canonical-tag", package.short)
+    result = _copy(ocx, target_registry, "--to", target_registry, "--no-keep-tag", package.short)
     assert result.returncode == 0, result.stderr
 
     target_digest = fetch_platform_manifest_digest(target_registry, package.repo, package.tag)
-    canonical_tag = target_digest.replace(":", ".")
-    assert json.loads(result.stdout)["canonical_tags_written"] == []
-    assert not _target_has_tag(target_registry, package.repo, canonical_tag), (
-        "--no-canonical-tag must suppress the write itself, not just its mention in the report"
+    keep_tag = "__ocx.keep." + target_digest.replace(":", "-")
+    assert json.loads(result.stdout)["keep_tags_written"] == []
+    assert not _target_has_tag(target_registry, package.repo, keep_tag), (
+        "--no-keep-tag must suppress the write itself, not just its mention in the report"
     )
 
 

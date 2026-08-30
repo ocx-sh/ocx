@@ -1306,7 +1306,8 @@ fn merge_root(committed: Option<&[u8]>, fetched: &[u8], scope: RootScope<'_>) ->
 ///   ([`LocalIndex::persist_dispatch`]), so recording it would create exactly
 ///   the tag-without-an-object absence D1 abolished.
 /// - **D7 — a reserved tag is not a version.** The `__ocx` namespace and
-///   `sha256.<hex>` digest aliases ([`Tag::is_reserved_str`]) are not version
+///   keep tags — `__ocx.keep.<algorithm>-<hex>` and the frozen legacy
+///   `sha256.<hex>` form ([`Tag::is_reserved_str`]) — are not version
 ///   pointers and must never appear as ones.
 pub(super) fn records_root_tag(tag: &str, manifest: &oci::Manifest) -> bool {
     if !matches!(manifest, oci::Manifest::ImageIndex(_)) {
@@ -3501,7 +3502,7 @@ mod tests {
             "latest",
             "__ocx.desc",
             "__OCX.future",
-            &format!("sha256.{}", "a".repeat(64)),
+            &format!("__ocx.keep.sha256-{}", "a".repeat(64)),
         ] {
             index.commit_root_tag(&tagged_id(tag), &content).await.unwrap();
         }
@@ -3563,10 +3564,16 @@ mod tests {
 
     /// N-16 — the UPDATE path, reserved-tag half. The tag resolves to a genuine
     /// IMAGE INDEX, so the kind gate above passes and only the reserved verdict
-    /// can exclude it. A `sha256.<hex>` or `__ocx*` name is not a version.
+    /// can exclude it. An `__ocx*` name — the keep tag included — is not a
+    /// version, and neither is the frozen legacy `sha256.<hex>` form.
     #[tokio::test(flavor = "multi_thread")]
     async fn derived_refresh_skips_a_reserved_tag() {
-        for reserved in ["__ocxfoo", "__OCX.future", &format!("sha256.{}", "a".repeat(64))] {
+        for reserved in [
+            "__ocxfoo",
+            "__OCX.future",
+            &format!("__ocx.keep.sha256-{}", "a".repeat(64)),
+            &format!("sha256.{}", "a".repeat(64)),
+        ] {
             let dir = TempDir::new().unwrap();
             let index = make_index(&dir);
             let source = source_for_tag(reserved);
@@ -3632,7 +3639,12 @@ mod tests {
     /// the only thing that can exclude them.
     #[tokio::test(flavor = "multi_thread")]
     async fn resolve_grow_skips_a_reserved_tag() {
-        for reserved in ["__ocxfoo", "__OCX.future", &format!("sha256.{}", "a".repeat(64))] {
+        for reserved in [
+            "__ocxfoo",
+            "__OCX.future",
+            &format!("__ocx.keep.sha256-{}", "a".repeat(64)),
+            &format!("sha256.{}", "a".repeat(64)),
+        ] {
             let dir = TempDir::new().unwrap();
             let chained = super::super::Index::from_chained(
                 make_index(&dir),

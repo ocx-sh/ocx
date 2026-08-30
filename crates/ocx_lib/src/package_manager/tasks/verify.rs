@@ -23,6 +23,7 @@
 use url::Url;
 
 use crate::file_structure::StateStore;
+use crate::oci::sign::SignatureFormat;
 use crate::oci::verify::pipeline::VerifyResult;
 use crate::oci::verify::{TrustRoot, VerifyContentMode, VerifyContext, VerifyError, VerifyPipeline};
 use crate::oci::{self};
@@ -57,18 +58,45 @@ pub struct VerifyOptions<'a> {
     /// without `--attestation`; the attestation modes carry the `--type`
     /// narrowing. Not defaulted — a verify run states what it is verifying.
     pub content: VerifyContentMode,
+    /// The cosign wire shape this run pins (`--signature-format`), or `None` to
+    /// prefer a bundle and fall back to a simplesigning sidecar when the bundle
+    /// shape is absent. A bundle that was fetched and refused is not an absence:
+    /// it fails closed with its own exit code.
+    pub signature_format: Option<SignatureFormat>,
+    /// Accept a keyless simplesigning sidecar carrying no transparency-log
+    /// evidence (`--allow-unlogged-signature`). Off is the contract; the
+    /// opt-out is for air-gapped CI. See
+    /// [`VerifyContext::allow_unlogged_signature`](crate::oci::verify::VerifyContext).
+    pub allow_unlogged_signature: bool,
+    /// Collect every verified candidate, not just the first.
+    ///
+    /// Q3: the commands that render `signatures[]` set it; the install-time
+    /// auto-verify hook does not, because full crypto per candidate for output
+    /// nobody reads is not a cost the install path pays. It widens the report,
+    /// never the verdict.
+    pub report_all: bool,
 }
 
 /// Success payload returned by [`PackageManager::verify_one`].
 pub struct VerifyReport {
-    /// Raw pipeline result (subject digest, referrer digest, cert identity,
-    /// signed-at timestamp, `cert_expired_but_tlog_valid` flag).
-    pub result: VerifyResult,
+    /// Every signature that verified, in scan order, deduplicated.
+    ///
+    /// **Never empty**, and the first element is the verdict — the same
+    /// candidate under either [`VerifyOptions::report_all`] setting, because
+    /// widening the arity appends behind the answer rather than reordering it.
+    /// One field rather than a `result` beside a list: two would be one
+    /// assignment away from disagreeing about which signature was the answer.
+    pub signatures: Vec<VerifyResult>,
 }
 
 impl PackageManager {
     /// Verify `package` for `platform` against `opts.trust_root`, requiring the
     /// signing certificate to satisfy one of `opts.policies` (ANY-of).
+    ///
+    /// `platform` is `None` when the caller narrowed into nothing: the run acts
+    /// on whatever the reference resolved to, index or bare manifest (C-010).
+    /// `Some(..)` narrows into an index and is an error when the resolved
+    /// object is not one.
     ///
     /// The pipeline is: resolve target → list referrers (capability cache) →
     /// pick the v0.3 bundle → verify cert chain vs trust root → bind signature
@@ -82,7 +110,7 @@ impl PackageManager {
     pub async fn verify_one(
         &self,
         package: &oci::Identifier,
-        platform: &oci::Platform,
+        platform: Option<&oci::Platform>,
         opts: VerifyOptions<'_>,
     ) -> Result<VerifyReport, PackageError> {
         // Read-only: verifying a package must never grow the permanent local
@@ -105,15 +133,18 @@ impl PackageManager {
             // trust-root gate. Closed by S-009/S-016 (WP10b), once
             // `--attestation` lands (WP9b).
             content: opts.content,
+            signature_format: opts.signature_format,
+            allow_unlogged_signature: opts.allow_unlogged_signature,
+            report_all: opts.report_all,
             // `ocx package verify` exists to verify: there is no permissive
             // form of it, and the pipeline's ANY-of entry point never reads
             // this field.
             verification: crate::oci::verify::VerificationMode::Demand,
         };
-        let result = VerifyPipeline::run(opts.client, context)
+        let signatures = VerifyPipeline::run(opts.client, context)
             .await
             .map_err(|err| map_verify_error(package.clone(), err))?;
-        Ok(VerifyReport { result })
+        Ok(VerifyReport { signatures })
     }
 }
 
@@ -137,8 +168,8 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::file_structure::{FileStructure, StateStore};
+    use crate::oci::client::test_transport::{StubTransport, StubTransportData};
     use crate::oci::index::{ChainMode, Index, IndexImpl, IndexOperation, LocalConfig, LocalIndex, SelectResult};
-    use crate::oci::referrer::{ReferrersApiCapability, ReferrersSupport};
     use crate::oci::verify::VerifyErrorKind;
 
     pub(crate) const REGISTRY: &str = "example.com";
@@ -204,22 +235,21 @@ pub(crate) mod tests {
         }
     }
 
-    /// Seed a fresh, cached "referrers unsupported" capability record so
-    /// `verify_one`'s pipeline stops at `VerifyErrorKind::ReferrersUnsupported`
-    /// right after the resolve step — never touching the transport
-    /// (`StubTransport::list_referrers` is `unimplemented!()`). This keeps the
-    /// discriminating assertion below scoped to the resolve step's index side
-    /// effect, not the rest of the sign-verify pipeline.
-    pub(crate) async fn seed_unsupported_capability(state: &StateStore) {
-        ReferrersApiCapability {
-            registry: REGISTRY.to_string(),
-            supported: ReferrersSupport::Unsupported,
-            probed_at: std::time::SystemTime::now(),
-            ttl_seconds: 3600,
-        }
-        .write_cache(state)
-        .await
-        .unwrap();
+    /// A transport standing in for a registry with **no** OCI 1.1 Referrers API
+    /// and no fallback referrers tag: `list_referrers` raises
+    /// `ClientError::ReferrersUnsupported`, and the tag-schema read that
+    /// `list_referrers_with_fallback` falls back to finds nothing
+    /// (`pull_manifest_raw` → `ManifestNotFound` → empty index).
+    ///
+    /// It used to seed a cached "unsupported" capability record instead, so the
+    /// pipeline stopped at `ensure_referrers_supported` before touching the
+    /// transport at all. D-1 deleted that gate, so the refusal has to come from
+    /// the transport now — and the truthful outcome is `NoSignaturesFound` (79),
+    /// not exit 84 (C-002: 84 is write-path only).
+    pub(crate) fn transport_without_referrers() -> StubTransport {
+        let data = StubTransportData::new();
+        data.write().referrers_unsupported = true;
+        StubTransport::new(data)
     }
 
     /// `verify_one` must resolve through the read-only view: a bare-tag verify
@@ -229,9 +259,7 @@ pub(crate) mod tests {
     /// at the end of this test, which is exactly the routing `verify_one` used
     /// before this fix.
     #[tokio::test(flavor = "multi_thread")]
-    async fn verify_one_resolves_read_only_and_never_grows_the_local_index() {
-        use crate::oci::client::test_transport::{StubTransport, StubTransportData};
-
+    async fn verify_one_answers_no_signatures_found_and_never_grows_the_local_index() {
         let root = TempDir::new().unwrap();
         let file_structure = FileStructure::with_root(root.path().to_path_buf());
         let index_store = file_structure.index.clone();
@@ -243,9 +271,7 @@ pub(crate) mod tests {
         let manager = PackageManager::new(file_structure, index, None, REGISTRY);
 
         let state = StateStore::new(root.path().join("state"));
-        seed_unsupported_capability(&state).await;
-
-        let client = oci::Client::with_transport(Box::new(StubTransport::new(StubTransportData::new())));
+        let client = oci::Client::with_transport(Box::new(transport_without_referrers()));
         // Empty material: this test never reaches signature verification.
         let trust_root = TrustRoot::default();
         // Loopback rather than a `.test` name: the verify pipeline resolves the
@@ -263,21 +289,24 @@ pub(crate) mod tests {
             state: &state,
             no_cache: false,
             content: VerifyContentMode::Signature,
+            signature_format: None,
+            allow_unlogged_signature: false,
+            report_all: false,
         };
 
         // `VerifyReport`/`VerifyResult` (the `Ok` payload) do not implement
         // `Debug` (owned by `oci::verify::pipeline`, out of scope here), so
         // match explicitly rather than `.expect_err(..)`.
-        match manager.verify_one(&tagged_id(), &platform, opts).await {
+        match manager.verify_one(&tagged_id(), Some(&platform), opts).await {
             Err(err) => match err.kind {
                 PackageErrorKind::Internal(crate::Error::Verify(verify_err)) => assert!(
-                    matches!(verify_err.kind, VerifyErrorKind::ReferrersUnsupported),
-                    "expected ReferrersUnsupported, got {:?}",
+                    matches!(verify_err.kind, VerifyErrorKind::NoSignaturesFound),
+                    "expected NoSignaturesFound, got {:?}",
                     verify_err.kind
                 ),
-                other => panic!("expected Internal(Verify(ReferrersUnsupported)), got {other:?}"),
+                other => panic!("expected Internal(Verify(NoSignaturesFound)), got {other:?}"),
             },
-            Ok(_) => panic!("no referrers support configured; verify_one must fail closed"),
+            Ok(_) => panic!("nothing is signed here; verify_one must fail closed"),
         }
 
         // Discriminating assertion: the committed local index must be

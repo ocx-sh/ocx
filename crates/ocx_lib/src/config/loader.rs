@@ -437,8 +437,18 @@ impl ConfigLoader {
         ))
     }
 
-    /// Strips the `[trust.sigstore]` fields a remote payload is not entitled
-    /// to set, each for its own reason.
+    /// Strips the `[trust]` values a remote payload is not entitled to set,
+    /// each for its own reason.
+    ///
+    /// A `[[trust.policy]]` signer naming its key by path (`key = "/srv/acme.pub"`)
+    /// is dropped unconditionally, for the reason `trusted_root` is: the path
+    /// names the **publisher's** disk, and on a fleet machine it either does not
+    /// exist or resolves to some unrelated local file — which the consumer would
+    /// then read, sight unseen, on every verification. `ocx config push` refuses
+    /// to publish that form at all; this is the consumer-side half, because the
+    /// publish-time check runs on the publisher and a payload can reach a
+    /// machine by other routes. `key_pem` travels with the payload and is left
+    /// alone: it is bounded by `MAX_MANAGED_CONFIG_BYTES` and names no file.
     ///
     /// `trusted_root` names a path on the **publisher's** disk. On a fleet
     /// machine it either does not exist or — worse — resolves to some unrelated
@@ -457,7 +467,43 @@ impl ConfigLoader {
     /// config value, so an unpinned payload that could set it would name the
     /// server a signing identity is handed to.
     fn guard_managed_sigstore_trust(parsed: &mut Config, source: &crate::oci::Identifier) {
-        let Some(sigstore) = parsed.trust.as_mut().and_then(|trust| trust.sigstore.as_mut()) else {
+        let Some(trust) = parsed.trust.as_mut() else {
+            return;
+        };
+        for policy in &mut trust.policy {
+            for signer in &mut policy.signers {
+                // `dropped` is whether a path form was present at all;
+                // `unusable` is whether removing it left the entry with no key
+                // of any kind.
+                let (dropped, unusable) = match signer {
+                    crate::trust::SignerSpec::Key(matcher) => {
+                        let dropped = matcher.key.take().is_some();
+                        (dropped, dropped && matcher.key_pem.is_none())
+                    }
+                    _ => (false, false),
+                };
+                if !dropped {
+                    continue;
+                }
+                log::warn!(
+                    "managed-config payload for '{source}' declares a [[trust.policy]] key signer by path; \
+                     ignored (a remote payload cannot name a file on this machine — publish the key inline \
+                     as `key_pem`)"
+                );
+                if unusable {
+                    // Blanking the field alone leaves a `KeyMatcher` with
+                    // neither `key` nor `key_pem`, which `validate_signers`
+                    // refuses by name — taking the **whole** policy down,
+                    // sibling keyless signers included, over a diagnostic the
+                    // operator never wrote. `Unknown` is the arm that already
+                    // means "this build cannot use this signer": it compiles to
+                    // no backend, so it narrows, and a policy whose signers all
+                    // narrow away is refused as `NoUsableSigner` instead.
+                    *signer = crate::trust::SignerSpec::Unknown;
+                }
+            }
+        }
+        let Some(sigstore) = trust.sigstore.as_mut() else {
             return;
         };
         if sigstore.trusted_root.take().is_some() {
@@ -1258,15 +1304,30 @@ impl ConfigLoader {
     /// process working directory — a config read by a daemon, a CI runner and
     /// an interactive shell must name the same file.
     ///
-    /// Only `[trust.sigstore] trusted_root` participates today. Every other
-    /// path-valued key in the tree is either already absolute by contract or
-    /// resolved by its own consumer.
+    /// Two keys participate today: `[trust.sigstore] trusted_root`, and each
+    /// `[[trust.policy]]` signer's `file:`-form `key`. Both name a file the
+    /// operator put beside their own config, so both anchor the same way and
+    /// through the same seam — a second anchoring site is how the two would
+    /// drift into resolving differently. Every other path-valued key in the tree
+    /// is either already absolute by contract or resolved by its own consumer.
+    ///
+    /// The **project `ocx.toml`** tier does not pass through here. Its trust
+    /// policies are read by `trust::policies_from_ocx_toml`, which takes the
+    /// project file's directory as a parameter and applies
+    /// [`TrustPolicy::anchor_relative_keys`] itself — same rule, one call site
+    /// each, neither able to skip it.
     fn anchor_relative_paths(parsed: &mut Config, config_path: &Path) {
         let Some(dir) = config_path.parent() else {
             return;
         };
-        if let Some(sigstore) = parsed.trust.as_mut().and_then(|trust| trust.sigstore.as_mut()) {
+        let Some(trust) = parsed.trust.as_mut() else {
+            return;
+        };
+        if let Some(sigstore) = trust.sigstore.as_mut() {
             sigstore.anchor_relative_root(dir);
+        }
+        for policy in &mut trust.policy {
+            policy.anchor_relative_keys(dir);
         }
     }
 
@@ -1905,7 +1966,7 @@ mod tests {
     #[test]
     fn a_system_locked_trust_policy_survives_the_accumulator_fold() {
         let mut system: Config = toml::from_str(
-            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nkeyless = { identity = \"system-ci\", oidc_issuer = \"iss\" }\n",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nsigners = [{ kind = \"keyless\", identity = \"system-ci\", oidc_issuer = \"iss\" }]\n",
         )
         .expect("system tier must parse");
         ConfigLoader::apply_system_locks(&mut system);
@@ -1913,9 +1974,9 @@ mod tests {
         let mut accumulator = ConfigLoader::builtin_defaults();
         accumulator.merge(system);
         for lower in [
-            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nkeyless = { identity = \"user-Y\", oidc_issuer = \"iss\" }\n",
-            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nkeyless = { identity = \"managed-Z\", oidc_issuer = \"iss\" }\n",
-            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nkeyless = { identity = \"overlay-W\", oidc_issuer = \"iss\" }\n",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nsigners = [{ kind = \"keyless\", identity = \"user-Y\", oidc_issuer = \"iss\" }]\n",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nsigners = [{ kind = \"keyless\", identity = \"managed-Z\", oidc_issuer = \"iss\" }]\n",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/tool\"\nsigners = [{ kind = \"keyless\", identity = \"overlay-W\", oidc_issuer = \"iss\" }]\n",
         ] {
             accumulator.merge(toml::from_str(lower).expect("lower tier must parse"));
         }
@@ -1927,10 +1988,10 @@ mod tests {
             "a narrower lower-tier scope must not outbid the system pin after the fold"
         );
         assert_eq!(
-            resolved[0]
-                .keyless
-                .as_ref()
-                .and_then(|keyless| keyless.identity.as_deref()),
+            resolved[0].signers.iter().find_map(|signer| match signer {
+                crate::trust::SignerSpec::Keyless(keyless) => keyless.identity.as_deref(),
+                crate::trust::SignerSpec::Key(_) | crate::trust::SignerSpec::Unknown => None,
+            }),
             Some("system-ci")
         );
     }
@@ -3564,7 +3625,7 @@ mod tests {
             "[mirrors]\n\"docker.io\" = \"https://mirror.corp.example\"\n",
             "[managed]\nsource = \"corp/managed-config:stable\"\nrequired = true\n",
             "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n",
-            "[trust.policy.keyless]\nidentity = \"ci@acme.example\"\noidc_issuer = \"https://iss.example\"\n",
+            "signers = [{ kind = \"keyless\", identity = \"ci@acme.example\", oidc_issuer = \"https://iss.example\" }]\n",
         ))
         .unwrap();
 
@@ -3678,6 +3739,71 @@ mod tests {
         assert_eq!(anchored, dir.path().join("sigstore").join("trusted-root.json"));
     }
 
+    /// The signer-key twin of the test above, riding the same seam. Its bug is
+    /// silent in exactly the same way: with no anchoring, a relative
+    /// `key = "keys/acme.pub"` in `/etc/ocx/config.toml` resolves against the process
+    /// working directory, so verification finds the key whenever the operator
+    /// runs from `/etc/ocx` and mysteriously stops when they cd elsewhere. The
+    /// tempdir is deliberately NOT the CWD — a test run from inside it would
+    /// pass either way.
+    ///
+    /// Ordinary path resolution, not a containment check: nothing here
+    /// restricts where a key may live.
+    #[tokio::test]
+    async fn a_relative_signer_key_anchors_to_the_declaring_config_dir_not_the_cwd() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = write_config(
+            &dir,
+            "config.toml",
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nsigners = [{ kind = \"key\", key = \"keys/acme.pub\" }]\n",
+        );
+
+        let config = ConfigLoader::load_and_merge(&[path]).await.expect("load");
+        let crate::trust::SignerSpec::Key(matcher) = &config.trust_policies()[0].signers[0] else {
+            panic!("still a key signer");
+        };
+        let anchored = std::path::PathBuf::from(matcher.key.as_deref().expect("the key reference survives"));
+        assert!(
+            anchored.is_absolute(),
+            "anchored to an absolute path: {}",
+            anchored.display()
+        );
+        assert_eq!(anchored, dir.path().join("keys").join("acme.pub"));
+    }
+
+    /// An absolute reference already names one file, and an inline `key_pem`
+    /// names none — rewriting either would corrupt it.
+    #[tokio::test]
+    async fn an_absolute_signer_key_and_an_inline_pem_survive_loading_unchanged() {
+        let dir = TempDir::new().expect("tempdir");
+        let absolute = dir.path().join("elsewhere").join("acme.pub");
+        let path = write_config(
+            &dir,
+            "config.toml",
+            // The path is quoted by the TOML serializer rather than by the
+            // format string: a Windows tempdir is `C:\Users\…`, and `\U` in a
+            // basic string is a unicode escape, so an interpolated `"{}"` makes
+            // the fixture unparseable on exactly one platform.
+            &format!(
+                "[[trust.policy]]\nscope = \"a/*\"\nsigners = [{{ kind = \"key\", key = {} }}]\n\
+                 [[trust.policy]]\nscope = \"b/*\"\nsigners = [{{ kind = \"key\", key_pem = \"inline\" }}]\n",
+                toml::Value::from(absolute.display().to_string())
+            ),
+        );
+
+        let config = ConfigLoader::load_and_merge(&[path]).await.expect("load");
+        let policies = config.trust_policies();
+        let crate::trust::SignerSpec::Key(by_path) = &policies[0].signers[0] else {
+            panic!("still a key signer");
+        };
+        assert_eq!(by_path.key.as_deref(), Some(absolute.display().to_string().as_str()));
+        let crate::trust::SignerSpec::Key(inline) = &policies[1].signers[0] else {
+            panic!("still a key signer");
+        };
+        assert_eq!(inline.key, None, "an inline pem gains no path");
+        assert_eq!(inline.key_pem.as_deref(), Some("inline"));
+    }
+
     #[tokio::test]
     async fn absolute_trusted_root_survives_loading_unchanged() {
         let dir = TempDir::new().expect("tempdir");
@@ -3685,9 +3811,11 @@ mod tests {
         let path = write_config(
             &dir,
             "config.toml",
+            // Quoted by the TOML serializer, not by the format string — see the
+            // signer-key twin above for the Windows path that breaks otherwise.
             &format!(
-                "[trust.sigstore]\ntrusted_root = \"{}\"\n",
-                absolute.display().to_string().replace('\\', "\\\\")
+                "[trust.sigstore]\ntrusted_root = {}\n",
+                toml::Value::from(absolute.display().to_string())
             ),
         );
 
@@ -3701,6 +3829,90 @@ mod tests {
         let source: crate::oci::Identifier = source.parse().expect("identifier parses");
         ConfigLoader::guard_managed_sigstore_trust(&mut parsed, &source);
         parsed.trust.expect("trust").sigstore.expect("sigstore")
+    }
+
+    /// Any well-formed SPKI PEM; the guard strips by *spelling*, never by
+    /// whether the material parses, so a real key would prove nothing extra.
+    const INLINE_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA\n-----END PUBLIC KEY-----\n";
+
+    fn managed_trust_after_guard(payload: &str, source: &str) -> crate::trust::TrustConfig {
+        let mut parsed: Config = toml::from_str(payload).expect("payload parses");
+        let source: crate::oci::Identifier = source.parse().expect("identifier parses");
+        ConfigLoader::guard_managed_sigstore_trust(&mut parsed, &source);
+        parsed.trust.expect("trust")
+    }
+
+    /// The consumer-side half of the publish-time refusal: a `key` signer
+    /// naming a path in a managed payload names the *publisher's* disk, so the
+    /// consumer must never read whatever sits at that path locally.
+    ///
+    /// The payload carries no `[trust.sigstore]` on purpose — the guard used to
+    /// return early when that table was absent, so a policy-only payload would
+    /// have walked straight past this strip.
+    #[test]
+    fn managed_tier_drops_a_key_signer_named_by_path() {
+        let trust = managed_trust_after_guard(
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n\
+             signers = [{ kind = \"key\", key = \"/home/operator/acme.pub\" }]\n",
+            "ghcr.io/acme/config@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        assert!(
+            matches!(&trust.policy[0].signers[0], crate::trust::SignerSpec::Unknown),
+            "a key signer left with no key at all must narrow to nothing, not linger as an \
+             unsatisfiable KeyMatcher: {:?}",
+            trust.policy[0].signers[0]
+        );
+        assert!(
+            trust.policy[0].clone().compile().is_err(),
+            "a policy whose only signer narrowed away must be refused, never accepted as trust-anyone"
+        );
+    }
+
+    /// Dropping the path form must not take the rest of the policy with it.
+    ///
+    /// Blanking `key` in place leaves a `KeyMatcher` with neither `key` nor
+    /// `key_pem`, which `validate_signers` refuses by name — so one legacy
+    /// payload would turn a fleet-wide scope into a hard config error on every
+    /// covered command, naming a signer the operator never wrote.
+    #[test]
+    fn managed_tier_drops_only_the_path_signer_and_keeps_its_siblings() {
+        let trust = managed_trust_after_guard(
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n\
+             signers = [\n\
+               { kind = \"key\", key = \"/home/operator/acme.pub\" },\n\
+               { kind = \"keyless\", identity = \"ci@acme.example\", oidc_issuer = \"https://token.actions.githubusercontent.com\" },\n\
+             ]\n",
+            "ghcr.io/acme/config@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        );
+
+        let compiled = trust.policy[0]
+            .clone()
+            .compile()
+            .expect("the keyless sibling still compiles after the key-by-path signer is dropped");
+        assert_eq!(compiled.backends.len(), 1, "exactly the keyless backend survives");
+        assert!(matches!(compiled.backends[0], crate::trust::PolicyBackend::Keyless(_)));
+    }
+
+    /// The other direction, or the strip above would be indistinguishable from
+    /// "managed payloads carry no key signers at all": inline material travels
+    /// with the payload, names no file, and is left exactly as published.
+    #[test]
+    fn managed_tier_keeps_an_inline_key_signer() {
+        let trust = managed_trust_after_guard(
+            &format!(
+                "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n\
+                 signers = [{{ kind = \"key\", key_pem = \"\"\"{INLINE_KEY_PEM}\"\"\" }}]\n"
+            ),
+            "ghcr.io/acme/config@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        let crate::trust::SignerSpec::Key(matcher) = &trust.policy[0].signers[0] else {
+            panic!("still a key signer");
+        };
+        assert_eq!(
+            matcher.key_pem.as_deref(),
+            Some(INLINE_KEY_PEM),
+            "inline material survives"
+        );
     }
 
     #[test]
@@ -3989,7 +4201,7 @@ mod tests {
         "[registries.\"ocx.sh\"]\nindex = \"https://index.corp.example\"\n",
         "[mirrors]\n\"ghcr.io\" = \"https://mirror.corp.example\"\n",
         "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n",
-        "[trust.policy.keyless]\nidentity = \"ci@acme.example\"\noidc_issuer = \"https://iss.example\"\n",
+        "signers = [{ kind = \"keyless\", identity = \"ci@acme.example\", oidc_issuer = \"https://iss.example\" }]\n",
         "[shell]\nhook = true\n",
         "[shell.consent]\nnamespaces = \"ocx.sh/*\"\n",
     );

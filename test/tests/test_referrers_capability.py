@@ -3,21 +3,24 @@
 """Acceptance tests for the referrers-API capability cache (#106).
 
 The cache-then-probe wiring itself (``from_cache`` → ``probe`` →
-``write_cache``, no tag fallback, exit 84 on an unsupported registry) is
-already covered by ``test_sign.py`` / ``test_verify.py``
-(``test_sign_referrers_unsupported_exits_84`` /
-``test_verify_referrers_unsupported_exits_84``, both against the
-``legacy_registry`` negative fixture). This file covers the remaining #106
-acceptance criterion: a supported registry's capability probe result is
-cached to disk and reused on a subsequent invocation within the 6h TTL.
+``write_cache``, exit 84 when the write path cannot proceed) is covered by
+``test_sign.py::test_sign_referrers_unsupported_exits_84`` against the
+``legacy_registry`` negative fixture. The **verify** path no longer probes at
+all: it reads the OCI referrers tag-schema fallback instead of refusing, so a
+registry with neither answers 79 — see
+``test_verify.py::test_verify_without_referrers_api_or_fallback_tag_exits_79``.
+This file covers the remaining #106 acceptance criterion: a supported
+registry's capability probe result is cached to disk and reused on a
+subsequent invocation within the 6h TTL.
 
 Acceptance-level, this can observe the *cache artifact* (file exists,
 correct shape, fresh expiry) and that the artifact is untouched by a second
-invocation. Since ``write_cache`` in both ``SignPipeline`` and
-``VerifyPipeline`` only runs on the cache-miss branch (see
-``crates/ocx_lib/src/oci/{sign,verify}/pipeline.rs``), an unchanged
-``probed_at`` after a second successful sign is direct proof that branch was
-not re-entered — i.e. no second probe happened. This test cannot observe the
+invocation. Since ``write_cache`` in ``SignPipeline`` only runs on the
+cache-miss branch (see ``crates/ocx_lib/src/oci/sign/pipeline.rs``), an
+unchanged ``probed_at`` after a second successful sign is direct proof that
+branch was not re-entered — i.e. no second probe happened. Both tests below
+drive ``sign`` for that reason: ``VerifyPipeline`` writes no capability record
+any more. This test cannot observe the
 real registry's HTTP traffic directly; the transport-level proof (a stub
 that errors if probed) lives in
 ``crates/ocx_lib/src/oci/referrer/capability.rs::fresh_cache_short_circuits_probe``.

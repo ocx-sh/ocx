@@ -160,11 +160,11 @@ impl PackageCascadeRepair {
             let package = report.logical.as_ref().unwrap_or(&report.identifier).without_digest();
             match (wrote, &self.announce_tags_path) {
                 (true, Some(path)) => data.print_hint(&format!(
-                    "publish the moved tags - run: ocx package announce --package {package} --tags-from-file {}",
+                    "publish the moved tags - run: ocx package announce --package {package} --tags-file {}",
                     path.display()
                 )),
                 (true, None) => data.print_hint(&format!(
-                    "publish the moved tags - re-run with --announce-tags <PATH>, then: ocx package announce --package {package} --tags-from-file <PATH>"
+                    "publish the moved tags - re-run with --announce-tags <PATH>, then: ocx package announce --package {package} --tags-file <PATH>"
                 )),
                 (false, _) => data.print_hint(&format!(
                     "index behind the registry - run: ocx package announce --package {package} --refresh"
@@ -413,7 +413,7 @@ mod tests {
 
         assert!(
             !repair.wrote_anything(),
-            "only failures means nothing landed, so the follow-up is --refresh not --tags-from-file"
+            "only failures means nothing landed, so the follow-up is --refresh not --tags-file"
         );
     }
 

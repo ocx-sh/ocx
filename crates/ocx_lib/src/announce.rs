@@ -304,7 +304,7 @@ pub async fn announce(
                         observe_and_rebuild(publisher, &head_root, &request, &now, &root_path, &package).await?;
                     // The retry re-resolved the curated set against the winning
                     // head, so its drop list supersedes — never unions with —
-                    // the pre-race one: for `--tags-from-file`/`--refresh` the base
+                    // the pre-race one: for `--tags-file`/`--refresh` the base
                     // root differs between passes, so the two lists legitimately
                     // differ and only the second describes what was announced.
                     reserved_dropped = merged.reserved_dropped;
@@ -394,7 +394,7 @@ struct Rebuilt {
 /// Shared verbatim by the initial commit and the C4 non-fast-forward retry, so
 /// the retry re-derives the *whole* sequence from the winning head instead of
 /// replaying a tag universe resolved against the pre-race root. Re-resolving is
-/// what preserves a concurrent announce's additions: `--tags-from-file` and
+/// what preserves a concurrent announce's additions: `--tags-file` and
 /// `--refresh` take the base root's tags as their starting set, so unioning
 /// against the new head keeps a tag the winner added — replaying a stale set
 /// would delete it, since [`pipeline::regenerate`] replaces `tags` wholesale.
@@ -748,12 +748,12 @@ mod tests {
         let data = StubTransportData::new();
         seed_index(&data, "1.0.0");
         let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data))));
-        let canonical = format!("sha256.{}", "a".repeat(64));
+        let keep = format!("__ocx.keep.sha256-{}", "a".repeat(64));
         let root = committed_root(serde_json::json!({}));
         let request = request(TagSelection::Replace(vec![
             "1.0.0".to_string(),
             "__ocx.desc".to_string(),
-            canonical.clone(),
+            keep.clone(),
         ]));
 
         let rebuilt = observe_and_rebuild(
@@ -769,7 +769,7 @@ mod tests {
 
         assert_eq!(
             rebuilt.reserved_dropped,
-            vec!["__ocx.desc".to_string(), canonical],
+            vec!["__ocx.desc".to_string(), keep],
             "both reserved tags ride out of the pass"
         );
         assert_eq!(rebuilt.observed.len(), 1, "only the real version was observed");

@@ -12,21 +12,41 @@ use ocx_lib::{
     publisher::{self, LayerRef, Publisher},
 };
 
+use crate::api::data::push::SignedPlatformReport;
 use crate::command::package_sign_common;
+use crate::options::key::KeyOpt;
+use crate::options::rekor_upload::RekorUploadOpt;
+use crate::options::signature_format::SignatureFormatOpt;
 use crate::{conventions, options};
 
 #[derive(Parser)]
+// The three signing modifiers are inert without something to sign, and a flag
+// that does nothing is the failure mode this spec rejects everywhere else. The
+// refusal is clap's, not hand-written: `ArgGroup::requires` pointing at a
+// second group renders "the following required arguments were not provided:
+// <--sign|--sbom>", which names both flags that would make the modifier mean
+// something. A hand-written check would have to reproduce that message, and it
+// would need "was this flag given" accessors on three option groups that are
+// shared with `sign`, `attest` and `verify` and deliberately expose only
+// resolvers.
+#[clap(group(clap::ArgGroup::new("signing_target").args(["sign", "sbom"]).multiple(true)))]
+#[clap(group(
+    clap::ArgGroup::new("signing_modifier")
+        .args(["signature_format", "key", "rekor_upload", "no_rekor_upload"])
+        .multiple(true)
+        .requires("signing_target")
+))]
 pub struct PackagePush {
     /// Will cascade rolling releases, ie. pushing 1.2.3 will also update 1.2, 1, etc.
     #[clap(long = "cascade", short = 'c')]
     cascade: bool,
 
-    /// Push a `sha256.<hex>` tag pointing at each pushed platform manifest
-    /// (default). A stray delete of a rolling or cascade tag can then never
-    /// orphan a digest something else still pins, since the canonical tag
-    /// names it directly. Pass `--no-canonical-tag` to skip it.
+    /// Push a `__ocx.keep.sha256-<hex>` tag pointing at each pushed platform
+    /// manifest (default). A stray delete of a rolling or cascade tag can then
+    /// never orphan a digest something else still pins, since the keep tag
+    /// names it directly. Pass `--no-keep-tag` to skip it.
     #[clap(flatten)]
-    canonical_tag: options::CanonicalTag,
+    keep_tag: options::KeepTag,
 
     /// Append a UTC build-metadata segment to the published tag.
     ///
@@ -81,13 +101,13 @@ pub struct PackagePush {
 
     /// After a successful push, append the pushed tag and any cascade tags
     /// to this file (creating it if absent), so `ocx package announce
-    /// --tags-from-file` can pick them up.
+    /// --tags-file` can pick them up.
     ///
     /// This is a scratch file for one pipeline run, not a persistent list -
     /// a stale file left over from an earlier run could re-add a tag that
     /// was deliberately dropped from a later announce.
-    #[clap(long = "announce-file", value_name = "PATH")]
-    announce_file: Option<std::path::PathBuf>,
+    #[clap(long = "tags-file", value_name = "PATH")]
+    tags_file: Option<std::path::PathBuf>,
 
     /// After the push, attest this CycloneDX SBOM against the pushed manifest.
     ///
@@ -102,6 +122,42 @@ pub struct PackagePush {
     /// and the attestation failure decides the exit code.
     #[clap(long = "sbom", value_name = "PATH")]
     sbom: Option<std::path::PathBuf>,
+
+    /// Sign each platform manifest this push writes, inline.
+    ///
+    /// Opt-in: a push without it signs nothing. The signature covers the
+    /// platform manifest, whose digest is final the moment it is pushed --
+    /// never the image index, whose digest is rewritten every time another
+    /// platform merges into it. Sign the index afterwards with
+    /// `ocx package sign --tags-file`, using the file `--tags-file` wrote.
+    ///
+    /// Keyless by default; `--key` selects a key pair. A push that lands and
+    /// then fails to sign is not rolled back: the push report is still
+    /// emitted, with the per-platform signing outcome recorded, and the
+    /// failure decides the exit code.
+    #[clap(long = "sign")]
+    sign: bool,
+
+    /// Signature wire format for `--sign` and `--sbom`.
+    ///
+    /// A usage error without one of those two flags.
+    #[clap(flatten)]
+    signature_format: SignatureFormatOpt,
+
+    /// Sign with a key pair instead of keyless Sigstore.
+    ///
+    /// A usage error without `--sign` or `--sbom`. The password for an
+    /// encrypted private key is read from `OCX_KEY_PASSWORD`.
+    #[clap(flatten)]
+    key: KeyOpt,
+
+    /// Whether the signature is recorded in the Rekor transparency log.
+    ///
+    /// A usage error without `--sign` or `--sbom`. Keyless signatures are
+    /// always recorded and `--no-rekor-upload` is refused there; under `--key`
+    /// recording is off unless asked for.
+    #[clap(flatten)]
+    rekor_upload: RekorUploadOpt,
 
     /// Target platform (e.g. `linux/amd64`, or `any` for platform-agnostic content)
     ///
@@ -199,6 +255,13 @@ impl PackagePush {
         // WATCH: 77-before-81 is S-018's contract, pinned end to end in WP10a.
         // Moving this block below `Publisher::new` silently returns 81 instead
         // — no unit test here reaches `remote_client()`, so nothing local reds.
+        if self.sign {
+            package_sign_common::refuse_when_offline(
+                &context,
+                &identifier,
+                ocx_lib::oci::sign::SignErrorKind::OfflineSignRefused,
+            )?;
+        }
         let sbom_predicate = match &self.sbom {
             None => None,
             Some(path) => {
@@ -209,6 +272,16 @@ impl PackagePush {
                 )?;
                 Some(package_sign_common::read_predicate(path, &identifier).await?)
             }
+        };
+
+        // Resolved before the push for the same reason the predicate is read
+        // before it: a malformed `--key`, a keyless `--no-rekor-upload`, or a
+        // forbidden `[trust.sigstore]` URL must cost no upload. Gated on a
+        // signing request, because an ordinary push must not start failing on
+        // a config key it never reads.
+        let signing = match self.sign || self.sbom.is_some() {
+            false => None,
+            true => Some(self.resolve_signing(&context, &identifier).await?),
         };
 
         let metadata_path = conventions::resolve_metadata_path(&self.layers, self.metadata.as_deref())?;
@@ -243,7 +316,7 @@ impl PackagePush {
         }];
 
         let build_meta: Option<String> = self.build_timestamp.as_ref().and_then(build_timestamp);
-        let canonical_tag = self.canonical_tag.enabled();
+        let keep_tag = self.keep_tag.enabled();
         // Last-wins on a repeated key, matching the POSIX convention for
         // repeated flags.
         let annotations: BTreeMap<String, String> = self.annotation.iter().cloned().collect();
@@ -261,43 +334,107 @@ impl PackagePush {
                     &self.layers,
                     existing_versions,
                     build_meta.as_deref(),
-                    canonical_tag,
+                    keep_tag,
                     &annotations,
                 )
                 .await?
         } else {
             publisher
-                .push(infos, &self.layers, build_meta.as_deref(), canonical_tag, &annotations)
+                .push(infos, &self.layers, build_meta.as_deref(), keep_tag, &annotations)
                 .await?
         };
 
-        // The primary version tag plus the rolling cascade tags. Canonical
-        // `sha256.<hex>` tags are deliberately left out: announce drops them
+        // The primary version tag plus the rolling cascade tags. The
+        // `__ocx.keep.*` tags are deliberately left out: announce drops them
         // downstream, so recording one in a file named "announce" would state
         // something that never gets announced.
         let mut pushed_tags = vec![identifier.tag_or_latest().to_string()];
         pushed_tags.extend(outcome.cascade_tags.iter().cloned());
 
-        // Emit the structured push report BEFORE the announce-file append. The
+        // Emit the structured push report BEFORE the tags-file append. The
         // push itself already succeeded and is not undoable, so an I/O failure
         // writing the scratch file must not swallow the report — the caller
         // still has to learn what landed in the registry. Plain output is a
-        // one-row table (identifier, digest, cascade + canonical tags, layer
+        // one-row table (identifier, digest, cascade + keep tags, layer
         // counts); `--format json`
-        // serializes the report consumed by `ocx-mirror pipeline push`.
+        // serializes the report consumed by `ocx-mirror pipeline push`, and
+        // adds the per-platform manifest digests, which are JSON-only because
+        // the plain table is already at its five-column budget.
+        // Read before the outcome is consumed: `platform_digests` is the
+        // signing input, and it names the platform manifests -- never the
+        // index, whose digest the next platform merge rewrites.
+        let platform_digests = outcome.platform_digests.clone();
         let mut report = crate::api::data::push::PushReport::from_outcome(identifier.to_string(), outcome);
+
+        // Post-push work is never rolled back -- a pushed manifest is
+        // immutable and OCI offers no un-push -- so every failure below is a
+        // row in the report and a line on stderr, and the process exit code is
+        // `sweep_exit_code` over all of them: one fault class scripts through,
+        // a mix collapses to the generic failure. Same collapse the `--tags`
+        // sweep uses, and the same vocabulary in the rows.
+        let mut failures: Vec<ocx_lib::cli::ExitCode> = Vec::new();
+
+        if let Some(options) = &signing
+            && self.sign
+        {
+            let signed = context
+                .manager()
+                .sign_platforms(&identifier, &platform_digests, options)
+                .await;
+            let mut rows = Vec::with_capacity(signed.len());
+            for (platform, outcome) in signed {
+                rows.push(match outcome {
+                    Ok(signed) => {
+                        // Read before the result is consumed, exactly as
+                        // `sign` does: a `--signature-format both` platform
+                        // that lost one leg is a failure that still carries
+                        // the leg that landed.
+                        let result = signed.result;
+                        let leg = result
+                            .first_failure()
+                            .map(|kind| (package_sign_common::leg_exit_code(kind), kind.to_string()));
+                        let signature = package_sign_common::signature_report(&identifier, Some(&platform), result);
+                        match leg {
+                            Some((code, message)) => {
+                                failures.push(code);
+                                SignedPlatformReport::failed(
+                                    platform.to_string(),
+                                    Some(signature),
+                                    package_sign_common::category_slug(code),
+                                    message,
+                                )
+                            }
+                            None => SignedPlatformReport::completed(platform.to_string(), signature),
+                        }
+                    }
+                    Err(error) => {
+                        let error = package_sign_common::attest_error_into_anyhow(error);
+                        failures.push(ocx_lib::cli::classify_error(error.as_ref()));
+                        log::error!("{}", crate::api::data::sanitize_for_terminal(&format!("{error:#}")));
+                        SignedPlatformReport::failed(
+                            platform.to_string(),
+                            None,
+                            package_sign_common::error_slug("package push", &error),
+                            format!("{error:#}"),
+                        )
+                    }
+                });
+            }
+            report = report.with_signatures(rows);
+        }
 
         // The push already landed. Whatever the attestation does, the report is
         // owed to the caller — so the outcome is folded into the report rather
         // than replacing it with an error envelope, and the error is returned
         // only after the report is on stdout.
-        let mut attest_failure = None;
         if let Some(predicate) = sbom_predicate {
-            match self.attest_sbom(&context, &identifier, &platform, predicate).await {
+            let options = signing.expect("--sbom resolves the signing options above");
+            match Self::attest_sbom(&context, &identifier, &platform, options, predicate).await {
                 Ok(outcome) => report = report.with_attestation(outcome),
                 Err(err) => {
                     report = report.with_attestation(package_sign_common::failed_outcome(&err));
-                    attest_failure = Some(err);
+                    failures.push(ocx_lib::cli::classify_error(err.as_ref()));
+                    log::error!("{}", crate::api::data::sanitize_for_terminal(&format!("{err:#}")));
                 }
             }
         }
@@ -305,74 +442,138 @@ impl PackagePush {
 
         // The append still decides the exit code: the caller asked for the file,
         // so a failure is a failure — it just no longer costs them the report.
-        if let Some(path) = &self.announce_file
-            && let Err(error) = append_to_announce_file(path, &pushed_tags).await
+        if let Some(path) = &self.tags_file
+            && let Err(error) = append_to_tags_file(path, &pushed_tags).await
         {
             context.ui().warn(format!(
-                "the push succeeded but the announce file {} was not written",
+                "the push succeeded but the tags file {} was not written",
                 path.display()
             ));
             return Err(error);
         }
 
-        // The push succeeded, so the attestation failure is the worst outcome
-        // in the run and owns the exit code. `main` classifies it through the
-        // same chain `ocx package attest` uses, and the envelope is suppressed
-        // because the push report already claimed stdout.
-        if let Some(error) = attest_failure {
-            return Err(error);
-        }
+        // The push succeeded, so a post-push failure is the worst outcome in
+        // the run and owns the exit code. It is returned rather than raised:
+        // the push report already claimed stdout, so an error envelope would
+        // be suppressed anyway, and only a code can express the sweep's
+        // "a mixed set collapses to Failure" rule. Each failure was logged
+        // above, which is the line `main` would have printed for a raised one.
+        Ok(ExitCode::from(package_sign_common::sweep_exit_code(&failures)))
+    }
 
-        Ok(ExitCode::SUCCESS)
+    /// Resolve the one option set both `--sign` and `--sbom` sign under.
+    ///
+    /// [`SignOptions`] is the carrier rather than a second struct: it already
+    /// holds every field [`AttestOptions`] needs beyond the predicate, and
+    /// minting a parallel type would give the Rekor-upload asymmetry a second
+    /// place to drift.
+    ///
+    /// `push` exposes no endpoint flags, so both URLs enter the shared ladder
+    /// with `None` and land on `[trust.sigstore]` then the builtin default,
+    /// behind the same SSRF guard `sign` uses. `no_tty` is `false` and the
+    /// token overrides are absent, matching what `push --sbom` already did.
+    ///
+    /// # Errors
+    ///
+    /// A forbidden endpoint URL, a malformed `--key` reference (exit 64) or a
+    /// recognised-but-unimplemented key backend (exit 85), and the keyless
+    /// `--no-rekor-upload` refusal (exit 64). Each carries the identifier,
+    /// because each is returned as a `SignError` rather than a bare kind.
+    ///
+    /// [`AttestOptions`]: ocx_lib::package_manager::AttestOptions
+    async fn resolve_signing(
+        &self,
+        context: &crate::app::Context,
+        identifier: &oci::Identifier,
+    ) -> anyhow::Result<ocx_lib::package_manager::SignOptions> {
+        let (fulcio_url, rekor_url) =
+            package_sign_common::resolve_sigstore_pair(context.config_trust_sigstore(), identifier, None, None)?;
+        // Both refusals are wrapped in `SignError` before they reach `anyhow`:
+        // `classify_error` downcasts the outer error, so a bare
+        // `SignErrorKind` exits 1 with an empty `context` instead of 85/64
+        // with the identifier. `sign` and `attest` wrap at the same two calls.
+        let key = self.key.reference().map_err(|kind| {
+            ocx_lib::oci::sign::SignError::new(identifier.clone(), ocx_lib::oci::sign::SignErrorKind::from(kind))
+        })?;
+        let configured_rekor_upload = context
+            .config_trust_sigstore()
+            .and_then(|sigstore| sigstore.rekor_upload);
+        let rekor_upload = self
+            .rekor_upload
+            .enabled(self.key.is_key_mode(), configured_rekor_upload)
+            .map_err(|kind| ocx_lib::oci::sign::SignError::new(identifier.clone(), kind))?;
+        // The OIDC token comes from OCX_IDENTITY_TOKEN or ambient CI detection
+        // exactly as `ocx package attest` resolves it; `push` carries no
+        // `--identity-token-*` flags, so both overrides enter as absent.
+        let identity_token = package_sign_common::resolve_override_token(None, false, identifier).await?;
+        Ok(ocx_lib::package_manager::SignOptions {
+            fulcio_url,
+            rekor_url,
+            identity_token,
+            no_cache: false,
+            no_tty: false,
+            key,
+            rekor_upload,
+            format: self.signature_format.write_format(),
+        })
     }
 
     /// Attest `predicate` as a CycloneDX SBOM against the manifest this push
     /// wrote for `platform`.
     ///
     /// The subject digest is resolved by the attest pipeline from the
-    /// identifier and platform, never derived from a canonical tag —
-    /// `--no-canonical-tag` may have suppressed those.
+    /// identifier and platform, never derived from a keep tag —
+    /// `--no-keep-tag` may have suppressed those.
+    ///
+    /// `options` is the same [`SignOptions`](ocx_lib::package_manager::SignOptions)
+    /// the inline platform signing ran under, so `--signature-format`, `--key`
+    /// and `--rekor-upload` mean one thing per invocation. `push --sbom` used
+    /// to hard-code keyless with a mandatory Rekor upload because push carried
+    /// none of those flags; it carries them now.
     ///
     /// # Errors
     ///
     /// Any attest-pipeline failure, already re-rooted so the JSON envelope
     /// keeps its `context.identifier`.
     async fn attest_sbom(
-        &self,
         context: &crate::app::Context,
         identifier: &oci::Identifier,
         platform: &oci::Platform,
+        options: ocx_lib::package_manager::SignOptions,
         predicate: Vec<u8>,
     ) -> anyhow::Result<crate::api::data::push::AttestationOutcome> {
         use ocx_lib::oci::attest::predicate::PredicateType;
 
-        // `push` exposes no endpoint flags, so `None` for both puts it on the
-        // tail of the same ladder `attest` walks: `[trust.sigstore]` > builtin
-        // default, then the same SSRF guard and the same refusal kind.
-        let (fulcio_url, rekor_url) =
-            package_sign_common::resolve_sigstore_pair(context.config_trust_sigstore(), identifier, None, None)?;
-        let identity_token = package_sign_common::resolve_override_token(None, false, identifier).await?;
         let result = context
             .manager()
             .attest_one(
                 identifier,
-                platform,
+                Some(platform),
                 ocx_lib::package_manager::AttestOptions {
-                    fulcio_url,
-                    rekor_url,
-                    identity_token,
+                    key: options.key,
+                    rekor_upload: options.rekor_upload,
+                    format: options.format,
+                    fulcio_url: options.fulcio_url,
+                    rekor_url: options.rekor_url,
+                    identity_token: options.identity_token,
                     predicate_type: PredicateType::CycloneDx,
                     predicate,
-                    no_cache: false,
-                    no_tty: false,
+                    no_cache: options.no_cache,
+                    no_tty: options.no_tty,
                     offline: context.is_offline(),
                 },
             )
             .await
             .map_err(package_sign_common::attest_error_into_anyhow)?
             .result;
+        // Both addresses are reported, and neither is required: under
+        // `--signature-format simplesigning` the pipeline writes the
+        // `sha256-<hex>.att` sidecar and no referrer, which is a published
+        // attestation and not a failure. `SignatureFormat` has no variant that
+        // writes nothing, so at least one of the two is `Some`.
         Ok(crate::api::data::push::AttestationOutcome::Succeeded {
-            referrer_digest: result.referrer_digest.to_string(),
+            referrer_digest: result.referrer.map(|leg| leg.manifest_digest.to_string()),
+            sidecar_digest: result.sidecar.map(|leg| leg.manifest_digest.to_string()),
             predicate_type: result.predicate_type,
             signed: result.signed,
         })
@@ -395,18 +596,66 @@ pub(crate) fn parse_annotation(argument: &str) -> anyhow::Result<(String, String
     Ok((key.to_string(), value.to_string()))
 }
 
-/// Appends `tags` onto the announce-file at `path` (created if absent),
+/// Appends `tags` onto the tags-file at `path` (created if absent),
 /// deduping against whatever is already there (design register C2).
-async fn append_to_announce_file(path: &std::path::Path, tags: &[String]) -> anyhow::Result<()> {
+async fn append_to_tags_file(path: &std::path::Path, tags: &[String]) -> anyhow::Result<()> {
     let existing = match tokio::fs::read(path).await {
         Ok(bytes) => conventions::parse_tags_file(&bytes),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(err) => return Err(err).with_context(|| format!("reading announce file {}", path.display())),
+        Err(err) => {
+            return Err(ocx_lib::error::file_error(path, err))
+                .with_context(|| format!("reading tags file {}", path.display()));
+        }
     };
     let merged = conventions::merge_tags_file(&existing, tags);
     tokio::fs::write(path, merged)
         .await
-        .with_context(|| format!("writing announce file {}", path.display()))
+        .map_err(|error| ocx_lib::error::file_error(path, error))
+        .with_context(|| format!("writing tags file {}", path.display()))
+}
+
+#[cfg(test)]
+mod stderr_neutralization_tests {
+    //! `push` is the one command that logs a failure *and* keeps going: the
+    //! push already landed, so an inline-signing or attestation failure is
+    //! reported rather than returned, and `main.rs`'s boundary log — the only
+    //! other place a cause chain reaches the terminal — never sees these
+    //! chains at all. That makes each of these sites a terminal boundary in
+    //! its own right (CWE-150): a registry-served error body quotes names read
+    //! off wire documents, and `tracing-subscriber` passes `\n`, `\r`, NUL and
+    //! the whole `Cf` bidi set straight through.
+
+    /// Every `log::error!` in this module's production half neutralizes what
+    /// it interpolates.
+    ///
+    /// Written per call site rather than as a count budget: comparing totals
+    /// (`log::error!` count == `sanitize_for_terminal` count) is satisfied by
+    /// one raw call plus one unrelated sanitized call elsewhere in the file,
+    /// which is exactly the shape that shipped. The non-zero assertion is the
+    /// other half — a needle that silently stops matching still reports green.
+    #[test]
+    fn every_stderr_log_neutralizes_its_cause_chain() {
+        let production = include_str!("package_push.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the module has a non-test half");
+        let sites: Vec<&str> = production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| line.contains("log::error!"))
+            .collect();
+        assert!(
+            !sites.is_empty(),
+            "the needle stopped matching — this guard would now pass on any code at all"
+        );
+        for site in sites {
+            assert!(
+                site.contains("sanitize_for_terminal"),
+                "an unsanitized cause chain reaches the terminal here: {}",
+                site.trim()
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -452,15 +701,15 @@ mod annotation_tests {
 }
 
 #[cfg(test)]
-mod announce_file_tests {
-    use super::append_to_announce_file;
+mod tags_file_tests {
+    use super::append_to_tags_file;
 
     #[tokio::test]
     async fn creates_the_file_with_the_pushed_and_cascade_tags() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("announce.txt");
 
-        append_to_announce_file(
+        append_to_tags_file(
             &path,
             &[
                 "3.28.1".to_string(),
@@ -481,14 +730,127 @@ mod announce_file_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("announce.txt");
 
-        append_to_announce_file(&path, &["3.28.1".to_string(), "3.28".to_string()])
+        append_to_tags_file(&path, &["3.28.1".to_string(), "3.28".to_string()])
             .await
             .expect("first append succeeds");
-        append_to_announce_file(&path, &["3.28.2".to_string(), "3.28".to_string()])
+        append_to_tags_file(&path, &["3.28.2".to_string(), "3.28".to_string()])
             .await
             .expect("second append succeeds");
 
         let content = tokio::fs::read_to_string(&path).await.expect("read announce file");
         assert_eq!(content, "3.28.1,3.28,3.28.2");
+    }
+}
+
+#[cfg(test)]
+mod signing_flag_tests {
+    //! The cross-flag rule: `--signature-format`, `--key` and `--rekor-upload`
+    //! are inert without something to sign, so clap refuses them without
+    //! `--sign` or `--sbom`.
+    //!
+    //! The refusal is expressed as an `ArgGroup` whose `requires` names a
+    //! second group, never as a hand-written check: clap then renders
+    //! `<--sign|--sbom <PATH>>`, which names both flags that would give the
+    //! modifier a meaning, and the three option groups stay untouched — they
+    //! are shared with `sign`, `attest` and `verify` and deliberately expose
+    //! resolvers rather than "was this given" predicates.
+
+    use clap::Parser as _;
+    use ocx_lib::oci::sign::SignatureFormat;
+
+    use super::PackagePush;
+
+    /// Every modifier flag, spelled as argv.
+    const MODIFIERS: [&[&str]; 4] = [
+        &["--signature-format", "bundle"],
+        &["--key", "/tmp/does-not-need-to-exist.pem"],
+        &["--rekor-upload"],
+        &["--no-rekor-upload"],
+    ];
+
+    fn parse(extra: &[&str]) -> Result<PackagePush, clap::Error> {
+        let mut argv = vec!["push"];
+        argv.extend_from_slice(extra);
+        argv.extend_from_slice(&["--identifier", "registry.example/pkg:1.0"]);
+        PackagePush::try_parse_from(argv)
+    }
+
+    /// Without a target, each modifier is a usage error naming both flags that
+    /// would make it mean something.
+    #[test]
+    fn a_signing_modifier_alone_is_refused_and_names_the_flags_that_would_admit_it() {
+        for modifier in MODIFIERS {
+            let Err(error) = parse(modifier) else {
+                panic!("{modifier:?} must be refused without a target");
+            };
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "{modifier:?} must be a missing-requirement refusal, not a parse failure"
+            );
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains("--sign") && rendered.contains("--sbom"),
+                "{modifier:?} must name both admitting flags, got: {rendered}"
+            );
+        }
+    }
+
+    /// Either target admits every modifier — `--sbom` included, which is the
+    /// half a `requires = "sign"` would have got wrong.
+    #[test]
+    fn either_target_admits_every_signing_modifier() {
+        for modifier in MODIFIERS {
+            for target in [vec!["--sign"], vec!["--sbom", "/tmp/sbom.json"]] {
+                let mut argv = target.clone();
+                argv.extend_from_slice(modifier);
+                parse(&argv).unwrap_or_else(|error| panic!("{target:?} must admit {modifier:?}: {error}"));
+            }
+        }
+    }
+
+    /// A bare push, and a `--sign` with no modifiers, both still parse: the
+    /// group is a requirement on the modifiers, never on the targets.
+    #[test]
+    fn a_push_parses_with_no_signing_flags_at_all() {
+        parse(&[]).expect("a bare push parses");
+        parse(&["--sign"]).expect("--sign alone parses");
+    }
+
+    /// The flattened groups are wired to push's own fields, so the resolvers
+    /// read what the command line said rather than their defaults.
+    #[test]
+    fn the_flattened_groups_reach_pushs_resolvers() {
+        let push = parse(&["--sign", "--key", "/tmp/k.pem", "--signature-format", "both"]).expect("parses");
+        assert!(push.key.is_key_mode(), "--key must select key mode");
+        assert_eq!(push.signature_format.write_format(), SignatureFormat::Both);
+        assert!(
+            !push.rekor_upload.enabled(true, None).expect("key mode resolves"),
+            "key mode does not upload unless asked"
+        );
+
+        let opted_in = parse(&["--sign", "--key", "/tmp/k.pem", "--rekor-upload"]).expect("parses");
+        assert!(opted_in.rekor_upload.enabled(true, None).expect("key mode resolves"));
+
+        let default_format = parse(&["--sign"]).expect("parses");
+        assert_eq!(default_format.signature_format.write_format(), SignatureFormat::Bundle);
+        assert!(!default_format.key.is_key_mode());
+    }
+
+    /// Keyless plus `--no-rekor-upload` is refused on push exactly as on
+    /// `sign`: a Fulcio certificate outlives its validity window, and the log
+    /// entry's timestamp is the only lasting proof the signature predates the
+    /// expiry.
+    #[test]
+    fn keyless_with_no_rekor_upload_is_refused_on_push_too() {
+        let push = parse(&["--sign", "--no-rekor-upload"]).expect("parses");
+        let error = push
+            .rekor_upload
+            .enabled(push.key.is_key_mode(), None)
+            .expect_err("keyless must refuse --no-rekor-upload");
+        assert!(
+            matches!(error, ocx_lib::oci::sign::SignErrorKind::RekorUploadRequiredForKeyless),
+            "got: {error}"
+        );
     }
 }

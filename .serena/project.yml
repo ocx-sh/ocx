@@ -85,7 +85,14 @@ additional_workspace_folders: []
 # list of additional paths to ignore in this project.
 # Same syntax as gitignore, so you can use * and **.
 # Note: global ignored_paths from serena_config.yml are also applied additively.
-ignored_paths: []
+ignored_paths:
+  # Agent worktrees are full copies of this workspace. If Serena is activated
+  # against one it starts ANOTHER rust-analyzer rooted there (~4 GB resident
+  # each), and rust-analyzer has no cross-project server sharing -- one instance
+  # per workspace root, by design. Three concurrent worktrees exhausted RAM+swap
+  # on a 32 GB machine. Work in a worktree with plain read/grep, or activate it
+  # as its own project deliberately, knowing the cost.
+  - ".agents/worktrees"
 
 # whether the project is in read-only mode
 # If set to true, all editing tools will be disabled and attempts to use them will result in an error

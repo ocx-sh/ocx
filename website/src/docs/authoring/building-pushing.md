@@ -143,8 +143,8 @@ ocx package sign -p linux/amd64 my/cmake:3.28
 Consumers verify by supplying the expected signer identity — verification fails loudly rather than
 silently if the bundle is absent or the identity does not match.
 
-For implementation detail (TUF trust root loading, referrers-capability cache, OCI 1.1 hard-fail
-policy, bundle storage paths, and slice boundaries) see [Signing In Depth][in-depth-signing].
+For implementation detail (TUF trust root loading, referrers-capability cache, how a referrer is
+published, bundle storage paths, and slice boundaries) see [Signing In Depth][in-depth-signing].
 
 For command flags, token-source precedence, and exit codes see the
 [`package sign` reference][cmd-package-sign] and [`package verify` reference][cmd-package-verify].

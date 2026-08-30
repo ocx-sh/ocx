@@ -316,7 +316,10 @@ mod tests {
     #[test]
     fn all_reserved_selection_names_the_dropped_tags_and_exits_usage_error() {
         let error = AnnounceError::NoCuratedTags {
-            reserved_dropped: vec!["__ocx.desc".to_string(), format!("sha256.{}", "a".repeat(64))],
+            reserved_dropped: vec![
+                "__ocx.desc".to_string(),
+                format!("__ocx.keep.sha256-{}", "a".repeat(64)),
+            ],
         };
         assert_eq!(error.classify(), Some(ExitCode::UsageError));
         let message = error.to_string();
@@ -325,7 +328,7 @@ mod tests {
             "the message must name the tags: {message}"
         );
         assert!(
-            message.contains(&format!("sha256.{}", "a".repeat(64))),
+            message.contains(&format!("__ocx.keep.sha256-{}", "a".repeat(64))),
             "the message must name the tags: {message}"
         );
         assert!(

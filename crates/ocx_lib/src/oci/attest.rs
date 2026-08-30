@@ -96,3 +96,42 @@ pub(crate) const ACCEPTED_TLOG_KINDS: &[(&str, &str)] = &[("dsse", "0.0.1")];
 
 /// The `(kind, version)` pair the sign side uploads.
 pub(crate) const TLOG_KIND_WRITTEN: (&str, &str) = ("dsse", "0.0.1");
+
+/// The `predicateType` cosign v3 writes on an **image signature** DSSE
+/// statement, whose predicate is empty and whose subject is the signed digest.
+///
+/// Deliberately a constant and **not** a [`predicate::PredicateType`] variant:
+/// `PredicateType::from_str` already yields `Uri(_)` for any absolute URI and
+/// `is_provenance` / `builder_id` / `wrap` dispatch on `.uri()`, so a variant
+/// buys nothing — and adding it to `PredicateType::ALIASES` would expose an
+/// image-signature predicate as a user-selectable `attest --type` value.
+///
+/// `pub`, unlike the bounds above, because it is a wire value the sign and
+/// verify pipelines both name; matching is a `.uri()`-level string comparison
+/// against a parsed statement's `predicateType`, the same rule
+/// `is_provenance` follows.
+pub const COSIGN_SIGN_PREDICATE_TYPE: &str = "https://sigstore.dev/cosign/sign/v1";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// cosign's own signature referrer, captured in G0. `include_str!` rather
+    /// than a runtime read: a moved fixture becomes a compile error.
+    const KEYLESS_REFERRER_MANIFEST: &str =
+        include_str!("../../../../test/tests/fixtures/golden/keyless_referrer_manifest.json");
+
+    /// T-12. The predicate type is what cosign v3.1.1 actually annotated its
+    /// signature referrer with, not a value read off a spec page.
+    #[test]
+    fn cosign_sign_predicate_type_matches_the_golden_referrer() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(KEYLESS_REFERRER_MANIFEST).expect("golden referrer manifest is JSON");
+        let annotated = manifest
+            .pointer("/annotations/dev.sigstore.bundle.predicateType")
+            .and_then(serde_json::Value::as_str)
+            .expect("golden referrer annotates a predicateType");
+
+        assert_eq!(annotated, COSIGN_SIGN_PREDICATE_TYPE);
+    }
+}

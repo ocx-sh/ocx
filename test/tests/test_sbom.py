@@ -124,6 +124,7 @@ def push_sbom_referrer(
     media_type: str,
     payload: bytes,
     layer_media_type: str | None = None,
+    subject_media_type: str | None = None,
 ) -> str:
     """Push a raw, unsigned SBOM referrer with `media_type` as its artifactType.
 
@@ -145,6 +146,10 @@ def push_sbom_referrer(
     case); pass a different value to simulate a registry listing whose
     artifactType and served layer disagree (the cross-family mislabel the read
     path is checked against).
+
+    ``subject_media_type`` defaults to the image-manifest type, which is what a
+    per-platform attach produces; pass the image-index type to attach to a
+    multi-platform tag's index the way `cosign attach sbom <tag>` does.
     """
     config_digest = reg.push_blob(registry, repo, b"{}", insecure=True)
     layer_digest = reg.push_blob(registry, repo, payload, insecure=True)
@@ -160,7 +165,11 @@ def push_sbom_referrer(
         "layers": [
             {"mediaType": layer_media_type or media_type, "digest": layer_digest, "size": len(payload)},
         ],
-        "subject": {"mediaType": reg.IMAGE_MANIFEST_MEDIA_TYPE, "digest": subject_digest, "size": subject_size},
+        "subject": {
+            "mediaType": subject_media_type or reg.IMAGE_MANIFEST_MEDIA_TYPE,
+            "digest": subject_digest,
+            "size": subject_size,
+        },
     }
     digest, _ = reg.push_manifest(registry, repo, manifest, insecure=True)
     return digest
@@ -219,6 +228,11 @@ def test_sbom_lists_the_verified_attestation_with_its_signer_and_time(
         f"signed_at is RFC 3339 with an explicit Z (PLAT-31), got {entry['signed_at']!r}"
     )
     assert "summary" not in entry, "the per-document summary appears only under --summary"
+    # S-004: ``shadowed`` is present on every entry, always. Unlike the optional
+    # certificate fields it is never omitted -- ``false`` is a true statement
+    # (nothing supersedes this document), so a consumer branches on the key
+    # without first testing for its presence.
+    assert entry["shadowed"] is False
 
 
 def test_sbom_without_identity_flags_defaults_to_permissive_listing(
@@ -252,6 +266,44 @@ def test_sbom_without_identity_flags_defaults_to_permissive_listing(
     assert data["summary"]["verification"] == "unverified"
     [entry] = data["entries"]
     assert entry["verified"] is False
+    # S-004, unverified half: `shadowed` is emitted on every entry regardless of
+    # trust class -- it answers "is this superseded", not "was this checked".
+    assert entry["shadowed"] is False
+
+
+def test_sbom_without_platform_runs_against_what_resolved(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+) -> None:
+    """C-010. ``package sbom`` with no ``--platform`` is not a usage error.
+
+    Same relaxation as ``package verify``: absent the flag the command acts on
+    whatever the reference resolved to, which for a multi-platform tag is the
+    index — where cosign attaches an index-level attestation.
+
+    ``sbom_args`` always passes ``--platform``, so the flags are spelled out
+    here without it. A clap refusal exits 64 with an empty stdout, so a
+    parseable envelope carrying a pipeline verdict is what proves the grammar
+    accepted the invocation.
+    """
+    result = ocx.run(
+        "package", "sbom",
+        "--rekor-url", sigstore_stack.rekor_url,
+        "--sigstore-trusted-root", str(sigstore_stack.trust_root),
+        "--certificate-identity", sigstore_stack.identity,
+        "--certificate-oidc-issuer", sigstore_stack.issuer,
+        published_package.short,
+        check=False,
+    )
+    assert result.returncode != 64, (
+        f"--platform must be optional; clap refused the invocation\n"
+        f"stderr: {result.stderr.strip()}"
+    )
+    assert json.loads(result.stdout)["error"]["detail"] == "no_signatures_found", (
+        f"the run must reach the pipeline and report on the resolved object; "
+        f"got {result.stdout}"
+    )
 
 
 def test_sbom_on_a_package_carrying_nothing_is_not_found(
@@ -877,6 +929,144 @@ def test_sbom_lists_a_foreign_tools_raw_referrer_as_unverified(
     assert summarized.returncode == 0, f"stdout: {summarized.stdout}"
     [summary_entry] = json.loads(summarized.stdout)["data"]["entries"]
     assert summary_entry["summary"]["component_count"] == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# S-010 / C-011 — a platform SBOM shadows an index one, per predicateType
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+#: A second CycloneDX document, distinguishable from `CYCLONEDX_MINIMAL` so the
+#: two referrers differ in more than their subject.
+CYCLONEDX_INDEX_LEVEL = b'{"bomFormat":"CycloneDX","specVersion":"1.6","components":[{"type":"library","name":"index-level"}]}'
+
+#: SPDX tag-value, the shape `SBOM_SPDX_TEXT_MEDIA_TYPE` types. Not JSON — which
+#: is the point: discovery is format-agnostic, only `--summary` is not.
+SPDX_TAG_VALUE = b"SPDXVersion: SPDX-2.3\nDataLicense: CC0-1.0\n"
+
+
+def test_sbom_shadows_the_index_cyclonedx_but_never_the_index_spdx(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+) -> None:
+    """S-010 / C-011. Three raw SBOMs across two subjects, read with --platform.
+
+    A platform-level CycloneDX supersedes the index-level CycloneDX and leaves
+    the index-level SPDX alone: they are different documents for different
+    consumers, not substitutes, and a consumer asking for SPDX would otherwise
+    be told the package carries none.
+
+    Read permissively (`no_identity_args`), because a raw attach is what a
+    foreign tool produces and demand mode refuses it before listing — the
+    shadowing rule is format-and-subject arithmetic and does not depend on who
+    signed. All three documents must still be listed: `--format json` is the
+    machine channel and marks rather than hides.
+    """
+    index_bytes, index_digest = reg.fetch_manifest_raw(
+        ocx.registry, published_package.repo, published_package.tag,
+    )
+    platform_digest, platform_size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    assert platform_digest != index_digest, (
+        "this test needs a multi-platform tag; the fixture resolved to a single manifest"
+    )
+
+    platform_cyclonedx = push_sbom_referrer(
+        ocx.registry, published_package.repo, platform_digest, platform_size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_MINIMAL,
+    )
+    index_cyclonedx = push_sbom_referrer(
+        ocx.registry, published_package.repo, index_digest, len(index_bytes),
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_INDEX_LEVEL,
+        subject_media_type=reg.IMAGE_INDEX_MEDIA_TYPE,
+    )
+    index_spdx = push_sbom_referrer(
+        ocx.registry, published_package.repo, index_digest, len(index_bytes),
+        media_type=SBOM_SPDX_TEXT_MEDIA_TYPE, payload=SPDX_TAG_VALUE,
+        subject_media_type=reg.IMAGE_INDEX_MEDIA_TYPE,
+    )
+
+    listed = ocx.run("package", "sbom", *no_identity_args(sigstore_stack), published_package.short, check=False)
+    assert listed.returncode == 0, f"sbom failed\nstdout: {listed.stdout}\nstderr: {listed.stderr}"
+    entries = {entry["referrer_digest"]: entry for entry in json.loads(listed.stdout)["data"]["entries"]}
+
+    assert set(entries) == {platform_cyclonedx, index_cyclonedx, index_spdx}, (
+        "all three documents must be listed: --format json marks a superseded "
+        f"document, it never drops it; got {sorted(entries)}"
+    )
+    assert entries[index_spdx]["shadowed"] is False, (
+        "an index-level SPDX is not a substitute for a platform CycloneDX; "
+        "hiding it is data loss, not a preference"
+    )
+    assert entries[index_cyclonedx]["shadowed"] is True, (
+        "the index-level CycloneDX is superseded by the platform-level one of the same type"
+    )
+    assert entries[platform_cyclonedx]["shadowed"] is False, (
+        "the preferred document can never be its own shadow"
+    )
+    assert entries[platform_cyclonedx]["subject_digest"] == platform_digest
+    assert entries[index_spdx]["subject_digest"] == index_digest
+
+    # The plain default is the one rendering that collapses. The superseded
+    # document's referrer digest leaves the table; the other two stay, so this
+    # cannot pass on an empty render.
+    plain = ocx.plain("package", "sbom", *no_identity_args(sigstore_stack), published_package.short, check=False)
+    assert plain.returncode == 0, f"stdout: {plain.stdout}\nstderr: {plain.stderr}"
+    assert index_cyclonedx not in plain.stdout, (
+        f"the human default collapses to the preferred document: {plain.stdout}"
+    )
+    for surviving in (platform_cyclonedx, index_spdx):
+        assert surviving in plain.stdout, (
+            f"{surviving} must still render; the table collapsed too far: {plain.stdout}"
+        )
+
+
+def test_sbom_without_platform_shadows_nothing(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+) -> None:
+    """C-011 rule 3, and the discriminating control for the test above.
+
+    Same registry shape, one flag removed: with no ``--platform`` nothing is
+    narrowed, one subject is read, and no document can supersede another. A
+    shadowing pass that ignored what was narrowed would mark the index-level
+    CycloneDX here too.
+    """
+    index_bytes, index_digest = reg.fetch_manifest_raw(
+        ocx.registry, published_package.repo, published_package.tag,
+    )
+    platform_digest, platform_size = adversarial.subject_of(
+        ocx.registry, published_package.repo, published_package.tag, platform=current_platform(),
+    )
+    push_sbom_referrer(
+        ocx.registry, published_package.repo, platform_digest, platform_size,
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_MINIMAL,
+    )
+    index_cyclonedx = push_sbom_referrer(
+        ocx.registry, published_package.repo, index_digest, len(index_bytes),
+        media_type=SBOM_CYCLONEDX_MEDIA_TYPE, payload=CYCLONEDX_INDEX_LEVEL,
+        subject_media_type=reg.IMAGE_INDEX_MEDIA_TYPE,
+    )
+
+    listed = ocx.run(
+        "package", "sbom",
+        "--rekor-url", sigstore_stack.rekor_url,
+        "--sigstore-trusted-root", str(sigstore_stack.trust_root),
+        published_package.short,
+        check=False,
+    )
+    assert listed.returncode == 0, f"stdout: {listed.stdout}\nstderr: {listed.stderr}"
+    entries = {entry["referrer_digest"]: entry for entry in json.loads(listed.stdout)["data"]["entries"]}
+    assert set(entries) == {index_cyclonedx}, (
+        "with no --platform the index is the subject itself, so only its own "
+        f"documents are read; got {sorted(entries)}"
+    )
+    assert entries[index_cyclonedx]["shadowed"] is False, (
+        "nothing was narrowed, so nothing is superseded"
+    )
 
 
 def test_sbom_demand_mode_lists_the_verified_document_and_refuses_the_unsigned_sibling(

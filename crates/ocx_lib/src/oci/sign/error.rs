@@ -14,6 +14,7 @@
 use crate::cli::{ClassifyErrorKind, ClassifyExitCode, ExitCode};
 use crate::oci::Identifier;
 use crate::oci::endpoint::UrlRejection;
+use crate::oci::sign::KeyRefError;
 
 /// Top-level sign error carrying the identifier being signed + the kind.
 ///
@@ -100,14 +101,19 @@ pub enum SignErrorKind {
     #[error("Rekor SET malformed or missing")]
     RekorSetMalformed,
 
-    /// Registry returned 404 on `/v2/<name>/referrers/`.
+    /// The Referrers API is absent **and** the tag-schema fallback write was
+    /// refused (spec D3).
     ///
-    /// Exit 84 (`ReferrersUnsupported`). Remediation: use a registry with OCI
-    /// 1.1 referrers support. The outer `SignError` Display (`"{identifier}:
-    /// {kind}"`) already prefixes this with the registry host, so the message
-    /// itself does not repeat it.
+    /// Exit 84 (`ReferrersUnsupported`). The old message — "registry does not
+    /// support the OCI Referrers API" — became false the moment the capability
+    /// gates were removed (ADR Amendment 10, C-009): an absent API is now
+    /// served by the fallback index, so reaching 84 on the write side means the
+    /// fallback could not hold the referrer either. Remediation is therefore a
+    /// registry that serves the Referrers API, which carries no such ceiling.
+    /// The outer `SignError` Display (`"{identifier}: {kind}"`) already
+    /// prefixes this with the registry host, so the message does not repeat it.
     #[error(
-        "registry does not support the OCI Referrers API (requires OCI Distribution 1.1+); \
+        "registry serves no OCI Referrers API and would not hold the referrers fallback index; \
          supply-chain commands are unavailable for this registry"
     )]
     ReferrersUnsupported,
@@ -118,6 +124,53 @@ pub enum SignErrorKind {
     /// plain typo in `--platform` as a bug in ocx.
     #[error("no manifest for platform {platform}")]
     TargetNotFound { platform: String },
+
+    /// `--platform` was given but the reference resolved to a single manifest.
+    ///
+    /// Exit 79 (`NotFound`) and a slug of its own, byte-identical to
+    /// [`VerifyErrorKind::TargetNotAnIndex`](crate::oci::verify::VerifyErrorKind::TargetNotAnIndex)
+    /// — one refusal, one word, whichever verb reported it. Separate from
+    /// [`Self::TargetNotFound`] because the remedies differ: "this package
+    /// ships no such platform" sends you looking for a build, "this reference
+    /// has no platforms to choose from" tells you to drop the flag.
+    #[error("--platform {platform} was given but the reference resolved to a single manifest, not an index")]
+    TargetNotAnIndex { platform: String },
+
+    /// The subject resolved to a digest OCX cannot address in a cosign
+    /// artifact. Everything the sign and attest paths write is sha256-only.
+    ///
+    /// Exit 65 (`DataError`), deliberately not 64: the algorithm is a property
+    /// of the *published manifest*, not of anything the caller typed, so no
+    /// amount of retyping the reference or the `--platform` fixes it. Same
+    /// class as [`Self::PredicateNotJson`] — material OCX was handed and
+    /// cannot use.
+    ///
+    /// Raised at target resolution, before a blob, a manifest or a Rekor entry
+    /// is written, because what OCX writes cannot carry the subject and fails
+    /// *later* and worse. The in-toto Statement's DigestSet is emitted from
+    /// the subject's own algorithm while
+    /// [`binds_subject`](crate::oci::attest::statement) accepts `sha256`
+    /// alone, so the refusal (`statement_subject_weak_algorithm`) arrives at
+    /// verify time — after a permanent transparency-log entry has been burned
+    /// and the run exited 0. cosign itself is sha256-only, so accepting a
+    /// stronger algorithm and failing later is strictly worse than refusing
+    /// up front, and the alternative — widening `binds_subject` — would
+    /// enlarge the trust surface to algorithms nothing else in the pipeline
+    /// handles.
+    ///
+    /// The sidecar tag is the reason the refusal is *not* narrowed to the
+    /// legs that build a Statement. It is
+    /// `<algorithm>-<encoded truncated to 64>.<suffix>`, so two subjects
+    /// sharing a 64-character prefix share one tag: the spec accepts that
+    /// collision for a referrers index, where the index is re-read and
+    /// filtered, but a signature parked under a colliding tag is simply the
+    /// wrong subject's. One algorithm end to end is the only shape in which
+    /// that question does not have to be asked.
+    #[error("cosign artifacts address their subject by sha256; this reference resolves to a {algorithm} digest")]
+    SubjectDigestUnsupported {
+        /// The algorithm prefix the subject digest carries, e.g. `sha384`.
+        algorithm: String,
+    },
 
     /// OIDC pre-check (expiry, audience) failed client-side — token never sent to Fulcio.
     ///
@@ -248,6 +301,99 @@ pub enum SignErrorKind {
         predicate_type: String,
     },
 
+    /// `--signature-format simplesigning` or `both` reached an attach with no
+    /// signing identity at all.
+    ///
+    /// Exit 64 (`UsageError`), the same code and the same reasoning as
+    /// [`Self::UnsignedTypeUnsupported`]: the offending value came from the
+    /// invocation. A `sha256-<hex>.att` sidecar layer **is** a DSSE envelope,
+    /// so an unsigned attach has nothing to put in one — and quietly writing
+    /// the bundle shape instead would make `--signature-format` a flag that did
+    /// something other than what it says, which is the failure mode this
+    /// surface rejects everywhere else. Remediation: supply an OIDC identity or
+    /// a `--key`, or drop the flag.
+    #[error(
+        "--signature-format {format} writes a sha256-<hex>.att sidecar, which carries a signed \
+         DSSE envelope; supply an OIDC identity or a --key, or drop the flag"
+    )]
+    SidecarRequiresSignature {
+        /// The requested format, echoed so the message names what was asked for.
+        format: crate::oci::sign::SignatureFormat,
+    },
+
+    /// A `--key` reference named a key backend OCX recognises but has not
+    /// implemented (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`,
+    /// `k8s://`).
+    ///
+    /// Exit 85 (`UnsupportedKeyBackend`), with its own envelope `error.kind`
+    /// rather than a fold into `usage_error`: the invocation was well-formed
+    /// and the backend is real, so a script can branch on "not built yet"
+    /// separately from "you typed it wrong". Remediation: pass a file key, or
+    /// wait for the backend. Never reported as "no such file or directory" --
+    /// the refusal happens at the parse boundary, before anything treats the
+    /// reference as a path.
+    ///
+    /// `transparent` rather than a wrapping message: the wrapped
+    /// [`KeyRefError`] already names the scheme, and a prefix here would render
+    /// the sentence twice under `{err:#}`. Transparent forwards `source()`
+    /// *past* the value it wraps, which is harmless here for two reasons --
+    /// `KeyRefError` is a leaf with no source of its own, and `exit_code()`
+    /// answers for this variant directly instead of delegating to the chain
+    /// walker (contrast `CopyErrorKind::Registry`, which must delegate).
+    #[error(transparent)]
+    UnsupportedKeyBackend(KeyRefError),
+
+    /// The key backend could not produce a signature.
+    ///
+    /// Exit code is the wrapped [`KeyBackendError`]'s own class, decided by
+    /// [`Self::exit_code`] below: unreachable backend → 75 (retry), unreadable
+    /// key material → 74, malformed key → 65, recognised-but-unimplemented
+    /// backend → 85. A KMS signs over the network, so "the backend was down"
+    /// and "the key is wrong" are different operator actions and must not
+    /// collapse into one code.
+    ///
+    /// `#[from]` because the conversion is unambiguous — `KeyBackendError` has
+    /// exactly one home in this taxonomy.
+    #[error(transparent)]
+    KeyBackend(#[from] crate::oci::sign::key_backend::KeyBackendError),
+
+    /// A `--key` reference could not be parsed: an unrecognised scheme token,
+    /// or nothing following the scheme.
+    ///
+    /// Exit 64 (`UsageError`). Remediation: fix the reference. Same
+    /// `transparent` reasoning as [`Self::UnsupportedKeyBackend`]; the two are
+    /// separate variants because their exit codes and their remedies differ,
+    /// and `From<KeyRefError>` is the single place that decides which applies.
+    #[error(transparent)]
+    KeyReferenceInvalid(KeyRefError),
+
+    /// `--no-rekor-upload` was given for a keyless signature.
+    ///
+    /// Exit 64 (`UsageError`) -- the flags parse, but the combination asks for
+    /// something that cannot be honoured.
+    ///
+    /// Deliberately **not** a clap `requires = "key"` (plan D-7): clap would
+    /// print "the following required arguments were not provided: --key", which
+    /// inverts the reason. The reason is the whole point. A Fulcio certificate
+    /// is valid for roughly ten minutes, so the Rekor entry's inclusion
+    /// timestamp is the only durable proof that the signature was produced
+    /// while the certificate still was. Skipping the entry does not make the
+    /// signature unverifiable now -- it makes it unverifiable forever, ten
+    /// minutes from now. So under keyless the flag is an error and never a
+    /// silent no-op.
+    ///
+    /// Carried G0 constraint, stated here so no later loop re-derives it
+    /// backwards: verification anchors certificate validity to that
+    /// *signing-time* proof -- the Rekor entry's integrated time -- and never
+    /// to wall-clock "is this certificate valid now". A golden keyless fixture
+    /// whose certificate expired ten minutes after capture must still verify.
+    #[error(
+        "--no-rekor-upload requires --key: a keyless signature must be recorded in Rekor, \
+         because a Fulcio certificate is valid for about ten minutes and the log entry's \
+         timestamp is the only lasting proof the signature was made while it was"
+    )]
+    RekorUploadRequiredForKeyless,
+
     /// Catch-all for Fulcio/Rekor HTTP errors outside the codes above.
     ///
     /// Exit 1 (`Failure`). Carries the underlying error via `#[source]` so
@@ -265,9 +411,22 @@ impl ClassifyErrorKind for SignErrorKind {
             Self::OidcTokenRejected => ExitCode::AuthError,
             Self::FulcioUnavailable => ExitCode::TempFail,
             Self::TransparencyLogUnavailable => ExitCode::TransparencyLogUnavailable,
-            Self::RekorSetMalformed | Self::PredicateNotJson | Self::PredicateTooLarge { .. } => ExitCode::DataError,
+            Self::RekorSetMalformed
+            | Self::PredicateNotJson
+            | Self::PredicateTooLarge { .. }
+            | Self::SubjectDigestUnsupported { .. } => ExitCode::DataError,
             Self::ReferrersUnsupported => ExitCode::ReferrersUnsupported,
-            Self::TargetNotFound { .. } => ExitCode::NotFound,
+            Self::TargetNotFound { .. } | Self::TargetNotAnIndex { .. } => ExitCode::NotFound,
+            Self::UnsupportedKeyBackend(_) => ExitCode::UnsupportedKeyBackend,
+            // The backend's own class, not a flattened one: a KMS signs over
+            // the network, so "unreachable" (retry) and "wrong key" (fix the
+            // config) are different operator actions.
+            Self::KeyBackend(error) => match error {
+                crate::oci::sign::key_backend::KeyBackendError::Unavailable { .. } => ExitCode::TempFail,
+                crate::oci::sign::key_backend::KeyBackendError::Io(_) => ExitCode::IoError,
+                crate::oci::sign::key_backend::KeyBackendError::MalformedKey { .. } => ExitCode::DataError,
+                crate::oci::sign::key_backend::KeyBackendError::Unsupported { .. } => ExitCode::UnsupportedKeyBackend,
+            },
             // OfflineAttestRefused shares 77 with OfflineSignRefused by
             // design: one policy, two verbs.
             Self::OidcPreCheckFailed { .. }
@@ -276,7 +435,10 @@ impl ClassifyErrorKind for SignErrorKind {
             | Self::IdentityTokenFilePermissive { .. } => ExitCode::PermissionDenied,
             Self::InvalidEndpointUrl { .. }
             | Self::ProvenanceVersionUnsupported { .. }
-            | Self::UnsignedTypeUnsupported { .. } => ExitCode::UsageError,
+            | Self::UnsignedTypeUnsupported { .. }
+            | Self::SidecarRequiresSignature { .. }
+            | Self::KeyReferenceInvalid(_)
+            | Self::RekorUploadRequiredForKeyless => ExitCode::UsageError,
             Self::Internal(_) => ExitCode::Failure,
         }
     }
@@ -292,6 +454,8 @@ impl ClassifyErrorKind for SignErrorKind {
             Self::RekorSetMalformed => "rekor_set_malformed",
             Self::ReferrersUnsupported => "referrers_unsupported",
             Self::TargetNotFound { .. } => "target_not_found",
+            Self::TargetNotAnIndex { .. } => "target_not_an_index",
+            Self::SubjectDigestUnsupported { .. } => "subject_digest_unsupported",
             Self::OidcPreCheckFailed { .. } => "oidc_pre_check_failed",
             Self::ForbiddenRegistryTarget { .. } => "forbidden_registry_target",
             Self::OfflineSignRefused => "offline_sign_refused",
@@ -302,7 +466,34 @@ impl ClassifyErrorKind for SignErrorKind {
             Self::ProvenanceVersionUnsupported { .. } => "provenance_version_unsupported",
             Self::OfflineAttestRefused => "offline_attest_refused",
             Self::UnsignedTypeUnsupported { .. } => "unsigned_type_unsupported",
+            Self::SidecarRequiresSignature { .. } => "sidecar_requires_signature",
+            Self::UnsupportedKeyBackend(_) => "unsupported_key_backend",
+            Self::KeyBackend(_) => "key_backend",
+            Self::KeyReferenceInvalid(_) => "key_reference_invalid",
+            Self::RekorUploadRequiredForKeyless => "rekor_upload_required_for_keyless",
             Self::Internal(_) => "internal",
+        }
+    }
+}
+
+/// Select the sign-side variant a `--key` parse failure belongs to.
+///
+/// The split is the whole reason two variants exist: an unimplemented backend
+/// exits 85 with its own `error.kind`, everything else is a malformed
+/// reference and exits 64. The match is exhaustive with no wildcard --
+/// `KeyRefError` is `#[non_exhaustive]`, but that binds downstream crates
+/// only, so in the crate that defines it a new rejection reason is a compile
+/// error until it is classified here.
+///
+/// The error is carried structurally, never through `.to_string()`: its
+/// `Display` is what names the offending scheme.
+impl From<KeyRefError> for SignErrorKind {
+    fn from(error: KeyRefError) -> Self {
+        match error {
+            KeyRefError::UnsupportedBackend { .. } => Self::UnsupportedKeyBackend(error),
+            KeyRefError::UnknownScheme { .. } | KeyRefError::Empty | KeyRefError::FileColonPrefix { .. } => {
+                Self::KeyReferenceInvalid(error)
+            }
         }
     }
 }
@@ -505,12 +696,90 @@ mod tests {
     }
 
     #[test]
+    fn key_ref_unsupported_scheme_exits_85_with_its_own_category() {
+        // T-16 / C-014. Every link is the production one: the real parser
+        // produces the error, the real `From` impl picks the variant, the real
+        // `classify()` yields the exit code, and the real `from_exit_code`
+        // turns that into the envelope's `error.kind`. Nothing is simulated.
+        //
+        // Asserting the number alone would not discriminate. An arm rewritten
+        // to `ErrorCategory::Internal` still exits 85 while the envelope says
+        // `"internal"` -- exactly the silent failure the wildcard-free
+        // `from_exit_code` exists to expose -- so the *serialized* category is
+        // asserted as well.
+        use crate::cli::ErrorCategory;
+        use crate::oci::sign::KeyRef;
+
+        let rejected = KeyRef::parse("awskms://alias/release").expect_err("awskms has no implementation");
+        let error = SignError::new(id(), SignErrorKind::from(rejected));
+
+        let exit = error.classify().expect("an unsupported backend classifies itself");
+        assert_eq!(exit, ExitCode::UnsupportedKeyBackend);
+        assert_eq!(exit as u8, 85, "the number is what `case $? in 85)` matches");
+        assert_eq!(error.kind.kind_detail(), "unsupported_key_backend");
+
+        let category = ErrorCategory::from_exit_code(exit);
+        assert_eq!(
+            serde_json::to_string(&category).expect("ErrorCategory serializes"),
+            "\"unsupported_key_backend\"",
+            "envelope error.kind must be the dedicated category, never \"internal\""
+        );
+
+        // E-04: the rendered chain names the backend, and never reads as a
+        // missing file.
+        let rendered = format!("{:#}", anyhow::Error::new(error));
+        assert!(
+            rendered.contains("awskms"),
+            "the message must name the scheme: {rendered}"
+        );
+        assert!(
+            !rendered.contains("No such file"),
+            "a recognised backend must never be reported as a missing path: {rendered}"
+        );
+    }
+
+    #[test]
+    fn key_reference_that_is_not_a_backend_is_a_usage_error() {
+        // The other half of the `From` split, asserted next to it so the two
+        // codes cannot quietly converge: an unrecognised scheme and an empty
+        // reference are malformed invocations (64), not unimplemented
+        // backends (85).
+        use crate::oci::sign::KeyRef;
+
+        for value in ["vault://secret/cosign", "file:"] {
+            let kind = SignErrorKind::from(KeyRef::parse(value).expect_err("not a usable key reference"));
+            assert_eq!(kind.exit_code(), ExitCode::UsageError, "value: {value}");
+            assert_eq!(kind.kind_detail(), "key_reference_invalid", "value: {value}");
+        }
+    }
+
+    #[test]
+    fn no_rekor_upload_under_keyless_states_the_reason_it_refuses() {
+        // D-7. This variant exists *because* the reason has to reach the user:
+        // clap's `requires = "key"` would say "the following required arguments
+        // were not provided: --key", which inverts it. Pin both halves of the
+        // sentence, since dropping either is what turns the refusal back into
+        // the message it was built to replace.
+        let kind = SignErrorKind::RekorUploadRequiredForKeyless;
+        assert_eq!(kind.exit_code(), ExitCode::UsageError);
+        assert_eq!(kind.kind_detail(), "rekor_upload_required_for_keyless");
+
+        let msg = format!("{kind}");
+        assert!(msg.contains("--key"), "must name the flag that makes it legal: {msg}");
+        assert!(
+            msg.contains("ten minutes"),
+            "the certificate window is the reason, and must survive a reword: {msg}"
+        );
+    }
+
+    #[test]
     fn kind_detail_values_are_stable() {
         // C-S1-1 frozen contract: these strings ship in JSON envelopes and consumer
         // scripts dispatch on them. A rename or typo here is a user-visible breaking
         // change. The exhaustive match in `kind_detail()` ensures a new variant forces
         // a new arm there; this table ensures the *string value* for each arm is pinned.
         use crate::oci::endpoint::UrlRejection;
+        use crate::oci::sign::{KeyRefError, Scheme};
         use SignErrorKind::*;
 
         // Construct one representative instance per variant.
@@ -527,6 +796,18 @@ mod tests {
                 "target_not_found",
                 TargetNotFound {
                     platform: "linux/amd64".into(),
+                },
+            ),
+            (
+                "target_not_an_index",
+                TargetNotAnIndex {
+                    platform: "linux/amd64".into(),
+                },
+            ),
+            (
+                "subject_digest_unsupported",
+                SubjectDigestUnsupported {
+                    algorithm: "sha384".into(),
                 },
             ),
             ("oidc_pre_check_failed", OidcPreCheckFailed { reason: String::new() }),
@@ -574,6 +855,22 @@ mod tests {
                     predicate_type: "https://slsa.dev/provenance/v1".into(),
                 },
             ),
+            (
+                "sidecar_requires_signature",
+                SidecarRequiresSignature {
+                    format: crate::oci::sign::SignatureFormat::Simplesigning,
+                },
+            ),
+            (
+                "unsupported_key_backend",
+                UnsupportedKeyBackend(KeyRefError::UnsupportedBackend { scheme: Scheme::AwsKms }),
+            ),
+            ("key_reference_invalid", KeyReferenceInvalid(KeyRefError::Empty)),
+            (
+                "key_backend",
+                KeyBackend(crate::oci::sign::key_backend::KeyBackendError::Unavailable { reason: "test".into() }),
+            ),
+            ("rekor_upload_required_for_keyless", RekorUploadRequiredForKeyless),
             ("internal", Internal(Box::new(std::io::Error::other("test")))),
         ];
 
@@ -586,7 +883,7 @@ mod tests {
         // against 12 arms. Closing that gap needs variant enumeration.
         assert_eq!(
             pairs.len(),
-            18,
+            25,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
 

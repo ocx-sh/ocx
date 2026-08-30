@@ -206,11 +206,20 @@ pub enum ClientError {
         source: Box<ClientError>,
     },
 
-    /// The registry does not implement the OCI Referrers API and has no
-    /// fallback-tag referrers index. Distinct from [`Self::Registry`] and
-    /// [`Self::RegistryTransient`]: the registry is reachable and answering,
-    /// the endpoint simply is not served — a rerun can never change that.
-    #[error("registry {registry} does not support the OCI Referrers API")]
+    /// The registry has no referrers path this operation can use, and a rerun
+    /// cannot change that. Distinct from [`Self::Registry`] and
+    /// [`Self::RegistryTransient`]: the registry is reachable and answering.
+    ///
+    /// Five sites raise it, and they do **not** share a cause: a probe that
+    /// found no Referrers API (`referrer::capability`, `copy::ensure_target_
+    /// serves_referrers`), a `list_referrers` that got a 404
+    /// (`native_transport`), a fallback-index PUT the registry declined, and a
+    /// fallback index this client's own caps refuse to grow. The variant
+    /// carries only a registry, so the message states the **verdict** the five
+    /// share and nothing else — an earlier form asserted a refused fallback
+    /// write, which is false at the three sites that never attempt one. Which
+    /// cause it was goes to the log at the site that raises it.
+    #[error("registry {registry} has no usable OCI referrers path for this subject")]
     ReferrersUnsupported { registry: String },
 }
 

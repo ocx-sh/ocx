@@ -115,20 +115,14 @@ impl ReferrerManifest {
 /// Build the Sigstore bundle annotation set cosign writes (ADR D1).
 ///
 /// `created` is [`bundle_created`]'s output, taken as an argument so the map
-/// stays a pure function of its inputs. `predicate_type` is `Some` for an
-/// attestation referrer and `None` for a signature referrer, which has no
-/// predicate.
-pub(crate) fn bundle_annotations(
-    created: &str,
-    content: &str,
-    predicate_type: Option<&str>,
-) -> BTreeMap<String, String> {
+/// stays a pure function of its inputs. Every referrer carries a
+/// `predicate_type` since D2: a signature is a DSSE Statement too, so its
+/// predicateType is what tells it from an attestation in a listing.
+pub(crate) fn bundle_annotations(created: &str, content: &str, predicate_type: &str) -> BTreeMap<String, String> {
     let mut annotations = BTreeMap::new();
     annotations.insert(CREATED.to_string(), created.to_string());
     annotations.insert(ANNOTATION_BUNDLE_CONTENT.to_string(), content.to_string());
-    if let Some(predicate_type) = predicate_type {
-        annotations.insert(ANNOTATION_BUNDLE_PREDICATE_TYPE.to_string(), predicate_type.to_string());
-    }
+    annotations.insert(ANNOTATION_BUNDLE_PREDICATE_TYPE.to_string(), predicate_type.to_string());
     annotations
 }
 
@@ -187,7 +181,8 @@ fn created_from_epoch(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oci::referrer::media_types::{BUNDLE_CONTENT_DSSE, BUNDLE_CONTENT_MESSAGE_SIGNATURE};
+    use crate::oci::attest::COSIGN_SIGN_PREDICATE_TYPE;
+    use crate::oci::referrer::media_types::BUNDLE_CONTENT_DSSE;
 
     fn descriptor(digest: &str, size: i64) -> Descriptor {
         Descriptor {
@@ -213,28 +208,13 @@ mod tests {
     /// manifest digest, so they are asserted as literals, not through the
     /// constants they came from.
     #[test]
-    fn signature_annotations_carry_created_and_message_signature_content() {
-        let annotations = bundle_annotations("2026-08-20T12:34:56Z", BUNDLE_CONTENT_MESSAGE_SIGNATURE, None);
+    fn attestation_annotations_add_the_predicate_type() {
+        let annotations = bundle_annotations("2026-08-20T12:34:56Z", BUNDLE_CONTENT_DSSE, "https://cyclonedx.org/bom");
 
         assert_eq!(
             annotations.get("org.opencontainers.image.created").map(String::as_str),
             Some("2026-08-20T12:34:56Z")
         );
-        assert_eq!(
-            annotations.get("dev.sigstore.bundle.content").map(String::as_str),
-            Some("message-signature")
-        );
-        assert_eq!(annotations.len(), 2, "a signature carries no predicateType");
-    }
-
-    #[test]
-    fn attestation_annotations_add_the_predicate_type() {
-        let annotations = bundle_annotations(
-            "2026-08-20T12:34:56Z",
-            BUNDLE_CONTENT_DSSE,
-            Some("https://cyclonedx.org/bom"),
-        );
-
         assert_eq!(
             annotations.get("dev.sigstore.bundle.content").map(String::as_str),
             Some("dsse-envelope")
@@ -255,8 +235,8 @@ mod tests {
     fn signature_referrer_manifest_golden_shape() {
         let value = manifest_json(Some(bundle_annotations(
             "2026-08-20T12:34:56Z",
-            BUNDLE_CONTENT_MESSAGE_SIGNATURE,
-            None,
+            BUNDLE_CONTENT_DSSE,
+            COSIGN_SIGN_PREDICATE_TYPE,
         )));
 
         assert_eq!(
@@ -277,12 +257,18 @@ mod tests {
         );
         assert_eq!(
             annotations.get("dev.sigstore.bundle.content").and_then(|v| v.as_str()),
-            Some("message-signature")
+            Some("dsse-envelope")
+        );
+        assert_eq!(
+            annotations
+                .get("dev.sigstore.bundle.predicateType")
+                .and_then(|v| v.as_str()),
+            Some("https://sigstore.dev/cosign/sign/v1")
         );
         assert_eq!(
             annotations.as_object().map(serde_json::Map::len),
-            Some(2),
-            "no third key on a signature referrer"
+            Some(3),
+            "no fourth key on a signature referrer"
         );
     }
 

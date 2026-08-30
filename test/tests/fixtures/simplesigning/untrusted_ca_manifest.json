@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.oci.image.config.v1+json",
+    "size": 233,
+    "digest": "sha256:62ff67e656bc3b7e541c8d6a456110e9f295823f16564fecfc4b5e2f912def14"
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.dev.cosign.simplesigning.v1+json",
+      "size": 259,
+      "digest": "sha256:2f047101812d1670ef948b1375c7196a95ed98c760c0d8b25707057b296cb2a0",
+      "annotations": {
+        "dev.cosignproject.cosign/signature": "MEUCIQDFtt9lR28Qh0F1PWXqV5cO0oEWbRzLuIx6r2LEDl9pJAIgDZegXTDfctHt7SE/+x4n+cdhA4J9MrPiXzkDK6MlcSU=",
+        "dev.sigstore.cosign/certificate": "-----BEGIN CERTIFICATE-----\nMIIB3DCCAYKgAwIBAgIBATAKBggqhkjOPQQDAjAtMRMwEQYDVQQKDApyb2d1ZSB0\nZXN0MRYwFAYDVQQDDA1yb2d1ZSB0ZXN0IENBMB4XDTI2MDgyOTEzNDkzNloXDTM2\nMDgyNjEzNDkzNlowADBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABGfgvtdJavjK\nqWVyf5OPUvaRnacFJduAGPOVr7jafXmQ/2r04sa2T3dH/WHzSqk+41dG7FSwF5+l\nODhJZdSlU8yjgb8wgbwwDAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYD\nVR0lBAwwCgYIKwYBBQUHAwMwHQYDVR0OBBYEFBHU0VJHGqtoCuabqQvv77oF9Uvb\nMB8GA1UdIwQYMBaAFDn942zRl69I63OPqHQXqy+I7ZsLMCIGA1UdEQEB/wQYMBaB\nFG9jeC10ZXN0QGV4YW1wbGUuY29tMCMGCisGAQQBg78wAQgEFQwTaHR0cDovL2Rl\neDo1NTU2L2RleDAKBggqhkjOPQQDAgNIADBFAiEA63dTQM8eFFbUjuefIhovld3f\nNzeaFaIsOfj1BmDN4XUCIDN+XgyhYuFCjVQQey9DCc648tMOnoBJz/0IC8mw1uu1\n-----END CERTIFICATE-----\n"
+      }
+    }
+  ]
+}

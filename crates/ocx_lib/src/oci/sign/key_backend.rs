@@ -1,0 +1,608 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+//! [`KeyBackend`] — the narrow signing primitive behind key-mode signing.
+//!
+//! Deliberately shaped for a KMS rather than for files. A file-shaped trait
+//! (`private_key() -> SigningKey`, synchronous, infallible) is trivially
+//! satisfiable today and unimplementable by the first remote backend, so it
+//! would be rewritten the moment `awskms://` lands — worse than having no
+//! trait at all.
+//!
+//! Adding a backend is a new implementor plus one arm in
+//! [`Scheme::is_implemented`](super::key_ref::Scheme::is_implemented). No
+//! contract in this file moves.
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use sha2::{Digest as _, Sha256};
+
+use super::key_ref::{KeyBackendKind, MAX_KEY_PEM_BYTES, Scheme};
+use crate::log;
+use crate::utility::fs::{BoundedReadError, read_bounded};
+
+/// The narrow signing primitive: turn a digest into a signature without ever
+/// exposing private key material.
+///
+/// Shaped for a KMS, not for files — `async` because a KMS signs over the
+/// network, and [`sign_prehash`](Self::sign_prehash) rather than a
+/// `private_key()` accessor because a KMS cannot satisfy the latter.
+/// [`Signer`](super::signer::Signer) stays the pipeline-level abstraction
+/// returning a whole bundle; the key-mode `Signer` **delegates** to a
+/// `KeyBackend` (ISP — `Signer`'s signature is keyless-shaped, taking a token
+/// and a Fulcio URL, and widening it would tax every caller).
+#[async_trait::async_trait]
+pub trait KeyBackend: Send + Sync {
+    /// Sign an already-hashed message.
+    ///
+    /// `digest` is the raw hash bytes, never hex and never base64. Returns the
+    /// DER-encoded signature.
+    ///
+    /// # Errors
+    ///
+    /// [`KeyBackendError::Io`] when the key material could not be read, and
+    /// [`KeyBackendError::MalformedKey`] when it is not a key this backend
+    /// accepts. [`KeyBackendError::Unavailable`] is reserved for the first
+    /// remote backend; no implemented one returns it.
+    async fn sign_prehash(&self, digest: &[u8]) -> Result<Vec<u8>, KeyBackendError>;
+
+    /// The DER `SubjectPublicKeyInfo` of this backend's public key.
+    ///
+    /// The backend supplies it; the caller must not reconstruct it from a
+    /// private key it is not allowed to see.
+    fn public_key_der(&self) -> &[u8];
+
+    /// Which backend this is, for `signatures[].key_backend`.
+    fn kind(&self) -> KeyBackendKind;
+
+    /// The bundle's `verificationMaterial.publicKey.hint`.
+    ///
+    /// Defaulted deliberately: the derivation is **wire-visible and fixed**
+    /// (see [`public_key_hint`]), so no backend may compute it differently.
+    fn hint(&self) -> String {
+        public_key_hint(self.public_key_der())
+    }
+}
+
+/// The cosign-compatible key hint: **standard base64 (with padding) of the
+/// SHA-256 of the DER `SubjectPublicKeyInfo`**.
+///
+/// This is a wire format, not an implementation detail: it is published in
+/// every key-mode bundle and cosign matches on it. URL-safe alphabet or
+/// dropped padding produce a hint no cosign verifier recognises.
+pub fn public_key_hint(spki_der: &[u8]) -> String {
+    BASE64.encode(Sha256::digest(spki_der))
+}
+
+/// Why a [`KeyBackend`] could not sign.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum KeyBackendError {
+    /// The backend could not be reached, or answered with a transient fault.
+    ///
+    /// **Reserved, not a current outcome.** `file` is the only backend OCX
+    /// implements and a local file is never unreachable, so nothing outside a
+    /// test double constructs this — it waits for the first remote backend the
+    /// way [`KeyBackendKind`]'s five KMS variants name backends no code drives
+    /// yet. The transport class (retry, exit 75) is what it classifies as when
+    /// one lands; until then no command can produce it and no exit-code table
+    /// should list it.
+    #[error("key backend unavailable: {reason}")]
+    Unavailable {
+        /// What the backend reported, for the operator to act on.
+        reason: String,
+    },
+    /// The key material could not be read from its location (exit 74).
+    #[error("cannot read key material")]
+    Io(#[source] std::io::Error),
+    /// The key material is present but not a key this backend accepts (exit 65).
+    #[error("malformed key material: {reason}")]
+    MalformedKey {
+        /// What about the material was rejected.
+        reason: String,
+    },
+    /// A recognised backend with no implementation (exit 85).
+    #[error("unsupported key backend `{scheme}`")]
+    Unsupported {
+        /// The backend named by the key reference.
+        scheme: Scheme,
+    },
+}
+
+/// The password guarding an encrypted private key, from `OCX_KEY_PASSWORD`.
+///
+/// Absent reads as the **empty** password, which is what cosign accepts when a
+/// key pair was generated by pressing enter twice — a real and supported shape,
+/// not a degenerate one, so an unset variable must not become a distinct error.
+///
+/// Never a flag: a password in `argv` is visible to every process on the host.
+/// Not zeroized either — the value is already in this process's environment
+/// block, so wiping a copy of it protects nothing.
+#[must_use]
+pub fn key_password() -> String {
+    std::env::var(crate::env::keys::OCX_KEY_PASSWORD).unwrap_or_default()
+}
+
+/// A key pair read from a file — the only [`KeyBackend`] that exists today.
+///
+/// Accepts cosign's own `ENCRYPTED SIGSTORE PRIVATE KEY` envelope
+/// (scrypt-wrapped ECDSA P-256), decrypted by
+/// [`SigStoreKeyPair::from_encrypted_pem`]. **This repository owns no scrypt and
+/// no PEM envelope** — that is `sigstore`'s job, and hand-rolling either would
+/// be owning a cryptographic wire format for no gain
+/// (`quality-core.md` §"Don't Own Non-Domain Code").
+///
+/// **Key generation is deliberately absent.** `cosign generate-key-pair` defines
+/// the format and cosign ships in the OCX index, so generation would mean owning
+/// scrypt KDF parameter choice, password prompting and TTY handling for a
+/// one-time bootstrap act.
+pub struct FileKeyBackend {
+    signing_key: p256::ecdsa::SigningKey,
+    public_key_der: Vec<u8>,
+}
+
+/// Written by hand, not derived: a derived `Debug` would reach into the signing
+/// key, and a private scalar must never be one `{:?}` away from a log line.
+/// Only the public half — which is published in every bundle anyway — is shown.
+impl std::fmt::Debug for FileKeyBackend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FileKeyBackend")
+            .field("hint", &self.hint())
+            .finish_non_exhaustive()
+    }
+}
+
+impl FileKeyBackend {
+    /// Read and decrypt the private key at `path`, taking the password from
+    /// `OCX_KEY_PASSWORD`.
+    ///
+    /// The one env-reading entry point, so every test drives
+    /// [`from_encrypted_pem`](Self::from_encrypted_pem) with an explicit
+    /// password and never mutates the process environment.
+    ///
+    /// # Errors
+    ///
+    /// [`KeyBackendError::Io`] when the file cannot be read, and whatever
+    /// [`from_encrypted_pem`](Self::from_encrypted_pem) raises.
+    pub fn open(path: &std::path::Path) -> Result<Self, KeyBackendError> {
+        let pem = read_key_pem(path)?;
+        Self::from_encrypted_pem(&pem, key_password().as_bytes())
+    }
+}
+
+/// Read a private-key PEM, bounded and refusing anything that is not a regular
+/// file.
+///
+/// Both guards live in [`read_bounded`] — one implementation, shared with
+/// `crate::trust::read_key_file` (the *public* half) and with the CLI's
+/// `--tags-file` reader. What is not shared is the wording: this side says
+/// "cannot read key material", the policy side names the offending signer's
+/// scope, and folding those would regress one of them.
+///
+/// The guards are load-bearing on any operator-supplied path.
+/// `ocx package sign --key /dev/zero` read until memory ran out (CWE-400)
+/// while this was a bare `std::fs::read`. This initiative already fixed that
+/// same bug once inside `read_key_file`, where a stray early return sat above
+/// the guards and both guard tests asserted against dead code. The guards exist
+/// because that happened; a second reader skipping them is that bug returning
+/// by another door — which is why there is no second reader any more.
+fn read_key_pem(path: &std::path::Path) -> Result<Vec<u8>, KeyBackendError> {
+    read_bounded(path, MAX_KEY_PEM_BYTES).map_err(|error| match error {
+        BoundedReadError::TooLarge { cap, .. } => KeyBackendError::MalformedKey {
+            reason: format!("larger than {cap} bytes, which no private key is"),
+        },
+        // The raw `io::Error` is carried through, not re-wrapped: its
+        // `ErrorKind` is what separates a missing key (exit 74) from an
+        // unreadable one downstream.
+        BoundedReadError::Io { source, .. } => KeyBackendError::Io(source),
+        not_regular => KeyBackendError::Io(std::io::Error::other(not_regular.to_string())),
+    })
+}
+
+impl FileKeyBackend {
+    /// Decrypt a cosign `ENCRYPTED SIGSTORE PRIVATE KEY` PEM.
+    ///
+    /// An empty `password` is legal — see [`key_password`].
+    ///
+    /// # Errors
+    ///
+    /// [`KeyBackendError::MalformedKey`] when the envelope does not decrypt
+    /// under this password, or when it yields anything but an ECDSA P-256 key.
+    pub fn from_encrypted_pem(pem: &[u8], password: &[u8]) -> Result<Self, KeyBackendError> {
+        let pair =
+            sigstore::crypto::signing_key::SigStoreKeyPair::from_encrypted_pem(pem, password).map_err(|error| {
+                // The frozen `MalformedKey` carries a `reason: String` and no
+                // `#[source]`, so the underlying error has nowhere structured to
+                // go. Log it rather than flatten it into the message: the two
+                // causes below are what an operator can act on, and sigstore's
+                // own Display for a failed decrypt names neither.
+                log::debug!("encrypted key PEM rejected by sigstore: {error}");
+                KeyBackendError::MalformedKey {
+                    reason: "not a cosign ENCRYPTED SIGSTORE PRIVATE KEY, or the password in OCX_KEY_PASSWORD is \
+                             wrong"
+                        .to_owned(),
+                }
+            })?;
+
+        // P-256 only. `SigStoreKeyPair` also models Ed25519 and RSA, but cosign
+        // generates P-256 and every OCX signature path is ECDSA P-256 — so an
+        // unexpected curve is refused by name here rather than failing later
+        // with a signature no verifier accepts.
+        let private_key_der = pair.private_key_to_der().map_err(|error| {
+            log::debug!("decrypted key could not be re-encoded as PKCS#8 DER: {error}");
+            KeyBackendError::MalformedKey {
+                reason: "the decrypted key could not be read as PKCS#8".to_owned(),
+            }
+        })?;
+        let signing_key =
+            <p256::ecdsa::SigningKey as p256::pkcs8::DecodePrivateKey>::from_pkcs8_der(private_key_der.as_ref())
+                .map_err(|error| {
+                    log::debug!("decrypted key is not ECDSA P-256: {error}");
+                    KeyBackendError::MalformedKey {
+                        reason: "not an ECDSA P-256 key; OCX signs with P-256, as cosign generates by default"
+                            .to_owned(),
+                    }
+                })?;
+
+        let public_key_der = pair.public_key_to_der().map_err(|error| {
+            log::debug!("public half could not be encoded as SPKI DER: {error}");
+            KeyBackendError::MalformedKey {
+                reason: "the key's public half could not be encoded as SPKI".to_owned(),
+            }
+        })?;
+
+        Ok(Self {
+            signing_key,
+            public_key_der,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl KeyBackend for FileKeyBackend {
+    async fn sign_prehash(&self, digest: &[u8]) -> Result<Vec<u8>, KeyBackendError> {
+        sign_prehash_p256(&self.signing_key, digest)
+    }
+
+    fn public_key_der(&self) -> &[u8] {
+        &self.public_key_der
+    }
+
+    fn kind(&self) -> KeyBackendKind {
+        KeyBackendKind::File
+    }
+}
+
+/// ECDSA P-256 over an already-hashed message, DER-encoded.
+///
+/// Shared by [`FileKeyBackend`] and the test double so the two cannot produce
+/// differently-encoded signatures — the double exists to stand in for the file
+/// backend, which it stops doing the moment its output shape diverges.
+///
+/// Signing is a few microseconds of arithmetic on a 32-byte digest, so it stays
+/// inline rather than going through `spawn_blocking`; the `async` in the trait
+/// is there for a KMS that signs over the network.
+fn sign_prehash_p256(signing_key: &p256::ecdsa::SigningKey, digest: &[u8]) -> Result<Vec<u8>, KeyBackendError> {
+    use p256::ecdsa::signature::hazmat::PrehashSigner as _;
+
+    let signature: p256::ecdsa::Signature = signing_key.sign_prehash(digest).map_err(|error| {
+        log::debug!("ECDSA P-256 refused a {}-byte prehash: {error}", digest.len());
+        // Unreachable from any in-tree caller — every one passes a 32-byte
+        // SHA-256 digest — and the frozen error set has no "bad argument" arm,
+        // so this lands on the one variant that means "input refused" (exit 65).
+        KeyBackendError::MalformedKey {
+            reason: format!(
+                "cannot sign a {}-byte prehash with ECDSA P-256; expected a 32-byte SHA-256 digest",
+                digest.len()
+            ),
+        }
+    })?;
+    Ok(signature.to_der().as_bytes().to_vec())
+}
+
+/// A deterministic in-memory [`KeyBackend`] over a fixed key.
+///
+/// ARCH-07's second implementation: the trait is justified by a KMS-shaped
+/// contract plus **an exercised double**, and this is the double. It exists so
+/// the signing tests never read a key file, never touch `OCX_KEY_PASSWORD` and
+/// never depend on a fixture's decryption succeeding — a signing bug and a
+/// key-loading bug then fail different tests.
+///
+/// Deterministic by construction: the key is fixed, and p256's ECDSA is
+/// RFC 6979, so one digest always yields one signature byte-for-byte.
+#[cfg(test)]
+pub struct StubKeyBackend {
+    signing_key: p256::ecdsa::SigningKey,
+    public_key_der: Vec<u8>,
+}
+
+#[cfg(test)]
+impl StubKeyBackend {
+    /// The double over a fixed non-zero scalar — the same idiom
+    /// `signer.rs`'s tests use.
+    #[must_use]
+    pub fn fixed() -> Self {
+        use p256::pkcs8::EncodePublicKey as _;
+
+        let signing_key = p256::ecdsa::SigningKey::from_bytes(&[7u8; 32].into())
+            .expect("a fixed non-zero scalar is a valid P-256 key");
+        let public_key_der = signing_key
+            .verifying_key()
+            .to_public_key_der()
+            .expect("a P-256 verifying key always encodes as SPKI")
+            .as_bytes()
+            .to_vec();
+        Self {
+            signing_key,
+            public_key_der,
+        }
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl KeyBackend for StubKeyBackend {
+    async fn sign_prehash(&self, digest: &[u8]) -> Result<Vec<u8>, KeyBackendError> {
+        sign_prehash_p256(&self.signing_key, digest)
+    }
+
+    fn public_key_der(&self) -> &[u8] {
+        &self.public_key_der
+    }
+
+    fn kind(&self) -> KeyBackendKind {
+        KeyBackendKind::File
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use p256::pkcs8::{DecodePublicKey as _, EncodePublicKey as _};
+
+    use super::*;
+
+    /// The digest every round-trip test signs over. Local rather than
+    /// reached for across modules: `signer.rs`'s `sha256` is private to it,
+    /// and a test helper is not worth widening a production surface for.
+    fn sha256(bytes: &[u8]) -> Vec<u8> {
+        Sha256::digest(bytes).to_vec()
+    }
+
+    /// The key the key-mode golden fixtures were signed with. `include_str!`
+    /// rather than a runtime read on purpose: a moved fixture becomes a
+    /// compile error, which is the failure mode we want.
+    const GOLDEN_PUBLIC_KEY_PEM: &str = include_str!("../../../../../test/tests/fixtures/golden/keys/cosign.pub");
+
+    /// The cosign-produced key-mode bundle. Its `publicKey.hint` is the
+    /// measured wire value this derivation must reproduce.
+    const GOLDEN_KEY_BUNDLE: &str = include_str!("../../../../../test/tests/fixtures/golden/key_bundle.json");
+
+    /// T-06. Pinned twice: against the hint cosign actually wrote into the
+    /// golden bundle, and against the literal — so regenerating the key pair
+    /// cannot move both sides together and leave the test green.
+    #[test]
+    fn public_key_hint_matches_cosign() {
+        let key = p256::PublicKey::from_public_key_pem(GOLDEN_PUBLIC_KEY_PEM).expect("golden key is a P-256 SPKI PEM");
+        let der = key.to_public_key_der().expect("re-encode SPKI");
+
+        let bundle: serde_json::Value = serde_json::from_str(GOLDEN_KEY_BUNDLE).expect("golden bundle is JSON");
+        let published = bundle
+            .pointer("/verificationMaterial/publicKey/hint")
+            .and_then(serde_json::Value::as_str)
+            .expect("golden bundle carries a publicKey hint");
+
+        assert_eq!(public_key_hint(der.as_bytes()), published);
+        assert_eq!(published, "IPToq8s+AghvzWpOChKmKD7Pi00bHB6zR/NABNmDFtA=");
+    }
+
+    /// The private half of the golden pair, as `cosign generate-key-pair` wrote
+    /// it: `ENCRYPTED SIGSTORE PRIVATE KEY`, scrypt-wrapped.
+    const GOLDEN_PRIVATE_KEY_PEM: &str = include_str!("../../../../../test/tests/fixtures/golden/keys/cosign.key");
+
+    /// Written down in `test/tests/fixtures/golden/keys/README.md` and in
+    /// `generate.py`, because it guards a key that signs nothing outside this
+    /// repository's own fixtures.
+    const GOLDEN_KEY_PASSWORD: &[u8] = b"ocxtest";
+
+    /// The message the round-trip tests sign. Verification hashes it itself
+    /// (ring's `ECDSA_P256_SHA256_ASN1` takes the message, not the digest), so
+    /// signing `sha256(MESSAGE)` through `sign_prehash` and verifying against
+    /// `MESSAGE` is what proves the prehash pipeline produces the same bytes an
+    /// ordinary verifier expects — the exact shape cosign uses.
+    const MESSAGE: &[u8] = b"ocx key-mode round trip";
+
+    fn verify_with_golden_public_key(signature_der: &[u8]) -> Result<(), sigstore::errors::SigstoreError> {
+        sigstore::crypto::CosignVerificationKey::try_from_pem(GOLDEN_PUBLIC_KEY_PEM.as_bytes())
+            .expect("cosign.pub is an SPKI PEM")
+            .verify_signature(sigstore::crypto::Signature::Raw(signature_der), MESSAGE)
+    }
+
+    /// The whole point of WP9a's sign half: a key pair **cosign generated**
+    /// round-trips through OCX. OCX signs with the encrypted private key, and
+    /// the committed public key verifies the result.
+    #[tokio::test]
+    async fn a_cosign_generated_key_pair_signs_and_verifies() {
+        let backend = FileKeyBackend::from_encrypted_pem(GOLDEN_PRIVATE_KEY_PEM.as_bytes(), GOLDEN_KEY_PASSWORD)
+            .expect("the golden key decrypts under its documented password");
+
+        let signature = backend
+            .sign_prehash(&sha256(MESSAGE))
+            .await
+            .expect("signing a SHA-256 digest");
+
+        verify_with_golden_public_key(&signature).expect("the golden public key verifies OCX's signature");
+    }
+
+    /// The backend must supply its own public key, and it must be the *same*
+    /// key — otherwise the bundle would advertise a hint no verifier can match.
+    #[test]
+    fn the_backend_supplies_the_golden_public_key_and_its_cosign_hint() {
+        let backend = FileKeyBackend::from_encrypted_pem(GOLDEN_PRIVATE_KEY_PEM.as_bytes(), GOLDEN_KEY_PASSWORD)
+            .expect("the golden key decrypts");
+
+        let expected = p256::PublicKey::from_public_key_pem(GOLDEN_PUBLIC_KEY_PEM)
+            .expect("cosign.pub is a P-256 SPKI PEM")
+            .to_public_key_der()
+            .expect("re-encode SPKI");
+
+        assert_eq!(backend.public_key_der(), expected.as_bytes());
+        assert_eq!(backend.hint(), "IPToq8s+AghvzWpOChKmKD7Pi00bHB6zR/NABNmDFtA=");
+        assert_eq!(backend.kind(), crate::oci::sign::KeyBackendKind::File);
+    }
+
+    /// **An empty password is legal**, as cosign permits — a user who pressed
+    /// enter twice at `generate-key-pair` gets a key with an empty passphrase,
+    /// and that key must sign. Built by re-wrapping the golden key rather than
+    /// committing a second fixture, so it exercises the identical envelope.
+    #[tokio::test]
+    async fn an_empty_password_opens_a_key_wrapped_with_one() {
+        let pair = sigstore::crypto::signing_key::SigStoreKeyPair::from_encrypted_pem(
+            GOLDEN_PRIVATE_KEY_PEM.as_bytes(),
+            GOLDEN_KEY_PASSWORD,
+        )
+        .expect("the golden key decrypts");
+        let wrapped_with_empty_password = pair
+            .private_key_to_encrypted_pem(b"")
+            .expect("re-wrap the same key under an empty password");
+
+        let backend = FileKeyBackend::from_encrypted_pem(wrapped_with_empty_password.as_bytes(), b"")
+            .expect("an empty password opens a key wrapped with one");
+
+        let signature = backend.sign_prehash(&sha256(MESSAGE)).await.expect("signing");
+        verify_with_golden_public_key(&signature).expect("still the same key, so the golden public key verifies");
+    }
+
+    /// The wrong password must be refused, and the refusal must name what the
+    /// operator can act on. Without this the empty-password test above proves
+    /// only that *something* succeeded.
+    #[test]
+    fn a_wrong_password_is_refused_by_name() {
+        let error = FileKeyBackend::from_encrypted_pem(GOLDEN_PRIVATE_KEY_PEM.as_bytes(), b"not-the-password")
+            .expect_err("a wrong password cannot open the envelope");
+
+        let KeyBackendError::MalformedKey { reason } = &error else {
+            panic!("a wrong password is a malformed-material refusal, got {error:?}");
+        };
+        assert!(
+            reason.contains("OCX_KEY_PASSWORD"),
+            "the refusal must name the variable to fix: {reason}"
+        );
+    }
+
+    /// An SPKI *public* key is not a private key, and saying so is the whole
+    /// difference between an actionable error and "no such file or directory".
+    #[test]
+    fn a_public_key_is_not_accepted_as_a_signing_key() {
+        let error = FileKeyBackend::from_encrypted_pem(GOLDEN_PUBLIC_KEY_PEM.as_bytes(), GOLDEN_KEY_PASSWORD)
+            .expect_err("a public key cannot sign");
+        assert!(matches!(error, KeyBackendError::MalformedKey { .. }), "got {error:?}");
+    }
+
+    /// A path that is not a regular file is an I/O refusal (74), not material
+    /// the parser gets to judge (65).
+    ///
+    /// `/dev/null` is the discriminating case and the reason `is_file` is not
+    /// redundant with the read: a bare `std::fs::read` of it succeeds with zero
+    /// bytes, so without the guard the empty result reaches the parser and an
+    /// unreadable *path* is reported as malformed *material* — which is exactly
+    /// how `ocx package sign` came to answer 65 where `ocx package verify`
+    /// answered 74 for the same `--key /dev/null`.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_a_regular_file_is_an_io_error() {
+        let error = read_key_pem(std::path::Path::new("/dev/null")).expect_err("a device is not a key file");
+        let KeyBackendError::Io(io) = &error else {
+            panic!("a path refusal must not be reported as malformed material, got {error:?}");
+        };
+        assert!(
+            io.to_string().contains("not a regular file"),
+            "the refusal must name why the path was unusable: {io}"
+        );
+    }
+
+    /// The size cap bounds the read of an operator-supplied path.
+    ///
+    /// Without it `--key /dev/zero` reads until memory runs out (CWE-400).
+    /// The red is bounded deliberately — one byte past the cap, never a device:
+    /// remove the cap and this file reaches the parser, which refuses it as an
+    /// unopenable envelope instead, so the assertion is on *which* refusal.
+    #[test]
+    fn a_key_file_past_the_size_cap_is_refused_before_parsing() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let path = dir.path().join("huge.key");
+        std::fs::write(&path, vec![b'x'; MAX_KEY_PEM_BYTES as usize + 1]).expect("oversized key file");
+
+        let error = read_key_pem(&path).expect_err("a file past the cap is refused");
+        let KeyBackendError::MalformedKey { reason } = &error else {
+            panic!("got {error:?}");
+        };
+        assert!(
+            reason.contains("larger than"),
+            "the refusal must be the cap's, not the parser's: {reason}"
+        );
+
+        // The accepting half: a file at the cap is not refused by it, so the
+        // guard bounds the read rather than rejecting every key.
+        let ok = dir.path().join("small.key");
+        std::fs::write(&ok, vec![b'x'; 16]).expect("small key file");
+        assert_eq!(read_key_pem(&ok).expect("a small file reads"), vec![b'x'; 16]);
+    }
+
+    /// `open` is the env-reading entry point, and a missing file must surface as
+    /// an I/O error (exit 74) rather than as a key-parsing failure (exit 65) —
+    /// the two send an operator to different places.
+    #[test]
+    fn opening_an_absent_key_file_is_an_io_error() {
+        let missing = std::env::temp_dir().join("ocx-no-such-key-file.key");
+        let error = FileKeyBackend::open(&missing).expect_err("an absent key file cannot be opened");
+        assert!(matches!(error, KeyBackendError::Io(_)), "got {error:?}");
+    }
+
+    /// The exercised second implementation (ARCH-07). Deterministic: RFC 6979
+    /// means one digest yields one signature, so a test can pin bytes.
+    #[tokio::test]
+    async fn the_test_double_signs_deterministically_and_verifies_under_its_own_key() {
+        let backend = StubKeyBackend::fixed();
+        let digest = sha256(MESSAGE);
+
+        let first = backend.sign_prehash(&digest).await.expect("signing");
+        let second = backend.sign_prehash(&digest).await.expect("signing again");
+        assert_eq!(
+            first, second,
+            "ECDSA is RFC 6979 here, so the same digest signs identically"
+        );
+
+        sigstore::crypto::CosignVerificationKey::try_from_der(backend.public_key_der())
+            .expect("the double's SPKI DER parses")
+            .verify_signature(sigstore::crypto::Signature::Raw(&first), MESSAGE)
+            .expect("the double's own public key verifies its signature");
+    }
+
+    /// The double stands in for the file backend, so the two must agree on the
+    /// signature encoding — DER, not the fixed-width r‖s form. A divergence here
+    /// makes every test that uses the double prove nothing about production.
+    #[tokio::test]
+    async fn the_double_and_the_file_backend_agree_on_the_signature_encoding() {
+        let digest = sha256(MESSAGE);
+        let from_double = StubKeyBackend::fixed().sign_prehash(&digest).await.expect("signing");
+        let from_file = FileKeyBackend::from_encrypted_pem(GOLDEN_PRIVATE_KEY_PEM.as_bytes(), GOLDEN_KEY_PASSWORD)
+            .expect("the golden key decrypts")
+            .sign_prehash(&digest)
+            .await
+            .expect("signing");
+
+        for signature in [&from_double, &from_file] {
+            assert_eq!(
+                signature[0], 0x30,
+                "DER SEQUENCE tag expected, got {:#04x}",
+                signature[0]
+            );
+            assert_eq!(
+                usize::from(signature[1]) + 2,
+                signature.len(),
+                "the DER length header must cover the whole signature"
+            );
+        }
+    }
+}

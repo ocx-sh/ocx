@@ -498,7 +498,7 @@ def test_announce_fork_retries_once_on_non_fast_forward_preserving_concurrent_ch
 def test_announce_tags_file_race_retry_unions_against_the_winning_head(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    """C3/C4: two concurrent `--tags-from-file` announces must UNION, never clobber.
+    """C3/C4: two concurrent `--tags-file` announces must UNION, never clobber.
     The loser's fast-forward-only update is rejected, and its retry has to
     re-resolve its curated universe against the WINNING head — `regenerate`
     replaces the root's `tags` object wholesale, so a retry that replays the tag
@@ -537,7 +537,7 @@ def test_announce_tags_file_race_retry_unions_against_the_winning_head(
     # The loser announces `3.0.0` by file — additive union (C3).
     tags_file = tmp_path / "tags.txt"
     tags_file.write_text("3.0.0")
-    report = announce_json(ocx, fake_forge, *args, "--tags-from-file", str(tags_file))
+    report = announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
 
     assert report["status"] == "updated"
     assert not fake_forge.concurrent_ref_advance, "the non-fast-forward must have been triggered"
@@ -652,7 +652,7 @@ def test_announce_unchanged_unmodelled_compare_status_is_refused(
     assert fake_forge.compare_status_once is None, "the scripted compare status must have fired"
 
 
-# ── curation: --tags, --tags-from-file, --tags-from-registry, --refresh ────
+# ── curation: --tags, --tags-file, --tags-from-registry, --refresh ────
 
 
 def test_announce_tags_replace_drops_omitted_committed_tag(
@@ -689,7 +689,7 @@ def test_announce_tags_file_union_adds_without_dropping(
     announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
     tags_file = tmp_path / "tags.txt"
     tags_file.write_text("2.0.0")
-    announce_json(ocx, fake_forge, *args, "--tags-from-file", str(tags_file))
+    announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
 
     assert set(committed_root(fake_forge, package)["tags"]) == {"1.0.0", "2.0.0"}
 
@@ -735,11 +735,11 @@ def test_announce_tags_from_registry_discovers_unannounced_tags(
     }, "every rolling tag the cascade wrote is discovered"
 
 
-def test_announce_tags_from_registry_drops_no_canonical_tag_into_the_root(
+def test_announce_tags_from_registry_drops_no_keep_tag_into_the_root(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    """`push` writes a canonical `sha256.<hex>` tag per platform by default, so a
-    registry listing carries one per published version. They are not versions and
+    """`push` writes an `__ocx.keep.<algorithm>-<hex>` tag per platform by default,
+    so a registry listing carries one per published version. They are not versions and
     must never reach the index — and, unlike a caller-named reserved tag, they are
     filtered silently rather than reported, because the caller named nothing."""
     package, args = _seed_cascade_and_curate_one(ocx, fake_forge, unique_repo, tmp_path)
@@ -747,7 +747,9 @@ def test_announce_tags_from_registry_drops_no_canonical_tag_into_the_root(
     report = announce_json(ocx, fake_forge, *args, "--tags-from-registry")
 
     tags = committed_root(fake_forge, package)["tags"]
-    assert not [tag for tag in tags if tag.startswith("sha256.")], f"canonical tags leaked into the root: {sorted(tags)}"
+    assert not [tag for tag in tags if tag.startswith("__ocx.keep.")], (
+        f"keep tags leaked into the root: {sorted(tags)}"
+    )
     assert report["reserved_tags_dropped"] == [], "a registry listing names nothing, so it reports no drops"
 
 
@@ -866,7 +868,7 @@ def test_announce_keeps_accumulating_while_its_pull_request_is_open(
 
     tags_file = tmp_path / "tags.txt"
     tags_file.write_text("2.0.0")
-    announce_json(ocx, fake_forge, *args, "--tags-from-file", str(tags_file))
+    announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
 
     assert (
         fake_forge.commit_parent("forkuser", "index", branch_name(package)) == first_head

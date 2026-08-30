@@ -453,7 +453,19 @@ impl Transfer<'_> {
         let source_image = self.client.read_reference(self.source, ReadAddressing::Canonical);
         let target_image = self.client.transport_write_reference(self.target);
 
-        let descriptors = transport.list_referrers(&source_image, subject, None).await?;
+        // `_with_fallback`, never the verdict-shaped `list_referrers`: this is a
+        // READ of the source, and a source that serves no Referrers API is not a
+        // failed copy — it is a source whose referrers live on the
+        // `<algorithm>-<encoded>` fallback tag, which is exactly what OCX's own
+        // sign/attest write there. The verdict belongs to
+        // `ensure_target_serves_referrers` above, on the target, which is the
+        // side that has to hold what it is handed; raising it here reported 84
+        // naming the SOURCE, contradicting the documented split and dropping
+        // every fallback-tag signature on the floor.
+        let descriptors = transport
+            .list_referrers_with_fallback(&source_image, subject, None)
+            .await?
+            .descriptors;
         let mut copied = 0usize;
         for descriptor in descriptors {
             if seen.len() >= MAX_REFERRERS_PER_LEAF {
@@ -1244,6 +1256,121 @@ mod tests {
         assert!(
             rendered.contains("cannot serve it"),
             "the failure must name the disagreement, not just the digest: {rendered}"
+        );
+    }
+
+    /// A source registry with no OCI 1.1 Referrers API keeps its referrers on
+    /// the `<algorithm>-<encoded>` fallback tag — which is exactly where OCX's
+    /// own `sign` and `attest` write them. Reading the source through the
+    /// verdict-shaped `list_referrers` turned that into exit 84 naming the
+    /// SOURCE, dropping every fallback-tag signature on the floor. The verdict
+    /// belongs to `ensure_target_serves_referrers`, on the target.
+    ///
+    /// `Transfer` is built directly rather than driving this through
+    /// `copy_leaf`: `StubTransportData::referrers_unsupported` is global, so
+    /// `copy_leaf` fails first — correctly — on the TARGET probe, a behaviour
+    /// `a_registry_without_the_referrers_api_fails_the_copy` already pins.
+    ///
+    /// The same global flag also refuses the stub's `push_referrer_manifest`,
+    /// so a fallback-listed referrer cannot complete a copy through this double
+    /// without editing it. The strongest observable that IS reachable is the
+    /// listed-but-unservable refusal: it names the descriptor, and the only
+    /// place that descriptor exists is the fallback tag. The control below —
+    /// the same fixture served through a working Referrers API — is what stops
+    /// that reading from being vacuous, by copying a referrer end to end.
+    #[tokio::test]
+    async fn a_source_without_the_referrers_api_is_read_through_the_fallback_tag() {
+        let source = identifier("dev.example.com", "team/demo");
+        let target = identifier("prod.example.com", "team/demo");
+        let sbom = referrer_manifest("application/spdx+json", SBOM_PAYLOAD);
+        let sbom_bytes = serde_json::to_vec(&sbom).expect("serialize");
+        let sbom_descriptor = descriptor(MEDIA_TYPE_OCI_IMAGE_MANIFEST, &sbom_bytes);
+
+        // Control: the Referrers API answers and the referrer is servable, so
+        // the copy carries it all the way to the target.
+        let control = StubTransportData::new();
+        let control_scratch = scratch_dir();
+        let control_leaf = seed_source(&control, &source, &leaf_manifest());
+        let control_sbom = seed(&control, &source, &sbom, &[EMPTY_CONFIG, SBOM_PAYLOAD]);
+        control.write().referrers.insert(
+            format!("{}@{control_leaf}", source.repository()),
+            vec![sbom_descriptor.clone()],
+        );
+        let control_client = client_for(&control);
+        let control_transfer = Transfer {
+            client: &control_client,
+            source: &source,
+            target: &target,
+            scratch: control_scratch.path(),
+        };
+        assert_eq!(
+            control_transfer
+                .copy_referrers(&control_leaf, 0, &mut BTreeSet::new())
+                .await
+                .expect("control: a listed, servable referrer copies"),
+            1,
+            "control must actually copy the referrer"
+        );
+        assert!(
+            pushed_manifest(&control, &target, &control_sbom).is_some(),
+            "control must land the referrer at the target"
+        );
+
+        // The real case: no Referrers API, and the referrer listed ONLY on the
+        // fallback tag — never in the stub's referrers map.
+        let data = StubTransportData::new();
+        let scratch = scratch_dir();
+        let leaf = seed_source(&data, &source, &leaf_manifest());
+        {
+            let index = crate::oci::ImageIndex {
+                schema_version: crate::oci::INDEX_SCHEMA_VERSION,
+                media_type: Some(crate::media_type::MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
+                manifests: vec![crate::oci::ImageIndexEntry {
+                    media_type: sbom_descriptor.media_type.clone(),
+                    digest: sbom_descriptor.digest.clone(),
+                    size: sbom_descriptor.size,
+                    platform: None,
+                    annotations: None,
+                    artifact_type: sbom_descriptor.artifact_type.clone(),
+                }],
+                artifact_type: None,
+                annotations: None,
+            };
+            let bytes = serde_json::to_vec(&index).expect("serialize the fallback index");
+            let key = crate::oci::client::sibling_tag_reference(
+                &canonical(&source),
+                crate::package::tag::referrer_fallback_tag(&leaf),
+            )
+            .to_string();
+            let digest = Algorithm::Sha256.hash(&bytes).to_string();
+            data.write().manifests.insert(key, (bytes, digest));
+        }
+        data.write().referrers_unsupported = true;
+
+        let client = client_for(&data);
+        let transfer = Transfer {
+            client: &client,
+            source: &source,
+            target: &target,
+            scratch: scratch.path(),
+        };
+        let error = transfer
+            .copy_referrers(&leaf, 0, &mut BTreeSet::new())
+            .await
+            .expect_err("the fallback-listed referrer is deliberately left unseeded");
+
+        assert!(
+            !matches!(error, ClientError::ReferrersUnsupported { .. }),
+            "reading the SOURCE must never raise the referrers verdict: {error}"
+        );
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&sbom_descriptor.digest),
+            "the refusal must name the descriptor the fallback tag listed, or the tag was never read: {rendered}"
+        );
+        assert!(
+            rendered.contains("cannot serve it"),
+            "the walk must have reached the referrer fetch: {rendered}"
         );
     }
 }

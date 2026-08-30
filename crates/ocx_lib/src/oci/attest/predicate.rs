@@ -17,7 +17,9 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::value::RawValue;
 
-use crate::oci::referrer::media_types::{SBOM_CYCLONEDX, SBOM_SPDX_JSON, SBOM_SPDX_TEXT};
+use crate::oci::referrer::media_types::{
+    COSIGN_SBOM_CYCLONEDX_XML, COSIGN_SBOM_SPDX_JSON, SBOM_CYCLONEDX, SBOM_SPDX_JSON, SBOM_SPDX_TEXT,
+};
 
 const URI_CYCLONEDX: &str = "https://cyclonedx.org/bom";
 const URI_SPDX: &str = "https://spdx.dev/Document";
@@ -223,10 +225,17 @@ pub(crate) fn sbom_artifact_type(predicate_type: &PredicateType) -> Option<&'sta
 /// its inputs, because the two SPDX serializations collapse onto one URI. This
 /// is what labels an unverified listing entry and what `--type` narrows against,
 /// so an unsigned entry is narrowed by exactly the value a signed one carries.
+///
+/// **Wider than [`sbom_artifact_type`]'s range on purpose.** Reading is parity
+/// with what is in registries, writing is a wire format OCX owns: cosign's own
+/// two extra spellings are accepted here (`media_types`' measured table) and
+/// never emitted. A serialization the URI cannot express is not lost by that —
+/// `predicateType` names the *document kind*, and the layer's media type stays
+/// the statement of how it is serialized.
 pub(crate) fn sbom_predicate_type_uri(artifact_type: &str) -> Option<&'static str> {
     match artifact_type {
-        SBOM_CYCLONEDX => Some(URI_CYCLONEDX),
-        SBOM_SPDX_JSON | SBOM_SPDX_TEXT => Some(URI_SPDX),
+        SBOM_CYCLONEDX | COSIGN_SBOM_CYCLONEDX_XML => Some(URI_CYCLONEDX),
+        SBOM_SPDX_JSON | SBOM_SPDX_TEXT | COSIGN_SBOM_SPDX_JSON => Some(URI_SPDX),
         _ => None,
     }
 }
@@ -254,6 +263,7 @@ pub struct PredicateTypeParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oci::referrer::media_types::SBOM_ARTIFACT_TYPES;
 
     /// A predicate spelled so that a `Value` round-trip is observable on three
     /// axes: a trailing-zero float, an escaped non-ASCII codepoint, and
@@ -283,6 +293,86 @@ mod tests {
         ("openvex", "https://openvex.dev/ns"),
         ("custom", "https://cosign.sigstore.dev/attestation/v1"),
     ];
+
+    /// Every layer media type `cosign attach sbom` can write, measured against
+    /// cosign v3.1.1 by reading back the `mediaType [...]` it prints for the
+    /// layer it uploads, over the full `--type` × `--input-format` cross
+    /// product.
+    ///
+    /// This is the parity surface for reading a `sha256-<hex>.sbom` sidecar and
+    /// a cosign OCI 1.1 SBOM referrer. Only two rows overlap OCX's own three
+    /// spellings, and `--type spdx` — cosign's DEFAULT — is not one of them, so
+    /// a map that covers only what OCX writes refuses cosign's most common
+    /// output.
+    const COSIGN_SBOM_LAYER_TYPES: &[(&str, Option<&str>)] = &[
+        // `--type spdx` with a JSON input, which is cosign's default type and
+        // its auto-detected format for a `.json` file.
+        ("text/spdx+json", Some(URI_SPDX)),
+        // `--type spdx --input-format text`.
+        ("text/spdx", Some(URI_SPDX)),
+        // `--type cyclonedx`, JSON input.
+        ("application/vnd.cyclonedx+json", Some(URI_CYCLONEDX)),
+        // `--type cyclonedx --input-format xml`.
+        ("application/vnd.cyclonedx+xml", Some(URI_CYCLONEDX)),
+        // `--type syft`. Deliberately unmapped: no in-toto predicateType URI
+        // names syft's native format, so labelling it would invent a claim.
+        // Refused by name (`sbom_media_type_unsupported`) rather than listed.
+        ("application/vnd.syft+json", None),
+    ];
+
+    /// The read map covers cosign's measured table, and refuses syft.
+    ///
+    /// Both halves are asserted from one table because either alone is
+    /// satisfiable by a broken map: mapping everything satisfies the positive
+    /// rows, mapping nothing satisfies the negative one.
+    #[test]
+    fn the_sbom_read_map_covers_cosigns_measured_layer_types() {
+        for (media_type, expected) in COSIGN_SBOM_LAYER_TYPES {
+            assert_eq!(
+                sbom_predicate_type_uri(media_type),
+                *expected,
+                "`cosign attach sbom` writes {media_type}; the read map must agree",
+            );
+        }
+        // OCX's own SPDX-JSON spelling is not in cosign's table and still maps —
+        // the two sets are a union, not a replacement.
+        assert_eq!(sbom_predicate_type_uri(SBOM_SPDX_JSON), Some(URI_SPDX));
+    }
+
+    /// The write set stays exactly OCX's three spellings.
+    ///
+    /// The guard on the previous test: widening the *read* map must not widen
+    /// what OCX emits. `sbom_artifact_type` is the attach path's chooser, and
+    /// its whole range has to remain something OCX would publish — a
+    /// `text/spdx+json` referrer written by OCX would be OCX adopting cosign's
+    /// non-standard spelling for no reason.
+    #[test]
+    fn widening_the_read_map_does_not_widen_what_ocx_writes() {
+        let written: Vec<&str> = PredicateType::ALIASES
+            .iter()
+            .filter_map(|alias| {
+                let predicate_type = alias.parse::<PredicateType>().expect("a known alias parses");
+                sbom_artifact_type(&predicate_type)
+            })
+            .collect();
+        // Non-emptiness first: a `sbom_artifact_type` that answered `None` for
+        // every alias satisfies both assertions below vacuously, and would mean
+        // the attach path could write nothing at all.
+        assert!(
+            !written.is_empty(),
+            "the attach path must still choose a type for the aliases OCX publishes",
+        );
+        for spelling in &written {
+            assert!(
+                SBOM_ARTIFACT_TYPES.contains(spelling),
+                "the attach path may only write a declared OCX SBOM type, got {spelling}",
+            );
+        }
+        assert!(
+            !written.contains(&COSIGN_SBOM_SPDX_JSON) && !written.contains(&COSIGN_SBOM_CYCLONEDX_XML),
+            "cosign's own spellings are read-only; OCX must never emit them, got {written:?}",
+        );
+    }
 
     fn raw(text: &str) -> Box<RawValue> {
         RawValue::from_string(text.to_owned()).expect("test input is valid JSON")

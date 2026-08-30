@@ -591,42 +591,32 @@ automatically for any package whose identifier falls under a policy's scope.
 [[trust.policy]]
 scope = "ghcr.io/acme/*"
 
-[trust.policy.keyless]
-identity    = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "https://github.com/acme/tool/.github/workflows/release.yml@refs/heads/main",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 
-`[[trust.policy]]` is an array-of-tables — declare one entry per accepted signer per scope.
-It is valid in every `config.toml` tier ([system, user, `$OCX_HOME`](#file-locations)) **and**
-in the project `ocx.toml`. Reading it from `ocx.toml` is a deliberate exception: every other
-OCI-tier command ignores `ocx.toml` entirely, but a trust policy is a security posture the
-checkout owner controls, not toolchain-binding resolution. The two sources are not equal
-peers, though — see [Tier precedence](#keys-trust-merge) below.
+`[[trust.policy]]` is an array-of-tables — declare one entry per scope, with a `signers` array
+listing every signer accepted for it. It is valid in every `config.toml` tier ([system, user,
+`$OCX_HOME`](#file-locations)) **and** in the project `ocx.toml`. Reading it from `ocx.toml` is
+a deliberate exception: every other OCI-tier command ignores `ocx.toml` entirely, but a trust
+policy is a security posture the checkout owner controls, not toolchain-binding resolution. The
+two sources are not equal peers, though — see [Tier precedence](#keys-trust-merge) below.
 
 #### Fields {#keys-trust-fields}
 
-Fields split across two levels — `scope` and `builder` are declared directly on `[[trust.policy]]`; `identity`, `identity_regexp` and `oidc_issuer` belong to its `[trust.policy.keyless]` sub-table, since identity matching and provenance-builder matching are independent checks.
+`scope`, `builder`, and `signers` are declared directly on `[[trust.policy]]`.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `scope` | string or table | no | Which packages this policy applies to — one prefix pattern (`"ghcr.io/acme/*"`), or an `{ include, exclude }` table of them. **Omitting it is a catch-all**: the policy governs every package. See [Scope matching](#keys-trust-scope). |
 | `builder` | string | no | Expected SLSA provenance `builder.id` (byte-equal). Only consulted when verifying an attestation whose predicate is SLSA provenance ([`verify --attestation`][cmd-package-verify-attestations]); ignored for a plain signature or any other predicate type. A mismatch is `builder_mismatch` (exit 65). |
+| `signers` | array of tables | yes | The signers this policy accepts for its scope. See [Signers](#keys-trust-signers) below. |
 
-**`[trust.policy.keyless]`:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `identity` | string | XOR with `identity_regexp` | Exact expected certificate SAN (byte-equal). |
-| `identity_regexp` | string | XOR with `identity` | Regex the certificate SAN must match in full. See [Regex identities](#keys-trust-regex). |
-| `oidc_issuer` | string | yes | Exact expected OIDC issuer URL (byte-equal). No regex form in this release — issuer URLs are stable. |
-
-Exactly one of `identity` / `identity_regexp` must be set — both present, or both absent, is a
-configuration error. Unknown keys are ignored, like everywhere else in `config.toml`: a file
-written for a newer ocx must still load on an older one, so a typo'd key (e.g. `scop`) is
-silently dropped rather than rejected. What still fails the entry is a missing **required**
-field — a policy without `oidc_issuer` is a parse error, and one that ends up with neither
-`identity` nor `identity_regexp` is rejected when the policy compiles, never silently treated
-as "trust anything".
+Unknown keys are ignored, like everywhere else in `config.toml`: a file written for a newer ocx
+must still load on an older one, so a typo'd key (e.g. `scop`) is silently dropped rather than
+rejected.
 
 ::: warning A dropped `scope` key widens the policy
 `scope` is optional and an absent one is a catch-all, so the tolerance above cuts both ways: a
@@ -634,6 +624,109 @@ policy whose `scope` key is misspelled loses its scope and then governs **every*
 rather than none. The one place the tolerance stops is inside a `scope` table — see
 [Include and exclude](#keys-trust-scope-set).
 :::
+
+#### Signers {#keys-trust-signers}
+
+`signers` is an array of tables, each tagged `kind = "keyless"` or `kind = "key"`. Every entry
+is one more way for a package under this policy's scope to pass verification.
+
+::: warning Adding a signer widens acceptance — it never narrows it
+`signers` is an **ANY-of** list: a signature passes if it satisfies *any one* entry. Adding a
+`kind = "key"` entry to a policy that already has a `kind = "keyless"` one does not switch the
+policy over to keys, or tighten it in any way — it just adds a second way in. Most readers hear
+"add a key policy" as tightening, which is the opposite of what happens. **Narrowing** a policy
+means *removing* entries, or — at the operator tier — declaring a [system-locked](#keys-trust-system-lock)
+policy that displaces the lower tiers wholesale.
+:::
+
+An absent or `[]` `signers` array is a **configuration error, not a catch-all** — it fails
+closed rather than silently accepting everything or nothing.
+
+**`kind = "keyless"` fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `identity` | string | XOR with `identity_regexp` | Exact expected certificate SAN (byte-equal). |
+| `identity_regexp` | string | XOR with `identity` | Regex the certificate SAN must match in full. See [Regex identities](#keys-trust-regex). |
+| `oidc_issuer` | string | yes | Exact expected OIDC issuer URL (byte-equal). No regex form in this release — issuer URLs are stable. |
+
+Exactly one of `identity` / `identity_regexp` must be set on each keyless entry — both present,
+or both absent, is a configuration error. What still fails the entry is a missing **required**
+field — a keyless signer without `oidc_issuer` is a parse error, and one that ends up with
+neither `identity` nor `identity_regexp` is rejected when the policy compiles, never silently
+treated as "trust anything".
+
+**`kind = "key"` fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `key` | string | XOR with `key_pem` | A key reference, `[scheme://]<rest>` in [cosign][cosign]'s spelling — a bare path, or a `file://` one, names a file. |
+| `key_pem` | string | XOR with `key` | The public key, as a verbatim SPKI PEM block. |
+
+Exactly one of `key` / `key_pem` must be set on each key entry — both present, or both absent,
+is a configuration error. There is no `key_regexp`: a public key is a fixed value, not a
+pattern, so a key signer always pins one exact key.
+
+```toml
+[[trust.policy]]
+scope   = "ghcr.io/acme/*"
+signers = [
+  { kind = "key", key = "etc/acme-release.pub" },
+  { kind = "key", key_pem = """
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...
+-----END PUBLIC KEY-----""" },
+]
+```
+
+A relative key reference resolves against the directory of the `config.toml` that
+declared it — the same ordinary path resolution [`[trust.sigstore] trusted_root`](#keys-trust-sigstore)
+already uses, not a containment check.
+
+A key reference the verifier cannot read — absent, permission denied, or any other I/O
+failure — is exit `74` (`io_error`, with `error.detail` `key_unreadable`), the same code
+[`ocx package sign --key <path>`][cmd-package-sign] answers for the same unreadable file. Not
+`78`: the path is a filesystem problem, not a malformed policy. A path that is not a regular
+file at all — a directory, a device — is `74` for the same reason.
+
+A file that reads fine and holds something that is not an SPKI public key is `65`
+(`key_malformed`), again matching sign: the path was usable and the *material* was not. Only
+an inline `key_pem` that is not a key stays `78`, because there the config text itself is the
+thing that is wrong. One rule, keyed on what failed rather than on which command asked.
+
+Mixing `kind = "keyless"` and `kind = "key"` entries in one policy is legal and is how a fleet
+migrates between signing models without touching scope:
+
+```toml
+[[trust.policy]]
+scope   = "ghcr.io/acme/*"
+signers = [
+  { kind = "keyless", identity = "ci@acme.example",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+  { kind = "key",     key = "etc/acme-release.pub" },
+]
+```
+
+::: tip Generating a key pair
+OCX does not implement key generation. Run [`cosign generate-key-pair`][cosign] from an
+activated environment — cosign ships in the OCX index — to produce a `cosign.key` /
+`cosign.pub` pair. An encrypted private key's password is read from
+[`OCX_KEY_PASSWORD`][env-ocx-key-password], never a flag; leaving it unset means the empty
+password, which cosign permits.
+:::
+
+#### Publishing signers to a fleet {#keys-trust-signers-publish}
+
+A `key` reference naming a path names it on the **operator's** disk, which means nothing on a
+consumer's — the same problem [`[trust.sigstore] trusted_root`](#keys-trust-sigstore-publish)
+has. [`ocx config push`][cmd-config-push] refuses a managed-config payload that declares a
+`kind = "key"` signer by path, naming `key_pem` as the fix (exit `78`, a configuration error):
+inline the key with `key_pem` before publishing it. A KMS reference is not a path and is not
+refused for this reason — it travels with the payload and means the same thing on every
+consumer — but a backend OCX has not implemented yet is refused as exit `85`
+(`unsupported_key_backend`), the same code `--key` and a local tier answer for it. Local tiers — project, operator, and user
+config on the author's own disk — leave `key` unrestricted; the refusal applies only to a
+published payload.
 
 #### Scope matching {#keys-trust-scope}
 
@@ -663,9 +756,10 @@ glob with one — and the table only says how they combine:
 [[trust.policy]]
 scope = { include = ["ghcr.io/acme/*", "ocx.sh/cmake"], exclude = ["ghcr.io/acme/experimental/*"] }
 
-[trust.policy.keyless]
-identity    = "ci@acme.example"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "ci@acme.example",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 
 A target matches when it matches **at least one** `include` **and no** `exclude`. The table must
@@ -679,9 +773,10 @@ subtree.
 [[trust.policy]]
 scope = { exclude = ["ghcr.io/acme/experimental/*"] }
 
-[trust.policy.keyless]
-identity    = "ci@acme.example"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "ci@acme.example",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 
 `exclude` beats `include` whenever both match. An excluded package is not "denied" — it is
@@ -716,16 +811,18 @@ When more than one policy's scope matches a target, the **longest** literal pref
 [[trust.policy]]                          # literal prefix "ghcr.io/acme/" (13 chars)
 scope = "ghcr.io/acme/*"
 
-[trust.policy.keyless]
-identity    = "ci@acme.example"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "ci@acme.example",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 
 [[trust.policy]]                          # literal prefix "ghcr.io/acme/secret-tool" (24 chars)
 scope = "ghcr.io/acme/secret-tool"
 
-[trust.policy.keyless]
-identity    = "release-bot@acme.example"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "release-bot@acme.example",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 
 Verifying `ghcr.io/acme/secret-tool:1.0` only accepts `release-bot@acme.example` — the
@@ -741,16 +838,18 @@ either one verifies until the old entry is removed:
 [[trust.policy]]                          # both scopes tie at "ghcr.io/acme/" (13 chars)
 scope = "ghcr.io/acme/*"
 
-[trust.policy.keyless]
-identity    = "old-ci@acme.example"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "old-ci@acme.example",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 
 [[trust.policy]]
 scope = "ghcr.io/acme/*"
 
-[trust.policy.keyless]
-identity    = "new-ci@acme.example"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "new-ci@acme.example",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 
 A policy whose scope is an `{ include, exclude }` table ranks by the **longest literal prefix
@@ -770,9 +869,10 @@ matching `evil-acme-lookalike`.
 [[trust.policy]]
 scope = "ghcr.io/acme/*"
 
-[trust.policy.keyless]
-identity_regexp = "^https://github\\.com/acme/.*/\\.github/workflows/release\\.yml@refs/tags/v[0-9.]+$"
-oidc_issuer     = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity_regexp = "^https://github\\.com/acme/.*/\\.github/workflows/release\\.yml@refs/tags/v[0-9.]+$",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 
 `identity_regexp` is useful when the SAN embeds a variable path component — a [GitHub
@@ -827,9 +927,10 @@ scope cannot take over, and an equally specific one cannot join the accepted set
 [[trust.policy]]
 scope = "ghcr.io/acme/*"
 
-[trust.policy.keyless]
-identity    = "ci@acme.example"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "ci@acme.example",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 
 ```toml [a lower tier]
@@ -837,9 +938,10 @@ oidc_issuer = "https://token.actions.githubusercontent.com"
 [[trust.policy]]
 scope = "ghcr.io/acme/tool"
 
-[trust.policy.keyless]
-identity    = "someone-else@example.test"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "someone-else@example.test",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 :::
 
@@ -855,16 +957,18 @@ as two locked entries, and both are accepted for the overlap window.
 [[trust.policy]]
 scope = "ghcr.io/acme/*"
 
-[trust.policy.keyless]
-identity    = "ci@acme.example"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "ci@acme.example",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 
 [[trust.policy]]                          # same scope, second accepted signer
 scope = "ghcr.io/acme/*"
 
-[trust.policy.keyless]
-identity    = "ci-2027@acme.example"
-oidc_issuer = "https://token.actions.githubusercontent.com"
+signers = [
+  { kind = "keyless", identity = "ci-2027@acme.example",
+                      oidc_issuer = "https://token.actions.githubusercontent.com" },
+]
 ```
 
 ::: warning What the lock does and does not reach
@@ -901,6 +1005,7 @@ Fulcio/Rekor endpoints [`ocx package sign`][cmd-package-sign] talks to by defaul
 trusted_root = "sigstore/trusted-root.json"    # path, relative to THIS config file
 fulcio_url   = "https://fulcio.corp.example"
 rekor_url    = "https://rekor.corp.example"
+rekor_upload = true
 ```
 
 Every field is optional and the whole sub-table may be absent — omitting it
@@ -918,9 +1023,17 @@ own signatures, which is the entire trust decision.
 | `trusted_root_json` | string | The trusted-root document inlined verbatim. This is the form a fleet receives — see [Publishing to a fleet](#keys-trust-sigstore-publish). Mutually exclusive with `trusted_root` |
 | `fulcio_url` | string | Default [Fulcio][fulcio] base URL for `ocx package sign` / `attest` when `--fulcio-url` is omitted. Precedence: an explicit flag wins, then this field, then the public-good builtin. `ocx package push --sbom` has no `--fulcio-url` flag at all, so this field is its only override |
 | `rekor_url` | string | Default [Rekor][rekor] base URL for `ocx package sign` / `verify` / `attest` / `sbom` when `--rekor-url` is omitted. Precedence: an explicit flag wins, then this field, then the public-good builtin. `ocx package push --sbom` and auto-verify expose no `--rekor-url` flag, so this field is their only override |
+| `rekor_upload` | boolean | The fleet-wide default for uploading a **key-mode** signature to the transparency log. Absent means off. |
 
 Setting both `trusted_root` and `trusted_root_json` is a configuration error —
 exit `78`, `trust_root_load`. One trust root, one spelling.
+
+::: warning `rekor_upload` governs key mode only
+Under keyless signing, uploading to Rekor is a **requirement**, not a default governed by this
+field — a Fulcio certificate is valid for about ten minutes, and the Rekor timestamp is the
+only proof the signature happened inside that window. `rekor_upload` is silently ignored for a
+keyless signer, deliberately without a warning.
+:::
 
 #### Where it sits in the ladder {#keys-trust-sigstore-ladder}
 
@@ -1458,6 +1571,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-ocx-binary-pin]: ./environment.md#ocx-binary-pin
 [xdg-basedir]: ./environment.md#external-xdg-config-home
 [env-sigstore-trusted-root]: ./environment.md#ocx-sigstore-trusted-root
+[env-ocx-key-password]: ./environment.md#ocx-key-password
 [in-depth-self-hosted-sigstore]: ../in-depth/self-hosted-sigstore.md
 [fulcio]: https://github.com/sigstore/fulcio
 [rekor]: https://github.com/sigstore/rekor

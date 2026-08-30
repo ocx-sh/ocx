@@ -97,6 +97,33 @@ pub enum ManagedConfigPublishError {
     #[error("managed config payload declares both trusted_root and trusted_root_json in [trust.sigstore]: keep one")]
     AmbiguousTrustRoot,
 
+    /// A `[[trust.policy]]` signer names its key by path (`key = "etc/acme.pub"`).
+    ///
+    /// The twin of [`Self::AmbiguousTrustRoot`], for the same reason: a managed
+    /// payload is a `config.toml` shipped as a package to a fleet, so a path in
+    /// one names the *operator's* disk and means nothing on any consumer's. The
+    /// refusal removes an incoherent state rather than adding a guard — inlining
+    /// the key with `key_pem` is the form that travels.
+    ///
+    /// Local tiers (project / operator / user config on the author's own disk)
+    /// leave `key` unrestricted; this applies only to a published payload.
+    #[error("managed config payload declares a key signer by path in [[trust.policy]]: inline it as `key_pem` instead")]
+    ManagedConfigKeyByPath,
+
+    /// A `[[trust.policy]]` entry in the payload does not compile.
+    ///
+    /// Caught here rather than left to the fleet: a payload is adopted by every
+    /// consumer at once, so an empty `signers` array or a malformed `key_pem`
+    /// would fail closed on every machine simultaneously, with the diagnostic
+    /// arriving at the consumer instead of the operator who wrote it. The path
+    /// form is already refused above, so compiling here reads no file.
+    #[error("managed config payload declares an unusable [[trust.policy]] entry")]
+    InvalidTrustPolicy {
+        /// Why the policy could not be compiled.
+        #[source]
+        source: crate::trust::TrustPolicyError,
+    },
+
     /// Reading the trusted-root file named by `[trust.sigstore] trusted_root`
     /// failed. The path is resolved relative to the payload's own directory.
     #[error("failed to read trusted root '{}' named by [trust.sigstore] trusted_root", path.display())]
@@ -162,7 +189,16 @@ impl crate::cli::ClassifyExitCode for ManagedConfigPublishError {
             | Self::InvalidToml { .. }
             | Self::ContainsManagedSection
             | Self::AmbiguousTrustRoot
+            | Self::ManagedConfigKeyByPath
             | Self::TrustedRootInvalid { .. } => Some(crate::cli::ExitCode::ConfigError),
+            // The third door onto one refusal: a payload naming a recognised
+            // but unimplemented backend is "upgrade ocx", not "your config is
+            // malformed", and `--key` plus the local config tiers both already
+            // answer 85 for the identical value.
+            Self::InvalidTrustPolicy { source } if source.names_unsupported_backend() => {
+                Some(crate::cli::ExitCode::UnsupportedKeyBackend)
+            }
+            Self::InvalidTrustPolicy { .. } => Some(crate::cli::ExitCode::ConfigError),
             Self::ReadFailed { source, .. } | Self::TrustedRootReadFailed { source, .. } => Some(match source.kind() {
                 std::io::ErrorKind::NotFound => crate::cli::ExitCode::NotFound,
                 std::io::ErrorKind::PermissionDenied => crate::cli::ExitCode::PermissionDenied,
@@ -181,6 +217,20 @@ impl crate::cli::ClassifyExitCode for ManagedConfigPublishError {
     }
 }
 
+/// Whether a `kind = "key"` signer names its key by **path**.
+///
+/// The refusal below is about paths, not about `key` being set at all: a KMS
+/// reference (`awskms://alias/release`) travels with the payload and means the
+/// same thing on every consumer's machine, so "inline it as `key_pem`" is
+/// advice no operator can follow for one. Unparseable references fall through
+/// to `compile()`, which names what is wrong with them.
+fn names_a_path(key: &crate::trust::KeyMatcher) -> bool {
+    key.key
+        .as_deref()
+        .and_then(|reference| crate::oci::sign::KeyRef::parse(reference).ok())
+        .is_some_and(|reference| reference.as_path().is_some())
+}
+
 // ── Pure validation ───────────────────────────────────────────────────────────
 
 /// Validates a managed-config payload before publishing.
@@ -193,7 +243,10 @@ impl crate::cli::ClassifyExitCode for ManagedConfigPublishError {
 /// 2. parses as [`crate::config::Config`] (unknown **top-level** sections are
 ///    tolerated for forward compatibility, matching the loader's posture),
 /// 3. carries no `[managed]` section,
-/// 4. does not declare both `[trust.sigstore]` trust-root spellings at once.
+/// 4. does not declare both `[trust.sigstore]` trust-root spellings at once,
+/// 5. names no `[[trust.policy]]` key by path — a fleet payload carries key
+///    material inline as `key_pem` or not at all,
+/// 6. compiles every `[[trust.policy]]` entry it declares.
 ///
 /// Returns the payload as text so a caller that needs to look at it again
 /// ([`crate::managed_config::preview_managed_config`]) reuses this UTF-8
@@ -204,7 +257,9 @@ impl crate::cli::ClassifyExitCode for ManagedConfigPublishError {
 /// [`ManagedConfigPublishError::PayloadTooLarge`],
 /// [`ManagedConfigPublishError::InvalidToml`],
 /// [`ManagedConfigPublishError::ContainsManagedSection`],
-/// [`ManagedConfigPublishError::AmbiguousTrustRoot`].
+/// [`ManagedConfigPublishError::AmbiguousTrustRoot`],
+/// [`ManagedConfigPublishError::ManagedConfigKeyByPath`],
+/// [`ManagedConfigPublishError::InvalidTrustPolicy`].
 pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<&str, ManagedConfigPublishError> {
     use serde::de::Error as _;
 
@@ -228,6 +283,25 @@ pub fn validate_managed_config_payload(bytes: &[u8]) -> Result<&str, ManagedConf
         && sigstore.trusted_root_json.is_some()
     {
         return Err(ManagedConfigPublishError::AmbiguousTrustRoot);
+    }
+    // The same rule one table over: key material a fleet receives must travel
+    // with the payload, so a signer names its key inline or not at all.
+    if let Some(trust) = parsed.trust.as_ref()
+        && trust.policy.iter().any(|policy| {
+            policy
+                .signers
+                .iter()
+                .any(|signer| matches!(signer, crate::trust::SignerSpec::Key(key) if names_a_path(key)))
+        })
+    {
+        return Err(ManagedConfigPublishError::ManagedConfigKeyByPath);
+    }
+    // Only now that every remaining key is inline: compiling reads no file, so
+    // this is a pure shape + PEM check the operator gets instead of the fleet.
+    for policy in parsed.trust.iter().flat_map(|trust| trust.policy.iter()) {
+        policy
+            .compile()
+            .map_err(|source| ManagedConfigPublishError::InvalidTrustPolicy { source })?;
     }
     Ok(text)
 }
@@ -311,8 +385,11 @@ pub async fn publish_managed_config(
         None => bytes.clone(),
         Some(declared) => {
             // Relative to the payload's own directory, exactly as the loader
-            // anchors it when reading a local `config.toml`.
-            let path = if declared.is_relative() {
+            // anchors it when reading a local `config.toml` — including the
+            // `!has_root()` test, which `SigstoreTrust::anchor_relative_root`
+            // explains. "Exactly as the loader" is the whole point of this
+            // branch, so the two must not drift on Windows either.
+            let path = if !declared.has_root() {
                 config_path.parent().unwrap_or(Path::new(".")).join(&declared)
             } else {
                 declared
@@ -390,9 +467,9 @@ pub async fn publish_managed_config(
             }
         })?;
         let existing_versions = Publisher::parse_versions(&existing_tags);
-        // Canonical tagging (`adr_index_indirection.md` Decision E) is a
+        // Keep tagging (`adr_index_indirection.md` Decision E) is a
         // `ocx package push` CLI contract; managed-config publishing has no
-        // `--[no-]canonical-tag` surface of its own, so it opts out to keep
+        // `--[no-]keep-tag` surface of its own, so it opts out to keep
         // today's tag set unchanged. Index annotations are likewise a
         // `ocx package push --annotation` contract with no `ocx config push`
         // surface, so none are written.
@@ -586,5 +663,199 @@ trusted_root_json = "{}"
                 "byte-identical when there is nothing to inline"
             );
         }
+    }
+
+    /// The public half of the golden cosign pair — the only thing a `key_pem`
+    /// entry ever carries.
+    const GOLDEN_PUBLIC_KEY_PEM: &str = include_str!("../../../../test/tests/fixtures/golden/keys/cosign.pub");
+
+    /// The reference is quoted by the TOML serializer rather than by the format
+    /// string: one caller builds it from a tempdir, and a Windows tempdir is
+    /// `C:\Users\…` — where `\U` in a basic string is a unicode escape, so an
+    /// interpolated `"{reference}"` makes the payload unparseable on exactly one
+    /// platform.
+    fn payload_with_key_reference(reference: &str) -> String {
+        let reference = toml::Value::from(reference);
+        format!("[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nsigners = [{{ kind = \"key\", key = {reference} }}]\n")
+    }
+
+    /// A payload is adopted fleet-wide at once, so a policy that cannot compile
+    /// fails closed on every consumer simultaneously — with the diagnostic
+    /// landing on the wrong person. Compiling here moves it to the operator who
+    /// wrote it. Every remaining key is inline by this point, so no file is read.
+    #[test]
+    fn validate_rejects_a_policy_that_does_not_compile() {
+        let empty_signers = "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nsigners = []\n";
+        let error = validate_managed_config_payload(empty_signers.as_bytes())
+            .expect_err("an empty signers array accepts nobody and must be refused");
+        assert!(
+            matches!(
+                error,
+                ManagedConfigPublishError::InvalidTrustPolicy {
+                    source: crate::trust::TrustPolicyError::NoSigners { .. }
+                }
+            ),
+            "got {error:?}"
+        );
+
+        let malformed_pem =
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nsigners = [{ kind = \"key\", key_pem = \"not a pem\" }]\n";
+        let error = validate_managed_config_payload(malformed_pem.as_bytes())
+            .expect_err("key material that no consumer can parse must be refused here");
+        assert!(
+            matches!(
+                error,
+                ManagedConfigPublishError::InvalidTrustPolicy {
+                    source: crate::trust::TrustPolicyError::KeyMalformed { .. }
+                }
+            ),
+            "got {error:?}"
+        );
+    }
+
+    /// The other direction: a payload whose policies *do* compile is accepted,
+    /// or the refusal above would be indistinguishable from "managed payloads
+    /// may carry no `[[trust.policy]]` at all".
+    #[test]
+    fn validate_accepts_a_policy_that_compiles() {
+        let keyless = "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n\
+                       signers = [{ kind = \"keyless\", identity = \"ci@acme.example\", oidc_issuer = \"https://iss.example\" }]\n";
+        validate_managed_config_payload(keyless.as_bytes()).expect("a compilable policy is publishable");
+    }
+
+    /// **A managed payload takes `key_pem` only.** It is a `config.toml` shipped
+    /// as a package to a fleet, so a path in one names the *operator's* disk and
+    /// means nothing on any consumer's. The refusal removes an incoherent state
+    /// rather than adding a guard — the same convention `trusted_root` /
+    /// `trusted_root_json` already follows.
+    #[test]
+    fn validate_rejects_a_key_signer_declared_by_path() {
+        // Both spellings of the path form: relative and absolute name the
+        // operator's disk alike, and a scan that caught only one would ship the
+        // other as a payload that resolves to nothing on every consumer.
+        for reference in ["etc/acme-release.pub", "/srv/keys/acme.pub"] {
+            let error = validate_managed_config_payload(payload_with_key_reference(reference).as_bytes())
+                .err()
+                .unwrap_or_else(|| panic!("`{reference}` names a path and must be refused"));
+            assert!(
+                matches!(error, ManagedConfigPublishError::ManagedConfigKeyByPath),
+                "`{reference}` got {error:?}"
+            );
+        }
+
+        // The removed `file:` spelling is refused too — one door later, and by
+        // the grammar rather than by this rule. `names_a_path` reads it through
+        // `KeyRef::parse`, which no longer yields a path for it, so the payload
+        // falls through to the `compile()` pass. Both halves asserted: still
+        // refused, and *not* as `ManagedConfigKeyByPath`, whose `key_pem`
+        // remedy is not the fix for a value that is simply misspelled.
+        let removed =
+            validate_managed_config_payload(payload_with_key_reference("file:etc/acme-release.pub").as_bytes())
+                .expect_err("the removed spelling is not publishable either");
+        assert!(
+            matches!(
+                &removed,
+                ManagedConfigPublishError::InvalidTrustPolicy {
+                    source: crate::trust::TrustPolicyError::KeyReferenceInvalid {
+                        source: crate::oci::sign::KeyRefError::FileColonPrefix { .. },
+                        ..
+                    }
+                }
+            ),
+            "the grammar names it, not the path rule; got {removed:?}"
+        );
+    }
+
+    /// A KMS reference is not a path, and the path refusal must not eat it.
+    ///
+    /// `awskms://alias/release` travels with the payload and means the same
+    /// thing on every consumer's machine, so the `key_pem` remedy the path
+    /// refusal names is advice no operator can follow for one — a KMS key has
+    /// no PEM to inline. It is refused, but as the third door onto 85
+    /// `unsupported_key_backend`: the same code `--key awskms://…` and a local
+    /// `config.toml` signer already answer for the identical value.
+    ///
+    /// Both halves, because either alone passes on a validator that answers the
+    /// same way for everything: the KMS form must not be `ManagedConfigKeyByPath`
+    /// **and** the path form must still be.
+    #[test]
+    fn a_kms_reference_is_85_not_the_path_refusal() {
+        let error = validate_managed_config_payload(payload_with_key_reference("awskms://alias/release").as_bytes())
+            .expect_err("an unimplemented backend cannot be published either");
+        assert!(
+            !matches!(error, ManagedConfigPublishError::ManagedConfigKeyByPath),
+            "a KMS reference names no path, and `key_pem` is not a remedy for it; got {error:?}"
+        );
+        assert_eq!(
+            error.classify(),
+            Some(ExitCode::UnsupportedKeyBackend),
+            "the same 85 the `--key` and local-config doors answer; got {error:?}"
+        );
+
+        let by_path = validate_managed_config_payload(payload_with_key_reference("etc/acme.pub").as_bytes())
+            .expect_err("a path form is refused in a managed payload");
+        assert!(
+            matches!(by_path, ManagedConfigPublishError::ManagedConfigKeyByPath),
+            "narrowing the refusal to paths must not stop it refusing paths; got {by_path:?}"
+        );
+    }
+
+    /// The refusal names `key_pem` as the fix — an operator who reads only the
+    /// error message has to know what to write instead.
+    #[test]
+    fn the_key_by_path_refusal_names_key_pem_as_the_fix() {
+        let error = validate_managed_config_payload(payload_with_key_reference("etc/acme.pub").as_bytes())
+            .expect_err("a path form is refused in a managed payload");
+        assert!(
+            matches!(error, ManagedConfigPublishError::ManagedConfigKeyByPath),
+            "got {error:?}"
+        );
+        assert_eq!(error.classify(), Some(ExitCode::ConfigError));
+        assert!(
+            error.to_string().contains("key_pem"),
+            "the refusal must name the fix; got: {error}"
+        );
+    }
+
+    /// The inline form is what travels, so it must be accepted — otherwise the
+    /// refusal above would leave a fleet with no way to pin a key at all.
+    #[test]
+    fn validate_accepts_a_key_signer_declared_inline() {
+        let toml = format!(
+            "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\nsigners = [{{ kind = \"key\", key_pem = \"\"\"\n{}\"\"\" }}]\n",
+            GOLDEN_PUBLIC_KEY_PEM
+        );
+        validate_managed_config_payload(toml.as_bytes()).expect("an inline key travels with the payload");
+    }
+
+    /// The refusal is scoped to key signers. A keyless policy names no file at
+    /// all, so it must publish unchanged — a broader scan would break every
+    /// payload that already ships one.
+    #[test]
+    fn validate_accepts_a_keyless_signer_in_a_managed_payload() {
+        let toml = "[[trust.policy]]\nscope = \"ghcr.io/acme/*\"\n\
+                    signers = [{ kind = \"keyless\", identity = \"ci@acme.example\", oidc_issuer = \"https://iss.example\" }]\n";
+        validate_managed_config_payload(toml.as_bytes()).expect("a keyless signer names no operator path");
+    }
+
+    /// **The local tier is unrestricted**, and this is the half that proves the
+    /// rule is about *publishing*, not about the value. The identical `key`
+    /// string that the managed payload refuses compiles fine when it is read as
+    /// an ordinary config on the author's own disk.
+    #[test]
+    fn the_same_key_reference_is_accepted_in_a_local_tier() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let key_path = directory.path().join("acme-release.pub");
+        std::fs::write(&key_path, GOLDEN_PUBLIC_KEY_PEM).expect("write the key");
+        let reference = key_path.display().to_string();
+
+        validate_managed_config_payload(payload_with_key_reference(&reference).as_bytes())
+            .expect_err("refused as a published payload");
+
+        let local: crate::config::Config =
+            toml::from_str(&payload_with_key_reference(&reference)).expect("the same text is ordinary config");
+        local.trust_policies()[0]
+            .compile()
+            .expect("a local tier resolves the very same reference");
     }
 }

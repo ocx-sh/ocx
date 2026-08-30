@@ -201,7 +201,7 @@ impl App {
         // `api().report(...)` call, which already honors `--format json`.
         let format = cli.context.format.mode();
         let command_name = canonical_command_name(command);
-        // Report-then-fail commands (e.g. `package push --announce-file` with an
+        // Report-then-fail commands (e.g. `package push --tags-file` with an
         // unwritable path) already printed their stdout document; appending the
         // envelope would leave two concatenated JSON documents on stdout. The
         // envelope is the stdout document only for failures that reported nothing.
