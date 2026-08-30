@@ -598,9 +598,44 @@ pub enum TrustRootLoadReason {
     EmbeddedAssetMissing,
 
     /// I/O error reading a trust-root asset (filesystem or embedded source).
+    ///
+    /// Not a file an operator named — the two sites that raise it are
+    /// `TrustRoot::load_embedded` (the TUF fetch did not produce a root) and
+    /// `Verifier::new` (the assembled root is unusable). Both stay
+    /// `ConfigError` (78). A path the operator typed raises
+    /// [`Self::TrustRootUnreadable`] instead.
     #[error("trust-root asset read failed")]
     AssetReadFailed {
         /// Underlying I/O / source error.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// A trust-root file an operator named could not be read.
+    ///
+    /// The doors are `--sigstore-trusted-root`, `OCX_SIGSTORE_TRUSTED_ROOT`,
+    /// `[trust.sigstore] trusted_root`, and the
+    /// `$OCX_HOME/sigstore/trusted-root.json` convention path when it is
+    /// present but unusable.
+    ///
+    /// Split from [`Self::AssetReadFailed`] because it exits 74 `io_error`
+    /// rather than 78 `config_error`: a path the operator typed that is
+    /// missing, is not a regular file, or is past the read ceiling is a
+    /// filesystem failure, and `--key file:<missing>` has always answered 74
+    /// for the identical shape. Its own `kind_detail` slug follows, so the
+    /// exit code and the word in the JSON envelope tell one story — the
+    /// `key_unreadable` precedent.
+    ///
+    /// The message interpolates its source, which is where the path is: the
+    /// verify error's own `Display` renders this reason and stops, so a
+    /// message that named no file left an operator with exit 74 and nothing to
+    /// act on — the shape `AssetReadFailed` still has, and the reason the
+    /// exit-code table's row for this flag can assert the path at all. A
+    /// trusted-root path is not a credential; `--key file:<missing>` has always
+    /// printed its own.
+    #[error("trust-root file could not be read: {source}")]
+    TrustRootUnreadable {
+        /// What the bounded read raised.
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
@@ -735,6 +770,13 @@ impl ClassifyErrorKind for VerifyErrorKind {
                 fault: crate::trust::KeyFault::FileBytes,
                 ..
             }) => ExitCode::DataError,
+            // The same carve-out as `KeyUnreadable` above, one flag family
+            // over: a trust-root path the operator typed that cannot be read is
+            // a filesystem failure, and `--key file:<missing>` already answers
+            // 74 for it. The `TrustRootLoad(_)` arm below would otherwise call
+            // an operator's typo a configuration error, naming a scope that is
+            // a flag rather than any config file.
+            Self::TrustRootLoad(TrustRootLoadReason::TrustRootUnreadable { .. }) => ExitCode::IoError,
             Self::TrustRootUnavailable
             | Self::TrustRootLoad(_)
             | Self::TrustPolicyInvalid(_)
@@ -769,6 +811,7 @@ impl ClassifyErrorKind for VerifyErrorKind {
             Self::BundleParseFailed => "bundle_parse_failed",
             Self::ForbiddenRegistryTarget { .. } => "forbidden_registry_target",
             Self::TrustRootUnavailable => "trust_root_unavailable",
+            Self::TrustRootLoad(TrustRootLoadReason::TrustRootUnreadable { .. }) => "trust_root_unreadable",
             Self::TrustRootLoad(_) => "trust_root_load",
             Self::NoIdentityProvided => "no_identity_provided",
             Self::TrustPolicyInvalid(error) if error.names_unsupported_backend() => "unsupported_key_backend",
@@ -1126,8 +1169,15 @@ mod tests {
 
     #[test]
     fn trust_root_load_maps_to_config_error() {
-        // Every TrustRootLoadReason variant produces ConfigError.
-        // ADR §C-S1-2: trust root failures are configuration-layer, not runtime faults.
+        // Every TrustRootLoadReason variant EXCEPT `TrustRootUnreadable` produces
+        // ConfigError. ADR §C-S1-2: trust root failures are configuration-layer,
+        // not runtime faults — but a path the operator typed is a filesystem
+        // failure, which is the carve-out the sibling test below pins.
+        //
+        // The list is the whole enum minus that one variant, deliberately: the
+        // comment used to say "every" over a list that was missing two, so a
+        // variant added without an arm would have been invisible here.
+        //
         // Asset-read failures carry a boxed source — construct one via a synthetic
         // io::Error so the source-carrying branch is also covered.
         let asset_read_source: Box<dyn std::error::Error + Send + Sync> =
@@ -1142,13 +1192,39 @@ mod tests {
             TrustRootLoadReason::PemParseFailed {
                 detail: "unexpected block label".into(),
             },
+            TrustRootLoadReason::NoCtLogKey,
             TrustRootLoadReason::NoCertificateBlocks,
+            TrustRootLoadReason::AmbiguousTrustRootConfig,
             TrustRootLoadReason::OfflineTrustMaterialUnavailable,
         ];
         for reason in reasons {
             let kind = VerifyErrorKind::TrustRootLoad(reason);
             assert_eq!(kind.exit_code(), ExitCode::ConfigError, "variant: {kind:?}");
         }
+    }
+
+    /// C-012/C-013. A trust-root path the operator typed exits 74, matching
+    /// `--key file:<missing>`; the two sites that are not file reads keep 78.
+    ///
+    /// Both halves in one test, because the interesting failure is not "74 is
+    /// wrong" but "both are 78 again" — a regression that a 74-only assertion
+    /// catches and a 78-only assertion does not, and vice versa. The 78 half is
+    /// `AssetReadFailed`, raised by `TrustRoot::load_embedded` when the TUF
+    /// fetch produces no root and by `Verifier::new` when the assembled root is
+    /// unusable. Neither opens a file the operator named.
+    #[test]
+    fn an_unreadable_trust_root_file_maps_to_io_error_while_the_tuf_sites_keep_config_error() {
+        let missing: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"));
+        let unreadable = VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::TrustRootUnreadable { source: missing });
+        assert_eq!(unreadable.exit_code(), ExitCode::IoError);
+        assert_eq!(unreadable.kind_detail(), "trust_root_unreadable");
+
+        let tuf: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(std::io::Error::other("TUF trust-root fetch failed"));
+        let not_a_file_read = VerifyErrorKind::TrustRootLoad(TrustRootLoadReason::AssetReadFailed { source: tuf });
+        assert_eq!(not_a_file_read.exit_code(), ExitCode::ConfigError);
+        assert_eq!(not_a_file_read.kind_detail(), "trust_root_load");
     }
 
     /// Every attestation variant, so the family below is a full enumeration
@@ -1408,6 +1484,12 @@ mod tests {
                 TrustRootLoad(TrustRootLoadReason::EmbeddedAssetMissing),
             ),
             (
+                "trust_root_unreadable",
+                TrustRootLoad(TrustRootLoadReason::TrustRootUnreadable {
+                    source: Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "no such file")),
+                }),
+            ),
+            (
                 "invalid_endpoint_url",
                 InvalidEndpointUrl {
                     endpoint: "--rekor-url".into(),
@@ -1530,7 +1612,7 @@ mod tests {
         // all. Closing that gap needs variant enumeration.
         assert_eq!(
             pairs.len(),
-            45,
+            46,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
 
