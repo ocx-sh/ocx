@@ -72,6 +72,7 @@ use tokio::sync::RwLock;
 use super::wire::{CatalogDocument, CatalogIndex, IndexFormatConfig, IndexRoot, RootTag, gate_format_version};
 use super::{IndexOperation, error, index_impl};
 use crate::oci::transport_policy::{self, Attempt, RetryBudget, RetryPolicy, TransportHardening};
+use crate::utility::fs::path::{FileReference, Spelling};
 use crate::utility::singleflight::{self, Acquisition};
 use crate::{Result, log, oci, oci::client::ReadAddressing};
 
@@ -582,24 +583,25 @@ fn invalid_index_url(
 /// path Win32 resolves against the **per-drive working directory**, silently
 /// serving the whole index out of wherever `ocx` was launched.
 fn resolve_file_base(namespace: &str, base: &str) -> Result<IndexBase> {
-    let rest = base.split_once("://").map_or("", |(_, rest)| rest);
-    // Splitting at the first `/` makes the authority check and the
-    // absolute-path check the same test: whatever precedes it is the authority,
-    // and a path that survives non-empty necessarily starts with `/`.
-    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-    let path = path.trim_end_matches('/');
+    // `FileReference::absolute` is both the empty-authority check and the
+    // absolute-path check: a payload that does not lead with `/` has an
+    // authority before its first slash, and one that trims away to nothing
+    // (`file:///`, `file://`) names no directory.
+    //
     // `path.len() == 3` is the whole of `/C:` — a drive with nothing under it.
     // Refused on every platform, so a base is valid or not independently of
     // where it is read; `/C:` is not a directory anyone means on Unix either.
-    let bare_drive = has_drive_prefix(path) && path.len() == 3;
-    if !authority.is_empty() || path.is_empty() || bare_drive {
+    let path = FileReference::parse(base)
+        .absolute()
+        .filter(|path| !(has_drive_prefix(path) && path.len() == 3));
+    let Some(path) = path else {
         return Err(invalid_index_url(
             namespace,
             base,
             error::INDEX_URL_FROM_REGISTRIES.to_string(),
             None,
         ));
-    }
+    };
     let url = format!("file://{path}");
     Ok(IndexBase {
         transport: Box::new(super::FileIndexTransport::new(url.clone(), file_root(path))),
@@ -864,9 +866,17 @@ impl OcxIndex {
         // is diverted here because it must never be host-keyed — it has no host
         // to key a `[mirrors]` override by, and `parse_url` reads its empty
         // authority as `MissingHost`.
+        //
+        // Routed on the shared `Spelling`, and on `FileUrl` **only**: this door
+        // refuses the bare spelling that the `key` door accepts, because a
+        // schemeless `index = "index.corp.example"` already means
+        // `https://index.corp.example`. Reading it as a path would silently
+        // reroute an operator's index to the filesystem.
+        if FileReference::parse(base).spelling() == Spelling::FileUrl {
+            return resolve_file_base(namespace, base);
+        }
         match scheme_of(base).as_deref() {
             None | Some("http") | Some("https") => {}
-            Some("file") => return resolve_file_base(namespace, base),
             Some(_) => {
                 return Err(invalid_index_url(
                     namespace,
@@ -2505,6 +2515,28 @@ mod tests {
             let error = OcxIndex::resolve_base_url(&index_config(base), "ocx.sh", &no_mirrors(), &[])
                 .expect_err("a scheme outside the closed set must be refused");
             expect_invalid_index_url(&error, super::super::error::INDEX_URL_FROM_REGISTRIES);
+        }
+    }
+
+    /// S-022 — the negative half of the shared `FileReference` grammar (#379).
+    ///
+    /// This door takes the `file://` spelling and **refuses the bare one**,
+    /// unlike `signers[].key`, which takes both: a schemeless `index` value is
+    /// already a host over https. Routing it to the filesystem would silently
+    /// point an operator's index at a local directory — at best a 404 much
+    /// later, at worst a tree someone else can write.
+    #[test]
+    fn resolve_base_url_refuses_the_bare_file_reference_spelling() {
+        for (base, expected) in [
+            ("index.corp.example", "https://index.corp.example"),
+            ("srv/ocx-index", "https://srv/ocx-index"),
+        ] {
+            let resolved = OcxIndex::resolve_base_url(&index_config(base), "ocx.sh", &no_mirrors(), &[])
+                .expect("a value with no `file://` names a host, not a path");
+            assert_eq!(
+                resolved.url, expected,
+                "`{base}` must resolve over https; a file base would read `file://…`"
+            );
         }
     }
 

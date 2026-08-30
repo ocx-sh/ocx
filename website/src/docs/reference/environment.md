@@ -318,7 +318,7 @@ ocx package sign --key env://OCX_SIGNING_KEY ocx.sh/acme/tool:1.0.0
 
 ### `OCX_SIGSTORE_TRUSTED_ROOT` {#ocx-sigstore-trusted-root}
 
-Path to a Sigstore [trusted-root][sigstore-tuf] JSON document — or a directory containing `trusted_root.json` — that [`ocx package verify`][cmd-package-verify] loads its trust material from. Equivalent to the `--sigstore-trusted-root` flag; the flag takes precedence when both are set.
+A bare path, or a `file://` one, naming a Sigstore [trusted-root][sigstore-tuf] JSON document — or a directory containing `trusted_root.json` — that [`ocx package verify`][cmd-package-verify] loads its trust material from. Equivalent to the `--sigstore-trusted-root` flag; the flag takes precedence when both are set.
 
 A trusted root carries three things together: the [Fulcio][fulcio] CA certificate(s), the certificate-transparency log keys, and the pinned [Rekor][rekor] public key. All three are load-bearing — a Fulcio certificate embeds a Signed Certificate Timestamp that the verifier checks against the CT log's key, so trust material carrying CA anchors alone is refused up front with exit `78` and the message `trust root carries no CT log key`.
 
