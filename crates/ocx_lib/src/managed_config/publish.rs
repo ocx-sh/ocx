@@ -385,15 +385,20 @@ pub async fn publish_managed_config(
         None => bytes.clone(),
         Some(declared) => {
             // Relative to the payload's own directory, exactly as the loader
-            // anchors it when reading a local `config.toml` — including the
-            // `!has_root()` test, which `SigstoreTrust::anchor_relative_root`
-            // explains. "Exactly as the loader" is the whole point of this
-            // branch, so the two must not drift on Windows either.
-            let path = if !declared.has_root() {
-                config_path.parent().unwrap_or(Path::new(".")).join(&declared)
-            } else {
-                declared
-            };
+            // anchors it when reading a local `config.toml` — one grammar and one
+            // relative rule, through the same `FileReference` seam
+            // `SigstoreTrust::anchor_relative_root` goes through. "Exactly as the
+            // loader" is the whole point of this branch, so the two must not drift
+            // on Windows, and must not drift on the spelling either: this path
+            // never reaches `ConfigLoader::anchor_relative_paths`, so a payload
+            // writing `file:///x` would otherwise send the operator's own publish
+            // run looking for a file named `file:///x`.
+            //
+            // `to_string_lossy` is exact: the value is deserialized from a TOML
+            // string, so it is UTF-8 by construction.
+            let written = declared.to_string_lossy().into_owned();
+            let path = crate::utility::fs::path::FileReference::parse(&written)
+                .anchored_at(config_path.parent().unwrap_or(Path::new(".")));
             let json =
                 tokio::fs::read(&path)
                     .await

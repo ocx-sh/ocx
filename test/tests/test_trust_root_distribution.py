@@ -249,6 +249,42 @@ def test_managed_config_delivers_the_trust_root_to_a_machine_with_no_local_copy(
     )
 
 
+def test_config_push_reads_the_file_url_spelling_of_the_declared_root(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """D2 — publish-time inlining reads the same two spellings the loader does.
+
+    ``ocx config push`` resolves ``trusted_root`` on its own, never through
+    ``ConfigLoader::anchor_relative_paths``, so before the widening a payload
+    spelling the root ``file://trusted_root.json`` sent the operator's own
+    publish run looking for a file named ``file://trusted_root.json``.
+
+    Relative on purpose: one value exercises both halves of the seam — the
+    spelling being consumed, and the remainder anchored against the payload's
+    own directory.
+    """
+    pkg = published_package
+    _prepare(ocx, sigstore_stack, identity_token, pkg)
+
+    (tmp_path / "trusted_root.json").write_bytes(sigstore_stack.trusted_root_json.read_bytes())
+    payload = '[trust.sigstore]\ntrusted_root = "file://trusted_root.json"\n'
+    digest = push_managed_config(ocx, f"{unique_repo}_cfg", "v1", payload, tmp_path)
+
+    pinned = f"{ocx.registry}/{unique_repo}_cfg@{digest}"
+    _adopt_managed(ocx, pinned)
+
+    result = _verify_offline(ocx, sigstore_stack, pkg, extra_env={"OCX_MANAGED_CONFIG": pinned})
+    assert result.returncode == 0, (
+        f"config push must read the file:// spelling and inline the document it names, got "
+        f"{result.returncode}\nstderr: {result.stderr.strip()}"
+    )
+
+
 def test_a_tag_pinned_managed_source_may_not_carry_a_trust_root(
     ocx: OcxRunner,
     published_package: PackageInfo,
