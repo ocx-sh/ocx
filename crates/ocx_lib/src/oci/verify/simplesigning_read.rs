@@ -125,8 +125,8 @@ use super::error::VerifyErrorKind;
 use super::identity::{self, matching_policies, oidc_issuer, parse_certificate, subject_identity};
 use super::pipeline::{
     ACCEPTED_MANIFEST_TYPES, MAX_REFERRER_MANIFEST_BYTES, MAX_SIGNATURE_CANDIDATES, PolicyDeferredToOcx,
-    RefusedCandidate, VerifiedSignature, VerifyResult, map_client_error, map_verification_error, pull_blob_capped,
-    resolve_rekor_public_key_pem,
+    RefusedCandidate, RekorKeyMemo, VerifiedSignature, VerifyResult, map_client_error, map_verification_error,
+    pull_blob_capped,
 };
 use super::signing_instant::SigningInstant;
 use super::tlog;
@@ -236,6 +236,10 @@ pub struct SidecarVerification<'a> {
     /// `--allow-unlogged-signature`. See
     /// [`VerifyContext::allow_unlogged_signature`](super::pipeline::VerifyContext).
     pub allow_unlogged: bool,
+    /// The run's resolved Rekor log keys, shared with every other door this
+    /// scan opens. Owned rather than borrowed because it is a handle: a clone
+    /// is the same memo.
+    pub rekor_keys: RekorKeyMemo,
 }
 
 /// What one sidecar manifest yielded: the layers that verified, and the ones
@@ -653,8 +657,8 @@ async fn verify_keyless(
 ///    `{body, integratedTime, logIndex, logID}`, against the log's own public
 ///    key ([`tlog::verify_set`] — the identical construction the bundle path
 ///    runs). The key comes from the same three-rung ladder the bundle path
-///    uses ([`resolve_rekor_public_key_pem`]): pinned trust material, then an
-///    online fetch, and nothing at all offline.
+///    uses ([`RekorKeyMemo::resolve`]): this run's already-resolved keys, then
+///    pinned trust material, then an online fetch, and nothing at all offline.
 /// 2. The **binding**: the logged `hashedrekord` body must name `sha256(payload)`
 ///    and carry this signature. Without it a real SET over a real entry for a
 ///    *different* artifact would pass step 1 and prove nothing about the bytes
@@ -702,13 +706,15 @@ pub(super) async fn logged_entry(
     let integrated_time = offline.payload.integrated_time;
     let log_index = u64::try_from(offline.payload.log_index).map_err(|_| VerifyErrorKind::RekorSetInvalid)?;
 
-    let pem = resolve_rekor_public_key_pem(
-        verify.trust_root,
-        verify.rekor_url,
-        verify.offline,
-        &offline.payload.log_id,
-    )
-    .await?;
+    let pem = verify
+        .rekor_keys
+        .resolve(
+            verify.trust_root,
+            verify.rekor_url,
+            verify.offline,
+            &offline.payload.log_id,
+        )
+        .await?;
     tlog::verify_set(
         &tlog::rekor_key(&pem)?,
         &tlog::TlogEntry {
@@ -1033,6 +1039,7 @@ mod tests {
             rekor_url,
             offline: true,
             allow_unlogged: false,
+            rekor_keys: RekorKeyMemo::default(),
         }
     }
 
@@ -1214,6 +1221,7 @@ mod tests {
                 rekor_url: &url,
                 offline: true,
                 allow_unlogged: true,
+                rekor_keys: RekorKeyMemo::default(),
             },
             DiscoveryMethod::SidecarTag,
         )
@@ -1342,6 +1350,7 @@ mod tests {
                 rekor_url: &url,
                 offline: true,
                 allow_unlogged: true,
+                rekor_keys: RekorKeyMemo::default(),
             },
             DiscoveryMethod::SidecarTag,
         )

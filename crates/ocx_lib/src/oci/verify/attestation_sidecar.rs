@@ -930,6 +930,7 @@ mod tests {
             rekor_url,
             offline: true,
             allow_unlogged: false,
+            rekor_keys: crate::oci::verify::pipeline::RekorKeyMemo::default(),
         }
     }
 
