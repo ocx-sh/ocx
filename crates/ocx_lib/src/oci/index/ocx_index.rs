@@ -521,6 +521,38 @@ fn scheme_of(url: &str) -> Option<String> {
     url.split_once("://").map(|(scheme, _)| scheme.to_ascii_lowercase())
 }
 
+/// The tail of a `file:` base written with a single slash (`file:/srv/x`),
+/// which carries no `://` for [`scheme_of`] to find.
+///
+/// Matched case-insensitively, because [`scheme_of`] lowercases its own token
+/// and a base is not more or less valid for being shouted. `file://…` is
+/// deliberately not matched: that spelling has a scheme and belongs to
+/// [`resolve_file_base`].
+fn file_colon_tail(url: &str) -> Option<&str> {
+    let (prefix, tail) = url.split_at_checked("file:".len())?;
+    (prefix.eq_ignore_ascii_case("file:") && !tail.starts_with("//")).then_some(tail)
+}
+
+/// The [`Error::InvalidIndexUrl`](error::Error::InvalidIndexUrl) `origin` for a
+/// single-slash `file:` base.
+///
+/// The correction rides `origin` because that field is what an operator reads
+/// to learn which setting to change, and it is the only part of the message
+/// this module composes.
+///
+/// A tail that is not absolute gets the shape rather than a literal: turning
+/// `file:srv/x` into `file://srv/x` would name a non-empty authority, a
+/// spelling [`resolve_file_base`] refuses in turn, and inventing a leading
+/// slash would name a directory the operator never wrote.
+fn file_colon_origin(tail: &str) -> String {
+    let from = error::INDEX_URL_FROM_REGISTRIES;
+    if tail.starts_with('/') {
+        format!("{from}; a file base needs two more slashes, as \"file://{tail}\"")
+    } else {
+        format!("{from}; a file base is written \"file:///<absolute path>\"")
+    }
+}
+
 fn invalid_index_url(
     namespace: &str,
     url: &str,
@@ -817,6 +849,16 @@ impl OcxIndex {
             .and_then(|entry| entry.index.as_deref())
             .filter(|url| !url.is_empty())
             .unwrap_or(DEFAULT_INDEX_BASE_URL);
+
+        // Check 1a, ahead of check 1 because check 1 cannot see it: `file:/srv/x`
+        // holds no `://`, so `scheme_of` reads it as schemeless and the `None`
+        // arm below waves it through as an https default. `parse_url` then
+        // splits it into host `file:` and path `srv/x`, and the invocation dies
+        // much later as a DNS lookup for a host named `file` instead of here as
+        // a config error naming the spelling the operator meant (#382).
+        if let Some(tail) = file_colon_tail(base) {
+            return Err(invalid_index_url(namespace, base, file_colon_origin(tail), None));
+        }
 
         // Check 1, on the CONFIGURED base and before `parse_url`: a `file` base
         // is diverted here because it must never be host-keyed — it has no host
@@ -2484,6 +2526,61 @@ mod tests {
         let drive = OcxIndex::resolve_base_url(&index_config("file:///C:/srv/x"), "ocx.sh", &no_mirrors(), &[])
             .expect("a drive-qualified path is a valid file base");
         assert_eq!(drive.url, "file:///C:/srv/x");
+    }
+
+    #[test]
+    fn resolve_base_url_refuses_a_single_slash_file_base() {
+        // C-003/S-002 (#382): `file:/srv/x` holds no `://`, so before check 1a
+        // it read as schemeless, defaulted to https, and `parse_url` split it
+        // into host `file:` + path `srv/x` — an `IndexBase` pointed at a host
+        // named `file`, failing much later as a DNS lookup.
+        let error = OcxIndex::resolve_base_url(&index_config("file:/srv/x"), "ocx.sh", &no_mirrors(), &[])
+            .expect_err("a file base written with one slash must be refused");
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("file:///srv/x"),
+            "the refusal must name the corrected spelling: {rendered}"
+        );
+        assert_eq!(
+            crate::cli::ClassifyExitCode::classify(&error),
+            Some(crate::cli::ExitCode::ConfigError),
+            "a refused index base is a config error (78)"
+        );
+
+        // `FILE:` is the same mistake shouted, and `file:` alone names no
+        // directory at all. Neither may reach the https default.
+        for base in ["FILE:/srv/x", "file:", "file:srv/x"] {
+            let error = OcxIndex::resolve_base_url(&index_config(base), "ocx.sh", &no_mirrors(), &[])
+                .expect_err("a single-colon file base must be refused whatever follows it");
+            assert!(
+                error.to_string().contains("file://"),
+                "the refusal must name the spelling that works: {error}"
+            );
+        }
+
+        // A relative tail gets the shape, not a literal: `file://srv/x` names a
+        // non-empty authority, which `resolve_file_base` refuses in turn.
+        let error = OcxIndex::resolve_base_url(&index_config("file:srv/x"), "ocx.sh", &no_mirrors(), &[])
+            .expect_err("a relative file tail is still refused");
+        assert!(
+            !error.to_string().contains("file://srv/x"),
+            "a suggested spelling that is itself refused is worse than none: {error}"
+        );
+    }
+
+    #[test]
+    fn a_schemeless_base_still_resolves_as_https() {
+        // S-022, the negative check 1a must not break: a schemeless base is an
+        // https host, and stays one. `file` appearing anywhere but the scheme
+        // position is ordinary text.
+        for (base, expected) in [
+            ("index.corp.example", "https://index.corp.example"),
+            ("profile.corp.example/ocx", "https://profile.corp.example/ocx"),
+        ] {
+            let resolved = OcxIndex::resolve_base_url(&index_config(base), "ocx.sh", &no_mirrors(), &[])
+                .expect("a schemeless base defaults to https");
+            assert_eq!(resolved.url, expected);
+        }
     }
 
     #[test]
