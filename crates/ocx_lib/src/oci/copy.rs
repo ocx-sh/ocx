@@ -123,6 +123,27 @@ pub struct LeafCopy {
     pub blobs: BlobTransfers,
     /// Referrer manifests copied, across the whole chain.
     pub referrers: usize,
+    /// What became of the leaf's cosign sidecar tags.
+    pub sidecars: SidecarCopy,
+}
+
+/// What became of the three cosign `<algorithm>-<hex>.{sig,att,sbom}` tags.
+///
+/// `conflicts` is data rather than an error on purpose (C-098). A destination
+/// tag holding a *different* manifest is a conflict local to one sidecar — the
+/// source view is perfectly coherent — and failing the whole copy there would
+/// block the legitimate case the guard exists to protect: re-promoting onto a
+/// destination that merely holds more signatures than the source. So the leaf
+/// and every other sidecar still land, and the caller turns a non-empty list
+/// into a non-zero exit.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SidecarCopy {
+    /// Sidecar manifests written to the target, or already there under the same
+    /// digest.
+    pub copied: usize,
+    /// Tags left exactly as they were, because the target already holds a
+    /// different manifest under them. Named so the caller can print them.
+    pub conflicts: Vec<String>,
 }
 
 /// Copies one leaf platform manifest, its blobs and its referrers.
@@ -226,6 +247,19 @@ pub async fn copy_leaf(
         .await?;
     log::debug!("Copied leaf manifest {digest} to {target_leaf}");
 
+    // Before `ensure_target_serves_referrers`, and the position is the contract
+    // (C-091). That gate refuses a target without the OCI 1.1 Referrers API,
+    // which is backwards for a mechanism that exists *for* registries lacking
+    // it: placed after it, this sweep could never run against a `registry:2`
+    // destination, and the scenario asserting sidecars still land there would
+    // pass only because it never executed. `--no-referrers` skips it (C-096) —
+    // one flag governs everything anchored to the leaf.
+    let sidecars = if include_referrers {
+        transfer.copy_sidecar_tags(&digest).await?
+    } else {
+        SidecarCopy::default()
+    };
+
     let referrers = if include_referrers {
         // Probed here rather than up front: a registry answers the referrers
         // endpoint for a subject it holds, and until the line above the target
@@ -253,6 +287,7 @@ pub async fn copy_leaf(
         size,
         blobs,
         referrers,
+        sidecars,
     })
 }
 
@@ -287,6 +322,130 @@ impl Transfer<'_> {
                 registry: image.resolve_registry().to_string(),
             }),
         }
+    }
+
+    /// Copies cosign's `<algorithm>-<hex>.{sig,att,sbom}` sidecar tags, verbatim.
+    ///
+    /// A cosign sidecar is not a referrer: its manifest declares neither
+    /// `artifactType` nor `subject`, so nothing lists it and the tag name is the
+    /// only way in. That is also why it is copied under the *same* tag name and
+    /// never re-homed as a proper referrer — re-homing means reconstructing the
+    /// manifest, and reconstruction is what corrupts signatures
+    /// ([cosign#4207](https://github.com/sigstore/cosign/issues/4207)). Same
+    /// bytes, same digest, same tag, or nothing.
+    ///
+    /// All three tags are probed **unconditionally**, with `HEAD`
+    /// ([`OciTransport::fetch_manifest_digest`](super::client::transport::OciTransport::fetch_manifest_digest)),
+    /// never only when the Referrers API came back empty. A repository
+    /// mid-migration carries an OCX referrer *and* a cosign `.sig`; under a
+    /// probe-when-empty rule the signature is dropped and the copy exits 0,
+    /// which is the silent loss `copy_referrers` refuses by name (PKG-11). Three
+    /// round-trips of headers answer the cost question without trading
+    /// correctness for it.
+    ///
+    /// # What fails the whole copy, and what does not
+    ///
+    /// A tag that HEADs and then cannot be fetched fails the copy, exactly as a
+    /// listed-but-unservable referrer does: the *source* view is incoherent, so
+    /// nothing this run writes is trustworthy. An index-shaped sidecar fails it
+    /// too, before any push — [`blob_set`] takes an `&ImageManifest` and cannot
+    /// see an index's children, so pushing one would publish a manifest at the
+    /// target naming children that were never transferred.
+    ///
+    /// A destination tag already holding a *different* manifest is the opposite
+    /// case and is returned as data, not an error: see [`SidecarCopy`].
+    async fn copy_sidecar_tags(&self, subject: &Digest) -> Result<SidecarCopy, ClientError> {
+        let transport = self.client.transport();
+        let source_image = self.client.read_reference(self.source, ReadAddressing::Canonical);
+        let target_image = self.client.transport_write_reference(self.target);
+        let mut outcome = SidecarCopy::default();
+
+        for suffix in crate::package::tag::SIDECAR_SUFFIXES {
+            let tag = crate::package::tag::sidecar_tag(subject, suffix);
+            let source_tag = super::client::sibling_tag_reference(&source_image, tag.clone());
+            let served = match transport.fetch_manifest_digest(&source_tag).await {
+                Ok(digest) => digest,
+                // No such attachment. The overwhelmingly common answer, and the
+                // one thing here that is not a fault.
+                Err(ClientError::ManifestNotFound(_)) => continue,
+                Err(other) => return Err(other),
+            };
+            let served = parse_descriptor_digest(&served)?;
+
+            let target_tag = super::client::sibling_tag_reference(&target_image, tag.clone());
+            match transport.fetch_manifest_digest(&target_tag).await {
+                // Same manifest already there: the copy has nothing to do and
+                // counts it, because the target does serve it.
+                Ok(existing) if existing == served.to_string() => {
+                    outcome.copied = outcome.copied.saturating_add(1);
+                    continue;
+                }
+                // A `.sig`/`.att` manifest accumulates signatures as layers
+                // *within itself*, so a verbatim PUT over a different manifest
+                // silently destroys every signature the target holds and the
+                // source does not. Merging the two layer sets is not the answer
+                // either — merging is reconstruction (cosign#4207). Refuse this
+                // one tag, name it, carry on.
+                Ok(_) => {
+                    outcome.conflicts.push(tag);
+                    continue;
+                }
+                Err(ClientError::ManifestNotFound(_)) => {}
+                Err(other) => return Err(other),
+            }
+
+            // Addressed by the digest the HEAD answered with, never by the tag:
+            // the identity check inside the fetch then covers this read too, and
+            // a tag that moves between the two calls cannot substitute a
+            // manifest for the one whose absence at the target was just checked.
+            let sidecar_id = self.source.without_tag().clone_with_digest(served.clone());
+            let Some((bytes, digest, manifest)) = self
+                .client
+                .fetch_manifest_raw_bytes_addressed(&sidecar_id, ReadAddressing::Canonical)
+                .await?
+            else {
+                return Err(ClientError::InvalidManifest(format!(
+                    "sidecar tag {tag} of {subject} resolves to {served} but the source cannot serve it; \
+                     re-run the copy, and if it persists the source registry is inconsistent"
+                )));
+            };
+
+            let super::Manifest::Image(image) = &manifest else {
+                return Err(ClientError::InvalidManifest(format!(
+                    "sidecar {tag} of {subject} is an image index; its children are not copied"
+                )));
+            };
+            // The signed payload is a blob, not an annotation: only the
+            // verification material (signature, certificate, chain, Rekor
+            // bundle) rides in annotations, and the payload the signature is
+            // over is the layer. Pushing the manifest alone would publish a
+            // sidecar at the target naming a blob nobody transferred.
+            self.copy_blobs(&blob_set(image, &sidecar_id)?).await?;
+
+            transport
+                .ensure_auth(&target_tag, super::RegistryOperation::Push)
+                .await?;
+            transport
+                .push_manifest_raw(&target_tag, bytes, manifest.content_type())
+                .await?;
+
+            // There is no conditional manifest PUT anywhere in the OCI
+            // distribution spec, so the check above is optimistic, not atomic:
+            // a second `ocx package copy` can observe the same absent tag and
+            // land its own PUT after ours. Reading the tag back and demanding
+            // *our* digest is what turns that into a reported conflict instead
+            // of the silent accumulation loss this guard exists to prevent —
+            // the same read-back `push_referrer_fallback_index` documents, and
+            // with the same limit: two writers converge, three need not.
+            match transport.fetch_manifest_digest(&target_tag).await {
+                Ok(landed) if landed == digest.to_string() => {
+                    outcome.copied = outcome.copied.saturating_add(1);
+                }
+                Ok(_) | Err(ClientError::ManifestNotFound(_)) => outcome.conflicts.push(tag),
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(outcome)
     }
 
     /// Transfers every blob that is not already at the target, bounded.
@@ -597,6 +756,8 @@ mod tests {
     const EMPTY_CONFIG: &[u8] = b"{}";
     const SBOM_PAYLOAD: &[u8] = b"an SPDX document, pretend";
     const SIGNATURE_PAYLOAD: &[u8] = b"a sigstore bundle, pretend";
+    const SIDECAR_PAYLOAD: &[u8] = b"a simplesigning payload, pretend";
+    const OTHER_SIDECAR_PAYLOAD: &[u8] = b"a second simplesigning payload, pretend";
 
     fn client_for(data: &StubTransportData) -> Client {
         Client::with_transport(Box::new(StubTransport::new(data.clone())))
@@ -721,6 +882,491 @@ mod tests {
     /// drop it first (TEST-06).
     fn scratch_dir() -> tempfile::TempDir {
         tempfile::tempdir().expect("a scratch root for the blob spool")
+    }
+
+    // ── cosign sidecar tags ──────────────────────────────────────────────
+
+    /// A cosign `sha256-<hex>.sig` manifest: empty config, the signed payload as
+    /// the single layer, and **no** `subject` or `artifactType`.
+    ///
+    /// Those two absences are the whole reason this mechanism needs its own
+    /// sweep: nothing lists a sidecar, so the tag name is the only way in — and
+    /// they are why it cannot be re-homed as a referrer without reconstructing
+    /// the manifest, which is what corrupts signatures (cosign#4207).
+    fn sidecar_manifest(payload: &'static [u8]) -> super::super::Manifest {
+        super::super::Manifest::Image(super::super::ImageManifest {
+            media_type: Some(MEDIA_TYPE_OCI_IMAGE_MANIFEST.to_string()),
+            config: descriptor("application/vnd.oci.empty.v1+json", EMPTY_CONFIG),
+            layers: vec![descriptor("application/vnd.dev.cosign.simplesigning.v1+json", payload)],
+            ..Default::default()
+        })
+    }
+
+    fn sidecar_reference(identifier: &Identifier, subject: &Digest, suffix: &str) -> crate::oci::native::Reference {
+        crate::oci::client::sibling_tag_reference(
+            &canonical(identifier),
+            crate::package::tag::sidecar_tag(subject, suffix),
+        )
+    }
+
+    /// Files `bytes` under BOTH keys a registry answers a tagged manifest on —
+    /// the tag and its digest — plus the blobs it names.
+    ///
+    /// Two keys and not one because the sweep uses both: it HEADs the *tag* and
+    /// then fetches by the *digest* that answered. Seeding only the tag is
+    /// exactly the listed-but-unservable state, which one test below wants
+    /// deliberately.
+    fn seed_sidecar_raw(
+        data: &StubTransportData,
+        repository: &Identifier,
+        subject: &Digest,
+        suffix: &str,
+        bytes: &[u8],
+        blobs: &[&'static [u8]],
+    ) -> Digest {
+        let digest = seed_raw(data, repository, bytes, blobs);
+        data.write().manifests.insert(
+            sidecar_reference(repository, subject, suffix).to_string(),
+            (bytes.to_vec(), digest.to_string()),
+        );
+        digest
+    }
+
+    /// [`seed_sidecar_raw`] with the manifest serialised **pretty-printed**.
+    ///
+    /// Indented bytes are a shape serde's writer never emits, so a copy that
+    /// parsed and re-encoded the sidecar fails the byte comparison on the first
+    /// byte of whitespace. Seeded compactly the assertion could not fail — the
+    /// same reason `leaf_manifest_bytes_survive_the_copy_verbatim` seeds pretty.
+    fn seed_sidecar(
+        data: &StubTransportData,
+        repository: &Identifier,
+        subject: &Digest,
+        suffix: &str,
+        payload: &'static [u8],
+    ) -> (Digest, Vec<u8>) {
+        let bytes = serde_json::to_vec_pretty(&sidecar_manifest(payload)).expect("serialize");
+        let digest = seed_sidecar_raw(data, repository, subject, suffix, &bytes, &[EMPTY_CONFIG, payload]);
+        (digest, bytes)
+    }
+
+    fn sidecar_at(
+        data: &StubTransportData,
+        identifier: &Identifier,
+        subject: &Digest,
+        suffix: &str,
+    ) -> Option<Vec<u8>> {
+        data.read()
+            .manifests
+            .get(&sidecar_reference(identifier, subject, suffix).to_string())
+            .map(|(bytes, _)| bytes.clone())
+    }
+
+    fn probe_count(data: &StubTransportData) -> usize {
+        data.read()
+            .calls
+            .iter()
+            .filter(|c| *c == "fetch_manifest_digest")
+            .count()
+    }
+
+    /// The sidecar's bytes, its tag name and its payload blob all have to reach
+    /// the target — and the bytes have to arrive unchanged, because a
+    /// simplesigning signature is over the payload the manifest names and the
+    /// verification material rides in the layer's annotations.
+    ///
+    /// The payload blob is the half an earlier reading of this feature missed:
+    /// "sidecar payloads are annotation-embedded" is half true, and pushing the
+    /// manifest alone publishes a sidecar at the target naming a blob nobody
+    /// transferred.
+    #[tokio::test]
+    async fn a_cosign_sidecar_tag_and_its_payload_blob_are_carried_verbatim() {
+        let scratch = scratch_dir();
+        let data = StubTransportData::new();
+        let source = identifier("dev.example.com", "team/demo");
+        let target = identifier("prod.example.com", "team/demo");
+        let leaf = seed_source(&data, &source, &leaf_manifest());
+        let (_, sidecar_bytes) = seed_sidecar(&data, &source, &leaf, ".sig", SIDECAR_PAYLOAD);
+
+        let copied = copy_leaf(&client_for(&data), &source, &target, &leaf, true, scratch.path())
+            .await
+            .expect("copy");
+
+        assert_eq!(copied.sidecars.copied, 1, "one sidecar tag carried");
+        assert!(copied.sidecars.conflicts.is_empty());
+        assert_eq!(
+            sidecar_at(&data, &target, &leaf, ".sig").as_deref(),
+            Some(sidecar_bytes.as_slice()),
+            "the sidecar must land under the same tag, byte for byte"
+        );
+        assert_ne!(
+            sidecar_bytes,
+            serde_json::to_vec(&sidecar_manifest(SIDECAR_PAYLOAD)).expect("serialize"),
+            "the fixture must differ from what a re-serialising copy would emit, \
+             or the assertion above cannot fail"
+        );
+        let payload = Algorithm::Sha256.hash(SIDECAR_PAYLOAD).to_string();
+        let target_key = crate::oci::client::test_transport::blob_location_key(&canonical(&target));
+        assert!(
+            data.read()
+                .blob_locations
+                .as_ref()
+                .and_then(|locations| locations.get(&target_key))
+                .is_some_and(|digests| digests.contains(&payload)),
+            "the signed payload blob must be at the target, or the sidecar names bytes nobody transferred"
+        );
+    }
+
+    /// The ordering is the contract (C-091). `ensure_target_serves_referrers`
+    /// refuses a target without the OCI 1.1 Referrers API — which is backwards
+    /// for a mechanism that exists *for* registries lacking it — and it returns
+    /// before `copy_referrers`. A sidecar sweep placed after it could never run
+    /// against such a target, and the scenario asserting sidecars still land
+    /// there would pass only because it never executed.
+    ///
+    /// So the assertion is deliberately "the copy fails AND the sidecar is at
+    /// the target": the error proves the gate still fires, the tag proves the
+    /// sweep ran first.
+    #[tokio::test]
+    async fn the_sidecar_sweep_runs_before_the_referrers_gate() {
+        let scratch = scratch_dir();
+        let data = StubTransportData::new();
+        let source = identifier("dev.example.com", "team/demo");
+        let target = identifier("prod.example.com", "team/demo");
+        let leaf = seed_source(&data, &source, &leaf_manifest());
+        let (_, sidecar_bytes) = seed_sidecar(&data, &source, &leaf, ".sig", SIDECAR_PAYLOAD);
+        data.write().referrers_unsupported = true;
+
+        let error = copy_leaf(&client_for(&data), &source, &target, &leaf, true, scratch.path())
+            .await
+            .expect_err("the referrers gate must still refuse the target");
+
+        assert!(
+            matches!(error, ClientError::ReferrersUnsupported { .. }),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            sidecar_at(&data, &target, &leaf, ".sig").as_deref(),
+            Some(sidecar_bytes.as_slice()),
+            "the sidecar must already have landed when the gate refused, or it runs after it"
+        );
+    }
+
+    /// All three tags are probed whether or not primary discovery found
+    /// anything (C-094).
+    ///
+    /// The fixture is the mid-migration state that makes this matter: an OCX
+    /// referrer the Referrers API *does* list, alongside a cosign sidecar. Under
+    /// a probe-only-when-empty rule the referrer satisfies discovery, the probe
+    /// never runs, and the signature is dropped at exit 0.
+    ///
+    /// Three probes, not four and not one: the count is what separates
+    /// "unconditional" from "incidental", and `fetch_manifest_digest` is the
+    /// HEAD-shaped call — the whole point of using it is that three absent tags
+    /// cost three sets of headers rather than three manifest bodies.
+    #[tokio::test]
+    async fn all_three_sidecar_tags_are_probed_even_when_the_referrers_api_answers() {
+        let source = identifier("dev.example.com", "team/demo");
+        let target = identifier("prod.example.com", "team/demo");
+        let sbom = referrer_manifest("application/spdx+json", SBOM_PAYLOAD);
+        let sbom_bytes = serde_json::to_vec(&sbom).expect("serialize");
+
+        // Run 1 — nothing under any sidecar tag, so every `fetch_manifest_digest`
+        // in the log is a source probe and the count is exact.
+        let data = StubTransportData::new();
+        let scratch = scratch_dir();
+        let leaf = seed_source(&data, &source, &leaf_manifest());
+        seed(&data, &source, &sbom, &[EMPTY_CONFIG, SBOM_PAYLOAD]);
+        data.write().referrers.insert(
+            format!("{}@{leaf}", source.repository()),
+            vec![descriptor(MEDIA_TYPE_OCI_IMAGE_MANIFEST, &sbom_bytes)],
+        );
+
+        let copied = copy_leaf(&client_for(&data), &source, &target, &leaf, true, scratch.path())
+            .await
+            .expect("copy");
+
+        assert_eq!(
+            copied.referrers, 1,
+            "primary discovery must be non-empty for this fixture to bite"
+        );
+        assert_eq!(probe_count(&data), 3, "one HEAD per suffix, unconditionally");
+        assert_eq!(copied.sidecars, SidecarCopy::default(), "and nothing was there to copy");
+
+        // Run 2 — the same non-empty discovery, plus a sidecar under `.att`,
+        // deliberately not the first suffix: a sweep that stopped at the first
+        // 404 would still be green on `.sig`.
+        let data = StubTransportData::new();
+        let scratch = scratch_dir();
+        let leaf = seed_source(&data, &source, &leaf_manifest());
+        seed(&data, &source, &sbom, &[EMPTY_CONFIG, SBOM_PAYLOAD]);
+        data.write().referrers.insert(
+            format!("{}@{leaf}", source.repository()),
+            vec![descriptor(MEDIA_TYPE_OCI_IMAGE_MANIFEST, &sbom_bytes)],
+        );
+        let (_, att_bytes) = seed_sidecar(&data, &source, &leaf, ".att", SIDECAR_PAYLOAD);
+
+        let copied = copy_leaf(&client_for(&data), &source, &target, &leaf, true, scratch.path())
+            .await
+            .expect("copy");
+
+        assert_eq!(copied.sidecars.copied, 1);
+        assert_eq!(
+            sidecar_at(&data, &target, &leaf, ".att").as_deref(),
+            Some(att_bytes.as_slice()),
+            "the sidecar must travel even though the Referrers API answered"
+        );
+    }
+
+    /// `--no-referrers` governs everything anchored to the leaf, sidecar tags
+    /// included (C-096) — and it must cost no probe at all, not merely no write.
+    #[tokio::test]
+    async fn no_referrers_skips_the_sidecar_tags_entirely() {
+        let scratch = scratch_dir();
+        let data = StubTransportData::new();
+        let source = identifier("dev.example.com", "team/demo");
+        let target = identifier("prod.example.com", "team/demo");
+        let leaf = seed_source(&data, &source, &leaf_manifest());
+        seed_sidecar(&data, &source, &leaf, ".sig", SIDECAR_PAYLOAD);
+
+        let copied = copy_leaf(&client_for(&data), &source, &target, &leaf, false, scratch.path())
+            .await
+            .expect("copy");
+
+        assert_eq!(copied.sidecars, SidecarCopy::default(), "nothing swept");
+        assert_eq!(probe_count(&data), 0, "not even probed");
+        assert!(sidecar_at(&data, &target, &leaf, ".sig").is_none());
+    }
+
+    /// A tag that HEADs and then cannot be fetched fails the whole copy (C-095).
+    ///
+    /// Same rule as a listed-but-unservable referrer, and for the same reason:
+    /// the *source* view is incoherent, so nothing this run writes is
+    /// trustworthy. Skipping it would leave the target holding an artifact whose
+    /// signature stayed behind, reported as a complete promotion.
+    ///
+    /// The control is the identical fixture with the digest key also seeded,
+    /// which copies — so the failure below is the absence being caught, not the
+    /// fixture being unable to carry a sidecar at all.
+    #[tokio::test]
+    async fn a_sidecar_tag_that_heads_but_cannot_be_fetched_fails_the_copy() {
+        let source = identifier("dev.example.com", "team/demo");
+        let target = identifier("prod.example.com", "team/demo");
+        let bytes = serde_json::to_vec_pretty(&sidecar_manifest(SIDECAR_PAYLOAD)).expect("serialize");
+
+        let control = StubTransportData::new();
+        let control_scratch = scratch_dir();
+        let control_leaf = seed_source(&control, &source, &leaf_manifest());
+        seed_sidecar_raw(
+            &control,
+            &source,
+            &control_leaf,
+            ".sig",
+            &bytes,
+            &[EMPTY_CONFIG, SIDECAR_PAYLOAD],
+        );
+        let copied = copy_leaf(
+            &client_for(&control),
+            &source,
+            &target,
+            &control_leaf,
+            true,
+            control_scratch.path(),
+        )
+        .await
+        .expect("control: a servable sidecar copies");
+        assert_eq!(copied.sidecars.copied, 1, "control must actually carry the sidecar");
+
+        // The real case: the TAG answers, the digest behind it does not.
+        let data = StubTransportData::new();
+        let scratch = scratch_dir();
+        let leaf = seed_source(&data, &source, &leaf_manifest());
+        let orphan = Algorithm::Sha256.hash(&bytes);
+        data.write().manifests.insert(
+            sidecar_reference(&source, &leaf, ".sig").to_string(),
+            (bytes.clone(), orphan.to_string()),
+        );
+
+        let error = copy_leaf(&client_for(&data), &source, &target, &leaf, true, scratch.path())
+            .await
+            .expect_err("a sidecar the source cannot serve must fail the copy");
+
+        let rendered = error.to_string();
+        assert!(
+            matches!(error, ClientError::InvalidManifest(_)),
+            "unexpected error: {error}"
+        );
+        assert!(
+            rendered.contains("cannot serve it") && rendered.contains(&orphan.to_string()),
+            "the failure must name the disagreement and the manifest: {rendered}"
+        );
+        assert!(sidecar_at(&data, &target, &leaf, ".sig").is_none());
+    }
+
+    /// An image-index-shaped sidecar is refused before any push (C-097a).
+    ///
+    /// `blob_set` takes an `&ImageManifest` and cannot see an index's children,
+    /// so a hostile source serving an index under `sha256-<hex>.sig` would
+    /// otherwise land at the target naming children that were never
+    /// transferred — the same defect the referrer path already refuses.
+    #[tokio::test]
+    async fn an_index_shaped_sidecar_is_refused_before_any_push() {
+        let scratch = scratch_dir();
+        let data = StubTransportData::new();
+        let source = identifier("dev.example.com", "team/demo");
+        let target = identifier("prod.example.com", "team/demo");
+        let leaf = seed_source(&data, &source, &leaf_manifest());
+        let index = super::super::Manifest::ImageIndex(super::super::ImageIndex {
+            schema_version: super::super::INDEX_SCHEMA_VERSION,
+            media_type: Some(crate::MEDIA_TYPE_OCI_IMAGE_INDEX.to_string()),
+            manifests: Vec::new(),
+            artifact_type: None,
+            annotations: None,
+        });
+        let bytes = serde_json::to_vec(&index).expect("serialize");
+        seed_sidecar_raw(&data, &source, &leaf, ".sig", &bytes, &[]);
+
+        let error = copy_leaf(&client_for(&data), &source, &target, &leaf, true, scratch.path())
+            .await
+            .expect_err("an index-shaped sidecar must be refused");
+
+        assert!(
+            matches!(error, ClientError::InvalidManifest(ref message) if message.contains("image index")),
+            "unexpected error: {error}"
+        );
+        assert!(
+            sidecar_at(&data, &target, &leaf, ".sig").is_none(),
+            "nothing may be pushed"
+        );
+    }
+
+    /// The three destination states of one sidecar tag (C-098): absent → write,
+    /// identical → no-op, different → refuse *that tag* and carry on.
+    ///
+    /// The refusal is per-sidecar rather than whole-copy on purpose. A
+    /// `.sig`/`.att` manifest accumulates signatures as layers within itself, so
+    /// a verbatim PUT over a different manifest silently destroys every
+    /// signature the target holds and the source does not — but the source view
+    /// is perfectly coherent, and failing the whole copy would block the
+    /// legitimate case: re-promoting onto a destination that merely holds
+    /// *more* signatures than the source. So the leaf lands, `.att` lands, and
+    /// `.sig` is named.
+    #[tokio::test]
+    async fn a_destination_sidecar_tag_holding_a_different_manifest_is_refused_and_named() {
+        let scratch = scratch_dir();
+        let data = StubTransportData::new();
+        let source = identifier("dev.example.com", "team/demo");
+        let target = identifier("prod.example.com", "team/demo");
+        let leaf = seed_source(&data, &source, &leaf_manifest());
+        let (_, sig_bytes) = seed_sidecar(&data, &source, &leaf, ".sig", SIDECAR_PAYLOAD);
+        let (_, att_bytes) = seed_sidecar(&data, &source, &leaf, ".att", SIDECAR_PAYLOAD);
+
+        // The target already holds a DIFFERENT `.sig` — the shape of a
+        // destination carrying a signature the source never had.
+        let occupier = serde_json::to_vec(&sidecar_manifest(OTHER_SIDECAR_PAYLOAD)).expect("serialize");
+        let occupier_digest = Algorithm::Sha256.hash(&occupier);
+        data.write().manifests.insert(
+            sidecar_reference(&target, &leaf, ".sig").to_string(),
+            (occupier.clone(), occupier_digest.to_string()),
+        );
+
+        let copied = copy_leaf(&client_for(&data), &source, &target, &leaf, true, scratch.path())
+            .await
+            .expect("a sidecar conflict must not fail the copy");
+
+        assert_eq!(
+            copied.sidecars.conflicts,
+            vec![crate::package::tag::sidecar_tag(&leaf, ".sig")],
+            "the refusal must name the tag it refused"
+        );
+        assert_eq!(
+            sidecar_at(&data, &target, &leaf, ".sig").as_deref(),
+            Some(occupier.as_slice()),
+            "the target's own signature must survive untouched"
+        );
+        assert_ne!(
+            occupier, sig_bytes,
+            "the fixture must be a genuinely different manifest"
+        );
+        assert_eq!(copied.sidecars.copied, 1, "the other sidecar still lands");
+        assert_eq!(
+            sidecar_at(&data, &target, &leaf, ".att").as_deref(),
+            Some(att_bytes.as_slice())
+        );
+        assert!(
+            pushed_manifest(&data, &target, &leaf).is_some(),
+            "and so does the leaf: the conflict is local to one tag"
+        );
+    }
+
+    /// A destination already serving the identical sidecar is a no-op, not a
+    /// conflict and not a re-push (C-098, "same digest → the copy proceeds").
+    #[tokio::test]
+    async fn a_destination_sidecar_tag_holding_the_same_manifest_is_a_no_op() {
+        let scratch = scratch_dir();
+        let data = StubTransportData::new();
+        let source = identifier("dev.example.com", "team/demo");
+        let target = identifier("prod.example.com", "team/demo");
+        let leaf = seed_source(&data, &source, &leaf_manifest());
+        let (sidecar_digest, sidecar_bytes) = seed_sidecar(&data, &source, &leaf, ".sig", SIDECAR_PAYLOAD);
+        data.write().manifests.insert(
+            sidecar_reference(&target, &leaf, ".sig").to_string(),
+            (sidecar_bytes.clone(), sidecar_digest.to_string()),
+        );
+        data.write().calls.clear();
+
+        let copied = copy_leaf(&client_for(&data), &source, &target, &leaf, true, scratch.path())
+            .await
+            .expect("copy");
+
+        assert_eq!(copied.sidecars.copied, 1, "counted: the target does serve it");
+        assert!(copied.sidecars.conflicts.is_empty());
+        assert!(
+            !data.read().calls.iter().any(
+                |c| c.starts_with("push_blob:") && c.contains(&Algorithm::Sha256.hash(SIDECAR_PAYLOAD).to_string())
+            ),
+            "an identical sidecar must cost no transfer, calls: {:?}",
+            data.read().calls
+        );
+    }
+
+    /// The read-back after the PUT (`transport.rs`'s
+    /// `push_referrer_fallback_index` documents the same pattern and the same
+    /// limit): there is **no conditional manifest PUT anywhere in the OCI
+    /// distribution spec**, so the pre-push absence check is optimistic, not
+    /// atomic. Two concurrent copies can both see the tag absent, and the later
+    /// PUT clobbers the earlier one — recreating the accumulation loss C-098
+    /// exists to prevent. Reading the tag back and demanding *our own* digest is
+    /// what turns that into a reported conflict.
+    ///
+    /// The fixture models the clobber as "the target does not serve back what it
+    /// accepted", which is the other half of the same match arm — the stub
+    /// cannot express a third party writing between our PUT and our read. What
+    /// is proven here is that the read-back exists and that its failure becomes
+    /// a conflict rather than a counted success; what is *not* proven is the
+    /// interleaving itself. Two writers converge, three need not: that limit is
+    /// inherited from the pattern, not fixed here.
+    #[tokio::test]
+    async fn a_sidecar_the_target_does_not_serve_back_is_reported_as_a_conflict() {
+        let scratch = scratch_dir();
+        let data = StubTransportData::new();
+        let source = identifier("dev.example.com", "team/demo");
+        let target = identifier("prod.example.com", "team/demo");
+        let leaf = seed_source(&data, &source, &leaf_manifest());
+        seed_sidecar(&data, &source, &leaf, ".sig", SIDECAR_PAYLOAD);
+        // Accepts every PUT and stores none of it.
+        data.write().capture_pushes = false;
+
+        let copied = copy_leaf(&client_for(&data), &source, &target, &leaf, true, scratch.path())
+            .await
+            .expect("the copy continues; the sidecar is reported");
+
+        assert_eq!(
+            copied.sidecars.conflicts,
+            vec![crate::package::tag::sidecar_tag(&leaf, ".sig")],
+            "a PUT whose read-back does not answer our digest is a conflict, not a success"
+        );
+        assert_eq!(copied.sidecars.copied, 0);
     }
 
     #[tokio::test]

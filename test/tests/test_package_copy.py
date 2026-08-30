@@ -18,14 +18,17 @@ from pathlib import Path
 
 from src.helpers import make_package
 from src.registry import (
+    fetch_blob,
     fetch_manifest_from_registry,
     fetch_manifest_raw,
     fetch_platform_manifest_digest,
+    get_manifest,
     index_platforms,
     push_blob,
     put_manifest,
 )
 from src.runner import OcxRunner, PackageInfo, current_platform
+from tests.fixtures import cosign_artifacts
 from tests.fixtures.sigstore_stack import SigstoreStack
 
 
@@ -503,6 +506,152 @@ def test_referrers_against_a_registry_without_the_api_exits_84(
         ocx, legacy_registry, "--to", legacy_registry, "--no-referrers", package.short, check=False
     )
     assert allowed.returncode == 0, allowed.stderr
+
+
+# ---------------------------------------------------------------------------
+# cosign sidecar tags (#376)
+# ---------------------------------------------------------------------------
+
+
+def _push_signed_subject(registry: str, repo: str) -> tuple[str, str, str]:
+    """Put cosign's own key-mode simplesigning artifact into ``registry``.
+
+    Returns ``(subject digest, sidecar tag, payload layer digest)``. Every
+    signature-bearing byte is the committed capture's — nothing here signs,
+    re-canonicalises or re-derives anything, so a promotion that altered one
+    byte is caught by the verify at the far end rather than by a fixture that
+    was regenerated to agree with it.
+    """
+    subject, _ = cosign_artifacts.push_subject(registry, repo)
+    tag, layer_digest = cosign_artifacts.push_sidecar(
+        registry, repo, subject, cosign_artifacts.GOLDEN / "simplesigning_key_manifest.json"
+    )
+    return subject, tag, layer_digest
+
+
+def _copy_by_digest(
+    ocx: OcxRunner,
+    destination: str,
+    repo: str,
+    subject: str,
+    *flags: str,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Promote one leaf manifest by digest. A leaf carries no platform and a
+    digest carries no tag, so both have to be declared."""
+    return _copy(
+        ocx,
+        destination,
+        *flags,
+        "--platform",
+        current_platform(),
+        "-i",
+        f"{destination}/{repo}:promoted",
+        f"{repo}@{subject}",
+        check=check,
+    )
+
+
+def test_a_cosign_sidecar_signature_survives_the_promotion(
+    ocx: OcxRunner, target_registry: str, unique_repo: str
+) -> None:
+    """S-016 / S-019 — the whole point of #376.
+
+    A cosign `sha256-<hex>.sig` attachment is not a referrer: its manifest
+    declares neither ``subject`` nor ``artifactType``, so nothing lists it and
+    the referrer walk cannot see it. Before this, promoting such a package
+    dropped the signature and exited 0.
+
+    Three things are asserted, and the third is the one an earlier reading of
+    this feature would have missed: the sidecar manifest arrives byte-identical,
+    its **payload blob** arrives too, and `ocx package verify` against the
+    destination alone succeeds. Copying the manifest without the blob would
+    publish a signature at the target that resolves to nothing behind it.
+    """
+    subject, tag, layer_digest = _push_signed_subject(ocx.registry, unique_repo)
+
+    result = _copy_by_digest(ocx, target_registry, unique_repo, subject)
+    assert result.returncode == 0, result.stderr
+
+    source_bytes, _ = fetch_manifest_raw(ocx.registry, unique_repo, tag)
+    target_bytes, _ = fetch_manifest_raw(target_registry, unique_repo, tag)
+    assert target_bytes == source_bytes, (
+        "the sidecar must land under the same tag, byte for byte — a re-serialised "
+        "manifest changes the digest cosign's own tooling addresses it by"
+    )
+    assert fetch_blob(target_registry, unique_repo, layer_digest), (
+        "the signed payload is a layer blob, not an annotation; without it the "
+        "sidecar at the target names bytes nobody transferred"
+    )
+
+    verified = subprocess.run(
+        [
+            str(ocx.binary), "--format", "json", "package", "verify",
+            "--rekor-url", cosign_artifacts.DEAD_REKOR_URL,
+            "--sigstore-trusted-root", str(cosign_artifacts.TRUST_ROOT),
+            "--key", str(cosign_artifacts.GOLDEN / "keys" / "cosign.pub"),
+            f"{target_registry}/{unique_repo}@{subject}",
+        ],
+        capture_output=True,
+        text=True,
+        env={**ocx.env, "OCX_INSECURE_REGISTRIES": f"{ocx.registry},{target_registry}"},
+        check=False,
+    )
+    assert verified.returncode == 0, f"stdout: {verified.stdout}\nstderr: {verified.stderr.strip()}"
+    [entry] = json.loads(verified.stdout)["data"]["signatures"]
+    assert entry["discovery_method"] == "sidecar_tag", entry
+    assert entry["signature_format"] == "simplesigning", entry
+
+
+def test_sidecar_tags_land_on_a_registry_without_the_referrers_api(
+    ocx: OcxRunner, legacy_registry: str, unique_repo: str
+) -> None:
+    """S-017 — and the reason the *position* of the sidecar step is the contract.
+
+    `ensure_target_serves_referrers` refuses a destination with no OCI 1.1
+    Referrers API, which is backwards for a mechanism that exists precisely for
+    registries lacking one. It also *returns*, so a sidecar step placed after it
+    could never run against `registry:2` — and this test would pass by never
+    executing.
+
+    So the assertion is deliberately two-sided: the copy still exits 84, proving
+    the referrers verdict is unchanged, **and** the sidecar is already at the
+    destination, proving the sweep ran before it. The `.att` tag, which the
+    source never had, is the control that keeps the positive from being vacuous.
+    """
+    subject, tag, layer_digest = _push_signed_subject(ocx.registry, unique_repo)
+
+    refused = _copy_by_digest(ocx, legacy_registry, unique_repo, subject, check=False)
+    assert refused.returncode == 84, refused.stderr
+
+    assert _target_has_tag(legacy_registry, unique_repo, tag), (
+        "the sidecar must have landed before the referrers gate refused the target"
+    )
+    assert get_manifest(legacy_registry, unique_repo, tag) == get_manifest(ocx.registry, unique_repo, tag)
+    assert fetch_blob(legacy_registry, unique_repo, layer_digest)
+    assert not _target_has_tag(legacy_registry, unique_repo, tag.replace(".sig", ".att")), (
+        "a tag the source never carried must not appear at the destination, or the "
+        "assertion above is not observing what it claims to"
+    )
+
+
+def test_no_referrers_copies_no_sidecar_tags(
+    ocx: OcxRunner, target_registry: str, unique_repo: str
+) -> None:
+    """S-024 — one flag governs everything anchored to the leaf.
+
+    `--no-referrers` is how a caller says "content only". A sidecar tag is
+    signature material by another name, so it is skipped on the same word.
+    """
+    subject, tag, _ = _push_signed_subject(ocx.registry, unique_repo)
+
+    result = _copy_by_digest(ocx, target_registry, unique_repo, subject, "--no-referrers")
+    assert result.returncode == 0, result.stderr
+
+    assert not _target_has_tag(target_registry, unique_repo, tag)
+    assert _target_has_tag(ocx.registry, unique_repo, tag), (
+        "control: the sidecar the copy was asked to skip does exist at the source"
+    )
 
 
 # ---------------------------------------------------------------------------
