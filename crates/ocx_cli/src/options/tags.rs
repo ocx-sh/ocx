@@ -3,7 +3,6 @@
 
 use std::path::PathBuf;
 
-use anyhow::Context as _;
 use ocx_lib::prelude::VecExt as _;
 use ocx_lib::utility::fs::{BoundedReadError, read_bounded};
 
@@ -43,8 +42,39 @@ pub struct TagsOpt {
     tags_file: Option<PathBuf>,
 }
 
-/// Read and parse a `--tags-file`, bounded at [`MAX_TAGS_FILE_BYTES`] and
-/// refusing anything that is not a regular file.
+/// Read a `--tags-file`, bounded at [`MAX_TAGS_FILE_BYTES`] and refusing
+/// anything that is not a regular file. Unparsed, and with the refusal still
+/// typed: one caller treats an absent file as an empty set and needs to see
+/// which refusal it got.
+///
+/// Blocking, so it goes to the pool rather than an async twin of the guard:
+/// one bounded reader, not two.
+async fn read_tags_bytes(path: &std::path::Path) -> Result<Vec<u8>, BoundedReadError> {
+    let target = path.to_path_buf();
+    match tokio::task::spawn_blocking(move || read_bounded(&target, MAX_TAGS_FILE_BYTES)).await {
+        Ok(result) => result,
+        // `ErrorKind::Other`, never `NotFound`, so a panicking pool task cannot
+        // be mistaken for an absent file by the fall-through below.
+        Err(join) => Err(BoundedReadError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(format!("tags-file read task panicked: {join}")),
+        }),
+    }
+}
+
+/// One door for every way this file can be unusable — missing, a directory, or
+/// past the cap — because the frozen exit-code table already sends
+/// `--tags-file` failures to 74 and an enormous file is not a different
+/// question for the caller.
+fn tags_file_error(path: &std::path::Path, error: BoundedReadError) -> anyhow::Error {
+    let io = match error {
+        BoundedReadError::Io { source, .. } => source,
+        refusal => std::io::Error::other(refusal),
+    };
+    anyhow::Error::new(ocx_lib::error::file_error(path, io)).context(format!("reading tags file {}", path.display()))
+}
+
+/// Read and parse a `--tags-file`, where the file must be there.
 ///
 /// The one reader for this file format's *input* side, shared by [`TagsOpt`]
 /// (`sign`, `attest`) and by `package announce`, which takes its own
@@ -55,24 +85,32 @@ pub struct TagsOpt {
 /// # Errors
 /// When the path cannot be read: missing, not a regular file, or past the cap.
 pub(crate) async fn read_tags_file(path: &std::path::Path) -> anyhow::Result<Vec<String>> {
-    // Blocking, so it goes to the pool rather than an async twin of the
-    // guard: one bounded reader, not two.
-    let target = path.to_path_buf();
-    let bytes = tokio::task::spawn_blocking(move || read_bounded(&target, MAX_TAGS_FILE_BYTES))
-        .await?
-        // One door for every way this file can be unusable — missing,
-        // a directory, or past the cap — because the frozen exit-code
-        // table already sends `--tags-file` failures to 74 and an
-        // enormous file is not a different question for the caller.
-        .map_err(|error| match error {
-            BoundedReadError::Io { source, .. } => source,
-            refusal => std::io::Error::other(refusal),
-        })
-        .map_err(|error| ocx_lib::error::file_error(path, error))
-        .with_context(|| format!("reading tags file {}", path.display()))?;
+    let bytes = read_tags_bytes(path)
+        .await
+        .map_err(|error| tags_file_error(path, error))?;
     // The one shared parser for this file format, already used by
     // `package announce` and `package cascade repair`.
     Ok(crate::conventions::parse_tags_file(&bytes))
+}
+
+/// The same read, for the one caller whose file may legitimately not exist yet:
+/// `package push --tags-file` appends to a file it creates, so absence is an
+/// empty set rather than a failure.
+///
+/// **Absence only.** `TooLarge` and `NotRegularFile` refuse a file that IS
+/// there, and treating either as "no tags yet" would let `push` overwrite an
+/// operator's tag list with just this run's tags — the same shape as the
+/// trust-root ladder's rung-4 arm, and the reason `BoundedReadError` carries no
+/// wildcard-friendly variant.
+///
+/// # Errors
+/// When the path exists and cannot be read: not a regular file, or past the cap.
+pub(crate) async fn read_tags_file_if_present(path: &std::path::Path) -> anyhow::Result<Vec<String>> {
+    match read_tags_bytes(path).await {
+        Ok(bytes) => Ok(crate::conventions::parse_tags_file(&bytes)),
+        Err(BoundedReadError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(tags_file_error(path, error)),
+    }
 }
 
 impl TagsOpt {
