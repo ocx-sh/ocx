@@ -111,6 +111,14 @@ pub struct Cli {
 
 pub struct App {}
 
+// The crate has a library target, so `App::new` is public API and clippy asks
+// for the conventional `Default` beside it.
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         Self {}

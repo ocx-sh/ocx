@@ -5,15 +5,8 @@ use std::process::ExitCode;
 
 use ocx_lib::log;
 
-use crate::app::classify_error;
-
-mod api;
-mod app;
-mod build_receipt;
-mod command;
-mod conventions;
-mod error_envelope;
-mod options;
+use ocx::api;
+use ocx::app::{self, classify_error};
 
 #[tokio::main]
 async fn main() -> ExitCode {

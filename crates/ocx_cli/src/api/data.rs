@@ -168,7 +168,7 @@ pub(crate) fn sanitize_error_chain(error: &dyn std::error::Error) -> String {
     sanitize_for_terminal(&chain)
 }
 
-pub(crate) fn sanitize_for_terminal(raw: &str) -> String {
+pub fn sanitize_for_terminal(raw: &str) -> String {
     // Three predicates, and none is redundant: `char::is_control` is `Cc`
     // only, while both the bidi overrides and the zero-width codepoints are
     // `Cf`. Dropping either `Cf` filter as a "simplification" silently

@@ -45,10 +45,9 @@ impl Completion {
     }
 
     /// Which rung of the ladder decided [`Self::enabled`] for the same inputs.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "first call site lands in WP-13 (`ocx shell state`)")
-    )]
+    // No `expect(dead_code)`: the crate has a library target, so a `pub` method
+    // on a `pub` type is reachable and the lint no longer fires. First in-tree
+    // call site still lands in WP-13 (`ocx shell state`).
     pub fn rung(&self, interactive: bool, configured: Option<bool>) -> Rung {
         self.resolve(interactive, configured).1
     }

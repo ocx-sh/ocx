@@ -55,6 +55,9 @@ strip = "symbols"
 [workspace.dependencies]
 # Internal crates
 ocx_lib = { path = "crates/ocx_lib" }
+# The CLI as a library. Only `ocx_schema` links it, so that the published
+# report contract is generated from the very types the CLI serializes.
+ocx = { path = "crates/ocx_cli" }
 
 # Async runtime
 tokio = { version = "1.52", features = ["full"] }
