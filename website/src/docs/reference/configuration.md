@@ -1518,7 +1518,7 @@ Two key classes are rejected everywhere `[env]` can appear — the project table
 
 ## JSON Schemas {#schemas}
 
-OCX publishes JSON Schemas for every config, project, and patch file at stable URLs. IDEs and language servers ([taplo][taplo], [yaml-language-server][yaml-ls], VS Code, Zed) consume them for autocompletion, hover docs, and validation.
+OCX publishes JSON Schemas for every config, project, and patch file at stable URLs, plus one for the `--format json` output of every command. IDEs and language servers ([taplo][taplo], [yaml-language-server][yaml-ls], VS Code, Zed) consume them for autocompletion, hover docs, and validation.
 
 | File | Schema URL |
 |------|------------|
@@ -1527,8 +1527,11 @@ OCX publishes JSON Schemas for every config, project, and patch file at stable U
 | `ocx.lock` (project lock — machine-generated) | [`https://ocx.sh/schemas/project-lock/v3.json`][schema-project-lock] |
 | `metadata.json` (package) | [`https://ocx.sh/schemas/metadata/v1.json`][schema-metadata] |
 | Patch descriptor (`ocx patch publish --descriptor`) | [`https://ocx.sh/schemas/patch/v1.json`][schema-patch] |
+| `--format json` output (every command) | [`https://ocx.sh/schemas/reports/v1.json`][schema-reports] |
 
 `ocx init` writes a `#:schema https://ocx.sh/schemas/project/v1.json` directive on the first line of every generated `ocx.toml`, so [taplo][taplo]-aware editors pick the schema up automatically with no extra wiring. To opt other files in by hand, prepend the same directive at the top of the file. A patch descriptor is plain JSON, so add a `"$schema": "https://ocx.sh/schemas/patch/v1.json"` key to get the same autocompletion and validation while authoring it. The `project-lock` schema carries a top-level `$comment` flagging it as machine-generated — never hand-edit `ocx.lock`; rerun [`ocx lock`][cmd-lock] instead.
+
+The `reports` schema is for consumers rather than authors: it is generated from the Rust types the CLI serializes, and its `reports` object maps each command's JSON root to a definition under `$defs`. Its `required` sets say exactly which keys a command always writes, which is the distinction a hand-written sample cannot carry — a field declared `Option<T>` is always present and `null` when unset, while one carrying `skip_serializing_if` is omitted entirely and never `null`. An SDK or script that pins its parsers against this file cannot drift into reading a key OCX does not publish, or demanding one OCX may omit.
 
 ## Future Config Keys {#future}
 
@@ -1574,6 +1577,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [schema-project-lock]: https://ocx.sh/schemas/project-lock/v3.json
 [schema-metadata]: https://ocx.sh/schemas/metadata/v1.json
 [schema-patch]: https://ocx.sh/schemas/patch/v1.json
+[schema-reports]: https://ocx.sh/schemas/reports/v1.json
 
 <!-- in-depth -->
 [config-indepth]: ../in-depth/configuration.md

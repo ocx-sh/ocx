@@ -6,6 +6,7 @@ x-shared:
   schema-sources: &schema-sources
     - '{{.ROOT_DIR}}/crates/ocx_schema/src/**/*.rs'
     - '{{.ROOT_DIR}}/crates/ocx_lib/src/**/*.rs'
+    - '{{.ROOT_DIR}}/crates/ocx_cli/src/**/*.rs'
     - '{{.ROOT_DIR}}/Cargo.lock'
 
 vars:
@@ -14,6 +15,7 @@ vars:
   PROJECT_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/project"
   PROJECT_LOCK_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/project-lock"
   PATCH_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/patch"
+  REPORTS_SCHEMA_DIR: "{{.TASKFILE_DIR}}/src/public/schemas/reports"
 
 tasks:
   generate:
@@ -61,6 +63,15 @@ tasks:
       - mkdir -p {{.PATCH_SCHEMA_DIR}}
       - cargo run -p ocx_schema --release -- patch > {{.PATCH_SCHEMA_DIR}}/v1.json
 
+  generate-reports:
+    desc: Generate the JSON Schema for every --format json report
+    sources: *schema-sources
+    status:
+      - test -f {{.REPORTS_SCHEMA_DIR}}/v1.json
+    cmds:
+      - mkdir -p {{.REPORTS_SCHEMA_DIR}}
+      - cargo run -p ocx_schema --release -- reports > {{.REPORTS_SCHEMA_DIR}}/v1.json
+
   default:
     desc: Generate all schemas
     cmds:
@@ -69,3 +80,4 @@ tasks:
       - task: generate-project
       - task: generate-project-lock
       - task: generate-patch
+      - task: generate-reports

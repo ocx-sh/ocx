@@ -13,6 +13,8 @@ use ocx_lib::patch::PatchDescriptor;
 use ocx_lib::project::{ProjectConfig, ProjectLock};
 use schemars::generate::SchemaSettings;
 
+pub mod reports;
+
 /// Top-level `$comment` injected into the project-lock schema. Flags the
 /// format as machine-generated and subject to evolution so consumers
 /// (taplo, schema-store) surface a hint not to hand-author `ocx.lock`.
@@ -22,7 +24,8 @@ const PROJECT_LOCK_COMMENT: &str = "machine-generated; format may evolve across 
 /// Generate a JSON Schema for the given schema kind.
 ///
 /// Returns `Some(json_string)` for known kinds and `None` for unknown kinds.
-/// Known kinds: `metadata`, `config`, `project`, `project-lock`, `patch`.
+/// Known kinds: `metadata`, `config`, `project`, `project-lock`, `patch`,
+/// `reports`.
 ///
 /// The output JSON has its `$id` set to the canonical published URL
 /// (`https://ocx.sh/schemas/<kind>/<version>.json`). Every schema is at
@@ -64,6 +67,10 @@ pub fn schema_for(kind: &str) -> Option<String> {
             "https://ocx.sh/schemas/patch/v1.json",
             None,
         )),
+        // Not a `generate_schema` call: the report contract is 48 roots over a
+        // shared `$defs` bag, and its `required` sets are corrected against
+        // serde's actual output. `reports` owns both.
+        "reports" => Some(reports::reports_schema()),
         _ => None,
     }
 }

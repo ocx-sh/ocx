@@ -3666,6 +3666,7 @@ dependencies = [
  "futures",
  "libc",
  "ocx_lib",
+ "schemars 1.2.2",
  "secrecy",
  "serde",
  "serde_json",
@@ -3761,6 +3762,7 @@ dependencies = [
 name = "ocx_schema"
 version = "0.6.0"
 dependencies = [
+ "ocx",
  "ocx_lib",
  "schemars 1.2.2",
  "serde_json",
