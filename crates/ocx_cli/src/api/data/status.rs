@@ -26,7 +26,7 @@ use crate::api::Printable;
 /// TOML authoring grammar, emitting a constant as a bare string and a path as a
 /// `{ type, value }` table. A JSON consumer would have to branch on
 /// string-vs-object per key to read it. The report always emits both fields.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct EnvValueOut {
     #[serde(rename = "type")]
     kind: ModifierKind,
@@ -35,6 +35,7 @@ pub struct EnvValueOut {
     /// may omit it, and what the omission inherits is decided at compose
     /// time, which status does not do. Skipped in JSON when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     separator: Option<String>,
     /// Verbatim as written. A relative `path` value stays relative — resolving
     /// it against the project root is composition, which `ocx inspect` and
@@ -51,21 +52,23 @@ pub struct EnvValueOut {
 /// - no `platforms` — declared but not yet locked (added since the last
 ///   `ocx lock`).
 /// - no `declared` — locked but no longer declared (orphaned in a stale lock).
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ToolStatus {
     /// The `ocx.toml` value for this binding, verbatim (`ocx.sh/go-task:3`).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     declared: Option<String>,
     /// EVERY platform leaf the lock records, not the host's. Picking the host
     /// leaf is resolution — `ocx inspect` does that.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     platforms: Option<BTreeMap<String, String>>,
 }
 
 /// One group's declarations. `default` is a group like any other: the
 /// top-level `[tools]` and `[env]` tables in `ocx.toml` ARE its tools and env,
 /// which is why `default` is a reserved group name.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct GroupStatus {
     tools: BTreeMap<String, ToolStatus>,
     /// This scope's `[env]` table alone — never merged with another scope's.
@@ -83,7 +86,7 @@ pub struct GroupStatus {
 /// header fields stay absent. Status is the command reached for when the
 /// project is broken, so failing the way every other command already fails
 /// would leave it with nothing to say in exactly that case.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct LockStatus {
     present: bool,
     /// Why the lock could not be parsed. Its presence IS the unreadable state
@@ -91,15 +94,19 @@ pub struct LockStatus {
     /// already says. The header fields and every binding's `platforms` are
     /// absent alongside it: nothing was read.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     error: Option<String>,
     /// `true` when the lock's stored `declaration_hash` matches the current
     /// config's. `false` means `ocx.toml` changed since the last `ocx lock`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     current: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     lock_version: Option<u8>,
     /// The hash stored in `ocx.lock`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     declaration_hash: Option<String>,
     /// The hash recomputed from `ocx.toml` — what the lock's stored hash would
     /// have to be for `current` to hold. Emitted alongside the stored one so a
@@ -115,8 +122,10 @@ pub struct LockStatus {
     /// `current` true.
     declaration_hash_expected: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     generated_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     generated_at: Option<String>,
 }
 
@@ -134,7 +143,7 @@ pub struct LockStatus {
 /// single-table exemption `inspect` does — its content is inherently nested,
 /// and flattening groups × tools × env into one row shape would encode the
 /// structure as string prefixes.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct StatusReport {
     /// Absolute path of the `ocx.toml` this report describes.
     project: String,
@@ -147,7 +156,7 @@ pub struct StatusReport {
 }
 
 /// Per-package resolve-time policy from `[package."<id>"]`.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PackageSettingsOut {
     #[serde(rename = "no-patches")]
     no_patches: bool,

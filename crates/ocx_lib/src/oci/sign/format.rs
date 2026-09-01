@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// the enum is hand-written on the clap side (`ocx_lib` carries
 /// `clap_builder`, not the `clap` derive), so nothing makes the two agree
 /// automatically.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, schemars::JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignatureFormat {
     /// An OCI 1.1 referrer carrying a Sigstore bundle v0.3. The default, and

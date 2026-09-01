@@ -126,7 +126,7 @@ pub enum Decision {
 /// The near-exact precedent is mise's trust bypass, CVE-2026-35533 /
 /// GHSA-436v-8fw5-4mj8. The borrowed-digest variant clause 2 used to admit is
 /// [ocx-sh/ocx#344](https://github.com/ocx-sh/ocx/issues/344).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Grant {
     /// Clause 1 — a valid stamp for this directory whose source set covers the
@@ -169,7 +169,7 @@ impl Grant {
 /// [`evaluate`] and constructed by the deciding call site — Decision 10
 /// enumerates them in one list as "the reason the shell is not active", and a
 /// single enum is what makes the report total.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "reason")]
 pub enum Reason {
     /// No valid stamp and no matching grant — with the project's derived source

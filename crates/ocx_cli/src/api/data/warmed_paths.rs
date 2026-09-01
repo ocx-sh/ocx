@@ -23,7 +23,7 @@ const ADVISORIES_KEY: &str = "advisories";
 /// resolved to `always` yields its generated shim directory instead, because
 /// that is what the run created — its package directory does not exist yet and
 /// naming one would be a lie in a machine-read field.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct WarmedPath {
     #[serde(skip)]
     pub package: String,
@@ -100,6 +100,28 @@ impl Printable for WarmedPaths {
             &["Package".into(), "Kind".into(), "Path".into()],
             &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
+    }
+}
+
+// The `Serialize` impl above writes a map keyed by package name, not the struct's
+// own fields, so the schema is hand-written to match it.
+impl schemars::JsonSchema for WarmedPaths {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "WarmedPaths".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            // One reserved key sits beside the per-package entries. A package
+            // literally named `advisories` would collide with it; the wire
+            // format has no escape for that, so it is documented, not fixed.
+            "properties": {
+                ADVISORIES_KEY: generator.subschema_for::<Vec<LazyAdvisoryReport>>(),
+            },
+            "required": [ADVISORIES_KEY],
+            "additionalProperties": generator.subschema_for::<WarmedPath>(),
+        })
     }
 }
 

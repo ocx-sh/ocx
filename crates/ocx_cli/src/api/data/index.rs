@@ -33,7 +33,7 @@ use crate::api::data::sanitize_for_terminal;
 /// `roots` is what the `p/` walk found, and it is reported even when the three
 /// lists are empty: a `0` there says the walk found an empty tree, which is a
 /// different fact from "the catalog already matched".
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct RegenerateEntry {
     pub registry: String,
     pub roots: usize,
@@ -163,7 +163,7 @@ impl Printable for RegenerateReport {
 // ── `ocx index sync --dry-run` (C-027) ───────────────────────────────────────
 
 /// One registry's enumerated package set.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CatalogPreviewEntry {
     pub registry: String,
     pub packages: Vec<String>,
@@ -237,6 +237,30 @@ impl Printable for CatalogPreview {
             &["Registry".into(), "Package".into()],
             &rows.map(|column| column.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
+    }
+}
+
+// The `Serialize` impl above is transparent, so the published schema is the
+// inner type's. `registries` is written as a bare array.
+impl schemars::JsonSchema for CatalogPreview {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "CatalogPreview".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <Vec<CatalogPreviewEntry>>::json_schema(generator)
+    }
+}
+
+// The `Serialize` impl above is transparent, so the published schema is the
+// inner type's. `registries` is written as a bare array.
+impl schemars::JsonSchema for RegenerateReport {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "RegenerateReport".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <Vec<RegenerateEntry>>::json_schema(generator)
     }
 }
 

@@ -36,7 +36,7 @@ use crate::api::data::sanitize_for_terminal;
 ///
 /// `signer` is the signing mechanism used: `"keyless-fulcio"`, or the key
 /// backend's own slug under a key.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct SignatureReport {
     /// User-facing identifier string that was signed (echoes the CLI arg).
     pub identifier: String,
@@ -68,6 +68,7 @@ pub struct SignatureReport {
     pub key_backend: oci::sign::KeyBackendKind,
     /// The signing key's cosign hint, in key mode only.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub public_key_hint: Option<String>,
     /// Whether a transparency record was created, and its log index when so.
     ///
@@ -83,20 +84,23 @@ pub struct SignatureReport {
 }
 
 /// One wire shape's outcome, as reported.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct SignatureLegReport {
     /// The shape: `bundle` or `simplesigning`.
     pub format: oci::sign::SignatureFormat,
     /// Digest of the signed payload blob — the Sigstore bundle under `bundle`,
     /// the simplesigning claim under `simplesigning`. Absent when the leg failed.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub payload_digest: Option<oci::Digest>,
     /// Digest of the manifest the payload hangs from — the OCI referrer under
     /// `bundle`, the `sha256-<hex>.sig` sidecar under `simplesigning`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub manifest_digest: Option<oci::Digest>,
     /// Why the leg failed, when it did. `None` means it was written.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub error: Option<String>,
 }
 

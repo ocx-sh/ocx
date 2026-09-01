@@ -17,7 +17,7 @@ use crate::app::build_info::Provenance;
 /// --format json` behaviour. `libc` is a JSON array of the detected libc
 /// `os.features` tags (e.g. `["libc.glibc"]`, `["libc.glibc","libc.musl"]`),
 /// empty when none were detected (non-Linux host, NixOS, or a failed probe).
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct About {
     pub version: String,
     pub registry: String,

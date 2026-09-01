@@ -46,7 +46,7 @@ use crate::api::data::sanitize_for_terminal;
 /// neutralization is identity on a digest, a slug and an ISO-8601 stamp.
 /// Without it a SAN embedding `\x1b]52;c;<b64>\x07` sets the operator's
 /// clipboard (CWE-150).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SignatureEntry {
     /// Which cosign wire shape carried this signature.
     pub signature_format: SignatureFormat,
@@ -60,11 +60,13 @@ pub struct SignatureEntry {
     /// key — a legal shape, not malformed input. Registry-served, so it is
     /// attacker input: see the struct note before rendering it in plain text.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_identity: Option<String>,
     /// Certificate OIDC issuer embedded in the Fulcio cert. Absent under a key.
     /// Registry-served, so it is attacker input: see the struct note before
     /// rendering it in plain text.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_oidc_issuer: Option<String>,
     /// Rekor `integratedTime`, ISO-8601 UTC.
     ///
@@ -78,9 +80,11 @@ pub struct SignatureEntry {
     /// Absent when no transparency record exists (key mode without a Rekor
     /// upload), which is legal and must be visible rather than inferred.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub signed_at: Option<String>,
     /// Rekor log index, the dedup key when present.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub rekor_log_index: Option<u64>,
 }
 
@@ -95,7 +99,7 @@ pub struct SignatureEntry {
 /// JSON format: `{ subject_digest, referrer_digest, certificate_identity,
 /// certificate_oidc_issuer, signed_at }`, plus `signatures` once a discovery
 /// pipeline populates it.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct VerificationReport {
     /// Digest of the subject manifest whose signature was verified.
     pub subject_digest: oci::Digest,
@@ -126,6 +130,7 @@ pub struct VerificationReport {
     /// which is emitted unconditionally because `false` there is a true
     /// statement.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub signatures: Vec<SignatureEntry>,
 }
 

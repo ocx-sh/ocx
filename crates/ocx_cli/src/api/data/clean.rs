@@ -12,7 +12,7 @@ use ocx_lib::package_manager::CleanedObject;
 use crate::api::Printable;
 
 /// The kind of resource cleaned up.
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum CleanKind {
     Object,
@@ -47,7 +47,7 @@ impl fmt::Display for CleanKind {
 ///
 /// See [`adr_clean_project_backlinks.md`] "`ocx clean` UX" for the column
 /// layout and JSON shape specification.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CleanEntry {
     pub kind: CleanKind,
     pub dry_run: bool,
@@ -165,5 +165,17 @@ impl Printable for Clean {
                 &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
             );
         }
+    }
+}
+
+// The `Serialize` impl above is transparent, so the published schema is the
+// inner type's. `entries` is written as a bare array.
+impl schemars::JsonSchema for Clean {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Clean".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <Vec<CleanEntry>>::json_schema(generator)
     }
 }

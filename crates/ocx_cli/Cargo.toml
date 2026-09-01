@@ -51,6 +51,10 @@ futures.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Report structs in `api::data` derive `JsonSchema` beside `Serialize` so
+# `ocx_schema` can publish the wire contract from the same definition the
+# CLI serializes. `ocx_lib` already links schemars, so this adds no crate.
+schemars.workspace = true
 serde_repr.workspace = true
 console.workspace = true
 dunce.workspace = true

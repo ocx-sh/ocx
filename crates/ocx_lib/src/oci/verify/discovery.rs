@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 /// Reported verbatim on `signatures[].discovery_method`, so a caller can tell an
 /// OCI 1.1 registry from one that only answers the fallback tag schema
 /// without inspecting the registry itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryMethod {
     /// `GET /v2/<name>/referrers/<digest>` — the OCI 1.1 Referrers API.

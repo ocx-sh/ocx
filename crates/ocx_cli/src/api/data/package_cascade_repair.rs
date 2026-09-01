@@ -20,7 +20,7 @@ use crate::api::Printable;
 /// alias refused at preflight, a write the registry rejected). Collapsing them
 /// into one list would make a refusal indistinguishable from a plan that never
 /// covered the alias.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct RepairEntry {
     pub report: CascadeReport,
     pub planned: Vec<PlannedWrite>,
@@ -42,7 +42,7 @@ pub struct RepairEntry {
 /// per-package entry carrying the finding report, the planned writes and
 /// their outcomes, alongside the run-wide preview flag and the
 /// `--announce-tags` destination (`null` when the flag was not passed).
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PackageCascadeRepair {
     pub entries: Vec<RepairEntry>,
     /// True when nothing was written because the run was a preview.

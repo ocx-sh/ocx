@@ -13,7 +13,7 @@ use crate::api::Printable;
 /// installed.
 ///
 /// JSON format: `{ "bases_checked": N, "descriptors_updated": N, "companions_installed": N }`.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PatchSyncReport {
     /// Number of installed bases (plus global root) that were checked.
     pub bases_checked: usize,

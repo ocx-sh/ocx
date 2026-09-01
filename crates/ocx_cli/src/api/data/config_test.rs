@@ -12,7 +12,7 @@ use crate::api::Printable;
 /// The `[patches]` tier as it would resolve after the candidate merges —
 /// defaults applied, so an omitted field is reported as the value that would
 /// actually apply rather than as absent.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PatchesView {
     /// Registry hosting patch descriptors.
     pub registry: String,
@@ -27,7 +27,7 @@ pub struct PatchesView {
 /// Never the candidate's: a payload carrying a `[managed]` section is rejected
 /// outright, so this answers "which tier would adopt this payload", not
 /// "what does the payload declare".
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ManagedView {
     /// The effective managed-config source (env override, else the seed).
     pub source: String,
@@ -44,7 +44,7 @@ pub struct ManagedView {
 /// JSON format: a fixed shape — every field is always present, with `null` or
 /// `[]` where a tier is unconfigured, so a consumer can key on
 /// `.valid`/`.unknown_keys` without probing for the field first.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ConfigTestData {
     /// The candidate file this report describes.
     pub(crate) candidate: String,

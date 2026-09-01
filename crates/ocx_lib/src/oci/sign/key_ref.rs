@@ -366,7 +366,7 @@ pub enum KeyRefError {
 
 /// What produced or verified a signature — the frozen `signatures[].key_backend`
 /// vocabulary (`design_spec_cosign_parity.md` §"--format json").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyBackendKind {
     /// A Fulcio-issued ephemeral certificate; no long-lived key.

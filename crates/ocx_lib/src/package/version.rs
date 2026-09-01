@@ -481,6 +481,18 @@ impl Serialize for Version {
     }
 }
 
+// `Serialize` renders a `Version` as its `Display` string, so the published
+// schema says `string` rather than exposing the parsed field layout.
+impl schemars::JsonSchema for Version {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Version".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        String::json_schema(generator)
+    }
+}
+
 impl<'de> Deserialize<'de> for Version {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where

@@ -74,7 +74,7 @@ const ENCODER_TAG: &str = "1";
 /// record time: always `Some` for [`ModifierKind::List`] (defaulting to
 /// [`DEFAULT_SEPARATOR`]), and `None` reserved for path-kind, where it means
 /// [`crate::env::PATH_SEPARATOR`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 pub struct LedgerEntry {
     /// Environment-variable name.
     pub key: String,
@@ -110,7 +110,7 @@ impl From<&Entry> for LedgerEntry {
 ///
 /// C-018 — exactly two slots. A project nested inside a project does not layer;
 /// the inner one *replaces* the outer, so moving between them is a switch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScopeId {
     /// The `--global` toolchain tier.
@@ -127,7 +127,7 @@ pub enum ScopeId {
 /// vocabulary is total and the wire value is checkable. The two cached verdicts
 /// are both *negative*: they can only ever cause ocx to do less, which is the
 /// fail-safe direction, and the watch set expires both (A-13).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
     /// Never written to the carrier; present so the enum is total.
@@ -158,7 +158,7 @@ pub enum Verdict {
 /// A-05 — capture reads set-ness through `std::env::var_os`, so a set-but-empty
 /// variable is `Value("")` and **never** `Unset`. Reverting `Value("")` emits
 /// that arm's `export_constant(key, "")`, never `Shell::unset`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Prior {
     /// The variable did not exist before ocx set it; reverting removes it.
@@ -197,7 +197,7 @@ pub type Priors = BTreeMap<String, Prior>;
 /// selects no value, re-grants no consent, and names no revert.
 ///
 /// Everywhere else the rule above holds verbatim.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 pub struct ProjectScope {
     /// `ReferenceManager::name_for_path` of the canonical project directory.
     pub key: String,
@@ -216,7 +216,7 @@ pub struct ProjectScope {
 }
 
 /// The two scope slots (C-018).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 pub struct Scopes {
     /// The global toolchain tier's applied entries.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -252,7 +252,7 @@ pub struct Scopes {
 /// `v` describes **shape**; the envelope tag describes **encoding** (C-003). A
 /// change that is both bumps both. A-04 — `v` is additive-only, and a shape
 /// break ships a `v-1` revert-read arm in the same release.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema, Deserialize)]
 pub struct Ledger {
     /// Schema version of the payload shape.
     pub v: u8,

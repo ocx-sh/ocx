@@ -12,7 +12,7 @@ use crate::api::Printable;
 /// machine interface and stays empty when there is no parseable payload.
 ///
 /// JSON format: `{"registry": "...", "username": "..."}` on stdout.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct LoginResult {
     pub registry: String,
     pub username: String,
@@ -30,7 +30,7 @@ impl Printable for LoginResult {
 /// Plain format: nothing on stdout (see [`LoginResult`]).
 ///
 /// JSON format: `{"registry": "..."}` on stdout.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct LogoutResult {
     pub registry: String,
 }

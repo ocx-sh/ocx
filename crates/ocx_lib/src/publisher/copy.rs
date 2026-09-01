@@ -203,7 +203,7 @@ pub struct CopyRequest<'a> {
 /// Pre-formatting the prose into a JSON string made a sentence with a space and
 /// two parentheses into a wire value (`subsystem-cli-api.md`, "Typed Enums Over
 /// Strings").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Disposition {
     /// The target's index had no entry for this platform.

@@ -16,7 +16,7 @@ use crate::api::Printable;
 /// for install, current for select), or `None` when no host symlink was written
 /// — a foreign-platform install populates the object store but writes neither
 /// host pointer (issue #179).
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct InstallEntry {
     pub identifier: oci::Identifier,
     pub metadata: Metadata,
@@ -30,7 +30,7 @@ pub struct InstallEntry {
 ///
 /// JSON format: object keyed by package identifier, each value an
 /// `{ identifier, metadata, path }` object.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct Installs {
     #[serde(flatten)]
     pub packages: BTreeMap<String, InstallEntry>,

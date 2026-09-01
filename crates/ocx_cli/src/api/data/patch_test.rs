@@ -16,7 +16,7 @@ use crate::api::data::env::EntrySource;
 /// optional `source` object is present only for companion overlay entries and
 /// names the rule glob + companion that produced the entry; base-native entries
 /// omit it. Shares [`EntrySource`] with `--show-patches`.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PatchTestEntry {
     pub key: String,
     pub value: String,
@@ -25,9 +25,11 @@ pub struct PatchTestEntry {
     /// The separator a [`ModifierKind::List`] entry folds with; `None` on
     /// every other kind. Skipped in JSON when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub separator: Option<String>,
     /// Provenance for a companion overlay entry; `None` for base-native entries.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub source: Option<EntrySource>,
 }
 
@@ -43,7 +45,7 @@ pub struct PatchTestEntry {
 /// JSON format:
 /// `{ "base": "...", "companions": ["...", ...], "entries": [{ "key", "value", "type"[,
 /// "separator"][, "source": { "kind": "patch", "rule", "companion" }] }, ...] }`.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PatchTestReport {
     /// The base identifier the descriptor was composed onto.
     pub base: String,

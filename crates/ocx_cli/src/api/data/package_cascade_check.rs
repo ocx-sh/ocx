@@ -24,7 +24,7 @@ use crate::api::Printable;
 /// JSON format: `{ "reports": [...] }` — one library report object per
 /// package, each carrying that package's alias states, slot rows, index
 /// findings and ignored tags.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PackageCascadeCheck {
     pub reports: Vec<CascadeReport>,
     /// Packages a configured index source claims but has no root document for

@@ -907,6 +907,31 @@ impl Serialize for Platform {
     }
 }
 
+// `Serialize` writes the OCI platform object (via `oci_client::manifest::Platform`,
+// a foreign type that cannot carry our derive), so the schema mirrors the OCI
+// image-spec object rather than this enum's variants.
+impl schemars::JsonSchema for Platform {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Platform".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "description": "An OCI image-spec platform object. `Platform::Any` writes os and architecture as \"any\".",
+            "properties": {
+                "architecture": {"type": "string"},
+                "os": {"type": "string"},
+                "os.version": {"type": "string"},
+                "os.features": {"type": "array", "items": {"type": "string"}},
+                "variant": {"type": "string"},
+                "features": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["architecture", "os"],
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for Platform {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
         let native = native::Platform::deserialize(deserializer)?;

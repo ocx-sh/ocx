@@ -21,7 +21,7 @@ use crate::api::Printable;
 
 /// Overall outcome of a scripted test run. Mirrors
 /// `ocx_lib::script::ScriptOutcomeKind` at the OCX-facing level.
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptStatus {
     /// Script ran to completion; all assertions passed.
@@ -41,7 +41,7 @@ pub enum ScriptStatus {
 /// The terminating assertion record (when the run failed on an assertion).
 ///
 /// `message` prose is non-stable; its presence and field shape are contractual.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct AssertionRecord {
     /// Assertion kind (e.g. `ok`, `eq`, `contains`).
     pub kind: String,
@@ -50,7 +50,7 @@ pub struct AssertionRecord {
 }
 
 /// Surfaced `RunResult` fields for the script's terminal/top-level `ocx.run`.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct RunSummary {
     /// Child exit code (or `128 + signal` when signal-killed).
     pub exit_code: i32,
@@ -70,7 +70,7 @@ pub struct RunSummary {
 ///
 /// JSON format: `{"status", "assertion", "run"}` — `assertion`/`run` are
 /// `null` when not applicable.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ScriptRunReport {
     /// Overall status (the structured mirror of the exit code).
     pub status: ScriptStatus,

@@ -17,7 +17,7 @@ use crate::api::data::sanitize_for_terminal;
 ///
 /// JSON format: array of repository names without tags, or object keyed by
 /// repository name with tag arrays as values.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct Catalog {
     pub repositories: CatalogData,
 }
@@ -47,7 +47,7 @@ impl Catalog {
 
 /// Polymorphic catalog payload: either a plain list of repository names or a
 /// map of repository names to their tags.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum CatalogData {
     WithoutTags(Vec<String>),

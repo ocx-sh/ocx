@@ -36,7 +36,7 @@ use crate::api::data::sanitize_for_terminal;
 /// caller passed: alias resolution decides what is published, annotated and
 /// hashed, so echoing it is what keeps the resolution visible rather than
 /// surprising (ADR D-c).
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct AttestationReport {
     /// User-facing identifier that was attested (echoes the CLI arg).
     pub identifier: String,
@@ -51,13 +51,16 @@ pub struct AttestationReport {
     /// signed attach, the SBOM document itself on an unsigned one. The JSON key
     /// keeps its shipped name.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub bundle_digest: Option<oci::Digest>,
     /// Digest of the published OCI referrer manifest wrapping the payload.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub referrer_digest: Option<oci::Digest>,
     /// Digest of the `sha256-<hex>.att` sidecar manifest, when
     /// `--signature-format` asked for one.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub sidecar_digest: Option<oci::Digest>,
     /// Whether the referrer carries a signature. `false` means the document was
     /// attached as-is, with no identity behind it — the two certificate fields
@@ -65,9 +68,11 @@ pub struct AttestationReport {
     pub signed: bool,
     /// Certificate SAN (identity) embedded in the Fulcio cert.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_identity: Option<String>,
     /// Certificate OIDC issuer URL embedded in the Fulcio cert.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_oidc_issuer: Option<String>,
     /// Which key model produced this attestation (`keyless`, `file`, and —
     /// once they exist — `aws_kms` and friends). Absent on an unsigned attach,
@@ -76,9 +81,11 @@ pub struct AttestationReport {
     /// Spelled as [`SignatureReport`](super::signature::SignatureReport)
     /// spells it, so one vocabulary describes both commands.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub key_backend: Option<oci::sign::KeyBackendKind>,
     /// The signing key's cosign hint, in key mode only.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub public_key_hint: Option<String>,
     /// Whether a transparency record was created, and its log index when so.
     ///

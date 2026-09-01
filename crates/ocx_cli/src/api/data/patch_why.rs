@@ -11,7 +11,7 @@ use crate::api::Printable;
 /// `variable` is the env var name, `rule` is the descriptor rule `match` glob
 /// that admitted the companion for the base, and `companion` is the companion
 /// identifier whose interface projection produced the var.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PatchWhyEntry {
     pub variable: String,
     pub rule: String,
@@ -75,6 +75,18 @@ impl Printable for PatchWhyReport {
             &["Variable".into(), "Rule".into(), "Companion".into()],
             &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
+    }
+}
+
+// The `Serialize` impl above is transparent, so the published schema is the
+// inner type's. `base` is plain-channel only and never reaches JSON.
+impl schemars::JsonSchema for PatchWhyReport {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PatchWhyReport".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <Vec<PatchWhyEntry>>::json_schema(generator)
     }
 }
 

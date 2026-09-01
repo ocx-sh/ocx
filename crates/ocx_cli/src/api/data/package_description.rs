@@ -8,7 +8,7 @@ use ocx_lib::oci;
 use crate::api::Printable;
 
 /// A single field in the description.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct Inner {
     pub title: Option<String>,
     pub description: Option<String>,
@@ -93,5 +93,32 @@ impl Printable for PackageDescriptions {
             println!("== {key} ==");
             description.print_plain(printer);
         }
+    }
+}
+
+// The `Serialize` impl above is transparent, so the published schema is the
+// inner type's. A package with no description serializes as `null`, not as `{}`.
+impl schemars::JsonSchema for PackageDescription {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PackageDescription".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <Option<Inner>>::json_schema(generator)
+    }
+}
+
+// The `Serialize` impl above writes a map keyed by the argument the caller passed, not the struct's
+// own fields, so the schema is hand-written to match it.
+impl schemars::JsonSchema for PackageDescriptions {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PackageDescriptions".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "additionalProperties": generator.subschema_for::<PackageDescription>(),
+        })
     }
 }

@@ -53,7 +53,7 @@ use crate::{log, oci, package, package_manager};
 /// JSON serialization produces a discriminated object:
 /// - Unit variants: `{"reason": "bootstrap"}`
 /// - Variants with detail: `{"reason": "registry_probe_failed", "detail": "…"}`
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 #[serde(tag = "reason", content = "detail", rename_all = "snake_case")]
 pub enum SkippedReason {
     /// The subprocess version query failed: binary absent (true bootstrap),

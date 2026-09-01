@@ -14,7 +14,7 @@ use crate::api::Printable;
 /// Prevents typos at compile time (a stringly-typed `&'static str` would accept
 /// `"up_to-date"` silently). Serde serializes each variant to its `snake_case`
 /// name, matching the JSON wire format pinned by the snapshot tests.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum StatusKind {
     UpToDate,
@@ -48,16 +48,18 @@ impl std::fmt::Display for StatusKind {
 ///
 /// Plain format: key/value table; rows with no payload (e.g. `identifier` when
 /// status = `up_to_date`) are suppressed.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct UpdateCheckData {
     status: StatusKind,
     /// Identifier of the available update; present iff status = `update_available`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     identifier: Option<String>,
     /// Why the check was skipped; present iff status = `skipped`. Carries the
     /// structured [`SkippedReason`] enum so scripts can dispatch on `reason`
     /// without string parsing.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     skipped_reason: Option<SkippedReason>,
 }
 
@@ -115,7 +117,7 @@ impl Printable for UpdateCheckData {
 ///
 /// Plain format: key/value table with conditional rows; `Status` always
 /// present, `From`/`To`/`Skipped reason` appear only when applicable.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct SelfUpdateData {
     status: StatusKind,
     /// Previously installed version; present iff status = `installed` AND the
@@ -123,14 +125,17 @@ pub struct SelfUpdateData {
     /// invocation was not available (binary absent, non-zero exit, malformed
     /// JSON output).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     from: Option<String>,
     /// Newly installed version; present iff status = `installed`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     to: Option<String>,
     /// Why the update was skipped; present iff status = `skipped`. Carries the
     /// structured [`SkippedReason`] enum so scripts can dispatch on `reason`
     /// without string parsing.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     skipped_reason: Option<SkippedReason>,
 }
 

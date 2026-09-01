@@ -18,7 +18,7 @@ use crate::api::data::self_setup::ManagedConfigEntry;
 /// `"previous_digest"`, `refresh_unavailable` carries `"reason"`, both omitted
 /// everywhere else — the same `managed_config` entry shape `ocx self setup`
 /// reports, so fleet tooling can parse both with one schema.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ConfigSetupData {
     managed_config: ManagedConfigEntry,
 }

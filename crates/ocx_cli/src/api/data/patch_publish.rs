@@ -13,7 +13,7 @@ use crate::api::Printable;
 /// count.
 ///
 /// JSON format: `{ "reference": "...", "manifest_digest": "...", "rules": N }`.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PatchPublishReport {
     /// Canonical reference the descriptor was published to
     /// (`registry/repository:__ocx.patch`).

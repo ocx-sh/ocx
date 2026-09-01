@@ -14,7 +14,7 @@ use crate::api::data::path_kind::PathKind;
 /// `path` is the package root directory (parent of `content/` and
 /// `entrypoints/`). Consumers traverse into `<path>/content/` for the
 /// installed files or `<path>/entrypoints/` for generated launchers.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PathEntry {
     pub package: String,
     pub path: PathBuf,
@@ -72,7 +72,7 @@ impl Printable for Paths {
 /// shim tree. [`PathKind`] is the discriminator that lets a consumer tell the
 /// two apart — minted once for the whole feature and shared with `ocx pull`'s
 /// report, never re-spelled here.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct LocatedPath {
     /// The requested identifier, verbatim. Serialized as the map **key**, never
     /// as a field: it would be byte-identical to the key it sits under, and a
@@ -136,6 +136,36 @@ impl Printable for LocatedPaths {
             &["Package".into(), "Kind".into(), "Path".into()],
             &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
+    }
+}
+
+// The `Serialize` impl above writes a map keyed by package name, not the struct's
+// own fields, so the schema is hand-written to match it.
+impl schemars::JsonSchema for Paths {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Paths".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "additionalProperties": generator.subschema_for::<std::path::PathBuf>(),
+        })
+    }
+}
+
+// The `Serialize` impl above writes a map keyed by package name, not the struct's
+// own fields, so the schema is hand-written to match it.
+impl schemars::JsonSchema for LocatedPaths {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "LocatedPaths".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "additionalProperties": generator.subschema_for::<LocatedPath>(),
+        })
     }
 }
 

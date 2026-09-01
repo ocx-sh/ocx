@@ -27,7 +27,7 @@ const MISE_SHELL: &str = "MISE_SHELL";
 const MISE_ORIG_PATH: &str = "__MISE_ORIG_PATH";
 
 /// A coexisting per-prompt environment manager.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Tool {
     /// Yielded on `DIRENV_DIR` **naming the resolved project's canonical
@@ -43,7 +43,7 @@ pub enum Tool {
 /// `signal` is what `ocx shell state` renders, because a user staring at an
 /// `.envrc` will guess the wrong cause (C-050 reason 4) — it names the variable
 /// observed and, for direnv, the directory it named.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Observation {
     /// The tool observed live in this shell.
     pub tool: Tool,

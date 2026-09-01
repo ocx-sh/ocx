@@ -46,10 +46,11 @@ use crate::app::build_info::Provenance;
 /// `cargo_pkg_version` is suppressed when it would be identical to
 /// `version` — only meaningful for dev-deploy builds where the embedded
 /// version is overridden via `__OCX_BUILD_VERSION`.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct VersionData {
     version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     cargo_pkg_version: Option<String>,
     #[serde(flatten)]
     provenance: Provenance,
@@ -173,6 +174,18 @@ impl Printable for VerboseVersionData {
 impl serde::Serialize for VerboseVersionData {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.0.serialize(serializer)
+    }
+}
+
+// The `Serialize` impl above is transparent, so the published schema is the
+// inner type's. Verbosity changes the plain rendering only.
+impl schemars::JsonSchema for VerboseVersionData {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "VerboseVersionData".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <VersionData>::json_schema(generator)
     }
 }
 

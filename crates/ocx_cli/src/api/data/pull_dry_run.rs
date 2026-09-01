@@ -12,7 +12,7 @@ use crate::api::Printable;
 
 /// Whether a locked tool is already in the object store or would be
 /// fetched on a real `ocx pull`.
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "kebab-case")]
 pub enum PullStatus {
     Cached,
@@ -41,7 +41,7 @@ impl fmt::Display for PullStatus {
 /// documented on [`crate::api::data::paths::PathEntry`]: consumers
 /// traverse into `<path>/content/` for installed files or
 /// `<path>/entrypoints/` for generated launchers.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct DryRunEntry {
     pub package: PinnedIdentifier,
     pub status: PullStatus,
@@ -99,5 +99,17 @@ impl Printable for PullDryRun {
             &["Package".into(), "Status".into()],
             &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
+    }
+}
+
+// The `Serialize` impl above is transparent, so the published schema is the
+// inner type's. `entries` is written as a bare array.
+impl schemars::JsonSchema for PullDryRun {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PullDryRun".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <Vec<DryRunEntry>>::json_schema(generator)
     }
 }

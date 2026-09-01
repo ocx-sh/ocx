@@ -26,7 +26,7 @@ use crate::api::Printable;
 /// run whose announce branch is ahead of the index base still ensures, and
 /// therefore reports, one. `written_paths` is empty outside `--out`.
 /// `reserved_tags_dropped` is an array, empty rather than absent.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct AnnounceReport {
     /// The announced `<namespace>/<package>` identifier.
     pub package: String,

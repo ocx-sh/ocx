@@ -28,7 +28,7 @@ use crate::api::data::sweep::SweptStatus;
 /// `ocx-mirror pipeline push`, which keys its go/no-go bookkeeping off `status`
 /// and records `cascade_tags_written` in the run summary; `layers` and
 /// `platform_digests` are additive.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PushReport {
     /// The pushed package identifier (`registry/repository:tag`).
     pub identifier: String,
@@ -67,6 +67,7 @@ pub struct PushReport {
     /// with one value. JSON only — the plain table is already at its
     /// five-column budget and a digest column would blow the width.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub platform_digests: BTreeMap<String, String>,
     /// One row per platform manifest `--sign` signed inline, in push order.
     ///
@@ -81,6 +82,7 @@ pub struct PushReport {
     /// pushed; the index digest is rewritten on every platform merge, so it is
     /// signed later by `ocx package sign --tags-file`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub signatures: Vec<SignedPlatformReport>,
     /// `None` unless `--sbom` was passed.
     ///
@@ -90,6 +92,7 @@ pub struct PushReport {
     /// and OCI offers no un-push — so the two outcomes are reported separately
     /// rather than folded into one verdict.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub attestation: Option<AttestationOutcome>,
 }
 
@@ -111,7 +114,7 @@ pub struct PushReport {
 /// not carry is omitted from `platform_digests`, so it never becomes a row.
 ///
 /// [`SweptTagReport`]: crate::api::data::sweep::SweptTagReport
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct SignedPlatformReport {
     /// The platform whose manifest was signed, canonically spelled
     /// (`os/arch[/variant][+feature,…]`) — the same key `platform_digests`
@@ -124,15 +127,18 @@ pub struct SignedPlatformReport {
     /// `--signature-format both` platform where one leg landed and one did not
     /// is a failure that still carries the leg that landed.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub report: Option<SignatureReport>,
     /// The JSON error envelope's per-variant slug for this platform's failure,
     /// falling back to its frozen category. Present exactly when `status` is
     /// `failed`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub kind: Option<String>,
     /// Human-readable cause, sanitized for the terminal (CWE-150). Present
     /// exactly when `status` is `failed`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub message: Option<String>,
 }
 
@@ -166,7 +172,7 @@ impl SignedPlatformReport {
 /// A failure carries the error slug the JSON error envelope would have used
 /// (CLI-04), not a bespoke string, so a script branches on the same vocabulary
 /// either way.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum AttestationOutcome {
     /// The attestation was published on the pushed manifest.
@@ -175,12 +181,14 @@ pub enum AttestationOutcome {
         /// `--signature-format simplesigning`, which publishes the
         /// `sha256-<hex>.att` sidecar alone and no referrer.
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[schemars(extend("x-ocx-absent-when-none" = true))]
         referrer_digest: Option<String>,
         /// Digest of the `sha256-<hex>.att` sidecar manifest, when
         /// `--signature-format` asked for one. The spelling is
         /// [`AttestationReport`](crate::api::data::attestation::AttestationReport)'s,
         /// so one vocabulary describes the same two addresses in both reports.
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[schemars(extend("x-ocx-absent-when-none" = true))]
         sidecar_digest: Option<String>,
         /// The resolved `predicateType` URI written into the Statement.
         predicate_type: String,

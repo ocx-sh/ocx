@@ -45,7 +45,7 @@ pub type ExpectedGraph = BTreeMap<AliasTag, BTreeMap<native::Platform, ExpectedS
 /// `3.28`, `3.28.1`). A track root — `latest` for the default track, the bare
 /// variant name (`debug`) for a variant track — is named by no version at all,
 /// which is the only reason this enum exists rather than a bare `Version`.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AliasTag {
     /// The root of one track: `None` is the default track's `latest`, `Some`
     /// is a variant track's bare name.
@@ -179,7 +179,7 @@ pub struct ExpectedSlot {
 }
 
 /// The verdict for one (alias, platform) slot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum SlotStatus {
     /// The alias carries exactly the expected entry.
@@ -206,9 +206,12 @@ pub enum SlotStatus {
 /// Digests are the wire strings verbatim rather than parsed values: an index
 /// may legitimately name a digest algorithm this build does not implement, and
 /// a report must be able to show it.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub struct SlotRow {
     pub tag: AliasTag,
+    // `oci_client::manifest::Platform` is registry-defined and cannot carry our
+    // derive; it is published as free-form JSON rather than mirrored here.
+    #[schemars(with = "serde_json::Value")]
     pub platform: native::Platform,
     pub status: SlotStatus,
     /// The digest the alias carries for this platform, if any.
@@ -224,7 +227,7 @@ pub struct SlotRow {
 }
 
 /// What the registry holds at an alias tag, taken as a whole.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case", tag = "state")]
 pub enum AliasState {
     /// An image index — the shape every alias is supposed to have.
@@ -241,7 +244,7 @@ pub enum AliasState {
 ///
 /// Only ever produced for a logical identifier: a physical repository has no
 /// reverse mapping back to an index root, so the layer is skipped entirely.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case", tag = "finding")]
 pub enum IndexFinding {
     /// The index committed a different digest than the alias points at today.
@@ -257,7 +260,7 @@ pub enum IndexFinding {
 
 /// Something check found that no repair can fix without new content being
 /// published.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case", tag = "reason")]
 pub enum Unrepairable {
     /// A planned entry points at a child manifest the registry no longer
@@ -275,7 +278,7 @@ pub enum Unrepairable {
 
 /// The whole finding set for one package — the value both `check` and `repair`
 /// report, and the input `plan_repairs` works from.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub struct CascadeReport {
     /// The physical repository the graph was read from.
     pub identifier: oci::Identifier,
@@ -311,10 +314,14 @@ impl CascadeReport {
 /// A repair never patches an alias in place: it rebuilds the entire index from
 /// content the registry already serves and PUTs it, so the write is idempotent
 /// and a partially-applied run leaves every untouched alias byte-identical.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub struct PlannedWrite {
     pub tag: AliasTag,
     /// The complete index to PUT at `tag`.
+    // `OciImageIndex` comes from `oci_client` and cannot carry our derive. The
+    // OCI image index is a registry-defined document, not part of the contract
+    // this schema publishes, so it is described as free-form JSON.
+    #[schemars(with = "serde_json::Value")]
     pub index: oci::ImageIndex,
     /// The digest the alias points at now — `None` when the alias does not
     /// exist yet.

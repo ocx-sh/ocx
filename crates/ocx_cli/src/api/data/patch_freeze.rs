@@ -14,7 +14,7 @@ use crate::api::Printable;
 /// companions and descriptors were frozen, followed by the snapshot path.
 ///
 /// JSON format: `{ "companions": N, "descriptors": N, "path": "..." }`.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct PatchFreezeReport {
     /// Number of companion packages pinned by the snapshot.
     pub companions: usize,

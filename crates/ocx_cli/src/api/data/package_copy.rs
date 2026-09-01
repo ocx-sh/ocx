@@ -17,7 +17,7 @@ use crate::api::data::sanitize_for_terminal;
 /// Typed rather than a pre-formatted `String`, so `Serialize` emits a token a
 /// script matches on while `Display` and [`CopyStatus::action`] stay free to
 /// read like English (`subsystem-cli-api.md`, "Typed Enums Over Strings").
-#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CopyStatus {
     Copied,
@@ -49,7 +49,7 @@ impl fmt::Display for CopyStatus {
 /// job finds out whether the catalog page travelled, and a warning is not a
 /// field. `None` — the flag was not passed — serializes as `null`, so the key
 /// is always there to branch on.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum DescriptionOutcome {
     /// Pulled from the source and pushed to the target.
@@ -94,7 +94,7 @@ impl fmt::Display for DescriptionOutcome {
 /// "disposition" }], "cascade_tags_written", "keep_tags_written",
 /// "referrers_copied", "sidecars_copied", "sidecar_conflicts",
 /// "blobs": { "present", "mounted", "uploaded" }, "description" }`.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CopyReport {
     /// The source reference as given.
     pub source: String,
@@ -124,7 +124,7 @@ pub struct CopyReport {
 }
 
 /// What became of one platform.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CopiedPlatformRow {
     pub platform: String,
     /// The leaf digest the target serves for this platform. For a
@@ -136,7 +136,7 @@ pub struct CopiedPlatformRow {
 }
 
 /// Blob traffic, summed over every platform.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct BlobSummary {
     /// Already at the target — nothing transferred.
     pub present: usize,

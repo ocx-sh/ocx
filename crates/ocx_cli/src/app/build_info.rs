@@ -43,7 +43,7 @@ const SHORT_SHA_LEN: usize = 8;
 ///               "ref":        "…", "sha":      "…" }
 /// }
 /// ```
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct Provenance {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel: Option<&'static str>,
@@ -56,7 +56,7 @@ pub struct Provenance {
 }
 
 /// Git commit metadata baked at build time.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CommitInfo {
     /// Full 40-character SHA-1.
     pub sha: String,
@@ -72,7 +72,7 @@ pub struct CommitInfo {
 }
 
 /// Build environment metadata (timestamp, profile, target, rustc).
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct BuildInfo {
     /// ISO-8601 UTC build timestamp.
     pub timestamp: String,
@@ -86,7 +86,7 @@ pub struct BuildInfo {
 
 /// GitHub Actions context. Present only when built under a GitHub
 /// workflow that exported the standard `GITHUB_*` env vars.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct CiInfo {
     pub provider: &'static str,
     /// Direct link to the run that produced this binary.

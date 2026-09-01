@@ -14,7 +14,7 @@ use crate::api::Printable;
 /// Serde serializes each variant to its `snake_case` name, matching the JSON
 /// wire format the snapshot tests pin. `Skipped` is the dirty-RC outcome (the
 /// CLI maps it to exit 82); every other status is exit 0.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum StatusKind {
     /// Shims and/or profiles were written or upgraded.
@@ -41,14 +41,14 @@ impl std::fmt::Display for StatusKind {
 // ── per-profile outcome ───────────────────────────────────────────────────────
 
 /// JSON-serialized per-profile outcome (`{"path":"…","outcome":"completed"}`).
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct ProfileEntry {
     path: String,
     outcome: ProfileOutcomeKind,
 }
 
 /// Serde-facing mirror of [`ProfileOutcome`] (`snake_case` discriminant).
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum ProfileOutcomeKind {
     Completed,
@@ -88,22 +88,24 @@ impl std::fmt::Display for ProfileOutcomeKind {
 /// Pinned path (VERSION given): same shapes plus `"digest":"sha256:<hex>"` when
 /// resolution produced one. `digest` is omitted on unpinned fast-path runs so
 /// existing JSON consumers stay byte-identical (plan D7).
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct BootstrapEntry {
     status: ApiBootstrapStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     version: Option<String>,
     /// Resolved content digest; present when pinning produced one.
     ///
     /// Stringified at this API boundary — lib carries [`ocx_lib::oci::Digest`].
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     digest: Option<String>,
 }
 
 /// API-layer status discriminant (mirrors `ocx_lib::setup::BootstrapStatus`).
 ///
 /// Named `ApiBootstrapStatus` to avoid shadowing the lib type imported above.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum ApiBootstrapStatus {
     AlreadyPresent,
@@ -150,21 +152,24 @@ impl BootstrapEntry {
 ///
 /// Shared with `api/data/config_setup.rs` — `ocx config setup` reports the
 /// same entry shape so fleet tooling parses both commands with one schema.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ManagedConfigEntry {
     status: ManagedConfigStatusKind,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     digest: Option<String>,
     /// The digest the snapshot carried before a `refreshed` run.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     previous_digest: Option<String>,
     /// Why a `refresh_unavailable` run could not reach the registry.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     reason: Option<String>,
 }
 
 /// Serde-facing mirror of [`ManagedConfigSetupOutcome`] (`snake_case` discriminant).
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 enum ManagedConfigStatusKind {
     NotConfigured,
@@ -269,7 +274,7 @@ impl ManagedConfigEntry {
 ///   `refreshed`, and `"reason"` on `refresh_unavailable`.
 /// - `exec_policy_warning`, `conflicting_ocx`, and `reload_hint` appear only
 ///   when present.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct SelfSetupData {
     status: StatusKind,
     bootstrap: BootstrapEntry,
@@ -279,15 +284,19 @@ pub struct SelfSetupData {
     /// status = `skipped`. Carried separately for a script to `case` on without
     /// scanning the `profiles` list.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     dirty_profiles: Vec<String>,
     /// Windows execution-policy `Restricted` advisory, if applicable.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     exec_policy_warning: Option<String>,
     /// An `ocx` on `PATH` ahead of the directory the shim prepends, if found.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     conflicting_ocx: Option<String>,
     /// Whether the user should re-source their profile to activate ocx now.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     reload_hint: bool,
     /// Result of adopting/clearing the `--managed-config` tier (phase 1.5).
     managed_config: ManagedConfigEntry,

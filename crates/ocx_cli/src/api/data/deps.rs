@@ -26,7 +26,7 @@ fn name_tag(id: &oci::Identifier, theme: &Theme) -> String {
 /// `visibility` is `None` for root nodes (the packages the user asked about)
 /// and `Some(v)` for dependencies, where `v` is the visibility as declared
 /// by the parent — not the propagated result.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct Dependency {
     pub identifier: oci::Identifier,
     pub repeated: bool,
@@ -35,7 +35,7 @@ pub struct Dependency {
 }
 
 /// Tree view of the dependency graph (default output).
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct Dependencies {
     pub roots: Vec<Dependency>,
 }
@@ -84,12 +84,12 @@ impl Printable for Dependencies {
 }
 
 /// Flat view of the resolved dependency order.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct FlatDependencies {
     pub entries: Vec<FlatDependency>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct FlatDependency {
     pub identifier: oci::Identifier,
     pub visibility: Visibility,
@@ -125,10 +125,11 @@ impl Printable for FlatDependencies {
 }
 
 /// Why view — all paths from roots to a target dependency.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct DependenciesTrace {
     pub paths: Vec<Vec<oci::Identifier>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub message: Option<String>,
 }
 

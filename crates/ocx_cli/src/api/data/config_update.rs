@@ -13,7 +13,7 @@ use crate::api::Printable;
 /// (managed-config phase 4) — this type only carries the already-decided
 /// value.
 ///
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigUpdateStatus {
     /// No managed-config tier is configured.
@@ -59,39 +59,48 @@ impl std::fmt::Display for ConfigUpdateStatus {
 /// Pure data carrier — construct with a struct literal at the call site (no
 /// status derivation lives here; see [`ConfigUpdateStatus`] doc). Fields are
 /// `pub(crate)` so `command/config_update.rs` builds it directly.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct ConfigUpdateData {
     pub(crate) status: ConfigUpdateStatus,
     /// The effective managed-config source (flag > env > seed).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) source: Option<String>,
     /// The local snapshot's manifest digest.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) digest: Option<String>,
     /// ISO-8601 UTC timestamp of the snapshot's last fetch.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) fetched_at: Option<String>,
     /// The tier's refresh policy (`apply` / `notify` / `manual`).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) policy: Option<String>,
     /// Active kill switches (e.g. `OCX_NO_CONFIG_REFRESH`), by env-var name.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) kill_switches: Vec<String>,
     /// Whether the registry's current digest differs from the local
     /// snapshot; present only when reachable (`--check`, online).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) drift: Option<bool>,
     /// The tag the local snapshot was fetched under (snapshot v2 bookkeeping —
     /// shows which floating/pinned tag the tier tracks).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) tag: Option<String>,
     /// ISO-8601 UTC instant until which the background tick is paused
     /// (`ocx config update --pause`); absent when no pause is in force.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) paused_until: Option<String>,
     /// The version spec pinned alongside an in-force pause
     /// (`--pause <d> <VERSION>`); absent when the pause carries no pin.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub(crate) pinned: Option<String>,
 }
 

@@ -117,7 +117,7 @@ enum Body {
 /// object: `deps` (the transitive dependencies in transitive-closure order),
 /// `surface` (the interface + private projections), and interface-projection
 /// `conflicts`.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct ClosureOut {
     /// Transitive dependencies in transitive-closure order (deps before
     /// dependents). The inspected root is NOT listed here — it is named by the
@@ -128,7 +128,7 @@ struct ClosureOut {
 }
 
 /// One transitive dependency of a [`ClosureOut`], in transitive-closure order.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct ClosureDepOut {
     /// Short display name — the repository's final path segment (e.g.
     /// `deps-mid`). The flat plain tree labels each dep by this.
@@ -143,6 +143,7 @@ struct ClosureDepOut {
     /// Tri-state, mirrors `Bundle.binaries`: key absent = undeclared,
     /// `Some(empty)` = publisher asserts zero interface executables.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     binaries: Option<Vec<String>>,
     entrypoints: Vec<String>,
     /// The dep's own declared integration namespace keys, lexicographically
@@ -157,7 +158,7 @@ struct ClosureDepOut {
 }
 
 /// A declared dependency edge (as authored) inside a [`ClosureDepOut`].
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct ClosureEdgeOut {
     identifier: String,
     visibility: String,
@@ -167,7 +168,7 @@ struct ClosureEdgeOut {
 /// The two symmetric surface projections of a closure — "what binaries /
 /// entrypoints / env keys would land, and on which axis, if this were
 /// installed", without installing.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct SurfacesOut {
     /// Consumer-facing: what reaches someone installing the root.
     interface: SurfaceOut,
@@ -178,7 +179,7 @@ struct SurfacesOut {
 
 /// One projected surface — binaries/entrypoints/env/integrations admitted on
 /// a single axis.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct SurfaceOut {
     binaries: Vec<BinaryAttribution>,
     entrypoints: Vec<BinaryAttribution>,
@@ -200,7 +201,7 @@ struct SurfaceOut {
 /// One env key exposed on the interface surface, attributed to the package that
 /// declares it. `type` is the modifier kind (`path` | `constant` | `list`).
 /// No value — see [`SurfaceOut::env`].
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct EnvVarAttribution {
     key: String,
     #[serde(rename = "type")]
@@ -208,8 +209,10 @@ struct EnvVarAttribution {
     /// The declared separator for a `list`-kind entry; `None` for every other
     /// kind. Skipped in JSON when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     separator: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     package: Option<String>,
 }
 
@@ -237,10 +240,11 @@ impl EnvVarAttribution {
 ///
 /// No `value`: the closure envelope is payload-free — see [`SurfaceOut::env`]
 /// for the same reason applied to env values.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct NamespaceAttribution {
     namespace: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     package: Option<String>,
 }
 
@@ -262,7 +266,7 @@ impl NamespaceAttribution {
 /// Install/compose-gate conditions detected over the interface projection
 /// (Codex C2). Both arrays always present; empty means the surface is
 /// realizable. Inspect stays a view, not a gate — exit 0 either way.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct ConflictsOut {
     entrypoints: Vec<EntrypointConflictOut>,
     repositories: Vec<RepositoryConflictOut>,
@@ -270,7 +274,7 @@ struct ConflictsOut {
 
 /// Two or more interface-admitted closure nodes declare the same entrypoint
 /// name.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct EntrypointConflictOut {
     name: String,
     packages: Vec<String>,
@@ -278,7 +282,7 @@ struct EntrypointConflictOut {
 
 /// One repository resolved to two or more distinct digests on the interface
 /// projection.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct RepositoryConflictOut {
     repository: String,
     digests: Vec<String>,
@@ -377,7 +381,7 @@ fn conflicts_out(conflicts: ClosureConflicts) -> ConflictsOut {
 }
 
 /// One platform child of an image index, or one locked platform leaf.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct CandidateOut {
     digest: String,
     /// This candidate as a pullable reference — the entry's identifier with
@@ -393,15 +397,17 @@ struct CandidateOut {
     /// Absent for a lock-projected candidate: `ocx.lock` records the leaf
     /// digest per platform, not the descriptor that pointed at it.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     media_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     size: Option<i64>,
 }
 
 /// The OCI resolution chain for the selected platform. Carries only the walk
 /// (`index` → `manifest` → `config`); the platform-selected manifest's layers
 /// are rendered alongside the metadata, not inside the chain.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct Resolution {
     pinned: String,
     chain: Vec<ChainOut>,
@@ -410,7 +416,7 @@ struct Resolution {
 /// One blob in the resolution chain. Same descriptor surface as a layer
 /// (digest, media type, size) plus the OCI `role` so a consumer can tell
 /// the index from the manifest from the config without decoding digests.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct ChainOut {
     digest: String,
     role: String,
@@ -420,7 +426,7 @@ struct ChainOut {
 
 /// A single layer descriptor from the inspected manifest (default mode) or the
 /// platform-selected manifest (`--resolve`).
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 struct Layer {
     digest: String,
     media_type: String,
@@ -1166,6 +1172,58 @@ impl Printable for InspectReport {
         for inspect in &self.packages {
             inspect.print_plain(data);
         }
+    }
+}
+
+// Both `Serialize` impls above build their field list at run time, so neither
+// schema can be derived. Written out here so the published contract says what
+// the serializer actually does.
+impl schemars::JsonSchema for InspectReport {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "InspectReport".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "properties": {
+                // Omitted entirely when no platform was resolved — never null.
+                "platform": {"type": "string"},
+                "packages": generator.subschema_for::<Vec<PackageInspect>>(),
+                "env": generator.subschema_for::<Vec<EnvEntry>>(),
+            },
+            "required": ["packages", "env"],
+        })
+    }
+}
+
+impl schemars::JsonSchema for PackageInspect {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PackageInspect".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "object",
+            "$comment": "`name` and `identifier` are always written. `pinned_identifier` and \
+        `pinned_digest` appear together, and only when the body pinned an artifact. The remaining keys \
+        come from exactly one body shape: `candidates` (a candidate listing or an `ocx.lock` binding), \
+        `metadata` + `layers` (a manifest), or `platform` + `metadata` + `layers` + `resolution` (a \
+        resolved package). `closure` rides along with the last two under `--closure`.",
+            "properties": {
+                "name": {"type": "string"},
+                "identifier": generator.subschema_for::<oci::Identifier>(),
+                "pinned_identifier": {"type": "string"},
+                "pinned_digest": {"type": "string"},
+                "candidates": generator.subschema_for::<Vec<CandidateOut>>(),
+                "platform": generator.subschema_for::<oci::Platform>(),
+                "metadata": generator.subschema_for::<Metadata>(),
+                "layers": generator.subschema_for::<Vec<Layer>>(),
+                "resolution": generator.subschema_for::<Resolution>(),
+                "closure": generator.subschema_for::<ClosureOut>(),
+            },
+            "required": ["name", "identifier"],
+        })
     }
 }
 

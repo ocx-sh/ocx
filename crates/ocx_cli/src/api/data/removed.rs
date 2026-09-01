@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::api::Printable;
 
 /// Whether the resource was actually removed, purged, or was already absent.
-#[derive(Serialize, Clone, Copy)]
+#[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum RemovedStatus {
     Removed,
@@ -33,7 +33,7 @@ impl fmt::Display for RemovedStatus {
 /// The `path` field holds the symlink that was removed (for `Removed`),
 /// the object directory that was purged (for `Purged`), or is `None`
 /// when the resource was already absent.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct RemovedEntry {
     pub package: String,
     pub status: RemovedStatus,
@@ -79,5 +79,17 @@ impl Printable for Removed {
             &["Package".into(), "Status".into()],
             &rows.map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
         );
+    }
+}
+
+// The `Serialize` impl above is transparent, so the published schema is the
+// inner type's. `entries` is written as a bare array.
+impl schemars::JsonSchema for Removed {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Removed".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <Vec<RemovedEntry>>::json_schema(generator)
     }
 }

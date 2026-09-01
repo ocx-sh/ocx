@@ -15,7 +15,7 @@ use crate::api::data::sanitize_for_terminal;
 /// (Package | Platform) with `--platforms`, or (Package | Variant) with `--variants`.
 ///
 /// JSON format: object keyed by package name; values are arrays of tags, platforms, or variants.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct Tags {
     #[serde(flatten)]
     pub packages: TagsData,
@@ -56,7 +56,7 @@ fn into_sorted(packages: HashMap<String, impl IntoIterator<Item = String>>) -> B
 }
 
 /// Polymorphic tag payload.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum TagsData {
     Tags(BTreeMap<String, Vec<String>>),

@@ -42,14 +42,14 @@ use crate::{log, oci};
 const CASCADE_APPLY_CONCURRENCY: usize = 8;
 
 /// What happened to one alias tag in a repair run.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub struct RepairOutcome {
     pub tag: AliasTag,
     pub outcome: WriteOutcome,
 }
 
 /// The result of attempting one alias index write.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case", tag = "outcome")]
 pub enum WriteOutcome {
     /// The index was written. `verified` is false when the post-write read-back

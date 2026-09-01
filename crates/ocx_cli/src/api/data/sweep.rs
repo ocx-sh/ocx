@@ -25,7 +25,7 @@ use crate::api::data::sanitize_for_terminal;
 /// `ocx package attest` can attach an unsigned statement when the run has no
 /// signing material at all, and a status that claimed `signed` there would
 /// contradict the very report it sits next to.
-#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, schemars::JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SweptStatus {
     /// The tag's index was acted on; `report` carries the outcome.
@@ -72,7 +72,7 @@ impl SweptStatus {
 /// `flatten` inside a tagged enum inside a `flatten` is a shape that silently
 /// changes as those attributes compose. A `status` field plus three optionals
 /// is the same information with none of that.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct SweptTagReport<R> {
     /// The tag as the caller spelled it, so the report names what was asked
     /// for rather than what it resolved to.
@@ -83,6 +83,7 @@ pub struct SweptTagReport<R> {
     /// produced one, which includes a `failed` row carrying a partial report:
     /// a `--signature-format both` tag where one leg landed and one did not.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub report: Option<R>,
     /// The JSON error envelope's per-variant slug for this tag's failure,
     /// falling back to its frozen category for errors outside the sign and
@@ -92,11 +93,13 @@ pub struct SweptTagReport<R> {
     /// so the value a script reads here is the value it reads there — the same
     /// rule `push --sbom`'s failed attestation follows.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub kind: Option<String>,
     /// Human-readable cause, sanitized for the terminal (CWE-150). Present
     /// exactly when `status` is `failed` or `covered` — for a `covered` row it
     /// names the tag whose run wrote the referrer, not a failure.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub message: Option<String>,
 }
 
@@ -175,7 +178,7 @@ impl<R> SweptTagReport<R> {
 /// The envelope's `exit_code` is the code the process returns, which for a
 /// partially-failed sweep is non-zero while the document still names every tag
 /// that succeeded — the whole point of not aborting at the first failure.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct SweepReport<R> {
     /// One row per swept tag, in the order the tags were given.
     pub tags: Vec<SweptTagReport<R>>,

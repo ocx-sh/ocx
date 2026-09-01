@@ -37,7 +37,7 @@ use crate::api::data::sanitize_for_terminal;
 const MAX_PLAIN_REFUSALS: usize = 20;
 
 /// Every verified attestation a package carries, plus what was refused.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SbomListingReport {
     /// One-glance counts, so a consumer branches on a field instead of
     /// measuring an array (PKG-25).
@@ -61,7 +61,7 @@ pub struct SbomListingReport {
 ///
 /// Deliberately the same vocabulary as the per-entry `verified` flag rather
 /// than the internal mode names, so one word means one thing at both levels.
-#[derive(Debug, Serialize, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Serialize, schemars::JsonSchema, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum ListingVerification {
     /// Signatures were checked against the resolved policies.
@@ -71,7 +71,7 @@ pub enum ListingVerification {
 }
 
 /// The counts and the status a script branches on.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ListingSummary {
     /// `success` when nothing was refused, `partial_failure` otherwise.
     pub status: &'static str,
@@ -100,7 +100,7 @@ pub struct ListingSummary {
 }
 
 /// One verified attestation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SbomEntry {
     /// predicateType. Read out of the **signed** payload when
     /// [`Self::verified`]; derived from the referrer's `artifactType`
@@ -149,30 +149,36 @@ pub struct SbomEntry {
     pub referrer_digest: String,
     /// Certificate SAN (identity) embedded in the Fulcio cert.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_identity: Option<String>,
     /// Certificate OIDC issuer embedded in the Fulcio cert.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub certificate_oidc_issuer: Option<String>,
     /// Rekor integrated time, RFC 3339 with an explicit `Z` (PLAT-31).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub signed_at: Option<String>,
     /// Populated only under `--summary`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub summary: Option<SbomSummaryOut>,
 }
 
 /// What `--summary` reports for one CycloneDX document.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SbomSummaryOut {
     /// The document's own `specVersion`, verbatim.
     pub spec_version: String,
     /// `serialNumber`, when the document carries one.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub serial_number: Option<String>,
     /// Length of the top-level `components` array.
     pub component_count: usize,
     /// `metadata.component.name`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub top_level_component: Option<String>,
 }
 
@@ -188,7 +194,7 @@ impl From<ocx_lib::sbom::SbomSummary> for SbomSummaryOut {
 }
 
 /// One candidate that was examined and refused.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct RefusedEntry {
     /// The referrer's digest, verbatim as the registry listed it.
     pub referrer_digest: String,

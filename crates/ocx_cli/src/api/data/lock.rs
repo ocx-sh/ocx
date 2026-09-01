@@ -16,7 +16,7 @@ use crate::api::Printable;
 /// leaf digest (the primary digest column). `platforms` maps each
 /// shipped platform's lossless key string to its leaf digest — the full
 /// available-only map surfaced in verbose / JSON output.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct LockEntry {
     pub binding: String,
     pub group: String,
@@ -31,7 +31,7 @@ pub struct LockEntry {
 ///
 /// JSON format: array of `{ binding, group, digest, platforms }` objects,
 /// where `platforms` is the full available-only platform-key → digest map.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct LockReport {
     entries: Vec<LockEntry>,

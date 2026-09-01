@@ -15,7 +15,7 @@ use serde::Serialize;
 /// and `ocx package which` both answer "where is this tool on disk", and both
 /// answer it with the same two-value vocabulary — so it lives here rather than
 /// being re-spelled in either report type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum PathKind {
     /// The package root: the parent of `content/` and `entrypoints/`.

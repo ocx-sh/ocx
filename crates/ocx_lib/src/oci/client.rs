@@ -71,7 +71,7 @@ pub(crate) enum LayerPushOutcome {
 /// `Serialize` derives directly on this type (rather than a CLI-side
 /// wrapper) so `ocx_cli`'s `PushReport` can embed it verbatim as the
 /// `layers` field of the push JSON report.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct LayerCounts {
     /// Layers a cross-repository blob mount placed in the target repository
     /// without any upload.

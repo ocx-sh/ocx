@@ -30,7 +30,7 @@ use crate::api::Printable;
 /// and `companion`. A native entry has no `source` object at all (the field is
 /// skipped). Pre-1.0 this replaces the Phase-4 `"source":"patch"` string with
 /// the richer provenance object.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum EntrySource {
     // Never constructed — a native entry's `source` stays `None` so JSON omits
@@ -68,7 +68,7 @@ impl fmt::Display for EntrySource {
 /// agreement (`ocx_lib::env::reconcile_list_separators`), so a `list` entry
 /// reaching here never carries a bare `None` unless nothing in the
 /// composition ever declared one.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct EnvEntry {
     pub key: String,
     pub value: String,
@@ -77,11 +77,13 @@ pub struct EnvEntry {
     /// The separator a [`ModifierKind::List`] entry folds with. `None` on
     /// every other kind. Skipped in JSON when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub separator: Option<String>,
     /// Origin annotation for `--show-patches`. `None` = package native entry;
     /// `Some(EntrySource::Patch { rule, companion })` = companion overlay entry
     /// carrying its provenance. Skipped in JSON when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub source: Option<EntrySource>,
 }
 
@@ -94,10 +96,11 @@ pub struct EnvEntry {
 /// `package` is populated for every entry; the `Option` typing leaves room
 /// for a future no-clean-attribution source without a breaking schema
 /// change. See `adr_declared_binaries_metadata.md` §4 Decision A.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct BinaryAttribution {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub package: Option<String>,
 }
 
@@ -131,10 +134,11 @@ impl BinaryAttribution {
 /// payload. One row per (package, namespace) pair — an array longer than the
 /// distinct-namespace count is the structural guarantee that nothing merged.
 /// See `adr_package_integrations.md` C-014.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct IntegrationAttribution {
     pub namespace: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub package: Option<String>,
     pub payload: serde_json::Value,
 }
@@ -168,11 +172,12 @@ impl IntegrationAttribution {
 /// deferred tool's declared metadata can describe something that will not
 /// substitute cleanly until its content materializes; reaching a log alone
 /// would make them unreadable to the tooling this product is a backend for.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct LazyAdvisoryReport {
     pub kind: &'static str,
     pub package: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub key: Option<String>,
     pub message: String,
 }
@@ -229,7 +234,7 @@ impl LazyAdvisoryReport {
 /// inside `entries`. `advisories` is the fourth such sibling — always present, empty unless a
 /// deferred tool raised something; warning-only, and a consumer branches on its `kind`, never
 /// on `message`.
-#[derive(Serialize)]
+#[derive(Serialize, schemars::JsonSchema)]
 pub struct EnvVars {
     pub entries: Vec<EnvEntry>,
     pub binaries: Vec<BinaryAttribution>,

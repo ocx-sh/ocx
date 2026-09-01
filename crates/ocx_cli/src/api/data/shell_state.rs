@@ -137,7 +137,7 @@ fn written_description(written: &str) -> String {
 /// Absent members are recorded too: a tier file that did not exist becoming
 /// present is exactly the change the watch set must notice, which is why the
 /// loader records candidates rather than survivors (A-13).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct WatchMember {
     /// The watched path.
     pub path: PathBuf,
@@ -155,7 +155,7 @@ pub struct WatchMember {
 /// The priors are the one datum nothing can reconstruct (C-050), and the thing
 /// C-012's `unset __OCX_ENV_STATE` repair gesture destroys — which is why this
 /// is reported per constant rather than as a single yes/no.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct PriorStatus {
     /// The constant's env key, as the carrier records it.
     pub key: String,
@@ -169,7 +169,7 @@ pub struct PriorStatus {
 /// `ocx shell state` declares no `--hook` / `--no-hook` pair of its own, so
 /// rungs 1 and 2 are unreachable from here by construction and the answer comes
 /// from rung 3 (`OCX_NO_HOOK`), rung 4 (`[shell] hook`) or rung 5 (auto).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct HookStatus {
     /// The deciding rung, rendered the way a user spells it.
     pub rung: String,
@@ -184,7 +184,7 @@ pub struct HookStatus {
 /// A reason row that is not a member of [`Reason`] because it does not make the
 /// shell inert on its own — it explains an answer the user would otherwise get
 /// wrong.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "note")]
 pub enum Note {
     /// A-12 — the CWD walk skipped a symlinked `ocx.toml` candidate and
@@ -262,7 +262,7 @@ pub enum Detail {
 /// allowlist — a stamp written from here would consent to the very project it
 /// is diagnosing). Repair is the `unset __OCX_ENV_STATE` gesture or a new
 /// shell (C-012); this command is how a user checks the gesture worked.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ShellStateReport {
     /// `$OCX_HOME`, and whether it exists. A missing home is an ordinary state
     /// on a fresh install and exits 0; only a home that cannot be *read* is the
@@ -1043,6 +1043,18 @@ impl Printable for VerboseShellState {
 impl Serialize for VerboseShellState {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.0.serialize(serializer)
+    }
+}
+
+// The `Serialize` impl above is transparent, so the published schema is the
+// inner type's. Verbosity changes the plain rendering only.
+impl schemars::JsonSchema for VerboseShellState {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "VerboseShellState".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <ShellStateReport>::json_schema(generator)
     }
 }
 
