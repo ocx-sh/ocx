@@ -1162,8 +1162,17 @@ The two grants are not symmetric, and that is the whole answer:
 - **`paths` is a directory grant and deliberately drift-blind.** Its stated use case — the devcontainer
   publisher — is precisely one where the operator *cannot* enumerate sources; making it
   drift-sensitive breaks it on the first `git pull` that adds a tool, in an environment with no human
-  at the prompt to re-confirm. These are git `safe.directory` semantics: exact directory,
-  unconditional, no content re-check.
+  at the prompt to re-confirm. These are git `safe.directory` semantics: unconditional, no content
+  re-check.
+
+  > **Amended 2026-08-31 — the git citation was wrong on grammar, not on the point it was cited for.**
+  > `git-config(1)` (git 2.54): *"Giving a directory with `/*` appended to it will allow access to all
+  > repositories under the named directory."* git ships an exact-directory form **and** a `/*`-suffixed
+  > subtree form, not exact-only — see the correction folded into [C-030](#c-030--namespaces-grammar-enforced-at-parse)
+  > below, which `paths` now mirrors. What survives from this paragraph is unchanged: **whichever form
+  > granted, the grant is unconditional and content-blind** — neither form re-checks the lock's source
+  > set on drift, and the owner has accepted that a subtree-derived grant authorizes the project
+  > `[env]` channel exactly as an exact-directory grant does.
 
 Consequences, each testable:
 - **Revoking a grant is immediately effective**, because no stamp was ever derived from it.
@@ -1335,9 +1344,28 @@ is *relocated* to a primitive cheaper than creating a sibling directory — regi
 There is **no whole-list-refusal contract** and no filtering-deserializer prohibition: with a single
 spec there are no surviving entries, so the question does not arise.
 
-**`paths` is exact-directory, matched on the canonicalized path.** No prefix, no glob (git ships
-exact-only and documents that it has no glob; every prefix grammar shipped carries the sibling-typosquat
-footgun). **Only the project side is canonicalized; whitelist entries are compared literally** (after
+**`paths` is exact-directory, or its trailing-`/*` subtree form, matched on the canonicalized path.**
+No string prefix, no other glob (every prefix grammar shipped carries the sibling-typosquat footgun;
+the subtree form below is component-bounded, not a string prefix, so it does not carry that footgun
+either).
+
+> **Amended 2026-08-31 — the "no prefix, no glob" sentence above rested on a wrong git citation.**
+> `git-config(1)` (git 2.54): *"Giving a directory with `/*` appended to it will allow access to all
+> repositories under the named directory."* git ships an exact-directory form and a `/*`-suffixed
+> subtree form, not exact-only. `paths` now ships both, borrowing git's `/*` spelling and its
+> component-bounded matching rather than mis-citing it — but deliberately widening it by one
+> directory: git's `/*` covers only what is nested *under* the named directory, never the directory
+> itself (per the man-page wording just quoted); OCX's `<path>/*` grants that directory too, plus
+> everything beneath it, matched **component-wise** (`Path::starts_with`, never a string prefix) —
+> `/w/acme/*` covers `/w/acme` and `/w/acme/tools` but never the sibling `/w/acme-evil`. A `*` that leaves no
+> named directory behind — a bare `*`, or `/*` alone — is not a subtree grant and matches nothing:
+> there is no whole-filesystem token, for the same reason `namespaces` has no whole-registry one
+> (A-27). The owner has accepted that a subtree grant authorizes the project `[env]` channel exactly
+> as an exact-directory grant does. See [C-027](#c-027--grants-do-not-stamp-nothing-on-the-activation-path-writes-a-stamp)
+> for why that reach is unconditional, and `EC-GRANT-020`/`EC-GRANT-021` in the edge-case register for
+> the shipped tests.
+
+**Only the project side is canonicalized; whitelist entries are compared literally** (after
 separator and trailing-slash normalization). Canonicalizing *entries* at read time would make the grant
 follow a symlink an attacker may control on the parent (`/workspaces/repo → /tmp/evil` needs only write
 access on `/workspaces`); comparing literally never matches a symlinked checkout and is then silently
@@ -1363,7 +1391,61 @@ implication is **vacuous at source granularity** — `ocx.sh/acme/*` and `ocx.sh
 set, and a three-component pattern is rejected (A-27). `paths` entries stay a **literal byte compare**
 after separator and trailing-slash normalization — no case folding, no canonicalization of the entry,
 a case-only mismatch is `Inert` — with a **near-miss** line in `ocx shell state`'s reason enumeration
-when an entry differs from the canonical directory only by ASCII case or separator style (A-28).
+when an entry differs from the canonical directory only by ASCII case (A-28).
+
+> **Amended 2026-09-01 (round 3) — the case rule follows the platform.** Byte-exact holds on
+> case-sensitive filesystems, where `/a/B` and `/a/b` are two directories and folding them widens a
+> grant onto one an attacker may create. Windows cannot hold both, so `normalize_consent_path` folds
+> ASCII case on `Component::Normal` there — `std` already folded the drive letter for the same
+> reason — and refusing to fold left an operator who wrote `C:\W\Acme` inert on a directory the OS
+> considers identical to the one they named. Both arms route both operands through the same
+> normalizer, so the exact and subtree forms can never fold differently. The A-28 near-miss is
+> therefore a Unix-only note: on Windows the case it describes is a grant. Pinned by EC-GRANT-025.
+
+> **Amended 2026-08-31 — the near-miss wording above was too broad; only the case arm can fire.**
+> Separator and trailing-slash normalization runs *before* the byte compare (C-030), so an entry
+> that differs from the canonical directory only by separator style is not a *mismatch* at all — it
+> normalizes to an exact match. "Differs only by separator style" therefore never reaches the
+> near-miss branch as a distinct state; only an ASCII-case-only difference can. `paths` also now
+> ships the subtree form (`<path>/*`) alongside the exact form described here — see the amendment
+> on the "no prefix, no glob" sentence above for the full grammar.
+
+> **Amended 2026-08-31 (round 2) — three further owner decisions on this grammar.**
+>
+> **Tilde expansion.** A leading `~` in a `paths` entry, and in each `OCX_CONSENT_PATHS` token
+> (C-031), is expanded against `$HOME` before separator/trailing-slash normalization and the byte
+> compare — matching git `safe.directory`'s own `~/…` interpolation. Expansion is **textual
+> substitution only**: it does not canonicalize the result and does not resolve a symlink, so an
+> entry naming a symlinked `~/dev` still misses if the canonical project directory resolves
+> elsewhere — the identical fail-safe direction "entries are never canonicalized" already takes for
+> an absolute entry. `~user/…` is **not** expanded; it is left as a literal string, which can never
+> equal an absolute canonical directory and so never matches (EC-GRANT-022).
+>
+> **Bare `*` / `/*`, considered and rejected as a whole-machine token.** git ships
+> `safe.directory = *` to mean "trust every repository on this machine". `paths` was asked to mirror
+> it and the answer is no: the reason is the one A-27 already gives `namespaces` for refusing a
+> whole-registry spelling — a token that authorizes every directory on the host cannot be scoped by a
+> publisher who does not control the host it lands on, and the devcontainer use case `paths` exists to
+> serve is served by naming the checkout, never by naming the filesystem. The grammar therefore ships
+> no equivalent of git's `*`, and `["*"]` / `["/*"]` continue to match nothing (EC-GRANT-021).
+>
+> **The canonical-`project_dir` precondition is now release-enforced, not a debug assertion.**
+> `Path::starts_with` is a **component** compare, not a containment check: for the subtree form,
+> `/w/acme/../../etc` `starts_with` `/w/acme`, so a `..`-bearing `project_dir` would escape the
+> subtree it appears to sit inside rather than merely miss it. `consent_path_matches`'s precondition —
+> every caller derives `project_dir` through `canonical_project_dir` — was carried only as a
+> `debug_assert!`, correct in every test build and silent in release. It now fails closed on its own:
+> a `project_dir` carrying a `..` component matches **no** `paths` entry, exact or subtree form,
+> refused before the compare runs rather than trusted into it (EC-GRANT-023).
+>
+> `ocx shell state`'s reason enumeration (C-050) is extended to match: an entry that can never match
+> anything under any interpretation — an unseparated subtree spelling, a mid-path `*`, a bare `*`
+> naming no directory, a literal `..` component, or an unsupported `~user/…` form (the shipped
+> `EntryDefect` enum also names an unresolvable home directory and a relative entry, for the same
+> reason) — now gets a named diagnostic line, alongside the ASCII-case near-miss above (EC-GRANT-024).
+>
+> See `adr_shell_env_addenda.md` A-28 for the addenda-side fold, and `EC-GRANT-022`–`EC-GRANT-024` in
+> the edge-case register for the shipped tests.
 
 ---
 
@@ -1391,6 +1473,18 @@ constructed**. An all-empty value (`''`, `','`, `',,'`) contributes **nothing** 
 a prompt over either. `OCX_CONSENT_PATHS` follows the same rule: an empty token must never become an
 empty `PathBuf`, which normalizes toward a root rather than toward nothing.
 
+**Tilde expansion is a match-time concern, not a parse-time one, and both channels share the same
+seam.** `OCX_CONSENT_PATHS` tokens are split and empty-dropped verbatim — no `~` handling in the
+parser — and stored in `ShellConsent.paths` exactly as written, identically to a config-tier `paths`
+entry. A leading `~` is expanded against `$HOME` only when an entry is actually compared, inside the
+same `consent_path_matches` / entry-defect seam C-030 defines, so a config-tier entry and an
+env-channel token get identical treatment by construction rather than by two independent
+implementations agreeing. Expansion is textual substitution only — no canonicalization, no symlink
+resolution — so a symlinked `$HOME` still misses. `~user/…` is not expanded and is carried through as
+a literal token, which can never match a canonical directory; `ocx shell state` prints the token as the
+user wrote it, expansion left out. `OCX_CONSENT_NAMESPACES` has no path-shaped tokens and is unaffected
+(EC-GRANT-022).
+
 **Whole-contribution refusal on a malformed (non-empty) pattern**: discard the **entire**
 `OCX_CONSENT_NAMESPACES` contribution with **one warning**; the config tiers stand alone. Neither channel
 activates on a partially-parsed spec, and neither widens.
@@ -1402,15 +1496,17 @@ through a parser that keeps empty tokens — that variant **must** make the untr
 is what proves the assertion discriminates rather than passing vacuously. Same pair for
 `OCX_CONSENT_PATHS`.
 
-**Extended by [A-27](./adr_shell_env_addenda.md), [A-40](./adr_shell_env_addenda.md)** — "malformed" is
-decided by the **same** `validate_consent_pattern` the config tiers use (C-030); one validator, two
-channels. The per-channel split is only in the consequence, and A-40 corrects the config side: a
-rejected pattern makes `[shell.consent]` fail to deserialize, and the refused table is then **stripped**
-— that grant contributes nothing while every other section of the file still applies, on **every** tier,
-exit 0 with the reason recorded — *unless* the table carries a non-empty `namespaces.exclude`, the one
-key that **withdraws** another tier's grant, where dropping it would widen and the file therefore keeps
-the hard failure. On `OCX_CONSENT_NAMESPACES` the **whole** contribution is discarded with one warning
-and the config tiers stand alone. Empty tokens are dropped before any pattern is constructed, unchanged.
+**Extended by [A-27](./adr_shell_env_addenda.md), [A-28](./adr_shell_env_addenda.md) (round 2),
+[A-40](./adr_shell_env_addenda.md)** — "malformed" is decided by the **same** `validate_consent_pattern`
+the config tiers use (C-030); one validator, two channels. The per-channel split is only in the
+consequence, and A-40 corrects the config side: a rejected pattern makes `[shell.consent]` fail to
+deserialize, and the refused table is then **stripped** — that grant contributes nothing while every
+other section of the file still applies, on **every** tier, exit 0 with the reason recorded — *unless*
+the table carries a non-empty `namespaces.exclude`, the one key that **withdraws** another tier's grant,
+where dropping it would widen and the file therefore keeps the hard failure. On `OCX_CONSENT_NAMESPACES`
+the **whole** contribution is discarded with one warning and the config tiers stand alone. Empty tokens
+are dropped before any pattern is constructed, unchanged. `OCX_CONSENT_PATHS` additionally expands a
+leading `~` per token, mirroring C-030's rule for a `paths` entry (A-28, round 2).
 
 ---
 
@@ -2333,15 +2429,19 @@ already cover between them.
 [A-26](./adr_shell_env_addenda.md), [A-28](./adr_shell_env_addenda.md),
 [A-29](./adr_shell_env_addenda.md), [A-32](./adr_shell_env_addenda.md)** — the over-cap state is read
 from the ledger's `over_cap` **marker**, not inferred from an absent carrier (A-01), and the reason
-enumeration gains four rows: a **skipped symlinked `ocx.toml` candidate** with the ancestor project
+enumeration gains five rows: a **skipped symlinked `ocx.toml` candidate** with the ancestor project
 activated in its place, naming `--project` / `OCX_PROJECT` as the opt-in — the loader's `log::warn!`
 never reaches the prompt, so this row is the user's only path to that answer (A-12); *"active via
 `paths` grant; source-set drift is not tracked for path grants"* (A-26); a **`paths` near-miss**
-differing from the canonical directory only by ASCII case or separator style (A-28); and the deciding
-config tier **by name**, never a hard-coded "managed" (A-32). This command is also a named non-member
-of the six-writer stamp allowlist: running it MUST NOT create `state/projects/<key>/` — it is the
-command a confused user is told to run, and a stamp written from here would consent to the very
-project it is diagnosing (A-29).
+differing from the canonical directory only by ASCII case (A-28); the deciding
+config tier **by name**, never a hard-coded "managed" (A-32); and, round 2, a **`paths` entry that can
+never match anything** under any interpretation — a subtree spelling missing its separator
+(`/w/acme*`), a mid-path `*` (`/w/*/tools`), a bare `*` naming no directory, an entry carrying a
+literal `..` component, or an unsupported `~user/…` form — flagged alongside the ASCII-case near-miss
+(A-28, round 2). This command
+is also a named non-member of the six-writer stamp allowlist: running it MUST NOT create
+`state/projects/<key>/` — it is the command a confused user is told to run, and a stamp written from
+here would consent to the very project it is diagnosing (A-29).
 
 ---
 
@@ -2676,9 +2776,13 @@ nothing. **Never** read as a catch-all.
 the bare `"ocx.sh/acme"`, because a source is exactly two components. It does **not** match
 `ocx.sh/acme-evil`. A three-component pattern (`ocx.sh/acme/team`) names a repository, not a source, and
 is **rejected at parse** alongside the four forms above (A-27).
-→ `paths = ["/home/u/project"]` does **not** match `/home/u/project-evil` (exact-directory, no prefix, no
-glob), and does **not** match a symlinked checkout resolving to it (entries compared literally; the
-project side canonicalized) — inert is the fail-safe direction.
+→ `paths = ["/home/u/project"]` does **not** match `/home/u/project-evil` (exact directory, matched
+component-wise, never as a string prefix — see the 2026-08-31 amendment to C-030 above), and does
+**not** match a symlinked checkout resolving to it (entries compared literally; the project side
+canonicalized) — inert is the fail-safe direction.
+→ `paths = ["/home/u/project/*"]` **does** match `/home/u/project` and `/home/u/project/sub` (subtree
+form, any depth) but still **not** `/home/u/project-evil` (component-bounded, not a string prefix);
+`paths = ["*"]` and `paths = ["/*"]` match nothing at all — there is no whole-filesystem token (C-030).
 → Carve-outs are at **source granularity**, so a carve-out withdraws one organisation another tier's
 `include` already covers, never a repository from an org: `{ include = ["ocx.sh/acme",
 "ocx.sh/acme-compromised"], exclude = ["ocx.sh/acme-compromised"] }` consents to `ocx.sh/acme` and
@@ -2941,7 +3045,7 @@ different state (C-004); and — for (6) — **which of the two** situations it 
 symlinked `ocx.toml` candidate** with the ancestor project activated instead, naming `--project` /
 `OCX_PROJECT` as the opt-in (the loader's warn never reaches the prompt, so this row is the only path
 to that answer); *"active via `paths` grant; source-set drift is not tracked for path grants"*; a
-**`paths` near-miss** differing from the canonical directory only by ASCII case or separator style; and
+**`paths` near-miss** differing from the canonical directory only by ASCII case; and
 the deciding config tier by name.
 → Also prints, always: the decoded ledger as **fields, not base64**; applied-per-scope with `global` and
 `project` separate; fingerprint status per watch-set member; and **`priors` intactness** per constant the

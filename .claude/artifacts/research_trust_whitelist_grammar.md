@@ -60,11 +60,20 @@ tier may ship it; an env var must also work (devcontainer pre-whitelist).
 ## git `safe.directory`
 
 - `safe.directory = *` is the literal documented full opt-out. Otherwise each entry is one
-  directory (repeatable multi-value key), **no glob support** — `/workspaces/*` does not work;
-  every repo path is listed individually.
+  directory (repeatable multi-value key) **or a directory with `/*` appended**, granting every
+  repository beneath it.
   [safe.adoc](https://raw.githubusercontent.com/git/git/master/Documentation/config/safe.adoc) ·
   [capistrano#2109](https://github.com/capistrano/capistrano/issues/2109) ·
   [Ken Muse](https://www.kenmuse.com/blog/avoiding-dubious-ownership-in-dev-containers/)
+
+  > **Corrected 2026-08-31 — the "no glob support" claim above was checked and is wrong.**
+  > `git-config(1)` (git 2.54), under `safe.directory`, states plainly: *"Giving a directory with
+  > `/*` appended to it will allow access to all repositories under the named directory."* Verified
+  > directly against the man page (`man git-config`), not carried forward from either citation below.
+  > git ships **two** forms — exact-directory and a `/*`-suffixed subtree — not exact-only. This
+  > correction propagates to [`research_shell_env_sota_gap_check.md`](./research_shell_env_sota_gap_check.md)
+  > (item 24, marked "confirmed, literal quote match" — also wrong) and to the ADR/design-spec/addenda
+  > text that cited the exact-only claim as Decision 4's rationale.
 - **"Only respected in protected configuration"** — system + global + `-c`/env, **never repo-local
   `.git/config`**. Exactly the pattern chosen for OCX's whitelist.
 - No dedicated env var; injected via `-c safe.directory=...` or `GIT_CONFIG_*`.
@@ -96,7 +105,7 @@ tier may ship it; an env var must also work (devcontainer pre-whitelist).
 |---|---|---|---|---|---|---|
 | direnv | `prefix` (footgun) + `exact` in `direnv.toml [whitelist]` | one file, no fleet tier | n/a | none | `prefix` implies descendants; `exact` does not | whitelist: none. Separate allow-store: SHA256(path+contents), re-prompts on edit |
 | mise | `trusted_config_paths` prefix list | project / user / system, walked to `MISE_CEILING_PATHS` | closest-to-cwd wins — this is what let a project's own file win, pre-fix | `MISE_TRUSTED_CONFIG_PATHS`, OS-PATH-sep list | prefix implies descendants | none by default; paranoid adds content hash |
-| git `safe.directory` | exact path per entry; `*` = full opt-out; **no glob** | system / global / `-c`-env only; repo-local never consulted | union across protected tiers | via `-c` or `GIT_CONFIG_*` | none — every path listed | none (static) |
+| git `safe.directory` | exact path, or a `/*`-suffixed subtree, per entry (corrected 2026-08-31); `*` = full opt-out | system / global / `-c`-env only; repo-local never consulted | union across protected tiers | via `-c` or `GIT_CONFIG_*` | subtree entry implies descendants, component-bounded; exact entry implies nothing | none (static) |
 | VS Code | opaque internal list, UI/API-managed | single user-level list | n/a | none documented | parent trust implies all subfolders | none documented |
 | Codespaces/devcontainer | n/a — policy-level auto-trust of the environment | n/a | n/a | n/a | n/a | n/a |
 
@@ -105,9 +114,12 @@ tier may ship it; an env var must also work (devcontainer pre-whitelist).
 1. **Prefix vs exact vs glob.** Every tool shipping a prefix grammar (direnv, mise) has the same
    footgun: `/home/user/project` also matches `/home/user/project-evil`, and anyone who can get a
    sibling directory created under a trusted prefix (temp checkout, symlink, reused CI workspace)
-   inherits trust free. `exact` and per-path enumeration close it at one entry per repo. **No tool
-   surveyed ships true glob** — git explicitly documents that it does not, and the devcontainer
-   workaround is a `postStartCommand` that writes an exact entry per session.
+   inherits trust free. `exact` and per-path enumeration close it at one entry per repo. **Corrected
+   2026-08-31**: git does ship a subtree form (see the git section above) — the earlier claim here
+   that "no tool surveyed ships true glob" was wrong. It is not a string-prefix grammar, though: git's
+   `/*` form is component-bounded, so `/home/user/project/*` never reaches the sibling `-evil`
+   directory the way a string prefix would. The devcontainer `postStartCommand` workaround remains
+   valid for a path unknown at build time; it is one option, not the only one.
 2. **Precedence: override vs union.** mise's most-specific-wins is exactly the shape that became
    GHSA-436v-8fw5-4mj8 once a local tier could write trust-control keys — override precedence is
    dangerous precisely when the override authority and the config author are the same untrusted
@@ -120,10 +132,14 @@ tier may ship it; an env var must also work (devcontainer pre-whitelist).
    case. **None** of the surveyed tools treat "hostile parent process sets this env var" as
    in-scope — all assume the process env is already trusted context, the same boundary as the
    shell profile. Consistent with OCX's existing shell-activation trust boundary.
-4. **Subdirectory implication.** direnv `exact` and git `safe.directory` require one entry per repo
-   and imply nothing; direnv `prefix`, mise, and VS Code parent-trust all imply descendants,
-   trading ergonomics for the footgun in (1). For OCX's target user (fleet trusting internal
-   namespaces) descendant implication is the *product requirement*, not a mistake — and the
+4. **Subdirectory implication.** direnv `exact` requires one entry per repo and implies nothing;
+   direnv `prefix`, mise, and VS Code parent-trust all imply descendants, trading ergonomics for the
+   footgun in (1). **Corrected 2026-08-31**: git `safe.directory` belongs on *both* sides of this
+   line, not only the "implies nothing" side — its exact form implies nothing, its `/*` subtree form
+   implies descendants, and because that form is component-bounded rather than a string prefix it
+   gets the ergonomics of the second group without the footgun of the first. For OCX's target user
+   (fleet trusting internal namespaces) descendant implication is the *product requirement*, not a
+   mistake — and the
    mitigation is to do it at the **OCI-namespace level** rather than filesystem path prefix, which
    removes the sibling-typosquat vector entirely because there is no filesystem to typosquat into.
 5. **Revocation/drift.** Only direnv's allow-store and mise's paranoid mode re-check content. Every

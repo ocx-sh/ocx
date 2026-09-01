@@ -169,6 +169,24 @@ research-axes:
   `plan_servable_index_snapshot.md`, which is mid-execution with a dirty worktree at
   `.agents/worktrees/wp8`. Repointing would hijack that run's `/next`. The owner decides
   which plan owns the pointer.
+- **A correction pass overshoots into a new false claim — budget a check for the fix, not
+  only for the defect.** The 2026-08-31 consent round found that the record's premise about
+  git (`safe.directory` "has no glob support") was simply wrong. The fix pass corrected it
+  and then asserted *exact* parity at six sites, including a doc comment that feeds the
+  published JSON schema. Measured with controls, git's `/*` **refuses** the named directory
+  and allows only what is nested under it; ours grants it. A fix-round reviewer caught it —
+  the same failure class the round existed to close, one layer later. Two rules fell out:
+  when a claim about an external tool is load-bearing, **run the tool** (a five-line probe
+  with a positive and a negative control beats any man-page paraphrase), and always spend
+  one reviewer on the fix diff itself, never assume a fix round is self-verifying.
+- **A codex-companion job's `status` stays `running` after its worker dies.** The
+  2026-08-31 consent review's gate job froze at minute 1; its pid was gone while the state
+  JSON still read `"status": "running"`, and the agent polling it reported "long reasoning
+  turn" for two hours. Liveness is `ps -p <pid>` on the pid in the job's own JSON plus log
+  mtime growth — never the status field, and never the shared broker process, which stays
+  alive with CPU burn across all jobs and so returns the same answer in every state. Brief
+  every Codex-driving agent with this and give it a time budget; a skip with a reason is a
+  valid gate result.
 - **Note for the next `/hex-init`:** a worker went idle without delivering its report and
   had to be pulled with `SendMessage`; treat "idle" as "not reported" and pull, do not
   assume completion.

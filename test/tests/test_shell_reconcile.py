@@ -1982,6 +1982,51 @@ def test_a_paths_grant_does_not_match_a_sibling_with_a_longer_name(arena: Arena)
     )
 
 
+def test_a_paths_subtree_grant_activates_the_named_directory_and_not_a_sibling(arena: Arena) -> None:
+    """C-025 clause 3 / C-031 — the subtree form (``<dir>/*``) grants ``<dir>`` and
+    every project beneath it, matched component-wise, never a sibling whose name
+    merely starts with ``<dir>``'s own name.
+
+    ``c031_the_env_channel_carries_a_subtree_entry_intact`` (``config/shell.rs``)
+    proves the matcher and the env-channel split in isolation; this is the
+    acceptance-level round trip neither unit test reaches — env-parse
+    (``OCX_CONSENT_PATHS=<dir>/*``) through the real activation decision
+    (``ocx shell state``) to the emitted environment (``--reconcile``).
+
+    The grant below names ``project`` itself, never the two clones' shared
+    parent: granting the parent would legitimately cover BOTH ``project`` and
+    ``project-evil``, and the negative assertion — the whole point of this test
+    — would then prove nothing.
+    """
+    source = _locked_project(arena, "alpha", _ENV_BLOCK_A)
+    (source / "binA").mkdir()
+    project = _clone_of(source, arena.projects / "project")
+    (project / "binA").mkdir(exist_ok=True)
+    evil = _clone_of(source, arena.projects / "project-evil")
+    (evil / "binA").mkdir(exist_ok=True)
+
+    granted = arena.env(OCX_CONSENT_PATHS=str(project / "*"))
+
+    state = matrix.shell_state(arena.ocx, project, granted)
+    assert state["inert_reason"]["reason"] != "no_stamp_no_grant", (
+        f"the subtree grant must cover the directory it names; got {state['inert_reason']}"
+    )
+    emitted = matrix.reconcile(arena.ocx, "bash", project, granted)
+    assert "export WP14_CONST='alpha'" in emitted.stdout, (
+        f"the grant must actually apply the project's env, not merely flip the state predicate:\n{emitted.stdout}"
+    )
+
+    evil_state = matrix.shell_state(arena.ocx, evil, granted)
+    assert evil_state["inert_reason"]["reason"] == "no_stamp_no_grant", (
+        f"a `<dir>/*` entry must not match a sibling whose name merely starts with `<dir>`'s name; "
+        f"got {evil_state['inert_reason']}"
+    )
+    evil_emitted = matrix.reconcile(arena.ocx, "bash", evil, granted)
+    assert "export WP14_CONST=" not in evil_emitted.stdout, (
+        f"the sibling must apply nothing, not merely report itself inert:\n{evil_emitted.stdout}"
+    )
+
+
 def test_a_namespaces_grant_goes_inert_when_a_source_leaves_it(arena: Arena) -> None:
     """S-012 edge / C-025 clause 2 — the quantifier re-runs every prompt, with no stamp."""
     project = arena.projects / "ns"

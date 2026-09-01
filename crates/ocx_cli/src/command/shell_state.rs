@@ -34,7 +34,7 @@ use ocx_lib::activation::{self, ProjectIdentity};
 use ocx_lib::project::consent::{Decision, Reason};
 use ocx_lib::shell::coexistence;
 use ocx_lib::shell::reconcile::{self, CARRIER_KEY, Ledger};
-use ocx_lib::{ShellConsent, effective_consent, normalize_consent_path};
+use ocx_lib::{ShellConsent, consent_entry_defect, consent_path_matches, effective_consent};
 
 use crate::api::data::shell_state::{HookStatus, Note, ShellStateReport, VerboseShellState, WatchMember};
 use crate::app::project_context::{self, ProjectContextError};
@@ -433,31 +433,41 @@ async fn symlinked_candidate_note(config_path: &Path, project_dir: &Path) -> Opt
     }
 }
 
-/// A-26 and A-28 — the two `paths`-grant rows.
+/// A-26, A-28 and the paths-entry-defect diagnostic — the three
+/// `paths`-grant rows.
 ///
 /// A-26: a matching entry activates unconditionally, and source-set drift is
 /// **not** tracked for path grants, because nothing on the activation path
-/// writes a stamp to drift against. A-28: an entry differing from the canonical
-/// directory only by ASCII case does **not** grant — entries are compared as
-/// literal bytes after separator and trailing-slash normalization — so the
+/// writes a stamp to drift against. An entry's own grant semantics — exact
+/// directory, or a component-bounded subtree when it ends in `/*` — live in
+/// [`consent_path_matches`], not here. A-28: an entry that would grant only if
+/// the compare folded ASCII case does **not** grant on its own bytes — so the
 /// near-miss earns a row of its own instead of a silent `Inert`.
+///
+/// Third: an entry [`consent_entry_defect`] classifies as malformed can never
+/// grant at all, on any project. Checked **before** the near-miss, so the two
+/// never double-report one entry — a defect is the more fundamental problem,
+/// and (unlike the exact-vs-near-miss pair) the two conditions can genuinely
+/// overlap, e.g. an entry whose `*` sits mid-path happens to ASCII-case-match
+/// a project literally named the same way. And unlike the near-miss, this row
+/// is **not** gated on `decision`: a malformed entry is wrong on its own
+/// bytes, not on whether some other clause — a stamp, a namespace grant, a
+/// sibling `paths` entry — happened to grant the same project. Gating it to
+/// `Inert` like the near-miss would hide a config bug the moment anything else
+/// let the user in.
 fn paths_grant_notes(project_dir: &Path, decision: &Decision, whitelist: &ShellConsent) -> Vec<Note> {
-    let canonical = normalize_consent_path(project_dir);
-    // Advisory only: the near-miss arm below compares case-insensitively, and a
-    // lossy render is the right operand for a *note*. The grant arm above never
-    // goes near it — that comparison is the trust boundary and stays on the
-    // path's own bytes.
-    let canonical_lossy = canonical.to_string_lossy();
     let mut notes = Vec::new();
     for entry in &whitelist.paths {
-        let normalized = normalize_consent_path(entry);
-        if normalized == canonical {
+        if consent_path_matches(entry, project_dir) {
             if matches!(decision, Decision::Activate(_)) {
                 notes.push(Note::ActiveViaPathsGrant { entry: entry.clone() });
             }
-        } else if normalized.to_string_lossy().eq_ignore_ascii_case(&canonical_lossy)
-            && matches!(decision, Decision::Inert(_))
-        {
+        } else if let Some(defect) = consent_entry_defect(entry) {
+            notes.push(Note::PathsDefect {
+                entry: entry.clone(),
+                defect: defect.to_string(),
+            });
+        } else if ascii_case_near_miss(entry, project_dir) && matches!(decision, Decision::Inert(_)) {
             // Only when the project is actually inert. On an active project the
             // row reads as a contradiction next to `active: yes`, and A-28's
             // purpose is to explain a refusal, not to annotate a grant.
@@ -468,6 +478,24 @@ fn paths_grant_notes(project_dir: &Path, decision: &Decision, whitelist: &ShellC
         }
     }
     notes
+}
+
+/// Whether `entry` would grant `project_dir` if the compare folded ASCII case
+/// (A-28).
+///
+/// Advisory only — a lossy render is the right operand for a *note*. The grant
+/// arm never goes near it: that comparison is the trust boundary and stays on
+/// the path's own bytes.
+///
+/// **Unix-only in effect.** `consent_path_matches` already folds ASCII case on
+/// Windows, where the filesystem cannot hold two directories that differ only
+/// by case — so an entry reaching this predicate there has already failed to
+/// match on something case folding cannot repair, and this returns `false`.
+/// The note it feeds describes a refusal that only a case-sensitive filesystem
+/// can produce.
+fn ascii_case_near_miss(entry: &Path, project_dir: &Path) -> bool {
+    let folded = |path: &Path| PathBuf::from(path.to_string_lossy().to_ascii_lowercase());
+    consent_path_matches(&folded(entry), &folded(project_dir))
 }
 
 /// The enumerated inertness reason, resolved by one ordered ladder so the
@@ -918,12 +946,21 @@ mod tests {
             paths: vec![PathBuf::from("/Users/u/Repo")],
             namespaces: None,
         };
-        assert_eq!(
-            paths_grant_notes(project_dir, &Decision::Inert(Reason::LockUnavailable), &near),
+        // On Windows the case fold is part of the match, so this entry grants
+        // outright — and the grant row is gated on an `Activate` decision, so
+        // an inert project earns no row at all. The near-miss describes a
+        // refusal only a case-sensitive filesystem can produce.
+        let expected = if cfg!(windows) {
+            vec![]
+        } else {
             vec![Note::PathsNearMiss {
                 entry: PathBuf::from("/Users/u/Repo"),
                 canonical: PathBuf::from("/Users/u/repo"),
             }]
+        };
+        assert_eq!(
+            paths_grant_notes(project_dir, &Decision::Inert(Reason::LockUnavailable), &near),
+            expected
         );
 
         let exact = ShellConsent {
@@ -935,6 +972,218 @@ mod tests {
             vec![Note::ActiveViaPathsGrant {
                 entry: PathBuf::from("/Users/u/repo/"),
             }]
+        );
+    }
+
+    /// A-26 — a subtree entry (`/*`) grants a project beneath it, exactly
+    /// once.
+    ///
+    /// Red state: in `paths_grant_notes`, change the grant check from
+    /// `consent_path_matches(entry, project_dir)` to `entry == project_dir` —
+    /// the subtree entry no longer covers `/Users/u/repo/tools`, and this
+    /// test reds on an empty note list.
+    #[test]
+    fn a026_subtree_entry_grants_a_project_beneath_it() {
+        let whitelist = ShellConsent {
+            paths: vec![PathBuf::from("/Users/u/repo/*")],
+            namespaces: None,
+        };
+        assert_eq!(
+            paths_grant_notes(
+                Path::new("/Users/u/repo/tools"),
+                &Decision::Activate(Grant::Path),
+                &whitelist
+            ),
+            vec![Note::ActiveViaPathsGrant {
+                entry: PathBuf::from("/Users/u/repo/*"),
+            }]
+        );
+    }
+
+    /// A-28 — a subtree entry that would grant only if ASCII case were
+    /// folded earns exactly one near-miss row on an inert project, the same
+    /// as the exact-entry case.
+    ///
+    /// Red state: in `ascii_case_near_miss`, replace the `consent_path_matches`
+    /// call with a bytewise `folded(entry) == folded(project_dir)` check —
+    /// that drops the subtree arm, the case-differing subtree entry no
+    /// longer near-misses, and this test reds on an empty note list.
+    #[test]
+    fn a028_subtree_entry_ascii_case_near_miss() {
+        let whitelist = ShellConsent {
+            paths: vec![PathBuf::from("/Users/ACME/*")],
+            namespaces: None,
+        };
+        // Windows: same as the exact case above — the subtree entry folds and
+        // grants, so there is no near miss left to report.
+        let expected = if cfg!(windows) {
+            vec![]
+        } else {
+            vec![Note::PathsNearMiss {
+                entry: PathBuf::from("/Users/ACME/*"),
+                canonical: PathBuf::from("/Users/acme/tools"),
+            }]
+        };
+        assert_eq!(
+            paths_grant_notes(
+                Path::new("/Users/acme/tools"),
+                &Decision::Inert(Reason::LockUnavailable),
+                &whitelist
+            ),
+            expected
+        );
+    }
+
+    /// An entry naming an unrelated directory earns no note at all on an
+    /// inert project — neither a grant nor a near-miss.
+    ///
+    /// Red state: stub `ascii_case_near_miss` to `-> true` unconditionally —
+    /// an unrelated entry then earns a near-miss row it must never get, and
+    /// this test reds on a non-empty note list.
+    #[test]
+    fn unrelated_entry_earns_no_note() {
+        let whitelist = ShellConsent {
+            paths: vec![PathBuf::from("/elsewhere/other")],
+            namespaces: None,
+        };
+        assert!(
+            paths_grant_notes(
+                Path::new("/Users/acme/tools"),
+                &Decision::Inert(Reason::LockUnavailable),
+                &whitelist
+            )
+            .is_empty(),
+            "an entry naming an unrelated directory must not earn a row of either kind"
+        );
+    }
+
+    // ── the paths-entry-defect diagnostic ─────────────────────────────────
+
+    /// One deterministic example per defect class the entry's own bytes
+    /// decide. `UnresolvableHome` is excluded: whether a leading `~` resolves
+    /// depends on the host's home directory, and neither `consent_entry_defect`
+    /// nor this crate exposes a test seam to override it.
+    ///
+    /// Red state: delete the `else if let Some(defect) = consent_entry_defect(entry)`
+    /// arm from `paths_grant_notes` — every case below reds on an empty note
+    /// list.
+    #[test]
+    fn each_deterministic_defect_class_earns_its_own_row() {
+        for entry in [
+            "/w/*/tools",
+            "/w/acme*",
+            "*",
+            "/w/acme/../etc",
+            "~alice/project",
+            "relative/path",
+        ] {
+            let path = PathBuf::from(entry);
+            let defect =
+                consent_entry_defect(&path).unwrap_or_else(|| panic!("{entry:?} must be classified as defective"));
+            let whitelist = ShellConsent {
+                paths: vec![path.clone()],
+                namespaces: None,
+            };
+            let notes = paths_grant_notes(
+                Path::new("/unrelated/project"),
+                &Decision::Inert(Reason::LockUnavailable),
+                &whitelist,
+            );
+            assert_eq!(
+                notes,
+                vec![Note::PathsDefect {
+                    entry: path,
+                    defect: defect.to_string(),
+                }],
+                "entry {entry:?} must earn exactly one defect row"
+            );
+        }
+    }
+
+    /// A well-formed entry — exact, or an exact `/*` subtree — is never
+    /// flagged as defective, whether or not it happens to match the project
+    /// in view.
+    ///
+    /// Red state: change the `consent_entry_defect` guard in
+    /// `paths_grant_notes` to `if true` (always taking the defect branch) —
+    /// this reds on a non-empty note list.
+    #[test]
+    fn a_well_formed_entry_earns_no_defect_row() {
+        for entry in ["/Users/u/repo", "/Users/u/repo/*"] {
+            assert!(
+                consent_entry_defect(Path::new(entry)).is_none(),
+                "a well-formed entry must not be classified as defective: {entry}"
+            );
+        }
+        let whitelist = ShellConsent {
+            paths: vec![PathBuf::from("/Users/u/repo/*")],
+            namespaces: None,
+        };
+        let notes = paths_grant_notes(
+            Path::new("/elsewhere/other"),
+            &Decision::Inert(Reason::LockUnavailable),
+            &whitelist,
+        );
+        assert!(
+            notes.iter().all(|note| !matches!(note, Note::PathsDefect { .. })),
+            "a well-formed, non-matching entry must earn no defect row: {notes:?}"
+        );
+    }
+
+    /// A defect takes priority over a near-miss for the same entry —
+    /// structural by the `else if` chain, pinned here with an entry that
+    /// would ALSO ASCII-case-near-miss the project if the defect check were
+    /// skipped, so the two branches genuinely compete for it.
+    ///
+    /// Red state: change the near-miss `else if` in `paths_grant_notes` to a
+    /// second, independent `if` (so both branches can fire for one entry) —
+    /// this reds on two notes instead of one.
+    #[test]
+    fn a_defective_entry_never_also_earns_a_near_miss_row() {
+        let entry = Path::new("/W/*/tools");
+        let project_dir = Path::new("/w/*/tools");
+        assert!(
+            ascii_case_near_miss(entry, project_dir),
+            "the fixture must actually reach the near-miss predicate, or this proves nothing about priority"
+        );
+        let defect = consent_entry_defect(entry).expect("the fixture entry must be defective");
+
+        let whitelist = ShellConsent {
+            paths: vec![entry.to_path_buf()],
+            namespaces: None,
+        };
+        let notes = paths_grant_notes(project_dir, &Decision::Inert(Reason::LockUnavailable), &whitelist);
+        assert_eq!(
+            notes,
+            vec![Note::PathsDefect {
+                entry: entry.to_path_buf(),
+                defect: defect.to_string(),
+            }],
+            "a defective entry must not also earn a near-miss row for the same problem: {notes:?}"
+        );
+    }
+
+    /// Unlike the near-miss, a defect row fires even when the project
+    /// activated through another clause — a malformed entry is a config error
+    /// on its own bytes, not a fact about whether this project got in.
+    ///
+    /// Red state: add `&& matches!(decision, Decision::Inert(_))` to the
+    /// defect branch in `paths_grant_notes` (mirroring the near-miss's gate)
+    /// — this reds on an empty note list.
+    #[test]
+    fn a_defective_entry_is_reported_even_on_an_active_project() {
+        let whitelist = ShellConsent {
+            paths: vec![PathBuf::from("/w/*/tools")],
+            namespaces: None,
+        };
+        let notes = paths_grant_notes(
+            Path::new("/unrelated/project"),
+            &Decision::Activate(Grant::Stamp),
+            &whitelist,
+        );
+        assert!(
+            matches!(notes.as_slice(), [Note::PathsDefect { .. }]),
+            "a malformed entry is a config error regardless of what granted the project: {notes:?}"
         );
     }
 }

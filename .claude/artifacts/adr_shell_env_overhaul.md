@@ -44,7 +44,16 @@ Four research artifacts, all persisted, all load-bearing:
 - [`research_shell_env_reconciler_and_launcher_farm.md`](./research_shell_env_reconciler_and_launcher_farm.md) — mise's `EnvDiffOperation::{Add,Change,Remove}` proves "typed diff over byte snapshot" is shipping practice (~4 ms no-op, ~14 ms reload); its `__MISE_ORIG_PATH` PATH-ownership heuristic is a hand-rolled patch for the provenance gap our ledger closes structurally. direnv's untyped `{Prev,Next}` is the design-against case. PowerShell has exactly one extension point (`prompt`) and every surveyed tool **wraps** it. Nushell has no `eval`.
 - [`research_private_env_state_vars.md`](./research_private_env_state_vars.md) — direnv fails hard on a corrupt `DIRENV_DIFF` (visible base64 errors, [#519](https://github.com/direnv/direnv/issues/519)); mise warns-ignores-rebuilds. Both compress because their payloads grow (direnv's `DIRENV_WATCHES` has hit `E2BIG`, [doomemacs#2335](https://github.com/hlissner/doom-emacs/issues/2335)). Neither authenticates the carrier, and neither needs to.
 - [`research_project_state_layout.md`](./research_project_state_layout.md) — pnpm 10.x added a `projects/` symlink registry for exactly the GC purpose OCX's already serves. Nix `gcroots/per-user/` never cleans stale entries ([nix#7166](https://github.com/NixOS/nix/issues/7166)); OCX's three-state probe is strictly better. direnv keys trust on **path hash AND content hash** — two axes. VS Code hashes the *raw* opened path and forks state on symlink-vs-real ([vscode#313681](https://github.com/microsoft/vscode/issues/313681)) — canonicalize first, which `name_for_path`'s callers already do.
-- [`research_trust_whitelist_grammar.md`](./research_trust_whitelist_grammar.md) — every prefix grammar shipped (direnv `prefix`, mise `trusted_config_paths`) carries the sibling-typosquat footgun: `/home/u/project` also matches `/home/u/project-evil`. git `safe.directory` ships exact-path-only, no glob, **and refuses repo-local config outright** — "only respected in protected configuration". mise's GHSA-436v-8fw5-4mj8 is what happens when the untrusted tier can write trust-control keys; CVE-2026-33646 is its sibling (a project file format with no trust gate at all). Only direnv's allow-store and mise's paranoid mode re-check content; static lists are the field default.
+- [`research_trust_whitelist_grammar.md`](./research_trust_whitelist_grammar.md) — every string-*prefix* grammar shipped (direnv `prefix`, mise `trusted_config_paths`) carries the sibling-typosquat footgun: `/home/u/project` also matches `/home/u/project-evil`. git `safe.directory` **refuses repo-local config outright** — "only respected in protected configuration". mise's GHSA-436v-8fw5-4mj8 is what happens when the untrusted tier can write trust-control keys; CVE-2026-33646 is its sibling (a project file format with no trust gate at all). Only direnv's allow-store and mise's paranoid mode re-check content; static lists are the field default.
+
+  > **Corrected 2026-08-31 — "git `safe.directory` ships exact-path-only, no glob" was checked and is
+  > wrong.** `git-config(1)` (git 2.54): *"Giving a directory with `/*` appended to it will allow
+  > access to all repositories under the named directory."* git ships an exact-directory form **and**
+  > a `/*`-suffixed subtree form, matched component-wise (not a string prefix, so it does not carry
+  > the footgun above). Decision 4's `paths` grammar rested on the wrong half of this citation and is
+  > corrected below to borrow git's spelling, deliberately widened by one directory — see [`research_trust_whitelist_grammar.md`](./research_trust_whitelist_grammar.md)
+  > and [`research_shell_env_sota_gap_check.md`](./research_shell_env_sota_gap_check.md) §5 item 7 for
+  > the verification.
 
 **Key insight:** every primitive here is precedented. The novelty is provenance tagging (which package contributed an element) and the combination of a typed reconciler with an existing GC ledger — not the mechanics.
 
@@ -235,7 +244,8 @@ hook        = true
 completions = true                           # same ladder as `hook` (Decision 5)
 
 [shell.consent]
-paths      = ["/workspaces/acme-monorepo"]   # exact canonical directory, no prefix, no glob
+paths      = ["/workspaces/acme-monorepo"]   # exact canonical directory; add /* for that directory's
+                                             # subtree — corrected 2026-08-31, see the amendment below
 namespaces = "ocx.sh/acme-corp"              # one ScopeSpec, org grant; "ocx.sh/acme-corp/*" is the
                                              # same set — a source is exactly two components (A-27)
 # or the object form, which a bare string cannot spell — carve-outs are at SOURCE granularity, so a
@@ -245,7 +255,77 @@ namespaces = "ocx.sh/acme-corp"              # one ScopeSpec, org grant; "ocx.sh
 ```
 
 - **Never `ocx.toml` — and this needs a guard, not a citation.** Today a `[shell]` block in `ocx.toml` is a hard parse error, because `ProjectConfig` and `RawProjectConfig` both carry `#[serde(deny_unknown_fields)]` (`project/config.rs:122,259`). But that attribute's own docstring (`:113-115`) states its purpose as *"schema drift in consumer `ocx.toml` files surfaces as a parse error rather than silent ignore"* — it is a **typo detector**, load-bearing for a security property in a different file, with nothing recording the coupling and no test pinning it. Three sibling config structs already omit it citing fleet forward-compat (`config/managed.rs:23`, `config/patch.rs:21`, `config/registry.rs:19`), and the Component Contracts row below mandates exactly that doctrine for `Config`. The first person to apply this ADR's own forward-compat argument to `ocx.toml` reopens GHSA-436v-8fw5-4mj8 without ever opening this ADR. Worse, `ConfigLoader::load_with_local_view` **already resolves a project tier into the pipeline that carries `Config`** and parks it: `let _project_path = Self::project_path(…)` (`config/loader.rs:145`), commented *"consumed in later phases once the project-config schema lands"*. The untrusted tier is pre-wired one commit from being read, and `Config` has no `deny_unknown_fields` anywhere in its tree. **So: convert the prose into a guard that can go red.** When `[shell]` lands on `Config`, strip `shell` from any project-tier contribution explicitly, in `guard_managed_sigstore_trust`'s home and idiom (`config/loader.rs:431`), and ship two tests — a project-tier fold cannot contribute `[shell.consent]`, and `[shell]` in `ocx.toml` is refused. "Structurally, not by discipline" is only true once those exist; until then it *is* discipline.
-- **`paths` is exact-directory, matched on the canonicalized path.** No prefix, no glob. Every tool shipping a prefix grammar carries the sibling-typosquat footgun; git ships exact-only and documents that it has no glob. The dynamic case (a checkout whose path is unknown at image-build time) is served by the env channel, which is strictly better than git's `postStartCommand` workaround. **Only the project side is canonicalized; whitelist entries are compared literally** (after separator and trailing-slash normalization). The two choices have opposite failure modes and only one can ship: canonicalizing *entries* at read time makes the grant follow a symlink an attacker may control on the parent (`/workspaces/repo → /tmp/evil` needs only write access on `/workspaces`), while comparing literally never matches a symlinked checkout and is then silently inert. Inert is the fail-safe direction, and an operator writing an exact path can write the real one. The project side is already correct — `dunce::canonicalize` at `project/registry.rs:311`, and `walk_for_project_file` rejects a symlinked `ocx.toml` at `config/loader.rs:652-657`. **Entries are compared as literal bytes, with no case folding** — canonicalizing or case-folding the entry would widen the grant, which is the wrong failure direction here — so a case-only or separator-only near-miss between a `paths` entry and the canonical directory is `Inert`, same as any other mismatch; to pay off the resulting support cost, `ocx shell state`'s not-active reason enumeration (Decision 10) names that near-miss explicitly when it is the cause (A-28).
+- **`paths` is exact-directory, matched on the canonicalized path.** No prefix, no glob. Every tool shipping a prefix grammar carries the sibling-typosquat footgun; git ships exact-only and documents that it has no glob. The dynamic case (a checkout whose path is unknown at image-build time) is served by the env channel, which is strictly better than git's `postStartCommand` workaround. **Only the project side is canonicalized; whitelist entries are compared literally** (after separator and trailing-slash normalization). The two choices have opposite failure modes and only one can ship: canonicalizing *entries* at read time makes the grant follow a symlink an attacker may control on the parent (`/workspaces/repo → /tmp/evil` needs only write access on `/workspaces`), while comparing literally never matches a symlinked checkout and is then silently inert. Inert is the fail-safe direction, and an operator writing an exact path can write the real one. The project side is already correct — `dunce::canonicalize` at `project/registry.rs:311`, and `walk_for_project_file` rejects a symlinked `ocx.toml` at `config/loader.rs:652-657`. **Entries are compared as literal bytes, with no case folding on a case-sensitive filesystem** (amended 2026-09-01, round 3: ASCII case folds on Windows, where the filesystem folds it too — see EC-GRANT-025) — canonicalizing or case-folding the entry would widen the grant, which is the wrong failure direction here — so a case-only or separator-only near-miss between a `paths` entry and the canonical directory is `Inert`, same as any other mismatch; to pay off the resulting support cost, `ocx shell state`'s not-active reason enumeration (Decision 10) names that near-miss explicitly when it is the cause (A-28).
+
+> **Amended 2026-08-31 — this bullet rested on a mistaken premise about git, and is corrected.** "git
+> ships exact-only and documents that it has no glob" is false: `git-config(1)` (git 2.54) states
+> plainly, under `safe.directory`, *"Giving a directory with `/*` appended to it will allow access to
+> all repositories under the named directory."* git ships **two** forms, and `paths` now ships both
+> rather than one — though the subtree form is not an exact mirror, as the next bullet notes:
+>
+> - `<path>` — that one canonical directory, exactly as this bullet describes.
+> - `<path>/*` — that directory and everything beneath it, matched **component-wise**
+>   (`Path::starts_with`, never a string prefix) — `/w/acme/*` covers `/w/acme` and `/w/acme/tools`
+>   but never the sibling `/w/acme-evil`. This borrows git's own `/*` spelling and its component-bounded
+>   matching, not a new grammar, but deliberately widens it by one directory: git's `/*` covers only
+>   what is nested *under* the named directory, never the directory itself, per the man-page wording
+>   quoted above; OCX's `/*` grants the named directory too. It does not carry the sibling-typosquat
+>   footgun the "no prefix" framing above was warning against, because component-boundedness is exactly
+>   what a string prefix lacks.
+> - There is no whole-filesystem token: a `*` that leaves no named directory behind — a bare `*`, or
+>   `/*` alone — is not a subtree grant and matches nothing, for the same reason `namespaces` has no
+>   whole-registry spelling (A-27).
+> - **Owner decision, accepted:** a subtree-derived grant authorizes the project `[env]` channel
+>   exactly as an exact-directory grant does — the "**Only the project side is canonicalized**"
+>   sentence and the symlink reasoning above are otherwise unchanged by this correction and continue
+>   to apply to both forms.
+> - **The "case-only or separator-only near-miss" sentence above is also too broad; only the case leg
+>   is reachable.** Separator and trailing-slash normalization runs before the byte compare, so an
+>   entry differing from the canonical directory only by separator style is not a mismatch at all — it
+>   normalizes to an exact match, on both platforms: two spellings are two different directories on
+>   Unix (no row reaches the compare) and one path on Windows (an exact hit). `ascii_case_near_miss`
+>   folds ASCII case only. Read that sentence as "a case-only near-miss," not "case-only or
+>   separator-only."
+>
+> See [`research_trust_whitelist_grammar.md`](./research_trust_whitelist_grammar.md) and
+> [`research_shell_env_sota_gap_check.md`](./research_shell_env_sota_gap_check.md) §5 item 7 for the
+> verification, and `design_spec_shell_env_overhaul.md` C-027/C-030 and `adr_shell_env_addenda.md`
+> A-26 for the rest of the fold.
+
+> **Amended 2026-08-31 (round 2) — three further owner decisions on this grammar.**
+>
+> - **A leading `~` is expanded**, in a `paths` entry and in each `OCX_CONSENT_PATHS` token alike,
+>   matching git `safe.directory`'s own `~/…` interpolation. Expansion is **textual substitution
+>   only**: `~` is replaced with `$HOME` before separator/trailing-slash normalization and the byte
+>   compare, and nothing more — it does not canonicalize the result and does not resolve a symlink, so
+>   a symlinked `~/dev` still misses if the canonical project directory resolves elsewhere, the
+>   identical fail-safe direction "entries are never canonicalized" already takes for an absolute
+>   entry. `~user/…` is **not** expanded; it survives as a literal string that can never equal an
+>   absolute canonical directory, so it never matches.
+> - **A bare `*` / `/*` stays refused, and this was reconsidered, not merely left alone.** git ships
+>   `safe.directory = *` as an explicit trust-everything token; `paths` was asked to mirror it and the
+>   answer is no, for the identical reason A-27 gives `namespaces` no whole-registry spelling — a token
+>   that authorizes every directory on the host cannot be scoped by a publisher who does not control
+>   the host it lands on, and the devcontainer case `paths` exists to serve is served by naming the
+>   checkout, never by naming the filesystem. The grammar therefore ships no equivalent of git's `*`,
+>   deliberately, and the absence is a decision to record rather than an omission to rediscover.
+> - **The canonical-`project_dir` precondition moves from a debug assertion to a release-enforced
+>   refusal.** `Path::starts_with` is a **component** compare, not a containment check: for the subtree
+>   form, `/w/acme/../../etc` `starts_with` `/w/acme`, so a `..`-bearing `project_dir` would escape the
+>   subtree it appears to sit inside rather than merely miss it. The premise that every caller derives
+>   `project_dir` through `canonical_project_dir` was previously carried only as a `debug_assert!` in
+>   `consent_path_matches` — correct in every test build, silent in release. It is now enforced on
+>   every build: a `project_dir` carrying a `..` component matches **no** `paths` entry, exact or
+>   subtree, refused before the compare runs rather than trusted into it.
+>
+> `ocx shell state`'s reason enumeration is extended to match: an entry that can never match anything
+> under any interpretation — an unseparated subtree spelling, a mid-path `*`, a bare `*` naming no
+> directory, a literal `..` component, or an unsupported `~user/…` form — now gets a named diagnostic
+> line, the same support-cost trade the ASCII-case near-miss line above already made (Decision 10,
+> Component Contracts row, below).
+>
+> See `design_spec_shell_env_overhaul.md` C-030/C-031/C-050 and `adr_shell_env_addenda.md` A-28 for the
+> rest of the fold, and the edge-case register's `EC-GRANT-022`–`EC-GRANT-024` for the shipped tests.
 - **`namespaces` is one `ScopeSpec`** (`trust.rs:247`) — not a `Vec<ScopeSpec>`, and not a `Vec<String>`. A flat list carries the defect `[[trust.policy]]` already solved: a union over entries can only ever widen, so "everything under `ocx.sh/acme/*` except the one compromised namespace" is unspellable, and the exception has to be bolted on beside the list. A single `ScopeSpec` is *either* a fixed string *or* `Set { include, exclude }`, which states coverage and carve-out in one value. `ScopeSpec` already carries this exact grammar — string form `scope = "ghcr.io/acme/*"`, segment-bounded without a `*`, literal-prefix glob with one (`config/loader.rs:1523`) — already matched against canonical `registry/repository` targets, which is the same target shape a lock source has. Project rule: extend existing mechanisms, do not duplicate. **Sharing the type does not couple the policies.** `ScopeSpec` is a matching primitive, not a trust semantic: a namespace consented for shell activation is **not** thereby trusted for signature verification, and a namespace named in `[[trust.policy]]` does **not** grant activation consent. The two lists are read by different code paths answering different questions — *whose binaries may reach my PATH on `cd`* versus *whose signature satisfies a verification policy* — and neither reads the other's configuration. Two things the single-spec shape gives that a flat list cannot:
   - **`Set { include, exclude }` carve-outs.** A fleet pre-consenting to `ocx.sh/acme/*` while excluding one compromised namespace is currently unspellable; with `ScopeSpec` it is the object form, already schema'd and already refusing a table that names neither key (so a typo'd `includ` fails loudly instead of widening to catch-all — the correct failure direction for consent material).
   - **`ScopeSpec::specificity_for` (`trust.rs:419`)**, the ranking `[[trust.policy]]` already uses.
@@ -420,7 +500,7 @@ Previously this existed only as a parenthetical inside an acceptance-test bullet
 | `ocx_cli::options::Hook` | Decision 5 |
 | `ocx self setup` | `+ --hook | --no-hook` → writes `[shell] hook`; `+ --completion | --no-completion` → writes `[shell] completions` (new pair — `setup` flattens neither today); flag absent writes nothing, home tier, surgical `toml_edit` (Decision 5) |
 | `ocx self activate` | `+ --hook | --no-hook`; `+ --reconcile` (hidden plumbing, per-prompt); reads `[shell]` once — both `hook` and `completions` (Decision 5, option C) |
-| `ocx shell state` (new — **the only new command surface**) | Read-only introspection: decoded ledger (fields, not base64), applied-per-scope, fingerprint status against the watch set, `priors` intactness, and the enumerated reason the shell is **not** active (no stamp + no grant, stamp/source-set drift, the lock's claimed sources not corroborated by the store's own pull-origin record (clause 2 refusal), hook disabled naming the deciding rung and tier, yielded to direnv/mise naming the live signal, ledger over cap ⇒ absent, ledger absent vs corrupt, `ocx.lock` absent/unreadable/unparseable). **Contract: output is human-readable and never eval-able**, asserted by a test that the output is not interchangeable with `self activate`'s; `--format json` is a context, not a divergent surface. Never writes: no stamp, no ledger repair, no plan (Decision 10). **The reason enumeration gains four more rows**: a skipped symlinked `ocx.toml` candidate and the ancestor project activated in its place, naming `--project`/`OCX_PROJECT` as the opt-in (A-12); a `paths` entry that near-misses the canonical directory by ASCII case or separator style only (A-28); for a `paths`-activated project, the truthful *"active via `paths` grant; source-set drift is not tracked for path grants"* rather than a phantom drift check (A-26); and, when the hook-disabled or `[shell]`-merge reason fires, the **deciding config tier named explicitly** — never the word "managed" asserted generically (A-32) |
+| `ocx shell state` (new — **the only new command surface**) | Read-only introspection: decoded ledger (fields, not base64), applied-per-scope, fingerprint status against the watch set, `priors` intactness, and the enumerated reason the shell is **not** active (no stamp + no grant, stamp/source-set drift, the lock's claimed sources not corroborated by the store's own pull-origin record (clause 2 refusal), hook disabled naming the deciding rung and tier, yielded to direnv/mise naming the live signal, ledger over cap ⇒ absent, ledger absent vs corrupt, `ocx.lock` absent/unreadable/unparseable). **Contract: output is human-readable and never eval-able**, asserted by a test that the output is not interchangeable with `self activate`'s; `--format json` is a context, not a divergent surface. Never writes: no stamp, no ledger repair, no plan (Decision 10). **The reason enumeration gains five more rows**: a skipped symlinked `ocx.toml` candidate and the ancestor project activated in its place, naming `--project`/`OCX_PROJECT` as the opt-in (A-12); a `paths` entry that near-misses the canonical directory by ASCII case only (A-28); for a `paths`-activated project, the truthful *"active via `paths` grant; source-set drift is not tracked for path grants"* rather than a phantom drift check (A-26); when the hook-disabled or `[shell]`-merge reason fires, the **deciding config tier named explicitly** — never the word "managed" asserted generically (A-32); and a `paths` entry that can **never** match anything under any interpretation — a subtree spelling missing its separator (`/w/acme*`, which `subtree_prefix` parses as one literal component, never a subtree marker), a mid-path `*` (`/w/*/tools`), a bare `*` naming no directory, a literal `..` component, or an unsupported `~user/…` form — flagged the same way as the ASCII-case near-miss (A-28, round 2) |
 | Env vars | `__OCX_ENV_STATE` (private carrier), `OCX_NO_HOOK` (boolean, `env::flag`), `OCX_CONSENT_PATHS` (OS PATH-sep), `OCX_CONSENT_NAMESPACES` (comma-sep). Bare `OCX_SHELL` is **reserved, never read** (Decision 5) |
 | On-disk | `$OCX_HOME/state/projects/<16hex>/consent.json` |
 | Untouched | `OCX_ENV` (name, help text, codec, stripping); package metadata `Env`; `ocx.lock`; OCI manifests; `ocx.toml` grammar; PATH shim-slot ordering `entrypoints/` > `bin/` > `shims/`; `move_to_front`; every `Shell::export_path` arm; `ocx direnv export` / `direnv init` |

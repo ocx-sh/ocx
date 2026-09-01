@@ -24,8 +24,9 @@ pub use config::patch::{
     PatchConfig, PatchConfigError, ResolvedPatchConfig, expand_patch_path, patches_from_env, resolve_patch_config,
 };
 pub use config::shell::{
-    ConsentPatternError, ConsentScopeSpec, OCX_CONSENT_NAMESPACES, OCX_CONSENT_PATHS, ShellConfig, ShellConsent,
-    effective_consent, env_channel, normalize_consent_path, normalize_consent_pattern, validate_consent_pattern,
+    ConsentPatternError, ConsentScopeSpec, EntryDefect, OCX_CONSENT_NAMESPACES, OCX_CONSENT_PATHS, ShellConfig,
+    ShellConsent, consent_entry_defect, consent_path_matches, effective_consent, env_channel,
+    normalize_consent_pattern, validate_consent_pattern,
 };
 pub use config::{Config, ConfigTier, RegistryConfig, RegistryDefaults};
 

@@ -4323,8 +4323,14 @@ def test_traceability_every_pytest_and_manual_row_names_a_real_covering_test() -
     # 220 original rows + 3 added by this module for Discovery corrections 12,
     # 14, 15 (plan_shell_env_overhaul.md §5: EC-HOOK-015, EC-HOOK-016, EC-PROC-015),
     # + EC-LIST-011 (ocx#350) and EC-HOOK-017 (ocx#347) + EC-REC-007 (S-022,
-    # `shell_integration_installed`) + EC-REC-008 (finding 97, `lock_refusal`).
-    assert len(register) == 227, f"the register must still parse to exactly 227 rows; got {len(register)}"
+    # `shell_integration_installed`) + EC-REC-008 (finding 97, `lock_refusal`)
+    # + EC-GRANT-020 and EC-GRANT-021 (the `paths` subtree form)
+    # + EC-GRANT-022, EC-GRANT-023 and EC-GRANT-024 (round 2: tilde expansion,
+    # the release-enforced canonical-`project_dir` refusal, and the
+    # never-matching-entry diagnostic)
+    # + EC-GRANT-025 and EC-GRANT-026 (round 3: the per-platform ASCII-case
+    # fold, and the single-wildcard rule).
+    assert len(register) == 234, f"the register must still parse to exactly 234 rows; got {len(register)}"
     test_to_ids = _this_modules_test_to_ids()
     known_test_names = set(test_to_ids.keys()) | _shell_module_test_names()
     known_manual_procedures = {

@@ -1001,10 +1001,12 @@ that the source-set predicate would be "dead code" is false for clause 2. `paths
 publisher) is precisely one where the operator *cannot* enumerate sources; making
 it drift-sensitive breaks it on the first `git pull` that adds a tool, in an
 environment with no human at the prompt to re-confirm. This is git
-`safe.directory` semantics — exact directory, unconditional, no content re-check —
-which ADR:45 already cites as the field precedent. Not stamping also keeps the
-write seam at exactly six commands (A-29) and keeps a write off the stat-only
-per-prompt path (D4).
+`safe.directory` semantics — unconditional, no content re-check, for either its
+exact-directory or its trailing-`/*` subtree arm (C-030, corrected 2026-08-31:
+"exact directory" above should read "exact directory, or its subtree arm" — git
+ships both, and `paths` now mirrors both) — which ADR:45 already cites as the
+field precedent. Not stamping also keeps the write seam at exactly six commands
+(A-29) and keeps a write off the stat-only per-prompt path (D4).
 
 **Consequence to state in the ADR.** Revoking a `paths` grant is immediately
 effective, because no stamp was ever derived from it; and `ocx shell state` reports
@@ -1122,6 +1124,15 @@ state`'s not-active reason enumeration MUST include a **near-miss** line when a
 `paths` entry differs from the canonical directory only by ASCII case or separator
 style.
 
+> **Amended 2026-09-01 (round 3) — the case rule follows the platform.** Byte-exact holds on
+> case-sensitive filesystems, where `/a/B` and `/a/b` are two directories and folding them widens a
+> grant onto one an attacker may create. Windows cannot hold both, so `normalize_consent_path` folds
+> ASCII case on `Component::Normal` there — `std` already folded the drive letter for the same
+> reason — and refusing to fold left an operator who wrote `C:\W\Acme` inert on a directory the OS
+> considers identical to the one they named. Both arms route both operands through the same
+> normalizer, so the exact and subtree forms can never fold differently. The A-28 near-miss is
+> therefore a Unix-only note: on Windows the case it describes is a grant. Pinned by EC-GRANT-025.
+
 **Rationale.** ADR:225's own reasoning, one step further: canonicalizing entries
 follows an attacker-controllable parent symlink; folding case merges `/a/B` and
 `/a/b` into one grant on a case-*sensitive* filesystem, which widens. Inert is the
@@ -1135,6 +1146,58 @@ state: replace the compare with `eq_ignore_ascii_case` and the `Inert` assertion
 fails; drop the near-miss branch and the reason-string assertion fails.
 
 **Verdict.** Adopts EC-GRANT-012.
+
+> **Amended 2026-08-31 (round 2) — three further decisions on the entry-matching contract this
+> resolution owns.**
+>
+> **Tilde expansion (closes EC-GRANT-022).** A leading `~` in a `paths` entry, and in each
+> `OCX_CONSENT_PATHS` token (C-031), is expanded against `$HOME` before the separator/trailing-slash
+> normalization this resolution already specifies, mirroring git `safe.directory`'s own `~/…`
+> interpolation. Expansion is **textual substitution only** — no canonicalization, no symlink
+> resolution — so a symlinked `~/dev` still misses if the canonical project directory resolves
+> elsewhere, the identical fail-safe direction the literal-byte-compare rule above already takes.
+> `~user/…` is **not** expanded; it survives as a literal string that can never equal an absolute
+> canonical directory, and therefore never matches.
+>
+> **The canonical-`project_dir` precondition moves from a debug assertion to a release-enforced
+> refusal (closes EC-GRANT-023).** `Path::starts_with` is a component compare, not a containment
+> check: for the subtree form, `/w/acme/../../etc` `starts_with` `/w/acme`, so a `..`-bearing
+> `project_dir` would **escape** the subtree it appears to sit inside rather than merely miss it. The
+> premise — every caller derives `project_dir` through `canonical_project_dir` — was carried only as
+> `debug_assert!` in `consent_path_matches`, correct in every test build and silent in release. It is
+> now checked on every build: a `project_dir` carrying a `..` component matches no `paths` entry,
+> exact or subtree, refused before the compare runs.
+>
+> **`ocx shell state` gains a never-matching-entry diagnostic, extending this resolution's near-miss
+> line beyond the ASCII-case row (closes EC-GRANT-024).** Previously an entry that could never match
+> anything under any interpretation was silently inert, with no line explaining why — the same support
+> cost this resolution already paid off for a case-only mismatch, unpaid for a structurally dead entry.
+> The reason enumeration (C-050) now also names: a subtree spelling missing its separator (`/w/acme*`,
+> which `subtree_prefix` parses as one literal component, never a subtree marker); a mid-path `*`
+> (`/w/*/tools`, same reason); a bare `*` naming no directory (`*`, `/*` — EC-GRANT-021's own case, now
+> reported rather than merely inert); an entry carrying a literal `..` component (never produced by the
+> canonicalized project-directory side of the compare, so an entry that has one can never equal it); and
+> an unsupported `~user/…` form. The shipped `EntryDefect` enum carries two further variants beyond
+> those five — an unresolvable home directory, and a relative entry, which can never lead with the root
+> a canonical directory always starts from — for the identical reason. None of these are rejected at
+> parse — unlike `namespaces`'s rejected classes (A-27), a `paths` entry is a plain string with no
+> grammar to fail at load — they are ordinary entries that simply never match, and the diagnostic is the
+> only way a user learns that short of reading this document.
+>
+> **Test hook.** EC-GRANT-022 (tilde expansion on both channels, including the no-symlink-resolution
+> case and the unsupported `~user/…` form); EC-GRANT-023 (a `..`-bearing `project_dir` matches neither
+> an exact nor a subtree entry that would otherwise cover it); EC-GRANT-024 (each of the four
+> never-matching spellings above produces the new reason line in `ocx shell state`, with a positive
+> control that a spelling one edit away — `/w/acme/*`, `/w/acme` — does match).
+
+> **Amended 2026-08-31 (round 2) — considered and rejected: a bare `*` / `/*` as a whole-machine
+> token.** git ships `safe.directory = *` to mean "trust every repository on this machine"; `paths`
+> was asked to mirror it and the owner declined, for the identical reason A-27 refuses `namespaces` a
+> whole-registry spelling — a token that authorizes every directory on the host cannot be scoped by a
+> publisher who does not control the host it lands on, and the devcontainer case `paths` exists to
+> serve is served by naming the checkout, never by naming the filesystem. No code changed: `["*"]` and
+> `["/*"]` already matched nothing (EC-GRANT-021); this records that the wider spelling was considered
+> and refused, not merely never proposed.
 
 ### A-29 — Read-only commands never consent, stated as a negative contract
 

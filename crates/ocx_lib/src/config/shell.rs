@@ -12,8 +12,8 @@
 //!
 //! [`ConfigLoader::fold_project_tier`]: crate::config::loader::ConfigLoader::fold_project_tier
 
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::ffi::{OsStr, OsString};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Deserializer};
 
@@ -137,8 +137,13 @@ impl ShellConfig {
 #[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ShellConsent {
-    /// Exact canonical directories that activate unconditionally (C-025 clause
-    /// 3). git `safe.directory` semantics: exact directory, no prefix, no glob.
+    /// Canonical directories that activate unconditionally (C-025 clause 3).
+    /// Modelled on git's `safe.directory`: an entry is one exact directory,
+    /// or — with a trailing `/*` — that directory and everything beneath it,
+    /// matched component-wise ([`consent_path_matches`]). git's `/*` covers
+    /// only what is nested *under* the named directory; this one covers the
+    /// named directory too. A bare `*` grants nothing: OCX has no
+    /// trust-this-machine token.
     ///
     /// **Only the project side is canonicalized; entries are compared
     /// literally** after separator and trailing-slash normalization
@@ -147,7 +152,13 @@ pub struct ShellConsent {
     /// parent; comparing literally never matches a symlinked checkout and is
     /// then silently inert — the fail-safe direction. A-28 adds a **near-miss**
     /// row to `ocx shell state` when an entry differs from the canonical
-    /// directory only by ASCII case or separator style.
+    /// directory only by ASCII case.
+    ///
+    /// A **leading** `~` expands against the home directory at match time, the
+    /// way git interpolates one in `safe.directory` — textually, resolving no
+    /// symlink, and never rewritten into the stored entry, so `ocx shell state`
+    /// still prints what the user wrote. `~user` is not supported.
+    /// [`consent_entry_defect`] names every spelling that can never match.
     ///
     /// A-26 — a `paths` grant is deliberately drift-blind and writes no stamp,
     /// so revoking it is immediately effective.
@@ -533,12 +544,22 @@ pub fn normalize_consent_pattern(pattern: &str) -> Result<String, ConsentPattern
 /// Render `path` for the literal `[shell.consent] paths` comparison (C-030,
 /// A-28).
 ///
-/// Separator and trailing-slash normalization **only** — no case folding, no
-/// canonicalization of the entry. Folding case would merge `/a/B` and `/a/b`
-/// into one grant on a case-sensitive filesystem, which widens; canonicalizing
-/// the entry would make the grant follow a symlink an attacker may control on
-/// the parent. A case-only mismatch is therefore inert, and `ocx shell state`
-/// reports it as a near-miss instead (A-28).
+/// Separator, trailing-slash, and — **on Windows only** — ASCII-case
+/// normalization. No canonicalization of the entry ever: that would make the
+/// grant follow a symlink an attacker may control on the parent.
+///
+/// **The case rule follows the platform, because so does the filesystem.** On
+/// Unix `/a/B` and `/a/b` are two directories, so folding them onto one grant
+/// widens it onto a directory an attacker can create; a case-only mismatch is
+/// inert there and `ocx shell state` reports it as a near-miss instead (A-28).
+/// On Windows they are one directory — the filesystem itself refuses to hold
+/// both — so folding merges nothing that was ever apart, and *not* folding
+/// leaves an operator who wrote `C:\W\Acme` staring at an inert shell for a
+/// directory Windows considers identical. `std` already folds the drive letter
+/// for exactly this reason; this extends the same rule to the components after
+/// it. The fold is ASCII-only, matching the drive letter's, rather than
+/// Unicode case folding: a full fold is locale- and version-dependent, and a
+/// trust boundary that shifts with an ICU table is not one.
 ///
 /// The normalizer is [`Path::components`], and both halves of that choice are
 /// the fix for a widening this function used to ship:
@@ -560,7 +581,303 @@ pub fn normalize_consent_pattern(pattern: &str) -> Result<String, ConsentPattern
 /// a grant is not.
 #[must_use]
 pub fn normalize_consent_path(path: &Path) -> OsString {
-    path.components().collect::<PathBuf>().into_os_string()
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            // Windows-only: `Prefix` already arrives with its drive letter
+            // folded by `std`; `Normal` is what is left to fold. Pushing
+            // `as_os_str()` for every other component is exactly what
+            // `FromIterator<Component> for PathBuf` does, so the separator and
+            // trailing-slash behaviour is unchanged — including `RootDir`,
+            // which `push` resolves against a preceding `Prefix` rather than
+            // replacing it.
+            #[cfg(windows)]
+            Component::Normal(name) => normalized.push(name.to_ascii_lowercase()),
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized.into_os_string()
+}
+
+/// Whether the `paths` entry `entry` grants the canonical directory
+/// `project_dir` (C-025 clause 3).
+///
+/// Two spellings, borrowing git `safe.directory`'s:
+///
+/// - `/w/acme` — that one directory, and nothing else.
+/// - `/w/acme/*` — that directory and everything beneath it.
+///
+/// The second deliberately widens git's by one directory: measured against git
+/// 2.54, `safe.directory = /w/acme/*` refuses `/w/acme` itself and allows only
+/// what is nested under it. The spelling and the component-bounded matching are
+/// git's; granting the named directory as well is ours.
+///
+/// The subtree form matches **component-wise**, never as a string prefix, so
+/// `/w/acme/*` covers `/w/acme/tools` and never the attacker-planted sibling
+/// `/w/acme-evil`. That sibling is the reason a bare string prefix was refused
+/// in the first place; a component-bounded one has no such reach.
+///
+/// A trailing `*` component is the **only** wildcard. `?`, `[…]` and every
+/// other glob metacharacter is an ordinary filename byte, so `/w/acm?` grants a
+/// directory literally named `acm?` and never `/w/acm3`.
+///
+/// A `*` that leaves no named directory behind — a bare `*`, or `/*` — is
+/// **not** a subtree grant and matches nothing. git spells that "trust every
+/// repository on this machine"; OCX has no such token, for the same reason
+/// `namespaces` has no whole-registry one.
+///
+/// A **leading** `~` — `~` alone or `~/…` — expands against the home directory
+/// before anything is compared, in both channels, the way git interpolates one
+/// in `safe.directory`. Two forms never expand and therefore match nothing:
+/// `~user`, which is not supported, and a leading `~` on a machine where no
+/// home directory resolves. [`consent_entry_defect`] names both, and it is the
+/// same [`expanded_entry`] seam, so the diagnostic and the grant can never
+/// disagree.
+///
+/// **The expansion is textual.** It does not canonicalize and does not resolve
+/// symlinks, so a `~/dev` whose `dev` is a symlink still fails to match the
+/// canonical project directory behind it — the entry side is never
+/// canonicalized and `~` is not an exception to that. `ocx shell state` prints
+/// the entry as the user wrote it, never the expansion.
+///
+/// Only the project side is ever canonicalized. The entry is compared as its
+/// own bytes after separator and trailing-slash normalization
+/// ([`normalize_consent_path`], C-030), so a grant never follows a symlink an
+/// attacker may control on the parent — and, conversely, an entry naming a
+/// symlinked route to a project is inert rather than matching. Write the entry
+/// as the canonical path `ocx shell state` prints.
+///
+/// **Both arms compare through [`Path`], so both fold exactly what
+/// `Path::starts_with` folds and nothing else.** `Path`'s own equality is
+/// `components() == components()`, and `PrefixComponent`'s equality is on its
+/// *parsed* form, whose drive letter `std` ASCII-uppercases — so `c:\w\acme`
+/// and `C:\w\acme` are one entry on Windows, in the exact form as well as in
+/// the subtree form. The exact arm used to compare `OsString`s bytewise, which
+/// left one entry style meaning two different things depending on which
+/// spelling it carried.
+///
+/// **Ordinary components fold ASCII case on Windows and nowhere else**, which
+/// [`normalize_consent_path`] applies to both operands of both arms. Windows
+/// cannot hold two directories differing only by case, so the fold merges
+/// nothing that was ever distinct; Unix can, so folding there would widen a
+/// grant onto a directory an attacker may create, and a case-only mismatch
+/// stays inert and surfaces as `ocx shell state`'s A-28 near-miss. That note is
+/// therefore Unix-only in practice: on Windows the case it describes is a
+/// grant.
+///
+/// **`project_dir` must already be canonical, and this fails closed when it is
+/// not.** The subtree form is what makes that load-bearing rather than
+/// cosmetic: the exact form only ever *misses* on a non-canonical directory,
+/// but the subtree form is a containment test, and a `..` component **escapes**
+/// the subtree it appears to sit in — `/w/acme/../../etc` is inside
+/// `/w/acme/*` as far as `Path::starts_with` is concerned. Every caller derives
+/// the directory through
+/// [`canonical_project_dir`](crate::project::consent::canonical_project_dir), so
+/// a `..` here means that premise was broken upstream: such a directory matches
+/// **nothing**, in a release build exactly as in a debug one.
+#[must_use]
+pub fn consent_path_matches(entry: &Path, project_dir: &Path) -> bool {
+    // Refuse, rather than assert: a debug-only assertion leaves the release
+    // build granting the escape it names, and a trust boundary that means two
+    // different things per profile is not a boundary.
+    if project_dir
+        .components()
+        .any(|component| component == Component::ParentDir)
+    {
+        return false;
+    }
+    // An entry whose leading `~` cannot be expanded matches nothing — never a
+    // panic, and never a partial expansion that would compare a literal `~`.
+    let Ok(entry) = expanded_entry(entry) else {
+        return false;
+    };
+    let project = PathBuf::from(normalize_consent_path(project_dir));
+    match subtree_prefix(&entry) {
+        // `subtree_prefix` collects through `Path::components`, which is only
+        // half of the normalization: the Windows ASCII-case fold lives in
+        // `normalize_consent_path`. Routing the prefix through it too is what
+        // keeps the subtree arm and the exact arm folding the same thing —
+        // without it the subtree form would stay case-sensitive on Windows
+        // while the exact form folded, which is the asymmetry this whole
+        // function exists to not have.
+        Some(prefix) => project.starts_with(normalize_consent_path(&prefix)),
+        // Mixed operands, one comparison: `PathBuf: PartialEq<OsString>`
+        // delegates to `<Path as PartialEq>::eq`, which is
+        // `components() == components()` — the identical comparison
+        // `starts_with` performs above, and **not** the `OsString` byte compare
+        // the types suggest. That is the whole fix: a byte compare folded the
+        // drive letter on neither side while the arm above folded it on both.
+        None => project == normalize_consent_path(&entry),
+    }
+}
+
+/// The directory a subtree entry names, or `None` when `entry` is an exact
+/// grant.
+///
+/// `None` for a `*` that names no directory (bare `*`, `/*`, `C:\*`): a grant
+/// over the whole filesystem is not expressible.
+fn subtree_prefix(entry: &Path) -> Option<PathBuf> {
+    let mut components = entry.components();
+    if components.next_back()? != Component::Normal(OsStr::new("*")) {
+        return None;
+    }
+    let prefix: PathBuf = components.collect();
+    prefix
+        .components()
+        .any(|component| matches!(component, Component::Normal(_)))
+        .then_some(prefix)
+}
+
+/// Why a `paths` entry can never match any canonical directory.
+///
+/// One entry, one defect: the first one found is reported, most specific first,
+/// so `~alice/../x` is a `~user` problem rather than a `..` problem. Every
+/// variant is derived from the same [`expanded_entry`] and [`subtree_prefix`]
+/// the matcher uses, so the two cannot drift apart.
+///
+/// **The one thing that can defeat the `*` classes** is a directory whose name
+/// is literally `*` — `mkdir '*'` is legal on Unix, illegal on Windows — for
+/// which `/w/acme*` or `/w/*/tools` would be a legitimate exact entry. The
+/// classes read `*` as the wildcard the grammar defines it to be, which is what
+/// every author of such an entry meant; the other classes hold without
+/// exception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryDefect {
+    /// A `*` component that is not the entry's last component (`/w/*/tools`).
+    StarNotLast,
+    /// A `*` inside a component carrying other characters (`/w/acme*`).
+    StarInsideComponent,
+    /// A `*` leaving no named directory behind (`*`, `/*`, `C:\*`).
+    StarNamesNoDirectory,
+    /// A `..` component — a canonical directory never carries one.
+    ParentDirComponent,
+    /// A leading `~` that no home directory could expand.
+    UnresolvableHome,
+    /// A `~user` form, which is not supported.
+    UnsupportedTildeUser,
+    /// A relative entry — a canonical directory is always absolute, so no
+    /// comparison of either arm can ever succeed against one.
+    ///
+    /// **Beyond the six variants the plan named**, and reported here because it
+    /// is genuinely unmatchable rather than merely suspicious: `Path` equality
+    /// and `Path::starts_with` both compare from the first component, and a
+    /// canonical directory always leads with a root (and, on Windows, a drive
+    /// prefix) that a relative entry has nothing to put beside.
+    RelativePath,
+}
+
+impl std::fmt::Display for EntryDefect {
+    /// One lower-case fragment naming the defect and the spelling the author
+    /// most likely meant — this is what `ocx shell state` prints next to the
+    /// entry, for someone looking at their own `config.toml`.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            EntryDefect::StarNotLast => {
+                "'*' is a wildcard only as the entry's last component; write '<directory>/*' to grant a subtree"
+            }
+            EntryDefect::StarInsideComponent => {
+                "'*' is a whole component, never part of one; write '<directory>/*' to grant everything beneath \
+                 '<directory>'"
+            }
+            EntryDefect::StarNamesNoDirectory => {
+                "'*' with no directory before it would grant every directory on this machine, which has no \
+                 spelling; name the directory to grant"
+            }
+            EntryDefect::ParentDirComponent => {
+                "'..' never appears in a canonical directory; write the path the way 'ocx shell state' prints it"
+            }
+            EntryDefect::UnresolvableHome => {
+                "a leading '~' needs a home directory and none resolved on this machine; write the path out in full"
+            }
+            EntryDefect::UnsupportedTildeUser => "'~user' is never expanded; write that user's directory out in full",
+            EntryDefect::RelativePath => {
+                "a relative entry never matches; a canonical project directory is always absolute, so write the \
+                 full path"
+            }
+        })
+    }
+}
+
+/// `Some(defect)` when `entry` can never match any canonical directory,
+/// `None` when it is a well-formed exact or subtree entry.
+///
+/// The diagnostic half of [`consent_path_matches`], and the reason a silently
+/// inert entry is now a reported one: `ocx shell state` renders the returned
+/// defect's `Display` beside the entry **as the user wrote it**, expansion and
+/// all left out of the rendering.
+///
+/// Agreement with the matcher is by construction, not by parallel
+/// re-derivation: this routes through the same [`expanded_entry`] and the same
+/// [`subtree_prefix`], so an entry this refuses is one the matcher's own
+/// `let Ok(entry) = …` / `subtree_prefix` arms already refuse. See
+/// [`EntryDefect`] for the one literal-`*`-directory reading the `*` classes
+/// assume.
+#[must_use]
+pub fn consent_entry_defect(entry: &Path) -> Option<EntryDefect> {
+    let entry = match expanded_entry(entry) {
+        Ok(entry) => entry,
+        Err(defect) => return Some(defect),
+    };
+    let components: Vec<Component<'_>> = entry.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        if !name.as_encoded_bytes().contains(&b'*') {
+            continue;
+        }
+        if *name != OsStr::new("*") {
+            return Some(EntryDefect::StarInsideComponent);
+        }
+        if index + 1 != components.len() {
+            return Some(EntryDefect::StarNotLast);
+        }
+        // The last component is a bare `*`; whether that is a subtree grant is
+        // `subtree_prefix`'s decision and not a second copy of its rule.
+        if subtree_prefix(&entry).is_none() {
+            return Some(EntryDefect::StarNamesNoDirectory);
+        }
+    }
+    if components.contains(&Component::ParentDir) {
+        return Some(EntryDefect::ParentDirComponent);
+    }
+    if !entry.is_absolute() {
+        return Some(EntryDefect::RelativePath);
+    }
+    None
+}
+
+/// `entry` with a leading `~` expanded against this machine's home directory.
+///
+/// The one seam the grant path and the `ocx shell state` diagnostic share, so
+/// neither can expand an entry the other would not. Textual: it joins, and it
+/// canonicalizes nothing.
+fn expanded_entry(entry: &Path) -> Result<PathBuf, EntryDefect> {
+    expand_against(entry, crate::file_structure::home_directory().as_deref())
+}
+
+/// [`expanded_entry`] against an explicit home directory.
+///
+/// `home` is a parameter because the interesting branch is the machine that has
+/// no home directory, and a test cannot produce one by any other means without
+/// mutating the process environment out from under every concurrent test.
+///
+/// Only a **leading** `~` component expands: `/w/~/dev` names a directory
+/// literally called `~`, which is a legal name, and rewriting it would be the
+/// same class of widening as rewriting `\` on Unix.
+fn expand_against(entry: &Path, home: Option<&Path>) -> Result<PathBuf, EntryDefect> {
+    let mut components = entry.components();
+    let Some(Component::Normal(first)) = components.next() else {
+        return Ok(entry.to_path_buf());
+    };
+    if first.as_encoded_bytes().first() != Some(&b'~') {
+        return Ok(entry.to_path_buf());
+    }
+    if first != OsStr::new("~") {
+        return Err(EntryDefect::UnsupportedTildeUser);
+    }
+    let home = home.ok_or(EntryDefect::UnresolvableHome)?;
+    Ok(home.join(components.as_path()))
 }
 
 /// The `OCX_CONSENT_*` env channel's contribution (C-031).
@@ -595,7 +912,10 @@ pub fn env_channel(paths: Option<&str>, namespaces: Option<&str>) -> ShellConsen
 /// does for `PATH` itself. Only the empty-token rule is applied on top: an
 /// empty entry would become an empty `PathBuf`, which normalizes toward a root
 /// rather than toward nothing. The surviving bytes are kept verbatim — trimming
-/// a path's own bytes would silently rename a legitimate directory.
+/// a path's own bytes would silently rename a legitimate directory, and a
+/// leading `~` is expanded at match time by [`consent_path_matches`] rather
+/// than here, so both channels get the interpolation and neither loses the
+/// entry the user wrote.
 fn parse_consent_paths(value: &str) -> Vec<PathBuf> {
     std::env::split_paths(value)
         .filter(|path| !path.as_os_str().is_empty() && !path.to_string_lossy().trim().is_empty())
@@ -936,6 +1256,310 @@ mod tests {
         );
     }
 
+    // ── the entry side: drive letters, `~`, and the defect predicate ─────────
+
+    /// Both arms of [`consent_path_matches`] fold the same thing as each other,
+    /// and what that is follows the platform's own filesystem.
+    ///
+    /// `Path::starts_with` compares `Component`s, and `PrefixComponent`'s
+    /// equality is on its *parsed* form, whose drive letter `std`
+    /// ASCII-uppercases (`library/std/src/sys/path/windows_prefix.rs`,
+    /// `parse_drive`). The exact arm used to compare `OsString`s bytewise, so
+    /// `c:\w\acme\*` granted `C:\w\acme\sub` while `c:\w\acme` did not
+    /// grant `C:\w\acme` — one entry style, two case rules.
+    ///
+    /// Ordinary components then fold ASCII case on Windows, where the
+    /// filesystem cannot hold two directories that differ only by case, and
+    /// never on Unix, where it can and folding would widen a grant onto a
+    /// directory an attacker may create.
+    ///
+    /// EC-GRANT-025 — an ordinary component's ASCII case folds on Windows and
+    /// nowhere else, in both arms.
+    ///
+    /// Red state, Unix half: lowercase both operands of the exact arm
+    /// (`…to_string_lossy().to_ascii_lowercase()`) and the ordinary-component
+    /// refusals flip. Red state, Windows half: drop the `Component::Normal` arm
+    /// from [`normalize_consent_path`] and the two case-folded grants flip.
+    /// Neither half's red state is reachable from the other's host, which is
+    /// why each is pinned separately rather than behind one `cfg!` expression.
+    #[test]
+    fn s2_both_arms_fold_the_same_thing_as_each_other_and_the_platform() {
+        // The positive control: an exact entry grants its own directory, so
+        // every refusal below is this rule and not a dead clause.
+        assert!(consent_path_matches(Path::new("/w/acme"), Path::new("/w/acme")));
+
+        #[cfg(windows)]
+        {
+            assert!(
+                consent_path_matches(Path::new(r"c:\w\acme"), Path::new(r"C:\w\acme")),
+                "the exact arm must fold the drive letter, because the subtree arm already does"
+            );
+            assert!(
+                consent_path_matches(Path::new(r"c:\w\acme\*"), Path::new(r"C:\w\acme\sub")),
+                "the subtree arm's drive-letter folding is the behaviour being matched, not changed"
+            );
+            // Windows cannot hold `C:\w\Acme` and `C:\w\acme` at once, so
+            // folding them onto one grant merges nothing that was ever apart —
+            // and refusing to fold would leave an operator inert on a directory
+            // the OS considers identical to the one they wrote.
+            assert!(
+                consent_path_matches(Path::new(r"C:\w\Acme"), Path::new(r"C:\w\acme")),
+                "an ordinary component folds ASCII case on Windows, in the exact arm"
+            );
+            assert!(
+                consent_path_matches(Path::new(r"C:\w\Acme\*"), Path::new(r"C:\w\acme\sub")),
+                "an ordinary component folds ASCII case on Windows, in the subtree arm too"
+            );
+            // `/` and `\` are both separators on Windows, so the two spellings
+            // of one directory must be one grant — in both arms, since each
+            // splits through `Path::components`.
+            assert!(
+                consent_path_matches(Path::new("C:/w/acme"), Path::new(r"C:\w\acme")),
+                "a forward-slash entry names the same directory as a backslash one"
+            );
+            assert!(
+                consent_path_matches(Path::new("C:/w/acme/*"), Path::new(r"C:\w\acme\sub")),
+                "the subtree arm splits on the same separators the exact arm does"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            // Unix holds `/w/Acme` and `/w/acme` as two directories, so folding
+            // them would hand a grant to whichever one an attacker got to
+            // create first.
+            assert!(
+                !consent_path_matches(Path::new("/w/Acme"), Path::new("/w/acme")),
+                "the exact arm must keep an ordinary component's own bytes on a case-sensitive filesystem"
+            );
+            assert!(
+                !consent_path_matches(Path::new("/w/Acme/*"), Path::new("/w/acme/sub")),
+                "the subtree arm must keep an ordinary component's own bytes too"
+            );
+            assert!(
+                !consent_path_matches(Path::new(r"c:\w\acme"), Path::new(r"C:\w\acme")),
+                "with no Prefix component there is nothing to fold; these are two ordinary directory names"
+            );
+        }
+    }
+
+    /// The grammar has exactly one wildcard — a whole trailing `*` component.
+    /// Every other glob metacharacter is an ordinary filename byte.
+    ///
+    /// Worth pinning because the entry is a plain TOML string with no load-time
+    /// grammar, so `?` looks like it might mean something: a reader who writes
+    /// `/w/acm?` gets a silently inert entry, not a one-character wildcard, and
+    /// nobody may later "fix" that by routing the entry through a glob matcher —
+    /// `?` and `[…]` match arbitrary siblings, which is the whole reach the
+    /// component-bounded design exists to deny.
+    ///
+    /// EC-GRANT-026 — a trailing `*` component is the only wildcard; every
+    /// other glob metacharacter is a literal filename byte.
+    ///
+    /// Red state: match the entry with any glob engine and the four refusals
+    /// below flip; the two literal-identity assertions are the positive control
+    /// that keeps them from passing for want of a match altogether.
+    #[test]
+    fn s2_only_a_trailing_star_is_a_wildcard_and_every_other_glob_byte_is_literal() {
+        for (entry, project) in [
+            ("/w/acm?", "/w/acm3"),
+            ("/w/acme?", "/w/acme"),
+            ("/w/acm?/*", "/w/acm3/sub"),
+            ("/w/[ab]", "/w/a"),
+        ] {
+            assert!(
+                !consent_path_matches(Path::new(entry), Path::new(project)),
+                "'{entry}' must not match '{project}' — the only wildcard is a trailing `*` component"
+            );
+        }
+
+        // …and each of those bytes still matches itself, so an entry naming a
+        // directory that legitimately carries one is a working grant rather
+        // than a shape the matcher refuses.
+        for path in ["/w/we?rd", "/w/[ab]"] {
+            assert!(
+                consent_path_matches(Path::new(path), Path::new(path)),
+                "'{path}' is a legal directory name and must grant itself literally"
+            );
+        }
+    }
+
+    /// A leading `~` expands against the home directory, in **both** channels,
+    /// and the entry itself is stored as the user wrote it.
+    ///
+    /// git interpolates one in `safe.directory`; before this, `~/dev/*` was
+    /// silently inert, which is the failure class this whole branch is about.
+    ///
+    /// EC-GRANT-022 — a leading `~` expands; the expansion is textual and
+    /// resolves no symlink.
+    ///
+    /// Red state: return `Ok(entry.to_path_buf())` unconditionally from
+    /// [`expand_against`] — the pre-fix behaviour — and every assertion below
+    /// flips except the literal-`~`-component one.
+    #[test]
+    fn a28_a_leading_tilde_expands_against_the_home_directory() {
+        let home = Path::new("/home/u");
+
+        assert_eq!(
+            expand_against(Path::new("~/dev/*"), Some(home)),
+            Ok(PathBuf::from("/home/u/dev/*")),
+            "`~/…` joins onto the home directory, wildcard and all"
+        );
+        assert_eq!(
+            expand_against(Path::new("~"), Some(home)),
+            Ok(PathBuf::from("/home/u")),
+            "a bare `~` is the home directory itself"
+        );
+        assert_eq!(
+            expand_against(Path::new("~alice/dev"), Some(home)),
+            Err(EntryDefect::UnsupportedTildeUser),
+            "`~user` is not supported and must never expand to this user's home"
+        );
+        assert_eq!(
+            expand_against(Path::new("~/dev"), None),
+            Err(EntryDefect::UnresolvableHome),
+            "no home directory means the entry matches nothing, never a literal `~` compare"
+        );
+        assert_eq!(
+            expand_against(Path::new("/w/~/dev"), Some(home)),
+            Ok(PathBuf::from("/w/~/dev")),
+            "only a LEADING `~` expands; `~` elsewhere is a legal directory name"
+        );
+
+        // Both channels carry the entry as written — the expansion happens at
+        // match time, so `ocx shell state` can still print `~/dev/*`.
+        assert_eq!(
+            env_channel(Some("~/dev/*"), None).paths,
+            vec![PathBuf::from("~/dev/*")],
+            "the env channel stores the entry verbatim"
+        );
+        assert_eq!(
+            parse("[consent]\npaths = [\"~/dev/*\"]\n")
+                .expect("parses")
+                .consent
+                .expect("consent present")
+                .paths,
+            vec![PathBuf::from("~/dev/*")],
+            "the config channel stores the entry verbatim"
+        );
+
+        // End to end, against this machine's own home. Both branches assert:
+        // a machine with no home directory must make the entry inert, not
+        // make this test vacuous.
+        match crate::file_structure::home_directory() {
+            Some(home) => {
+                assert!(
+                    consent_path_matches(Path::new("~/dev/*"), &home.join("dev").join("acme")),
+                    "a checkout under the granted tree activates through the expansion"
+                );
+                assert!(
+                    !consent_path_matches(Path::new("~/dev/*"), Path::new("/elsewhere/dev/acme")),
+                    "the expansion is not a licence to match outside the home directory"
+                );
+            }
+            None => assert_eq!(
+                consent_entry_defect(Path::new("~/dev/*")),
+                Some(EntryDefect::UnresolvableHome),
+                "with no home directory the entry is reported rather than silently inert"
+            ),
+        }
+    }
+
+    /// [`consent_entry_defect`] and [`consent_path_matches`] agree: every
+    /// entry the predicate calls defective is one the matcher refuses, and
+    /// every entry it calls well-formed is one the matcher grants.
+    ///
+    /// A defect-free entry that never matches, or a "defective" entry the
+    /// matcher would grant, is the failure this pairing exists to catch — so
+    /// each row carries the directories a reader would expect it to cover.
+    ///
+    /// EC-GRANT-024 — every entry the diagnostic calls defective is one the
+    /// matcher refuses, and every defect-free entry is one it can grant.
+    ///
+    /// Red state: drop the `!entry.is_absolute()` arm of
+    /// [`consent_entry_defect`] and the two relative rows report `None` while
+    /// the matcher still refuses them — the disagreement in its cheapest form.
+    #[test]
+    fn c030_the_entry_defect_predicate_agrees_with_the_matcher() {
+        // (entry, its defect, directories a reader might expect it to cover)
+        let defective: &[(&str, EntryDefect, &[&str])] = &[
+            (
+                "/w/*/tools",
+                EntryDefect::StarNotLast,
+                &["/w/acme/tools", "/w/tools", "/w"],
+            ),
+            (
+                "/w/acme*",
+                EntryDefect::StarInsideComponent,
+                &["/w/acme", "/w/acme-corp", "/w/acme/sub"],
+            ),
+            ("*", EntryDefect::StarNamesNoDirectory, &["/w/acme", "/"]),
+            ("/*", EntryDefect::StarNamesNoDirectory, &["/w/acme", "/"]),
+            ("/w/acme/../etc", EntryDefect::ParentDirComponent, &["/w/etc", "/etc"]),
+            (
+                "~alice/dev",
+                EntryDefect::UnsupportedTildeUser,
+                &["/home/alice/dev", "/w/dev"],
+            ),
+            ("dev/tools", EntryDefect::RelativePath, &["/w/dev/tools", "/dev/tools"]),
+            ("dev/*", EntryDefect::RelativePath, &["/w/dev/tools", "/dev/tools"]),
+        ];
+        for (entry, defect, never_granted) in defective {
+            assert_eq!(
+                consent_entry_defect(Path::new(entry)),
+                Some(*defect),
+                "'{entry}' must be reported as {defect:?}"
+            );
+            for directory in *never_granted {
+                assert!(
+                    !consent_path_matches(Path::new(entry), Path::new(directory)),
+                    "'{entry}' is reported as {defect:?}, so the matcher must not grant '{directory}'"
+                );
+            }
+        }
+
+        // The other direction: a well-formed entry is reported clean AND
+        // actually grants what it names. Without these rows the assertions
+        // above are satisfied by a predicate that condemns everything.
+        for (entry, granted) in [
+            ("/w/acme", "/w/acme"),
+            ("/w/acme/", "/w/acme"),
+            ("/w/acme/*", "/w/acme"),
+            ("/w/acme/*", "/w/acme/tools/deep"),
+            ("/w/acme-corp", "/w/acme-corp"),
+        ] {
+            assert_eq!(
+                consent_entry_defect(Path::new(entry)),
+                None,
+                "'{entry}' is a well-formed entry"
+            );
+            assert!(
+                consent_path_matches(Path::new(entry), Path::new(granted)),
+                "'{entry}' is reported clean, so it must grant '{granted}'"
+            );
+        }
+
+        // `UnresolvableHome` is the one variant whose input is the machine
+        // rather than the entry. It is asserted through the seam both the
+        // predicate and the matcher route through, which is what makes the
+        // agreement structural: an entry this refuses is one the matcher's own
+        // `let Ok(entry) = …` arm refuses.
+        assert_eq!(
+            expand_against(Path::new("~/dev/*"), None),
+            Err(EntryDefect::UnresolvableHome)
+        );
+
+        // Windows-only, because `*` is not a legal filename byte there and the
+        // drive prefix is the component that leaves the `*` naming nothing.
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                consent_entry_defect(Path::new(r"C:\*")),
+                Some(EntryDefect::StarNamesNoDirectory)
+            );
+            assert!(!consent_path_matches(Path::new(r"C:\*"), Path::new(r"C:\w\acme")));
+        }
+    }
+
     // ── C-031 / S-037 — the env channel ─────────────────────────────────────
 
     /// C-031, S-037, and fault injection 1: empty tokens are dropped **before**
@@ -987,6 +1611,39 @@ mod tests {
         assert!(
             !consent.paths.iter().any(|path| path.as_os_str().is_empty()),
             "an empty token must never become a PathBuf"
+        );
+    }
+
+    /// C-031 + the subtree form's primary use case: a devcontainer or CI image
+    /// writes `OCX_CONSENT_PATHS=/w/acme/*` into the image and every checkout
+    /// that lands under `/w/acme` later activates, without the image knowing
+    /// their names.
+    ///
+    /// Asserted end to end through the env channel rather than on
+    /// [`consent_path_matches`] alone: `split_paths` owns the split, so a
+    /// channel that mangled the `*` token would leave the matcher's own tests
+    /// green while the documented use case never worked.
+    ///
+    /// Red state: strip the entry's last component in [`parse_consent_paths`]
+    /// (or trim `*` off it) and the first assertion goes inert.
+    #[test]
+    fn c031_the_env_channel_carries_a_subtree_entry_intact() {
+        let consent = env_channel(Some("/w/acme/*"), None);
+        let [entry] = consent.paths.as_slice() else {
+            panic!("the channel must contribute exactly one entry, got {:?}", consent.paths);
+        };
+
+        assert!(
+            consent_path_matches(entry, Path::new("/w/acme/tools")),
+            "a checkout under the granted tree is covered by the image's entry"
+        );
+        assert!(
+            consent_path_matches(entry, Path::new("/w/acme")),
+            "the named directory is inside its own subtree"
+        );
+        assert!(
+            !consent_path_matches(entry, Path::new("/w/acme-evil")),
+            "the sibling a string prefix would have caught is component-bounded out"
         );
     }
 

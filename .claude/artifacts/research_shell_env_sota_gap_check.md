@@ -20,7 +20,7 @@ Two real contradictions found. Both are wrong *citations*, not wrong claims — 
 | direnv tmux/SSH reattach ([#106](https://github.com/direnv/direnv/issues/106)) | **confirmed (tmux only)** | open since 2014; the SSH-reattach case is the same timing class but not literally in the thread |
 | mise **GHSA-436v-8fw5-4mj8** | **confirmed** | "Local settings bypass config trust checks" — an untrusted `.mise.toml` sets trust-control values read *before* the trust check, letting `[env] _.source` execute. Affects 2026.2.18–2026.6.4, high, published 2026-04-03. Maps to **CVE-2026-35533** |
 | **CVE-2026-33646** | **confirmed, genuinely distinct** | `.tool-versions` is parsed through Tera with `exec()` registered and is **not** trust-gated the way `.mise.toml` is (fixed ≥2026.3.10). Exactly "a project file format with no trust gate at all" |
-| git `safe.directory` exact-path-only, "only respected in protected configuration" | **confirmed, literal quote match** | git docs: no wildcard/recursive form |
+| git `safe.directory` exact-path-only, "only respected in protected configuration" | **CONTRADICTED — corrected 2026-08-31; see §5 item 7** | Half right: "only respected in protected configuration" is a literal git-docs quote and stands. "Exact-path-only" does not: `git-config(1)` (git 2.54) states *"Giving a directory with `/*` appended to it will allow access to all repositories under the named directory."* — a subtree form, not exact-only |
 | [PowerShell#3571](https://github.com/PowerShell/PowerShell/issues/3571) casing | **confirmed, and permanently unresolved** | closed `Committee-Reviewed` / `Resolution-No Activity` — discussed, not fixed |
 | [fish-shell#8604](https://github.com/fish-shell/fish-shell/issues/8604) / [#9147](https://github.com/fish-shell/fish-shell/issues/9147) for the index-shift hazard | **weak citation** | both support "fish has no remove primitive" (feature requests for `fish_remove_path`); **neither discusses multi-element index shift**. The mechanic is real fish behaviour but is not documented in either thread — see the better citation in §5 |
 | [nushell#14944](https://github.com/nushell/nushell/issues/14944) | **confirmed, exact match** | lowercase `pwd` fails to fire an `env_change.PWD` hook |
@@ -102,3 +102,13 @@ Decision 6(b)'s "until that spike lands" wording should accommodate.
    same honesty bar the ADR already applies to its own two internally-discovered hazards.
 6. **SSH env-forwarding cross-host carrier leakage is handled but never named.** One sentence in the
    Security NFR citing Decision 1 rule (a).
+7. **The ADR's own git `safe.directory` citation is wrong, not merely under-cited — added 2026-08-31.**
+   This gap check marked it "confirmed, literal quote match" without checking the primitive it was
+   citing for, the mistake this file exists to catch, made once by the file itself.
+   `git-config(1)` (git 2.54) states plainly, under `safe.directory`: *"Giving a directory with `/*`
+   appended to it will allow access to all repositories under the named directory."* git ships an
+   exact-directory form and a `/*`-suffixed subtree form, not exact-only; only "only respected in
+   protected configuration" survives as literally quoted. Corrected in
+   [`research_trust_whitelist_grammar.md`](./research_trust_whitelist_grammar.md) (the primary
+   citation) and folded into `adr_shell_env_overhaul.md` Decision 4, `design_spec_shell_env_overhaul.md`
+   C-027/C-030, and `adr_shell_env_addenda.md` A-26.

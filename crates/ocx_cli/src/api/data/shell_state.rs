@@ -213,15 +213,28 @@ pub enum Note {
         /// The resolution failure, rendered for a human.
         detail: String,
     },
-    /// A-28 — a `paths` entry differing from the canonical directory only by
-    /// ASCII case. Entries are compared as literal bytes after separator and
-    /// trailing-slash normalization, so this is `Inert`; the row exists to pay
-    /// off the support cost of that decision.
+    /// A-28 — a `paths` entry that would grant `canonical` if the compare
+    /// folded ASCII case, exact or subtree entry alike. Entries are compared
+    /// as literal bytes ([`ocx_lib::consent_path_matches`]), so this is
+    /// `Inert`; the row exists to pay off the support cost of that decision.
     PathsNearMiss {
         /// The entry that nearly matched.
         entry: PathBuf,
         /// The canonical project directory it was compared against.
         canonical: PathBuf,
+    },
+    /// A `[shell.consent] paths` entry that can never match any project by
+    /// construction — [`ocx_lib::consent_entry_defect`]'s classification of
+    /// the entry's own bytes, independent of which project is in view.
+    /// `namespaces`' sibling grant refuses a pattern this broken at parse
+    /// time (A-27); a `paths` entry is an ordinary path and parses
+    /// regardless of whether it can ever grant, so without this row it sits
+    /// in the config forever, granting nothing and saying nothing.
+    PathsDefect {
+        /// The malformed entry.
+        entry: PathBuf,
+        /// [`ocx_lib::EntryDefect`]'s own rendering of what is wrong with it.
+        defect: String,
     },
 }
 
@@ -740,12 +753,27 @@ impl ShellStateReport {
                 }
                 Note::PathsNearMiss { entry, canonical } => {
                     out.push(format!(
-                        "{} a paths entry differs only by ASCII case",
+                        "{} a paths entry would grant if ASCII case were folded",
                         theme.label("note:")
                     ));
                     out.push(theme.field("  ", "entry", quoted_path(entry)));
                     out.push(theme.field("  ", "canonical dir", quoted_path(canonical)));
                     out.push("  entries are compared as literal bytes, so this does not grant".to_owned());
+                }
+                Note::PathsDefect { entry, defect } => {
+                    out.push(format!(
+                        "{} a paths entry can never match any project",
+                        theme.label("note:")
+                    ));
+                    out.push(theme.field("  ", "entry", quoted_path(entry)));
+                    // No separate `fix:` line: unlike a `Reason` refusal, this
+                    // note is not gated to an inert project (a defective entry
+                    // is a config bug whether or not something else granted),
+                    // and `every_inert_arm_names_a_fix_and_no_other_arm_does`
+                    // holds `fix:` to exactly the arms that block activation.
+                    // `EntryDefect::Display` already states the actionable
+                    // rewrite, so the guidance is not lost.
+                    out.push(theme.field("  ", "problem", defect));
                 }
             }
         }
@@ -1507,6 +1535,13 @@ mod tests {
         }];
         arms.push(("note_paths_near_miss", near_miss));
 
+        let mut paths_defect = base(None);
+        paths_defect.notes = vec![Note::PathsDefect {
+            entry: PathBuf::from("/w/*/tools"),
+            defect: "a `*` may appear only as the entry's final path component".to_owned(),
+        }];
+        arms.push(("note_paths_defect", paths_defect));
+
         let mut unresolved = base(None);
         unresolved.project_dir = None;
         unresolved.project_key = None;
@@ -1558,6 +1593,7 @@ mod tests {
             Note::ActiveViaPathsGrant { .. } => "active_via_paths_grant",
             Note::ProjectUnresolved { .. } => "project_unresolved",
             Note::PathsNearMiss { .. } => "paths_near_miss",
+            Note::PathsDefect { .. } => "paths_defect",
         }
     }
 
@@ -1603,6 +1639,7 @@ mod tests {
                 "active_via_paths_grant",
                 "project_unresolved",
                 "paths_near_miss",
+                "paths_defect",
             ]),
             "every Note variant must be exercised by an arm in `every_arm()`"
         );

@@ -1223,16 +1223,93 @@ withdraw one namespace a higher tier granted, without touching the grant itself.
 **Default**: `[]`  
 **Union with**: [`OCX_CONSENT_PATHS`][env-consent-paths]
 
-Exact, canonicalized project directories that activate unconditionally — [git][git-safe-directory]'s
-`safe.directory` semantics: no prefix, no glob. Entries are compared literally after
+Canonical project directories that activate unconditionally — modelled on
+[git][git-safe-directory]'s `safe.directory`, with one difference: the subtree form here
+grants the named directory itself as well as everything beneath it, where git's `/*`
+covers only the repositories nested under it:
+
+| Entry | Grants |
+|-------|--------|
+| `/workspaces/acme` | that directory, and nothing else |
+| `/workspaces/acme/*` | that directory and every project beneath it, at any depth |
+
+The subtree form matches **component-wise**, never as a string prefix, so
+`/workspaces/acme/*` covers `/workspaces/acme/tools` and never the attacker-planted
+sibling `/workspaces/acme-evil`. A `*` that names no directory — a bare `*`, or `/*` —
+grants nothing: git spells that "trust every repository on this machine", and OCX has no
+such token, for the same reason [`namespaces`](#keys-shell-consent-namespaces) has no
+whole-registry one.
+
+::: warning A `paths` grant reaches further than the entry alone
+A subtree entry activates a directory that does not exist yet: clone a repository into a
+granted `/*` root next month and it activates the moment you `cd` into it, with no further
+gesture — the same reach any prefix-based allowlist has, git's `safe.directory` included.
+And unlike a [`namespaces`](#keys-shell-consent-namespaces) grant, a `paths` grant —
+subtree or exact — opens the project's own [`[env]`](#project-config-env) table too: that
+table has no publisher to hold accountable, so a relative `type = "path"` entry needs none,
+and one line of a clone's `ocx.toml` puts `<clone>/bin` in front of `PATH`. This is
+deliberate — it is what makes the CI-image and devcontainer case in
+[Consent grants][in-depth-shell-consent] work.
+:::
+
+**Write the entry as the canonical, absolute path.** A leading `~` is expanded against
+the current user's home directory, the same interpolation [git][git-safe-directory]'s
+`safe.directory` applies; `%(prefix)` is still not interpolated. The expansion is
+**textual, not a symlink resolution**, and entries are otherwise compared literally after
 separator and trailing-slash normalization; the entry itself is never canonicalized, so a
-grant never silently follows a symlink an attacker controls on the parent. A case-only or
-separator-only mismatch is inert rather than matched, and surfaces as a near-miss in
-[`ocx shell state`][cmd-shell-state].
+grant never silently follows a symlink an attacker controls on the parent. That cuts both
+ways for a `~`-prefixed entry too: `~/dev/*` where `dev` is itself a symlink onto another
+mount still fails to match the project's canonical directory, because only the leading `~`
+is substituted and the rest of the entry is compared as written — and, in the same breath,
+an entry naming a symlinked route to a project (`/workspaces/acme` where `acme` is a
+symlink onto a mounted volume) never matches either. There is no `~user/…` form; only the
+invoking user's own home expands. The path to write is the one
+[`ocx shell state`][cmd-shell-state] prints as the project directory.
+
+**ASCII case folds on Windows and nowhere else**, because that is where the filesystem
+folds it too. Windows cannot hold `C:\w\Acme` and `C:\w\acme` at once, so treating them
+as one entry merges nothing that was ever distinct — the drive letter (`c:` and `C:`) has
+always folded for exactly that reason, and the components after it now follow the same
+rule, in the exact form and the subtree form alike. A case-sensitive filesystem *can* hold
+both, so on Linux and macOS every component is compared byte-exactly: a case-only mismatch
+is inert rather than matched, and surfaces in [`ocx shell state`][cmd-shell-state] as a
+near-miss row. The fold is ASCII-only, matching the drive letter's — a full Unicode fold
+is locale- and version-dependent, and this comparison is a trust boundary.
+
+**A trailing `/*` is the grammar's only wildcard.** `?`, `[…]` and every other glob
+metacharacter is an ordinary filename byte, in both channels: `/w/acm?` grants a directory
+literally named `acm?` and never `/w/acm3`. On Windows both separators are accepted —
+`C:/w/acme` and `C:\w\acme` are one entry — because `/` and `\` are both separators
+there; on Unix a `\` is a legal character in a directory name and is compared as one.
+
+An entry that can **never** match — no matter what it is compared against — earns its
+own diagnostic row in [`ocx shell state`][cmd-shell-state] naming the defect, instead of
+sitting silently inert next to an ordinary "no matching grant" verdict:
+
+| Entry shape | Why it can never match |
+|-------------|-------------------------|
+| `/w/*/tools` | a `*` is a wildcard only as the entry's last component |
+| `/w/acme*` | a `*` is a whole component, never part of one |
+| `*`, `/*`, `C:\*` | a `*` with no directory before it would grant every directory on this machine, which has no spelling |
+| `/w/acme/..` | a canonical directory never carries a `..` component |
+| a leading `~` with no home directory resolvable on this machine | the expansion needs a home directory and none resolved |
+| `~user/x` | `~user` is never expanded — only the invoking user's own home is |
+| a relative entry (`dev/acme`) | a canonical project directory is always absolute |
+
+None of these is rejected at parse — a `paths` entry is a plain TOML string with no
+load-time grammar of its own, unlike a [`namespaces`](#keys-shell-consent-namespaces)
+pattern — so `ocx shell state` is the one place the defect surfaces, one row per entry,
+naming the specific problem rather than folding it into the generic "no matching grant"
+reason.
+
+The `*` classes above read `*` as the wildcard the grammar defines it to be, which is what
+every author of such an entry meant. The one case that defeats that reading is a directory
+literally named `*` — `mkdir '*'` is legal, if unusual, on Unix — for which `/w/acme*` or
+`/w/*/tools` would be a legitimate exact entry; every other class holds without exception.
 
 ```toml
 [shell.consent]
-paths = ["/workspaces/acme-monorepo", "/workspaces/acme-tools"]
+paths = ["/workspaces/acme-monorepo", "/workspaces/acme-tools/*"]
 ```
 
 This grant is deliberately drift-blind: it writes no consent stamp, so revoking it —
@@ -1246,8 +1323,10 @@ removing the entry — is immediately effective on the next prompt.
 **Union with**: [`OCX_CONSENT_NAMESPACES`][env-consent-namespaces]
 
 OCI source namespaces (`<host>[:<port>]/<org>`) that activate a project whose whole lock
-resolved inside them. A trailing `/*` is accepted and equivalent — `ocx.sh/acme-corp` and
-`ocx.sh/acme-corp/*` name the identical set.
+resolved inside them. A trailing `/*` is accepted and equivalent here — `ocx.sh/acme-corp`
+and `ocx.sh/acme-corp/*` name the identical set, unlike a
+[`paths`](#keys-shell-consent-paths) entry, where the same suffix is the entire difference
+between granting one directory and its whole subtree.
 
 ```toml
 [shell.consent]

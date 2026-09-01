@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::shell::{ShellConsent, normalize_consent_path};
+use crate::config::shell::{ShellConsent, consent_path_matches};
 use crate::file_structure::StateStore;
 use crate::log;
 use crate::oci;
@@ -101,8 +101,27 @@ pub enum Decision {
 /// `[env]` channel has no publisher at all — a relative `type = "path"` value
 /// resolves against the project root, so one line of `ocx.toml` puts
 /// `<clone>/bin` in front of `PATH` — and it is therefore authorized only by
-/// clauses 1 and 3, both of which are explicit gestures naming *this*
-/// directory.
+/// clauses 1 and 3, the two clauses that stand on a human's own gesture rather
+/// than on text a clone ships.
+///
+/// **Clause 3's gesture names a directory or a tree, and a tree is still the
+/// gesture.** A `paths` entry is one exact directory, or — written with a
+/// trailing `/*` — that directory and everything beneath it
+/// ([`consent_path_matches`]). A subtree entry therefore opens the `[env]`
+/// channel for every project under it, **including ones that do not exist
+/// yet**: a clone dropped into a granted tree tomorrow activates on its first
+/// prompt, its own `ocx.toml` `[env]` included. That is the deliberate reading
+/// of the form, not a leak it tolerates — it is the devcontainer and CI-image
+/// case the form exists for, where the workspace root is written down once in
+/// an image and the checkouts arrive later. It is the reach `git`'s own
+/// `safe.directory = /w/acme/*` has, widened by one directory: git's form
+/// covers only what is nested *under* the named directory, ours covers that
+/// directory too (measured, git 2.54). The operator's gesture remains
+/// the whole bound: it is spelled in a `config.toml` tier or `OCX_CONSENT_PATHS`
+/// and never in project bytes, it is component-bounded so a sibling
+/// `/w/acme-evil` is outside it, and no `*` spelling reaches the filesystem
+/// root. What clause 3 does not do is *narrow* to a leaf — an operator who
+/// means one directory writes one directory.
 ///
 /// The near-exact precedent is mise's trust bypass, CVE-2026-35533 /
 /// GHSA-436v-8fw5-4mj8. The borrowed-digest variant clause 2 used to admit is
@@ -118,8 +137,12 @@ pub enum Grant {
     /// auto-enabler, bounded by what this host actually pulled under that name
     /// rather than by what the lock claims.
     Namespace,
-    /// Clause 3 — the canonical directory is named by `[shell.consent] paths`.
-    /// An operator or the user wrote this directory down.
+    /// Clause 3 — the canonical directory is covered by `[shell.consent]
+    /// paths`: by an entry naming it exactly, or by a trailing-`/*` entry
+    /// naming it or an ancestor of it and granting that whole subtree. An
+    /// operator or the user wrote this directory — or a tree holding it —
+    /// down, which is why this grant opens the project `[env]` channel for a
+    /// checkout the entry never named.
     Path,
 }
 
@@ -152,7 +175,7 @@ pub enum Reason {
     /// No valid stamp and no matching grant — with the project's derived source
     /// set and the grants it was tested against, so the user can see what to
     /// add. A-28 also surfaces a `paths` **near-miss** here: an entry differing
-    /// from the canonical directory only by ASCII case or separator style.
+    /// from the canonical directory only by ASCII case.
     NoStampNoGrant {
         /// The source set derived from `ocx.lock` (C-026).
         derived_sources: BTreeSet<String>,
@@ -586,9 +609,10 @@ pub fn record(project_dir: &Path, sources: &BTreeSet<String>) -> crate::Result<R
 /// Clause 2 authorizes the package/tool channel and nothing else — a published
 /// package is the only thing its evidence can vouch for.
 ///
-/// `project_dir` must already be canonical (C-022). `lock_sources` is `None`
-/// when the lock is absent, unreadable or unparseable — one outcome for all
-/// three. `verified` is [`verified_sources`] for the **same** parsed lock;
+/// `project_dir` must already be canonical (C-022), and clause 3 **fails
+/// closed** when it is not: a directory carrying a `..` is granted by no
+/// `paths` entry. `lock_sources` is `None` when the lock is absent, unreadable
+/// or unparseable — one outcome for all three. `verified` is [`verified_sources`] for the **same** parsed lock;
 /// `None` there is a corroboration failure, never an absent lock.
 #[must_use]
 pub fn evaluate(
@@ -679,14 +703,16 @@ pub fn evaluate_with_stamp(
 
 /// Whether `project_dir` is named by `[shell.consent] paths` (C-025 clause 3).
 ///
-/// Literal comparison after separator/trailing-slash normalization on both
-/// sides — never a case fold, never a canonicalization of the entry, per C-030.
+/// One entry's semantics live in [`consent_path_matches`] — exact directory, or
+/// a component-bounded subtree when the entry ends in `/*`, with a leading `~`
+/// expanded there and nowhere else. A `project_dir` that is **not** canonical —
+/// one carrying a `..` — is matched by no entry at all: the subtree form is a
+/// containment test, and a `..` escapes the tree it appears to sit in.
 fn path_granted(project_dir: &Path, whitelist: &ShellConsent) -> bool {
-    let project = normalize_consent_path(project_dir);
     whitelist
         .paths
         .iter()
-        .any(|entry| normalize_consent_path(entry) == project)
+        .any(|entry| consent_path_matches(entry, project_dir))
 }
 
 /// Whether every source in `sources` matches `[shell.consent] namespaces`, and
@@ -1616,6 +1642,186 @@ mod tests {
         );
     }
 
+    /// EC-GRANT-020 — a `*`-suffixed entry grants the named directory and
+    /// everything under it, bounded by path components.
+    ///
+    /// The sibling assertion is the whole reason the subtree form is spelled
+    /// with an explicit `/*` and matched component-wise: a string prefix would
+    /// let `/w/acme/*` cover an attacker-planted `/w/acme-evil`.
+    ///
+    /// Red state: swap `consent_path_matches`' `Path::starts_with` for a
+    /// `str::starts_with` on the rendered prefix, and the sibling activates.
+    #[test]
+    fn c030_a_star_suffixed_entry_grants_the_subtree_but_never_a_sibling() {
+        let grant = paths_grant(Path::new("/w/acme/*"));
+        let locked = sources(&["ocx.sh/cmake"]);
+        let verdict = |dir: &str| evaluate_corroborated(Path::new(dir), None, Some(&locked), &grant);
+
+        assert_eq!(
+            verdict("/w/acme"),
+            Decision::Activate(Grant::Path),
+            "the named directory is inside its own subtree"
+        );
+        assert_eq!(
+            verdict("/w/acme/tools/inner"),
+            Decision::Activate(Grant::Path),
+            "any depth beneath the named directory is granted"
+        );
+        assert!(
+            matches!(verdict("/w/acme-evil"), Decision::Inert(_)),
+            "a sibling sharing a string prefix is not inside the subtree"
+        );
+        assert!(
+            matches!(verdict("/w"), Decision::Inert(_)),
+            "the parent of the granted directory is not granted"
+        );
+    }
+
+    /// EC-GRANT-021 — a `*` that leaves no directory behind is not a subtree
+    /// grant.
+    ///
+    /// git spells `safe.directory = *` "trust every repository on this
+    /// machine"; OCX has no such token, for the same reason `namespaces` has no
+    /// whole-registry one.
+    ///
+    /// Red state: drop `subtree_prefix`' "at least one `Normal` component"
+    /// guard and both entries grant every directory on the machine.
+    #[test]
+    fn c030_a_star_naming_no_directory_grants_nothing() {
+        let locked = sources(&["ocx.sh/cmake"]);
+
+        // The positive control: the same directory, under an entry that does
+        // name it. Without this the loop below is green for a build whose
+        // clause 3 grants nothing at all, which is indistinguishable from one
+        // that refuses these two entries specifically.
+        assert_eq!(
+            evaluate_corroborated(
+                Path::new("/w/acme"),
+                None,
+                Some(&locked),
+                &paths_grant(Path::new("/w/acme"))
+            ),
+            Decision::Activate(Grant::Path),
+            "an entry naming the directory does grant it, so the refusals below are the rule and not a dead clause"
+        );
+
+        for entry in ["*", "/*"] {
+            let grant = paths_grant(Path::new(entry));
+            assert!(
+                matches!(
+                    evaluate_corroborated(Path::new("/w/acme"), None, Some(&locked), &grant),
+                    Decision::Inert(_)
+                ),
+                "`{entry}` is a filesystem-wide grant, which is not expressible"
+            );
+        }
+    }
+
+    /// The `*` is a whole path component, never a suffix on one.
+    ///
+    /// `/w/acme*` is one legal directory name, so the entry is an *exact* grant
+    /// for the directory spelled that way and a grant for nothing else. Read as
+    /// a suffix it would instead name the subtree `/w`, which covers every
+    /// sibling — including the attacker-planted `/w/acme-evil` the component
+    /// bound exists to exclude.
+    ///
+    /// Red state: relax `subtree_prefix`' component equality to a suffix test
+    /// (`last.as_os_str().to_string_lossy().ends_with('*')`) and all three
+    /// refusals below activate as `Grant::Path`. The literal-directory control
+    /// survives that mutation, which is what makes it a control.
+    #[test]
+    fn c030_a_star_grants_a_subtree_only_as_its_own_component() {
+        let grant = paths_grant(Path::new("/w/acme*"));
+        let locked = sources(&["ocx.sh/cmake"]);
+        let verdict = |dir: &str| evaluate_corroborated(Path::new(dir), None, Some(&locked), &grant);
+
+        for missed in ["/w/acme", "/w/acme-evil", "/w/other"] {
+            assert!(
+                matches!(verdict(missed), Decision::Inert(_)),
+                "`/w/acme*` is a directory name, not a subtree over /w; '{missed}' must stay inert"
+            );
+        }
+        assert_eq!(
+            verdict("/w/acme*"),
+            Decision::Activate(Grant::Path),
+            "the control: a directory literally named `/w/acme*` is what the entry does grant"
+        );
+    }
+
+    /// The `*` is the **last** component or it is not a wildcard at all.
+    ///
+    /// A `*` in the middle is not a grant over its own left-hand prefix: read
+    /// that way, `/w/*/inner` would hand out all of `/w`. It is instead an
+    /// exact entry for the one directory spelled with a literal `*` segment.
+    ///
+    /// Red state: replace `subtree_prefix`' `next_back()` equality with a scan
+    /// (`components.any(|c| c == Component::Normal("*"))`, prefix taken up to
+    /// the first `*`) and every refusal below activates as `Grant::Path`.
+    #[test]
+    fn c030_a_star_grants_a_subtree_only_as_the_last_component() {
+        let grant = paths_grant(Path::new("/w/*/inner"));
+        let locked = sources(&["ocx.sh/cmake"]);
+        let verdict = |dir: &str| evaluate_corroborated(Path::new(dir), None, Some(&locked), &grant);
+
+        for missed in ["/w", "/w/anything", "/w/anything/inner"] {
+            assert!(
+                matches!(verdict(missed), Decision::Inert(_)),
+                "a mid-path `*` must not grant its left-hand prefix; '{missed}' must stay inert"
+            );
+        }
+        assert_eq!(
+            verdict("/w/*/inner"),
+            Decision::Activate(Grant::Path),
+            "the control: the entry is exact, and the directory it exactly names is granted"
+        );
+    }
+
+    /// Two more spellings that look like a subtree grant and are not: a `..`
+    /// segment before the `*`, and `**`.
+    ///
+    /// Both are inert rather than errors — an entry is never canonicalized and
+    /// never re-parsed, so a spelling the grammar does not know simply matches
+    /// no canonical directory.
+    ///
+    /// Red state, per row: for `/w/acme/../*`, lexically normalize the prefix
+    /// in `subtree_prefix` (`/w/acme/..` → `/w`) and the `/w/…` rows activate;
+    /// for `/w/acme/**`, relax the component equality to a suffix test and the
+    /// `/w/acme` rows activate. The positive control fails with neither, and
+    /// pins that the real subtree form still works.
+    #[test]
+    fn c030_near_miss_star_spellings_grant_nothing() {
+        let locked = sources(&["ocx.sh/cmake"]);
+
+        for (entry, missed) in [
+            ("/w/acme/../*", "/w/acme"),
+            ("/w/acme/../*", "/w"),
+            ("/w/acme/../*", "/w/other"),
+            ("/w/acme/**", "/w/acme"),
+            ("/w/acme/**", "/w/acme/tools"),
+        ] {
+            let grant = paths_grant(Path::new(entry));
+            assert!(
+                matches!(
+                    evaluate_corroborated(Path::new(missed), None, Some(&locked), &grant),
+                    Decision::Inert(_)
+                ),
+                "'{entry}' is not the subtree spelling and must not grant '{missed}'"
+            );
+        }
+
+        assert_eq!(
+            evaluate_corroborated(
+                Path::new("/w/acme/tools"),
+                None,
+                Some(&locked),
+                &paths_grant(Path::new("/w/acme/*"))
+            ),
+            Decision::Activate(Grant::Path),
+            "the control: the one spelling that IS a subtree grant still grants, so the rows above are \
+             discriminating between spellings and not reporting a dead clause"
+        );
+    }
+
     /// S2 / CWE-41 — a Unix directory literally named `services\api` must not
     /// satisfy a `paths` grant for `services/api`.
     ///
@@ -1657,6 +1863,55 @@ mod tests {
                 r"a directory named `services\api` is not the directory `services/api`; got {verdict:?}"
             );
         }
+    }
+
+    /// S2 — a `project_dir` that is not canonical grants **nothing**, in a
+    /// release build exactly as in a debug one.
+    ///
+    /// `Path::starts_with` is a component compare, so `/w/acme/../../etc` sits
+    /// inside `/w/acme/*` as far as the subtree arm can tell: a `..` escapes
+    /// the tree the entry names while still satisfying the containment test.
+    /// Round 1 held the premise with a `debug_assert!`, which is a guard the
+    /// shipped binary does not carry — so the refusal is now a real one.
+    ///
+    /// EC-GRANT-023 — a `project_dir` carrying a `..` component grants
+    /// nothing, in a release build exactly as in a debug one.
+    ///
+    /// Red state: delete the `Component::ParentDir` refusal at the top of
+    /// [`consent_path_matches`] and the first escape activates as
+    /// `Grant::Path`.
+    #[test]
+    fn s2_a_non_canonical_project_dir_grants_nothing() {
+        let locked = sources(&["ocx.sh/cmake"]);
+        let grant = paths_grant(Path::new("/w/acme/*"));
+        let verdict = |dir: &str| evaluate_corroborated(Path::new(dir), None, Some(&locked), &grant);
+
+        assert_eq!(
+            verdict("/w/acme/tools"),
+            Decision::Activate(Grant::Path),
+            "the positive control: a canonical directory under the granted tree still activates, so the \
+             refusals below are the guard and not a dead clause"
+        );
+        for escape in ["/w/acme/..", "/w/acme/../../etc", "/w/acme/tools/../../../etc"] {
+            assert!(
+                matches!(verdict(escape), Decision::Inert(_)),
+                "'{escape}' satisfies the containment test only because `..` is just another component; it \
+                 escapes the granted tree and must activate nothing"
+            );
+        }
+
+        // The exact arm too. It only ever *missed* on a non-canonical
+        // directory, so the refusal must not depend on which arm happened to
+        // run — an entry spelled with the same `..` is still no grant.
+        assert!(matches!(
+            evaluate_corroborated(
+                Path::new("/w/acme/.."),
+                None,
+                Some(&locked),
+                &paths_grant(Path::new("/w/acme/.."))
+            ),
+            Decision::Inert(_)
+        ));
     }
 
     // ── A-25 — any unusable stamp is an absent stamp ─────────────────────────
@@ -2033,10 +2288,11 @@ mod tests {
         );
     }
 
-    /// EC-GRANT-010 — `paths` is git `safe.directory` semantics: the byte-exact
+    /// EC-GRANT-010 — an entry with no trailing `/*` is the byte-exact
     /// canonical directory and nothing else. A sibling, a nested child and the
-    /// parent all miss, so the prefix-typosquat class every prefix grammar
-    /// ships is structurally absent here.
+    /// parent all miss. The subtree form opts into the children explicitly and
+    /// is component-bounded, so the sibling never comes back either — see
+    /// `c030_a_star_suffixed_entry_grants_the_subtree_but_never_a_sibling`.
     #[test]
     fn ec_grant_010_paths_matches_the_exact_directory_and_neither_kin_nor_parent() {
         let granted = Path::new("/w/acme");
