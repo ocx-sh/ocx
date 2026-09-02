@@ -25,6 +25,10 @@ not copies. Team-shared — commit it.
 - Constitution: `.claude/rules/arch-principles.md` (optional gate; plans
   checked against it when present).
 
+- Federation lead: `../ocx-mirror` — this repo participates as satellite key
+  `ocx` for plan(s): `mirror-signing`. Run hex orchestrators from the
+  lead, not here.
+
 ## Preferences
 
 ```yaml
