@@ -232,7 +232,9 @@ impl PackageSign {
         Ok(failure.map_or(ExitCode::SUCCESS, ExitCode::from))
     }
 
-    /// Sign the index each swept tag resolves to, one row per tag.
+    /// Sign the index each swept tag resolves to, one row per tag — and one
+    /// signature per distinct index, so a cascade release's aliases publish one
+    /// referrer between them and a re-sweep adds one more, never one per tag.
     ///
     /// The loop itself is [`PackageManager::sign_tags`]; this is the reporting
     /// half — turn each outcome into a row, collect the failures' exit codes,
@@ -255,6 +257,7 @@ impl PackageSign {
         for entry in swept {
             let row = match entry.outcome {
                 SweptOutcome::SkippedBareManifest => SweptTagReport::skipped(entry.tag),
+                SweptOutcome::CoveredBy(signed_as) => SweptTagReport::covered(entry.tag, signed_as),
                 SweptOutcome::Failed(error) => {
                     let error = sign_error_into_anyhow(*error);
                     failures.push(ocx_lib::cli::classify_error(error.as_ref()));

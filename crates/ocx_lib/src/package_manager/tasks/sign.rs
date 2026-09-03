@@ -16,6 +16,7 @@
 use url::Url;
 use zeroize::Zeroizing;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::oci::index::IndexOperation;
@@ -157,6 +158,25 @@ pub enum SweptOutcome<R> {
     /// a tag list mixing single-platform and multi-platform packages is the
     /// normal case for a repository that publishes both.
     SkippedBareManifest,
+    /// The tag names the index another tag in this same sweep already acted
+    /// on; the payload is that tag.
+    ///
+    /// A signature — and an attestation — is a referrer of the **subject
+    /// digest**, never of the tag. A cascade release points several tags at one
+    /// index, so acting per tag files N identical referrers against one
+    /// subject, and a second sweep over that unchanged index files N more.
+    /// `ocx package verify` reads at most `MAX_SIGNATURE_CANDIDATES` (8) of
+    /// them, so re-sweeping a five-tag release stops verifying on the second
+    /// run. One referrer per distinct subject is what the in-process publish
+    /// path already writes; this makes the sweep agree with it. Signing
+    /// deliberately **appends** — a second identity's signature must be able to
+    /// join the first — so a re-sweep still adds one referrer per distinct
+    /// index. What it must never add is one per tag.
+    ///
+    /// Recorded only for a digest whose run **completed**: a tag whose pipeline
+    /// failed published nothing, so the next tag naming that index tries again
+    /// rather than reporting itself covered by a failure.
+    CoveredBy(String),
     /// This tag's own failure. The sweep records it and carries on to the rest.
     ///
     /// Boxed because `PackageError` dwarfs every other variant, and a sweep
@@ -184,6 +204,12 @@ impl PackageManager {
     /// already signed and are **not** revisited — nothing here narrows into an
     /// index, which is why `--platform` is refused alongside `--tags`.
     ///
+    /// **One signature per distinct subject digest, not per tag.** A cascade
+    /// release points `3`, `3.7`, `3.7.0` and `latest` at one index; tags after
+    /// the first to name a given digest are reported
+    /// [`CoveredBy`](SweptOutcome::CoveredBy) rather than signed again, so a
+    /// re-sweep costs one referrer rather than N.
+    ///
     /// Never returns `Err`: a sweep's whole purpose is to survive a per-tag
     /// failure, so every outcome — signed, skipped, failed — is a row in the
     /// returned vector, in the order the tags were given. Aborting at the first
@@ -196,6 +222,9 @@ impl PackageManager {
         tags: &[String],
         opts: &SignOptions,
     ) -> Vec<SweptTag<SignReport>> {
+        // Subject digest -> the tag whose run signed it. The sweep iterates
+        // tags but signs digests: see [`SweptOutcome::CoveredBy`].
+        let mut signed: HashMap<oci::Digest, String> = HashMap::new();
         let mut swept = Vec::with_capacity(tags.len());
         for tag in tags {
             let identifier = package.clone_with_tag(tag.clone());
@@ -213,9 +242,23 @@ impl PackageManager {
                 // The resolution travels with it: this loop just asked the
                 // index chain what the tag names, and the pipeline would
                 // otherwise ask the identical question one call later (#373).
-                Ok(Some(resolved)) => match self.sign_one(&identifier, None, opts.clone(), Some(&resolved)).await {
-                    Ok(report) => SweptOutcome::Done(report),
-                    Err(error) => SweptOutcome::Failed(Box::new(error)),
+                //
+                // `.cloned()` ends the borrow before the `None` arm inserts.
+                Ok(Some(resolved)) => match signed.get(&resolved.0).cloned() {
+                    Some(first) => {
+                        crate::log::warn!(
+                            "Skipping '{identifier}': it names the index tag '{first}' was already signed as; \
+                             a signature is a referrer of the subject digest, so one covers both."
+                        );
+                        SweptOutcome::CoveredBy(first)
+                    }
+                    None => match self.sign_one(&identifier, None, opts.clone(), Some(&resolved)).await {
+                        Ok(report) => {
+                            signed.insert(resolved.0.clone(), tag.clone());
+                            SweptOutcome::Done(report)
+                        }
+                        Err(error) => SweptOutcome::Failed(Box::new(error)),
+                    },
                 },
             };
             swept.push(SweptTag {
@@ -552,13 +595,17 @@ mod tests {
             let outcome = match &row.outcome {
                 SweptOutcome::Done(_) => "signed",
                 SweptOutcome::SkippedBareManifest => "skipped",
+                SweptOutcome::CoveredBy(_) => "covered",
                 SweptOutcome::Failed(_) => "failed",
             };
             assert_eq!(
                 outcome, "failed",
                 "the empty registry fails each tag inside the pipeline; a skip would mean \
                  the sweep never entered it, and the count would then be one per tag for a \
-                 reason unrelated to the fix (tag '{}')",
+                 reason unrelated to the fix. `covered` would mean worse: every tag here \
+                 resolves to one digest, so recording a digest whose run *failed* would \
+                 report these siblings as covered by a signature nobody published, and \
+                 they must be retried instead (tag '{}')",
                 row.tag,
             );
         }

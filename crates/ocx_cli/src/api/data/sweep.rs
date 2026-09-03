@@ -37,6 +37,16 @@ pub enum SweptStatus {
     /// single-platform and multi-platform packages is the normal case for a
     /// repository publishing both.
     Skipped,
+    /// The tag names the index another tag in this same sweep already acted on,
+    /// so one referrer covers both and nothing was written for this tag.
+    ///
+    /// Not a failure, and it does not make the run exit non-zero: the tag *is*
+    /// signed (or attested), by the referrer the covering tag's row reports.
+    /// `message` names that tag. A cascade release points several tags at one
+    /// index, and a referrer is filed against the subject digest, never against
+    /// a tag — so acting once per tag would publish N identical referrers, and
+    /// a second sweep N more.
+    Covered,
     /// This tag failed. The sweep carried on to the rest and the run exits
     /// non-zero at the end.
     Failed,
@@ -49,6 +59,7 @@ impl SweptStatus {
         match self {
             Self::Completed => "completed",
             Self::Skipped => "skipped",
+            Self::Covered => "covered",
             Self::Failed => "failed",
         }
     }
@@ -83,7 +94,8 @@ pub struct SweptTagReport<R> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     /// Human-readable cause, sanitized for the terminal (CWE-150). Present
-    /// exactly when `status` is `failed`.
+    /// exactly when `status` is `failed` or `covered` — for a `covered` row it
+    /// names the tag whose run wrote the referrer, not a failure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
@@ -97,6 +109,21 @@ impl<R> SweptTagReport<R> {
             report: Some(report),
             kind: None,
             message: None,
+        }
+    }
+
+    /// A tag whose index another tag in the same sweep already acted on.
+    ///
+    /// `signed_as` is that tag. Reported rather than dropped: a caller who
+    /// passed five tags must still see what became of all five, and the row
+    /// points at the one carrying the referrer.
+    pub fn covered(tag: String, signed_as: String) -> Self {
+        Self {
+            tag,
+            status: SweptStatus::Covered,
+            report: None,
+            kind: None,
+            message: Some(sanitize_for_terminal(&format!("same index as tag '{signed_as}'"))),
         }
     }
 
@@ -131,7 +158,7 @@ impl<R> SweptTagReport<R> {
     /// The plain table's third column for this row.
     fn detail(&self) -> String {
         match (&self.status, &self.message) {
-            (SweptStatus::Failed, Some(message)) => message.clone(),
+            (SweptStatus::Failed | SweptStatus::Covered, Some(message)) => message.clone(),
             (SweptStatus::Skipped, _) => "resolves to a single manifest; push already signed it".to_string(),
             _ => String::new(),
         }

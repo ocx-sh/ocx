@@ -170,9 +170,12 @@ impl PackageManager {
     ///
     /// The index sweep [`sign_tags`](Self::sign_tags) performs, for the attest
     /// verb: same skip rule (a tag resolving to a bare manifest is left alone),
-    /// same survive-and-continue rule, same never-`Err` contract. One predicate
-    /// is attached to every swept index — the predicate is the caller's file,
-    /// read once before the sweep starts.
+    /// same survive-and-continue rule, same never-`Err` contract, and the same
+    /// one-run-per-distinct-subject-digest rule: an attestation is a referrer
+    /// of the subject digest too, so a cascade release's aliases collapse to
+    /// one run here exactly as they do for `sign`. One predicate is attached to
+    /// every swept index — the predicate is the caller's file, read once before
+    /// the sweep starts.
     pub async fn attest_tags(
         &self,
         package: &oci::Identifier,
@@ -180,7 +183,11 @@ impl PackageManager {
         opts: &AttestOptions,
     ) -> Vec<super::sign::SweptTag<AttestReport>> {
         use super::sign::{SweptOutcome, SweptTag};
+        use std::collections::HashMap;
 
+        // Subject digest -> the tag whose run attested it, exactly as in
+        // `sign_tags`: see [`SweptOutcome::CoveredBy`].
+        let mut attested: HashMap<oci::Digest, String> = HashMap::new();
         let mut swept = Vec::with_capacity(tags.len());
         for tag in tags {
             let identifier = package.clone_with_tag(tag.clone());
@@ -195,9 +202,23 @@ impl PackageManager {
                 // The resolution travels on, exactly as it does in
                 // `sign_tags`: this loop already asked the index chain what the
                 // tag names, and the pipeline would ask again (#373).
-                Ok(Some(resolved)) => match self.attest_one(&identifier, None, opts.clone(), Some(&resolved)).await {
-                    Ok(report) => SweptOutcome::Done(report),
-                    Err(error) => SweptOutcome::Failed(Box::new(error)),
+                //
+                // `.cloned()` ends the borrow before the `None` arm inserts.
+                Ok(Some(resolved)) => match attested.get(&resolved.0).cloned() {
+                    Some(first) => {
+                        crate::log::warn!(
+                            "Skipping '{identifier}': it names the index tag '{first}' was already attested as; \
+                             an attestation is a referrer of the subject digest, so one covers both."
+                        );
+                        SweptOutcome::CoveredBy(first)
+                    }
+                    None => match self.attest_one(&identifier, None, opts.clone(), Some(&resolved)).await {
+                        Ok(report) => {
+                            attested.insert(resolved.0.clone(), tag.clone());
+                            SweptOutcome::Done(report)
+                        }
+                        Err(error) => SweptOutcome::Failed(Box::new(error)),
+                    },
                 },
             };
             swept.push(SweptTag {
@@ -359,12 +380,16 @@ mod tests {
             let outcome = match &row.outcome {
                 SweptOutcome::Done(_) => "attested",
                 SweptOutcome::SkippedBareManifest => "skipped",
+                SweptOutcome::CoveredBy(_) => "covered",
                 SweptOutcome::Failed(_) => "failed",
             };
             assert_eq!(
                 outcome, "failed",
                 "the empty registry fails each tag inside the pipeline; a skip would mean \
-                 the sweep never entered it (tag '{}')",
+                 the sweep never entered it. `covered` would mean worse: every tag here \
+                 resolves to one digest, so recording a digest whose run *failed* would \
+                 report these siblings as covered by an attestation nobody published, and \
+                 they must be retried instead (tag '{}')",
                 row.tag,
             );
         }
