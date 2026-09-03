@@ -466,8 +466,13 @@ pub struct VerifyPipeline;
 impl VerifyPipeline {
     /// Run the verify pipeline against a [`VerifyContext`].
     ///
-    /// The registry transport is derived from `client` internally, so the
-    /// public API never exposes `&dyn OciTransport` (ADR Amendment 1, Option 3).
+    /// The registry transport is derived from `client` internally, so this
+    /// entry point takes no `&dyn OciTransport` (ADR Amendment 1, Option 3).
+    /// The crate does expose one elsewhere: OCX-C-1's
+    /// [`native_transport`](fn@crate::oci::client::native_transport) constructs a
+    /// transport for `ocx-mirror`, and OCX-C-2's
+    /// [`list_signature_candidates`](super::list_signature_candidates) takes
+    /// one — neither reaches this pipeline.
     ///
     /// Returns every signature that verified, in scan order and deduplicated by
     /// D6's key. **The verdict is the first element** and is the same under

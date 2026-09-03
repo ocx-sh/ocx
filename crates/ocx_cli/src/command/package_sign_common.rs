@@ -342,10 +342,11 @@ pub(crate) fn resolve_endpoint(
 /// [`SignErrorKind::InvalidEndpointUrl`] → exit 64, so the envelope's
 /// `error.detail` names the offending flag.
 ///
-/// `push --sbom` exposes no endpoint flags and passes `None` for both, landing
-/// on the tail of the same ladder: without the config tier an operator on a
-/// self-hosted stack could `attest` but not `push --sbom` — the same run, two
-/// different Fulcios.
+/// Every signing verb reaches this one ladder, including `push --sign` and
+/// `push --sbom`, which carry `--fulcio-url` / `--rekor-url` of their own
+/// (OCX-C-5). The config tier is what the flags rest on: without it an
+/// operator on a self-hosted stack could `attest` but not push — the same run,
+/// two different Fulcios.
 ///
 /// Fulcio is validated first, so a run with both endpoints wrong names
 /// `--fulcio-url` every time rather than whichever the compiler ordered.
