@@ -32,7 +32,7 @@ use crate::{conventions, options};
 #[clap(group(clap::ArgGroup::new("signing_target").args(["sign", "sbom"]).multiple(true)))]
 #[clap(group(
     clap::ArgGroup::new("signing_modifier")
-        .args(["signature_format", "key", "rekor_upload", "no_rekor_upload"])
+        .args(["signature_format", "key", "rekor_upload", "no_rekor_upload", "fulcio_url", "rekor_url"])
         .multiple(true)
         .requires("signing_target")
 ))]
@@ -137,6 +137,23 @@ pub struct PackagePush {
     /// failure decides the exit code.
     #[clap(long = "sign")]
     sign: bool,
+
+    /// Fulcio CA endpoint (the keyless certificate issuer)
+    ///
+    /// Defaults to [trust.sigstore].fulcio_url, else public Fulcio.
+    ///
+    /// Keyless-only: an error alongside `--key`, never silently ignored. A
+    /// flag that does nothing is the failure mode this command refuses
+    /// everywhere. A usage error without `--sign` or `--sbom`.
+    #[clap(long = "fulcio-url", value_name = "URL", conflicts_with = "key")]
+    fulcio_url: Option<String>,
+
+    /// Rekor transparency-log endpoint
+    ///
+    /// Defaults to [trust.sigstore].rekor_url, else public Rekor. A usage
+    /// error without `--sign` or `--sbom`.
+    #[clap(long = "rekor-url", value_name = "URL")]
+    rekor_url: Option<String>,
 
     /// Signature wire format for `--sign` and `--sbom`.
     ///
@@ -468,10 +485,11 @@ impl PackagePush {
     /// minting a parallel type would give the Rekor-upload asymmetry a second
     /// place to drift.
     ///
-    /// `push` exposes no endpoint flags, so both URLs enter the shared ladder
-    /// with `None` and land on `[trust.sigstore]` then the builtin default,
-    /// behind the same SSRF guard `sign` uses. `no_tty` is `false` and the
-    /// token overrides are absent, matching what `push --sbom` already did.
+    /// `--fulcio-url` and `--rekor-url` let both URLs enter the shared ladder
+    /// as an explicit flag, ahead of `[trust.sigstore]` and the builtin
+    /// default, behind the same SSRF guard `sign` uses. `no_tty` is `false`
+    /// and the token overrides are absent, matching what `push --sbom`
+    /// already did.
     ///
     /// # Errors
     ///
@@ -486,8 +504,12 @@ impl PackagePush {
         context: &crate::app::Context,
         identifier: &oci::Identifier,
     ) -> anyhow::Result<ocx_lib::package_manager::SignOptions> {
-        let (fulcio_url, rekor_url) =
-            package_sign_common::resolve_sigstore_pair(context.config_trust_sigstore(), identifier, None, None)?;
+        let (fulcio_url, rekor_url) = package_sign_common::resolve_sigstore_pair(
+            context.config_trust_sigstore(),
+            identifier,
+            self.fulcio_url.as_deref(),
+            self.rekor_url.as_deref(),
+        )?;
         // Both refusals are wrapped in `SignError` before they reach `anyhow`:
         // `classify_error` downcasts the outer error, so a bare
         // `SignErrorKind` exits 1 with an empty `context` instead of 85/64
@@ -758,11 +780,19 @@ mod signing_flag_tests {
     use super::PackagePush;
 
     /// Every modifier flag, spelled as argv.
-    const MODIFIERS: [&[&str]; 4] = [
+    ///
+    /// OCX-C-5 added the two endpoint flags, and they join this list rather
+    /// than getting a test of their own: both group rules below iterate it, so
+    /// a member added here is covered by the refusal case *and* the
+    /// both-targets case at once — which is exactly the pair a flag admitted
+    /// by only one of them would slip through.
+    const MODIFIERS: [&[&str]; 6] = [
         &["--signature-format", "bundle"],
         &["--key", "/tmp/does-not-need-to-exist.pem"],
         &["--rekor-upload"],
         &["--no-rekor-upload"],
+        &["--fulcio-url", "https://f.example"],
+        &["--rekor-url", "https://r.example"],
     ];
 
     fn parse(extra: &[&str]) -> Result<PackagePush, clap::Error> {
@@ -849,5 +879,82 @@ mod signing_flag_tests {
             matches!(error, ocx_lib::oci::sign::SignErrorKind::RekorUploadRequiredForKeyless),
             "got: {error}"
         );
+    }
+
+    // ── OCX-C-5: the two endpoint flags ────────────────────────────────
+
+    /// **OCX-C-5.** `--fulcio-url` is keyless-only and conflicts with `--key`;
+    /// `--rekor-url` is allowed in key mode alongside `--rekor-upload`.
+    ///
+    /// The asymmetry is the contract, so both halves are asserted here: a
+    /// conflict on both flags would break the key-mode operator who runs a
+    /// self-hosted Rekor, and a conflict on neither would let `--fulcio-url`
+    /// pass silently into a run that never contacts Fulcio — the
+    /// flag-that-does-nothing failure this command refuses everywhere.
+    #[test]
+    fn fulcio_url_is_keyless_only_while_rekor_url_is_allowed_under_a_key() {
+        // `let ... else` rather than `expect_err`: `PackagePush` carries a key
+        // reference and deliberately implements no `Debug`, so the `Ok` half
+        // cannot be formatted into a panic message.
+        let Err(error) = parse(&["--sign", "--fulcio-url", "https://f.example", "--key", "/tmp/k.pem"]) else {
+            panic!("--fulcio-url names a certificate issuer a key-mode signature never asks");
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "the refusal must be clap's conflict, not a parse failure: {error}"
+        );
+
+        parse(&[
+            "--sign",
+            "--key",
+            "/tmp/k.pem",
+            "--rekor-upload",
+            "--rekor-url",
+            "https://r.example",
+        ])
+        .expect("a key-mode signature may name the transparency log it is recorded in");
+    }
+
+    /// **OCX-C-5.** The endpoint pair `push` resolves prefers its own flags
+    /// over `[trust.sigstore]`.
+    ///
+    /// Both tiers are populated and they disagree, so a resolver reading the
+    /// wrong one is a wrong *value* rather than an absent one — which a
+    /// flag-only or config-only fixture could not tell apart. The flags are
+    /// read off the parsed command exactly as `resolve_signing` reads them, so
+    /// a flag that never reached the struct reds this too.
+    ///
+    /// `[trust.sigstore]` is what makes a self-hosted stack a fleet-wide
+    /// setting; the flags are what let one publish run out-vote it, which is
+    /// the whole reason ocx-mirror needs them (D1).
+    #[test]
+    fn the_resolved_endpoint_pair_prefers_pushs_flags_over_trust_sigstore() {
+        let configured = ocx_lib::trust::SigstoreTrust {
+            fulcio_url: Some("https://fleet-fulcio.example".to_string()),
+            rekor_url: Some("https://fleet-rekor.example".to_string()),
+            ..ocx_lib::trust::SigstoreTrust::default()
+        };
+        let identifier = ocx_lib::oci::Identifier::parse("registry.example/pkg:1.0").expect("static parse");
+
+        let push = parse(&[
+            "--sign",
+            "--fulcio-url",
+            "https://flag-fulcio.example",
+            "--rekor-url",
+            "https://flag-rekor.example",
+        ])
+        .expect("both endpoint flags parse under --sign");
+
+        let (fulcio, rekor) = crate::command::package_sign_common::resolve_sigstore_pair(
+            Some(&configured),
+            &identifier,
+            push.fulcio_url.as_deref(),
+            push.rekor_url.as_deref(),
+        )
+        .expect("both flag values are valid https endpoints");
+
+        assert_eq!(fulcio.as_str().trim_end_matches('/'), "https://flag-fulcio.example");
+        assert_eq!(rekor.as_str().trim_end_matches('/'), "https://flag-rekor.example");
     }
 }

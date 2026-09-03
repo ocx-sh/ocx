@@ -4,7 +4,7 @@
 use crate::{
     ACCEPTED_MANIFEST_MEDIA_TYPES, MEDIA_TYPE_DESCRIPTION_V1, MEDIA_TYPE_MARKDOWN, MEDIA_TYPE_OCI_EMPTY_CONFIG,
     MEDIA_TYPE_OCI_IMAGE_INDEX, MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_PACKAGE_V1, MEDIA_TYPE_PNG, MEDIA_TYPE_SVG,
-    Result, archive, compression, log, media_type_from_path, oci,
+    Result, archive, auth, compression, log, media_type_from_path, oci,
     package::{self, info::Info, tag::InternalTag},
 };
 
@@ -128,6 +128,39 @@ pub use transport::{MountOutcome, OciTransport, ProgressFn, ReferrersListing, no
 
 use error::ClientError;
 
+/// Builds an [`OciTransport`] over an already-configured fork client.
+///
+/// The one public constructor for a transport. `ocx-mirror` owns its own
+/// registry-client construction policy (`adr_registry_mirror_sync.md`, Open
+/// question 1, amended 2026-08-14) and needs the referrer vocabulary this
+/// trait already exposes publicly: the capability probe, the referrer
+/// manifest PUT, and the tag-schema fallback merge. Without a way to *name* a
+/// transport from outside this crate, those public methods are unreachable.
+///
+/// This is a deliberate, scoped exception to the "registry operations go
+/// through the CLI surface" doctrine in `arch-principles.md` (Core vs Plugin
+/// Boundary): the fallback merge has no CLI spelling, and `ocx package copy`
+/// refuses the referrers-less target by ratified decision
+/// ([ocx#392](https://github.com/ocx-sh/ocx/issues/392)). `oci/copy.rs` is
+/// untouched by this seam and keeps its own exit-84 contract.
+///
+/// `auth` is consulted per registry, exactly as [`Client`] consults it.
+///
+/// The exception is as wide as the trait, deliberately: the ratified
+/// signature returns [`OciTransport`] whole, so the caller also gets
+/// [`push_manifest_raw`](OciTransport::push_manifest_raw),
+/// [`push_blob`](OciTransport::push_blob),
+/// [`push_blob_from_path`](OciTransport::push_blob_from_path) and
+/// [`mount_blob`](OciTransport::mount_blob) — every write this crate can make
+/// to a registry, not only the referrer vocabulary the exception was argued
+/// for. The caller likewise inherits whatever TLS-root and plain-HTTP policy
+/// `client` was built with: this function configures neither and cannot
+/// re-check either, so a fork client built to accept plain HTTP hands back a
+/// transport that speaks plain HTTP.
+pub fn native_transport(client: oci::native::Client, auth: auth::Auth) -> Box<dyn OciTransport> {
+    Box::new(native_transport::NativeTransport::new(client, auth))
+}
+
 /// Bytes and digests of a single-layer OCI artifact, returned by
 /// [`Client::fetch_single_layer_artifact`].
 #[derive(Debug)]
@@ -217,9 +250,14 @@ impl Client {
     ///
     /// Crate-internal: the sign/verify pipelines take a `&Client` and derive
     /// the transport through here for their transport-level calls (capability
-    /// probes, referrer manifest reads). The public API never exposes
-    /// `&dyn OciTransport` — pipelines are driven through the `PackageManager`
-    /// facade (`sign_one` / `verify_one`), not by handing callers a transport.
+    /// probes, referrer manifest reads). [`Client`] itself never hands a
+    /// caller a transport — its pipelines are driven through the
+    /// `PackageManager` facade (`sign_one` / `verify_one`).
+    ///
+    /// That is a statement about `Client`, not about the crate:
+    /// [`native_transport`](fn@native_transport) is the one public constructor of a
+    /// `Box<dyn OciTransport>` (OCX-C-1), and it deliberately bypasses this
+    /// type entirely rather than widening it.
     pub(crate) fn transport(&self) -> &dyn OciTransport {
         &*self.transport
     }

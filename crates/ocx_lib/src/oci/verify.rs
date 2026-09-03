@@ -16,6 +16,11 @@
 //! `self-hosted-sigstore.md`. Design record:
 //! [`adr_oci_referrers_signing_v1.md`](../../../../.claude/artifacts/adr_oci_referrers_signing_v1.md).
 
+// `pub`: OCX-C-2 — the mirror-facing non-verifying signature discovery seam.
+// `SignerCandidate`'s identity fields are read but never checked; see the
+// module doc for why that is the whole point.
+pub mod candidates;
+
 // `error` is `pub` — `VerifyError`/`VerifyErrorKind` are bound by the CLI layer.
 pub mod error;
 
@@ -58,6 +63,7 @@ mod tlog;
 // pipeline call site, both inside `oci::verify`.
 mod signing_instant;
 
+pub use candidates::{SignerCandidate, list_signature_candidates};
 pub use discovery::DiscoveryMethod;
 pub use dsse::VerifiedAttestation;
 pub use error::{VerifyError, VerifyErrorKind};
