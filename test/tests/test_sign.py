@@ -1559,6 +1559,92 @@ def test_sign_tags_accepts_the_file_push_writes(
     assert all(row["status"] == "completed" for row in rows.values()), rows
 
 
+def _bundle_referrer_digests(registry: str, repo: str, subject: str) -> list[str]:
+    """The Sigstore-bundle referrers filed against `subject`, by digest.
+
+    Digests rather than a count: a count says a referrer landed and nothing
+    about whether the second run replaced the first or appended to it.
+    """
+    status, referrers = list_referrers(registry, repo, subject)
+    assert status == 200, f"referrers lookup for {subject} returned {status}"
+    return sorted(
+        entry["digest"]
+        for entry in referrers["manifests"]
+        if entry["artifactType"] == SIGSTORE_BUNDLE_V03
+    )
+
+
+def test_sign_tags_signs_one_referrer_per_index_not_per_tag(
+    ocx: OcxRunner,
+    published_package: PackageInfo,
+    sigstore_stack: SigstoreStack,
+    identity_token: Path,
+) -> None:
+    """N cascade aliases of one index produce ONE signature, per run.
+
+    A Sigstore signature is a referrer of the **subject digest**, never of the
+    tag. `push --cascade` points `1.0.0`, `1.0` and `1` at a single index, so a
+    sweep that iterated tags filed three identical referrers against one
+    subject. `ocx package verify` reads at most eight candidates
+    (`MAX_SIGNATURE_CANDIDATES`), so a re-sweep of a five-tag release crossed
+    the cap and the artifact stopped verifying — a latent failure that only
+    appears on a *second* run, which is why this test sweeps twice.
+
+    The second sweep is a per-run delta assertion, not an idempotence one:
+    `sign` deliberately appends rather than replacing (a second identity's
+    signature must be able to join the first), so a re-run adds its own
+    referrer. What must not happen is a re-run adding one *per tag*.
+    """
+    pkg = published_package
+    aliases = [pkg.tag, "1.0", "1"]
+    index_digest = fetch_manifest_digest(ocx.registry, pkg.repo, pkg.tag)
+    for alias in aliases:
+        assert fetch_manifest_digest(ocx.registry, pkg.repo, alias) == index_digest, (
+            f"premise: --cascade must point {alias} at the same index as {pkg.tag}"
+        )
+    assert not _bundle_referrer_digests(ocx.registry, pkg.repo, index_digest), (
+        "premise: the index carries no signature before the first sweep"
+    )
+
+    def sweep() -> dict[str, dict]:
+        result = ocx.run(
+            "package", "sign",
+            *_keyless_args_without_platform(sigstore_stack, identity_token),
+            "--tags", ",".join(aliases),
+            pkg.short,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return _sweep_rows(result)
+
+    rows = sweep()
+    assert set(rows) == set(aliases), "every tag the caller passed is reported"
+    assert rows[pkg.tag]["status"] == "completed", rows[pkg.tag]
+    assert rows[pkg.tag]["report"]["subject_digest"] == index_digest
+    for alias in aliases[1:]:
+        assert rows[alias]["status"] == "covered", rows[alias]
+        assert pkg.tag in rows[alias]["message"], (
+            f"a covered row must name the tag that carried the signature: {rows[alias]}"
+        )
+        assert "report" not in rows[alias], "a covered tag published nothing of its own"
+
+    after_first = _bundle_referrer_digests(ocx.registry, pkg.repo, index_digest)
+    assert len(after_first) == 1, (
+        f"three tags naming one index must publish one signature between them, "
+        f"got {len(after_first)}: {after_first}"
+    )
+
+    sweep()
+    after_second = _bundle_referrer_digests(ocx.registry, pkg.repo, index_digest)
+    assert len(after_second) == 2, (
+        f"a second sweep over the unchanged index must add one referrer, not one "
+        f"per tag; got {len(after_second) - len(after_first)} new: {after_second}"
+    )
+    assert set(after_first) < set(after_second), (
+        "the first run's signature must survive the second — sign appends"
+    )
+
+
 def test_sign_tags_skips_a_bare_manifest_tag_without_failing_the_run(
     ocx: OcxRunner,
     published_package: PackageInfo,

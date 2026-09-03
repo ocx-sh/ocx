@@ -3959,6 +3959,21 @@ failure listed — aborting at the first failure of twenty would leave you with 
 idea which of the remaining nineteen succeeded. When every failure shares one exit
 code the sweep returns that code; a mix returns `1`.
 
+**One signature per index, not per tag.** A signature is a referrer of the
+subject's **digest**, never of a tag, so the cascade aliases of one release —
+`3`, `3.7`, `3.7.0`, `latest` — all name one index and one signature covers all
+of them. The sweep resolves every tag, collapses those sharing a digest, and
+signs each digest once; tags after the first to name a given index are reported
+`covered`, with the tag that carried the signature named in the detail column.
+Signing per tag would publish N identical referrers against one subject, and
+[`verify`](#package-verify) reads at most eight signature candidates — so a
+release swept twice would stop verifying. Re-running a sweep is therefore cheap
+and safe, though not a no-op: `sign` **appends** rather than replacing (a second
+identity's signature must be able to join the first), so each run adds one
+referrer per distinct index, never one per tag. A tag whose own run *failed* is
+retried by the next tag naming the same index — nothing was published, so
+nothing covers it.
+
 Under `--format json` a swept run emits one document listing every tag:
 
 ```json
@@ -3969,15 +3984,20 @@ Under `--format json` a swept run emits one document listing every tag:
   "data": {
     "tags": [
       { "tag": "1.2.3", "status": "completed", "report": { "subject_digest": "sha256:<64-hex>" } },
-      { "tag": "1.2", "status": "skipped" },
+      { "tag": "1.2", "status": "covered", "message": "same index as tag '1.2.3'" },
+      { "tag": "1.1", "status": "skipped" },
       { "tag": "latest", "status": "failed", "kind": "target_not_found", "message": "no manifest for platform any" }
     ]
   }
 }
 ```
 
-Each `report` is the single-reference document described under **JSON output** below,
-verbatim — a consumer parses a swept run with the same code, one level down.
+`status` is one of `completed`, `covered`, `skipped` or `failed`. Only `failed`
+makes the run exit non-zero: a `covered` tag *is* signed, by the referrer the
+row it names reports. Each `report` is the single-reference document described
+under **JSON output** below, verbatim — a consumer parses a swept run with the
+same code, one level down; `covered` and `skipped` rows carry no `report` of
+their own, because neither published one.
 
 **Token precedence**
 
@@ -4416,7 +4436,7 @@ ocx package attest [OPTIONS] --predicate <PATH> --type <TYPE> <IDENTIFIER>
 | `--tags <TAG,...>` | — | — | Sweep these tags instead of acting on the reference alone. Repeatable, and accepts a comma-separated list. Each tag is attested as the index it resolves to, in the repository the identifier names. Refused alongside `--platform` (exit 64) |
 | `--tags-file <PATH>` | — | — | Read the sweep's tags from a file, one per line or comma-separated — the same file [`ocx package push --tags-file`][cmd-package-push] writes and [`ocx package announce`][cmd-package-announce] reads. Unioned with `--tags` when both are given. Refused alongside `--platform` (exit 64) |
 
-The sweep behaves exactly as it does for [`sign`][cmd-package-sign] — same skip rule for a tag resolving to a single manifest, same continue-past-a-failure rule, same aggregated document under `--format json` (with `"command": "package attest"`).
+The sweep behaves exactly as it does for [`sign`][cmd-package-sign] — same skip rule for a tag resolving to a single manifest, same continue-past-a-failure rule, same one-attestation-per-distinct-index rule (an attestation is a referrer of the subject digest too, so cascade aliases collapse to one run and the rest report `covered`), and the same aggregated document under `--format json` (with `"command": "package attest"`).
 
 Token precedence and the ambient-CI detection order are identical to [`sign`][cmd-package-sign] — neither command has a `--identity-token` value flag; only file, stdin, an environment variable, and ambient CI detection.
 

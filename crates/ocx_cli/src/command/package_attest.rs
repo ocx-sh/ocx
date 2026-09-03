@@ -245,6 +245,7 @@ impl PackageAttest {
         for entry in swept {
             let row = match entry.outcome {
                 SweptOutcome::SkippedBareManifest => SweptTagReport::skipped(entry.tag),
+                SweptOutcome::CoveredBy(attested_as) => SweptTagReport::covered(entry.tag, attested_as),
                 SweptOutcome::Failed(error) => {
                     let error = package_sign_common::attest_error_into_anyhow(*error);
                     failures.push(ocx_lib::cli::classify_error(error.as_ref()));
