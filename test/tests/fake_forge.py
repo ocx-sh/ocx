@@ -53,6 +53,10 @@ _COMMIT_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGMENT})/gi
 # the upstream base?"). The whole `base...owner:branch` spec is one path segment.
 _COMPARE_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGMENT})/compare/(?P<basehead>{_SEGMENT})$")
 _PULLS_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGMENT})/pulls$")
+# `GET /repos/<owner>/<repo>/pulls/<number>` — the SINGLE pull request. Distinct
+# from `_PULLS_RE` above on purpose: `mergeable` is absent from every entry the
+# list endpoint returns, so the mergeability detector has to come here.
+_PULL_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGMENT})/pulls/(?P<number>\d+)$")
 _FORKS_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGMENT})/forks$")
 _BLOBS_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGMENT})/git/blobs$")
 _TREES_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGMENT})/git/trees$")
@@ -155,6 +159,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             head = query.get("head", [None])[0]
             state = query.get("state", [None])[0]
             self.server.handle_get_pulls(self, match.group("owner"), match.group("repo"), head, state)
+            return
+
+        match = _PULL_RE.fullmatch(path)
+        if match:
+            self.server.handle_get_pull(
+                self, match.group("owner"), match.group("repo"), int(match.group("number"))
+            )
             return
 
         self._reply_json(404, {"message": "not found"})
@@ -573,10 +584,106 @@ class FakeForge(GitLabRoutes, http.server.ThreadingHTTPServer):
             cursor = self.commits.get(cursor, {}).get("parent")
         return False
 
+    def _merge_base_locked(self, sha_a: str, sha_b: str) -> str | None:
+        """The first commit reachable from both sides, or None when the two
+        histories share no ancestor (caller holds `self.lock`).
+
+        The graph is a single parent chain, so "first common ancestor" is
+        unambiguous: collect one side's whole chain, then walk the other until
+        it lands in it."""
+        seen: set[str] = set()
+        cursor: str | None = sha_a
+        while cursor is not None:
+            seen.add(cursor)
+            cursor = self.commits.get(cursor, {}).get("parent")
+        cursor = sha_b
+        while cursor is not None:
+            if cursor in seen:
+                return cursor
+            cursor = self.commits.get(cursor, {}).get("parent")
+        return None
+
+    def _tree_locked(self, commit_sha: str | None) -> dict[str, str]:
+        """A commit's flattened `{path: blob sha}` tree; empty for no commit."""
+        if commit_sha is None:
+            return {}
+        return self.trees.get(self.commits.get(commit_sha, {}).get("tree", ""), {})
+
+    def _conflicting_locked(
+        self, base_full: str, base_branch: str, head_full: str, head_branch: str
+    ) -> bool:
+        """Whether merging `head` into `base` would conflict (caller holds
+        `self.lock`).
+
+        Computed from the object graph, never scripted. A knob would let a test
+        pass on an answer a real forge would not give, and both forge surfaces
+        answer from here so neither client can agree with a fixture written for
+        it alone.
+
+        A file-level three-way against the merge base — which is what git does
+        for a whole-file rewrite, and a package root is exactly that. Two
+        conditions, both required:
+
+        * the branches must have DIVERGED. One side being an ancestor of the
+          other fast-forwards and can never conflict, whatever the trees say.
+        * some path must have moved on BOTH sides since the merge base, to
+          *different* blobs. A path only one side touched merges cleanly, and so
+          does one both sides moved to the same content.
+
+        The second condition is what keeps the detector honest: an unrelated
+        package's root advancing the index base is a divergence with no shared
+        path, and reading that as a conflict would fire on the ordinary #228
+        shape."""
+        base_sha = self.refs.get(base_full, {}).get(base_branch)
+        head_sha = self.refs.get(head_full, {}).get(head_branch)
+        if base_sha is None or head_sha is None:
+            return False
+        if self._is_ancestor_locked(base_sha, head_sha) or self._is_ancestor_locked(head_sha, base_sha):
+            return False
+        merge_base_tree = self._tree_locked(self._merge_base_locked(base_sha, head_sha))
+        base_tree = self._tree_locked(base_sha)
+        head_tree = self._tree_locked(head_sha)
+        return any(
+            base_tree.get(path) != head_tree.get(path)
+            and base_tree.get(path) != merge_base_tree.get(path)
+            and head_tree.get(path) != merge_base_tree.get(path)
+            for path in base_tree.keys() | head_tree.keys()
+        )
+
     def handle_get_pulls(self, handler: _Handler, owner: str, repo: str, head: str | None, state: str | None) -> None:
         with self.lock:
             record = self.open_prs.get((owner, repo), {}).get(head or "")
         handler._reply_json(200, [record] if record else [])
+
+    def handle_get_pull(self, handler: _Handler, owner: str, repo: str, number: int) -> None:
+        """`GET /repos/:owner/:repo/pulls/:number` -> the pull request, carrying
+        the `mergeable` tri-state the list endpoint omits.
+
+        `mergeable` is COMPUTED (`_conflicting_locked`), so the answer is one a
+        real forge could have given for this graph. It is a plain bool here
+        rather than GitHub's `true | false | null`, because the fake has already
+        finished computing: `null` means "GitHub is still working on it", a
+        state this graph is never in. The client's `null` -> `Unknown` arm is
+        pinned by a Rust unit test instead."""
+        with self.lock:
+            found = next(
+                (
+                    (head, record)
+                    for head, record in self.open_prs.get((owner, repo), {}).items()
+                    if record["number"] == number
+                ),
+                None,
+            )
+            if found is None:
+                handler._reply_json(404, {"message": "not found"})
+                return
+            head, record = found
+            head_owner, _, head_branch = head.partition(":")
+            conflicting = self._conflicting_locked(
+                f"{owner}/{repo}", record["base"]["ref"], f"{head_owner}/{repo}", head_branch
+            )
+            body = dict(record) | {"mergeable": not conflicting}
+        handler._reply_json(200, body)
 
     def handle_post_fork(self, handler: _Handler, owner: str, repo: str, body: dict[str, Any]) -> None:
         upstream_full = f"{owner}/{repo}"
@@ -698,7 +805,13 @@ class FakeForge(GitLabRoutes, http.server.ThreadingHTTPServer):
                 return
             self._pr_counter += 1
             number = self._pr_counter
-            record = {"number": number, "html_url": f"{self.base_url}/{owner}/{repo}/pull/{number}"}
+            # `base` is what the mergeability route compares the head against;
+            # GitHub returns it on both the list and the single-request read.
+            record = {
+                "number": number,
+                "html_url": f"{self.base_url}/{owner}/{repo}/pull/{number}",
+                "base": {"ref": body.get("base", "main")},
+            }
             open_prs[head] = record
         handler._reply_json(201, record)
 

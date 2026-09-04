@@ -44,7 +44,8 @@ use super::http::build_forge_http_client;
 use super::identity::{fork_identity_from_path, verify_fork_namespace, verify_gitlab_fork};
 use super::poll::{PollSchedule, backoff_delays};
 use super::{
-    BranchComparison, CommitBase, Forge, ForgeError, ForgeToken, ForkIdentity, PullRequest, RefUpdate, RepoCoordinate,
+    BranchComparison, CommitBase, Forge, ForgeError, ForgeToken, ForkIdentity, Mergeability, PullRequest, RefUpdate,
+    RepoCoordinate,
 };
 
 /// Canonical GitLab host — every other host is a self-managed instance.
@@ -621,6 +622,26 @@ impl Forge for GitLabForge {
         merge_request_from_body(&url, existing, true).map(Some)
     }
 
+    /// Whether merge request `number` (an `iid`, project-local to `index`)
+    /// merges cleanly.
+    ///
+    /// GitLab computes mergeability asynchronously, so the single-request GET
+    /// can legitimately answer "still checking"; that is
+    /// [`Mergeability::Unknown`], never a guess, and never a poll.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ForgeError`] on transport failure, a project that is not
+    /// visible to the credential, or a non-success status other than 404.
+    async fn pull_request_mergeability(&self, index: &RepoCoordinate, number: u64) -> Result<Mergeability, ForgeError> {
+        let index_id = self.project_id(index).await?;
+        let url = self.project_id_url(index_id, &format!("/merge_requests/{number}"));
+        let Some(body) = self.get_json_optional(&url).await? else {
+            return Ok(Mergeability::Unknown);
+        };
+        Ok(mergeability_from_merge_request(&body))
+    }
+
     async fn find_fork(
         &self,
         upstream: &RepoCoordinate,
@@ -881,6 +902,35 @@ fn merge_request_from_body(url: &str, value: &Value, updated: bool) -> Result<Pu
     })
 }
 
+/// A merge-request body's merge status as a [`Mergeability`].
+///
+/// Two fields answer overlapping questions, and only their intersection is
+/// trustworthy. `has_conflicts` is the direct one and decides first;
+/// `detailed_merge_status` also spells a conflict, and is read as a fallback so
+/// a response that carries only one of the pair still lands on the same
+/// verdict.
+///
+/// `broken_status` — GitLab's "can not merge the source into the target
+/// branch, potential conflict" — is a conflict for this detector's purpose: the
+/// contract is that an unchanged run never reports success over a request that
+/// cannot merge, and a benign `Unknown` here would do exactly that. The
+/// no-verdict states are only the two *in-progress* values. Every
+/// other value — a failed pipeline, a missing approval, a draft — is a reason
+/// the request cannot merge *right now*, which is not the
+/// base-moved-under-the-branch conflict this detector exists to catch, so it
+/// reads as mergeable rather than raising an error the caller cannot act on. An
+/// absent field is the older API shape and carries no conflict either.
+fn mergeability_from_merge_request(value: &Value) -> Mergeability {
+    if value.get("has_conflicts").and_then(Value::as_bool) == Some(true) {
+        return Mergeability::Conflicting;
+    }
+    match value.get("detailed_merge_status").and_then(Value::as_str) {
+        Some("conflict" | "broken_status") => Mergeability::Conflicting,
+        Some("checking" | "unchecked") => Mergeability::Unknown,
+        _ => Mergeability::Mergeable,
+    }
+}
+
 #[cfg(any(test, feature = "__testing"))]
 fn testing_base_url_override() -> Option<String> {
     std::env::var("__OCX_TESTING_FORGE_BASE_URL").ok()
@@ -945,6 +995,77 @@ mod tests {
         assert_eq!(request.number, 7, "iid is the number a human sees, not the global id");
         assert_eq!(request.html_url, "https://gitlab.com/acme/index/-/merge_requests/7");
         assert!(!request.updated);
+    }
+
+    #[test]
+    fn mergeability_reads_the_conflict_flag_before_the_status_word() {
+        // `has_conflicts` is the direct answer and decides on its own, whatever
+        // `detailed_merge_status` says beside it.
+        assert_eq!(
+            mergeability_from_merge_request(&json!({
+                "iid": 7,
+                "has_conflicts": true,
+                "detailed_merge_status": "conflict",
+            })),
+            Mergeability::Conflicting
+        );
+        // The documented conflict spelling stands on its own too: a response
+        // carrying only one half of the pair must not read as mergeable.
+        assert_eq!(
+            mergeability_from_merge_request(&json!({ "iid": 7, "detailed_merge_status": "conflict" })),
+            Mergeability::Conflicting
+        );
+    }
+
+    #[test]
+    fn mergeability_treats_an_unfinished_check_as_no_verdict() {
+        // GitLab computes mergeability asynchronously. These two values are the
+        // only ones that mean "not computed yet"; reading either as a verdict
+        // would report a conflict on a request nobody has looked at.
+        for status in ["checking", "unchecked"] {
+            assert_eq!(
+                mergeability_from_merge_request(&json!({ "iid": 7, "detailed_merge_status": status })),
+                Mergeability::Unknown,
+                "{status} is an unfinished check, not a verdict"
+            );
+        }
+    }
+
+    /// GitLab documents `broken_status` as "can not merge the source into the
+    /// target branch, potential conflict". The D2 contract is that an unchanged
+    /// run never reports success over a request that cannot merge, so this is
+    /// a conflict here — `Unknown` would let it through as a benign `unchanged`.
+    #[test]
+    fn mergeability_treats_a_broken_status_as_a_conflict() {
+        assert_eq!(
+            mergeability_from_merge_request(&json!({ "iid": 7, "detailed_merge_status": "broken_status" })),
+            Mergeability::Conflicting,
+            "a request GitLab says cannot merge must trip the detector"
+        );
+    }
+
+    #[test]
+    fn mergeability_reads_every_other_status_as_mergeable() {
+        // `has_conflicts: false` with a settled status is the clean case. So is
+        // a blocked-for-some-other-reason request: a failed pipeline is not the
+        // base-moved-under-the-branch conflict this detector looks for, and an
+        // absent field is the older API shape, which carries no conflict either.
+        assert_eq!(
+            mergeability_from_merge_request(&json!({
+                "iid": 7,
+                "has_conflicts": false,
+                "detailed_merge_status": "mergeable",
+            })),
+            Mergeability::Mergeable
+        );
+        assert_eq!(
+            mergeability_from_merge_request(&json!({ "iid": 7, "detailed_merge_status": "ci_still_running" })),
+            Mergeability::Mergeable
+        );
+        assert_eq!(
+            mergeability_from_merge_request(&json!({ "iid": 7 })),
+            Mergeability::Mergeable
+        );
     }
 
     #[test]

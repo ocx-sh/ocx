@@ -24,7 +24,10 @@ use crate::api::Printable;
 /// `pull_request_number` / `fork` are always `null` for `--out`; in `--fork`
 /// mode they are `null` only when the run made no pull request — an unchanged
 /// run whose announce branch is ahead of the index base still ensures, and
-/// therefore reports, one. `written_paths` is empty outside `--out`.
+/// therefore reports, one. So does an unchanged run whose branch has
+/// diverged from the index base but still holds an open, mergeable pull
+/// request: that pull request is reported too, not dropped. `written_paths`
+/// is empty outside `--out`.
 /// `reserved_tags_dropped` is an array, empty rather than absent.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct AnnounceReport {
@@ -33,7 +36,9 @@ pub struct AnnounceReport {
     /// `"unchanged"` when the rebuilt root was byte-identical to the committed
     /// one, so nothing was committed; `"updated"` otherwise. An unchanged
     /// `--fork` run still ensures a pull request when its announce branch is
-    /// ahead of the index base.
+    /// ahead of the index base, and still reports one when the branch has
+    /// diverged from the index base but its open pull request can still
+    /// merge.
     pub status: String,
     /// `"updated"` when the package's `__ocx.desc` artifact moved, so the
     /// root's `desc` object was rebuilt and its readme (and logo) written as

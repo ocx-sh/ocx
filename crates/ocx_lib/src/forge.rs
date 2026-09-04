@@ -34,7 +34,7 @@ mod identity;
 mod kind;
 mod poll;
 
-pub use api::{BranchComparison, CommitBase, Forge, RefUpdate};
+pub use api::{BranchComparison, CommitBase, Forge, Mergeability, RefUpdate};
 pub use error::ForgeError;
 pub use github::GitHubForge;
 pub use gitlab::GitLabForge;

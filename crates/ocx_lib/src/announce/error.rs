@@ -7,7 +7,9 @@
 //! them to the existing sysexits without a new code (design register C13): an
 //! SSRF refusal maps to `ConfigError` (78), a DNS resolution failure reaching
 //! the physical registry maps to `Unavailable` (69), and a curated tag that
-//! does not resolve on the physical registry maps to `NotFound` (79). A forge
+//! does not resolve on the physical registry maps to `NotFound` (79), and an
+//! otherwise-unchanged run whose open pull request cannot merge into the index
+//! base maps to `DataError` (65). A forge
 //! auth failure (401/403 — a bad or missing `OCX_ANNOUNCE_TOKEN`) maps to
 //! `AuthError` (80) and a forge transport failure maps to `Unavailable` (69),
 //! both via [`ForgeError`](crate::forge::ForgeError)'s own classification. The
@@ -161,12 +163,26 @@ pub enum AnnounceError {
     #[error("no base ref found on {repo} to commit onto")]
     MissingBaseRef { repo: String },
 
-    /// The C4 retry re-read the branch head that won the race, but the package
-    /// root is absent from it — the winning commit deleted or never carried it.
+    /// The C4 retry re-read the head that won the race — the branch head when
+    /// accumulating, the index base when rebuilding a spent or stale branch —
+    /// but the package root is absent from it: the winning commit deleted or
+    /// never carried it.
     /// Distinct from [`Self::MissingBaseRef`]: the ref resolved fine, the FILE
     /// at it did not.
     #[error("no committed root at {path} on {repo}@{sha} to retry the announce against")]
     MissingHeadRoot { repo: String, path: String, sha: String },
+
+    /// An otherwise-unchanged run found its open pull request unmergeable
+    /// (ADR `adr_announce_diverged_branch_rebuild.md` D2). Every run that
+    /// commits repoints the branch with [`RefUpdate`](crate::forge::RefUpdate)
+    /// `::Reset` and makes the request mergeable by construction, so this is
+    /// the one corner announce cannot clear itself: it has no close-request or
+    /// delete-ref primitive. Nothing is lost — every tag is already on the base
+    /// — only the pull request is stuck.
+    #[error(
+        "pull request #{number} ({url}) cannot merge into the index base — close it, or delete branch {branch}, so the next announce rebuilds it"
+    )]
+    PullRequestUnmergeable { number: u64, url: String, branch: String },
 
     /// Writing a root or CAS object to the `--out` directory failed.
     #[error("failed to write {path}")]
@@ -227,6 +243,13 @@ impl crate::cli::ClassifyExitCode for AnnounceError {
             // named no version. `EX_USAGE` is that category, and it keeps the
             // all-reserved collapse discriminable from an unclassified crash.
             Self::NoCuratedTags { .. } => Some(crate::cli::ExitCode::UsageError),
+            // The branch was rebuilt onto the current base and the request
+            // still will not merge: nothing is malformed and nothing is absent,
+            // the two sides genuinely disagree and only a human clears it —
+            // `DescDisappeared`'s category exactly. `TempFail` (75) would invite
+            // a retry that can never succeed, and an unclassified 1 is the crash
+            // code, which is how #399 stayed invisible in the first place.
+            Self::PullRequestUnmergeable { .. } => Some(crate::cli::ExitCode::DataError),
             // Writing the `--out` tree failed: a full disk, an `ENOTDIR`, a
             // read-only mount. `cli/classify.rs`'s bare-`io::Error` walker
             // special-cases only `PermissionDenied`, so every other kind lands
@@ -390,6 +413,33 @@ mod tests {
         assert!(
             message.contains(&format!("sha256:{}", "a".repeat(64))),
             "the message must name the digest the root recorded: {message}"
+        );
+    }
+
+    /// D2's refusal is the one announce failure a rerun cannot clear, so a
+    /// release wrapper must be able to tell it from a crash (exit 1) and from a
+    /// transient (75). The message has to name the branch, because deleting it
+    /// is one of the two actions that unstick the package.
+    #[test]
+    fn pull_request_unmergeable_classifies_as_data_error() {
+        let error = AnnounceError::PullRequestUnmergeable {
+            number: 648,
+            url: "https://github.com/ocx-sh/index/pull/648".to_string(),
+            branch: "indexbot-announce-acme-widget".to_string(),
+        };
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+        let message = error.to_string();
+        assert!(
+            message.contains("indexbot-announce-acme-widget"),
+            "the message must name the branch to delete: {message}"
+        );
+        assert!(
+            message.contains("648"),
+            "the message must name the pull request: {message}"
+        );
+        assert!(
+            message.contains("https://github.com/ocx-sh/index/pull/648"),
+            "the message must link the pull request: {message}"
         );
     }
 

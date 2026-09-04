@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::forge::{BranchComparison, CommitBase, Forge, RefUpdate, RepoCoordinate};
+use crate::forge::{BranchComparison, CommitBase, Forge, Mergeability, PullRequest, RefUpdate, RepoCoordinate};
 use crate::oci::index::serialize_root;
 use crate::publisher::Publisher;
 
@@ -108,23 +108,32 @@ pub async fn announce(
 
     // 1. Read the committed root (C10), from the announce branch head while the
     //    branch is live (C4) so sequential announces accumulate, else from the
-    //    index main.
+    //    index main — carrying a stale branch's tag delta forward (D1).
     let root_read = read_committed_root(
         forge,
         &request.index_repo,
-        branch_repo.as_ref().filter(|_| branch_state.is_live()),
+        branch_repo.as_ref(),
+        &branch_state,
         &root_path,
         &branch,
     )
     .await?;
     let committed_bytes = pipeline::require_root(&package, &root_path, &root_read.base_ref, root_read.bytes)?;
-    let committed_root: Value =
+    let mut committed_root: Value =
         serde_json::from_slice(&committed_bytes).map_err(|source| AnnounceError::RootParse {
             path: root_path.clone(),
             source,
         })?;
     if !committed_root.is_object() {
         return Err(AnnounceError::RootNotObject { path: root_path });
+    }
+    // D1: a stale branch supplies its tags but never its shape — that shape is
+    // what froze in #399. `committed_bytes` deliberately stays the BASE's raw
+    // bytes while the regeneration input becomes the merged root: comparing C6
+    // against the merged root would read `unchanged` for exactly the runs this
+    // rebuild exists to unfreeze.
+    if let Some(carried) = &root_read.carried_tags {
+        pipeline::carry_branch_tags(&mut committed_root, carried);
     }
 
     // 2/3/4. Resolve the curated tag set (C3/C5), observe it (X3), regenerate
@@ -178,12 +187,27 @@ pub async fn announce(
                 // on the branch that the index base does not have. Such a run
                 // may have committed content whose pull request then failed to
                 // open, stranding the update; ensure an open PR exists so it is
-                // never lost (design register C6 amendment). `branch_sha` is
-                // `Some` only for a LIVE branch, which is the whole predicate:
-                // a branch sitting at, already merged into, or squash-merged
-                // away from the base carries nothing unmerged, and opening a
-                // pull request for it produces the unmergeable one #228 is
-                // about.
+                // never lost (design register C6 amendment).
+                //
+                // Exactly two states carry something unmerged, and they need
+                // opposite handling. `Live` (`branch_sha` is `Some`) accumulates
+                // and may still be missing its pull request. `Stale` already HAS
+                // one — the variant holds it — so the only open question there
+                // is whether that request can still merge (D2). Every other
+                // state carries nothing unmerged, and opening a pull request for
+                // it produces the unmergeable one #228 is about.
+                if let BranchState::Stale(pull_request) = &branch_state {
+                    refuse_if_unmergeable(forge, &request.index_repo, &branch_state, &branch).await?;
+                    return Ok(AnnounceOutcome {
+                        package,
+                        status,
+                        pull_request: Some(pull_request.clone()),
+                        fork: existing_fork,
+                        written_paths: Vec::new(),
+                        reserved_tags_dropped: reserved_dropped,
+                        desc_status,
+                    });
+                }
                 if let Some(repo) = &branch_repo
                     && root_read.branch_sha.is_some()
                 {
@@ -259,11 +283,12 @@ pub async fn announce(
                 None => (request.index_repo.clone(), INDEX_BASE_REF),
             };
             let base_sha = root_read.base_sha;
-            // F2/C4: the ref update is fast-forward-only (CAS). If a concurrent
-            // announce advanced the branch between our read and our commit,
-            // re-read the new head, re-run the WHOLE regeneration against it,
-            // and retry exactly once so the concurrent change is preserved,
-            // never overwritten.
+            // F2/C4: the ref update is the CAS an accumulating branch needs —
+            // a rebuilt one (spent or stale) repoints with `Reset` on purpose,
+            // see `BranchState::ref_update`. Either way, if the base moved
+            // between our read and our commit, re-read the new head, re-run the
+            // WHOLE regeneration against it, and retry exactly once so the
+            // concurrent change is preserved, never overwritten.
             match forge
                 .commit_files(
                     &commit_repo,
@@ -281,25 +306,43 @@ pub async fn announce(
             {
                 Ok(_) => {}
                 Err(crate::forge::ForgeError::NonFastForward { .. }) => {
+                    // WHOSE head to re-read is the same question the first
+                    // attempt already answered. An accumulating run raced
+                    // another announce on the branch, so the branch head is the
+                    // winner. A rebuilt run (spent or stale) never based on the
+                    // branch at all — it lost to the index main moving under it,
+                    // and re-reading the branch head here would turn the rebuild
+                    // straight back into accumulate-on-stale, which is #399 in
+                    // the retry path.
+                    let (retry_repo, retry_branch) = match root_read.branch_sha {
+                        Some(_) => (&commit_repo, branch.as_str()),
+                        None => (&request.index_repo, INDEX_BASE_REF),
+                    };
                     let head_sha = forge
-                        .get_ref_sha(&commit_repo, &format!("heads/{branch}"))
+                        .get_ref_sha(retry_repo, &format!("heads/{retry_branch}"))
                         .await?
                         .ok_or_else(|| AnnounceError::MissingBaseRef {
-                            repo: commit_repo.full_path(),
+                            repo: retry_repo.full_path(),
                         })?;
                     let head_bytes = forge
-                        .get_file_contents(&commit_repo, &root_path, &head_sha)
+                        .get_file_contents(retry_repo, &root_path, &head_sha)
                         .await?
                         .ok_or_else(|| AnnounceError::MissingHeadRoot {
-                            repo: commit_repo.full_path(),
+                            repo: retry_repo.full_path(),
                             path: root_path.clone(),
                             sha: head_sha.clone(),
                         })?;
-                    let head_root: Value =
+                    let mut head_root: Value =
                         serde_json::from_slice(&head_bytes).map_err(|source| AnnounceError::RootParse {
                             path: root_path.clone(),
                             source,
                         })?;
+                    // D1 again: the re-read base carries the shape, the stale
+                    // branch the tags. Skipping this would drop on the retry
+                    // exactly what the first attempt carried.
+                    if let Some(carried) = &root_read.carried_tags {
+                        pipeline::carry_branch_tags(&mut head_root, carried);
+                    }
                     let merged =
                         observe_and_rebuild(publisher, &head_root, &request, &now, &root_path, &package).await?;
                     // The retry re-resolved the curated set against the winning
@@ -318,25 +361,39 @@ pub async fn announce(
                     // nothing is stranded.
                     if merged.root_bytes == head_bytes && pipeline::new_cas_count(&head_root, &merged.observed) == 0 {
                         status = AnnounceStatus::Unchanged;
+                        // The same D2 tripwire as the first pass, for the same
+                        // reason: this arm commits nothing, so a conflicting
+                        // request stays conflicting and would be reported as a
+                        // benign `unchanged` — #399 in the retry path. Reachable
+                        // when a concurrent writer wins the race on a stale
+                        // branch: GitLab sends a per-file `last_commit_id` even
+                        // under `Reset` and maps its rejection to
+                        // `NonFastForward`.
+                        refuse_if_unmergeable(forge, &request.index_repo, &branch_state, &branch).await?;
                     } else {
                         forge
-                            // The winning head IS our base now, so this is a
-                            // fast-forward by construction — and it must stay
-                            // CAS-checked, since a third announce could have
-                            // advanced the branch again while we regenerated.
+                            // Same ref discipline as the first attempt, for the
+                            // same reasons. Accumulating: the winning head IS
+                            // our base now, so the update is a fast-forward by
+                            // construction — and it stays CAS-checked, since a
+                            // third announce could have advanced the branch
+                            // again while we regenerated. Rebuilt: the branch
+                            // still holds the commits the base does not, so the
+                            // repoint is still deliberately not a fast-forward.
                             .commit_files(
                                 &commit_repo,
                                 &branch,
-                                // The winning head is in the branch's own
-                                // repository, so that is where the base lives.
+                                // The base is wherever the head was re-read
+                                // from: the branch's own repository when
+                                // accumulating, the index main when rebuilding.
                                 CommitBase {
-                                    repo: &commit_repo,
+                                    repo: retry_repo,
                                     sha: &head_sha,
-                                    branch: &branch,
+                                    branch: retry_branch,
                                 },
                                 &message,
                                 &merged.files,
-                                RefUpdate::FastForward,
+                                branch_state.ref_update(),
                             )
                             .await?;
                     }
@@ -463,6 +520,45 @@ async fn observe_and_rebuild(
     })
 }
 
+/// D2's tripwire: refuse an outcome that moves nothing while its open pull
+/// request cannot merge.
+///
+/// A no-op for every state but [`BranchState::Stale`]. That is not an
+/// optimisation but the whole design: every other outcome either commits — and
+/// a commit repoints the branch with [`RefUpdate::Reset`], making the request
+/// mergeable by construction — or has no open request to be stuck. So the
+/// mergeability read costs a round trip only where announce has already decided
+/// to write nothing, never on the hot path.
+///
+/// [`Mergeability::Unknown`] is deliberately benign: the forge may still be
+/// computing a verdict, and the next run re-asks. No polling.
+///
+/// # Errors
+///
+/// [`AnnounceError::PullRequestUnmergeable`] when the forge reports a conflict —
+/// the one corner announce cannot clear itself — or any forge failure.
+async fn refuse_if_unmergeable(
+    forge: &dyn Forge,
+    index_repo: &RepoCoordinate,
+    branch_state: &BranchState,
+    branch: &str,
+) -> Result<(), AnnounceError> {
+    let BranchState::Stale(pull_request) = branch_state else {
+        return Ok(());
+    };
+    if matches!(
+        forge.pull_request_mergeability(index_repo, pull_request.number).await?,
+        Mergeability::Conflicting
+    ) {
+        return Err(AnnounceError::PullRequestUnmergeable {
+            number: pull_request.number,
+            url: pull_request.html_url.clone(),
+            branch: branch.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// The outcome of reading the committed root: its bytes (`None` when the path is
 /// absent), the fork branch head SHA when the announce branch already exists
 /// (C4, reused as the commit base), and the ref it was read from.
@@ -478,16 +574,14 @@ struct RootRead {
     /// reading at the resolved SHA closes it.
     base_sha: String,
     base_ref: String,
+    /// The stale announce branch head's own `tags` object, merged onto the
+    /// base's root before regeneration (D1) so no tag already announced into
+    /// the still-open pull request is lost. `None` for every state but
+    /// [`BranchState::Stale`], and `None` there too when the branch head
+    /// carries no root or no `tags`.
+    carried_tags: Option<Value>,
 }
 
-/// Read the committed root per C4/C10: the fork's own announce branch head when
-/// it exists (accumulate), else the index repository's `main`.
-///
-/// `fork` is the **verified** fork coordinate — `None` for `--out` and for a
-/// fork target with no fork yet, both of which can only read the index base.
-/// Reading the branch through the verified coordinate rather than the raw
-/// `--fork` value is what makes C4 accumulation work for a fork renamed away
-/// from the upstream's repository name.
 /// What the per-package announce branch on the fork is currently worth.
 ///
 /// The branch name is derived from the package alone, so it outlives every pull
@@ -498,10 +592,22 @@ struct RootRead {
 enum BranchState {
     /// No announce branch on the fork — the first announce for this package.
     Absent,
-    /// The branch is still carrying work: an open pull request holds it, or its
-    /// commits fast-forward onto the index base. Accumulate onto it (C4), so two
-    /// announces before a merge land in one pull request with both tag sets.
+    /// The branch is still carrying work and its commits fast-forward onto the
+    /// index base. Accumulate onto it (C4), so two announces before a merge land
+    /// in one pull request with both tag sets.
     Live,
+    /// The branch holds unmerged commits, the index base has moved on
+    /// underneath them, and a pull request over the result is still open.
+    ///
+    /// Reading that branch head as the committed root is what froze 34 packages
+    /// for up to 21 days: its root may predate a base-wide shape migration, so
+    /// every later run reproduced the pre-migration bytes and reported a benign
+    /// `unchanged` while the pull request stayed unmergeable (ocx-sh/ocx#399).
+    /// The base supplies the shape, the branch supplies its tag delta, and the
+    /// ref is repointed at the result — one commit on the current base, carrying
+    /// every tag the open request already had. Holds that request so the
+    /// unchanged path can reuse it without a second lookup.
+    Stale(PullRequest),
     /// The branch exists and carries nothing the base needs — its pull request
     /// merged (leaving it `Diverged` under a squash merge, `Behind` under a merge
     /// commit) or was closed unmerged. Residue: rebuild from the base and repoint
@@ -510,18 +616,20 @@ enum BranchState {
 }
 
 impl BranchState {
-    /// Whether the branch may serve as the base for this announce.
+    /// Whether the branch's own head may serve as the committed root for this
+    /// announce. A stale branch may not: its shape is the frozen one.
     fn is_live(&self) -> bool {
         matches!(self, Self::Live)
     }
 
-    /// How the ref update must behave. Repointing a spent branch at a commit
-    /// built on the upstream base is deliberately not a fast-forward — refusing
-    /// the rewrite would preserve the already-merged commits that make the branch
-    /// unusable in the first place.
+    /// How the ref update must behave. Repointing a spent or stale branch at a
+    /// commit built on the upstream base is deliberately not a fast-forward —
+    /// refusing the rewrite would preserve exactly what makes the branch
+    /// unusable: the already-merged commits of a spent one, the pre-migration
+    /// root of a stale one.
     fn ref_update(&self) -> RefUpdate {
         match self {
-            Self::Spent => RefUpdate::Reset,
+            Self::Spent | Self::Stale(_) => RefUpdate::Reset,
             Self::Absent | Self::Live => RefUpdate::FastForward,
         }
     }
@@ -535,7 +643,8 @@ impl BranchState {
 /// only [`BranchComparison::Diverged`] needs a second question, because git
 /// cannot tell "my commits were squash-merged and the base now carries them"
 /// from "my commits are unmerged and the base moved on underneath me". An open
-/// pull request means the latter.
+/// pull request means the latter — [`BranchState::Stale`], rebuilt on the base
+/// with its tags carried forward, never read as the committed root itself.
 async fn resolve_branch_state(
     forge: &dyn Forge,
     index_repo: &RepoCoordinate,
@@ -554,34 +663,53 @@ async fn resolve_branch_state(
         // C6 amendment opens the one they never got.
         BranchComparison::Ahead => Ok(BranchState::Live),
         BranchComparison::Identical | BranchComparison::Behind => Ok(BranchState::Spent),
-        BranchComparison::Diverged => {
-            if forge.find_open_pull_request(index_repo, fork, branch).await?.is_some() {
-                Ok(BranchState::Live)
-            } else {
-                Ok(BranchState::Spent)
-            }
-        }
+        BranchComparison::Diverged => match forge.find_open_pull_request(index_repo, fork, branch).await? {
+            Some(pull_request) => Ok(BranchState::Stale(pull_request)),
+            None => Ok(BranchState::Spent),
+        },
     }
 }
 
+/// Read the committed root per C4/C10: the announce branch head while the
+/// branch is [`BranchState::Live`] (accumulate), else the index repository's
+/// `main`.
+///
+/// `branch_repo` is the **verified** coordinate the branch lives in — `None` for
+/// `--out` and for a fork target with no fork yet, both of which can only read
+/// the index base. Reading the branch through the verified coordinate rather
+/// than the raw `--fork` value is what makes C4 accumulation work for a fork
+/// renamed away from the upstream's repository name.
+///
+/// The liveness decision is the caller's, passed in as `branch_state` rather
+/// than re-derived here: the base SHA this returns is the one the bytes were
+/// READ at (see [`RootRead::base_sha`]), and a second, independent answer to
+/// "is this branch usable" could disagree with the one the commit is built on.
+///
+/// # Errors
+///
+/// [`AnnounceError::MissingBaseRef`] when the index base ref does not resolve,
+/// [`AnnounceError::RootParse`] when a stale branch head's root is not JSON, or
+/// any forge failure.
 async fn read_committed_root(
     forge: &dyn Forge,
     index_repo: &RepoCoordinate,
-    fork: Option<&RepoCoordinate>,
+    branch_repo: Option<&RepoCoordinate>,
+    branch_state: &BranchState,
     root_path: &str,
     branch: &str,
 ) -> Result<RootRead, AnnounceError> {
     // The announce branch only ever exists on the fork; an absent branch reads
     // back as `None`, falling through to `main`.
-    if let Some(fork) = fork
-        && let Some(branch_sha) = forge.get_ref_sha(fork, &format!("heads/{branch}")).await?
+    if let Some(repo) = branch_repo.filter(|_| branch_state.is_live())
+        && let Some(branch_sha) = forge.get_ref_sha(repo, &format!("heads/{branch}")).await?
     {
-        let bytes = forge.get_file_contents(fork, root_path, &branch_sha).await?;
+        let bytes = forge.get_file_contents(repo, root_path, &branch_sha).await?;
         return Ok(RootRead {
             bytes,
             branch_sha: Some(branch_sha.clone()),
             base_sha: branch_sha,
             base_ref: branch.to_string(),
+            carried_tags: None,
         });
     }
     let base_sha = forge
@@ -591,12 +719,51 @@ async fn read_committed_root(
             repo: index_repo.full_path(),
         })?;
     let bytes = forge.get_file_contents(index_repo, root_path, &base_sha).await?;
+    // D1: the base supplies the shape, a stale branch supplies the tags it
+    // announced into the still-open pull request. One extra read, for `tags`
+    // alone — every other key of that root may be the pre-migration form.
+    let carried_tags = match (branch_repo, branch_state) {
+        (Some(repo), BranchState::Stale(_)) => branch_head_tags(forge, repo, root_path, branch).await?,
+        _ => None,
+    };
     Ok(RootRead {
         bytes,
         branch_sha: None,
         base_sha,
         base_ref: INDEX_BASE_REF.to_string(),
+        carried_tags,
     })
+}
+
+/// The `tags` object of the announce branch head's root.
+///
+/// `None` when the ref, the file, or the key is absent: a branch with no root to
+/// read carries no delta, and failing the run instead would keep the package
+/// frozen — the outcome this whole path exists to end. A root that is present
+/// but unparseable is a different claim (announce wrote it, so it cannot be
+/// malformed) and is refused.
+///
+/// # Errors
+///
+/// [`AnnounceError::RootParse`] when the branch head's root is not valid JSON,
+/// or any forge failure.
+async fn branch_head_tags(
+    forge: &dyn Forge,
+    repo: &RepoCoordinate,
+    root_path: &str,
+    branch: &str,
+) -> Result<Option<Value>, AnnounceError> {
+    let Some(branch_sha) = forge.get_ref_sha(repo, &format!("heads/{branch}")).await? else {
+        return Ok(None);
+    };
+    let Some(bytes) = forge.get_file_contents(repo, root_path, &branch_sha).await? else {
+        return Ok(None);
+    };
+    let root: Value = serde_json::from_slice(&bytes).map_err(|source| AnnounceError::RootParse {
+        path: root_path.to_string(),
+        source,
+    })?;
+    Ok(root.get("tags").filter(|tags| tags.is_object()).cloned())
 }
 
 #[cfg(test)]

@@ -2675,9 +2675,9 @@ One self-hosted shape is **not** supported: an instance mounted under a path pre
 
 Both forges use the same credential variable, [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] — a GitHub personal access token or a GitLab personal access token, depending on which forge the run targets.
 
-A run that produces no change — the rebuilt entry is byte-identical to the one already committed — makes no commit, and the report's `status` reads `unchanged` instead of `updated`. Running `announce` again for a package already announced from the same branch updates the existing pull request in place rather than opening a second one.
+A run that produces no change — the rebuilt entry is byte-identical to the one already committed — makes no commit, and the report's `status` reads `unchanged` instead of `updated`. Running `announce` again for a package already announced from the same branch updates the existing pull request in place rather than opening a second one. When the index repository's default branch has moved since that pull request opened, the run instead rebuilds the announce branch on the current base as a single commit that carries every tag already announced into the pull request, so the pull request stays mergeable and nothing already announced is lost — the branch's commit history is rewritten, but the pull request itself is reused.
 
-An unchanged run normally opens no pull request either. The one exception is a run whose announce branch still carries commits the index repository does not have: an earlier run's update reached the branch but never reached a pull request, so the unchanged run opens (or reuses) one and reports it, rather than leaving that work stranded.
+An unchanged run normally opens no pull request either. Two exceptions exist. The first: a run whose announce branch still carries commits the index repository does not have — an earlier run's update reached the branch but never reached a pull request, so the unchanged run opens (or reuses) one and reports it, rather than leaving that work stranded. The second: an unchanged run — nothing new to carry forward — whose open pull request can no longer merge. That is a failure, not a no-op: the run exits 65 and names the branch. Close the pull request or delete the branch, and the next announce rebuilds it.
 
 `--out` is unaffected by all of that: it writes the whole entry every run, unchanged included, so `announce --out dir` followed by a step that consumes `dir` never sees an empty directory. Only `status` reports that nothing moved.
 
@@ -2727,6 +2727,7 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-file <
 | `--fork` names a different host than `--index-repo`, or either coordinate's host is malformed. A fork lives on the same instance as its upstream, and a host that is not a hostname is refused rather than interpreted | 64 |
 | `--index-repo` or `--fork` names a nested namespace on GitHub, which has no nested organizations. Checked before any request | 64 |
 | The description recorded in the index no longer exists on the registry — republish it, or ask for it to be cleared in the index | 65 |
+| An unchanged run's open pull request can no longer merge against the index base — close the pull request or delete the branch; the next announce rebuilds it | 65 |
 
 **JSON report**
 

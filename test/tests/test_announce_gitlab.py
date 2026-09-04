@@ -199,6 +199,92 @@ def _committed_bytes(fake_forge: FakeForge, package: str) -> bytes:
     return raw
 
 
+# ── #399: a Diverged branch with an open merge request rebuilds on the base ─
+
+
+def test_stale_branch_rebuilds_onto_the_upstream_head_when_its_root_changes_shape(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """GitLab mirror of the GitHub `Stale`-rebuild test (#399): an open merge
+    request survives the index's root migrating shape underneath it. The merge
+    request iid is reused, and the rebuilt branch's parent is the upstream
+    head — not the branch's own prior commit — because `BranchState::Stale`
+    (D1, `adr_announce_diverged_branch_rebuild.md`) reads the root's SHAPE from
+    the current base on every run, carrying only the branch's tags forward."""
+    package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
+
+    first = announce_json(
+        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab"
+    )
+
+    base_root = json.loads(fake_forge.read_file(INDEX_OWNER, INDEX_REPO, f"p/{package}.json", branch="main"))
+    shaped_root = {
+        **{key: value for key, value in base_root.items() if key != "tags"},
+        "owners": [{"login": "acme", "id": 1}],
+        "tags": base_root["tags"],
+    }
+    fake_forge.seed_root(INDEX_OWNER, INDEX_REPO, f"p/{package}.json", shaped_root)
+
+    tags_file = tmp_path / "tags.txt"
+    tags_file.write_text("2.0.0")
+    second = announce_json(
+        ocx, fake_forge, "--package", package, "--tags-file", str(tags_file), "--fork", FORK_FULL, forge="gitlab"
+    )
+
+    assert second["status"] == "updated"
+    assert second["pull_request_number"] == first["pull_request_number"], "the open merge request must be reused"
+    root = _fork_root(fake_forge, package)
+    assert root["owners"] == [{"login": "acme", "id": 1}], "the base's shape must be carried, not dropped"
+    assert list(root["tags"]) == ["1.0.0", "2.0.0"]
+    assert fake_forge.commit_parent(FORK_NAMESPACE, INDEX_REPO, branch_name(package)) == fake_forge.branch_head(
+        INDEX_OWNER, INDEX_REPO, "main"
+    ), "the rebuild must sit directly on the current upstream head"
+
+
+def test_announce_refuses_an_unchanged_run_whose_open_merge_request_conflicts(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """GitLab mirror: an unchanged `Stale` run whose open merge request cannot
+    merge must fail loudly (exit 65), never report a clean `unchanged` while
+    the merge request stays CONFLICTING forever — D2's tripwire
+    (`adr_announce_diverged_branch_rebuild.md`)."""
+    package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
+
+    first = announce_json(
+        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab"
+    )
+    branch = branch_name(package)
+    head_before = fake_forge.branch_head(FORK_NAMESPACE, INDEX_REPO, branch)
+
+    # Serialized canonically (indent=2 + trailing newline, CONTRACTS §14) so
+    # this is what ocx itself would regenerate byte-for-byte if nothing had
+    # diverged — otherwise C6 reads "changed" off formatting alone and the run
+    # rebuilds instead of hitting the unchanged path.
+    committed_bytes = fake_forge.read_file(FORK_NAMESPACE, INDEX_REPO, f"p/{package}.json", branch=branch)
+    assert committed_bytes is not None
+    branch_root = json.loads(committed_bytes)
+    diverged_root = {
+        **{key: value for key, value in branch_root.items() if key != "tags"},
+        "owners": [{"login": "acme", "id": 1}],
+        "tags": branch_root["tags"],
+    }
+    fake_forge.seed_files(
+        INDEX_OWNER, INDEX_REPO, {f"p/{package}.json": (json.dumps(diverged_root, indent=2) + "\n").encode()}
+    )
+
+    result = announce(
+        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab", check=False
+    )
+
+    assert result.returncode == 65, f"expected a data error, got {result.returncode}"
+    assert branch in result.stderr, "the stderr must name the branch a human has to clear"
+    assert str(first["pull_request_number"]) in result.stderr or first["pull_request_url"] in result.stderr, (
+        "the stderr must name the stuck merge request"
+    )
+    assert fake_forge.branch_head(FORK_NAMESPACE, INDEX_REPO, branch) == head_before, "a refused run must not move the branch"
+
+
 # ── compare-and-swap ──────────────────────────────────────────────────────
 
 
