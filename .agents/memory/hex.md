@@ -58,6 +58,18 @@ research-axes:
   (CLAUDE.md model policy; matches models.md Rule 4).
 
 ## Memory
+- **A hermetic fixture can red a path the old suite only passed via the public internet
+  (proxy-aware SSRF guard, ocx#407/#323).** The stdlib forward-proxy fixture made acceptance A
+  fail with exit 75 AFTER the proxied pull had succeeded: `ChainedIndex`'s manifest/blob walks
+  fell through from an authoritative miss to the registry-backed `ocx.sh` source, and the twin
+  test was green only because that dial reached the public ocx.sh and got a 404. Grep the trace
+  for external dials before blaming the fixture; fixing the walk (four sibling walks already
+  honoured the authoritative stop) was right, aliasing the fixture would have hidden a contract
+  violation. Same run: three reviewers missed that a textual host check must judge the SAME
+  normalised form the transport dials (`0x7f000001`, `[::1]` slipped a raw `IpAddr` parse);
+  the security perspective caught it, the researcher confirmed the class. Codex's one-shot
+  then found the remaining route-blind spot in the resolver hook (destination named like the
+  proxy on a direct route) — deferred with a pin-map design, since its fix would reopen #323.
 - **The cross-model gate earned its keep a SIXTH time, and this run makes the pattern
   unambiguous.** Eight Claude reviewers on the shell-env branch (spec, test-coverage,
   security, escaping, performance, docs, architect, SOTA) produced 6 Block findings between
