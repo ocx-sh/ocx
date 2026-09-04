@@ -9,11 +9,12 @@ import sys
 import textwrap
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
+from src import forward_proxy as forward_proxy_mod
 from src.helpers import PROJECT_ROOT, start_registry
 from src.runner import OcxRunner
 
@@ -300,6 +301,25 @@ def html_mirror():
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@pytest.fixture()
+def forward_proxy(registry: str) -> Iterator[forward_proxy_mod.ForwardProxy]:
+    """A per-test absolute-form HTTP forward proxy (`src/forward_proxy.py`)
+    that aliases `forward_proxy_mod.PHANTOM_REGISTRY` onto the real `registry`
+    fixture's loopback port.
+
+    Function-scoped and ephemeral-port, like `fake_forge` above — no xdist
+    group, no port knob needed. `OcxRunner` builds its per-invocation
+    environment from scratch (`OcxRunner.__init__` / `run(env_overrides=...)`),
+    so an ambient developer `HTTP_PROXY`/`HTTPS_PROXY` can never leak into a
+    test; a test that needs proxying sets it explicitly via `env_overrides`.
+    """
+    host, port = registry.split(":", 1)
+    with forward_proxy_mod.running(
+        {forward_proxy_mod.PHANTOM_REGISTRY: (host, int(port))}
+    ) as proxy:
+        yield proxy
 
 
 # ---------------------------------------------------------------------------
