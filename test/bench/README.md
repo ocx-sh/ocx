@@ -22,11 +22,11 @@ task test:shell-latency
 
 That one command runs two things in order — the pure evaluator's self-check, then the
 live gate with fault injection folded into the same invocation
-(`__OCX_TESTING_LATENCY_INJECT_MS=7.0`, run under `--expect-fail
+(`__OCX_TESTING_LATENCY_INJECT_MS=11.0`, run under `--expect-fail
 --expect-fail-gate 'shell startup <=' --expect-fail-gate 'per-prompt reconcile'`). Both
 named gates must go red for the step to pass, so a green from an unrelated gate cannot
-stand in for either budget's own red state. 7 ms is an **edge** value, not a
-sledgehammer: it exceeds **both** budgets on its own (2 ms startup, 6.1 ms reconcile), so
+stand in for either budget's own red state. 11 ms is an **edge** value, not a
+sledgehammer: it exceeds **both** budgets on its own (2 ms startup, 10 ms reconcile), so
 the red does not depend on whatever the baseline happened to measure, but it does not
 overshoot far enough to red an arbitrarily wide one. It is testing the number, not just
 the presence of an assert; `shell_latency.py` refuses an `--expect-fail-gate` run whose
@@ -54,7 +54,7 @@ a prompt runs. Both are structurally checked before anything is timed — the st
 command's stdout must carry the prompt hook and the floor's must not — and a mismatch
 raises rather than reporting a number, so `--expect-fail` cannot absorb it.
 
-The per-prompt no-op `--reconcile` delta is a **hard gate**, asserted against 6.1 ms —
+The per-prompt no-op `--reconcile` delta is a **hard gate**, asserted against 10 ms —
 the startup half keeps C-044's original 2 ms, and the two are separate constants
 precisely so neither can move the other. A brief amendment loosened the reconcile to
 25 ms against an observed ~16-22 ms, but that cost was never the reconciler — it was
@@ -143,6 +143,21 @@ the fixture's. So the budget moved a third time, 3 ms → **6.1 ms**: 20% over 5
 *forced* — 4.7 against 3.0 is a real red, not a falsified-evidence correction. The
 injection went 4 ms → 7 ms with it, which rule one requires and `shell_latency.py`
 enforces against the live value.
+
+**Then a fourth move, 6.1 ms → a hard 10 ms, for the opposite reason.** The CI half
+this file kept asking for arrived as five GitHub-runner observations — 5.870 / 6.235 /
+6.384 / 6.365 / 7.590 ms — of which three sat *over* the 6.1 ms budget and still exited
+0, because the overshoot was smaller than the floor's own scatter and the gate abstained
+(the failure state [#360](https://github.com/ocx-sh/ocx/issues/360) predicted). Building
+the suspect commit and the one before it and benching them alternately on one quiet box
+clears the code: medians 4.82 vs 4.96 ms over eight pairs. The runner is simply slower,
+and its wall clock is not stable enough to derive a contract from — 20% over 7.590 is
+9.1, a number the sixth observation would move again. So the budget stops tracking the
+measurement and becomes a **chosen ceiling**: 10 ms, the product answer to how long a
+prompt may take, moved only by a decision that says so. `_WORST_KNOWN_GOOD_RECONCILE_MS`
+goes on tracking the machine underneath it (now 7.590 ms), and the injection went
+7 ms → 11 ms, which rule one requires. The cost, stated plainly: a breach between 7.6
+and 10 ms is now invisible.
 
 What the number now says out loud: a prompt on a 15-tool host costs about **4.7 ms**,
 not about 2.2. The reconciler never got slower — it had been measured over half its
