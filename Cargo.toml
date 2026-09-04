@@ -102,10 +102,19 @@ oci-client = "0.17"
 # transitively via the `oci-client` fork — this direct edge adds no new crate.
 # `rustls` matches the fork's exact TLS feature so cargo feature unification
 # yields ONE rustls provider, not two (`adr_index_indirection.md` F).
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset", "http2", "system-proxy"] }
 # Mozilla CA roots compiled into the binary so TLS works without a system
 # trust store (minimal container / CI runner without ca-certificates).
 webpki-root-certs = "1"
+# The system/env proxy matcher reqwest itself uses to decide whether a
+# request is proxied (`client-proxy` feature) — already in the dependency
+# graph at this version via reqwest, so this is a direct edge onto an
+# existing crate, not a new one. Lets the SSRF guard ask reqwest's own
+# question ("would this be proxied?") instead of re-deriving it.
+# `client-proxy-system` declares (rather than merely inherits via reqwest's
+# `system-proxy` feature unification) that `Matcher::from_system()` reads the
+# Windows registry / macOS system config, not just env vars.
+hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system"] }
 # Test-only (ocx_lib `[dev-dependencies]`). An HTTP/2 *server* the retry
 # ladder's classifier can be driven against: no HTTP/1.1 fixture can produce a
 # `GOAWAY`/`RST_STREAM`, so without one the h2 branch of

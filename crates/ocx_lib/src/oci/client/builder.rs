@@ -154,7 +154,7 @@ impl ClientBuilder {
     /// validation (the private-registry escape hatch).
     pub fn ssrf_guard(mut self, trusted_hosts: Vec<String>) -> Self {
         let resolver: std::sync::Arc<dyn reqwest::dns::Resolve> = std::sync::Arc::new(
-            crate::oci::ssrf::GuardedResolver::new(std::sync::Arc::new(trusted_hosts)),
+            crate::oci::ssrf::GuardedResolver::new(std::sync::Arc::new(trusted_hosts), crate::oci::ssrf::proxy_rules()),
         );
         self.config.dns_resolver = Some(resolver);
         self

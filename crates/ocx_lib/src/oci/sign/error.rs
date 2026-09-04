@@ -829,9 +829,7 @@ mod tests {
                 "invalid_endpoint_url",
                 InvalidEndpointUrl {
                     endpoint: "--fulcio-url".into(),
-                    reason: UrlRejection {
-                        reason: "URL must use HTTPS".into(),
-                    },
+                    reason: UrlRejection::new("URL must use HTTPS"),
                 },
             ),
             ("predicate_not_json", PredicateNotJson),

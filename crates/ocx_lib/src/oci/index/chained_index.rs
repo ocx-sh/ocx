@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -240,6 +241,10 @@ pub struct ChainedIndex {
     /// affordance**: production always attaches `fs.blobs` via
     /// [`super::Index::from_chained_with_content_store`] (`context.rs`).
     content_store: Option<BlobStore>,
+    /// Proxy-route rules for [`Self::guard_local_physical`]. Defaults to the
+    /// process-wide [`oci::ssrf::proxy_rules`]; replaced via
+    /// [`index_impl::IndexImpl::set_proxy_rules`] (test seam).
+    rules: Arc<oci::ssrf::ProxyRules>,
 }
 
 /// Max in-flight singleflight keys. Scoped per ChainedIndex instance —
@@ -259,6 +264,7 @@ impl ChainedIndex {
             singleflight: singleflight::Group::new(SINGLEFLIGHT_MAX_KEYS, SINGLEFLIGHT_TIMEOUT),
             write_policy: LocalWritePolicy::Full,
             content_store: None,
+            rules: oci::ssrf::proxy_rules(),
         }
     }
 
@@ -294,6 +300,7 @@ impl ChainedIndex {
             singleflight: singleflight::Group::new(SINGLEFLIGHT_MAX_KEYS, SINGLEFLIGHT_TIMEOUT),
             write_policy: LocalWritePolicy::ReadOnly,
             content_store: self.content_store.clone(),
+            rules: self.rules.clone(),
         }
     }
 
@@ -415,7 +422,22 @@ impl ChainedIndex {
             return Ok(());
         }
         let (host, port) = oci::ssrf::split_host_port(physical.registry());
-        match oci::ssrf::resolve_and_validate(host, port, self.trusted_hosts_for(logical.registry())).await {
+        // Route-aware (ocx#407): on a proxied dial `guard_destination` performs
+        // no lookup, so it can only return `ForbiddenTarget` — the textual
+        // literal refusal — and the two `is_plain_dns_name` arms below are
+        // unreachable on that route. They keep their meaning on a direct dial,
+        // which is the only route that resolves and so the only one that can
+        // fail to.
+        let scheme = oci::ssrf::DialScheme::for_registry(self.insecure_hosts(), physical.registry());
+        match oci::ssrf::guard_destination(
+            scheme,
+            host,
+            port,
+            self.trusted_hosts_for(logical.registry()),
+            &self.rules,
+        )
+        .await
+        {
             Ok(_) => Ok(()),
             Err(error @ oci::ssrf::SsrfError::ForbiddenTarget { .. }) => Err(super::error::Error::from(error).into()),
             Err(error) if !is_plain_dns_name(host) => Err(super::error::Error::from(error).into()),
@@ -1468,15 +1490,6 @@ impl index_impl::IndexImpl for ChainedIndex {
     }
 
     /// The `trusted_hosts` set configured for `registry` — the SSRF escape hatch
-    /// of the source that owns it, or empty when none does.
-    ///
-    /// Reuses the source's own construction input rather than re-reading config:
-    /// `[registries."<ns>"].trusted_hosts` reaches `OcxIndex` exactly once, in
-    /// `context.rs`, and every guard that consults it — [`Self::guard_local_physical`]
-    /// at resolve time, [`Index::guard_physical_dial`] at the dial site — reads
-    /// that one value. Keyed on the registry (ownership) like
-    /// [`Self::kind_for_registry`], never on per-name jurisdiction.
-    /// The `trusted_hosts` set configured for `registry` — the SSRF escape hatch
     /// the operator declared for that namespace, or empty when they declared
     /// none.
     ///
@@ -1508,6 +1521,19 @@ impl index_impl::IndexImpl for ChainedIndex {
             .map_or(&[], |source| source.trusted_hosts())
     }
 
+    /// The plain-HTTP authorities, read from the local index's config-threaded
+    /// set — not registry-keyed, because `OCX_INSECURE_REGISTRIES` is one flat
+    /// list of authorities rather than a per-namespace setting. It rides on the
+    /// local index for the reason [`Self::trusted_hosts_for`] gives: every
+    /// chain is built from one.
+    fn insecure_hosts(&self) -> &[String] {
+        self.local_index.insecure_hosts()
+    }
+
+    fn set_proxy_rules(&mut self, rules: Arc<oci::ssrf::ProxyRules>) {
+        self.rules = rules;
+    }
+
     fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
         Box::new(Self {
             local_index: self.local_index.clone(),
@@ -1517,6 +1543,7 @@ impl index_impl::IndexImpl for ChainedIndex {
             singleflight: self.singleflight.clone(),
             write_policy: self.write_policy,
             content_store: self.content_store.clone(),
+            rules: self.rules.clone(),
         })
     }
 
@@ -4647,7 +4674,8 @@ mod chain_refs_tests {
         // Default mode, online shape: the local root is the answer — by the
         // local-first order, and by the source being unable to answer anyway.
         // Exactly the position every warm resolve is in.
-        let chained = Index::from_chained(cache, vec![Index::from_impl(UnreachableSource)], ChainMode::Default);
+        let chained = Index::from_chained(cache, vec![Index::from_impl(UnreachableSource)], ChainMode::Default)
+            .with_proxy_rules(crate::oci::ssrf::ProxyRules::direct());
         match chained.physical_reference(&digest_only_id()).await {
             Err(crate::Error::OciIndex(super::super::error::Error::Ssrf(
                 crate::oci::ssrf::SsrfError::ForbiddenTarget { .. },
@@ -4688,7 +4716,8 @@ mod chain_refs_tests {
         seed_root_pointing_at(&cache, REGISTRY, "127.0.0.1:5999/evil/pkg").await;
 
         let spy = PhysicalSource::default();
-        let chained = Index::from_chained(cache, vec![Index::from_impl(spy.clone())], ChainMode::Default);
+        let chained = Index::from_chained(cache, vec![Index::from_impl(spy.clone())], ChainMode::Default)
+            .with_proxy_rules(crate::oci::ssrf::ProxyRules::direct());
         let error = chained
             .physical_reference(&digest_only_id())
             .await
@@ -4724,7 +4753,8 @@ mod chain_refs_tests {
         seed_root_pointing_at(&cache, &private, &format!("{private}/{REPO}")).await;
 
         let logical = Identifier::new_registry(REPO, &private).clone_with_digest(digest_a());
-        let chained = Index::from_chained(cache, vec![], ChainMode::Default);
+        let chained = Index::from_chained(cache, vec![], ChainMode::Default)
+            .with_proxy_rules(crate::oci::ssrf::ProxyRules::direct());
         let physical = chained
             .physical_reference(&logical)
             .await
@@ -4764,7 +4794,8 @@ mod chain_refs_tests {
         let cache = make_local_index(&dir);
         seed_root_pointing_at(&cache, REGISTRY, &format!("{forbidden}/evil/pkg")).await;
 
-        let chained = Index::from_chained(cache, vec![], ChainMode::Offline);
+        let chained = Index::from_chained(cache, vec![], ChainMode::Offline)
+            .with_proxy_rules(crate::oci::ssrf::ProxyRules::direct());
         match chained.physical_reference(&digest_only_id()).await {
             Err(crate::Error::OciIndex(super::super::error::Error::Ssrf(
                 crate::oci::ssrf::SsrfError::ForbiddenTarget { .. },
@@ -4797,7 +4828,8 @@ mod chain_refs_tests {
         let cache = local_index_trusting(&dir, REGISTRY, &["10.0.0.0/8"]);
         seed_root_pointing_at(&cache, REGISTRY, "10.0.0.7/private/cmake").await;
 
-        let chained = Index::from_chained(cache, vec![], ChainMode::Offline);
+        let chained = Index::from_chained(cache, vec![], ChainMode::Offline)
+            .with_proxy_rules(crate::oci::ssrf::ProxyRules::direct());
         let physical = chained
             .physical_reference(&digest_only_id())
             .await
@@ -4816,7 +4848,8 @@ mod chain_refs_tests {
         let cache = local_index_trusting(&dir, "other.example.com", &["10.0.0.0/8"]);
         seed_root_pointing_at(&cache, REGISTRY, "10.0.0.7/private/cmake").await;
 
-        let chained = Index::from_chained(cache, vec![], ChainMode::Offline);
+        let chained = Index::from_chained(cache, vec![], ChainMode::Offline)
+            .with_proxy_rules(crate::oci::ssrf::ProxyRules::direct());
         let error = chained
             .physical_reference(&digest_only_id())
             .await
@@ -4845,7 +4878,8 @@ mod chain_refs_tests {
         let cache = make_local_index(&dir);
         seed_root_pointing_at(&cache, REGISTRY, "registry.invalid/mirrored/cmake").await;
 
-        let chained = Index::from_chained(cache, vec![], ChainMode::Offline);
+        let chained = Index::from_chained(cache, vec![], ChainMode::Offline)
+            .with_proxy_rules(crate::oci::ssrf::ProxyRules::direct());
         let physical = chained
             .physical_reference(&digest_only_id())
             .await
@@ -4880,7 +4914,8 @@ mod chain_refs_tests {
         let cache = make_local_index(&dir);
         seed_root_pointing_at(&cache, REGISTRY, &format!("{UNRESOLVABLE}/evil/pkg")).await;
 
-        let chained = Index::from_chained(cache, vec![], ChainMode::Default);
+        let chained = Index::from_chained(cache, vec![], ChainMode::Default)
+            .with_proxy_rules(crate::oci::ssrf::ProxyRules::direct());
         let physical = chained
             .physical_reference(&digest_only_id())
             .await
@@ -4925,7 +4960,8 @@ mod chain_refs_tests {
         let cache = make_local_index(&dir);
         seed_root_pointing_at(&cache, REGISTRY, &format!("{BRACKETED_LOOPBACK}/evil/pkg")).await;
 
-        let chained = Index::from_chained(cache, vec![], ChainMode::Default);
+        let chained = Index::from_chained(cache, vec![], ChainMode::Default)
+            .with_proxy_rules(crate::oci::ssrf::ProxyRules::direct());
         let error = chained
             .physical_reference(&digest_only_id())
             .await
@@ -4938,6 +4974,40 @@ mod chain_refs_tests {
                 ))
             ),
             "expected the guard's fail-closed resolution refusal, got: {error:?}"
+        );
+    }
+
+    /// The proxied half of the sibling above: configuring a proxy must not
+    /// launder an address-shaped authority past the floor.
+    ///
+    /// `[::1].invalid:5000` is not spellable as a URL host, so it never
+    /// normalises into a destination the matcher can intercept — the route
+    /// degrades to `Direct` (`ProxyRules::dial_route`'s fail-closed
+    /// direction), the resolving floor runs, and the lookup failure is refused
+    /// because the authority is address-shaped. Without that degradation a
+    /// proxied route would skip the lookup and admit it on the text alone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_local_root_naming_an_address_shaped_host_fails_closed_under_a_proxy_too() {
+        const BRACKETED_LOOPBACK: &str = "[::1].invalid:5000";
+        let dir = TempDir::new().unwrap();
+        let cache = make_local_index(&dir);
+        seed_root_pointing_at(&cache, REGISTRY, &format!("{BRACKETED_LOOPBACK}/evil/pkg")).await;
+
+        let chained = Index::from_chained(cache, vec![], ChainMode::Default).with_proxy_rules(
+            crate::oci::ssrf::ProxyRules::proxied_everywhere("http://proxy.corp:3128"),
+        );
+        let error = chained
+            .physical_reference(&digest_only_id())
+            .await
+            .expect_err("a proxy must not turn an unjudgeable address-shaped host into an admission");
+        assert!(
+            matches!(
+                error,
+                crate::Error::OciIndex(super::super::error::Error::Ssrf(
+                    crate::oci::ssrf::SsrfError::Resolution { .. }
+                ))
+            ),
+            "expected the direct route's fail-closed resolution refusal, got: {error:?}"
         );
     }
 
@@ -5093,6 +5163,8 @@ mod chain_refs_tests {
             client: crate::oci::Client::with_transport(Box::new(StubTransport::new(StubTransportData::new()))),
             allow_yanked: false,
             trusted_hosts: Vec::new(),
+            insecure_hosts: Vec::new(),
+            proxy_rules: crate::oci::ssrf::ProxyRules::direct(),
         }))
     }
 

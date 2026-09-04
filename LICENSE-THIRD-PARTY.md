@@ -11,7 +11,7 @@ OCX's own code is licensed separately — see `LICENSE`.
 
 | License | Crates |
 | --- | ---: |
-| Apache License 2.0 | 328 |
+| Apache License 2.0 | 332 |
 | MIT License | 92 |
 | Unicode License v3 | 19 |
 | BSD 3-Clause "New" or "Revised" License | 6 |
@@ -702,6 +702,7 @@ Applies to:
 - windows-interface
 - windows-link
 - windows-numerics
+- windows-registry
 - windows-result
 - windows-strings
 - windows-sys
@@ -6028,6 +6029,7 @@ Applies to:
 - compression-core
 - core-foundation-sys
 - core-foundation
+- core-foundation
 - curve25519-dalek-derive
 - derivative
 - displaydoc
@@ -6094,6 +6096,8 @@ Applies to:
 - stable_deref_trait
 - symlink
 - syn
+- system-configuration-sys
+- system-configuration
 - tar
 - tempfile
 - thread_local

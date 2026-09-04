@@ -373,6 +373,8 @@ mod tests {
             client: client(&StubTransportData::new()),
             allow_yanked: false,
             trusted_hosts: Vec::new(),
+            insecure_hosts: Vec::new(),
+            proxy_rules: crate::oci::ssrf::ProxyRules::direct(),
         });
         (source, transport)
     }
@@ -829,6 +831,8 @@ mod tests {
             client: client(&StubTransportData::new()),
             allow_yanked: false,
             trusted_hosts: Vec::new(),
+            insecure_hosts: Vec::new(),
+            proxy_rules: crate::oci::ssrf::ProxyRules::direct(),
         });
 
         let observation = gather(

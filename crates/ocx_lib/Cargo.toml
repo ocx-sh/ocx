@@ -31,6 +31,11 @@ tokio.workspace = true
 
 oci-client.workspace = true
 reqwest.workspace = true
+hyper-util.workspace = true
+# `hyper_util::client::proxy::matcher::Matcher::intercept` takes an `http::Uri`,
+# so the SSRF guard's route probe (`oci/ssrf.rs`) needs the type at runtime, not
+# only in tests.
+http.workspace = true
 # Bundled Mozilla CA roots seeded into the static-file index HTTP client so TLS
 # works without a system trust store (minimal container / CI runner). The OCI
 # half gets the same set via the `oci-client` fork's `ClientConfig::default()`;
@@ -177,7 +182,6 @@ tokio = { workspace = true, features = ["test-util"] }
 # way the retry classifier's h2 branch has a reachable red state at all.
 # Test-only on purpose: production speaks h2 through `reqwest`, never directly.
 h2.workspace = true
-http.workspace = true
 
 [lints]
 workspace = true

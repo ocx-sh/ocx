@@ -108,6 +108,12 @@ pub struct LocalIndex {
     /// Empty for constructions that thread no config (tests, `IndexSync`),
     /// which then guard every rewritten host.
     trusted_hosts: std::collections::HashMap<String, Vec<String>>,
+    /// The `OCX_INSECURE_REGISTRIES` authorities (`host[:port]`, exactly as
+    /// spelled) this index may dial over plain HTTP — see
+    /// [`index_impl::IndexImpl::insecure_hosts`] for why the index carries it.
+    /// Empty for constructions that thread no config (tests, `IndexSync`),
+    /// which then treat every dial as HTTPS.
+    insecure_hosts: Vec<String>,
 }
 
 impl LocalIndex {
@@ -117,6 +123,7 @@ impl LocalIndex {
             allow_yanked: false,
             gated_sources: Arc::new(RwLock::new(HashSet::new())),
             trusted_hosts: std::collections::HashMap::new(),
+            insecure_hosts: Vec::new(),
         }
     }
 
@@ -136,6 +143,23 @@ impl LocalIndex {
     pub fn with_trusted_hosts(mut self, trusted_hosts: std::collections::HashMap<String, Vec<String>>) -> Self {
         self.trusted_hosts = trusted_hosts;
         self
+    }
+
+    /// Sets the `OCX_INSECURE_REGISTRIES` authorities — see the field doc.
+    /// Consuming builder for the same reason as [`Self::with_trusted_hosts`]:
+    /// only `context.rs` opts in, from the resolved config, and every other
+    /// construction site stays a single `new(..)` call.
+    pub fn with_insecure_hosts(mut self, insecure_hosts: Vec<String>) -> Self {
+        self.insecure_hosts = insecure_hosts;
+        self
+    }
+
+    /// The authorities this index dials over plain HTTP, or empty when none
+    /// were configured. Read by
+    /// [`ChainedIndex`](super::chained_index::ChainedIndex) so the dial-site
+    /// guard can pick the scheme whose proxy setting applies.
+    pub fn insecure_hosts(&self) -> &[String] {
+        &self.insecure_hosts
     }
 
     /// The `trusted_hosts` SSRF exemption the operator configured for
@@ -1370,6 +1394,10 @@ impl index_impl::IndexImpl for LocalIndex {
     // root-document path with the catalogued one and only skips the catalog
     // cross-check/self-heal, never resolution correctness
     // (`adr_index_indirection.md` A2/H).
+    fn insecure_hosts(&self) -> &[String] {
+        &self.insecure_hosts
+    }
+
     async fn list_repositories(&self, registry: &str) -> Result<Vec<String>> {
         self.list_local_repositories(registry, SourceKind::Derived).await
     }
