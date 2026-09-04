@@ -648,6 +648,33 @@ class LatencyReport:
         return [gate for gate in self.gates if gate.inconclusive]
 
 
+def overall_verdict(report: LatencyReport) -> str:
+    """The summary word, as a human and a ``grep`` both read it.
+
+    PURE. A run that abstained is **not** a pass and must not lead with the word
+    PASSED. This is the reporting half of ocx-sh/ocx#360: three CI runs breached
+    the then-6.1 ms budget, abstained because the overshoot sat under the floor's
+    own scatter, and printed ``Overall: PASSED — but 1 wall-clock gate(s) reached
+    NO VERDICT``. The caveat was there, on the same line, after the word everyone
+    scans for. All three were read as green for four days.
+
+    The **exit code deliberately does not change**: a contended runner is not a
+    regression, and reddening the build on one is how a gate gets switched off —
+    which is the same argument :func:`_budget_gate` rule 3 already makes. What
+    changes is only which word the reader lands on. A red still says FAILED,
+    because a resolvable breach is a verdict whatever else abstained.
+    """
+    if not report.passed:
+        return "FAILED"
+    if report.inconclusive:
+        names = ", ".join(gate.name for gate in report.inconclusive)
+        return (
+            f"NO VERDICT — {len(report.inconclusive)} wall-clock gate(s) could not be decided on this "
+            f"runner ({names}). Nothing went red; nothing was proven either"
+        )
+    return "PASSED"
+
+
 def unmatched_gate_needles(needles: Sequence[str], gates: Sequence[Gate]) -> list[str]:
     """The needles in ``needles`` that name no **failed** gate.
 
@@ -1242,12 +1269,7 @@ def format_report(report: LatencyReport) -> str:
             f"{rec['measurement_admissible']})"
         ),
         "",
-        f"Overall: {'PASSED' if report.passed else 'FAILED'}"
-        + (
-            f" — but {len(report.inconclusive)} wall-clock gate(s) reached NO VERDICT on a contended runner"
-            if report.inconclusive
-            else ""
-        ),
+        f"Overall: {overall_verdict(report)}",
     ]
     return "\n".join(lines)
 
@@ -2865,6 +2887,25 @@ def self_check() -> None:
         RECONCILE_GATE_NEEDLE
     ]
     needles.append(False)
+
+    # The summary word, in all three colours. The abstaining one is the case
+    # ocx-sh/ocx#360 was filed about, and it is the reason this is asserted at
+    # all: it was previously spelled by an inline conditional whose green and
+    # abstaining branches differed only in a trailing clause, so nothing could
+    # have caught the two being read as the same thing.
+    green = LatencyReport(gates=[Gate(name="g", observed=1.0, budget=2.0, passed=True, unit="ms")], passed=True)
+    assert overall_verdict(green) == "PASSED"
+    red = LatencyReport(gates=[Gate(name="g", observed=3.0, budget=2.0, passed=False, unit="ms")], passed=False)
+    assert overall_verdict(red) == "FAILED"
+    abstained = LatencyReport(
+        gates=[Gate(name="g", observed=3.0, budget=2.0, passed=True, unit="ms", inconclusive=True)],
+        passed=True,
+    )
+    verdict = overall_verdict(abstained)
+    assert verdict.startswith("NO VERDICT"), verdict
+    assert "PASSED" not in verdict, (
+        f"an abstaining run must not carry the word a reader scans for: {verdict!r}"
+    )
 
     # The budget's own value, against the measurement that set it. Every fixture
     # above states its input as an offset from the budget — which is what keeps
