@@ -1615,7 +1615,7 @@ mod tests {
     /// directory stays inert on every filesystem; folding it would merge `/a/B`
     /// and `/a/b` into one grant where the filesystem keeps them apart.
     #[test]
-    fn c030_paths_compare_normalizes_separators_but_never_case() {
+    fn c030_paths_compare_normalizes_separators_and_only_windows_folds_case() {
         let project = Path::new("/w/Repo");
 
         assert_eq!(
@@ -1628,18 +1628,24 @@ mod tests {
             Decision::Activate(Grant::Path),
             "a trailing slash on the entry is normalized away"
         );
-        assert!(
-            matches!(
-                evaluate_corroborated(
-                    project,
-                    None,
-                    Some(&sources(&["ocx.sh/cmake"])),
-                    &paths_grant(Path::new("/w/repo"))
-                ),
-                Decision::Inert(_)
-            ),
-            "case folding would widen the grant, so a case-only mismatch stays inert"
+        let case_only = evaluate_corroborated(
+            project,
+            None,
+            Some(&sources(&["ocx.sh/cmake"])),
+            &paths_grant(Path::new("/w/repo")),
         );
+        if cfg!(windows) {
+            // Windows folds ASCII case in the compare because its filesystem
+            // folds it too: `/w/Repo` and `/w/repo` are one directory there, so
+            // refusing would leave an operator inert on the directory they named.
+            assert_eq!(case_only, Decision::Activate(Grant::Path));
+        } else {
+            assert!(
+                matches!(case_only, Decision::Inert(_)),
+                "case folding would widen the grant onto a second directory an \
+                 attacker can create, so a case-only mismatch stays inert"
+            );
+        }
     }
 
     /// EC-GRANT-020 — a `*`-suffixed entry grants the named directory and
