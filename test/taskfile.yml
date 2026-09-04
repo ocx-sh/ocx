@@ -189,7 +189,7 @@ tasks:
     desc: >-
       NFR latency gate for the per-prompt reconciler (C-044): zero execs on the
       no-op prompt path, shell startup within exec_floor + 2 ms and the
-      per-prompt reconcile within exec_floor + 3 ms - two budgets, not one
+      per-prompt reconcile within exec_floor + 10 ms - two budgets, not one
       shared number - with the floor measured in the same run. Both
       measured commands are DERIVED at run time - startup from the shipped
       env.sh sourced by a real interactive bash, reconcile from the hook body
@@ -221,13 +221,13 @@ tasks:
         OCX_COMMAND={{.LATENCY_OCX_BINARY}}
         uv run --no-project python bench/shell_latency.py
         --out {{.LATENCY_RESULTS_DIR}}/shell-latency.json
-      # 3. Fault injection (plan section 7.6), 7 ms against a 2 ms startup budget
-      #    and a 6.1 ms reconcile budget - an EDGE test, not a sledgehammer.
+      # 3. Fault injection (plan section 7.6), 11 ms against a 2 ms startup budget
+      #    and a 10 ms reconcile budget - an EDGE test, not a sledgehammer.
       #
       #    It is sized by two rules, and both hold for both legs again. Rule one:
       #    the injection must exceed the budget ON ITS OWN, so the red does not
       #    depend on the baseline - a machine where the measured work were free
-      #    still reds. 7 > 6.1 and 7 > 2. It was 3 ms until 2026-08-26 and briefly
+      #    still reds. 11 > 10 and 11 > 2. It was 3 ms until 2026-08-26 and briefly
       #    failed this rule for the reconcile when that budget moved 2 -> 3 ms:
       #    the leg still went red, but only because ~2 ms of real reconcile sat
       #    underneath, which is a detection one faster machine away from silently
@@ -237,15 +237,19 @@ tasks:
       #    cannot come back unnoticed the next time a budget moves.
       #
       #    Rule two: it must not overshoot, or the step certifies only that an
-      #    assert exists. At 7 ms the observed deltas are ~7.5 (startup) and
-      #    ~11.8 (reconcile), so the same run would NOT red a 8 / 12 ms pair -
-      #    it is testing the numbers, not their presence. The previous 8 ms /
-      #    100 ms pair was 4x its budget on both legs and would have passed a
-      #    budget nearly twice as loose.
+      #    assert exists. The delay lands on top of the real work, so at 7 ms the
+      #    observed deltas were ~7.5 (startup) and ~11.8 (reconcile) - 1.9x the
+      #    then-6.1 ms reconcile budget. At 11 ms, measured on a quiet box over two
+      #    runs: 11.544 / 11.712 (startup) and 16.050 / 16.106 (reconcile), so the
+      #    same run would NOT red a 12 / 17 ms pair - it is testing the numbers,
+      #    not their presence, and at 1.6x the reconcile budget it is tighter than
+      #    the 1.9x it replaces. The previous 8 ms / 100 ms pair was 4x its budget
+      #    on both legs and would have passed a budget nearly twice as loose.
       #
-      #    It went 4 -> 7 ms when the reconcile budget went 3 -> 6.1, which is
-      #    rule one doing its job: `shell_latency.py` refuses the run outright
-      #    when the injection stops clearing a budget it is pointed at, so this
+      #    It went 4 -> 7 ms when the reconcile budget went 3 -> 6.1, and 7 -> 11
+      #    when it went 6.1 -> 10, which is rule one doing its job:
+      #    `shell_latency.py` refuses the run outright when the injection stops
+      #    clearing a budget it is pointed at (`inject <= gate.budget`), so this
       #    value cannot be left behind by a budget move.
       #
       #    The delay lands INSIDE the measured processes (`shell::hook::registration`
@@ -274,7 +278,7 @@ tasks:
       #    measurement of the runner.
       - >-
         OCX_COMMAND={{.LATENCY_OCX_BINARY}}
-        __OCX_TESTING_LATENCY_INJECT_MS=7.0
+        __OCX_TESTING_LATENCY_INJECT_MS=11.0
         uv run --no-project python bench/shell_latency.py --expect-fail
         --expect-fail-gate 'shell startup <='
         --expect-fail-gate 'per-prompt reconcile'
