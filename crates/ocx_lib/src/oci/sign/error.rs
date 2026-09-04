@@ -225,10 +225,13 @@ pub enum SignErrorKind {
     /// User-supplied Sigstore endpoint URL failed SSRF/scheme validation.
     ///
     /// Surfaces at the boundary where `--fulcio-url` / `--rekor-url` are
-    /// parsed. Exit 64 (`UsageError`) — a malformed flag value is a CLI
-    /// misuse, not a runtime fault. The `endpoint` field carries the flag
-    /// name (e.g. `--fulcio-url`) so the envelope `error.detail` is
-    /// programmatically dispatchable.
+    /// parsed. Exit 64 (`UsageError`) for a malformed flag value — a CLI
+    /// misuse, not a runtime fault — except when the host simply does not
+    /// resolve, where `reason` (a [`UrlRejection`]) carries 69
+    /// (`Unavailable`) instead: unreachable is a different failure than
+    /// malformed. The `endpoint` field carries the flag name (e.g.
+    /// `--fulcio-url`) so the envelope `error.detail` is programmatically
+    /// dispatchable.
     #[error("invalid {endpoint} URL: {reason}")]
     InvalidEndpointUrl {
         /// Flag name the URL was supplied via (e.g. `--fulcio-url`).
@@ -433,8 +436,13 @@ impl ClassifyErrorKind for SignErrorKind {
             | Self::OfflineSignRefused
             | Self::OfflineAttestRefused
             | Self::IdentityTokenFilePermissive { .. } => ExitCode::PermissionDenied,
-            Self::InvalidEndpointUrl { .. }
-            | Self::ProvenanceVersionUnsupported { .. }
+            // The rejection verdict was decided in `oci/endpoint.rs`
+            // (`UrlRejection` carries an exit code set by its
+            // `From<SsrfError>` impl): 69 for an endpoint that does not
+            // resolve, else the documented 64. Delegate rather than
+            // flattening every rejection to one code.
+            Self::InvalidEndpointUrl { reason, .. } => reason.exit_code(),
+            Self::ProvenanceVersionUnsupported { .. }
             | Self::UnsignedTypeUnsupported { .. }
             | Self::SidecarRequiresSignature { .. }
             | Self::KeyReferenceInvalid(_)
@@ -568,6 +576,46 @@ mod tests {
             mode: 0o644,
         };
         assert_eq!(kind.exit_code(), ExitCode::PermissionDenied);
+    }
+
+    /// Plan row 12 (sign half): a Sigstore endpoint whose host does not resolve
+    /// exits `Unavailable` (69).
+    ///
+    /// The flag value is well-formed; the service behind it is unreachable, so
+    /// reporting CLI misuse tells a script to fix its arguments when the
+    /// correct response is to retry or check the network. The rejection built
+    /// from an `SsrfError` already carries that verdict — the variant's arm
+    /// must read it rather than answer 64 for every rejection alike.
+    #[test]
+    fn an_endpoint_url_that_does_not_resolve_maps_to_unavailable() {
+        use crate::oci::endpoint::UrlRejection;
+        let kind = SignErrorKind::InvalidEndpointUrl {
+            endpoint: "--fulcio-url".into(),
+            reason: UrlRejection::from(crate::oci::ssrf::SsrfError::Resolution {
+                host: "fulcio.invalid".to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "name or service not known"),
+            }),
+        };
+        assert_eq!(kind.exit_code(), ExitCode::Unavailable);
+    }
+
+    /// Plan row 12 (sign half), paired positive: every rejection verdict other
+    /// than an unresolvable host keeps the documented `UsageError` (64).
+    ///
+    /// Guards the fix against over-reach — delegating to the carried verdict
+    /// must not import the *registry* guard's table, where a forbidden target
+    /// is 78. On the Sigstore side a refused endpoint URL stays 64.
+    #[test]
+    fn an_endpoint_url_refused_as_a_forbidden_target_stays_a_usage_error() {
+        use crate::oci::endpoint::UrlRejection;
+        let kind = SignErrorKind::InvalidEndpointUrl {
+            endpoint: "--fulcio-url".into(),
+            reason: UrlRejection::from(crate::oci::ssrf::SsrfError::ForbiddenTarget {
+                host: "fulcio.internal".to_string(),
+                ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            }),
+        };
+        assert_eq!(kind.exit_code(), ExitCode::UsageError);
     }
 
     #[test]
