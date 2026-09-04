@@ -1368,7 +1368,7 @@ Honors the global [`--format`][arg-format] and [`--project`][arg-project] / [`--
       "env": { "PATH": { "type": "path", "value": "node_modules/.bin" } }
     }
   },
-  "package_settings": { "ocx.sh/foo:1": { "no-patches": true } }
+  "package_settings": { "ocx.sh/foo:1": { "no_patches": true } }
 }
 ```
 
