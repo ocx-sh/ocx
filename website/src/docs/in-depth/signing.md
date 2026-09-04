@@ -306,7 +306,9 @@ ocx --offline package verify -p linux/amd64 registry.internal/cmake:3.28 \
 :::tip Custom Sigstore endpoints
 `--fulcio-url` and `--rekor-url` point the CLI at a private or self-hosted Sigstore deployment instead of the public Fulcio/Rekor. `validate_sigstore_url` accepts `http://` only for loopback hosts (`127.0.0.0/8`, `::1`, `localhost`); any non-loopback target must be `https://`.
 
-The same SSRF floor that guards registry traffic guards these endpoints: a URL is refused by **where it resolves**, not by how it is spelled, so a private-range or link-local address is rejected with exit 64 (`InvalidEndpointUrl`), the same code as any other malformed `--fulcio-url`/`--rekor-url`. A self-hosted Sigstore on a private network is therefore reachable only after its host is allow-listed — `[registries."<ns>"] trusted_hosts` in the operator `config.toml`, the same key that admits a private registry.
+The same SSRF floor that guards registry traffic guards these endpoints: a URL is refused by **where it resolves**, not by how it is spelled. An endpoint that resolves into a forbidden range — a private-range or link-local address, with no `trusted_hosts` entry — is rejected with exit 64 (`InvalidEndpointUrl`), the same code as any other malformed `--fulcio-url`/`--rekor-url`; one that fails to resolve at all exits 69 instead, since a rerun changes nothing until the host or the network is fixed. A self-hosted Sigstore on a private network is therefore reachable only after its host is allow-listed — `[registries."<ns>"] trusted_hosts` in the operator `config.toml`, the same key that admits a private registry.
+
+Under a configured [HTTP proxy][env-external-proxies], a hostname-configured `--fulcio-url`/`--rekor-url` is dialed through the proxy rather than refused: OCX itself never resolves the destination when a proxy is in the path, so the guard admits the proxy's own hostname at the connection-time resolver instead of treating it as an unapproved host.
 :::
 
 ## Signing Flow Summary {#signing-flow}
@@ -375,6 +377,7 @@ The same SSRF floor that guards registry traffic guards these endpoints: a URL i
 <!-- environment -->
 [env-identity-token]: ../reference/environment.md#ocx-identity-token
 [env-sigstore-trusted-root]: ../reference/environment.md#ocx-sigstore-trusted-root
+[env-external-proxies]: ../reference/environment.md#external-proxies
 [config-trust-sigstore]: ../reference/configuration.md#keys-trust-sigstore
 [in-depth-self-hosted-sigstore]: ./self-hosted-sigstore.md
 [in-depth-cosign-parity]: ./cosign-parity.md
