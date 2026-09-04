@@ -22,12 +22,11 @@
 //! publish every field a spec defines, but every field it does publish must be
 //! one the spec defines. `ResourceDescriptor` satisfies that outright — ocx
 //! fills what it has and omits `content`, `downloadLocation` and `mediaType`,
-//! which name nothing it has. Platform does not: it publishes `features`, which
-//! image-spec `v1.1.1` removed. That is pinned in [`KNOWN_PLATFORM_DEVIATIONS`]
-//! rather than fixed, because deleting a property from a published schema is a
-//! wire decision, and a conformance test is not where wire decisions get made.
-//! The ratchet keeps the deviation visible and keeps a second one from joining
-//! it quietly.
+//! which name nothing it has. Platform now does too: the schema no longer
+//! publishes the removed `features` property, so [`KNOWN_PLATFORM_DEVIATIONS`]
+//! is empty. The mechanism stays — deleting a property from a published schema
+//! was a wire decision, and the ratchet is what keeps the next one from
+//! joining silently if it ever needs a new entry.
 
 mod spec_vocabulary;
 
@@ -63,13 +62,12 @@ const PROTO_TYPE_STRING: i64 = 9;
 ///
 /// `(kind, json_pointer_path, property)`.
 ///
-/// The single entry, `features`: image-spec removed it, and the `oci-client`
-/// fork's `Platform` struct still carries it as RESERVED
-/// (`external/rust-oci-client/src/manifest.rs:483`). ocx sets it to `None` at
-/// every construction site, never reads it, and it is `skip_serializing_if`, so
-/// it reaches no wire ocx writes — but it is published in the schema. Removing
-/// it is a schema/wire break and therefore the owner's call, not this test's.
-const KNOWN_PLATFORM_DEVIATIONS: &[(&str, &str, &str)] = &[("reports", "/$defs/Platform", "features")];
+/// Empty today: the schema no longer publishes `features` (image-spec
+/// `v1.1.1` removed it; ocx's hand-authored `Platform` schema was fixed to
+/// match). The ratchet mechanism stays in place — a future deviation still
+/// needs an owner decision, not a silent test edit — so an entry lands here
+/// again only if one is deliberately introduced.
+const KNOWN_PLATFORM_DEVIATIONS: &[(&str, &str, &str)] = &[];
 
 fn schema(kind: &str) -> Value {
     let raw = ocx_schema::schema_for(kind).unwrap_or_else(|| panic!("schema_for({kind:?}) returned None"));

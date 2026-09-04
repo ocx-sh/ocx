@@ -45,7 +45,7 @@ pub type ExpectedGraph = BTreeMap<AliasTag, BTreeMap<native::Platform, ExpectedS
 /// `3.28`, `3.28.1`). A track root — `latest` for the default track, the bare
 /// variant name (`debug`) for a variant track — is named by no version at all,
 /// which is the only reason this enum exists rather than a bare `Version`.
-#[derive(schemars::JsonSchema, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AliasTag {
     /// The root of one track: `None` is the default track's `latest`, `Some`
     /// is a variant track's bare name.
@@ -99,6 +99,23 @@ impl fmt::Display for AliasTag {
 impl Serialize for AliasTag {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(self)
+    }
+}
+
+// The `#[derive(schemars::JsonSchema)]` a plain enum would carry publishes a
+// tagged union (`Root`/`Version` variant shapes) — a lie once `Serialize`
+// above collapses every variant to the tag string. The schema must describe
+// the wire form, not the Rust shape behind it.
+impl schemars::JsonSchema for AliasTag {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "AliasTag".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "The registry tag itself, e.g. latest, 3, 3.28, 3.28.1, or a variant name.",
+        })
     }
 }
 

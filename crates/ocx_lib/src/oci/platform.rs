@@ -925,7 +925,6 @@ impl schemars::JsonSchema for Platform {
                 "os.version": {"type": "string"},
                 "os.features": {"type": "array", "items": {"type": "string"}},
                 "variant": {"type": "string"},
-                "features": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["architecture", "os"],
         })

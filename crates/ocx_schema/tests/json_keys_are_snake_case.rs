@@ -59,15 +59,7 @@ const BORROWED_DEFINITION_NAMES: &[&str] = &["Platform", "ResourceDescriptor"];
 /// `(kind, json_pointer_path, key)`. Every entry must match a real offender
 /// on every run (checked below) — an entry that stops offending is stale and
 /// fails the test, same as a new, unlisted offender.
-const KNOWN_NON_SNAKE: &[(&str, &str, &str)] = &[
-    ("reports", "/$defs/AliasTag/oneOf/0/properties/Root", "Root"),
-    ("reports", "/$defs/AliasTag/oneOf/1/properties/Version", "Version"),
-    (
-        "reports",
-        "/$defs/PackageSettingsOut/properties/no-patches",
-        "no-patches",
-    ),
-];
+const KNOWN_NON_SNAKE: &[(&str, &str, &str)] = &[];
 
 /// `^[a-z0-9]+(_[a-z0-9]+)*$` without pulling in the `regex` crate: one or
 /// more lowercase-alphanumeric runs, separated by single underscores, with no
