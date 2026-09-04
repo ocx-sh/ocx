@@ -854,6 +854,25 @@ These variables expect **PEM** armor (`-----BEGIN CERTIFICATE-----`), regardless
 To skip HTTPS entirely for a development registry that has no certificate, use [`OCX_INSECURE_REGISTRIES`](#ocx-insecure-registries) instead. It is scoped to the hosts you name and never weakens verification for public registries.
 :::
 
+### Proxies — `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY` {#external-proxies}
+
+On a network where outbound traffic is routed through a corporate HTTP proxy, OCX reads the same forward-proxy variables [curl][curl-proxy-env], [git][git-http-proxy], and [reqwest][reqwest-proxy] already read — there is no separate `OCX_PROXY` variable. This matters for more than routing: on many such networks OCX cannot resolve an external hostname itself at all, only the proxy can, so the SSRF guard that runs before every index-indirected registry dial (see [`trusted_hosts`][config-registries-trusted-hosts]) adapts to a proxied destination instead of failing on a lookup only the proxy is able to make.
+
+| Variable | Applies to |
+|----------|------------|
+| `HTTPS_PROXY` | `https://` destinations |
+| `HTTP_PROXY` | `http://` destinations |
+| `ALL_PROXY` | Either scheme, when the scheme-specific variable above is unset |
+| `NO_PROXY` | Names destinations dialed directly, bypassing every variable above |
+
+Each is checked upper-case first, then lower-case (`https_proxy`, `http_proxy`, `all_proxy`, `no_proxy`) as a fallback, and the whole set is read once at process start. An `https://` destination consults `HTTPS_PROXY`, then falls back to `ALL_PROXY` — never `HTTP_PROXY`, whose scheme it does not share. `NO_PROXY` accepts an exact host, a leading-dot domain suffix, a CIDR block, or `*` to exclude every destination. On Windows and macOS, OCX also reads the operating system's own proxy configuration — the registry-based Internet Settings on Windows, the System Configuration framework on macOS — so a proxy set through Control Panel or System Settings applies with no environment variable at all.
+
+Under a configured proxy, OCX never resolves the destination host itself — the proxy does, over a `CONNECT` tunnel for `https://` or an absolute-form request line for `http://`. The SSRF guard adapts to this: for a proxied destination it skips the DNS pre-flight, since there is nothing local to resolve, but still refuses a forbidden IP literal — loopback, private, or link-local — written directly into an index root's pointer, and it admits the proxy's own hostname at the connection-time resolver hook, the one address the guard would otherwise have no way to approve. A destination `NO_PROXY` excludes is dialed directly instead, with the full resolve-then-validate guard unchanged.
+
+:::info Same variables curl and git already read
+`HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY` are a de facto standard read by [curl][curl-proxy-env], [git][git-http-proxy], and every HTTP client built on [reqwest][reqwest-proxy] — including OCX's own. A proxy configured once, the same way, works for all of them.
+:::
+
 ### `XDG_CONFIG_HOME` {#external-xdg-config-home}
 
 User-level configuration base directory, defined by the [XDG Base Directory Specification][xdg-basedir]. On Linux, OCX uses it to locate the user-tier [configuration file][config-ref]: the user tier is `$XDG_CONFIG_HOME/ocx/config.toml`, falling back to `~/.config/ocx/config.toml` when the variable is unset.
@@ -905,6 +924,9 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [sigstore-tuf]: https://docs.sigstore.dev/certificate_authority/overview/
 [mise]: https://mise.jdx.dev/cli/trust.html
 [git-safe-directory]: https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory
+[git-http-proxy]: https://git-scm.com/docs/git-config#Documentation/git-config.txt-httpproxy
+[curl-proxy-env]: https://curl.se/docs/manpage.html
+[reqwest-proxy]: https://docs.rs/reqwest/latest/reqwest/struct.Proxy.html
 [direnv]: https://direnv.net/
 
 <!-- commands -->
@@ -971,6 +993,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [config-home-tier]: ../in-depth/configuration.md#tier-ocx-home
 [config-mirrors]: ./configuration.md#keys-mirrors
 [config-registries-insecure]: ./configuration.md#keys-registries-insecure
+[config-registries-trusted-hosts]: ./configuration.md#keys-registries-trusted-hosts
 [config-patches]: ./configuration.md#keys-patches
 [config-managed]: ./configuration.md#keys-managed
 [config-managed-refresh]: ./configuration.md#keys-managed-refresh

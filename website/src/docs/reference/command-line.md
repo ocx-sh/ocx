@@ -308,13 +308,13 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 |------|------|----------|-----------|----------|
 | 0 | Success | — | Successful completion | — |
 | 1 | Failure | — | Generic failure — only when no specific code applies | Inspect stderr |
-| 64 | UsageError | EX_USAGE | Bad CLI invocation: unknown flag, wrong argument count, invalid syntax; `package verify` given only one of `--certificate-identity` / `--certificate-oidc-issuer`, or given neither with no matching [`[[trust.policy]]`][config-trust] scope | Check the command syntax |
+| 64 | UsageError | EX_USAGE | Bad CLI invocation: unknown flag, wrong argument count, invalid syntax; `package verify` given only one of `--certificate-identity` / `--certificate-oidc-issuer`, or given neither with no matching [`[[trust.policy]]`][config-trust] scope; also a `--fulcio-url`/`--rekor-url` the SSRF guard refuses because it points at a forbidden address (loopback, private, link-local), whether spelled as an IP literal or resolved from a name | Check the command syntax |
 | 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest, tampered Sigstore bundle; also a manifest fetch that got back something other than a manifest — an HTML page from a misconfigured [mirror][config-mirrors], for instance — refused by its content type before digest verification ever runs; also registry-served content whose digest does not match the descriptor; also a platform feature mismatch — the package ships for the host os/arch but no candidate's `os.features` are a subset of the host's (e.g. glibc vs musl), see [`--platform`](#package-install); also an ambiguous selection — a dual-libc host matched two equally-specific candidates (see [libc differentiation][authoring-libc]); also a registry-controlled redirect or auth realm that OCX refuses to follow during push or pull — a session URL or redirect naming a different registry host, a plaintext credential realm, a redirect that would drop TLS, or a redirect on an upload request at all (see [Redirect Refusals][authoring-building-pushing-redirect-refusals]) | Validate identifiers and file contents; for a mirror serving a non-manifest response, check the mirror's own health and its `[mirrors]` routing; for a feature mismatch or ambiguous selection, override with `--platform`; for a refused redirect or realm, see [Redirect Refusals][authoring-building-pushing-redirect-refusals] — it is a registry-side problem or a missing `insecure` entry, never one a rerun fixes |
-| 69 | Unavailable | EX_UNAVAILABLE | The registry answered, but not usefully — and a rerun will not change that. Also a local resource that cannot be reached | Inspect stderr; fix the registry or the URL before retrying |
+| 69 | Unavailable | EX_UNAVAILABLE | The registry answered, but not usefully — and a rerun will not change that. Also a local resource that cannot be reached; also a guarded registry or Sigstore endpoint host that fails to resolve at all — a proxied destination is unaffected, since the configured proxy resolves it instead of OCX (see [Proxies][env-external-proxies]) | Inspect stderr; fix the registry or the URL before retrying |
 | 74 | IoError | EX_IOERR | I/O error: filesystem permission denied, disk full, read/write failure | Check filesystem permissions and free space |
 | 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: registry connect failure or timeout, 429, 502, 503, 504, rate limit, transient network, or a layer blob that arrived short of its manifest-declared size | Retry with backoff |
 | 77 | PermissionDenied | EX_NOPERM | Insufficient permissions: filesystem EPERM, offline sign refused, OIDC pre-check failed | Adjust filesystem permissions, or drop `--offline` to sign |
-| 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure, trust root unavailable, a matched [`[[trust.policy]]`][config-trust] entry is malformed. Three carve-outs from that last one, each keyed on what was actually unusable: an unreadable or non-regular `key` path is 74, a key file whose bytes are not a key is 65, and an unimplemented key backend is 85. An inline `key_pem` that is not a key stays here — config text is what is wrong | Inspect the config file at the printed path |
+| 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure, trust root unavailable, a registry host the SSRF guard refuses outright (see [`trusted_hosts`][config-registries-trusted-hosts]), a matched [`[[trust.policy]]`][config-trust] entry is malformed. Three carve-outs from that last one, each keyed on what was actually unusable: an unreadable or non-regular `key` path is 74, a key file whose bytes are not a key is 65, and an unimplemented key backend is 85. An inline `key_pem` that is not a key stays here — config text is what is wrong | Inspect the config file at the printed path |
 | 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent, no signatures found for target | Pin a different version or correct the path |
 | 80 | AuthError | OCX | Authentication failure: registry 401 or 403, missing credentials, Fulcio OIDC token rejected | Refresh or set registry credentials |
 | 81 | PolicyBlocked | OCX | A deliberate local policy (`--offline` or `--frozen`) refused a network or resolution operation — not a fault. Includes an unpinned-tag resolve that the policy forbade | Loosen the flag, or populate the local index first with `ocx index update` — itself run without the flag |
@@ -4023,6 +4023,7 @@ Never pass a raw token on the command line — it would appear in shell history 
 | 64 | `InvalidEndpointUrl` — malformed `--fulcio-url` or `--rekor-url` (must be `https://`, or `http://` on loopback only; no credentials, no unsupported schemes) |
 | 64 | `KeyReferenceInvalid` — `--key` could not be parsed at all: an unrecognised scheme token, or nothing following the scheme |
 | 64 | `RekorUploadRequiredForKeyless` — `--no-rekor-upload` was given without `--key`: a keyless signature must be recorded in Rekor, because a Fulcio certificate is valid for about ten minutes and the log entry's timestamp is the only lasting proof the signature was made while it was |
+| 69 | `InvalidEndpointUrl` — the `--fulcio-url`/`--rekor-url` host does not resolve at all; a rerun will not help until the host or the network is fixed |
 | 65 | `RekorSetMalformed` — Rekor returned the log entry but its Signed Entry Timestamp could not be extracted or parsed |
 | 65 | `SubjectDigestUnsupported` — the reference resolves to a subject addressed by `sha384` or `sha512`. cosign artifacts address their subject by `sha256` alone: the in-toto Statement binds on `sha256`, and the sidecar tag truncates the digest to 64 characters, so two subjects sharing a prefix would share one tag. Refused before anything is published or logged to Rekor, rather than at verify time after a permanent transparency-log entry has been burned |
 | 65 | `KeyBackend` — a `--key <path>` reference names a file that was read in full but whose bytes are not a key this backend accepts, or that exceeds the size cap. `error.detail` is `key_backend` |
@@ -4129,6 +4130,7 @@ On error, `ocx package sign` emits a C-S1-1 error envelope. The `error.detail` f
 | `offline_sign_refused` | 77 | `--offline` is incompatible with `package sign` |
 | `identity_token_file_permissive` | 77 | Token file has permissive permissions, wrong owner, or is a symlink |
 | `invalid_endpoint_url` | 64 | Malformed `--fulcio-url` or `--rekor-url` |
+| `invalid_endpoint_url` | 69 | The endpoint host does not resolve at all |
 | `unsupported_key_backend` | 85 | `--key` named a key backend OCX recognises but has not implemented (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://`). Decided at the parse boundary, so it is never reported as a missing file |
 | `key_backend` | 74 | A `--key <path>` reference names a file that could not be read — missing, permission denied, a directory or device node rather than a regular file, or another I/O failure. The single detail every `KeyBackendError` variant collapses to; `unsupported_key_backend` above is the separate parse-time refusal |
 | `key_backend` | 65 | A `--key <path>` reference names a file that was read in full but whose bytes are not a key this backend accepts, or that exceeds the size cap |
@@ -4207,6 +4209,7 @@ A Fulcio certificate embeds a Signed Certificate Timestamp that the verifier che
 |------|-----------|
 | 0 | Signature verified — identity and issuer match, bundle cryptographically valid |
 | 64 | `UsageError` — malformed `--rekor-url` (must be `https://`, or `http://` on loopback only; no credentials, no userinfo) |
+| 69 | `UsageError` — the `--rekor-url` host does not resolve at all; a rerun will not help until the host or the network is fixed |
 | 64 | `NoIdentityProvided` — neither `--certificate-identity` nor `--certificate-oidc-issuer` was given and no [`[[trust.policy]]`][config-trust] scope covers the target (a lone flag is instead rejected at parse time as a bare usage error, with no envelope) |
 | 65 | Data integrity failure: signature invalid, subject digest mismatch, certificate chain invalid, Rekor SET invalid (bundle tampered), Rekor transparency-log body does not bind to the bundle (spliced SET), the signature candidate examination cap was reached before a valid signature was found, or bundle parse failed. In `--attestation` mode, also: predicate type mismatch, a missing or weak-digest subject, an unrecognized in-toto statement or DSSE payload type, a SLSA provenance builder mismatch, more than one matching attestation with no `--type` to disambiguate, or the attestation exceeded its size or byte-budget limit |
 | 74 | `IoError` — the key file a `--key <path>` reference (or a matched [`[[trust.policy]]`][config-trust] signer's `key`) names could not be read. Also a path that is not a readable regular file — a directory, a device — the same 74 [`--config`](#arg-config) answers for one. The same code [`sign`](#package-sign) answers for the same reference, so the flag means one thing on both sides |
@@ -4335,6 +4338,7 @@ The envelope shape matches the `package sign` error envelope (see [`package sign
 | `trust_policy_invalid` | 78 | A matched [`[[trust.policy]]`][config-trust] entry is malformed — identity XOR violation, or an `identity_regexp` that does not compile |
 | `key_unreadable` | 74 | The key file a path reference names could not be read — missing, permission denied, not a regular file, or another I/O failure. Byte-identical outcome to [`package sign`](#package-sign)'s 74 for the same `--key <path>`, so one flag with one value cannot mean two things depending on the verb. Reaches here from `--key` and from a `key` path signer in a matched [`[[trust.policy]]`][config-trust] entry alike |
 | `invalid_endpoint_url` | 64 | Malformed `--rekor-url` |
+| `invalid_endpoint_url` | 69 | The `--rekor-url` host does not resolve at all |
 | `attestation_not_found` | 79 | No attestation referrer found for the target (`--attestation` mode) |
 | `predicate_type_mismatch` | 65 | The `--type` given does not match any verified attestation's `predicateType` |
 | `statement_subject_mismatch` | 65 | The in-toto Statement's `subject` does not name the target manifest digest |
@@ -4450,6 +4454,7 @@ Token precedence and the ambient-CI detection order are identical to [`sign`][cm
 |------|-----------|
 | 0 | Attestation published successfully |
 | 64 | `InvalidEndpointUrl` — malformed `--fulcio-url` or `--rekor-url` |
+| 69 | `InvalidEndpointUrl` — the `--fulcio-url`/`--rekor-url` host does not resolve at all; a rerun will not help until the host or the network is fixed |
 | 64 | `ProvenanceVersionUnsupported` — `--type` resolved to a SLSA provenance predicate below v1.0 (`slsaprovenance` or `slsaprovenance02`); pass `--type slsaprovenance1` |
 | 64 | `UnsignedTypeUnsupported` — no signing identity is visible and `--type` did not resolve to one of the three SBOM media types; supply an identity to attach it signed, or use a `cyclonedx`/`spdx`/`spdxjson` type |
 | 64 | `SidecarRequiresSignature` — `--signature-format simplesigning` or `both` was given for an attach with no signing identity; an `.att` sidecar layer *is* a signed DSSE envelope, so supply an identity or a key, or drop the flag |
@@ -4544,6 +4549,7 @@ On error, `ocx package attest` emits the same envelope shape as [`sign`][cmd-pac
 | `identity_token_file_permissive` | 77 | Token file has permissive permissions, wrong owner, or is a symlink |
 | `forbidden_registry_target` | 78 | The target registry is refused by policy |
 | `invalid_endpoint_url` | 64 | Malformed `--fulcio-url` or `--rekor-url` |
+| `invalid_endpoint_url` | 69 | The endpoint host does not resolve at all |
 | `provenance_version_unsupported` | 64 | `--type` resolved to a SLSA provenance predicate below v1.0; pass `--type slsaprovenance1` |
 | `unsigned_type_unsupported` | 64 | No signing identity is visible and `--type` did not resolve to a CycloneDX or SPDX predicate |
 | `sidecar_requires_signature` | 64 | `--signature-format simplesigning` or `both` was given for an attach with no signing identity to build a DSSE envelope from |
@@ -4616,7 +4622,7 @@ ocx package sbom [OPTIONS] <IDENTIFIER>
 
 **Exit codes**
 
-Shares [`verify`][cmd-package-verify]'s exit-code taxonomy under `--verify` — 79 when nothing verifies, 65 for any data-integrity failure, 78 for a trust-root or policy problem, 83 for Rekor unavailability. Exit 84 is not reachable from `sbom` at all: a registry serving no OCI Referrers API is read through the fallback referrers tag, so a registry with neither is "nothing found" (79), never a capability refusal. 84 belongs to the signing side — [`sign`](#package-sign) and [`attest`](#package-attest), which must *write* a referrer. Under `--no-verify` the trust-material codes — 78 (trust root or policy), 77 (identity), 83 (Rekor), and the 65 signature classes — are unreachable, because no trust material is consulted; 64 for an invalid `--rekor-url` stays reachable either way, since it is validated before the mode is resolved. Seven `sbom`-specific additions:
+Shares [`verify`][cmd-package-verify]'s exit-code taxonomy under `--verify` — 79 when nothing verifies, 65 for any data-integrity failure, 78 for a trust-root or policy problem, 83 for Rekor unavailability. Exit 84 is not reachable from `sbom` at all: a registry serving no OCI Referrers API is read through the fallback referrers tag, so a registry with neither is "nothing found" (79), never a capability refusal. 84 belongs to the signing side — [`sign`](#package-sign) and [`attest`](#package-attest), which must *write* a referrer. Under `--no-verify` the trust-material codes — 78 (trust root or policy), 77 (identity), 83 (Rekor), and the 65 signature classes — are unreachable, because no trust material is consulted; 64 for a malformed `--rekor-url` — or one the SSRF guard refuses as a forbidden address — stays reachable either way, since it is validated before the mode is resolved; so does 69, for a `--rekor-url` host that does not resolve at all. Seven `sbom`-specific additions:
 
 | Code | Condition |
 |------|-----------|
@@ -5704,6 +5710,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [env-sigstore-trusted-root]: ./environment.md#ocx-sigstore-trusted-root
 [env-offline]: ./environment.md#ocx-offline
 [env-no-verify]: ./environment.md#ocx-no-verify
+[env-external-proxies]: ./environment.md#external-proxies
 
 <!-- external: completions -->
 [clap-complete]: https://docs.rs/clap_complete/latest/clap_complete/

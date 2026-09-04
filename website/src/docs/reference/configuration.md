@@ -233,6 +233,8 @@ trusted_hosts = ["10.0.0.0/8", "registry.corp"]
 
 The guard is default-on and needs no configuration for public registries. There is no command-line flag to widen the trust set — the exemption lives only on the config entry, so a [system-locked](#keys-registries-system-lock) entry's `trusted_hosts` cannot be broadened by a lower tier or a CLI override. A refused host exits with a configuration error that names the host and points back to `trusted_hosts`.
 
+Under a configured [HTTP proxy][env-external-proxies], OCX never resolves the physical host itself, so this list is judged by name alone — checked against `trusted_hosts`, then refused if it is itself a forbidden IP literal — with no DNS lookup in between. A name-based internal host that only resolves through the proxy's own network is outside what `trusted_hosts` can see or control; refusing it is the proxy's egress policy to enforce, not OCX's.
+
 #### `insecure` {#keys-registries-insecure}
 
 **Type**: boolean  
@@ -1636,6 +1638,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-consent-paths]: ./environment.md#ocx-consent-paths
 [env-consent-namespaces]: ./environment.md#ocx-consent-namespaces
 [env-ocx-lazy-report]: ./environment.md#ocx-lazy-report
+[env-external-proxies]: ./environment.md#external-proxies
 
 <!-- user guide -->
 [user-guide-managed-config]: ../user-guide.md#managed-config
