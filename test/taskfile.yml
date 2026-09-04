@@ -239,11 +239,16 @@ tasks:
       #    Rule two: it must not overshoot, or the step certifies only that an
       #    assert exists. The delay lands on top of the real work, so at 7 ms the
       #    observed deltas were ~7.5 (startup) and ~11.8 (reconcile) - 1.9x the
-      #    then-6.1 ms reconcile budget. At 11 ms, measured on a quiet box over two
-      #    runs: 11.544 / 11.712 (startup) and 16.050 / 16.106 (reconcile), so the
-      #    same run would NOT red a 12 / 17 ms pair - it is testing the numbers,
-      #    not their presence, and at 1.6x the reconcile budget it is tighter than
-      #    the 1.9x it replaces. The previous 8 ms / 100 ms pair was 4x its budget
+      #    then-6.1 ms reconcile budget. At 11 ms it was measured twice on a quiet
+      #    dev box - 11.544 / 11.712 (startup), 16.050 / 16.106 (reconcile) - and
+      #    once on the GitHub runner this step actually runs on, which is the
+      #    slower of the two and therefore the one the rule is read against:
+      #    11.972 and 17.340. So the same run would NOT red a 12 / 18 ms pair - it
+      #    is testing the numbers, not their presence, and at 1.7x the reconcile
+      #    budget it is tighter than the 1.9x it replaces. Quote the runner's pair
+      #    and not the dev box's: a sizing rule derived from the quieter machine
+      #    is the same laundering `shell_latency.py`'s budget notes spend three
+      #    paragraphs refusing. The previous 8 ms / 100 ms pair was 4x its budget
       #    on both legs and would have passed a budget nearly twice as loose.
       #
       #    It went 4 -> 7 ms when the reconcile budget went 3 -> 6.1, and 7 -> 11
