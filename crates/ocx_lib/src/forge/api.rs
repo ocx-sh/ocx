@@ -46,6 +46,25 @@ pub enum BranchComparison {
     Diverged,
 }
 
+/// Whether an open pull request can merge into its base as it stands.
+///
+/// A detector, not a gate: announce consults it on exactly one path — an
+/// otherwise-unchanged run whose branch was rebuilt onto the current base and
+/// still carries an open pull request. Every other outcome commits with
+/// [`RefUpdate::Reset`], which makes the request mergeable by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mergeability {
+    /// The forge reports the request merges into its base cleanly.
+    Mergeable,
+    /// The forge reports the request conflicts with its base.
+    Conflicting,
+    /// No verdict is available — the forge is still computing one, or the pull
+    /// request is not there to answer for. Benign either way: a request that
+    /// does not exist cannot conflict, and a forge mid-computation answers on
+    /// the next run.
+    Unknown,
+}
+
 /// Whether a ref update may rewrite history.
 ///
 /// [`FastForward`](Self::FastForward) is the default and the one every ordinary
@@ -157,6 +176,25 @@ pub trait Forge: Send + Sync {
         head: &RepoCoordinate,
         branch: &str,
     ) -> Result<Option<PullRequest>, ForgeError>;
+
+    /// Whether the open pull request `number` on `index` can merge into its
+    /// base.
+    ///
+    /// Read-only, **one request, never a poll**. A forge that has not finished
+    /// computing the answer reports [`Mergeability::Unknown`], and so does a
+    /// pull request that is not found — the caller treats both as benign and
+    /// asks again on the next run, so an implementation must not wait for a
+    /// verdict it can report as unknown.
+    ///
+    /// `number` is the request's project-local number scoped to `index`:
+    /// GitHub's `number`, GitLab's `iid`. It is never the forge's internal
+    /// database id.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ForgeError`] on transport failure or a non-success status
+    /// other than "absent".
+    async fn pull_request_mergeability(&self, index: &RepoCoordinate, number: u64) -> Result<Mergeability, ForgeError>;
 
     /// Look up an existing fork of `upstream` at `fork`, **without creating
     /// one**. `None` when nothing is there, or when what is there is not a

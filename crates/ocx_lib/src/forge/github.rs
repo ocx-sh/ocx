@@ -28,7 +28,8 @@ use super::http::build_forge_http_client;
 use super::identity::{verify_fork_namespace, verify_github_fork};
 use super::poll::{PollSchedule, backoff_delays};
 use super::{
-    BranchComparison, CommitBase, Forge, ForgeError, ForgeToken, ForkIdentity, PullRequest, RefUpdate, RepoCoordinate,
+    BranchComparison, CommitBase, Forge, ForgeError, ForgeToken, ForkIdentity, Mergeability, PullRequest, RefUpdate,
+    RepoCoordinate,
 };
 
 /// Canonical github.com REST base URL — a dedicated API origin, not a path on
@@ -540,6 +541,26 @@ impl Forge for GitHubForge {
         pull_request_from_body(&pulls_url, existing, true).map(Some)
     }
 
+    /// Whether pull request `number` on `index` merges cleanly.
+    ///
+    /// The single-pull GET, not the list endpoint: `mergeable` is absent from
+    /// every listed pull request, and this GET is also what *asks* GitHub to
+    /// compute the merge commit in the first place. One request, no poll — a
+    /// verdict GitHub has not finished computing is [`Mergeability::Unknown`],
+    /// which the caller re-asks on the next run.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ForgeError`] on transport failure or a non-success status
+    /// other than 404.
+    async fn pull_request_mergeability(&self, index: &RepoCoordinate, number: u64) -> Result<Mergeability, ForgeError> {
+        let url = self.url(&format!("/repos/{}/pulls/{number}", index.full_path()));
+        let Some(body) = self.get_json_optional(&url).await? else {
+            return Ok(Mergeability::Unknown);
+        };
+        Ok(mergeability_from_body(&body))
+    }
+
     /// Look up an existing fork of `upstream` at `fork`, **without creating
     /// one**. `None` when nothing is there, or when what is there is not a
     /// verified fork of `upstream` (a same-named stranger repository).
@@ -959,6 +980,23 @@ fn pull_request_from_body(url: &str, value: &Value, updated: bool) -> Result<Pul
         html_url,
         updated,
     })
+}
+
+/// GitHub's `mergeable` tri-state as a [`Mergeability`].
+///
+/// The field is `null` — present but empty — for as long as GitHub is computing
+/// the background merge commit, and the first GET of a pull request is what
+/// starts that computation. Reading `null` as either verdict is therefore
+/// wrong in opposite directions: as `false` it reports a conflict on a
+/// perfectly mergeable request the very first time it is asked, as `true` it
+/// clears a conflicting one. Absent is treated the same as `null`, since a
+/// shape that carries no field carries no verdict either.
+fn mergeability_from_body(value: &Value) -> Mergeability {
+    match value.get("mergeable").and_then(Value::as_bool) {
+        Some(true) => Mergeability::Mergeable,
+        Some(false) => Mergeability::Conflicting,
+        None => Mergeability::Unknown,
+    }
 }
 
 #[cfg(any(test, feature = "__testing"))]
@@ -1476,6 +1514,69 @@ mod tests {
         assert_eq!(pull_request.number, 42);
         assert_eq!(pull_request.html_url, "https://example.test/pull/42");
         assert!(pull_request.updated);
+    }
+
+    #[test]
+    fn mergeability_reads_githubs_tri_state() {
+        // `true` and `false` are verdicts; `null` is GitHub still computing the
+        // background merge commit, and an absent field carries no verdict
+        // either. Each of the three must land on its own variant — a parser
+        // that collapsed `null` into a verdict would either invent a conflict
+        // on the first look at a clean pull request or clear a real one.
+        assert_eq!(
+            mergeability_from_body(&json!({ "number": 42, "mergeable": true })),
+            Mergeability::Mergeable
+        );
+        assert_eq!(
+            mergeability_from_body(&json!({ "number": 42, "mergeable": false })),
+            Mergeability::Conflicting
+        );
+        assert_eq!(
+            mergeability_from_body(&json!({ "number": 42, "mergeable": Value::Null })),
+            Mergeability::Unknown
+        );
+        assert_eq!(mergeability_from_body(&json!({ "number": 42 })), Mergeability::Unknown);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mergeability_gets_the_single_pull_request_and_reads_404_as_unknown() {
+        // The single-pull GET, not the list endpoint: `mergeable` is absent
+        // from every listed pull request, so a client reading the list would
+        // report `Unknown` forever. One request, and a pull request that is
+        // gone is unknown rather than an error — nothing that does not exist
+        // can conflict.
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("GET", "/repos/forkuser/index/pulls/42") => (200, r#"{"number":42,"mergeable":false}"#.to_string()),
+            ("GET", "/repos/forkuser/index/pulls/7") => (404, r#"{"message":"Not Found"}"#.to_string()),
+            _ => (599, r#"{"message":"unexpected request"}"#.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        let forge = fake.forge();
+        assert_eq!(
+            forge
+                .pull_request_mergeability(&test_repo(), 42)
+                .await
+                .expect("a modelled body is not an error"),
+            Mergeability::Conflicting
+        );
+        assert_eq!(
+            forge
+                .pull_request_mergeability(&test_repo(), 7)
+                .await
+                .expect("an absent pull request is not an error"),
+            Mergeability::Unknown
+        );
+
+        assert_eq!(
+            fake.routes(),
+            [
+                "GET /repos/forkuser/index/pulls/42".to_string(),
+                "GET /repos/forkuser/index/pulls/7".to_string(),
+            ],
+            "one request per call, and no poll"
+        );
     }
 
     #[test]

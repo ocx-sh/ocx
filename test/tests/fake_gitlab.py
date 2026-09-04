@@ -44,6 +44,10 @@ FILE_RE = re.compile(rf"^/projects/(?P<id>{_ID})/repository/files/(?P<path>.+)$"
 COMPARE_RE = re.compile(rf"^/projects/(?P<id>{_ID})/repository/compare$")
 COMMITS_RE = re.compile(rf"^/projects/(?P<id>{_ID})/repository/commits$")
 MERGE_REQUESTS_RE = re.compile(rf"^/projects/(?P<id>{_ID})/merge_requests$")
+# The SINGLE merge request. `has_conflicts` and `detailed_merge_status` are only
+# worth carrying here — the list endpoint answers "which request", this one
+# answers "can it merge".
+MERGE_REQUEST_RE = re.compile(rf"^/projects/(?P<id>{_ID})/merge_requests/(?P<iid>\d+)$")
 FORK_RE = re.compile(rf"^/projects/(?P<id>{_ID})/fork$")
 FORKS_RE = re.compile(rf"^/projects/(?P<id>{_ID})/forks$")
 
@@ -93,6 +97,11 @@ class GitLabRoutes:
         match = MERGE_REQUESTS_RE.fullmatch(path)
         if match:
             self.gl_get_merge_requests(handler, match.group("id"), query)
+            return True
+
+        match = MERGE_REQUEST_RE.fullmatch(path)
+        if match:
+            self.gl_get_merge_request(handler, match.group("id"), int(match.group("iid")))
             return True
 
         return False
@@ -296,6 +305,43 @@ class GitLabRoutes:
             record = self.gitlab_merge_requests.get(key)
         handler._reply_json(200, [record] if record else [])
 
+    def gl_get_merge_request(self, handler: _Handler, identifier: str, iid: int) -> None:
+        """`GET /projects/:id/merge_requests/:iid` -> the merge request, with the
+        two fields the client reads to decide mergeability.
+
+        Both are COMPUTED by `_conflicting_locked` (`fake_forge.py`) — the same
+        helper the GitHub surface answers `mergeable` from, over the same object
+        graph. That is the point of one graph: the two clients are held to one
+        oracle instead of to a per-surface knob that could tell each of them
+        what it wants to hear.
+
+        Only the settled pair is emitted. GitLab's in-progress values
+        (`checking`, `unchecked`) mean "not computed yet", which this fake never
+        is; the client's arm for them is pinned by a Rust unit test."""
+        with self.lock:
+            target = self._gl_resolve_locked(identifier)
+            if target is None:
+                handler._reply_json(404, {"message": "404 Project Not Found"})
+                return
+            found = next(
+                (
+                    (key, record)
+                    for key, record in self.gitlab_merge_requests.items()
+                    if key[0] == target and record["iid"] == iid
+                ),
+                None,
+            )
+            if found is None:
+                handler._reply_json(404, {"message": "404 Merge Request Not Found"})
+                return
+            (_, source, source_branch), record = found
+            conflicting = self._conflicting_locked(target, record["target_branch"], source, source_branch)
+            body = dict(record) | {
+                "has_conflicts": conflicting,
+                "detailed_merge_status": "conflict" if conflicting else "mergeable",
+            }
+        handler._reply_json(200, body)
+
     # ── write routes ─────────────────────────────────────────────────────
 
     def gl_post_commit(self, handler: _Handler, identifier: str, body: dict[str, Any]) -> None:
@@ -435,6 +481,9 @@ class GitLabRoutes:
                 "iid": number,
                 "web_url": f"{self.base_url}/{target}/-/merge_requests/{number}",
                 "state": "opened",
+                # The branch the request targets — what the single-request route
+                # compares the source branch against.
+                "target_branch": body.get("target_branch", "main"),
             }
             self.gitlab_merge_requests[key] = record
         handler._reply_json(201, record)

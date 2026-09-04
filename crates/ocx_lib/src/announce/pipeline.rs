@@ -577,6 +577,45 @@ fn parse_keywords(raw: Option<&String>) -> Vec<Value> {
         .collect()
 }
 
+/// Carry a stale announce branch's tag delta onto the index base's root (ADR
+/// `adr_announce_diverged_branch_rebuild.md` D1): every key of `branch_tags` the
+/// base does not already hold is appended, in the branch's own order, after the
+/// base's set.
+///
+/// Tag order is byte-visible — [`serialize_root`](crate::oci::index::serialize_root)
+/// emits the map as it stands and never sorts — so "base order first" is a wire
+/// contract, not cosmetics. `tags` also stays the root's LAST key (CONTRACTS
+/// §14): replacing an existing key keeps its position under `preserve_order`,
+/// and a root carrying no `tags` gets one appended, which is the same place.
+///
+/// **The base entry wins on a shared key**, and the reason is yank governance
+/// rather than freshness: [`regenerate`] overwrites `content` and `observed` on
+/// any digest move, so this tie-break only ever decides `yanked`. The base's
+/// yank is merged, CI-validated state that a branch nobody reviewed must not
+/// revert; an unmerged branch-side yank costs one `--yank` re-run.
+///
+/// A non-object on either side is a no-op: the caller's own root-shape checks
+/// refuse that document, and this is not the place to raise it a second time.
+//
+// ponytail: union, not a 3-way merge. A tag the base dropped through a `--tags`
+// replace while the branch still carried it is therefore re-proposed. Upgrade
+// path is a 3-way against the compare API's merge base (`merge_base_commit` on
+// GitHub, `/repository/merge_base` on GitLab) — worth it only once someone
+// actually hits the re-proposal.
+pub fn carry_branch_tags(base: &mut Value, branch_tags: &Value) {
+    let Some(branch_tags) = branch_tags.as_object() else {
+        return;
+    };
+    let Some(root) = base.as_object_mut() else {
+        return;
+    };
+    let mut merged = root.get("tags").and_then(Value::as_object).cloned().unwrap_or_default();
+    for (tag, entry) in branch_tags {
+        merged.entry(tag.clone()).or_insert_with(|| entry.clone());
+    }
+    root.insert("tags".to_string(), Value::Object(merged));
+}
+
 /// Rebuild the root's `tags` map from the observed curated set (design register
 /// C3/C6). A tag whose observed digest equals its committed `content` keeps its
 /// entry verbatim — same `observed` timestamp, same yank marker — so a no-op
@@ -1419,6 +1458,112 @@ mod tests {
         };
         assert_eq!(repository, "oci://127.0.0.1/x");
         assert_eq!(digest, recorded);
+    }
+
+    // ── carry_branch_tags (stale-branch rebuild, ADR D1) ─────────────
+
+    /// Tag order is byte-visible: `serialize_root` does not sort, so "the
+    /// base's set first, branch-only keys appended in the branch's order" is a
+    /// wire contract rather than cosmetics. `tags` must also stay the root's
+    /// last key (CONTRACTS §14).
+    #[test]
+    fn carry_appends_branch_only_tags_after_the_base_set() {
+        let mut base = committed_root("oci://ghcr.io/x/y");
+        base["tags"]["3.0.0"] = json!({ "content": digest_string('c'), "observed": "2026-02-01T00:00:00Z" });
+        let branch_tags = json!({
+            "2.0.0": { "content": digest_string('b'), "observed": "2026-03-01T00:00:00Z" },
+            "1.5.0": { "content": digest_string('d'), "observed": "2026-03-02T00:00:00Z" },
+        });
+
+        carry_branch_tags(&mut base, &branch_tags);
+
+        let order: Vec<&str> = base["tags"]
+            .as_object()
+            .expect("tags object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            order,
+            vec!["1.0.0", "3.0.0", "2.0.0", "1.5.0"],
+            "the base keeps its order and the branch-only tags append in theirs"
+        );
+        let fields: Vec<&str> = base
+            .as_object()
+            .expect("root object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            fields,
+            vec!["name", "repository", "owners", "status", "created", "desc", "tags"],
+            "tags stays the last key — replacing it must not move it"
+        );
+    }
+
+    /// The base entry wins on a shared key. The tie-break is yank governance,
+    /// not freshness: `regenerate` rewrites `content`/`observed` on any digest
+    /// move, so it only ever decides `yanked`, and the base's marker is merged,
+    /// CI-validated state a stale branch must not revert.
+    #[test]
+    fn carry_keeps_the_base_entry_for_a_shared_tag() {
+        let mut base = committed_root("oci://ghcr.io/x/y");
+        base["tags"]["1.0.0"]["yanked"] = json!({ "reason": "CVE-2026-1", "at": "2026-02-01T00:00:00Z" });
+        let branch_tags = json!({
+            "1.0.0": { "content": digest_string('b'), "observed": "2026-03-01T00:00:00Z" },
+        });
+
+        carry_branch_tags(&mut base, &branch_tags);
+
+        assert_eq!(
+            base["tags"]["1.0.0"]["yanked"]["reason"].as_str(),
+            Some("CVE-2026-1"),
+            "the base's yank marker must survive a branch entry that lacks one"
+        );
+        assert_eq!(
+            base["tags"]["1.0.0"]["observed"].as_str(),
+            Some("2026-01-01T00:00:00Z"),
+            "the branch's fresher observed must not replace the base entry"
+        );
+    }
+
+    /// The append path: a root carrying no `tags` at all still ends up with
+    /// one, in last position, holding the branch's entries in the branch's
+    /// order. `tags` is required of every real index root, so this is the
+    /// defensive branch — and the one whose failure mode is silent tag loss.
+    #[test]
+    fn carry_creates_a_missing_tags_object_as_the_last_key() {
+        let mut base = committed_root("oci://ghcr.io/x/y");
+        base.as_object_mut().expect("root object").shift_remove("tags");
+        let branch_tags = json!({
+            "2.0.0": { "content": digest_string('b'), "observed": "2026-03-01T00:00:00Z" },
+            "1.0.0": { "content": digest_string('a'), "observed": "2026-03-02T00:00:00Z" },
+        });
+
+        carry_branch_tags(&mut base, &branch_tags);
+
+        let fields: Vec<&str> = base
+            .as_object()
+            .expect("root object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            fields,
+            vec!["name", "repository", "owners", "status", "created", "desc", "tags"],
+            "the created tags object must land last (CONTRACTS §14)"
+        );
+        let order: Vec<&str> = base["tags"]
+            .as_object()
+            .expect("tags object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            order,
+            vec!["2.0.0", "1.0.0"],
+            "every branch tag carries, in branch order"
+        );
     }
 
     // ── regenerate (C6 no-churn) ─────────────────────────────────────────────

@@ -688,11 +688,15 @@ def test_announce_tags_file_union_adds_without_dropping(
     args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
     announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    first_head = fake_forge.branch_head("forkuser", "index", branch_name(package))
     tags_file = tmp_path / "tags.txt"
     tags_file.write_text("2.0.0")
     announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
 
     assert set(committed_root(fake_forge, package)["tags"]) == {"1.0.0", "2.0.0"}
+    # An Ahead (not Diverged) branch fast-forwards onto its OWN prior head —
+    # the counterpart to the Stale/Reset contract pinned elsewhere in this file.
+    assert fake_forge.commit_parent("forkuser", "index", branch_name(package)) == first_head
 
 
 def _seed_cascade_and_curate_one(
@@ -842,16 +846,216 @@ def test_announce_after_its_pull_request_squash_merges_rebuilds_from_the_base(
     assert set(committed_root(fake_forge, package)["tags"]) == {"1.0.0", "2.0.0"}
 
 
-def test_announce_keeps_accumulating_while_its_pull_request_is_open(
+# ── #399: a Diverged branch with an open pull request rebuilds on the base ─
+
+
+def test_announce_rebuilds_a_stale_branch_when_the_base_changes_its_own_root(
     ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
 ) -> None:
-    """C4 survives the #228 fix: an OPEN pull request still accumulates.
+    """#399: the index base migrating THIS package's root shape must not
+    freeze its open pull request forever.
 
-    The guard against over-correcting. Resetting the branch whenever it does not
-    fast-forward would silently drop announce #1's still-unmerged tag the moment
-    anything else landed on the index base — the exact failure C4's
-    "update, don't overwrite" rule exists to prevent. Here nothing merged, the
-    pull request is still open, and the second announce must build ON the first."""
+    `resolve_branch_state` used to read `Diverged` + open-PR as `Live`, so the
+    committed root came from the branch head and every later run reproduced
+    the branch's pre-migration bytes — reported `unchanged`, committed nothing,
+    left the pull request CONFLICTING (the ocx-sh/index#740 `owners[]`
+    respelling, 34 packages frozen up to 21 days). `BranchState::Stale` (D1)
+    fixes it: the root's SHAPE is read from the current index base, the
+    branch's own tags are carried onto it, and the branch is reset to sit
+    directly on the base. The parent assertion is what discriminates a real
+    rebuild from a read that merely tolerates the new shape; the shape and tag
+    order assertions are what discriminate a rebuild from one that regenerates
+    a fresh document instead of the base's own."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+
+    # Migrate THIS package's root shape on main, the way ocx-sh/index#740 added
+    # `owners[]`: every non-`tags` key stays, `owners` is inserted ahead of
+    # `tags`, and `tags` itself stays whatever main already carries.
+    base_root = json.loads(fake_forge.read_file(INDEX_OWNER, INDEX_REPO, f"p/{package}.json", branch="main"))
+    shaped_root = {
+        **{key: value for key, value in base_root.items() if key != "tags"},
+        "owners": [{"login": "acme", "id": 1}],
+        "tags": base_root["tags"],
+    }
+    fake_forge.seed_root(INDEX_OWNER, INDEX_REPO, f"p/{package}.json", shaped_root)
+
+    tags_file = tmp_path / "tags.txt"
+    tags_file.write_text("2.0.0")
+    second = announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
+
+    assert second["status"] == "updated"
+    assert second["pull_request_number"] == first["pull_request_number"], "the open pull request must be reused"
+    branch = branch_name(package)
+    assert fake_forge.commit_parent("forkuser", "index", branch) == fake_forge.branch_head(
+        INDEX_OWNER, INDEX_REPO, "main"
+    ), "the rebuild must sit directly on the current index base"
+    root = committed_root(fake_forge, package)
+    assert root["owners"] == [{"login": "acme", "id": 1}], "the base's shape must be carried, not dropped"
+    assert list(root["tags"]) == [
+        "1.0.0",
+        "2.0.0",
+    ], "base order first, branch-only tags appended after — order is contract, not cosmetics"
+    assert list(root.keys())[-1] == "tags", "tags stays the last key of the root (wire_writer sort_keys=False)"
+    pull_path = f"/repos/{INDEX_OWNER}/{INDEX_REPO}/pulls/{first['pull_request_number']}"
+    assert fake_forge.request_count("GET", pull_path) == 0, (
+        "the mergeability tripwire (D2) is for the unchanged path only — this run committed something new"
+    )
+
+
+def test_announce_refuses_an_unchanged_run_whose_open_pull_request_conflicts(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """D2's tripwire: an unchanged `Stale` run whose open pull request cannot
+    merge must fail loudly, not report a clean `unchanged` while the pull
+    request stays CONFLICTING forever — the #399 freeze pattern in the one
+    corner the rebuild itself cannot reach. `Stale`'s rebuild only fixes a
+    conflict when there is something new to commit; here nothing is (the base
+    already carries the branch's only tag), so the rebuild step is a no-op and
+    the underlying same-file divergence leaves the open pull request
+    CONFLICTING regardless. Exit 65 (`DataError`, C13), naming the branch so a
+    human can close the pull request or delete the branch — the tool has no
+    close-PR / delete-ref primitive to clear this corner itself
+    (`adr_announce_diverged_branch_rebuild.md`)."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    branch = branch_name(package)
+    head_before = fake_forge.branch_head("forkuser", "index", branch)
+
+    # Main already carries the branch's exact tag entry (nothing new to carry)
+    # PLUS an added key — the same file diverged on both sides since the merge
+    # base, which is what makes the pull request genuinely CONFLICTING rather
+    # than merely behind. Serialized canonically (indent=2 + trailing newline,
+    # CONTRACTS §14) so this is what ocx itself would regenerate byte-for-byte
+    # if nothing had diverged — otherwise C6 reads "changed" off formatting
+    # alone and the run rebuilds instead of hitting the unchanged path.
+    committed_bytes = fake_forge.read_file("forkuser", "index", f"p/{package}.json", branch=branch)
+    assert committed_bytes is not None
+    branch_root = json.loads(committed_bytes)
+    diverged_root = {
+        **{key: value for key, value in branch_root.items() if key != "tags"},
+        "owners": [{"login": "acme", "id": 1}],
+        "tags": branch_root["tags"],
+    }
+    fake_forge.seed_files(
+        INDEX_OWNER, INDEX_REPO, {f"p/{package}.json": (json.dumps(diverged_root, indent=2) + "\n").encode()}
+    )
+
+    result = announce(ocx, fake_forge, *args, "--refresh", check=False)
+
+    assert result.returncode == 65, f"expected a data error, got {result.returncode}"
+    assert branch in result.stderr, "the stderr must name the branch a human has to clear"
+    assert str(first["pull_request_number"]) in result.stderr or first["pull_request_url"] in result.stderr, (
+        "the stderr must name the stuck pull request"
+    )
+    assert fake_forge.branch_head("forkuser", "index", branch) == head_before, "a refused run must not move the branch"
+
+
+def test_announce_rebuilds_a_stale_branch_once_then_reports_unchanged(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """A `Stale` rebuild is self-stabilizing, not churn. Read literally, C6
+    compares the regenerated candidate against index main's own raw bytes
+    (`adr_announce_diverged_branch_rebuild.md`): a `Stale` branch whose tag is
+    not yet on main therefore reports `updated` on THIS run, rebuilding onto
+    the moved base as one commit. That rebuild leaves the branch `Ahead` of
+    main (no longer `Diverged`), so the run after it takes the ordinary
+    pre-#399 C6-amendment path — compares against the branch's own
+    just-rebuilt bytes — and reports `unchanged`, reusing the pull request."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    branch = branch_name(package)
+
+    # An unrelated commit lands on the index base, so the branch is `Diverged`
+    # from it — with its pull request still open and untouched by the move.
+    fake_forge.seed_root(INDEX_OWNER, INDEX_REPO, "p/other/package.json", {"tags": {}})
+
+    second = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    assert second["status"] == "updated", "the Stale branch must rebuild onto the moved base"
+    assert second["pull_request_number"] == first["pull_request_number"]
+    assert fake_forge.commit_parent("forkuser", "index", branch) == fake_forge.branch_head(
+        INDEX_OWNER, INDEX_REPO, "main"
+    ), "the rebuild must sit directly on the current index base"
+    assert list(committed_root(fake_forge, package)["tags"]) == ["1.0.0"]
+
+    head_after_rebuild = fake_forge.branch_head("forkuser", "index", branch)
+    third = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+
+    assert third["status"] == "unchanged", "once ahead of main, a repeat run must not rebuild again"
+    assert third["pull_request_number"] == first["pull_request_number"]
+    assert fake_forge.branch_head("forkuser", "index", branch) == head_after_rebuild, (
+        "an unchanged run must not advance the branch"
+    )
+
+
+def test_announce_unchanged_stale_branch_with_a_mergeable_pull_request_reports_it(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """D2's other branch: a `Stale` unchanged run whose open pull request CAN
+    still merge must report `unchanged` and reuse the pull request, never the
+    hard error D2 raises only for a genuinely conflicting one. Main gains the
+    branch's EXACT committed bytes for this package's root under a new,
+    diverging commit — without closing the pull request — using raw bytes
+    (`seed_files`, not `seed_root`'s `json.dumps` round-trip, which would
+    change the blob and falsely register as a conflict). Both sides land the
+    path on the identical blob, so the fake's three-way (`_conflicting_locked`,
+    the shared oracle for both forges) answers `Mergeable`."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    branch = branch_name(package)
+    head_before = fake_forge.branch_head("forkuser", "index", branch)
+
+    committed_bytes = fake_forge.read_file("forkuser", "index", f"p/{package}.json", branch=branch)
+    assert committed_bytes is not None
+    fake_forge.seed_files(INDEX_OWNER, INDEX_REPO, {f"p/{package}.json": committed_bytes})
+
+    second = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+
+    assert second["status"] == "unchanged"
+    assert second["pull_request_number"] == first["pull_request_number"]
+    assert second["pull_request_url"] == first["pull_request_url"]
+    assert fake_forge.branch_head("forkuser", "index", branch) == head_before, "an unchanged run must not advance the branch"
+
+
+def test_announce_stale_branch_reset_is_not_subject_to_the_fast_forward_race_knob(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """A `Stale` branch commits with `Reset` (D1), and `fake_forge`'s only race
+    knob (`concurrent_ref_advance`) fires exclusively inside
+    `handle_patch_ref`'s fast-forward-only branch (`force: false`) — its own
+    comment says a `force: true` update is "deliberately NOT consulted, since
+    a reset is not racing anyone for a fast-forward". So arming that knob on a
+    `Stale` run cannot inject a race; this test pins exactly that (the knob
+    stays unconsumed) and, incidentally, that the ordinary rebuild still lands
+    correctly regardless. It does NOT exercise a Stale-branch race — see
+    `test/tests/test_announce_gitlab.py::test_a_stale_branch_retry_rebuilds_from_the_upstream_head`
+    for the real one, driven through GitLab's per-file compare-and-swap
+    instead, which GitHub's ref-level PATCH has no equivalent knob for."""
     make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     package = f"acme/{unique_repo}"
@@ -861,7 +1065,59 @@ def test_announce_keeps_accumulating_while_its_pull_request_is_open(
     args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
     announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
-    first_head = fake_forge.branch_head("forkuser", "index", branch_name(package))
+
+    base_root = json.loads(fake_forge.read_file(INDEX_OWNER, INDEX_REPO, f"p/{package}.json", branch="main"))
+    shaped_root = {
+        **{key: value for key, value in base_root.items() if key != "tags"},
+        "owners": [{"login": "acme", "id": 1}],
+        "tags": base_root["tags"],
+    }
+    fake_forge.seed_root(INDEX_OWNER, INDEX_REPO, f"p/{package}.json", shaped_root)
+
+    branch = branch_name(package)
+    racer = committed_root(fake_forge, package)
+    racer["tags"]["1.0.0"]["yanked"] = {"reason": "unreachable racer", "at": FIXED_CLOCK}
+    fake_forge.concurrent_ref_advance[f"forkuser/index/{branch}"] = {f"p/{package}.json": json.dumps(racer).encode()}
+
+    tags_file = tmp_path / "tags.txt"
+    tags_file.write_text("2.0.0")
+    report = announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
+
+    assert f"forkuser/index/{branch}" in fake_forge.concurrent_ref_advance, (
+        "documents the known limitation: a Reset commit never consumes this knob"
+    )
+    assert report["status"] == "updated"
+    assert fake_forge.commit_parent("forkuser", "index", branch) == fake_forge.branch_head(
+        INDEX_OWNER, INDEX_REPO, "main"
+    )
+    root = committed_root(fake_forge, package)
+    assert root["owners"] == [{"login": "acme", "id": 1}]
+    assert list(root["tags"]) == ["1.0.0", "2.0.0"]
+
+
+def test_announce_keeps_accumulated_tags_when_the_base_moves_under_its_open_pull_request(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """#228's invariant, restated for #399: no tag announced into an open pull
+    request is ever lost — NOT that the branch's own commit chain is never
+    rewritten. That second wording was only ever a proxy for the first, and
+    `BranchState::Stale` (D1) rebuilds the branch on the current index base on
+    every run, so once the base has moved the branch's new parent is the
+    base's OWN head rather than the branch's own prior head — on purpose. What
+    must still hold, and is what this test guards, is that BOTH tags land in
+    the one open pull request regardless: resetting the branch whenever it
+    diverges from the base must never silently drop announce #1's
+    still-unmerged tag the moment anything else lands on the index base — the
+    failure C4's "update, don't overwrite" rule exists to prevent."""
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
 
     # An unrelated commit lands on the index base, so the branch is now
     # `diverged` from it — with its pull request still open.
@@ -871,9 +1127,9 @@ def test_announce_keeps_accumulating_while_its_pull_request_is_open(
     tags_file.write_text("2.0.0")
     announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
 
-    assert (
-        fake_forge.commit_parent("forkuser", "index", branch_name(package)) == first_head
-    ), "an open pull request must keep accumulating onto its own branch"
+    assert fake_forge.commit_parent("forkuser", "index", branch_name(package)) == fake_forge.branch_head(
+        INDEX_OWNER, INDEX_REPO, "main"
+    ), "a Stale branch's rebuild must sit directly on the current index base"
     assert set(committed_root(fake_forge, package)["tags"]) == {"1.0.0", "2.0.0"}
 
 
