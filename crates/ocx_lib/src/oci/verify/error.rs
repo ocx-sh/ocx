@@ -1160,9 +1160,7 @@ mod tests {
         // classification is independent of the sign side.
         let kind = VerifyErrorKind::InvalidEndpointUrl {
             endpoint: "--rekor-url".into(),
-            reason: UrlRejection {
-                reason: "URL must use HTTPS".into(),
-            },
+            reason: UrlRejection::new("URL must use HTTPS"),
         };
         assert_eq!(kind.exit_code(), ExitCode::UsageError);
     }
@@ -1493,9 +1491,7 @@ mod tests {
                 "invalid_endpoint_url",
                 InvalidEndpointUrl {
                     endpoint: "--rekor-url".into(),
-                    reason: UrlRejection {
-                        reason: "URL must use HTTPS".into(),
-                    },
+                    reason: UrlRejection::new("URL must use HTTPS"),
                 },
             ),
             ("attestation_not_found", AttestationNotFound),

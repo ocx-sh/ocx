@@ -78,6 +78,16 @@ pub struct AnnounceRequest {
     /// SSRF escape-hatch hosts/CIDRs for the physical registry (design register
     /// X2 — sourced only from the selected `[registries."<ns>"]` entry).
     pub trusted_hosts: Vec<String>,
+    /// Registry authorities (`host[:port]`) allowed to be dialed over plain
+    /// HTTP, exactly as `OCX_INSECURE_REGISTRIES` and `[registries."<ns>"]
+    /// insecure` spell them.
+    ///
+    /// The announce pre-flight needs them because the dial **scheme** decides
+    /// which proxy variable applies (`HTTP_PROXY` vs `HTTPS_PROXY`), and
+    /// therefore whether the physical registry is reached through a proxy at
+    /// all — see
+    /// [`DialScheme::for_registry`](crate::oci::ssrf::DialScheme::for_registry).
+    pub insecure_hosts: Vec<String>,
 }
 
 /// Whether the announce changed the committed root (cross-track contract #4).

@@ -177,12 +177,17 @@ pub enum SelectResult {
 /// The cache is currently never cleared, but expiration or manual clearing may be added in the future if needed.
 pub struct Index {
     inner: Box<dyn index_impl::IndexImpl>,
+    /// Proxy-route rules for the dial-site SSRF guard ([`Self::guard_physical_dial`]).
+    /// Defaults to the process-wide [`crate::oci::ssrf::proxy_rules`]; override
+    /// with [`Self::with_proxy_rules`] (test seam).
+    rules: std::sync::Arc<crate::oci::ssrf::ProxyRules>,
 }
 
 impl Index {
     pub fn from_remote(oci_index: OciIndex) -> Self {
         Self {
             inner: Box::new(oci_index),
+            rules: crate::oci::ssrf::proxy_rules(),
         }
     }
 
@@ -193,6 +198,7 @@ impl Index {
     pub fn from_source(source: OcxIndex) -> Self {
         Self {
             inner: Box::new(source),
+            rules: crate::oci::ssrf::proxy_rules(),
         }
     }
 
@@ -208,7 +214,10 @@ impl Index {
     /// construction path.
     #[cfg(test)]
     pub(crate) fn from_impl(inner: impl index_impl::IndexImpl + 'static) -> Self {
-        Self { inner: Box::new(inner) }
+        Self {
+            inner: Box::new(inner),
+            rules: crate::oci::ssrf::proxy_rules(),
+        }
     }
 
     /// Construct an index that reads from `cache` first, falling through to
@@ -220,6 +229,7 @@ impl Index {
     pub fn from_chained(cache: LocalIndex, sources: Vec<Index>, mode: ChainMode) -> Self {
         Self {
             inner: Box::new(chained_index::ChainedIndex::new(cache, sources, mode)),
+            rules: crate::oci::ssrf::proxy_rules(),
         }
     }
 
@@ -238,6 +248,7 @@ impl Index {
     ) -> Self {
         Self {
             inner: Box::new(chained_index::ChainedIndex::new(cache, sources, mode).with_content_store(content_store)),
+            rules: crate::oci::ssrf::proxy_rules(),
         }
     }
 
@@ -249,7 +260,20 @@ impl Index {
     pub fn from_chained_lock_scoped(cache: LocalIndex, sources: Vec<Index>, mode: ChainMode) -> Self {
         Self {
             inner: Box::new(chained_index::ChainedIndex::new_lock_scoped(cache, sources, mode)),
+            rules: crate::oci::ssrf::proxy_rules(),
         }
+    }
+
+    /// Overrides the proxy-route rules used by [`Self::guard_physical_dial`].
+    /// Test seam — production always builds from the process-wide
+    /// [`crate::oci::ssrf::proxy_rules`].
+    #[must_use]
+    pub fn with_proxy_rules(mut self, rules: std::sync::Arc<crate::oci::ssrf::ProxyRules>) -> Self {
+        // The chain's own resolve-time guard reads its own copy, so pinning
+        // one half would leave the other on the ambient environment.
+        self.inner.set_proxy_rules(rules.clone());
+        self.rules = rules;
+        self
     }
 
     /// A view of this index that resolves identically but writes nothing into
@@ -260,6 +284,7 @@ impl Index {
     pub fn read_only_view(&self) -> Self {
         Self {
             inner: self.inner.read_only_view(),
+            rules: self.rules.clone(),
         }
     }
 
@@ -271,6 +296,7 @@ impl Index {
     pub fn remote_view(&self) -> Self {
         Self {
             inner: self.inner.remote_view(),
+            rules: self.rules.clone(),
         }
     }
 
@@ -344,6 +370,16 @@ impl Index {
         self.inner.physical_reference(identifier).await
     }
 
+    /// The `trusted_hosts` escape hatch configured for `registry`.
+    ///
+    /// Exposed so the Sigstore trust-service dial guard
+    /// ([`oci::endpoint::resolve_sigstore_url`](crate::oci::endpoint::resolve_sigstore_url))
+    /// reads the same operator-configured allowlist the registry guard reads,
+    /// rather than minting a second config surface for the same question.
+    pub fn trusted_hosts_for(&self, registry: &str) -> &[String] {
+        self.inner.trusted_hosts_for(registry)
+    }
+
     /// SSRF floor for a **rewritten** physical target, applied at the dial site —
     /// immediately before the first request that would reach it, and only when
     /// one is imminent.
@@ -363,7 +399,16 @@ impl Index {
     /// So this half **fails closed on everything**, a lookup failure included:
     /// here a dial is about to happen, and a connection can no more succeed on a
     /// name that does not resolve than the lookup did — while an answer that
-    /// appears only between the two questions is precisely the attack. The two
+    /// appears only between the two questions is precisely the attack.
+    ///
+    /// That rationale is about a lookup **this process performs**, so it scopes
+    /// to a direct dial. When a configured HTTP proxy intercepts the dial
+    /// ([`oci::ssrf::guard_destination`]) the destination name never reaches a
+    /// local resolver at all — it is text in the proxy's `CONNECT` line — so
+    /// there is no answer for a second one to contradict, and refusing an
+    /// unresolvable name would abort a pull that was going to work on a
+    /// proxy-only-DNS network (ocx#407). The floor itself does not move: a
+    /// forbidden IP literal is refused on either route. The two
     /// halves share the carve-out for a **non-rewrite** (`physical.registry() ==
     /// logical.registry()`) and the one `trusted_hosts` set
     /// ([`index_impl::IndexImpl::trusted_hosts_for`], keyed on the LOGICAL
@@ -378,25 +423,26 @@ impl Index {
     /// # Errors
     ///
     /// [`error::Error::Ssrf`] when the physical host resolves into a forbidden
-    /// range without a `trusted_hosts` entry, or cannot be resolved at all.
-    /// The `trusted_hosts` escape hatch configured for `registry`.
-    ///
-    /// Exposed so the Sigstore trust-service dial guard
-    /// ([`oci::endpoint::resolve_sigstore_url`](crate::oci::endpoint::resolve_sigstore_url))
-    /// reads the same operator-configured allowlist the registry guard reads,
-    /// rather than minting a second config surface for the same question.
-    pub fn trusted_hosts_for(&self, registry: &str) -> &[String] {
-        self.inner.trusted_hosts_for(registry)
-    }
-
+    /// range without a `trusted_hosts` entry, or — on a direct dial only —
+    /// cannot be resolved at all.
     pub async fn guard_physical_dial(&self, logical: &oci::Identifier, physical: &oci::Identifier) -> Result<()> {
         if physical.registry() == logical.registry() {
             return Ok(());
         }
         let (host, port) = oci::ssrf::split_host_port(physical.registry());
-        oci::ssrf::resolve_and_validate(host, port, self.inner.trusted_hosts_for(logical.registry()))
-            .await
-            .map_err(|error| crate::Error::from(error::Error::from(error)))?;
+        // `DialRoute::Proxied` is an admission: the proxy resolves and dials the
+        // destination, so there is no address here to pin and none to refuse
+        // beyond a forbidden literal, which `guard_destination` refuses on the
+        // text alone.
+        oci::ssrf::guard_destination(
+            oci::ssrf::DialScheme::for_registry(self.inner.insecure_hosts(), physical.registry()),
+            host,
+            port,
+            self.inner.trusted_hosts_for(logical.registry()),
+            &self.rules,
+        )
+        .await
+        .map_err(|error| crate::Error::from(error::Error::from(error)))?;
         Ok(())
     }
 
@@ -589,6 +635,7 @@ impl Clone for Index {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.box_clone(),
+            rules: self.rules.clone(),
         }
     }
 }
@@ -1561,6 +1608,10 @@ mod tests {
     /// A chained index over `sources` — the production shape, so the
     /// `trusted_hosts` lookup goes through the same registry-ownership keying
     /// `ChainedIndex` uses rather than a single source's own set.
+    /// Every chain a guard test drives is pinned to explicit no-proxy rules:
+    /// `cargo test` runs on machines that may have a real `HTTPS_PROXY`, and
+    /// the route decides whether the floor resolves at all. Tests that want a
+    /// proxy override with [`Index::with_proxy_rules`] afterwards.
     fn chained_with(directory: &tempfile::TempDir, sources: Vec<Index>) -> Index {
         Index::from_chained(
             LocalIndex::new(LocalConfig {
@@ -1569,6 +1620,7 @@ mod tests {
             sources,
             ChainMode::Default,
         )
+        .with_proxy_rules(oci::ssrf::ProxyRules::direct())
     }
 
     fn logical_id() -> Identifier {
@@ -1595,6 +1647,21 @@ mod tests {
             .guard_physical_dial(&logical_id(), &physical_id(LOOPBACK))
             .await
             .expect_err("a rewritten loopback target must be refused at the dial site");
+        assert!(is_forbidden_refusal(&error), "expected an SSRF refusal, got: {error:?}");
+    }
+
+    /// The same rewritten loopback NAME on a proxied route. A proxy resolves
+    /// the destination itself, so the floor has no address to judge — but
+    /// `localhost` names one by definition, and admitting it would let an
+    /// index root reach back into the caller's own machine through the proxy.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn guard_physical_dial_refuses_a_rewritten_loopback_name_on_a_proxied_route() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = chained_with(&directory, vec![])
+            .with_proxy_rules(proxied_everywhere())
+            .guard_physical_dial(&logical_id(), &physical_id(LOOPBACK))
+            .await
+            .expect_err("a loopback name must be refused whoever dials it");
         assert!(is_forbidden_refusal(&error), "expected an SSRF refusal, got: {error:?}");
     }
 
@@ -1662,5 +1729,146 @@ mod tests {
             .guard_physical_dial(&logical, &physical_id(LOOPBACK))
             .await
             .expect("a root naming the identifier's own registry is not a rewrite");
+    }
+
+    // ── The dial-site floor under an HTTP proxy (ocx#407) ────────────────────
+
+    /// A registry authority with a `.invalid` name (RFC 6761: never resolves)
+    /// and an explicit port, so it is also a legal `OCX_INSECURE_REGISTRIES`
+    /// spelling. On a proxy-only-DNS network this is every external registry:
+    /// the process cannot resolve it and does not have to.
+    const PHANTOM_REGISTRY: &str = "no-such-registry.invalid:5000";
+    /// The forbidden target the proxy route must not launder.
+    const FORBIDDEN_LITERAL: &str = "127.0.0.1:5000";
+    /// Hostname form on purpose: a proxy is operator config, and its own name
+    /// is what the process resolves. Nothing listens on it — the guard decides
+    /// the route without dialling either host.
+    const PROXY: &str = "http://proxy.corp:3128";
+
+    /// `ALL_PROXY`-equivalent: every scheme goes through the proxy.
+    fn proxied_everywhere() -> std::sync::Arc<oci::ssrf::ProxyRules> {
+        oci::ssrf::ProxyRules::proxied_everywhere(PROXY)
+    }
+
+    /// `HTTP_PROXY` only — the proxy intercepts plain-HTTP dials and nothing
+    /// else, so the route now depends on the scheme the guard picks. Built
+    /// from an injected matcher, never the environment: mutating env vars is
+    /// unsafe in edition 2024 and racy across a test binary's threads.
+    fn proxied_for_plain_http_only() -> std::sync::Arc<oci::ssrf::ProxyRules> {
+        std::sync::Arc::new(oci::ssrf::ProxyRules::new(
+            hyper_util::client::proxy::matcher::Matcher::builder()
+                .http(PROXY)
+                .build(),
+        ))
+    }
+
+    /// [`chained_with`], plus the `OCX_INSECURE_REGISTRIES` authorities the
+    /// operator declared — the set that decides whether a dial is `http` or
+    /// `https`, and so which proxy setting applies to it.
+    fn chained_with_insecure_hosts(directory: &tempfile::TempDir, insecure_hosts: Vec<String>) -> Index {
+        Index::from_chained(
+            LocalIndex::new(LocalConfig {
+                index_store: crate::file_structure::IndexStore::new(directory.path().join("index")),
+            })
+            .with_insecure_hosts(insecure_hosts),
+            vec![],
+            ChainMode::Default,
+        )
+        .with_proxy_rules(oci::ssrf::ProxyRules::direct())
+    }
+
+    fn is_resolution_refusal(error: &crate::Error) -> bool {
+        matches!(
+            error,
+            crate::Error::OciIndex(error::Error::Ssrf(oci::ssrf::SsrfError::Resolution { .. }))
+        )
+    }
+
+    /// ocx#407. Under a proxy the process never resolves the destination: the
+    /// name is literal text in the `CONNECT host:port` line, and the proxy
+    /// resolves it. On a corporate network where only the proxy has external
+    /// DNS the pre-flight lookup therefore cannot succeed, and refusing on it
+    /// aborts a pull that would have worked — the guard is answering a question
+    /// nobody asked.
+    ///
+    /// The pair of
+    /// [`guard_physical_dial_fails_closed_where_the_resolve_time_guard_tolerates`]:
+    /// same unresolvable input, opposite verdict, and the ONLY thing that
+    /// differs is the route. The rebinding rationale that makes the direct case
+    /// fail closed has no purchase here, because there is no local lookup whose
+    /// answer a later one could contradict.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn guard_physical_dial_admits_an_unresolvable_target_on_a_proxied_route() {
+        let (host, port) = oci::ssrf::split_host_port(PHANTOM_REGISTRY);
+        assert!(
+            matches!(
+                oci::ssrf::resolve_and_validate(host, port, &[]).await,
+                Err(oci::ssrf::SsrfError::Resolution { .. })
+            ),
+            "the fixture must genuinely fail to resolve, or admitting it proves nothing"
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        chained_with(&directory, vec![])
+            .with_proxy_rules(proxied_everywhere())
+            .guard_physical_dial(&logical_id(), &physical_id(PHANTOM_REGISTRY))
+            .await
+            .expect("a destination only the proxy has to resolve must not be refused for not resolving here");
+    }
+
+    /// The guard half of the pair above: the proxy route skips the LOOKUP, not
+    /// the FLOOR. An index root naming a loopback literal is refused on the
+    /// text alone — no DNS needed to judge an address that is already one, and
+    /// a proxy would happily connect back into the caller's own network.
+    ///
+    /// Green before and after the fix, deliberately: this is what proves the
+    /// #407 change did not turn `Proxied` into a bypass.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn guard_physical_dial_refuses_a_forbidden_literal_even_on_a_proxied_route() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = chained_with(&directory, vec![])
+            .with_proxy_rules(proxied_everywhere())
+            .guard_physical_dial(&logical_id(), &physical_id(FORBIDDEN_LITERAL))
+            .await
+            .expect_err("a forbidden literal must be refused whoever dials it");
+        assert!(is_forbidden_refusal(&error), "expected an SSRF refusal, got: {error:?}");
+    }
+
+    /// The scheme decides which proxy setting applies, and only the declared
+    /// `OCX_INSECURE_REGISTRIES` set can say a dial is plain HTTP. With an
+    /// `HTTP_PROXY`-only configuration a declared-insecure destination is
+    /// proxied, so the unresolvable name is admitted exactly as above.
+    ///
+    /// Paired with
+    /// [`guard_physical_dial_keeps_the_https_route_for_a_registry_not_declared_insecure`]:
+    /// same rules, same host, and the ONLY difference is whether the operator
+    /// declared it insecure. Without the pair, an implementation that always
+    /// probed `http` would pass this test while silently skipping the floor for
+    /// every HTTPS registry on a machine that only sets `HTTP_PROXY`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn guard_physical_dial_takes_the_plain_http_route_for_a_registry_declared_insecure() {
+        let directory = tempfile::tempdir().unwrap();
+        chained_with_insecure_hosts(&directory, vec![PHANTOM_REGISTRY.to_string()])
+            .with_proxy_rules(proxied_for_plain_http_only())
+            .guard_physical_dial(&logical_id(), &physical_id(PHANTOM_REGISTRY))
+            .await
+            .expect("an insecure registry is dialled over http, which this proxy intercepts");
+    }
+
+    /// The negative half: the same `HTTP_PROXY`-only rules leave an ordinary
+    /// (HTTPS) registry on the direct route, where the floor still resolves and
+    /// an unresolvable host is still refused.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn guard_physical_dial_keeps_the_https_route_for_a_registry_not_declared_insecure() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = chained_with_insecure_hosts(&directory, vec![])
+            .with_proxy_rules(proxied_for_plain_http_only())
+            .guard_physical_dial(&logical_id(), &physical_id(PHANTOM_REGISTRY))
+            .await
+            .expect_err("an https destination is not covered by an http-only proxy");
+        assert!(
+            is_resolution_refusal(&error),
+            "expected the direct route's lookup failure, got: {error:?}"
+        );
     }
 }

@@ -156,6 +156,11 @@ impl PackageAnnounce {
             unyank: self.unyank.clone(),
             yank_reason: self.yank_reason.clone().unwrap_or_default(),
             trusted_hosts: trusted_hosts.clone(),
+            // The same allowance `announce_client` passes as
+            // `plain_http_registries`, so the pre-flight decides the dial
+            // scheme — and hence which proxy variable applies (ocx#407) —
+            // from what the client will actually dial.
+            insecure_hosts: context.insecure_hosts().to_vec(),
         };
 
         // Argv faults are diagnosed BEFORE the credential check, so a malformed

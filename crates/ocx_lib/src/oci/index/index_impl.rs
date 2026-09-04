@@ -171,6 +171,40 @@ pub trait IndexImpl: Send + Sync {
         self.trusted_hosts()
     }
 
+    /// Replaces the proxy-route rules this source's own SSRF guard reads.
+    ///
+    /// Test seam, mirroring [`super::Index::with_proxy_rules`]: `cargo test`
+    /// runs on machines that may have a real `HTTPS_PROXY`, so a guard test
+    /// that read the ambient environment would pass or fail by accident. The
+    /// default is a no-op — only sources that guard a physical dial of their
+    /// own ([`ChainedIndex`](super::chained_index::ChainedIndex)) carry rules
+    /// to replace; `OcxIndex` takes its own at construction
+    /// ([`super::OcxIndexConfig::proxy_rules`]).
+    fn set_proxy_rules(&mut self, rules: std::sync::Arc<crate::oci::ssrf::ProxyRules>) {
+        let _ = rules;
+    }
+
+    /// The `OCX_INSECURE_REGISTRIES` authorities this index was built with —
+    /// the `host[:port]` spellings that are dialled over plain HTTP.
+    ///
+    /// Exposed on the trait because the SSRF floor's proxy question is
+    /// per-scheme (`HTTP_PROXY` applies to an `insecure` registry,
+    /// `HTTPS_PROXY` to every other), so
+    /// [`Index::guard_physical_dial`](super::Index::guard_physical_dial) has to
+    /// know which scheme the dial it is about to guard will use. The value
+    /// travels with the index for the same reason `trusted_hosts` does: every
+    /// chain that can mint a physical pointer is built from one, so no
+    /// construction site can forget it.
+    ///
+    /// The default is empty (every host dialled over HTTPS);
+    /// [`LocalIndex`](super::LocalIndex) and
+    /// [`OcxIndex`](super::ocx_index::OcxIndex) carry a configured set, and
+    /// [`ChainedIndex`](super::chained_index::ChainedIndex) delegates to its
+    /// local copy.
+    fn insecure_hosts(&self) -> &[String] {
+        &[]
+    }
+
     /// Whether this source is the configured owner of `registry` — a cheap,
     /// no-I/O ownership test, deliberately distinct from the per-name
     /// [`Self::jurisdiction`].

@@ -420,7 +420,13 @@ async fn observe_and_rebuild(
     // registry request of any kind. Under `--tags-from-registry` that first
     // request is the tag listing rather than an observe — a pre-flight inside
     // the observe loop would guard the wrong thing.
-    let physical = pipeline::guarded_physical(base_root, &request.trusted_hosts).await?;
+    let physical = pipeline::guarded_physical(
+        base_root,
+        &request.trusted_hosts,
+        &request.insecure_hosts,
+        &crate::oci::ssrf::proxy_rules(),
+    )
+    .await?;
     let discovered = match &request.curated {
         TagSelection::FromRegistry => pipeline::list_registry_tags(publisher, &physical).await?,
         TagSelection::Replace(_) | TagSelection::UnionFile(_) | TagSelection::Refresh => Vec::new(),
@@ -629,6 +635,10 @@ mod tests {
             // The loopback physical host is forbidden by default; trusting it
             // is what lets the observe loop reach the stub transport.
             trusted_hosts: vec!["127.0.0.1".to_string()],
+            // No plain-HTTP allowance: the fixture's dial scheme is https, so
+            // the guard's route decision does not depend on the ambient
+            // environment.
+            insecure_hosts: Vec::new(),
         }
     }
 

@@ -703,6 +703,15 @@ pub struct OcxIndex {
     /// addresses skip the default-on private/loopback/link-local/metadata
     /// refusal (`[registries."<ns>"].trusted_hosts`, X2).
     trusted_hosts: Vec<String>,
+    /// The `OCX_INSECURE_REGISTRIES` authorities this source may dial over
+    /// plain HTTP — the same value its `client` carries as
+    /// `plain_http_registries`. Read only to pick the dial scheme the SSRF
+    /// floor's proxy question depends on
+    /// ([`index_impl::IndexImpl::insecure_hosts`]).
+    insecure_hosts: Vec<String>,
+    /// Proxy-route rules for this source's own SSRF pre-flight
+    /// ([`Self::physical_identifier`]) — see [`OcxIndexConfig::proxy_rules`].
+    proxy_rules: Arc<oci::ssrf::ProxyRules>,
     cache: Arc<RwLock<SourceCacheInner>>,
     /// Coalesces the concurrent cold misses on `config.json`. Only a **served**
     /// document is broadcast as this group's answer — see
@@ -731,6 +740,15 @@ pub struct OcxIndexConfig {
     /// SSRF escape hatch for the physical hosts this source dereferences
     /// (`[registries."<ns>"].trusted_hosts`, X2). Empty = guard every host.
     pub trusted_hosts: Vec<String>,
+    /// The authorities dialled over plain HTTP (`OCX_INSECURE_REGISTRIES` plus
+    /// `[registries."<host>"] insecure`) — the same list `client` was built
+    /// with. Empty = every dial is HTTPS.
+    pub insecure_hosts: Vec<String>,
+    /// Whether a physical dial is proxied, which decides whether the SSRF
+    /// pre-flight resolves at all (ocx#407). Production passes
+    /// [`oci::ssrf::proxy_rules`]; tests pass explicit rules so the verdict
+    /// never depends on the developer's own environment.
+    pub proxy_rules: Arc<oci::ssrf::ProxyRules>,
 }
 
 impl OcxIndex {
@@ -742,6 +760,8 @@ impl OcxIndex {
             client: config.client,
             allow_yanked: config.allow_yanked,
             trusted_hosts: config.trusted_hosts,
+            insecure_hosts: config.insecure_hosts,
+            proxy_rules: config.proxy_rules,
             cache: Arc::new(RwLock::new(SourceCacheInner::default())),
             // One key (`()`), so one slot is the whole capacity.
             config_group: singleflight::Group::new(1, SOURCE_SINGLEFLIGHT_TIMEOUT),
@@ -808,6 +828,13 @@ impl OcxIndex {
     /// source carries exactly its own namespace's set and never another's.
     pub fn trusted_hosts(&self) -> &[String] {
         &self.trusted_hosts
+    }
+
+    /// The authorities this source dials over plain HTTP, or empty when none
+    /// were configured — see [`OcxIndexConfig::insecure_hosts`]. Decides which
+    /// proxy setting applies to a physical dial, and nothing else.
+    pub fn insecure_hosts(&self) -> &[String] {
+        &self.insecure_hosts
     }
 
     /// Resolves the static-file base for `namespace` — the URL and the
@@ -1196,17 +1223,29 @@ impl OcxIndex {
         };
         let (registry, repository) = parse_physical_repository(&root.repository)?;
         // SSRF floor (X1-X3, ocx#218): `registry` is a host from remote-controlled
-        // index data, so resolve + validate it against the private/loopback/
-        // link-local/metadata ranges BEFORE the first physical registry request
+        // index data, so validate it BEFORE the first physical registry request
         // (`self.client.*` in every caller). `trusted_hosts` is the explicit
         // per-namespace escape hatch. `self.client` additionally pins the
         // validated address at connect time via its `GuardedResolver`, closing
         // the resolve -> connect rebinding window. The resolved addresses are
         // discarded here — the pin, not this pre-flight, drives the connection.
+        //
+        // Route-aware (ocx#407): when a configured proxy intercepts the dial the
+        // process never resolves `registry` — the name is text in the proxy's
+        // `CONNECT` line — so the floor judges a forbidden IP literal textually
+        // and performs no lookup. `insecure_hosts` picks the scheme, because
+        // which proxy setting applies (`HTTP_PROXY` vs `HTTPS_PROXY`) depends on
+        // it.
         let (host, port) = oci::ssrf::split_host_port(&registry);
-        oci::ssrf::resolve_and_validate(host, port, &self.trusted_hosts)
-            .await
-            .map_err(super::error::Error::from)?;
+        oci::ssrf::guard_destination(
+            oci::ssrf::DialScheme::for_registry(self.insecure_hosts(), &registry),
+            host,
+            port,
+            &self.trusted_hosts,
+            &self.proxy_rules,
+        )
+        .await
+        .map_err(super::error::Error::from)?;
         let mut physical = oci::Identifier::new_registry(repository, registry);
         if let Some(digest) = identifier.digest() {
             physical = physical.clone_with_digest(digest);
@@ -1516,6 +1555,10 @@ impl index_impl::IndexImpl for OcxIndex {
         OcxIndex::trusted_hosts(self)
     }
 
+    fn insecure_hosts(&self) -> &[String] {
+        OcxIndex::insecure_hosts(self)
+    }
+
     fn index_base_url(&self) -> Option<&str> {
         Some(&self.base_url)
     }
@@ -1666,6 +1709,8 @@ mod tests {
             client,
             allow_yanked,
             trusted_hosts,
+            insecure_hosts: Vec::new(),
+            proxy_rules: oci::ssrf::ProxyRules::direct(),
         })
     }
 

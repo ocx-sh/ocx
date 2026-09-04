@@ -84,6 +84,7 @@ pub struct ResolvedTags {
 }
 
 /// The physical registry target dereferenced from a root's `repository` pointer.
+#[derive(Debug)]
 pub struct Physical {
     /// The registry host (for the SSRF pre-flight).
     pub host: String,
@@ -265,14 +266,36 @@ pub fn extract_physical(root: &Value) -> Result<Physical, AnnounceError> {
 /// listing unguarded. One `Physical` is resolved once and threaded to both, so
 /// the guarded target and the requested target cannot diverge.
 ///
+/// The pre-flight is route-aware because under a configured HTTP proxy the
+/// process resolves only the proxy — the physical registry is literal text in
+/// the `CONNECT` line — so resolving it here fails on a proxy-only-DNS network
+/// and judges addresses nothing connects to (ocx#407). `insecure_hosts` picks
+/// the dial **scheme**, which is what decides whether `HTTP_PROXY` or
+/// `HTTPS_PROXY` applies and therefore whether a proxy intercepts at all.
+///
+/// A proxied route yields no addresses to pin, so the [`Physical`] is returned
+/// on either route; the floor's verdict is the whole point of the call.
 /// # Errors
 ///
 /// [`AnnounceError::RootMissingField`] / [`AnnounceError::MalformedPhysicalRepository`]
 /// if the root's `repository` pointer is absent or unparseable;
 /// [`AnnounceError::Ssrf`] if the host is forbidden or unresolvable.
-pub async fn guarded_physical(root: &Value, trusted_hosts: &[String]) -> Result<Physical, AnnounceError> {
+///
+pub async fn guarded_physical(
+    root: &Value,
+    trusted_hosts: &[String],
+    insecure_hosts: &[String],
+    rules: &oci::ssrf::ProxyRules,
+) -> Result<Physical, AnnounceError> {
     let physical = extract_physical(root)?;
-    oci::ssrf::resolve_and_validate(&physical.host, physical.port, trusted_hosts).await?;
+    oci::ssrf::guard_destination(
+        oci::ssrf::DialScheme::for_registry(insecure_hosts, physical.identifier.registry()),
+        &physical.host,
+        physical.port,
+        trusted_hosts,
+        rules,
+    )
+    .await?;
     Ok(physical)
 }
 
@@ -1623,7 +1646,10 @@ mod tests {
         // observe loop need.
         let root = committed_root("oci://127.0.0.1/x");
         assert!(
-            matches!(guarded_physical(&root, &[]).await, Err(AnnounceError::Ssrf(_))),
+            matches!(
+                guarded_physical(&root, &[], &[], &oci::ssrf::ProxyRules::direct()).await,
+                Err(AnnounceError::Ssrf(_))
+            ),
             "forbidden host must be refused"
         );
     }
@@ -1636,13 +1662,101 @@ mod tests {
         let data = StubTransportData::new();
         let publisher = stub_publisher(&data);
         let root = committed_root("oci://127.0.0.1/x");
-        let physical = guarded_physical(&root, &["127.0.0.1".to_string()])
+        let physical = guarded_physical(&root, &["127.0.0.1".to_string()], &[], &oci::ssrf::ProxyRules::direct())
             .await
             .expect("a trusted loopback host passes the pre-flight");
         let result = observe_curated(&publisher, &physical, &["1.0.0".to_string()]).await;
         assert!(
             matches!(result, Err(AnnounceError::UnresolvedTag { .. })),
             "a trusted host proceeds to observe; the empty stub yields UnresolvedTag"
+        );
+    }
+
+    // ── proxy-aware pre-flight (announce's copy of plan rows 9–10) ───────────
+    //
+    // Every case here builds its rules from `Matcher::builder()`, which starts
+    // from `Default` and never from the environment, so an ambient developer
+    // proxy cannot perturb them — and no test mutates an env var.
+
+    /// A registry name that no resolver can ever answer for, standing in for a
+    /// public registry only the corporate proxy can resolve. `.invalid` is
+    /// reserved by RFC 2606, so this needs no network and no fixture.
+    const UNRESOLVABLE_REGISTRY: &str = "no-such-registry.invalid:5000";
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_proxied_route_admits_a_registry_this_host_cannot_resolve() {
+        // Mirrors plan row 9 (`guard_physical_dial_admits_an_unresolvable_target_on_a_proxied_route`)
+        // at the announce guard: under a proxy the destination name is literal
+        // text in the CONNECT line, so a local lookup neither can succeed on a
+        // proxy-only-DNS network nor decides anything (ocx#407).
+        let root = committed_root(&format!("oci://{UNRESOLVABLE_REGISTRY}/acme/widget"));
+
+        let physical = guarded_physical(
+            &root,
+            &[],
+            &[],
+            &oci::ssrf::ProxyRules::proxied_everywhere("http://proxy.corp:3128"),
+        )
+        .await
+        .expect("a proxied destination is admitted without resolving it locally");
+
+        assert_eq!(physical.host, "no-such-registry.invalid");
+        assert_eq!(physical.port, 5000);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_forbidden_ip_literal_is_refused_even_on_a_proxied_route() {
+        // Mirrors plan row 10 (`…refuses_a_forbidden_literal_even_on_a_proxied_route`).
+        // Guard test: green before and after the fix. A proxy must never become
+        // a laundering hop for a loopback target, so a forbidden literal is
+        // refused on the text alone, with no lookup and no trusted_hosts entry.
+        let root = committed_root("oci://127.0.0.1:5000/acme/widget");
+
+        let result = guarded_physical(
+            &root,
+            &[],
+            &[],
+            &oci::ssrf::ProxyRules::proxied_everywhere("http://proxy.corp:3128"),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(AnnounceError::Ssrf(oci::ssrf::SsrfError::ForbiddenTarget { .. }))
+            ),
+            "a forbidden IP literal stays refused on a proxied route, got {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_plain_http_allowance_decides_which_proxy_variable_applies() {
+        // Mirrors plan row 9's route decision at the announce guard, for the
+        // design's "each guard site computes `DialScheme::for_registry(
+        // insecure_hosts, physical.registry())`". With only an HTTP proxy
+        // configured, the same authority is proxied when it is dialed over
+        // plain HTTP and direct when it is dialed over HTTPS — and a direct
+        // dial to an unresolvable name still fails closed.
+        let root = committed_root(&format!("oci://{UNRESOLVABLE_REGISTRY}/acme/widget"));
+        let rules = oci::ssrf::ProxyRules::new(
+            hyper_util::client::proxy::matcher::Matcher::builder()
+                .http("http://proxy.corp:3128")
+                .build(),
+        );
+
+        let physical = guarded_physical(&root, &[], &[UNRESOLVABLE_REGISTRY.to_string()], &rules)
+            .await
+            .expect("an insecure registry dials http, which this proxy intercepts");
+        assert_eq!(physical.identifier.registry(), UNRESOLVABLE_REGISTRY);
+
+        let refused = guarded_physical(&root, &[], &[], &rules).await;
+        assert!(
+            matches!(
+                refused,
+                Err(AnnounceError::Ssrf(oci::ssrf::SsrfError::Resolution { .. }))
+            ),
+            "without the plain-HTTP allowance the dial is https, which this proxy does not \
+             intercept: the route is direct and the name does not resolve, got {refused:?}"
         );
     }
 

@@ -294,7 +294,13 @@ impl Context {
         // `ocx patch test`'s scratch chain, `PackageManager::offline_view` —
         // reads the same operator config. `--offline` builds no sources at all,
         // so without this the floor would have no exemption to read there.
-        .with_trusted_hosts(trusted_hosts_by_namespace(&config));
+        .with_trusted_hosts(trusted_hosts_by_namespace(&config))
+        // The authorities dialled over plain HTTP, for the same reason and by
+        // the same route: the dial-site SSRF guard has to know a physical
+        // pointer's scheme to know which proxy setting covers it (ocx#407).
+        // The one value every client builder already passes as
+        // `plain_http_registries` — never a second copy of that predicate.
+        .with_insecure_hosts(insecure_hosts.clone());
 
         // Single `Index::from_chained` entry point; see
         // `chain_mode_and_sources` for the offline/online derivation.
@@ -844,6 +850,8 @@ impl Context {
                 client,
                 allow_yanked,
                 trusted_hosts,
+                insecure_hosts: insecure_hosts.to_vec(),
+                proxy_rules: oci::ssrf::proxy_rules(),
             }));
         }
         Ok(sources)

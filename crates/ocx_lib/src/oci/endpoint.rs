@@ -13,9 +13,12 @@
 //! `adr_oci_referrers_signing_v1.md` Amendment 2) so both pipelines share one
 //! validator without verify depending on sign. Any future library consumer
 //! (mirror tool, SDK, Bazel rule) routes through the same guard before it
-//! reaches an HTTP client. The function returns a [`UrlRejection`] on failure;
-//! each caller wraps it into their own `InvalidEndpointUrl` variant so
-//! exit-code classification stays local to the sign or verify subsystem.
+//! reaches an HTTP client. The function returns a [`UrlRejection`] on failure,
+//! which each caller wraps into their own `InvalidEndpointUrl` variant to
+//! attach the originating flag name. The exit verdict itself originates here
+//! and is carried on the rejection: a rejected URL is a usage error (64), an
+//! endpoint that does not resolve is unavailable (69), and the sign and verify
+//! wraps read that answer rather than each minting one.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -73,7 +76,7 @@ const SIGSTORE_MAX_IDLE_PER_HOST: usize = 2;
 /// short `read_timeout`: nothing on `reqwest::Client` exposes its configured
 /// timeouts, so proving the bound exists means exercising it, and exercising
 /// the shipped 15 s value is not a unit test.
-fn sigstore_client_builder(read_timeout: Duration) -> reqwest::ClientBuilder {
+fn sigstore_client_builder(read_timeout: Duration, rules: Arc<crate::oci::ssrf::ProxyRules>) -> reqwest::ClientBuilder {
     // Bundled roots, exactly as `forge::github` and `oci::index::ocx_index`
     // do it: reqwest's rustls path falls back to the OS trust store and
     // panics where that store is empty (minimal container, CI runner with
@@ -87,7 +90,7 @@ fn sigstore_client_builder(read_timeout: Duration) -> reqwest::ClientBuilder {
         .read_timeout(read_timeout)
         .pool_max_idle_per_host(SIGSTORE_MAX_IDLE_PER_HOST)
         .redirect(refuse_redirects())
-        .dns_resolver(Arc::new(PinnedResolver))
+        .dns_resolver(Arc::new(PinnedResolver { rules }))
 }
 
 /// Shared HTTP client for Sigstore trust-services calls.
@@ -105,7 +108,7 @@ fn sigstore_client_builder(read_timeout: Duration) -> reqwest::ClientBuilder {
 pub fn sigstore_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        match sigstore_client_builder(SIGSTORE_READ_TIMEOUT).build() {
+        match sigstore_client_builder(SIGSTORE_READ_TIMEOUT, crate::oci::ssrf::proxy_rules()).build() {
             Ok(client) => client,
             // Only a TLS-backend init failure reaches here, and it fails every
             // HTTPS request that follows anyway. Retry the same fully-bounded
@@ -114,7 +117,7 @@ pub fn sigstore_http_client() -> &'static reqwest::Client {
             // pinned resolver. The bare-client terminal is unreachable in
             // practice: the retry fails identically, and `Client::new()`
             // panics under the same TLS-init failure.
-            Err(_) => sigstore_client_builder(SIGSTORE_READ_TIMEOUT)
+            Err(_) => sigstore_client_builder(SIGSTORE_READ_TIMEOUT, crate::oci::ssrf::proxy_rules())
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
@@ -232,13 +235,26 @@ fn pin_sigstore_host(host: &str, addresses: Vec<SocketAddr>) {
 /// preceded by a guard call, so an unpinned name means either a new call site
 /// that skipped the guard or a redirect/rebind — both refusals, not fallbacks.
 ///
-/// One deployment is refused as a side effect: with an HTTP proxy configured by
-/// hostname, the connector dials the *proxy*, which no guard ever named, so
-/// every Sigstore call fails here. That is fail-closed rather than silent, but
-/// it is a regression for proxied environments — tracked as
-/// <https://github.com/ocx-sh/ocx/issues/323>, and the refusal message says so
-/// rather than blaming a host the operator never configured.
-struct PinnedResolver;
+/// One name is admitted without a pin: this process's own HTTP proxy. Under a
+/// proxy the connector dials the proxy, and the Sigstore endpoint travels as
+/// literal text in the `CONNECT` line, so the name this hook is asked for is
+/// the proxy — a host no guard was ever given, and refusing it fails every
+/// Fulcio, Rekor and OIDC call on such a network (ocx#323). Admitting it is a
+/// stated design property, not a hole: the proxy is operator configuration,
+/// the same trust tier as `trusted_hosts`, and RFC1918 by nature, so a range
+/// judgement on it would refuse every corporate deployment. Every other
+/// unpinned name is still refused.
+///
+/// Residual, deliberate: this hook is handed a name with no route context —
+/// reqwest asks it what to dial, not why — so "is this the proxy?" is
+/// approximated by membership of the configured proxy-host set, which is
+/// scheme-agnostic. A host that is both the proxy and a Sigstore endpoint
+/// therefore relies on the pin being consulted first, below.
+struct PinnedResolver {
+    /// This process's proxy configuration, consulted only to recognise the
+    /// proxy's own hostname.
+    rules: Arc<crate::oci::ssrf::ProxyRules>,
+}
 
 impl reqwest::dns::Resolve for PinnedResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
@@ -249,13 +265,30 @@ impl reqwest::dns::Resolve for PinnedResolver {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&host)
             .cloned();
+        let rules = Arc::clone(&self.rules);
         Box::pin(async move {
+            // Pin first, proxy admission only on a miss. One host can be both
+            // the configured proxy and a guard-cleared endpoint -- the proxy
+            // set is scheme-agnostic, so an `HTTP_PROXY`-only proxy still
+            // matches an `https` endpoint the guard routed direct and pinned.
+            // Admitting that name as a proxy would throw away the guard's own
+            // verdict and re-resolve it unjudged, which is the rebinding
+            // window this type exists to close. A proxied route pins nothing,
+            // so the ocx#323 admission below still fires whenever it matters.
             match pinned {
                 Some(addresses) => Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs),
+                None if rules.is_proxy_host(&host) => {
+                    // Plain lookup, no range judgement: see the type doc
+                    // above. Port 0 because reqwest overrides it from the
+                    // request URL after resolution, as `GuardedResolver` does.
+                    let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+                    Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+                }
                 None => Err(format!(
-                    "sigstore host {host} was never approved by the SSRF guard; only a guarded \
-                     endpoint is dialed. If {host} is an HTTP proxy, signing and verification \
-                     cannot run through it — see https://github.com/ocx-sh/ocx/issues/323"
+                    "sigstore host {host} was never approved by the SSRF guard; only an endpoint \
+                     the guard cleared, or this process's configured HTTP proxy, is dialed. A \
+                     name arriving here is neither: it is a redirect target, or a second DNS \
+                     answer for a name that was cleared (rebinding)"
                 )
                 .into()),
             }
@@ -305,14 +338,42 @@ fn is_loopback_host(url: &Url) -> bool {
 /// leave open -- unlike the registry guard, where the pull runs on a shared
 /// client with no resolver hook.
 ///
+/// All of the above describes a *direct* route. Where the process's proxy
+/// configuration intercepts the endpoint, the proxy resolves and dials it and
+/// this process never does, so
+/// [`guard_destination`](crate::oci::ssrf::guard_destination) performs no
+/// lookup, refuses a forbidden IP literal textually, and approves no addresses
+/// -- nothing is pinned, and [`PinnedResolver`] is asked for the proxy's name
+/// rather than the endpoint's.
+///
 /// # Errors
 ///
 /// [`SsrfError::ForbiddenTarget`](crate::oci::ssrf::SsrfError::ForbiddenTarget)
 /// when the endpoint resolves into a forbidden range with no `trusted_hosts`
-/// entry, and
-/// [`SsrfError::Resolution`](crate::oci::ssrf::SsrfError::Resolution) when it
-/// does not resolve at all -- failing closed either way.
+/// entry (or, on a proxied route, is a forbidden IP literal), and
+/// [`SsrfError::Resolution`](crate::oci::ssrf::SsrfError::Resolution) when a
+/// directly-routed endpoint does not resolve at all -- failing closed either
+/// way.
 pub async fn resolve_sigstore_url(url: &Url, trusted: &[String]) -> Result<(), crate::oci::ssrf::SsrfError> {
+    resolve_sigstore_url_with_rules(url, trusted, &crate::oci::ssrf::proxy_rules()).await
+}
+
+/// [`resolve_sigstore_url`] with the proxy rules injected instead of read from
+/// the process environment.
+///
+/// The seam exists because the route decides the whole verdict: on a proxied
+/// route the process never resolves the endpoint, so there is nothing to look
+/// up and nothing to pin. Proving that needs rules a test can choose, and the
+/// alternative -- mutating `HTTPS_PROXY` around the call -- is `unsafe` in
+/// edition 2024 and racy under a shared-process test runner.
+///
+/// Private, so the public shape stays a two-argument call for the sign, verify
+/// and auto-verify callers outside this module.
+async fn resolve_sigstore_url_with_rules(
+    url: &Url,
+    trusted: &[String],
+    rules: &crate::oci::ssrf::ProxyRules,
+) -> Result<(), crate::oci::ssrf::SsrfError> {
     // `host_str()` re-brackets an IPv6 literal (`[::1]`), and a bracketed host
     // is neither a parseable address nor a resolvable name -- it would fail
     // closed on every IPv6 endpoint. Take the already-parsed host instead.
@@ -330,8 +391,24 @@ pub async fn resolve_sigstore_url(url: &Url, trusted: &[String]) -> Result<(), c
     } else {
         trusted
     };
-    let approved = crate::oci::ssrf::resolve_and_validate(&host, port, trusted).await?;
-    pin_sigstore_host(&host, approved);
+    // The scheme decides which proxy the destination would be routed through
+    // (`HTTPS_PROXY` vs `HTTP_PROXY`), so it is read from the URL rather than
+    // assumed. `validate_sigstore_url` admits only `https` and a loopback
+    // `http`, so no third scheme reaches here; treating one as `Https` anyway
+    // is the fail-closed direction, since an http-only proxy then leaves the
+    // full direct-route floor in place.
+    let scheme = if url.scheme() == "http" {
+        crate::oci::ssrf::DialScheme::Http
+    } else {
+        crate::oci::ssrf::DialScheme::Https
+    };
+    match crate::oci::ssrf::guard_destination(scheme, &host, port, trusted, rules).await? {
+        crate::oci::ssrf::DialRoute::Direct(approved) => pin_sigstore_host(&host, approved),
+        // Nothing to pin: on a proxied route the process resolves only the
+        // proxy, so the guard approved no addresses for this host. Recording
+        // one here would hand [`PinnedResolver`] a verdict no guard made.
+        crate::oci::ssrf::DialRoute::Proxied => {}
+    }
     Ok(())
 }
 
@@ -354,6 +431,13 @@ pub async fn resolve_sigstore_url(url: &Url, trusted: &[String]) -> Result<(), c
 pub struct UrlRejection {
     /// Short description of why the URL was rejected.
     pub reason: String,
+    /// The exit code a bare rejection (one that reached the exit boundary
+    /// without a sign- or verify-side wrap) classifies to.
+    /// [`ExitCode::UsageError`](crate::cli::ExitCode::UsageError) for every
+    /// string-level rejection; [`Self`]'s `From<SsrfError>` impl raises it to
+    /// [`Unavailable`](crate::cli::ExitCode::Unavailable) for an endpoint that
+    /// does not resolve.
+    exit: crate::cli::ExitCode,
 }
 
 impl From<crate::oci::ssrf::SsrfError> for UrlRejection {
@@ -361,24 +445,63 @@ impl From<crate::oci::ssrf::SsrfError> for UrlRejection {
     ///
     /// A refused endpoint is a refused endpoint whichever layer caught it, and
     /// routing it here keeps the CLI contract fixed: same error variant, same
-    /// `error.detail` flag attribution, same exit code. `SsrfError`'s own
+    /// `error.detail` flag attribution, and — for every verdict but an
+    /// unresolvable host — the same exit code. `SsrfError`'s own
     /// `Display` names the host and the address it resolved to -- both from the
     /// caller's own URL, so there is nothing to redact.
     fn from(error: crate::oci::ssrf::SsrfError) -> Self {
-        Self::new(error.to_string())
+        // Deliberately not `error.classify()`. That is the *registry* guard's
+        // table, where a forbidden target is a configuration error (78); on
+        // the Sigstore side a rejected endpoint URL is documented as 64, and
+        // that is the contract both `SignErrorKind::InvalidEndpointUrl` and
+        // its verify twin report. Only the resolution failure moves, to the
+        // 69 the registry guard now gives the identical condition.
+        let exit = match error {
+            crate::oci::ssrf::SsrfError::Resolution { .. } => crate::cli::ExitCode::Unavailable,
+            // Spelled out rather than wildcarded: `SsrfError` is
+            // `#[non_exhaustive]` only to other crates, so within this one an
+            // added variant lands here as a compile error instead of a silent
+            // 64.
+            crate::oci::ssrf::SsrfError::ForbiddenTarget { .. } => crate::cli::ExitCode::UsageError,
+        };
+        Self {
+            reason: error.to_string(),
+            exit,
+        }
     }
 }
 
 impl UrlRejection {
-    fn new(reason: impl Into<String>) -> Self {
-        Self { reason: reason.into() }
+    /// Builds a bare rejection classifying to
+    /// [`ExitCode::UsageError`](crate::cli::ExitCode::UsageError).
+    ///
+    /// `pub` (rather than `oci::endpoint`-private) so a caller outside this
+    /// module can construct a rejection without going through a struct
+    /// literal — the private `exit` field means that literal no longer
+    /// compiles outside this module.
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            exit: crate::cli::ExitCode::UsageError,
+        }
+    }
+
+    /// The exit code this rejection classifies to, independent of whether a
+    /// sign- or verify-side wrap ever asks
+    /// [`ClassifyExitCode::classify`](crate::cli::ClassifyExitCode::classify).
+    #[must_use]
+    pub fn exit_code(&self) -> crate::cli::ExitCode {
+        self.exit
     }
 }
 
 impl crate::cli::ClassifyExitCode for UrlRejection {
-    /// Exit 64 (`UsageError`), the same code
+    /// Exit 64 (`UsageError`) for a rejected URL, the same code
     /// [`SignErrorKind::InvalidEndpointUrl`](crate::oci::sign::SignErrorKind::InvalidEndpointUrl)
-    /// and its verify twin already give for a rejected endpoint URL.
+    /// and its verify twin already give — and 69 (`Unavailable`) for the one
+    /// rejection that is not the operator's fault, an endpoint whose host does
+    /// not resolve. Both answers are carried on the rejection itself, so a
+    /// bare classification and a wrapped one cannot disagree.
     ///
     /// This impl is what a *bare* rejection classifies to — one that reached
     /// the exit boundary without a sign- or verify-side wrap, because it came
@@ -387,7 +510,7 @@ impl crate::cli::ClassifyExitCode for UrlRejection {
     /// code keeps one answer for one condition: the same bad URL exits the
     /// same way whichever tier supplied it.
     fn classify(&self) -> Option<crate::cli::ExitCode> {
-        Some(crate::cli::ExitCode::UsageError)
+        Some(self.exit)
     }
 }
 
@@ -468,6 +591,20 @@ mod tests {
 
     // ── The pin: the guard's verdict is what the client dials ──────────────
 
+    /// The shipped client with `.no_proxy()`, so an ambient developer
+    /// `HTTP_PROXY` cannot route the loopback fixtures below.
+    fn hermetic_sigstore_client() -> reqwest::Client {
+        sigstore_client_builder(
+            SIGSTORE_READ_TIMEOUT,
+            Arc::new(crate::oci::ssrf::ProxyRules::new(
+                hyper_util::client::proxy::matcher::Matcher::builder().build(),
+            )),
+        )
+        .no_proxy()
+        .build()
+        .expect("the shared builder produces a client")
+    }
+
     /// Chain a `reqwest::Error` into one string, so an assertion sees the
     /// resolver's own message rather than reqwest's outer "error sending
     /// request" wrapper.
@@ -500,7 +637,7 @@ mod tests {
     /// than passing wrongly: a pinned host resolves, so `expect_err` panics.
     #[tokio::test]
     async fn the_shared_client_refuses_a_host_no_guard_approved() {
-        let error = sigstore_http_client()
+        let error = hermetic_sigstore_client()
             .get("http://unguarded.invalid:1/")
             .send()
             .await
@@ -525,7 +662,10 @@ mod tests {
         // Lookup is case-insensitive: the guard sees the URL's host, reqwest
         // lowercases before it asks.
         let name = reqwest::dns::Name::from_str("pinned.example").expect("test name");
-        let resolved: Vec<SocketAddr> = PinnedResolver
+        let rules = Arc::new(crate::oci::ssrf::ProxyRules::new(
+            hyper_util::client::proxy::matcher::Matcher::builder().build(),
+        ));
+        let resolved: Vec<SocketAddr> = PinnedResolver { rules }
             .resolve(name)
             .await
             .expect("pinned host resolves")
@@ -533,19 +673,66 @@ mod tests {
         assert_eq!(resolved, approved);
     }
 
+    /// A pin outranks the proxy admission.
+    ///
+    /// The configured-proxy set is scheme-agnostic, so one name can be both
+    /// this process's `HTTP_PROXY` and an `https` endpoint the guard routed
+    /// direct and pinned. Consulting the pin first is what keeps the guard's
+    /// verdict authoritative for that name: admitting it as a proxy instead
+    /// would discard the pin and re-resolve it with no floor, which is exactly
+    /// the rebinding window the pin exists to close.
+    ///
+    /// Discriminates: test `is_proxy_host` before the pin map and the resolver
+    /// takes the lookup path, which cannot resolve a `.invalid` name and fails.
+    #[tokio::test]
+    async fn a_pinned_host_outranks_the_proxy_admission() {
+        use reqwest::dns::Resolve as _;
+        use std::str::FromStr as _;
+
+        let approved: Vec<SocketAddr> = vec!["127.0.0.1:8443".parse().expect("test address")];
+        pin_sigstore_host("pinned-and-proxy.invalid", approved.clone());
+
+        let rules = Arc::new(crate::oci::ssrf::ProxyRules::new(
+            hyper_util::client::proxy::matcher::Matcher::builder()
+                .all("http://pinned-and-proxy.invalid:3128")
+                .build(),
+        ));
+        let name = reqwest::dns::Name::from_str("pinned-and-proxy.invalid").expect("test name");
+        let resolved: Vec<SocketAddr> = PinnedResolver { rules }
+            .resolve(name)
+            .await
+            .expect("a pinned host resolves by its pin, not by a lookup that cannot succeed")
+            .collect();
+        assert_eq!(
+            resolved, approved,
+            "the guard's own verdict must outrank the proxy admission"
+        );
+    }
+
     /// A loopback endpoint the operator typed is pinned by the guard, so the
     /// local-stack carve-out survives the resolver.
     #[tokio::test]
     async fn guarding_a_loopback_endpoint_pins_it_for_the_client() {
         let url = validate_sigstore_url("http://localhost:5555", "--rekor-url").expect("loopback URL is admitted");
-        resolve_sigstore_url(&url, &[])
-            .await
-            .expect("loopback is the operator's opt-in");
+        // Explicit empty rules, not the ambient environment: an `http`
+        // endpoint is routed by the developer's own `HTTP_PROXY`, and a
+        // proxied route pins nothing, so this would red on a proxied machine
+        // for a reason that has nothing to do with the pin it asserts on.
+        resolve_sigstore_url_with_rules(
+            &url,
+            &[],
+            &crate::oci::ssrf::ProxyRules::new(hyper_util::client::proxy::matcher::Matcher::builder().build()),
+        )
+        .await
+        .expect("loopback is the operator's opt-in");
 
         use reqwest::dns::Resolve as _;
         use std::str::FromStr as _;
         let name = reqwest::dns::Name::from_str("localhost").expect("test name");
-        let resolved: Vec<SocketAddr> = PinnedResolver
+        let rules = Arc::new(crate::oci::ssrf::ProxyRules::new(
+            hyper_util::client::proxy::matcher::Matcher::builder().build(),
+        ));
+        let resolved: Vec<SocketAddr> = PinnedResolver { rules }
             .resolve(name)
             .await
             .expect("localhost is pinned")
@@ -580,9 +767,14 @@ mod tests {
     async fn an_explicitly_named_local_stack_is_admitted() {
         for raw in ["http://127.0.0.1:5555", "http://localhost:3000", "http://[::1]:3000"] {
             let url = validate_sigstore_url(raw, "--fulcio-url").expect("loopback string accepted");
-            resolve_sigstore_url(&url, &[])
-                .await
-                .unwrap_or_else(|e| panic!("an opted-in local stack must be admitted: {raw}: {e}"));
+            // Empty rules: the carve-out under test is the direct route's.
+            resolve_sigstore_url_with_rules(
+                &url,
+                &[],
+                &crate::oci::ssrf::ProxyRules::new(hyper_util::client::proxy::matcher::Matcher::builder().build()),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("an opted-in local stack must be admitted: {raw}: {e}"));
         }
     }
 
@@ -626,7 +818,14 @@ mod tests {
     #[tokio::test]
     async fn a_public_endpoint_is_admitted() {
         let url = validate_sigstore_url("https://8.8.8.8", "--rekor-url").expect("https accepted");
-        resolve_sigstore_url(&url, &[]).await.expect("a public address passes");
+        // Empty rules: the direct route is the one that has a floor to pass.
+        resolve_sigstore_url_with_rules(
+            &url,
+            &[],
+            &crate::oci::ssrf::ProxyRules::new(hyper_util::client::proxy::matcher::Matcher::builder().build()),
+        )
+        .await
+        .expect("a public address passes");
     }
 
     fn unwrap_err(result: Result<Url, UrlRejection>) -> UrlRejection {
@@ -845,7 +1044,7 @@ mod tests {
             }
         });
 
-        let error = sigstore_http_client()
+        let error = hermetic_sigstore_client()
             .post(format!("http://{redirector_addr}/api/v1/signingCert"))
             .body(r#"{"credentials":{"oidcIdentityToken":"secret"}}"#)
             .send()
@@ -900,7 +1099,7 @@ mod tests {
             }
         });
 
-        let response = sigstore_http_client()
+        let response = hermetic_sigstore_client()
             .get(format!("http://{addr}/api/v1/log/entries"))
             .send()
             .await
@@ -938,9 +1137,15 @@ mod tests {
             }
         });
 
-        let client = sigstore_client_builder(Duration::from_millis(300))
-            .build()
-            .expect("the shared builder produces a client");
+        let client = sigstore_client_builder(
+            Duration::from_millis(300),
+            Arc::new(crate::oci::ssrf::ProxyRules::new(
+                hyper_util::client::proxy::matcher::Matcher::builder().build(),
+            )),
+        )
+        .no_proxy()
+        .build()
+        .expect("the shared builder produces a client");
         let outcome = tokio::time::timeout(
             Duration::from_secs(5),
             client.get(format!("http://{addr}/api/v1/log/entries")).send(),
@@ -972,7 +1177,7 @@ mod tests {
             }
         });
 
-        let response = sigstore_http_client()
+        let response = hermetic_sigstore_client()
             .get(format!("http://{addr}/api/v1/log/publicKey"))
             .send()
             .await
@@ -981,6 +1186,233 @@ mod tests {
             read_body_capped(response).await.as_deref(),
             Some(&b"{\"logIndex\":1}"[..]),
             "an under-cap body must be returned unchanged"
+        );
+    }
+
+    // ── The proxy route: the process dials the proxy, not the endpoint ─────
+
+    /// An operator whose only egress is an HTTP proxy named by *hostname* can
+    /// sign and verify (ocx-sh/ocx#323).
+    ///
+    /// Under a proxy the connector resolves and dials the proxy; the Sigstore
+    /// endpoint is literal text in the absolute-form request line, so the guard
+    /// never resolves it and never pins it. [`PinnedResolver`] is asked for the
+    /// proxy's own hostname instead -- a name no guard was ever given -- and
+    /// before the admission it refused that name, which failed every Fulcio,
+    /// Rekor and OIDC call on such a network.
+    ///
+    /// Two real listeners, so the assertion is on what each one received rather
+    /// than on how the client is configured: the proxy must see the endpoint
+    /// spelled out in the request line, and the endpoint itself must never be
+    /// dialed by this process.
+    ///
+    /// Discriminates: drop the proxy-host admission from [`PinnedResolver`] and
+    /// the send fails with `never approved by the SSRF guard`, naming
+    /// `localhost` -- the proxy the operator configured, not an endpoint.
+    ///
+    /// Hermetic: rules come from an explicit `Matcher`, never the ambient
+    /// environment, and the client is built here rather than taken from the
+    /// process-wide [`sigstore_http_client`]. One shared-state caveat remains
+    /// and is why this wants a per-test process (`cargo nextest`, the project
+    /// runner): the pin map is process-wide, so a sibling test that pins
+    /// `localhost` would let the dial succeed by the pin rather than by the
+    /// admission. That weakens the red proof under a single-process
+    /// `cargo test` run; it never makes this test fail.
+    #[tokio::test]
+    async fn a_hostname_configured_proxy_is_dialed_instead_of_being_refused_as_unguarded() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let target = TcpListener::bind("127.0.0.1:0").await.expect("bind sigstore endpoint");
+        let target_addr = target.local_addr().expect("sigstore endpoint address");
+        let dialed_directly = Arc::new(AtomicBool::new(false));
+        let dialed_by_client = Arc::clone(&dialed_directly);
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = target.accept().await {
+                dialed_by_client.store(true, Ordering::SeqCst);
+                let mut scratch = [0_u8; 1024];
+                let _ = socket.read(&mut scratch).await;
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+            }
+        });
+
+        let proxy = TcpListener::bind("127.0.0.1:0").await.expect("bind forward proxy");
+        let proxy_addr = proxy.local_addr().expect("forward proxy address");
+        let (request_line_tx, request_line_rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = proxy.accept().await {
+                let mut scratch = [0_u8; 2048];
+                let read = socket.read(&mut scratch).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&scratch[..read]).into_owned();
+                // Reported before the response, so the client cannot return
+                // from `send()` before the request line is on the channel.
+                let _ = request_line_tx.send(request.lines().next().unwrap_or_default().to_string());
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\n\r\n{\"logIndex\":1}")
+                    .await;
+            }
+        });
+
+        // Hostname form on purpose: an IP-literal proxy skips the resolver hook
+        // entirely, so it would prove nothing about the refusal this closes.
+        let proxy_url = format!("http://localhost:{}", proxy_addr.port());
+        let rules = Arc::new(crate::oci::ssrf::ProxyRules::new(
+            hyper_util::client::proxy::matcher::Matcher::builder()
+                .all(proxy_url.clone())
+                .build(),
+        ));
+        let client = sigstore_client_builder(Duration::from_secs(5), rules)
+            .proxy(reqwest::Proxy::all(&proxy_url).expect("the proxy URL is well-formed"))
+            .build()
+            .expect("the shared builder produces a client");
+
+        let response = client
+            .get(format!("http://{target_addr}/api/v1/log/publicKey"))
+            .send()
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "a hostname-configured proxy must be dialed, not refused as unguarded: {}",
+                    error_chain(&error)
+                )
+            });
+        assert!(
+            response.status().is_success(),
+            "the proxy answered {}, which the fixture never does",
+            response.status()
+        );
+
+        let request_line = tokio::time::timeout(Duration::from_secs(5), request_line_rx)
+            .await
+            .expect("the proxy must receive the request")
+            .expect("the proxy fixture reports its request line");
+        assert_eq!(
+            request_line,
+            format!("GET http://{target_addr}/api/v1/log/publicKey HTTP/1.1"),
+            "the endpoint must travel as absolute-form text through the proxy"
+        );
+        assert!(
+            !dialed_directly.load(Ordering::SeqCst),
+            "the endpoint was dialed by this process -- the proxy configuration was bypassed"
+        );
+    }
+
+    /// The same admission at the resolver, where it is decidable without a
+    /// listener -- and without the process-wide pin map.
+    ///
+    /// The end-to-end test above needs a proxy hostname that resolves to
+    /// loopback, which in practice means `localhost`, and `localhost` is a name
+    /// other tests pin. This one names a proxy that resolves nowhere, so no pin
+    /// can ever satisfy it: what is asserted is only that a configured proxy
+    /// host is *judged* as one. An admitted name that does not resolve fails
+    /// with a lookup error; the bug is failing with the guard's refusal, which
+    /// blames a host the operator configured on purpose.
+    ///
+    /// Discriminates: drop the proxy-host admission and the verdict is the
+    /// `never approved by the SSRF guard` refusal verbatim.
+    #[tokio::test]
+    async fn the_pinned_resolver_admits_a_configured_proxy_host_rather_than_refusing_it_as_unguarded() {
+        use reqwest::dns::Resolve as _;
+        use std::str::FromStr as _;
+
+        let rules = Arc::new(crate::oci::ssrf::ProxyRules::new(
+            hyper_util::client::proxy::matcher::Matcher::builder()
+                .all("http://ocx-proxy.invalid:3128")
+                .build(),
+        ));
+        let name = reqwest::dns::Name::from_str("ocx-proxy.invalid").expect("test name");
+
+        let resolver = PinnedResolver { rules };
+        let verdict = match resolver.resolve(name).await {
+            Ok(addresses) => format!("resolved to {:?}", addresses.collect::<Vec<_>>()),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            !verdict.contains("never approved by the SSRF guard"),
+            "the configured proxy host was refused as unguarded: {verdict}"
+        );
+    }
+
+    /// A proxied Sigstore endpoint is admitted without a lookup, and pins
+    /// nothing.
+    ///
+    /// On a proxied route the process resolves only the proxy, so an endpoint
+    /// name that this host cannot resolve is not a refusal -- it is the proxy's
+    /// to resolve. Pinning is the matching half: there are no approved
+    /// addresses, so nothing may be recorded for [`PinnedResolver`] to replay.
+    ///
+    /// Discriminates: keep the direct-route lookup on a proxied route and the
+    /// call fails with `failed to resolve host`; pin unconditionally and the
+    /// map carries an entry the guard never approved.
+    #[tokio::test]
+    async fn a_proxied_sigstore_endpoint_is_admitted_without_being_pinned() {
+        let url = validate_sigstore_url("https://fulcio.proxied-only.invalid", "--fulcio-url")
+            .expect("the string check admits an https endpoint");
+        let rules = crate::oci::ssrf::ProxyRules::new(
+            hyper_util::client::proxy::matcher::Matcher::builder()
+                .all("http://localhost:1")
+                .build(),
+        );
+
+        resolve_sigstore_url_with_rules(&url, &[], &rules)
+            .await
+            .expect("a proxied endpoint is the proxy's to resolve, so there is no lookup to fail");
+
+        let pinned = sigstore_pins()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key("fulcio.proxied-only.invalid");
+        assert!(!pinned, "a proxied route approved no addresses, so it must pin none");
+    }
+
+    /// A Sigstore endpoint that does not resolve is unavailable (69), not a
+    /// usage error (64).
+    ///
+    /// 64 tells the operator their `--fulcio-url` is malformed. A name that
+    /// fails to resolve is the same class of failure as any unreachable
+    /// service -- the flag was fine, the network was not -- and the registry
+    /// guard now says 69 for it too, so the two answers agree. The other two
+    /// rows are the paired positives: a refused address and a bad scheme are
+    /// genuine usage errors and keep 64.
+    ///
+    /// Discriminates: build the rejection from a fixed `UsageError` and the
+    /// resolution row reds.
+    #[test]
+    fn a_url_rejection_carrying_a_resolution_failure_classifies_as_unavailable() {
+        use crate::cli::{ClassifyExitCode as _, ExitCode};
+
+        let unresolvable = UrlRejection::from(crate::oci::ssrf::SsrfError::Resolution {
+            host: "fulcio.invalid".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "failed to lookup address information"),
+        });
+        assert_eq!(
+            unresolvable.exit_code(),
+            ExitCode::Unavailable,
+            "an endpoint that does not resolve is unavailable, not a usage error"
+        );
+        assert_eq!(
+            unresolvable.classify(),
+            Some(ExitCode::Unavailable),
+            "a bare rejection classifies to the verdict it carries"
+        );
+
+        let forbidden = UrlRejection::from(crate::oci::ssrf::SsrfError::ForbiddenTarget {
+            host: "fulcio.corp.test".to_string(),
+            ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 1, 2, 3)),
+        });
+        assert_eq!(
+            forbidden.exit_code(),
+            ExitCode::UsageError,
+            "a refused endpoint stays the 64 the sign and verify wraps already report"
+        );
+
+        let bad_scheme = unwrap_err(validate_sigstore_url("ftp://example.com/bundle", "--rekor-url"));
+        assert_eq!(
+            bad_scheme.exit_code(),
+            ExitCode::UsageError,
+            "a string-level rejection is a usage error"
         );
     }
 }
