@@ -977,6 +977,23 @@ mod tests {
         toml::from_str(toml)
     }
 
+    /// A POSIX-spelled fixture, as this platform actually spells an absolute
+    /// path.
+    ///
+    /// A canonical project directory comes out of `dunce::canonicalize`, so on
+    /// Windows it always carries a drive prefix — which is exactly why a
+    /// driveless `/w/acme` is `EntryDefect::RelativePath` there. Fixtures
+    /// standing in for a canonical directory carry the prefix; the ones
+    /// asserting the defect deliberately do not. Case is preserved: the A-28
+    /// rows turn on it.
+    fn abs(posix: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{}", posix.replace('/', "\\")))
+        } else {
+            PathBuf::from(posix)
+        }
+    }
+
     fn include_of(consent: &ShellConsent) -> Vec<String> {
         consent
             .namespaces
@@ -1173,21 +1190,30 @@ mod tests {
         );
     }
 
-    /// A-28: `paths` entries normalize separators and a trailing slash, and
-    /// nothing else. A case-only difference stays a mismatch.
+    /// A-28: `paths` entries normalize separators and a trailing slash — and,
+    /// on Windows only, ASCII case, because the filesystem folds it there too.
+    /// On a case-sensitive filesystem a case-only difference stays a mismatch.
     #[test]
-    fn c030_a28_paths_normalize_separators_only_never_case() {
+    fn c030_a28_paths_normalize_separators_and_only_windows_folds_case() {
         let expected_trimmed = if cfg!(windows) {
             r"\home\u\project"
         } else {
             "/home/u/project"
         };
         assert_eq!(normalize_consent_path(Path::new("/home/u/project/")), expected_trimmed);
-        assert_ne!(
-            normalize_consent_path(Path::new("/Users/u/Repo")),
-            normalize_consent_path(Path::new("/Users/u/repo")),
-            "case folding would merge two directories into one grant on a case-sensitive filesystem"
-        );
+        let upper = normalize_consent_path(Path::new("/Users/u/Repo"));
+        let lower = normalize_consent_path(Path::new("/Users/u/repo"));
+        if cfg!(windows) {
+            assert_eq!(
+                upper, lower,
+                "Windows folds ASCII case because its filesystem cannot hold both directories at once"
+            );
+        } else {
+            assert_ne!(
+                upper, lower,
+                "case folding would merge two directories into one grant on a case-sensitive filesystem"
+            );
+        }
         let expected_root = if cfg!(windows) { r"\" } else { "/" };
         assert_eq!(
             normalize_consent_path(Path::new("/")),
@@ -1520,6 +1546,11 @@ mod tests {
         // The other direction: a well-formed entry is reported clean AND
         // actually grants what it names. Without these rows the assertions
         // above are satisfied by a predicate that condemns everything.
+        //
+        // These rows carry a drive prefix on Windows because they stand in for
+        // a **canonical** directory, which `dunce::canonicalize` always spells
+        // with one. A driveless `/w/acme` is `RelativePath` there — correctly,
+        // and that is the row above, not this one.
         for (entry, granted) in [
             ("/w/acme", "/w/acme"),
             ("/w/acme/", "/w/acme"),
@@ -1527,14 +1558,18 @@ mod tests {
             ("/w/acme/*", "/w/acme/tools/deep"),
             ("/w/acme-corp", "/w/acme-corp"),
         ] {
+            let (entry, granted) = (abs(entry), abs(granted));
             assert_eq!(
-                consent_entry_defect(Path::new(entry)),
+                consent_entry_defect(&entry),
                 None,
-                "'{entry}' is a well-formed entry"
+                "'{}' is a well-formed entry",
+                entry.display()
             );
             assert!(
-                consent_path_matches(Path::new(entry), Path::new(granted)),
-                "'{entry}' is reported clean, so it must grant '{granted}'"
+                consent_path_matches(&entry, &granted),
+                "'{}' is reported clean, so it must grant '{}'",
+                entry.display(),
+                granted.display()
             );
         }
 
