@@ -212,7 +212,7 @@ def test_status_reports_package_settings(ocx: OcxRunner, tmp_path: Path) -> None
 
     data = _status(ocx, project)
 
-    assert data["package_settings"] == {"ocx.sh/example:1": {"no-patches": True}}
+    assert data["package_settings"] == {"ocx.sh/example:1": {"no_patches": True}}
     assert data["lock"]["declaration_hash_expected"] == before, (
         "a [package.*] edit must not move the declaration hash"
     )

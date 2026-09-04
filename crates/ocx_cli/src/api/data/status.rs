@@ -158,7 +158,6 @@ pub struct StatusReport {
 /// Per-package resolve-time policy from `[package."<id>"]`.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PackageSettingsOut {
-    #[serde(rename = "no-patches")]
     no_patches: bool,
 }
 
