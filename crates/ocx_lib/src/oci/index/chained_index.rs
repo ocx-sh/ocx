@@ -415,8 +415,9 @@ impl ChainedIndex {
     /// # Errors
     ///
     /// [`Error::Ssrf`](super::error::Error::Ssrf) when the physical host resolves
-    /// into a forbidden range without a `trusted_hosts` entry, or when a lookup
-    /// failure cannot be tolerated ([`is_plain_dns_name`]).
+    /// into a forbidden range without a `trusted_hosts` entry, or — on a direct
+    /// dial only — when a lookup failure cannot be tolerated
+    /// ([`is_plain_dns_name`]).
     async fn guard_local_physical(&self, logical: &oci::Identifier, physical: &oci::Identifier) -> Result<()> {
         if physical.registry() == logical.registry() {
             return Ok(());
@@ -1255,7 +1256,11 @@ impl index_impl::IndexImpl for ChainedIndex {
     ///   write-through/replace failure is logged, not fatal — the fetch still
     ///   returns the verified bytes to the caller; a stuck heal is retried on
     ///   the next online fetch. Propagates the last error if every source
-    ///   erred (trust boundary).
+    ///   erred (trust boundary). A clean miss from the
+    ///   source authoritative for `identifier`'s namespace is likewise terminal —
+    ///   it ends the walk as `Ok(None)`, discarding any earlier
+    ///   non-authoritative source's error (Decision H: exactly one remote per
+    ///   namespace).
     async fn fetch_blob(&self, blob_ref: &oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
         let digest = blob_ref.digest();
         // Set when the cache-first read found a present-but-corrupt entry —
@@ -1290,7 +1295,7 @@ impl index_impl::IndexImpl for ChainedIndex {
         // this boundary. Propagate last error if every source erred (trust
         // boundary).
         let mut last_error: Option<crate::Error> = None;
-        for (source, _) in self.candidate_sources(blob_ref.as_identifier()).await {
+        for (source, authoritative) in self.candidate_sources(blob_ref.as_identifier()).await {
             match source.fetch_blob(blob_ref).await {
                 Ok(Some(bytes)) => {
                     if !digest_matches(&bytes, &digest) {
@@ -1316,6 +1321,10 @@ impl index_impl::IndexImpl for ChainedIndex {
                     }
                     return Ok(Some(bytes));
                 }
+                // Same authoritative-stop as `query_sources_manifest`: a clean
+                // miss from the namespace's one authoritative source is
+                // terminal, never a fall-through to the `OciIndex` catch-all.
+                Ok(None) if authoritative => return Ok(None),
                 Ok(None) => {}
                 Err(e) => {
                     log::warn!("Source fetch_blob failed for '{blob_ref}': {e}");
@@ -1336,6 +1345,13 @@ impl index_impl::IndexImpl for ChainedIndex {
     /// caller (chain-blob staging) that persists the result under the
     /// source-claimed digest — a re-serialised JSON body will not, in
     /// general, hash back to that digest.
+    ///
+    /// First `Some` wins; if every source errors the failure is propagated
+    /// rather than masked as a clean miss (trust boundary). A clean miss from
+    /// the source authoritative for `identifier`'s namespace is likewise
+    /// terminal — it ends the walk as `Ok(None)`, discarding any earlier
+    /// non-authoritative source's error (Decision H: exactly one remote per
+    /// namespace).
     async fn fetch_manifest_raw_bytes(
         &self,
         identifier: &oci::Identifier,
@@ -1344,9 +1360,13 @@ impl index_impl::IndexImpl for ChainedIndex {
             return Ok(None);
         }
         let mut last_error: Option<crate::Error> = None;
-        for (source, _) in self.candidate_sources(identifier).await {
+        for (source, authoritative) in self.candidate_sources(identifier).await {
             match source.fetch_manifest_raw_bytes(identifier).await {
                 Ok(Some(result)) => return Ok(Some(result)),
+                // Same authoritative-stop as `query_sources_manifest`: a clean
+                // miss from the namespace's one authoritative source is
+                // terminal, never a fall-through to the `OciIndex` catch-all.
+                Ok(None) if authoritative => return Ok(None),
                 Ok(None) => {}
                 Err(e) => {
                     log::warn!("Source fetch_manifest_raw_bytes failed for '{}': {e}", identifier);
@@ -4284,6 +4304,149 @@ mod chain_refs_tests {
             registry_spy.calls(),
             0,
             "the registry catch-all must never be listed once the authoritative source reported a clean miss"
+        );
+    }
+
+    /// The registry catch-all in its OUTAGE shape: non-authoritative
+    /// (`jurisdiction` defaults to `FallThrough`) and unreachable, counting
+    /// every call it receives. A transport error, never a clean miss — so a
+    /// walk that reaches it turns a resolvable read into a hard failure.
+    #[derive(Clone)]
+    struct FallThroughErrorSource {
+        calls: Arc<Mutex<usize>>,
+    }
+
+    #[async_trait]
+    impl index_impl::IndexImpl for FallThroughErrorSource {
+        async fn list_repositories(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        async fn list_tags(&self, _: &Identifier) -> Result<Option<Vec<String>>> {
+            Ok(None)
+        }
+        async fn fetch_manifest(&self, _: &Identifier, _op: IndexOperation) -> Result<Option<(Digest, Manifest)>> {
+            Ok(None)
+        }
+        async fn fetch_manifest_digest(&self, _: &Identifier, _op: IndexOperation) -> Result<Option<Digest>> {
+            Ok(None)
+        }
+        async fn fetch_blob(&self, _: &crate::oci::PinnedIdentifier) -> Result<Option<Vec<u8>>> {
+            *self.calls.lock().unwrap() += 1;
+            Err(super::super::error::Error::RemoteManifestNotFound("registry unreachable".to_string()).into())
+        }
+        async fn fetch_manifest_raw_bytes(&self, _: &Identifier) -> Result<Option<(Vec<u8>, Digest, Manifest)>> {
+            *self.calls.lock().unwrap() += 1;
+            Err(super::super::error::Error::RemoteManifestNotFound("registry unreachable".to_string()).into())
+        }
+        fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
+            Box::new(self.clone())
+        }
+    }
+
+    fn fall_through_error_source() -> (Arc<Mutex<usize>>, Index) {
+        let calls = Arc::new(Mutex::new(0));
+        (calls.clone(), Index::from_impl(FallThroughErrorSource { calls }))
+    }
+
+    /// Regression (ocx#407 fallout): the verbatim-bytes walk must stop on the
+    /// authoritative source's clean miss, exactly like
+    /// [`authoritative_clean_miss_does_not_fall_through_to_registry_resolve`]
+    /// and its `--remote` siblings — a clean miss from the namespace's one
+    /// authoritative source is terminal, never a fall-through to the
+    /// `OciIndex` catch-all.
+    ///
+    /// The second half is the paired positive: the SAME two behaviours with
+    /// the first source non-authoritative still walk on, so the assertion
+    /// discriminates on jurisdiction alone and not on the walk being dead.
+    ///
+    /// Without the stop, an index-answered install dies on the catch-all's
+    /// transport error — the shape acceptance case A hits behind a proxy that
+    /// cannot reach the logical registry, and the shape the twin
+    /// `test_index_ocx_sh.py` install was quietly surviving only by reaching
+    /// the public `ocx.sh` for a 404.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_authoritative_miss_on_the_manifest_walk_is_terminal_and_never_reaches_the_fall_through_source() {
+        let dir = TempDir::new().unwrap();
+        let (spy_calls, error_idx) = fall_through_error_source();
+        let chained = Index::from_chained(
+            make_local_index(&dir),
+            vec![Index::from_impl(AuthoritativeMissSource), error_idx],
+            ChainMode::Default,
+        );
+
+        let result = chained.fetch_manifest_raw_bytes(&digest_only_id()).await;
+        assert!(
+            matches!(result, Ok(None)),
+            "an authoritative clean miss must end the walk as Ok(None), got: {result:?}"
+        );
+        assert_eq!(
+            *spy_calls.lock().unwrap(),
+            0,
+            "the catch-all must never be asked once the authoritative source reported a clean miss"
+        );
+
+        // Paired positive: non-authoritative first source ⇒ the walk continues.
+        let dir = TempDir::new().unwrap();
+        let (spy_calls, error_idx) = fall_through_error_source();
+        let (_, fall_through_miss) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(
+            make_local_index(&dir),
+            vec![fall_through_miss, error_idx],
+            ChainMode::Default,
+        );
+
+        assert!(
+            chained.fetch_manifest_raw_bytes(&digest_only_id()).await.is_err(),
+            "a fall-through source's miss must still walk on, and the next source's outage propagates"
+        );
+        assert_eq!(
+            *spy_calls.lock().unwrap(),
+            1,
+            "the walk must have reached the second source"
+        );
+    }
+
+    /// The blob walk carries the same omission and the same fix — see the
+    /// manifest sibling above for why, including its paired positive.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_authoritative_miss_on_the_blob_walk_is_terminal_and_never_reaches_the_fall_through_source() {
+        let dir = TempDir::new().unwrap();
+        let (spy_calls, error_idx) = fall_through_error_source();
+        let chained = Index::from_chained(
+            make_local_index(&dir),
+            vec![Index::from_impl(AuthoritativeMissSource), error_idx],
+            ChainMode::Default,
+        );
+
+        let result = chained.fetch_blob(&pinned_for_test()).await;
+        assert!(
+            matches!(result, Ok(None)),
+            "an authoritative clean miss must end the blob walk as Ok(None), got: {result:?}"
+        );
+        assert_eq!(
+            *spy_calls.lock().unwrap(),
+            0,
+            "the catch-all must never be asked once the authoritative source reported a clean miss"
+        );
+
+        // Paired positive: non-authoritative first source ⇒ the walk continues.
+        let dir = TempDir::new().unwrap();
+        let (spy_calls, error_idx) = fall_through_error_source();
+        let (_, fall_through_miss) = make_source(TAG, digest_a());
+        let chained = Index::from_chained(
+            make_local_index(&dir),
+            vec![fall_through_miss, error_idx],
+            ChainMode::Default,
+        );
+
+        assert!(
+            chained.fetch_blob(&pinned_for_test()).await.is_err(),
+            "a fall-through source's miss must still walk on, and the next source's outage propagates"
+        );
+        assert_eq!(
+            *spy_calls.lock().unwrap(),
+            1,
+            "the walk must have reached the second source"
         );
     }
 
