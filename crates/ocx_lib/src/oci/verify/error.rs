@@ -237,10 +237,13 @@ pub enum VerifyErrorKind {
     /// User-supplied Sigstore endpoint URL failed SSRF/scheme validation.
     ///
     /// Surfaces at the boundary where `--rekor-url` is parsed by `ocx package
-    /// verify`. Exit 64 (`UsageError`) — a malformed flag value is a CLI
-    /// misuse, not a runtime fault. The `endpoint` field carries the flag
-    /// name (e.g. `--rekor-url`) so the envelope `error.detail` is
-    /// programmatically dispatchable.
+    /// verify`. Exit 64 (`UsageError`) for a malformed flag value — a CLI
+    /// misuse, not a runtime fault — except when the host simply does not
+    /// resolve, where `reason` (a [`UrlRejection`]) carries 69
+    /// (`Unavailable`) instead: unreachable is a different failure than
+    /// malformed. The `endpoint` field carries the flag name (e.g.
+    /// `--rekor-url`) so the envelope `error.detail` is programmatically
+    /// dispatchable.
     #[error("invalid {endpoint} URL: {reason}")]
     InvalidEndpointUrl {
         /// Flag name the URL was supplied via (e.g. `--rekor-url`).
@@ -781,9 +784,13 @@ impl ClassifyErrorKind for VerifyErrorKind {
             | Self::TrustRootLoad(_)
             | Self::TrustPolicyInvalid(_)
             | Self::ForbiddenRegistryTarget { .. } => ExitCode::ConfigError,
-            Self::InvalidEndpointUrl { .. } | Self::NoIdentityProvided | Self::KeyReferenceInvalid(_) => {
-                ExitCode::UsageError
-            }
+            // The rejection verdict was decided in `oci/endpoint.rs`
+            // (`UrlRejection` carries an exit code set by its
+            // `From<SsrfError>` impl): 69 for an endpoint that does not
+            // resolve, else the documented 64. Delegate rather than
+            // flattening every rejection to one code.
+            Self::InvalidEndpointUrl { reason, .. } => reason.exit_code(),
+            Self::NoIdentityProvided | Self::KeyReferenceInvalid(_) => ExitCode::UsageError,
             Self::Internal(_) => ExitCode::Failure,
         }
     }
@@ -1161,6 +1168,45 @@ mod tests {
         let kind = VerifyErrorKind::InvalidEndpointUrl {
             endpoint: "--rekor-url".into(),
             reason: UrlRejection::new("URL must use HTTPS"),
+        };
+        assert_eq!(kind.exit_code(), ExitCode::UsageError);
+    }
+
+    /// Plan row 12 (verify half): a Sigstore endpoint whose host does not
+    /// resolve exits `Unavailable` (69).
+    ///
+    /// Same reasoning as the sign twin, asserted separately because the verify
+    /// arm is its own `match` — a fix applied to one file leaves the other
+    /// reporting CLI misuse for an unreachable Rekor.
+    #[test]
+    fn an_endpoint_url_that_does_not_resolve_maps_to_unavailable() {
+        use crate::oci::endpoint::UrlRejection;
+        let kind = VerifyErrorKind::InvalidEndpointUrl {
+            endpoint: "--rekor-url".into(),
+            reason: UrlRejection::from(crate::oci::ssrf::SsrfError::Resolution {
+                host: "rekor.invalid".to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "name or service not known"),
+            }),
+        };
+        assert_eq!(kind.exit_code(), ExitCode::Unavailable);
+    }
+
+    /// Plan row 12 (verify half), paired positive: a forbidden-target refusal
+    /// keeps `UsageError` (64), so delegating to the carried verdict cannot
+    /// drag the registry guard's 78 onto the Sigstore surface.
+    ///
+    /// `invalid_endpoint_url_maps_to_usage_error` above covers the same code
+    /// for a plain string-level rejection; this one covers it for a rejection
+    /// that came through the SSRF guard.
+    #[test]
+    fn an_endpoint_url_refused_as_a_forbidden_target_stays_a_usage_error() {
+        use crate::oci::endpoint::UrlRejection;
+        let kind = VerifyErrorKind::InvalidEndpointUrl {
+            endpoint: "--rekor-url".into(),
+            reason: UrlRejection::from(crate::oci::ssrf::SsrfError::ForbiddenTarget {
+                host: "rekor.internal".to_string(),
+                ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            }),
         };
         assert_eq!(kind.exit_code(), ExitCode::UsageError);
     }

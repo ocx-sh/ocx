@@ -417,8 +417,13 @@ impl ClassifyExitCode for Error {
             Self::IndexHttpFailed { .. } | Self::CatalogDocumentAbsent { .. } => ExitCode::Unavailable,
             // A misconfigured index-role traffic target — a configuration fault.
             Self::PlainHttpIndexNotAllowed { .. } | Self::InvalidIndexUrl { .. } => ExitCode::ConfigError,
-            // An SSRF-refused physical host — the fix is `trusted_hosts` config.
-            Self::Ssrf(_) => ExitCode::ConfigError,
+            // A forbidden target is a configuration fault (78) — the fix is
+            // `trusted_hosts` config. An unresolvable host was never reached,
+            // so no `trusted_hosts` entry can fix it; that is the "registry
+            // unreachable" class (69) every other transport failure already
+            // reports. `SsrfError::classify` already carries the right verdict
+            // for both — delegate instead of flattening to one code.
+            Self::Ssrf(inner) => return inner.classify(),
         })
     }
 }
@@ -436,6 +441,27 @@ mod tests {
             ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         });
         assert_eq!(error.classify(), Some(ExitCode::ConfigError));
+    }
+
+    /// Plan row 12: an SSRF *resolution* failure classifies to `Unavailable`
+    /// (69), not `ConfigError` (78).
+    ///
+    /// A host that does not resolve was never reached, so no `trusted_hosts`
+    /// entry can fix it — that is the "registry unreachable" class every other
+    /// transport failure already reports. The verdict `SsrfError::classify`
+    /// already carries must survive the wrap instead of being flattened to one
+    /// code for both variants.
+    ///
+    /// Paired positive: `ssrf_refusal_classifies_as_config_error` directly
+    /// above pins `ForbiddenTarget` on `ConfigError` (78), so this pair fails
+    /// on a fix that merely swaps one blanket code for another.
+    #[test]
+    fn ssrf_resolution_classifies_as_unavailable() {
+        let error = Error::Ssrf(crate::oci::ssrf::SsrfError::Resolution {
+            host: "no-such-registry.invalid".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "name or service not known"),
+        });
+        assert_eq!(error.classify(), Some(ExitCode::Unavailable));
     }
 
     /// The exit code of a concurrent resolve must not depend on who reached the
