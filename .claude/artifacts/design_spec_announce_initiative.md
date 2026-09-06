@@ -24,7 +24,7 @@ explicitly marked OPEN.
 
 | # | Decision | Rationale anchor |
 |---|---|---|
-| S1 | Transport = **REST API only**. No git subprocess, no local clone of the index repo. | Owner 07-22; ocx ships dep-free; index carries CAS objects (clone cost grows) |
+| S1 | Transport = **REST API by default**; `--transport git` (a local clone plus a `git` subprocess) is a supported second write path, introduced for the GitLab job-token posture — see [`adr_index_claim_command.md`](./adr_index_claim_command.md) (Accepted 2026-09-05, D-T1–D-T10). | Owner 07-22; ocx ships dep-free; index carries CAS objects (clone cost grows). Widened 2026-09-05 per `adr_index_claim_command.md`. |
 | S2 | **Align with BCR model**, not grimoire's. Grimoire = parts donor ("copy and own"), never strategy donor. | Owner: "just a template, not one-to-one copy" |
 | S3 | **Always a reviewed pull request.** ~~Always fork~~ — *narrowed 2026-07-29*: a publisher in the org that owns the index cannot fork (GitHub refuses a fork into the owning org), so omitting `--fork` pushes the announce branch to `ocx-sh/index` itself and opens the PR from there. Still never a commit to the default branch, so the governance gate and `refresh`/`new-package` labelling are unchanged; the fork stays the only path for third parties. | Owner 07-22. Kills grimoire's tri-state permission probe entirely |
 | S4 | **PAT-only day one.** Machine account `ocx-bot` (classic PAT, `public_repo`) for the ocx-contrib fleet; third parties bring their own classic PAT. Fine-grained PATs cannot fork/PR public repos (github/roadmap#600). GitHub App recorded as future scaling option ONLY, with hard constraint: never any permission on a publisher's source repo (BCR #157 / xz lesson). | Owner 07-22 after BCR-App-sunset correction |

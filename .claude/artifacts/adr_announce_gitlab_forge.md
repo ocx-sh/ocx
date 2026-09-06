@@ -51,15 +51,19 @@ actively wrong for OCX, and this record names which and why.
 Three design-register decisions are touched:
 
 - **S7 ("GitHub-only v1")** is spent. GitLab is a peer implementation.
-- **S1 ("REST only, no git subprocess")** stands unchanged and applies to both
-  forges. The donor clones, commits and pushes with `git`; OCX does not.
+- **S1 ("REST API by default")** stands as amended by
+  [`adr_index_claim_command.md`](./adr_index_claim_command.md) (Accepted
+  2026-09-05): `--transport git` is a supported second write path, for the
+  GitLab job-token posture, and REST stays the default for both forges. The
+  donor clones, commits and pushes with `git` unconditionally; OCX's default
+  remains REST.
 - **S3 ("always fork")** keeps the narrowing already recorded in
   `announce.rs` — "always a **reviewed pull request**", from a fork or from a
   branch on the index itself. Unchanged by this ADR.
 
 ### D1 — The forge is a trait, and the orchestration never learns which one
 
-`Forge` (`forge/api.rs`) is exactly the ten operations `announce()` drives.
+`Forge` (`forge/api.rs`) is the operation set `announce()` drives.
 `GitHubForge` and `GitLabForge` implement it; `announce()` takes `&dyn Forge`.
 
 The alternative — an enum threaded through the orchestration — was rejected on
