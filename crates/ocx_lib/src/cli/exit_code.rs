@@ -44,7 +44,10 @@ pub enum ExitCode {
     /// The same command may succeed if it is run again — which is what makes
     /// automated retry safe on 75 and unsafe on [`ExitCode::Unavailable`].
     TempFail = 75,
-    /// Insufficient permissions: filesystem `EPERM`.
+    /// Insufficient permissions: filesystem `EPERM`, or a forge refusing to
+    /// push because the target branch is protected or a pre-receive hook
+    /// declined it, where the refusal is not a capability gate — that is
+    /// [`ExitCode::ForgeCapabilityUnavailable`] (86).
     /// Mirrors `EX_NOPERM` (77).
     PermissionDenied = 77,
     /// Configuration error: bad `config.toml`, missing required field, parse failure.
@@ -91,6 +94,22 @@ pub enum ExitCode {
     /// this code exists to prevent — "not built yet" is not "your config is
     /// wrong", and only one of them is fixed by editing the config.
     UnsupportedKeyBackend = 85,
+    /// A forge is reachable and refuses a write because the instance or the
+    /// target project lacks the capability the selected transport needs —
+    /// job-token push disabled on the target project, or the publishing
+    /// project missing from the target's job-token allowlist. OCX-specific.
+    ///
+    /// Distinct from [`ExitCode::Unavailable`] (69): that code means the
+    /// forge or a required local tool could not be reached at all, while
+    /// this one is raised only after a successful reach. Distinct from
+    /// [`ExitCode::AuthError`] (80): the credential is valid here, and the
+    /// refusal is not on it — an administrator, not the caller, must act.
+    /// Distinct from [`ExitCode::PolicyBlocked`] (81): that code is a
+    /// deliberate caller-side policy whose remedy is always in the caller's
+    /// own hands (loosen the flag); this code's remedy never is. Sibling of
+    /// [`ExitCode::ReferrersUnsupported`] (84): the forge is reachable, but
+    /// a capability it needs is absent, with no fallback.
+    ForgeCapabilityUnavailable = 86,
 }
 
 impl From<ExitCode> for std::process::ExitCode {
@@ -206,6 +225,14 @@ mod tests {
         // Tool-specific; canonical source is design_spec_cosign_parity.md
         // section "Exit codes". 85 is the first free slot above 84.
         assert_eq!(ExitCode::UnsupportedKeyBackend as u8, 85);
+    }
+
+    #[test]
+    fn exit_code_forge_capability_unavailable_is_86() {
+        // C-001; canonical source is adr_index_claim_command.md, section
+        // "Exit codes — full mapping". 85 was taken by UnsupportedKeyBackend,
+        // so 86 is the first free slot.
+        assert_eq!(ExitCode::ForgeCapabilityUnavailable as u8, 86);
     }
 
     #[test]

@@ -33,6 +33,7 @@ pub enum ErrorCategory {
     TransparencyLogUnavailable,
     ReferrersUnsupported,
     UnsupportedKeyBackend,
+    ForgeCapabilityUnavailable,
     IoError,
     Internal,
 }
@@ -72,10 +73,11 @@ impl ErrorCategory {
             ExitCode::DirtyRcBlock => Self::PermissionDenied,
             ExitCode::TransparencyLogUnavailable => Self::TransparencyLogUnavailable,
             ExitCode::ReferrersUnsupported => Self::ReferrersUnsupported,
-            ExitCode::UnsupportedKeyBackend => Self::UnsupportedKeyBackend,
             // Its own category rather than a fold into `UsageError`: same genus
             // as 84 (`ReferrersUnsupported`) -- a capability is absent, and the
             // invocation that named it was well-formed.
+            ExitCode::UnsupportedKeyBackend => Self::UnsupportedKeyBackend,
+            ExitCode::ForgeCapabilityUnavailable => Self::ForgeCapabilityUnavailable,
         }
     }
 }
@@ -108,13 +110,55 @@ mod tests {
             ),
             (ErrorCategory::ReferrersUnsupported, "\"referrers_unsupported\""),
             (ErrorCategory::UnsupportedKeyBackend, "\"unsupported_key_backend\""),
+            (
+                ErrorCategory::ForgeCapabilityUnavailable,
+                "\"forge_capability_unavailable\"",
+            ),
             (ErrorCategory::IoError, "\"io_error\""),
             (ErrorCategory::Internal, "\"internal\""),
         ];
+        // What this count pins, exactly: a row deleted from the table above.
+        // It cannot force a row for a *new* `ErrorCategory` variant -- `cases`
+        // is an array literal, so `len()` is a compile-time constant.
+        assert_eq!(
+            cases.len(),
+            14,
+            "a row was removed from the table above; restore it rather than lowering this count"
+        );
         for (variant, expected) in cases {
             let actual = serde_json::to_string(&variant).unwrap();
             assert_eq!(actual, expected, "variant {variant:?} serialization mismatch");
         }
+    }
+
+    #[test]
+    fn error_category_round_trips_86() {
+        // C-002, both halves in one function.
+        //
+        // Totality is the compiler's job -- the match is wildcard-free, so 86
+        // cannot land without *an* arm. But nothing forces it to be the *right*
+        // arm: `ExitCode::ForgeCapabilityUnavailable => Self::Internal` compiles
+        // clean, passes clippy, and ships exit 86 with `"kind":"internal"`,
+        // which is the precise defect the wildcard-free match exists to
+        // prevent. Assertion 1 is what reds on that rewrite. Assertion 2 does
+        // not read the binding at all -- it serializes the variant literal, so
+        // a serde rename reds it while the rewrite above leaves it green.
+        // Neither assertion stands in for the other.
+        //
+        // "Round trips" is one direction. `ErrorCategory` derives `Serialize`
+        // and nothing else -- there is no `Deserialize` and no `FromStr` for it
+        // anywhere in the workspace, and none is added to widen this test.
+        let category = ErrorCategory::from_exit_code(ExitCode::ForgeCapabilityUnavailable);
+        assert_eq!(
+            category,
+            ErrorCategory::ForgeCapabilityUnavailable,
+            "exit 86 must classify as its own category, never a fold into another"
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCategory::ForgeCapabilityUnavailable).expect("ErrorCategory serializes"),
+            "\"forge_capability_unavailable\"",
+            "envelope error.kind must be the dedicated category, never \"internal\""
+        );
     }
 
     #[test]
@@ -147,6 +191,10 @@ mod tests {
             ),
             (ExitCode::ReferrersUnsupported, ErrorCategory::ReferrersUnsupported),
             (ExitCode::UnsupportedKeyBackend, ErrorCategory::UnsupportedKeyBackend),
+            (
+                ExitCode::ForgeCapabilityUnavailable,
+                ErrorCategory::ForgeCapabilityUnavailable,
+            ),
         ];
         // What this count pins, exactly: a row deleted from the table above.
         // It cannot force a row for a *new* `ExitCode` variant -- `cases` is an
@@ -154,7 +202,7 @@ mod tests {
         // the wildcard-free match's job, not this assertion's.
         assert_eq!(
             cases.len(),
-            16,
+            17,
             "a row was removed from the table above; restore it rather than lowering this count"
         );
         for (code, expected) in cases {
