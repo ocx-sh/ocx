@@ -54,8 +54,9 @@ WALKTHROUGH_PAGES: tuple[Path, ...] = (
     PROJECT_ROOT / "website" / "src" / "docs" / "in-depth" / "environments.md",
     PROJECT_ROOT / "website" / "src" / "docs" / "in-depth" / "entry-points.md",
     PROJECT_ROOT / "website" / "src" / "docs" / "in-depth" / "lazy-loading.md",
+    PROJECT_ROOT / "website" / "src" / "docs" / "user-guide" / "claiming-a-namespace.md",
 )
-"""The six walkthrough pages subject to NC1–NC3 checks.
+"""The seven walkthrough pages subject to NC1–NC3 checks.
 
 Relative to ``PROJECT_ROOT``; paths are resolved at module import time via
 ``src.helpers.PROJECT_ROOT``.  These are the prose pages whose inline code

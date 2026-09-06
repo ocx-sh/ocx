@@ -439,9 +439,9 @@ The published schema lives at `https://ocx.sh/schemas/execution-record/v1.json` 
 [patches-how]: ../user-guide/patches.md#patches-how
 
 <!-- in-depth -->
-[in-depth-lazy-loading]: ./in-depth/lazy-loading.md#deferred-tools
-[in-depth-lazy-loading-materialize]: ./in-depth/lazy-loading.md#deferred-tools-materialize
-[in-depth-indices-local]: ./in-depth/indices.md#local
+[in-depth-lazy-loading]: ../in-depth/lazy-loading.md#deferred-tools
+[in-depth-lazy-loading-materialize]: ../in-depth/lazy-loading.md#deferred-tools-materialize
+[in-depth-indices-local]: ../in-depth/indices.md#local
 
 <!-- internal -->
 [execution-records-format]: #execution-records-format
