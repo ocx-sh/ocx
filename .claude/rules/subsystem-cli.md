@@ -315,15 +315,17 @@ Exempted vars (direct `std::env::var` read is compliant, not a forwarding-rule v
 | `OCX_IDENTITY_TOKEN` | `command/package_sign.rs` | Short-lived OIDC bearer token for Sigstore signing |
 | `OCX_KEY_PASSWORD` | `oci/sign/key_backend.rs::key_password` | Passphrase for a cosign `ENCRYPTED SIGSTORE PRIVATE KEY`; empty is legal, so absent and empty must stay indistinguishable |
 | `OCX_SIGNING_KEY` | `oci/sign/key_backend.rs::PemKeyBackend::open_env`, `trust.rs::compile_key_reference` | The signing key PEM itself, for `--key env://OCX_SIGNING_KEY` — the most sensitive entry here, a raw private key rather than a token |
+| `OCX_ANNOUNCE_GIT_TOKEN` | `forge/credentials.rs::ForgeCredentials::resolve` | The push half of the forge credential pair, presented as the secret of an HTTP Basic pair to `git push`. **Asymmetric against `OCX_ANNOUNCE_TOKEN` below, deliberately:** this one is scrubbed from plugin child environments, its API-half sibling is not, so a plugin-dispatched `ocx-mirror` inherits the API half and not the push half |
 
-Two variables meet the bar and are **deliberately not** on the list. They are recorded so a reviewer does not read their absence as an oversight, and `ocx_lib::env::keys::CREDENTIAL_KEYS` carries the same two notes:
+Two variables meet the bar and are **deliberately not** on the list; a third is recorded because its name puts it one underscore from a member. They are here so a reviewer does not read an absence as an oversight, and `ocx_lib::env::keys::CREDENTIAL_KEYS` carries the same notes:
 
-| Var | Read site | Why it is still open |
-|-----|-----------|----------------------|
-| `OCX_ANNOUNCE_TOKEN` | `command/package_announce.rs` | **Known-open, cross-repo decision.** A forge PAT, so it meets the rule — but `ocx-mirror` announces from a plugin process and inherits it deliberately. Adding it would break that. Owner's call. |
+| Var | Read site | Why it is not a member |
+|-----|-----------|-----------------------|
+| `OCX_ANNOUNCE_TOKEN` | `forge/credentials.rs::ForgeCredentials::resolve` (the ladder) | **Known-open, cross-repo decision.** A forge PAT, so it meets the rule — but `ocx-mirror` announces from a plugin process and inherits it deliberately. Adding it would break that. Owner's call. **This is now an asymmetry inside one family, not a blanket exclusion:** its push-half sibling `OCX_ANNOUNCE_GIT_TOKEN` *is* on the list above and *is* scrubbed, so a plugin-dispatched `ocx-mirror` inherits the API half and not the push half. Benign only because that plugin drives no git write transport today; wiring one there means passing the push credential explicitly rather than relying on inheritance. |
 | `OCX_AUTH_<slug>_TOKEN` | `auth.rs::get_env_auth` | **Known-open, mechanism gap.** A name *pattern*, so a fixed `&[&str]` cannot hold it at all. `script/ocx_module.rs::is_reserved_env_key` already masks this family from Starlark **by prefix** — two credential masks, one of which handles patterns. Closing it means teaching `CREDENTIAL_KEYS` prefixes too. |
+| `OCX_ANNOUNCE_GIT_USERNAME` | `forge/credentials.rs::ForgeCredentials::resolve` | **Not open — a decided no.** The user half of the HTTP Basic pair (default `gitlab-ci-token`). It does not meet the bar at all: holding it authenticates nobody, and listing it would say that it did. |
 
-Reviewers: a direct `std::env::var` read of any var listed above is compliant. Do NOT add these vars to `OcxConfigView`. If a new credential var is introduced, document it in this table in the same PR **and** add it to `ocx_lib::env::keys::CREDENTIAL_KEYS` — whose doc comment carries the membership rule and the three-edit checklist — **and** in `website/src/docs/reference/environment.md`, stating that it is never forwarded to child processes.
+Reviewers: a direct `std::env::var` read of any var listed above is compliant. Do NOT add these vars to `OcxConfigView`. If a new credential var is introduced, document it in this table in the same PR **and** add it to `ocx_lib::env::keys::CREDENTIAL_KEYS` — whose doc comment carries the membership rule and the four-edit checklist — **and** in `website/src/docs/reference/environment.md`, stating that it is never forwarded to child processes. Where the new member has a sibling that stays out, say so on both rows: an unexplained split inside one family reads as an oversight the next reviewer will "fix".
 
 ### Secret-bearing values: the `env://` convention
 

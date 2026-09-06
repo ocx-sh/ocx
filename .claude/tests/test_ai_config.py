@@ -2004,6 +2004,7 @@ class TestSubsystemCliCommandsTableCoverage:
         "package_push": "package push",
         "package_sbom": "package sbom",
         "package_announce": "package announce",
+        "package_claim": "package claim",
         # `cascade check` / `cascade repair` are two levels below `package`; the
         # table cell parser keeps the first two tokens, so both map to the same
         # documented head.

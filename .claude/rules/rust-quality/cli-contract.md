@@ -43,7 +43,11 @@ one `ExitCode` enum per workspace.
 | 80 | `AuthError` | Authentication failure |
 | 81 | `PolicyBlocked` | A deliberate `--offline` / `--frozen` / verify-offline refusal — policy, not fault |
 | 82 | `DirtyRcBlock` | Refused to rewrite a shell-RC block carrying user edits |
-| 83–99 | *(unassigned)* | Next free slots; allocate upward from 83 |
+| 83 | `TransparencyLogUnavailable` | Transparency log unreachable |
+| 84 | `ReferrersUnsupported` | Registry does not support the referrers API |
+| 85 | `UnsupportedKeyBackend` | Signing key backend not supported |
+| 86 | `ForgeCapabilityUnavailable` | Forge capability disabled or absent — an administrator's to enable |
+| 87–99 | *(unassigned)* | Next free slots; allocate upward from 87 |
 | 128+N | *(not ours)* | Forwarded signal status of a **child** process only |
 
 64–78 mirror BSD `sysexits.h`; 79+ is the private range above `EX__MAX`.
