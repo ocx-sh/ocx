@@ -21,6 +21,7 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 from announce_helpers import (
     FIXED_CLOCK,
@@ -41,6 +42,13 @@ from fake_forge import FakeForge
 from src.helpers import make_package
 from src.registry import fetch_manifest_raw, fetch_platform_manifest_digest
 from src.runner import OcxRunner
+
+#: A GitLab job token distinct from `TOKEN`, so a run carrying both is
+#: unambiguous about which of the two answered C-063's ladder. Local rather than
+#: shared with the GitLab suite: one scenario reads it, and the assertion it
+#: feeds is about the ladder, not about GitLab.
+JOB_TOKEN = "glcbt_test_job_token_JOB_TOKEN_VALUE_1234567890"
+
 
 # ── --out mode: byte-exact root + content-addressed CAS objects ────────────
 
@@ -96,7 +104,7 @@ def test_announce_out_writes_canonical_root_and_content_addressed_cas(
 
     out_dir = tmp_path / "out"
     report = announce_json(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0,2.0.0", "--out", str(out_dir)
+        ocx, fake_forge, "--tags", "1.0.0,2.0.0", "--out", str(out_dir), package
     )
 
     assert report["status"] == "updated"
@@ -160,7 +168,7 @@ def test_announce_out_writes_canonical_root_and_content_addressed_cas(
 
     out_dir_2 = tmp_path / "out2"
     report_2 = announce_json(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0,2.0.0", "--out", str(out_dir_2)
+        ocx, fake_forge, "--tags", "1.0.0,2.0.0", "--out", str(out_dir_2), package
     )
     assert sorted(report_2["written_paths"]) == sorted(written)
     for relative in written:
@@ -193,7 +201,7 @@ def test_announce_out_writes_the_whole_entry_even_when_nothing_changed(
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
 
     first_dir = tmp_path / "first"
-    first = announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(first_dir))
+    first = announce_json(ocx, fake_forge, "--tags", "1.0.0", "--out", str(first_dir), package)
     assert first["status"] == "updated"
     assert first["desc_status"] == "updated", "the description moved from null to an object"
 
@@ -211,7 +219,7 @@ def test_announce_out_writes_the_whole_entry_even_when_nothing_changed(
     fake_forge.seed_files("ocx-sh", "index", {f"p/{package}.json": root_bytes})
 
     second_dir = tmp_path / "second"
-    second = announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(second_dir))
+    second = announce_json(ocx, fake_forge, "--tags", "1.0.0", "--out", str(second_dir), package)
     assert second["status"] == "unchanged", "nothing moved, so the status must say so"
     assert second["desc_status"] == "unchanged", "the description did not move either"
     assert sorted(second["written_paths"]) == sorted(first["written_paths"]), (
@@ -265,7 +273,7 @@ def test_announce_refuses_a_tag_resolving_to_a_bare_manifest(
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
 
     result = announce(
-        ocx, fake_forge, "--package", package, "--tags", "9.9.9", "--out", str(tmp_path / "out"), check=False
+        ocx, fake_forge, "--tags", "9.9.9", "--out", str(tmp_path / "out"), package, check=False
     )
 
     assert result.returncode == 65, f"expected DataError (65), got {result.returncode}: {result.stderr}"
@@ -289,14 +297,13 @@ def test_announce_fork_happy_path_opens_pull_request(
     report = announce_json(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--fork",
         "forkuser/index",
         "--index-repo",
         INDEX_FULL,
+        package,
     )
     assert report["status"] == "updated"
     assert report["fork"] == "forkuser/index"
@@ -328,16 +335,16 @@ def test_announce_fork_second_identical_run_is_unchanged_and_reuses_the_pull_req
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    first = announce_json(ocx, fake_forge, *args)
+    first = announce_json(ocx, fake_forge, *args, package)
     assert first["status"] == "updated"
     assert first["pull_request_url"]
 
     blobs_before = fake_forge.request_count("POST", "/repos/forkuser/index/git/blobs")
     commits_before = fake_forge.request_count("POST", "/repos/forkuser/index/git/commits")
 
-    second = announce_json(ocx, fake_forge, *args)
+    second = announce_json(ocx, fake_forge, *args, package)
     assert second["status"] == "unchanged"
     # C6 amendment (F1): the branch diverges from the upstream base, so an
     # unchanged re-run ensures the PR still exists — it reuses the open one
@@ -371,12 +378,12 @@ def test_announce_fork_unchanged_with_no_branch_is_a_pure_noop(
     # unchanged short-circuit compares bytes, and only the canonical `--out`
     # form is byte-identical to what a fork run would regenerate.
     out_dir = tmp_path / "out"
-    announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(out_dir))
+    announce_json(ocx, fake_forge, "--tags", "1.0.0", "--out", str(out_dir), package)
     root_bytes = (out_dir / "p" / f"{package}.json").read_bytes()
     fake_forge.seed_files("ocx-sh", "index", {f"p/{package}.json": root_bytes})
 
     report = announce_json(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL
+        ocx, fake_forge, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL, package
     )
     assert report["status"] == "unchanged"
     assert report["pull_request_url"] is None
@@ -404,7 +411,7 @@ def test_announce_fork_unchanged_with_a_branch_not_ahead_is_a_pure_noop(
     # `--out` and seed those raw bytes as the index-main root (the byte compare
     # only matches the canonical form).
     out_dir = tmp_path / "out"
-    announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(out_dir))
+    announce_json(ocx, fake_forge, "--tags", "1.0.0", "--out", str(out_dir), package)
     root_bytes = (out_dir / "p" / f"{package}.json").read_bytes()
     fake_forge.seed_files("ocx-sh", "index", {f"p/{package}.json": root_bytes})
     # ...then park the announce branch exactly ON that base: it exists, and it
@@ -414,7 +421,7 @@ def test_announce_fork_unchanged_with_a_branch_not_ahead_is_a_pure_noop(
     )
 
     report = announce_json(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL
+        ocx, fake_forge, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL, package
     )
     assert report["status"] == "unchanged"
     assert report["pull_request_url"] is None
@@ -436,16 +443,16 @@ def test_announce_fork_recovers_stranded_pull_request_on_a_later_unchanged_run(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
     # Run 1: the commit lands, but the pull-request open fails.
     fake_forge.pull_fail_once = True
-    failed = announce(ocx, fake_forge, *args, check=False)
+    failed = announce(ocx, fake_forge, *args, package, check=False)
     assert failed.returncode != 0, "the pull-request open failure must surface as a non-zero exit"
     assert "1.0.0" in committed_root(fake_forge, package)["tags"], "the commit must have landed on the branch"
 
     # Run 2: identical content ⇒ unchanged, but the diverged branch recovers the PR.
-    recovered = announce_json(ocx, fake_forge, *args)
+    recovered = announce_json(ocx, fake_forge, *args, package)
     assert recovered["status"] == "unchanged"
     assert recovered["pull_request_url"], "a stranded update's PR must be recovered on the next run"
     assert recovered["fork"] == "forkuser/index"
@@ -467,10 +474,10 @@ def test_announce_fork_retries_once_on_non_fast_forward_preserving_concurrent_ch
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
     # A first announce commits `1.0.0` onto the branch.
-    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
 
     # Script a racing announce that yanks `1.0.0` and advances the branch head.
     # It reuses the real observed content, so on the retry `1.0.0` is an unmoved
@@ -483,7 +490,7 @@ def test_announce_fork_retries_once_on_non_fast_forward_preserving_concurrent_ch
         f"p/{package}.json": json.dumps(concurrent).encode()
     }
 
-    report = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0")
+    report = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0", package)
 
     assert report["status"] == "updated"
     # The scripted advance fired (the non-FF was hit and the retry engaged).
@@ -519,10 +526,10 @@ def test_announce_tags_file_race_retry_unions_against_the_winning_head(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
     # Shared starting state both racers read: the branch carries `1.0.0`.
-    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
 
     # The winner adds `2.0.0`, advancing the branch head between our read and
     # our commit. Its `content` is a placeholder — the retry re-observes every
@@ -538,7 +545,7 @@ def test_announce_tags_file_race_retry_unions_against_the_winning_head(
     # The loser announces `3.0.0` by file — additive union (C3).
     tags_file = tmp_path / "tags.txt"
     tags_file.write_text("3.0.0")
-    report = announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
+    report = announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file), package)
 
     assert report["status"] == "updated"
     assert not fake_forge.concurrent_ref_advance, "the non-fast-forward must have been triggered"
@@ -568,16 +575,16 @@ def test_announce_identical_race_retry_makes_no_empty_diff_commit(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
     # Shared starting state both racers read: the branch carries `1.0.0`.
-    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
 
     # Materialize the exact entry an announce of `1.0.0,2.0.0` produces. The
     # clock is pinned (`FIXED_CLOCK`) and `regenerate` carries an unmoved digest
     # verbatim, so these bytes are what the fork run below regenerates too.
     out_dir = tmp_path / "winner"
-    announce_json(ocx, fake_forge, "--package", package, "--tags", "1.0.0,2.0.0", "--out", str(out_dir))
+    announce_json(ocx, fake_forge, "--tags", "1.0.0,2.0.0", "--out", str(out_dir), package)
     winning_files = {
         path.relative_to(out_dir).as_posix(): path.read_bytes() for path in out_dir.rglob("*") if path.is_file()
     }
@@ -591,7 +598,7 @@ def test_announce_identical_race_retry_makes_no_empty_diff_commit(
     ref_update_path = f"/repos/forkuser/index/git/refs/heads/{branch}"
     ref_updates_before = fake_forge.request_count("PATCH", ref_update_path)
 
-    report = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0")
+    report = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0", package)
 
     assert not fake_forge.concurrent_ref_advance, "the non-fast-forward must have been triggered"
     assert report["status"] == "unchanged", "the winning head already carries our exact bytes"
@@ -621,12 +628,12 @@ def test_announce_unchanged_indeterminate_compare_is_refused(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    assert announce_json(ocx, fake_forge, *args)["status"] == "updated"
+    assert announce_json(ocx, fake_forge, *args, package)["status"] == "updated"
 
     fake_forge.compare_404_once = True
-    result = announce(ocx, fake_forge, *args, check=False)
+    result = announce(ocx, fake_forge, *args, package, check=False)
     assert result.returncode != 0, "an indeterminate compare must not resolve to a clean unchanged no-op"
     assert not fake_forge.compare_404_once, "the scripted compare 404 must have fired"
 
@@ -643,12 +650,12 @@ def test_announce_unchanged_unmodelled_compare_status_is_refused(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    assert announce_json(ocx, fake_forge, *args)["status"] == "updated"
+    assert announce_json(ocx, fake_forge, *args, package)["status"] == "updated"
 
     fake_forge.compare_status_once = "sideways"
-    result = announce(ocx, fake_forge, *args, check=False)
+    result = announce(ocx, fake_forge, *args, package, check=False)
     assert result.returncode != 0, "an unmodelled compare status must not resolve to a clean unchanged no-op"
     assert fake_forge.compare_status_once is None, "the scripted compare status must have fired"
 
@@ -665,12 +672,12 @@ def test_announce_tags_replace_drops_omitted_committed_tag(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0", package)
     assert set(committed_root(fake_forge, package)["tags"]) == {"1.0.0", "2.0.0"}
 
-    announce_json(ocx, fake_forge, *args, "--tags", "2.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags", "2.0.0", package)
     assert set(committed_root(fake_forge, package)["tags"]) == {
         "2.0.0"
     }, "a committed tag absent from --tags must be dropped"
@@ -685,13 +692,13 @@ def test_announce_tags_file_union_adds_without_dropping(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
     first_head = fake_forge.branch_head("forkuser", "index", branch_name(package))
     tags_file = tmp_path / "tags.txt"
     tags_file.write_text("2.0.0")
-    announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
+    announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file), package)
 
     assert set(committed_root(fake_forge, package)["tags"]) == {"1.0.0", "2.0.0"}
     # An Ahead (not Diverged) branch fast-forwards onto its OWN prior head —
@@ -714,9 +721,9 @@ def _seed_cascade_and_curate_one(
     package = f"acme/{unique_repo}"
     seed_empty_root(fake_forge, package, f"oci://{ocx.registry}/{unique_repo}")
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    announce_json(ocx, fake_forge, *args, "--tags", "1.2.3")
+    announce_json(ocx, fake_forge, *args, "--tags", "1.2.3", package)
     assert set(committed_root(fake_forge, package)["tags"]) == {
         "1.2.3"
     }, "precondition: the root starts behind the registry"
@@ -730,7 +737,7 @@ def test_announce_tags_from_registry_discovers_unannounced_tags(
     package reached the index gets announced without anyone naming the tags."""
     package, args = _seed_cascade_and_curate_one(ocx, fake_forge, unique_repo, tmp_path)
 
-    announce_json(ocx, fake_forge, *args, "--tags-from-registry")
+    announce_json(ocx, fake_forge, *args, "--tags-from-registry", package)
 
     assert set(committed_root(fake_forge, package)["tags"]) == {
         "1.2.3",
@@ -749,7 +756,7 @@ def test_announce_tags_from_registry_drops_no_keep_tag_into_the_root(
     filtered silently rather than reported, because the caller named nothing."""
     package, args = _seed_cascade_and_curate_one(ocx, fake_forge, unique_repo, tmp_path)
 
-    report = announce_json(ocx, fake_forge, *args, "--tags-from-registry")
+    report = announce_json(ocx, fake_forge, *args, "--tags-from-registry", package)
 
     tags = committed_root(fake_forge, package)["tags"]
     assert not [tag for tag in tags if tag.startswith("__ocx.keep.")], (
@@ -768,13 +775,13 @@ def test_announce_tags_from_registry_never_drops_a_committed_tag(
     package = f"acme/{unique_repo}"
     seed_empty_root(fake_forge, package, f"oci://{ocx.registry}/{unique_repo}")
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
-    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
 
     # A second package pushed into the same repo moves the registry on without
     # removing 1.0.0 from the committed root's claim.
     make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
-    announce_json(ocx, fake_forge, *args, "--tags-from-registry")
+    announce_json(ocx, fake_forge, *args, "--tags-from-registry", package)
 
     tags = committed_root(fake_forge, package)["tags"]
     assert "1.0.0" in tags, "the already-committed tag is never dropped by a registry-sourced run"
@@ -788,10 +795,10 @@ def test_announce_tags_from_registry_keeps_a_yank_marker(
     keeps its marker. This is what makes the additive union safe to re-run — a
     dropped tag would come back, a yanked one stays yanked."""
     package, args = _seed_cascade_and_curate_one(ocx, fake_forge, unique_repo, tmp_path)
-    announce_json(ocx, fake_forge, *args, "--yank", "1.2.3", "--yank-reason", "bad build", "--refresh")
+    announce_json(ocx, fake_forge, *args, "--yank", "1.2.3", "--yank-reason", "bad build", "--refresh", package)
     assert committed_root(fake_forge, package)["tags"]["1.2.3"]["yanked"]["reason"] == "bad build"
 
-    announce_json(ocx, fake_forge, *args, "--tags-from-registry")
+    announce_json(ocx, fake_forge, *args, "--tags-from-registry", package)
 
     yanked = committed_root(fake_forge, package)["tags"]["1.2.3"].get("yanked")
     assert yanked is not None, "a registry-sourced re-observe must not clear the yank marker"
@@ -832,12 +839,12 @@ def test_announce_after_its_pull_request_squash_merges_rebuilds_from_the_base(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
     _squash_merge_the_announce(fake_forge, package)
 
-    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0", package)
 
     branch = branch_name(package)
     assert fake_forge.commit_parent("forkuser", "index", branch) == fake_forge.branch_head(
@@ -872,9 +879,9 @@ def test_announce_rebuilds_a_stale_branch_when_the_base_changes_its_own_root(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
 
     # Migrate THIS package's root shape on main, the way ocx-sh/index#740 added
     # `owners[]`: every non-`tags` key stays, `owners` is inserted ahead of
@@ -889,7 +896,7 @@ def test_announce_rebuilds_a_stale_branch_when_the_base_changes_its_own_root(
 
     tags_file = tmp_path / "tags.txt"
     tags_file.write_text("2.0.0")
-    second = announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
+    second = announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file), package)
 
     assert second["status"] == "updated"
     assert second["pull_request_number"] == first["pull_request_number"], "the open pull request must be reused"
@@ -929,9 +936,9 @@ def test_announce_refuses_an_unchanged_run_whose_open_pull_request_conflicts(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
     branch = branch_name(package)
     head_before = fake_forge.branch_head("forkuser", "index", branch)
 
@@ -954,7 +961,7 @@ def test_announce_refuses_an_unchanged_run_whose_open_pull_request_conflicts(
         INDEX_OWNER, INDEX_REPO, {f"p/{package}.json": (json.dumps(diverged_root, indent=2) + "\n").encode()}
     )
 
-    result = announce(ocx, fake_forge, *args, "--refresh", check=False)
+    result = announce(ocx, fake_forge, *args, "--refresh", package, check=False)
 
     assert result.returncode == 65, f"expected a data error, got {result.returncode}"
     assert branch in result.stderr, "the stderr must name the branch a human has to clear"
@@ -980,16 +987,16 @@ def test_announce_rebuilds_a_stale_branch_once_then_reports_unchanged(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
     branch = branch_name(package)
 
     # An unrelated commit lands on the index base, so the branch is `Diverged`
     # from it — with its pull request still open and untouched by the move.
     fake_forge.seed_root(INDEX_OWNER, INDEX_REPO, "p/other/package.json", {"tags": {}})
 
-    second = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    second = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
     assert second["status"] == "updated", "the Stale branch must rebuild onto the moved base"
     assert second["pull_request_number"] == first["pull_request_number"]
     assert fake_forge.commit_parent("forkuser", "index", branch) == fake_forge.branch_head(
@@ -998,7 +1005,7 @@ def test_announce_rebuilds_a_stale_branch_once_then_reports_unchanged(
     assert list(committed_root(fake_forge, package)["tags"]) == ["1.0.0"]
 
     head_after_rebuild = fake_forge.branch_head("forkuser", "index", branch)
-    third = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    third = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
 
     assert third["status"] == "unchanged", "once ahead of main, a repeat run must not rebuild again"
     assert third["pull_request_number"] == first["pull_request_number"]
@@ -1024,9 +1031,9 @@ def test_announce_unchanged_stale_branch_with_a_mergeable_pull_request_reports_i
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
     branch = branch_name(package)
     head_before = fake_forge.branch_head("forkuser", "index", branch)
 
@@ -1034,7 +1041,7 @@ def test_announce_unchanged_stale_branch_with_a_mergeable_pull_request_reports_i
     assert committed_bytes is not None
     fake_forge.seed_files(INDEX_OWNER, INDEX_REPO, {f"p/{package}.json": committed_bytes})
 
-    second = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    second = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
 
     assert second["status"] == "unchanged"
     assert second["pull_request_number"] == first["pull_request_number"]
@@ -1062,9 +1069,9 @@ def test_announce_stale_branch_reset_is_not_subject_to_the_fast_forward_race_kno
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
 
     base_root = json.loads(fake_forge.read_file(INDEX_OWNER, INDEX_REPO, f"p/{package}.json", branch="main"))
     shaped_root = {
@@ -1081,7 +1088,7 @@ def test_announce_stale_branch_reset_is_not_subject_to_the_fast_forward_race_kno
 
     tags_file = tmp_path / "tags.txt"
     tags_file.write_text("2.0.0")
-    report = announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
+    report = announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file), package)
 
     assert f"forkuser/index/{branch}" in fake_forge.concurrent_ref_advance, (
         "documents the known limitation: a Reset commit never consumes this knob"
@@ -1115,9 +1122,9 @@ def test_announce_keeps_accumulated_tags_when_the_base_moves_under_its_open_pull
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
 
     # An unrelated commit lands on the index base, so the branch is now
     # `diverged` from it — with its pull request still open.
@@ -1125,7 +1132,7 @@ def test_announce_keeps_accumulated_tags_when_the_base_moves_under_its_open_pull
 
     tags_file = tmp_path / "tags.txt"
     tags_file.write_text("2.0.0")
-    announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
+    announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file), package)
 
     assert fake_forge.commit_parent("forkuser", "index", branch_name(package)) == fake_forge.branch_head(
         INDEX_OWNER, INDEX_REPO, "main"
@@ -1141,9 +1148,9 @@ def test_announce_refresh_reobserves_and_updates_a_moved_digest(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
     content_before = committed_root(fake_forge, package)["tags"]["1.0.0"]["content"]
 
     # Move the tag: re-push it with a new build (a fresh random marker, per
@@ -1154,7 +1161,7 @@ def test_announce_refresh_reobserves_and_updates_a_moved_digest(
     second_build.mkdir()
     make_package(ocx, unique_repo, "1.0.0", second_build, cascade=False)
 
-    report = announce_json(ocx, fake_forge, *args, "--refresh")
+    report = announce_json(ocx, fake_forge, *args, "--refresh", package)
     assert report["status"] == "updated", "a moved digest must not short-circuit as unchanged"
     content_after = committed_root(fake_forge, package)["tags"]["1.0.0"]["content"]
     assert content_after != content_before
@@ -1171,14 +1178,14 @@ def test_announce_yank_and_unyank_apply_to_curated_tags(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--tags", "1.0.0", "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    announce_json(ocx, fake_forge, *args)
-    announce_json(ocx, fake_forge, *args, "--yank", "1.0.0", "--yank-reason", "critical security issue")
+    announce_json(ocx, fake_forge, *args, package)
+    announce_json(ocx, fake_forge, *args, "--yank", "1.0.0", "--yank-reason", "critical security issue", package)
     yanked = committed_root(fake_forge, package)["tags"]["1.0.0"]["yanked"]
     assert yanked["reason"] == "critical security issue"
 
-    announce_json(ocx, fake_forge, *args, "--unyank", "1.0.0")
+    announce_json(ocx, fake_forge, *args, "--unyank", "1.0.0", package)
     assert "yanked" not in committed_root(fake_forge, package)["tags"]["1.0.0"]
 
 
@@ -1194,8 +1201,6 @@ def test_announce_yank_and_unyank_same_tag_errors(
     result = announce(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--yank",
@@ -1208,6 +1213,7 @@ def test_announce_yank_and_unyank_same_tag_errors(
         "forkuser/index",
         "--index-repo",
         INDEX_FULL,
+        package,
         check=False,
     )
     assert result.returncode != 0
@@ -1230,10 +1236,10 @@ def test_announce_fork_reused_across_runs_without_duplicate_creation(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
-    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0")
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
+    announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0", package)
 
     assert fake_forge.request_count("POST", "/repos/ocx-sh/index/forks") == 1
 
@@ -1247,10 +1253,10 @@ def test_announce_pull_request_422_reuses_existing_pr_without_duplicate(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0")
-    second = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0")
+    first = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0", package)
+    second = announce_json(ocx, fake_forge, *args, "--tags", "1.0.0,2.0.0", package)
 
     assert second["status"] == "updated"
     assert first["pull_request_number"] == second["pull_request_number"], "the same PR must be reused, not duplicated"
@@ -1271,14 +1277,13 @@ def test_announce_renamed_fork_resolves_via_response_body(
     report = announce_json(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--fork",
         "forkuser/index",
         "--index-repo",
         INDEX_FULL,
+        package,
     )
     assert report["status"] == "updated"
     assert report["fork"] == "forkuser/grimoire-index", "endpoints must rebuild from the response full_name"
@@ -1298,14 +1303,13 @@ def test_announce_parent_mismatch_fork_is_refused(
     result = announce(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--fork",
         "forkuser/index",
         "--index-repo",
         INDEX_FULL,
+        package,
         check=False,
     )
     assert result.returncode != 0
@@ -1329,14 +1333,13 @@ def test_announce_explicit_target_owner_fork_threads_organization(
     report = announce_json(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--fork",
         "ocx-contrib/index",
         "--index-repo",
         INDEX_FULL,
+        package,
     )
     assert report["status"] == "updated"
     assert report["fork"] == "ocx-contrib/index"
@@ -1363,14 +1366,13 @@ def test_announce_fork_readiness_pending_then_ready_succeeds(
     report = announce_json(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--fork",
         "forkuser/index",
         "--index-repo",
         INDEX_FULL,
+        package,
     )
     assert report["status"] == "updated"
     # Load-bearing: success alone would also be reported if the poll never ran,
@@ -1414,14 +1416,13 @@ def test_announce_fork_readiness_unresolvable_keeps_retrying(
             "json",
             "package",
             "announce",
-            "--package",
-            package,
             "--tags",
             "1.0.0",
             "--fork",
             "forkuser/index",
             "--index-repo",
             INDEX_FULL,
+            package,
         ],
         env=env,
         stdout=subprocess.PIPE,
@@ -1464,14 +1465,13 @@ def test_announce_forge_redirect_is_not_followed(
     result = announce(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--fork",
         "forkuser/index",
         "--index-repo",
         INDEX_FULL,
+        package,
         check=False,
     )
     assert result.returncode != 0, "a 3xx from the forge must not resolve to success"
@@ -1502,14 +1502,13 @@ def test_announce_fresh_fork_first_request_404_race_retry_fires(
     report = announce_json(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--fork",
         "forkuser/index",
         "--index-repo",
         INDEX_FULL,
+        package,
     )
     assert report["status"] == "updated"
     base_tree_reads = [
@@ -1536,14 +1535,13 @@ def test_announce_fresh_fork_tree_404_race_retry_fires(
     report = announce_json(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--fork",
         "forkuser/index",
         "--index-repo",
         INDEX_FULL,
+        package,
     )
     assert report["status"] == "updated"
     assert fake_forge.request_count("POST", "/repos/forkuser/index/git/trees") == 2, "exactly one retry must fire"
@@ -1568,14 +1566,13 @@ def test_announce_token_never_leaks_to_stdout_stderr_or_forge_request_log(
     result = announce(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--fork",
         "forkuser/index",
         "--index-repo",
         INDEX_FULL,
+        package,
     )
     assert TOKEN not in result.stdout
     assert TOKEN not in result.stderr
@@ -1609,12 +1606,11 @@ def test_announce_ssrf_forbidden_repository_refused_before_any_registry_call(
     result = announce(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--out",
         str(tmp_path / "out"),
+        package,
         check=False,
     )
     assert result.returncode == 78, f"expected ConfigError (78), got {result.returncode}: {result.stderr}"
@@ -1649,12 +1645,11 @@ def test_announce_ssrf_guard_active_permits_cidr_trusted_ip_literal_registry(
     report = announce_json(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--out",
         str(tmp_path / "out"),
+        package,
         extra_env={"OCX_INSECURE_REGISTRIES": f"{ocx.registry},127.0.0.1:{port}"},
     )
     assert report["status"] == "updated"
@@ -1686,7 +1681,7 @@ def test_announce_direct_commits_the_branch_to_the_index_repo_and_opens_a_pull_r
     assert main_before is not None, "the seeded index root must give main a head to compare against"
 
     report = announce_json(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--index-repo", INDEX_FULL
+        ocx, fake_forge, "--tags", "1.0.0", "--index-repo", INDEX_FULL, package
     )
 
     assert report["status"] == "updated"
@@ -1729,7 +1724,7 @@ def test_announce_direct_without_push_access_fails_closed_naming_repo_and_permis
     fake_forge.no_push_access.add(INDEX_FULL)
 
     result = announce(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--index-repo", INDEX_FULL, check=False
+        ocx, fake_forge, "--tags", "1.0.0", "--index-repo", INDEX_FULL, package, check=False
     )
 
     assert result.returncode == 80, f"expected AuthError (80), got {result.returncode}: {result.stderr}"
@@ -1752,13 +1747,187 @@ def test_announce_requires_the_credential_for_every_mode_that_writes(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    shared = ["--package", package, "--tags", "1.0.0", "--index-repo", INDEX_FULL]
+    shared = ["--tags", "1.0.0", "--index-repo", INDEX_FULL]
 
-    tokenless_direct = announce(ocx, fake_forge, *shared, token=None, check=False)
+    tokenless_direct = announce(ocx, fake_forge, *shared, package, token=None, check=False)
     assert tokenless_direct.returncode == 80, (
         f"the fork-free path writes, so it needs the credential: {tokenless_direct.stderr}"
     )
     assert "OCX_ANNOUNCE_TOKEN" in tokenless_direct.stderr
 
-    tokenless_out = announce(ocx, fake_forge, *shared, "--out", str(tmp_path / "out"), token=None, check=False)
+    tokenless_out = announce(ocx, fake_forge, *shared, "--out", str(tmp_path / "out"), package, token=None, check=False)
     assert tokenless_out.returncode == 0, f"--out writes nothing remote and must still run: {tokenless_out.stderr}"
+    # E-27 / C-061: the unauthenticated rung is REPORTED, not only tolerated.
+    # `require_credential` short-circuits on `--out` before it reads the
+    # credential, so this run resolves an empty `ForgeCredentials` and must say
+    # so. Nothing else in the suite observes that rung: the two assertions above
+    # are satisfied by the old direct-env read and by the ladder alike, which is
+    # why they cannot carry the C-063 migration on their own.
+    assert json.loads(tokenless_out.stdout)["credential_kind"] == "none", (
+        f"an --out run with no credential reports the rung that answered: {tokenless_out.stdout}"
+    )
+
+
+def test_an_empty_ocx_variable_falls_through_to_the_job_token_rung(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C-063 / DX-83: `OCX_ANNOUNCE_TOKEN=` inside a GitLab job under
+    `--transport git` resolves to `CI_JOB_TOKEN`, and the run authenticates as
+    the job.
+
+    The assertion that observes the ladder. Its sibling above --
+    `credential_kind == "none"` on a tokenless `--out` run -- does not: both the
+    ladder and the direct `std::env::var(OCX_ANNOUNCE_TOKEN)` read it replaced
+    report `none` for a run that has no credential at all, so that assertion
+    stays green under a revert. Only a run where a *different* rung answers can
+    tell the two shapes apart, and C-063's exit-80 refusal precedes every
+    network call, which is what makes the refusal itself observable here.
+
+    The state protected is a wrapper exporting an empty `OCX_ANNOUNCE_TOKEN`: it
+    must not win rung 1 and suppress a perfectly good `CI_JOB_TOKEN`, leaving a
+    CI job silently unauthenticated. `--transport git` and `GITLAB_CI` are the
+    other two conjuncts rung 2 is guarded by, so all three are set.
+
+    This scenario lives here, in the credential section, rather than beside the
+    GitLab-shaped ones: what it exercises is the shared ladder and the shared
+    exit-80 refusal, and the forge only supplies the environment in which the
+    second rung is reachable at all.
+
+    Reverted (a direct `OCX_ANNOUNCE_TOKEN` read at the CLI): exit 80 naming the
+    variable, and no request ever reaches the forge -- every assertion below
+    reds.
+    Repointed: the job token authenticates the reads, and the run fails later,
+    at the git clone, on a project the fixture's git-over-HTTP half does not
+    serve. That exit code belongs to the git read, so it is asserted only as
+    "not the credential refusal".
+
+    Also DX-67's only control: the forge read the last assertion inspects
+    happens downstream of `kind.client(...)`, so deleting announce's
+    `probe_git_binary` gate makes `ForgeKind::client` return `GitUnavailable`
+    (69) before any forge request and the captured header list is empty. Do not
+    narrow this test to the credential ladder alone.
+
+    Also C-064's `!push_is_job_token()` conjunct: this run is exactly the state
+    where the push half IS the pipeline's own job token, so the notice must not
+    fire. Mutation: drop that conjunct from the guard in `package_announce.rs`;
+    the `PUSH_IDENTITY_NEEDLE` assertion below reds.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    package = f"acme/{unique_repo}"
+    seed_empty_root(fake_forge, package, f"oci://{ocx.registry}/{unique_repo}")
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+
+    result = announce(
+        ocx,
+        fake_forge,
+        "--transport",
+        "git",
+        "--index-repo",
+        INDEX_FULL,
+        "--tags",
+        "1.0.0",
+        package,
+        forge="gitlab",
+        token="",
+        extra_env={"GITLAB_CI": "true", "CI_JOB_TOKEN": JOB_TOKEN},
+        check=False,
+    )
+
+    assert result.returncode != 80, (
+        f"an empty ocx variable must not refuse a job that has a CI_JOB_TOKEN: {result.stderr}"
+    )
+    # C-064's `!push_is_job_token()` conjunct. Asserted BEFORE the remedy
+    # assertion below, and the order is the point: `PUSH_IDENTITY_NOTICE` also
+    # spells `OCX_ANNOUNCE_TOKEN`, so dropping the conjunct reds that one too --
+    # with "the run authenticated, so nothing may name the missing-credential
+    # remedy", which is the wrong diagnosis for a notice that fired one conjunct
+    # too wide. Measured, not assumed: the mutation was run in both orders.
+    assert "not this job's CI_JOB_TOKEN" not in result.stderr, (
+        f"the push half IS this job's token here, so there is nothing to warn about: {result.stderr}"
+    )
+    assert "OCX_ANNOUNCE_TOKEN" not in result.stderr, (
+        f"the run authenticated, so nothing may name the missing-credential remedy: {result.stderr}"
+    )
+    # The positive half: not merely "past the gate" but "authenticated as the
+    # job". GitLab's job-token header carries the value only the ladder's second
+    # rung could have put there.
+    index_project_reads = fake_forge.auth_headers_for("GET", f"/projects/{quote(INDEX_FULL, safe='')}")
+    carried = [captured for captured in index_project_reads if captured.get("JOB-TOKEN") == [JOB_TOKEN]]
+    assert carried, (
+        f"the index read must carry the job token, which only rung 2 resolves: {index_project_reads}"
+    )
+
+
+# ── the `--package` deprecation window (C-062, S-034) ──────────────────────
+
+
+def test_announce_accepts_the_positional_package(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C-062: the positional is the canonical spelling, and a run that uses it
+    says nothing about the deprecation.
+
+    The negative half is what makes the sibling below discriminating. A notice
+    emitted unconditionally satisfies `"positional" in stderr` on the deprecated
+    form just as well, while telling every caller of the canonical form to
+    migrate to the form they are already using — a state no exit code shows.
+
+    Red at the stub: `selected_package` is `unimplemented!()`, so the process
+    panics before it reports (exit 101, empty stdout).
+    Mutation once implemented: warn unconditionally instead of only on the
+    `package_flag` arm; the stderr assertion reds.
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+
+    result = announce(ocx, fake_forge, "--tags", "1.0.0", "--out", str(tmp_path / "out"), package)
+
+    assert result.returncode == 0, f"the positional form is the canonical one: {result.stderr}"
+    assert json.loads(result.stdout)["package"] == package
+    assert "positional" not in result.stderr, (
+        f"the canonical spelling has nothing to warn about: {result.stderr}"
+    )
+
+
+def test_deprecated_package_flag_warns_once_on_stderr_only(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """S-034 / DX-69: `--package` still works, warns **once**, on stderr, and
+    leaves stdout a parseable JSON report.
+
+    The half of `announce_warning_never_reaches_stdout` that no Rust test can
+    reach: `Printer` writes the real streams and `Cell` exposes no text, so a
+    unit test observes neither channel. The mechanism is already proved in both
+    directions at `test_tag_reserved.py:131,137`, where a `ui().warn` lands on
+    stderr while `json.loads(result.stdout)` succeeds in the same run — this is
+    that shape, applied to the deprecation notice.
+
+    "Once" is the assertion a single process **can** carry: the merge of the two
+    arg ids happens at the head of `execute`, and moving it into an accessor
+    that `execute` calls at each of its reads would warn twice.
+
+    Red at the stub: `selected_package` is `unimplemented!()`, so the process
+    panics and stdout is not JSON at all.
+    Mutation once implemented: route the notice through `data.print_hint`
+    (the stdout halves red); merge the two ids in an accessor and call it at both
+    read sites (the count reds at 2).
+    """
+    make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
+    package = f"acme/{unique_repo}"
+    physical = f"oci://{ocx.registry}/{unique_repo}"
+    seed_empty_root(fake_forge, package, physical)
+    configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
+
+    result = announce(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--out", str(tmp_path / "out"))
+
+    assert result.returncode == 0, f"the deprecated spelling still executes: {result.stderr}"
+    report = json.loads(result.stdout)
+    assert report["package"] == package, "stdout carries the report, and only the report"
+    assert "--package" not in result.stdout, f"the notice must not reach stdout: {result.stdout}"
+    assert result.stderr.count("positional") == 1, (
+        f"the notice fires exactly once, naming the form that replaces the flag: {result.stderr}"
+    )
+    assert "0.7" in result.stderr, f"the notice names the release that removes the flag: {result.stderr}"

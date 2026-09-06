@@ -70,7 +70,7 @@ def test_fork_announce_commits_and_opens_a_merge_request(
     package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
 
     report = announce_json(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab"
+        ocx, fake_forge, "--tags", "1.0.0", "--fork", FORK_FULL, package, forge="gitlab"
     )
 
     assert report["status"] == "updated"
@@ -98,9 +98,9 @@ def test_both_forges_commit_the_same_root(
     """
     package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
 
-    announce(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", f"gh-fork/{INDEX_REPO}")
+    announce(ocx, fake_forge, "--tags", "1.0.0", "--fork", f"gh-fork/{INDEX_REPO}", package)
     announce(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", f"gl-fork/{INDEX_REPO}", forge="gitlab"
+        ocx, fake_forge, "--tags", "1.0.0", "--fork", f"gl-fork/{INDEX_REPO}", package, forge="gitlab"
     )
 
     branch = branch_name(package)
@@ -119,10 +119,10 @@ def test_second_announce_accumulates_onto_the_live_branch(
     make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
 
     first = announce_json(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab"
+        ocx, fake_forge, "--tags", "1.0.0", "--fork", FORK_FULL, package, forge="gitlab"
     )
     second = announce_json(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0,2.0.0", "--fork", FORK_FULL, forge="gitlab"
+        ocx, fake_forge, "--tags", "1.0.0,2.0.0", "--fork", FORK_FULL, package, forge="gitlab"
     )
 
     assert second["pull_request_number"] == first["pull_request_number"], "the open merge request must be reused"
@@ -136,12 +136,12 @@ def test_an_unchanged_rerun_commits_nothing(
     """C6: a run that moves nothing makes no commit and opens no second merge
     request. The branch head is the evidence — it must not advance."""
     package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
-    announce(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab")
+    announce(ocx, fake_forge, "--tags", "1.0.0", "--fork", FORK_FULL, package, forge="gitlab")
     head_before = fake_forge.branch_head(FORK_NAMESPACE, INDEX_REPO, branch_name(package))
     assert head_before is not None, "precondition: the first announce must have committed"
 
     report = announce_json(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab"
+        ocx, fake_forge, "--tags", "1.0.0", "--fork", FORK_FULL, package, forge="gitlab"
     )
 
     assert report["status"] == "unchanged"
@@ -166,7 +166,7 @@ def test_a_spent_branch_is_rebuilt_on_the_upstream_head_not_the_forks_own(
     else so the two cannot be confused.
     """
     package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
-    announce(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab")
+    announce(ocx, fake_forge, "--tags", "1.0.0", "--fork", FORK_FULL, package, forge="gitlab")
 
     # The merge lands upstream, and the announce branch keeps the now-merged
     # commits: from the branch's side this is indistinguishable from unmerged
@@ -184,7 +184,7 @@ def test_a_spent_branch_is_rebuilt_on_the_upstream_head_not_the_forks_own(
 
     make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     announce(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0,2.0.0", "--fork", FORK_FULL, forge="gitlab"
+        ocx, fake_forge, "--tags", "1.0.0,2.0.0", "--fork", FORK_FULL, package, forge="gitlab"
     )
 
     parent = fake_forge.commit_parent(FORK_NAMESPACE, INDEX_REPO, branch_name(package))
@@ -215,7 +215,7 @@ def test_stale_branch_rebuilds_onto_the_upstream_head_when_its_root_changes_shap
     make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
 
     first = announce_json(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab"
+        ocx, fake_forge, "--tags", "1.0.0", "--fork", FORK_FULL, package, forge="gitlab"
     )
 
     base_root = json.loads(fake_forge.read_file(INDEX_OWNER, INDEX_REPO, f"p/{package}.json", branch="main"))
@@ -229,7 +229,7 @@ def test_stale_branch_rebuilds_onto_the_upstream_head_when_its_root_changes_shap
     tags_file = tmp_path / "tags.txt"
     tags_file.write_text("2.0.0")
     second = announce_json(
-        ocx, fake_forge, "--package", package, "--tags-file", str(tags_file), "--fork", FORK_FULL, forge="gitlab"
+        ocx, fake_forge, "--tags-file", str(tags_file), "--fork", FORK_FULL, package, forge="gitlab"
     )
 
     assert second["status"] == "updated"
@@ -252,7 +252,7 @@ def test_announce_refuses_an_unchanged_run_whose_open_merge_request_conflicts(
     package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
 
     first = announce_json(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab"
+        ocx, fake_forge, "--tags", "1.0.0", "--fork", FORK_FULL, package, forge="gitlab"
     )
     branch = branch_name(package)
     head_before = fake_forge.branch_head(FORK_NAMESPACE, INDEX_REPO, branch)
@@ -274,7 +274,7 @@ def test_announce_refuses_an_unchanged_run_whose_open_merge_request_conflicts(
     )
 
     result = announce(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab", check=False
+        ocx, fake_forge, "--tags", "1.0.0", "--fork", FORK_FULL, package, forge="gitlab", check=False
     )
 
     assert result.returncode == 65, f"expected a data error, got {result.returncode}"
@@ -312,7 +312,7 @@ def test_a_concurrent_announce_is_unioned_not_clobbered(
     package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
     make_package(ocx, unique_repo, "2.0.0", tmp_path, cascade=False)
     make_package(ocx, unique_repo, "3.0.0", tmp_path, cascade=False)
-    announce(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab")
+    announce(ocx, fake_forge, "--tags", "1.0.0", "--fork", FORK_FULL, package, forge="gitlab")
 
     # The winner adds 2.0.0 with a placeholder digest, so the loser's retry can
     # be shown to genuinely RE-OBSERVE it rather than copy it forward.
@@ -328,12 +328,11 @@ def test_a_concurrent_announce_is_unioned_not_clobbered(
     report = announce_json(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags-file",
         str(tags_file),
         "--fork",
         FORK_FULL,
+        package,
         forge="gitlab",
     )
 
@@ -377,14 +376,13 @@ def test_a_nested_group_index_is_addressed_as_one_segment(
     report = announce_json(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--index-repo",
         nested_index,
         "--fork",
         nested_fork,
+        package,
         forge="gitlab",
     )
 
@@ -412,14 +410,13 @@ def test_a_self_hosted_host_requires_an_explicit_forge(
     refused = announce(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--index-repo",
         "git.example.com/acme/index",
         "--tags",
         "1.0.0",
         "--out",
         str(out_dir),
+        package,
         check=False,
     )
     assert refused.returncode != 0, "an undeclared self-hosted forge must be refused"
@@ -430,14 +427,13 @@ def test_a_self_hosted_host_requires_an_explicit_forge(
     declared = announce(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--index-repo",
         "git.example.com/acme/index",
         "--tags",
         "1.0.0",
         "--out",
         str(out_dir),
+        package,
         check=False,
         forge="gitlab",
     )
@@ -458,7 +454,7 @@ def test_a_fork_whose_parent_is_a_stranger_is_refused(
     fake_forge.gitlab_fork_parent_override = "stranger/index"
 
     result = announce(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, check=False, forge="gitlab"
+        ocx, fake_forge, "--tags", "1.0.0", "--fork", FORK_FULL, package, check=False, forge="gitlab"
     )
 
     assert result.returncode != 0, "a stranger project must not become a push target"
@@ -476,7 +472,7 @@ def test_a_self_fork_is_refused_by_name(
     package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
 
     result = announce(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", INDEX_FULL, check=False, forge="gitlab"
+        ocx, fake_forge, "--tags", "1.0.0", "--fork", INDEX_FULL, package, check=False, forge="gitlab"
     )
 
     assert result.returncode != 0
@@ -491,7 +487,7 @@ def test_the_fork_free_path_probes_push_access_before_writing(
     package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
     fake_forge.no_push_access.add(INDEX_FULL)
 
-    result = announce(ocx, fake_forge, "--package", package, "--tags", "1.0.0", check=False, forge="gitlab")
+    result = announce(ocx, fake_forge, "--tags", "1.0.0", package, check=False, forge="gitlab")
 
     assert result.returncode != 0
     assert INDEX_FULL in result.stderr, "the refusal must name the repository"
@@ -512,7 +508,7 @@ def test_the_credential_never_reaches_the_output(
     package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
 
     result = announce(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab"
+        ocx, fake_forge, "--tags", "1.0.0", "--fork", FORK_FULL, package, forge="gitlab"
     )
 
     assert TOKEN not in result.stdout + result.stderr, "the credential must not be printed"
@@ -536,7 +532,7 @@ def test_a_malformed_compare_is_refused_not_read_as_no_commits(
     refusal from a rebuild that then failed for another reason.
     """
     package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
-    announce(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab")
+    announce(ocx, fake_forge, "--tags", "1.0.0", "--fork", FORK_FULL, package, forge="gitlab")
     head_before = fake_forge.branch_head(FORK_NAMESPACE, INDEX_REPO, branch_name(package))
     assert head_before is not None, "the first announce must have created the branch"
 
@@ -544,12 +540,11 @@ def test_a_malformed_compare_is_refused_not_read_as_no_commits(
     result = announce(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0,2.0.0",
         "--fork",
         FORK_FULL,
+        package,
         check=False,
         forge="gitlab",
     )
@@ -573,7 +568,7 @@ def test_the_committed_root_is_read_at_a_pinned_commit(
     newer commit — so the concurrent announce is silently overwritten.
     """
     package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
-    announce(ocx, fake_forge, "--package", package, "--tags", "1.0.0", "--fork", FORK_FULL, forge="gitlab")
+    announce(ocx, fake_forge, "--tags", "1.0.0", "--fork", FORK_FULL, package, forge="gitlab")
 
     file_reads = [raw for method, raw in fake_forge.raw_requests if method == "GET" and "/repository/files/" in raw]
     assert file_reads, "the root must have been read over the API"
@@ -596,14 +591,13 @@ def test_a_fork_on_another_host_is_refused(
     result = announce(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--index-repo",
         "gitlab.example.com/acme/index",
         "--fork",
         "gitlab.com/forkuser/index",
+        package,
         check=False,
         forge="gitlab",
     )
@@ -629,14 +623,13 @@ def test_a_coordinate_whose_host_is_not_a_host_is_refused(
     refused = announce(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--index-repo",
         "gitlab.com@evil.example/acme/index",
         "--out",
         str(tmp_path / "out"),
+        package,
         check=False,
         forge="gitlab",
     )
@@ -645,14 +638,13 @@ def test_a_coordinate_whose_host_is_not_a_host_is_refused(
     accepted = announce(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--index-repo",
         f"gitlab.example.com/{INDEX_FULL}",
         "--out",
         str(tmp_path / "out2"),
+        package,
         check=False,
         forge="gitlab",
     )
@@ -671,14 +663,13 @@ def test_a_nested_namespace_index_is_refused_on_github(
     result = announce(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--index-repo",
         "acme/platform/index",
         "--out",
         str(tmp_path / "out"),
+        package,
         check=False,
     )
 
@@ -705,12 +696,11 @@ def test_an_omitted_host_matches_the_canonical_one(
     report = announce_json(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--fork",
         f"github.com/{FORK_NAMESPACE}/{INDEX_REPO}",
+        package,
     )
 
     assert report["status"] == "updated"
@@ -731,12 +721,11 @@ def test_a_malformed_command_line_is_diagnosed_before_the_missing_credential(
     result = announce(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--index-repo",
         "git.example.com/acme/index",
+        package,
         token=None,
         check=False,
     )
@@ -746,7 +735,7 @@ def test_a_malformed_command_line_is_diagnosed_before_the_missing_credential(
 
     # ...and the credential check still fires when the command line is fine.
     missing_token = announce(
-        ocx, fake_forge, "--package", package, "--tags", "1.0.0", token=None, check=False
+        ocx, fake_forge, "--tags", "1.0.0", package, token=None, check=False
     )
     assert missing_token.returncode == 80, f"a missing credential is still 80, got {missing_token.returncode}"
 
@@ -764,14 +753,13 @@ def test_a_path_segment_that_could_retarget_a_request_is_refused(
     result = announce(
         ocx,
         fake_forge,
-        "--package",
-        package,
         "--tags",
         "1.0.0",
         "--index-repo",
         "acme?x=1/index",
         "--out",
         str(tmp_path / "out"),
+        package,
         check=False,
     )
 
@@ -779,3 +767,187 @@ def test_a_path_segment_that_could_retarget_a_request_is_refused(
     assert not any("acme?x=1" in path for _, path in fake_forge.raw_requests), (
         "the coordinate must be refused before it reaches the wire"
     )
+
+
+# -- C-064 / S-027: the pre-existing-token warning --------------------------
+
+#: A job token that is NOT `TOKEN`, so a run carrying both is unambiguously
+#: "the operator's own credential, inside a job that has its own".
+JOB_TOKEN = "glcbt_test_job_token_JOB_TOKEN_VALUE_1234567890"
+
+#: The phrase asserted on in every half below. Long enough to be the notice and
+#: nothing else, short enough to survive a rewording of the remedy clause.
+PUSH_IDENTITY_NEEDLE = "not this job's CI_JOB_TOKEN"
+
+#: A push credential that is neither `TOKEN` nor `JOB_TOKEN`, so a run carrying
+#: all three says unambiguously which one the operator nominated for the push.
+PUSH_TOKEN = "glpat_test_push_token_PUSH_TOKEN_VALUE_1234567890"
+
+#: `GitPushCredential::DEFAULT_USERNAME` -- the user half of the HTTP Basic pair
+#: `--transport git` sends, which GitLab reads the value of and ignores. Spelled
+#: here because it is the string this suite asserts must NOT reach stderr; the
+#: Rust-side pin that reads it off the constant is
+#: `options::forge_write::tests::the_push_identity_notice_names_no_person`.
+PUSH_BASIC_USERNAME = "gitlab-ci-token"
+
+
+def _git_transport_run(
+    ocx: OcxRunner, fake_forge: FakeForge, package: str, ci_env: dict[str, str]
+):
+    """A `--transport git` announce carrying `ci_env`, run for its stderr.
+
+    The run is expected to FAIL: nothing registers the index project with the
+    fixture's git-over-HTTP half, so the first clone the transport attempts has
+    nothing to fetch. That is the point -- C-064 says the line is emitted
+    *before the write*, and a run that never reached a write is the cheapest
+    proof of it. The exit code is deliberately not asserted: it belongs to
+    whichever git read failed, and pinning it here would couple this scenario to
+    WP-17's end-to-end transport work.
+    """
+    return announce(
+        ocx,
+        fake_forge,
+        "--transport",
+        "git",
+        "--tags",
+        "1.0.0",
+        package,
+        forge="gitlab",
+        extra_env=ci_env,
+        check=False,
+    )
+
+
+def test_git_transport_warns_that_the_operator_token_authors_the_request(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C-064 / S-027, the positive half: inside `GITLAB_CI`, with a non-job
+    `OCX_ANNOUNCE_TOKEN` and no `OCX_ANNOUNCE_GIT_TOKEN`, one stderr line names
+    the push credential kind and the variable the secret came from.
+
+    The state is the one C-063's push ladder produces silently: rung 1 finds no
+    `OCX_ANNOUNCE_GIT_TOKEN`, so rung 2 hands the push half a copy of the API
+    credential the operator set for the REST calls, and the merge request is
+    authored by that token's owner instead of by the pipeline the operator
+    assumed would sign it. No exit code shows that.
+
+    DX-86: it names the credential, never a person. The one identity-shaped
+    string ocx holds here is the HTTP Basic username, which in this exact state
+    is the constant `gitlab-ci-token` -- it names the pipeline, the very party
+    this notice says did NOT author the request. So the rendered line is
+    asserted to carry the variable and not the username.
+
+    Mutation: delete the `self.forge.warn_push_identity(...)` call in
+    `package_announce.rs`; every stderr assertion below reds while the claim
+    twin in `test_package_claim.py` stays green.
+    """
+    package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
+
+    result = _git_transport_run(
+        ocx, fake_forge, package, {"GITLAB_CI": "true", "CI_JOB_TOKEN": JOB_TOKEN}
+    )
+
+    assert result.stderr.count(PUSH_IDENTITY_NEEDLE) == 1, (
+        f"exactly one notice, naming the credential the push does NOT use: {result.stderr}"
+    )
+    assert "push credential kind token" in result.stderr, (
+        f"the notice names the push credential kind the report also carries: {result.stderr}"
+    )
+    assert "OCX_ANNOUNCE_GIT_TOKEN" in result.stderr, (
+        f"the notice names the variable that changes the outcome: {result.stderr}"
+    )
+    assert "OCX_ANNOUNCE_TOKEN" in result.stderr, (
+        f"the notice names the variable the push secret came from: {result.stderr}"
+    )
+    # DX-86: the identity ocx cannot observe is said to be unobservable, never
+    # replaced by the Basic username -- which in this state names the pipeline.
+    assert PUSH_BASIC_USERNAME not in result.stderr, (
+        f"the HTTP Basic username names the pipeline, the one party this notice "
+        f"says did not author the request: {result.stderr}"
+    )
+    assert "cannot name" in result.stderr, (
+        f"ocx must say it cannot identify the token's owner: {result.stderr}"
+    )
+    # X6: the notice talks about credentials and must carry neither of them.
+    assert TOKEN not in result.stderr and JOB_TOKEN not in result.stderr, (
+        f"no credential value may reach stderr: {result.stderr}"
+    )
+
+
+def test_the_same_git_transport_run_outside_gitlab_ci_says_nothing(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C-064 / S-027, the negative half: the identical run without `GITLAB_CI`
+    emits nothing.
+
+    This is the half that makes the pair discriminating. `OCX_ANNOUNCE_TOKEN`
+    reaching the push half is the ordinary, correct outcome outside a CI job --
+    there is no job token it displaced, and the operator is authenticating as
+    themselves on purpose. A notice that fired here would satisfy the sibling
+    above just as well while telling every local operator to fix a run behaving
+    exactly as asked.
+
+    `CI_JOB_TOKEN` stays set, so `GITLAB_CI` is the ONLY difference between the
+    two runs and the assertion cannot be satisfied by the two environments
+    differing somewhere else.
+
+    Mutation: drop the `credentials.in_gitlab_ci()` conjunct from the guard in
+    `options/forge_write.rs` -- this assertion reds while the sibling above
+    stays green.
+    """
+    package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
+
+    result = _git_transport_run(ocx, fake_forge, package, {"CI_JOB_TOKEN": JOB_TOKEN})
+
+    assert PUSH_IDENTITY_NEEDLE not in result.stderr, (
+        f"outside a GitLab job there is no displaced job token to warn about: {result.stderr}"
+    )
+    assert "push credential kind" not in result.stderr, (
+        f"the notice must not fire outside GITLAB_CI at all: {result.stderr}"
+    )
+
+
+def test_a_nominated_push_credential_inside_gitlab_ci_says_nothing(
+    ocx: OcxRunner, fake_forge: FakeForge, unique_repo: str, tmp_path: Path
+) -> None:
+    """C-064 / S-027, the third half: the identical in-CI run emits nothing once
+    the operator has named the push credential with `OCX_ANNOUNCE_GIT_TOKEN`.
+
+    This is what makes the `!push_is_explicit()` conjunct falsifiable. Every
+    other conjunct of the guard holds here -- `--transport git`, `GITLAB_CI`, a
+    push credential that is not this job's token -- so the only thing keeping
+    the notice quiet is rung 1 of C-063's push ladder having answered. An
+    operator who nominated a push identity chose it, and being told about their
+    own choice is noise.
+
+    `PUSH_TOKEN` is a third distinct value, so the run cannot be read as "the
+    API credential leaked into the push half by another route": rung 1 is the
+    only rung that can produce it.
+
+    Mutation: drop the `!credentials.push_is_explicit()` conjunct from the guard
+    in `options/forge_write.rs` -- this assertion reds while the positive half
+    two tests up stays green.
+    """
+    package = _prepare(ocx, fake_forge, unique_repo, tmp_path)
+
+    result = _git_transport_run(
+        ocx,
+        fake_forge,
+        package,
+        {
+            "GITLAB_CI": "true",
+            "CI_JOB_TOKEN": JOB_TOKEN,
+            "OCX_ANNOUNCE_GIT_TOKEN": PUSH_TOKEN,
+        },
+    )
+
+    assert PUSH_IDENTITY_NEEDLE not in result.stderr, (
+        f"the operator nominated the push credential, so nothing was displaced: {result.stderr}"
+    )
+    assert "push credential kind" not in result.stderr, (
+        f"the notice must not fire once OCX_ANNOUNCE_GIT_TOKEN is set: {result.stderr}"
+    )
+    # X6: the run holds three credentials and may leak none of them.
+    assert not any(
+        secret in result.stderr for secret in (TOKEN, JOB_TOKEN, PUSH_TOKEN)
+    ), f"no credential value may reach stderr: {result.stderr}"

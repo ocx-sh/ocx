@@ -442,7 +442,7 @@ def test_j13_announce_tags_rejects_a_multi_package_run(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
     """One `--announce-tags` file holds one bare list of tag names, and
-    `announce --tags-file` takes one `--package`. Two packages in one
+    `announce --tags-file` takes one positional package. Two packages in one
     run would hand the follow-up a list it must attribute to a single
     package, so the flag is a usage error there — and nothing is written.
     """

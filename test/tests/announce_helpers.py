@@ -110,3 +110,58 @@ def committed_root(fake_forge: FakeForge, package: str, *, owner: str = "forkuse
     raw = fake_forge.read_file(owner, repo, f"p/{package}.json", branch=branch)
     assert raw is not None, f"no committed root found for {package} on {owner}/{repo}:{branch}"
     return json.loads(raw)
+
+
+def index_root_bytes(package: str, physical_repository: str, tags: dict[str, Any] | None = None) -> bytes:
+    """The committed index root `seed_empty_root` writes, as bytes.
+
+    Split out so the git-transport seeding route below writes byte-identical
+    content: `git_seed_files` commits real bytes into a real bare repository,
+    while `seed_root` inserts a value into the in-memory graph, and two
+    renderings of "the same" root would make a byte-exact comparison across the
+    two transports meaningless.
+    """
+    root = {"name": f"ocx.sh/{package}", "repository": physical_repository, "tags": tags or {}}
+    return (json.dumps(root, indent=2) + "\n").encode()
+
+
+def git_index_project(
+    fake_forge: FakeForge,
+    package: str,
+    physical_repository: str,
+    *,
+    tags: dict[str, Any] | None = None,
+) -> str:
+    """Register the index repository as a **git-transport** project and seed its
+    `main` with the claimed root at `p/<package>.json`. Returns the head's sha.
+
+    The git twin of `seed_empty_root`, and a separate function rather than a flag
+    on it: `seed_root` reaches `_reject_git_project_locked`, which raises
+    `GitFixtureError` for any project registered as a git route, so the REST
+    helper cannot be widened without breaking the REST callers that depend on it.
+    `git_seed_files` is the only seeding route on a git project.
+    """
+    fake_forge.git_create_project(INDEX_FULL)
+    return fake_forge.git_seed_files(
+        INDEX_FULL, "main", {f"p/{package}.json": index_root_bytes(package, physical_repository, tags)}
+    )
+
+
+def git_transport_env(shim: Any, home: Any, **extra: str) -> dict[str, str]:
+    """The per-invocation environment a `--transport git` run needs: the shim's
+    `PATH` and the fixture `HOME`, plus whichever credential or CI variables the
+    caller arms.
+
+    One builder rather than a literal per row, because `GITLAB_CI` and
+    `CI_JOB_TOKEN` are conjuncts of C-063's job-token rung: a row that spells the
+    dict by hand and forgets `GITLAB_CI` silently measures push-ladder rung 2
+    while reading as a job-token row, and `job_token_push_applies()` then reports
+    every capability check as `skipped`.
+
+    `shim` is a `git_shim.GitShim` and `home` a `git_http_fixture.FixtureHome`;
+    they are untyped here so this module keeps importing neither — it is shared
+    with four REST-only announce modules.
+    """
+    env = {"PATH": shim.child_path(), "HOME": str(home.path)}
+    env.update(extra)
+    return env
