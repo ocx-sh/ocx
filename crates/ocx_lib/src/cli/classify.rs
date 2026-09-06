@@ -107,6 +107,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::archive::Error as ArchiveError;
     use crate::auth::error::AuthError;
     use crate::ci::error::Error as CiError;
+    use crate::claim::ClaimError;
     use crate::cli::error::{MetadataResolutionError, UsageError};
     use crate::compression::error::Error as CompressionError;
     use crate::config::error::Error as ConfigError;
@@ -179,6 +180,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(UrlRejection);
     try_downcast!(ForgeError);
     try_downcast!(AnnounceError);
+    try_downcast!(ClaimError);
     try_downcast!(PackageManagerError);
     try_downcast!(PackageErrorKind);
     try_downcast!(DependencyError);
@@ -1335,5 +1337,86 @@ mod tests {
             source,
         });
         assert_eq!(classify(err), ExitCode::Unavailable);
+    }
+
+    // ── claim error classification (C-052 / C-071) ──────────────────────────
+
+    /// C-071 — every claim-owned exit code survives the `try_downcast!` ladder.
+    ///
+    /// Driven over a **boxed** `ClaimError` through `classify_error`, never over
+    /// `ClaimError::classify` directly: the impl tested in isolation is green in
+    /// both registration states, which is exactly the check that cannot tell
+    /// registration from its absence. `AnnounceError`'s own module-local tests are
+    /// that shape today, which is why this one is written here instead.
+    ///
+    /// **Two mutations, two halves.** Deleting `try_downcast!(ClaimError)` reds
+    /// the claim-owned rows — and, because `ClaimError::Forge` is
+    /// `#[error(transparent)]` and thiserror forwards `source()` past the wrapped
+    /// error, it reds the forge-derived row too. The plan's stated rationale ("the
+    /// forge-derived codes survive because `ForgeError` is separately registered")
+    /// is false under C-052's own design; the test is stronger than the plan
+    /// claimed, and the fix is emphatically **not** to make `Forge` non-transparent.
+    /// Replacing the arm with `Self::Forge(_) => None` reds only the last row,
+    /// which is what separates the two halves.
+    ///
+    /// `OutputWrite` deliberately carries `ErrorKind::Other`, not
+    /// `PermissionDenied`: this module's bare-`io::Error` walker special-cases
+    /// `PermissionDenied` → 77, so a fixture built from that kind would measure the
+    /// walker rather than the `OutputWrite` arm.
+    #[test]
+    fn claim_error_reaches_classify_error() {
+        use crate::claim::ClaimError;
+        use crate::forge::ForgeError;
+
+        let already_claimed = ClaimError::NamespaceAlreadyClaimed {
+            package: "acme/widget".to_string(),
+            path: "p/acme/widget.json".to_string(),
+            base_ref: "main".to_string(),
+        };
+        assert_eq!(
+            classify(already_claimed),
+            ExitCode::DataError,
+            "65 — go announce instead"
+        );
+
+        let unknown_owner = ClaimError::OwnerUnknown {
+            login: "nobody".to_string(),
+        };
+        assert_eq!(classify(unknown_owner), ExitCode::NotFound, "79 — no such account");
+
+        let bot = ClaimError::BotIdentity {
+            login: "dependabot[bot]".to_string(),
+        };
+        assert_eq!(classify(bot), ExitCode::UsageError, "64 — name a human owner");
+
+        let malformed = ClaimError::MalformedRepository {
+            value: "ghcr.io/acme/widget".to_string(),
+        };
+        assert_eq!(
+            classify(malformed),
+            ExitCode::UsageError,
+            "64 from ClaimError's own arm, not 65 from OciIndexError"
+        );
+
+        let write = ClaimError::OutputWrite {
+            path: "/out/p/acme/widget.json".to_string(),
+            source: std::io::Error::other("no space left on device"),
+        };
+        assert_eq!(
+            classify(write),
+            ExitCode::IoError,
+            "74 — and the fixture kind is Other, so the PermissionDenied walker cannot be what answered"
+        );
+
+        let forge = ClaimError::Forge(ForgeError::Status {
+            url: "https://api.github.com/user".to_string(),
+            status: 401,
+            detail: String::new(),
+        });
+        assert_eq!(
+            classify(forge),
+            ExitCode::AuthError,
+            "80 — only because `Forge(inner) => inner.classify()` is explicit; `source()` skips past a transparent wrapper"
+        );
     }
 }

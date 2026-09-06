@@ -78,6 +78,7 @@ pub fn reports_schema() -> String {
         ocx::api::data::announce::AnnounceReport,
         ocx::api::data::attestation::AttestationReport,
         ocx::api::data::catalog::Catalog,
+        ocx::api::data::claim::ClaimReport,
         ocx::api::data::clean::Clean,
         ocx::api::data::config_setup::ConfigSetupData,
         ocx::api::data::config_test::ConfigTestData,

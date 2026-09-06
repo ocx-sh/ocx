@@ -13,10 +13,20 @@ use clap::Subcommand;
 /// The former root commands `ocx install`, `ocx uninstall`, `ocx select`,
 /// `ocx exec`, and `ocx deselect` are moved here (C1 — handshake §2 / §7).
 /// The toolchain-tier counterparts (`ocx env`, `ocx exec`) remain at root.
+///
+/// `Announce` and `Claim` carry **no** doc comment on purpose, the same way
+/// [`CascadeGroup`](super::package_cascade::CascadeGroup)'s variants do: clap
+/// renders a variant's own doc as the subcommand's help and ignores the
+/// argument struct's whenever one is present, so a doc here would silently
+/// replace the multi-paragraph text those two commands need — which is exactly
+/// how both shipped with a `--help` that named no credential. The user-facing
+/// text lives with the flags it describes, in `package_announce.rs` and
+/// `package_claim.rs`, and
+/// `package_announce::tests::both_write_commands_render_the_credential_guidance`
+/// asserts over the *rendered* help so a doc re-added here reds rather than
+/// silently winning.
 #[derive(Subcommand)]
 pub enum Package {
-    /// Observe an owner-curated set of registry tags and publish the rebuilt
-    /// package entry into the index.
     Announce(super::package_announce::PackageAnnounce),
     /// Attach an in-toto attestation to a published package manifest.
     ///
@@ -32,6 +42,7 @@ pub enum Package {
     /// already holds.
     #[command(subcommand)]
     Cascade(super::package_cascade::CascadeGroup),
+    Claim(super::package_claim::PackageClaim),
     /// Promote an already-published package to another registry or repository.
     ///
     /// Copies the platform manifests, their blobs and their referrers verbatim,
@@ -90,6 +101,7 @@ impl Package {
             Package::Announce(announce) => announce.execute(context).await,
             Package::Attest(attest) => attest.execute(context).await,
             Package::Cascade(cascade) => cascade.execute(context).await,
+            Package::Claim(claim) => claim.execute(context).await,
             Package::Copy(copy) => copy.execute(context).await,
             Package::Create(create) => create.execute(context).await,
             Package::Description(description) => description.execute(context).await,

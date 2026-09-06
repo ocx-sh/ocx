@@ -6,12 +6,16 @@ pub mod announce;
 pub mod attestation;
 pub mod catalog;
 // ci_export deleted (C4 — handshake §6: ocx ci removed)
+pub mod claim;
 pub mod clean;
 pub mod config_setup;
 pub mod config_test;
 pub mod config_update;
 pub mod deps;
 pub mod env;
+/// Report vocabulary shared by `ocx package claim` and `ocx package announce`
+/// (DX-59). Carries no `Printable` impl, so it owes no `report_roots!` row.
+pub mod forge_report;
 pub mod index;
 pub mod install;
 pub mod lock;
