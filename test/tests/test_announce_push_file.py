@@ -56,10 +56,10 @@ def test_push_tags_file_feeds_announce_tags_file_union(
     physical = f"oci://{ocx.registry}/{unique_repo}"
     seed_empty_root(fake_forge, package, physical)
     configure_trusted_hosts(ocx, ocx.registry, [registry_host(ocx.registry)])
-    args = ["--package", package, "--fork", "forkuser/index", "--index-repo", INDEX_FULL]
+    args = ["--fork", "forkuser/index", "--index-repo", INDEX_FULL]
 
-    announce_json(ocx, fake_forge, *args, "--tags", "0.9.0")
-    report = announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file))
+    announce_json(ocx, fake_forge, *args, "--tags", "0.9.0", package)
+    report = announce_json(ocx, fake_forge, *args, "--tags-file", str(tags_file), package)
 
     assert report["status"] == "updated"
     final_tags = set(committed_root(fake_forge, package)["tags"])

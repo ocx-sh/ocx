@@ -269,8 +269,8 @@ def _announce_tags_file(
         [
             "package", "announce",
             "--tags-file", str(path),
-            "--package", "acme/widget",
             "--out", str(tmp_path),
+            "acme/widget",
         ],
         str(path),
     )
@@ -526,8 +526,8 @@ def _announce_tags_file_oversized(
         [
             "package", "announce",
             "--tags-file", str(path),
-            "--package", "acme/widget",
             "--out", str(tmp_path),
+            "acme/widget",
         ],
         str(path),
     )
