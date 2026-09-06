@@ -7,11 +7,13 @@
 # phases, so that peak, not the average, is what exhausted RAM+swap and killed
 # two orchestrator sessions.
 #
-# Capping jobs makes N concurrent worktrees cost 4N rustc rather than 32N, which
-# is what KEEPS parallel execution viable. Do not raise this to speed up a single
-# build: the cap is the thing that lets the other loops run at all.
+# Capping jobs makes N concurrent worktrees cost 12N rustc rather than 32N. The
+# cap is what KEEPS parallel execution viable -- do not raise it to speed up a
+# single build. Owner raised 4 -> 12 on 2026-09-06 for the index-claim run, where
+# at most two builder worktrees are live at a time and free RAM sat at 13-24 GB.
+# Lower it again if more than three worktrees build concurrently.
 #
 # CI has one workspace and a dedicated runner: override with `CARGO_BUILD_JOBS`
 # (the env var wins over this file) rather than editing it.
 [build]
-jobs = 4
+jobs = 12
