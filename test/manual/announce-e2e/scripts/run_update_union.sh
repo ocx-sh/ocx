@@ -30,10 +30,10 @@ announce_tag() {
     local tags_file="$WORK_DIR/$label.tags"
     printf '%s\n' "$tag" >"$tags_file"
     announce_capture "$label" \
-        --package "$E2E_NAMESPACE/$E2E_PACKAGE" \
         --tags-file "$tags_file" \
         --fork "$INDEX_FORK" \
-        --index-repo "$GH_REPO_INDEX"
+        --index-repo "$GH_REPO_INDEX" \
+        "$E2E_NAMESPACE/$E2E_PACKAGE"
 }
 
 main() {

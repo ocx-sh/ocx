@@ -157,13 +157,14 @@ written.
   `OCX_BINARY` at a dev-channel-equivalent build before running
   `clean_install_check.sh`; the default `target/release/ocx` works only if it
   is such a build.
-- **The publisher's announce step passes no `--package`.**
+- **The publisher's announce step names no package at all.**
   `ocx-e2e-publisher` `.github/workflows/e2e-publish.yml:228` invokes
   `ocx package announce --tags-file … --fork … --index-repo …`, but the
-  shipped CLI declares `--package` as `required = true`
-  (`crates/ocx_cli/src/command/package_announce.rs:38`). That is a clap usage
-  error, not a soft skip. Track C's repo owns the fix; the sequenced and
-  machine-lane drivers both depend on that step producing a pull request.
+  shipped CLI requires the package — as the positional the deprecated
+  `--package` flag became (`crates/ocx_cli/src/command/package_announce.rs`,
+  the `package_selector` group). That is a clap usage error, not a soft skip.
+  Track C's repo owns the fix; the sequenced and machine-lane drivers both
+  depend on that step producing a pull request.
 - **Everything downstream of "the HTTPS request leaves the container"** is
   unproven — that `index.ocx.sh` serves the rendered root, that a real root
   resolves through to a registry pull, and that
