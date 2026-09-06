@@ -24,10 +24,8 @@ not copies. Team-shared — commit it.
 - Worktrees: default `.agents/worktrees/` (gitignored, `.gitignore:50`).
 - Constitution: `.claude/rules/arch-principles.md` (optional gate; plans
   checked against it when present).
-
-- Federation lead: `../ocx-mirror` — this repo participates as satellite key
-  `ocx` for plan(s): `mirror-signing`. Run hex orchestrators from the
-  lead, not here.
+- Discussions: `.agents/discussions/<slug>.md` (hex-discuss artifacts; no
+  project convention documented, default home).
 
 ## Preferences
 
@@ -58,6 +56,103 @@ research-axes:
   (CLAUDE.md model policy; matches models.md Rule 4).
 
 ## Memory
+- **A structural check whose failure message renders the pattern it forbids seeds its own
+  corpus (2026-09-06).** C-062's repo-wide `--package` sweep prints the offending command line
+  when it fails; that message lands in the verify log, which sat inside its own "repo-wide"
+  scan scope. The **first true positive therefore made every later run red**, against its own
+  previous output, with no code defect anywhere. Prune every tree the project writes logs and
+  scratch to — gitignored ones especially — and prove the prune by **discrimination**, not by a
+  green: one byte-identical probe file must red at the repository root and stay green inside
+  the pruned tree. A green alone cannot separate "pruned correctly" from "the walker now
+  reaches nothing". Sibling trap on the same check: a probe wrapped in backticks does not red,
+  because the prose exemption strips backtick spans first — a probe that fails to red means
+  the probe was wrong before it means the check is weak.
+- **`git log` under the rtk proxy silently drops merge commits (2026-09-05).** `git log --graph`,
+  `git log --first-parent` and `git log <range>` all render a history with every merge commit
+  removed, so a feature branch integrating work packages reads as if nothing had been merged — and
+  a resume that derives state from `git log` concludes the opposite of the truth. `git diff` is
+  worse: it returns **empty**, even redirected to a file. Use `git rev-list --parents`,
+  `git diff-tree -r --name-status <base> <ref>`, `git show --stat` and `git rev-parse`. Same family
+  as the known `grep -c` / `rg` alternation defects; the failure is always a silent negative.
+- **A build slot is the only way several agent worktrees share one host (2026-09-05).**
+  `<repo>/.tmp/hex/build-slot.sh` is a host-wide `flock` that additionally waits for >= 10 GB free
+  before exec'ing, and every `cargo`/`nextest`/`clippy`/`task`/pytest call in every worker goes
+  through it. Without it, concurrent work packages OOM-kill the orchestrator, which is how the first
+  wave-3 session died. Keep at most **2 build-capable workers** alive; read-only reviewers are free.
+  The slot is shared with *other* Claude sessions on the same machine, so multi-minute waits are
+  normal and must not be worked around.
+- **An orchestrator killed mid-run leaves its workers' commits but loses its own plan edits
+  (2026-09-05).** Worker commits then cite `DX-` rows that exist nowhere, and renumbering is
+  impossible because the commits cannot be rewritten. Keep the number allocation the commits already
+  used, allocate the gap below it, and record the discontinuity as its own row. Corollary: write the
+  plan's Status and Schedule-log mutation **per merge**, not per wave — the artifact is the only
+  state that survives the session.
+- **Discussion handed off (hex-discuss, 2026-09-04): `.agents/discussions/index-claim-command.md`
+  → architect** — `ocx package claim` for [ocx#410](https://github.com/ocx-sh/ocx/issues/410) +
+  the GitLab git transport of [ocx#411](https://github.com/ocx-sh/ocx/issues/411), owner-ratified.
+  Nine decisions: `ocx package claim` beside announce; claim is its own command; owners written
+  `login`/`id` only, no `format_version` bump, indexbot gets its own emit-drop ADR; ocx 0.6.1
+  ships claim + git transport together; transport = one `GitLabForge`, REST reads / git writes,
+  orchestration transport-blind (council 2/3; separate writer rejected); owner detection when
+  `--owner` omitted, explicit list replaces, bots refused; credentials: `OCX_ANNOUNCE_TOKEN` =
+  API token, `OCX_ANNOUNCE_GIT_TOKEN`/`_USERNAME` override the push, job token picked up under
+  `git` only. Research: `.claude/artifacts/research_index_claim_{recon,prior_art,archaeology,council_transport}.md`.
+  Fact corrections found: ocx's `forge/gitlab.rs:148-157` and `environment.md:128` overstate the
+  job-token block (it reads files/branches/commits/MRs; cannot write); the indexbot owners ADR
+  wrongly says the catalog omits `owners` (it renders them with a `github.com` href).
+  **Promotion candidate for the next `/hex-init`:** convention "PR/MR author = the credential's
+  identity, owners = the explicit list; the two never substitute" — the doc use-case page the
+  discussion asked for. **Lane note:** `worker-researcher` has no Write tool (fourth run) — every
+  lane returned inline and the orchestrator persisted; brief that role inline-only.
+  Next: done 2026-09-05 — design record below.
+- **Design complete (hex-architect high, 2026-09-05): `.claude/artifacts/adr_index_claim_command.md`
+  (Status Proposed) + `system_design_index_claim_command.md`**, from the dossier
+  `.agents/discussions/index-claim-command.md`. Discover: `discover_index_claim_map.md` (claim diff
+  7 HOLDS). Research axes security / tooling / operability:
+  `research_index_claim_{security,git_tooling,operability}.md`. Panel (spec, quality, security,
+  sota — opus) r1: 5 Blocks; spec r2 found the round-1 ADR fixes never reached the design (B1) and
+  an exit-86 rule whose second signal had no classifier arm (B2); Codex terra found 2 Blocks the
+  panel missed — an unconditional fetch of a branch a first claim does not have, and an `ExitCode`
+  variant without its arm in the wildcard-free `ErrorCategory` match — triage in
+  `review_adr_index_claim_adversary.md`; reviews `review_adr_index_claim_{spec,spec_r2,spec_r3,quality,security,sota}.md`.
+  Three fix rounds → 0 Block / 0 High; open questions zero (live `root.schema.json` read).
+  **Lessons:** a fix brief names BOTH artifacts as edit targets and the re-validation checks
+  cross-artifact, or the ADR moves while the design stays; a structural fix (moving the version
+  gate across a phase boundary) re-opens producer/consumer and step-order checks — re-validate
+  after every such fix, not only after the round; `codex-companion task --help` runs a real task.
+  Deferred human questions: ADR § "Deferred to handoff".
+  Next: `/hex-plan high "Index claim command, forge write transports, and forge-neutral owners, per .claude/artifacts/adr_index_claim_command.md"`.
+- **Executing (hex-execute high, 2026-09-05): waves 1-2 of `.claude/artifacts/plan_index_claim_command.md` merged on `feat/index-claim-command`** — WP-1 exit code 86, WP-2 shared announce clock, WP-3 register amendments, WP-4 git-over-HTTP fixture + recording git shim, WP-5 forge write-transport surface. Resume at wave 3 (WP-6 onward); the plan's `## Schedule log` carries each merge SHA and its gate. **Twenty-six execution deviations recorded (DX-1..DX-26)** — the plan is the living design record, so read that table before wave 3: five are rulings the WP-5 edge-case hunt forced, and DX-24's `Redacted` newtype changes a field type WP-12 and WP-13 construct.
+  **Lessons.** *A builder that goes silent has usually done the work* — two did (WP-4 stub, WP-5 stub, ~2h each); both trees were nearly complete and the right move was a fresh agent told to assume nothing and verify item by item, not to redo it. *Hand a gate that can discriminate*: I gave WP-4 `pytest --collect-only` as its non-regression check and the builder proved it passes in BOTH polarities — `conftest.py` loads `fake_forge` by path inside the fixture body, while collection does an ordinary import that registers the module in `sys.modules`, which is exactly the state where the fault cannot occur (DX-17). *Measure the tool before believing the plan about it*: three plan-named tests were wrong about git 2.54.0 — it exports `GIT_PUSH_OPTION_COUNT=0` with no push-options negotiation, so the absence assertion was satisfiable only by the fabricating hook it existed to forbid; a chunked push is always two receive-pack POSTs because of the `probe_rpc`; and a `HOME`-side `postBuffer` at or below `LARGE_PACKET_MAX` aborts every protocol-v2 fetch (DX-19). *The undefended-guard shape repeats within one package*: WP-4 round 2 cured it for one knob and round 3 found the same hole in the skip round 2 had just added. *Close a one-way door while it is open* — `Redacted` could only be introduced at WP-5's merge, since WP-5 is the sole writer of `forge/error.rs` while two later packages construct its variants.
+  Next: `/hex-execute .claude/artifacts/plan_index_claim_command.md` — wave 3.
+- **Waves 5-6 executed (hex-execute high, 2026-09-06): WP-14..WP-17 merged on `feat/index-claim-command`** —
+  the `ocx package claim` CLI, the announce `--package` → positional window, and both acceptance suites.
+  **Thirty-seven more deviations, DX-51..DX-87.** Two review rounds per panel package; every reviewer opus.
+  **The suites are the whole story.** WP-16 ran against an already-implemented command, so it *validated*
+  rather than specified — and three of forty-four tests reddened on arrival, including a duplicate-owner
+  refusal whose exit code depended on whether the users API happened to be reachable. WP-17 then found two
+  defects that make the headline feature dead: `claim --transport git` cannot succeed on **any** input (the
+  multi-line request body reaches `render_push_options`, which refuses LF), and C-043's retry does not
+  converge under `git`. Every unit suite in waves 3 and 4 was green over all five. The plan's own
+  "shippable after wave 5" line was wrong, and only the end-to-end package could say so.
+  **Lessons.** *A contract can have no carrier* — C-060 contracted an `author` key that nothing on
+  `ClaimOutcome` could hold; three packages and four review rounds missed it because each checked only its
+  own half. Ask, per contracted field, *which struct holds this?* *clap renders the **variant** doc comment,
+  not the args struct's* — both write commands' long help was dead text, so a round-1 Block was "fixed" into
+  text nobody could read; pin help by reading the **built** `Command`. *A required `ArgGroup` renders every
+  member regardless of `Arg::hide`*, so a deprecation window's hidden flag reappears in `--help` without
+  `override_usage`. *The sweep count was wrong a second time* — 99 across **fourteen** files, not fifteen,
+  and one hit was a docstring; reproduce a count, never inherit it. *A stalled worker is a fourth failure
+  mode* beside idle, terminated and delivered: 40 minutes with no writes and no reply. The salvage commit is
+  what made it recoverable, and the fresh worker's first act — assume nothing, re-verify item by item —
+  found the salvaged tests **red on arrival**.
+  **Two mechanics worth carrying.** `git merge --squash` re-bases each step against the wrong parent: a
+  second squash of a successive commit conflicts, because the commit you just made is not the old one's
+  parent. Use `git cherry-pick -n` per commit, group them into the subjects the changelog needs, and prove
+  the result by **tree identity** against the branch tip. And the hourly `/tmp` reaper deletes
+  `forge::git_workspace`'s shim directory mid-run, producing up to 20 spurious failures — `TMPDIR=~/.cache/<wp>tmp`
+  fixes it, while a **repo-local** `TMPDIR` does not (two config-walk tests expect no `ocx.toml` above them).
+  Next: WP-18 (docs) and WP-19 (release gates), plus the two production fixes above.
 - **A hermetic fixture can red a path the old suite only passed via the public internet
   (proxy-aware SSRF guard, ocx#407/#323).** The stdlib forward-proxy fixture made acceptance A
   fail with exit 75 AFTER the proxied pull had succeeded: `ChainedIndex`'s manifest/blob walks
@@ -588,3 +683,65 @@ research-axes:
   your decision" while the grant was already in their inbox, costing a round trip each. When a
   worker parks on a decision, assume the next message it sends crossed yours and re-state the
   answer in one short paragraph rather than referring back to it.
+- **Active plan (hex-plan tier `high`, 2026-09-05): `.claude/artifacts/plan_index_claim_command.md`**
+  — `ocx package claim`, the `--transport api|git` forge write seam, forge-neutral `owners[]`.
+  19 work packages / 7 waves, 75 contracts, 40 scenarios, 7 ADR deviations. `State: plan-approved`,
+  shippable after wave 5. Reviews beside it: `review_plan_index_claim_{spec,quality,security,sota,adversary}.md`
+  plus `_spec_r2` / `_spec_r3` (each carrying its own applied-fix disposition). Research:
+  `research_plan_index_claim_{git_fixture,cli_patterns,gitlab_verification}.md`, `Expires: 2027-03-05`.
+  Next: `/hex-execute`.
+- **A ratified ADR's premise can be stale against HEAD — check the file it names before planning to
+  it.** `adr_index_claim_command.md` put the capturing subprocess helper in
+  `utility/child_process.rs`; the spawn primitives had since moved to a private
+  `launch/child_process.rs` behind a structural firewall (`SPAWN_TOKENS` / `SPAWN_ALLOWED`, whose own
+  module doc says the searches "are not proofs — privacy is what actually holds"). The plan records
+  it as a deviation with an allowlist row rather than following the ADR off the cliff. Verify each
+  ADR file anchor at plan time; ratified decisions stay ratified, ratified *premises* do not.
+- **The defect class that survived three review rounds: a symbol or file the change must touch whose
+  owner and whose dependents sit in different work packages.** It reappeared four times in one plan,
+  never twice in the same shape — module-declaration hubs no package declared (`command.rs`,
+  `api/data.rs`, `forge.rs`, `config.mts`); a widened constructor with one caller three waves
+  downstream; a contract's ownership left behind when its implementation moved; a parity test owned
+  one wave before the second half it asserts exists. **Same-wave file-set disjointness does not
+  catch any of them.** Add a decomposition check that asks, per symbol whose signature changes and
+  per file the change requires: *who owns it, and can every dependent still be finished by someone?*
+- **The cross-model gate earns its cost on exactly that class, and its own fix is usually too
+  heavy.** Codex found the stranded constructor (1 High after the panel had absorbed 8 Blocks / 18
+  Highs) and proposed moving a hub file into a later wave plus a new edge. Opening `kind.rs` showed
+  `client` is a factory over field-storing constructors, so a two-sentence contract amendment sufficed.
+  Take the adversary's *premise*, re-derive the *remedy* from the source.
+- **A widened check scope needs the sweep re-run, not just the wording changed.** "89 across six
+  acceptance modules" became "repo-wide" without re-sweeping; the real total was 99 across fifteen
+  files, four of them **user-facing remediation strings ocx prints at operators** telling them to run
+  the deprecated form. Also state the check's *predicate*, not only its scope — a check whose scope is
+  contracted and whose predicate is not gets written to whatever makes it green.
+- **`~/.cache/claude-hex/` was wiped mid-session**, so a durable-scratch path chosen to dodge the
+  hourly `/tmp` wipe still lost the adversary prompt between Write and `cat`. `.tmp/` inside the
+  repo (gitignored, `.gitignore:126`) held. Prefer in-repo scratch for anything a background job
+  reads back.
+
+### Wave 7 (WP-18, WP-19) — lessons
+
+- **A repo-wide structural check can poison itself.** C-062's `--package` sweep
+  prints the offending command line in its failure message; that message lands in
+  the verify log, which was inside its "repo-wide" scan scope. First true positive
+  → red forever. Exclusion set now prunes `.tmp` (DX-92). Prove such a fix by
+  *discrimination* — one byte-identical probe reds at the root, stays green inside
+  the pruned tree — never by a bare green.
+- **A probe that fails to red may be a bad probe.** The same check exempts prose by
+  stripping backtick spans first, so a probe written as `` `ocx package announce
+  --package …` `` is correctly ignored. Read the matcher before concluding the check
+  is weak.
+- **A package's own gate can be red at its merge base.** `task website:build` is
+  WP-18's Implement gate and `task verify` does not run it, so three dead relative
+  links from 2026-07-26 sat unnoticed. The package that owns the gate is the only
+  one that can clear it — accept the out-of-set file and record it (DX-94).
+- **"Documented" is half of a doc contract.** `cli-contract.md`'s EXIT-10 needs the
+  public row *and* a machine-readable assertion. WP-18 landed the row; all three
+  exit-86 acceptance rows asserted only the integer and stderr, with the JSON
+  envelope already in hand and never read (DX-93). A gate package that only reports
+  would have shipped it red — check both halves at the terminal gate.
+- **Rebase, don't squash, to land a wave on a moved tip.** `git merge --squash`
+  re-bases against the branch base and three-way-merges both sides. `git rebase
+  --onto <new-tip> <old-base> <branch>` then `merge --ff-only` preserved all three
+  wave-6 subjects, which are the changelog entries.
