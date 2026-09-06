@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use crate::forge::{ForkIdentity, PullRequest, RepoCoordinate};
+use crate::forge::{ForkIdentity, PullRequest, PushAccess, RepoCoordinate};
 use crate::oci;
 
 /// How the caller curated the tag set (design register C3/C5).
@@ -138,4 +138,26 @@ pub struct AnnounceOutcome {
     /// is not a failure, so they are reported here rather than refused; empty
     /// when the selection carried none.
     pub reserved_tags_dropped: Vec<String>,
+    /// The announce branch the run wrote to — `indexbot-announce-<ns>-<pkg>`.
+    ///
+    /// **Empty under [`AnnounceTarget::Out`]**, which reads no branch and pushes
+    /// nothing. The name is derived from the package alone and is therefore
+    /// available on every run, so reporting it there would tell a consumer a
+    /// branch was written when none was; the field says what this run did, not
+    /// what a different run would be called.
+    pub branch: String,
+    /// What the write preflight checked, and how each check came out.
+    ///
+    /// Held as the [`PushAccess`] itself rather than as a copied-out
+    /// `Vec<CapabilityCheck>`: that vector is private to the module declaring it
+    /// and [`PushAccess::skipped_all`] is its only constructor, so "the
+    /// capability array is non-empty on every run" stays a property the compiler
+    /// holds. Copying the rows out here would make `Vec::new()` spellable at
+    /// every construction site and re-open exactly that hole. Render through
+    /// [`PushAccess::checks`].
+    ///
+    /// A run that never probes — `--out`, either unchanged arm, and the whole
+    /// fork path — carries the seeded rows, every one
+    /// [`Skipped`](crate::forge::CheckStatus::Skipped), rather than nothing.
+    pub capability_checks: PushAccess,
 }

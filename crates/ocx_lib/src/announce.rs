@@ -45,7 +45,9 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::forge::{BranchComparison, CommitBase, Forge, Mergeability, PullRequest, RefUpdate, RepoCoordinate};
+use crate::forge::{
+    BranchComparison, CommitBase, Forge, Mergeability, PullRequest, PushAccess, RefUpdate, RepoCoordinate,
+};
 use crate::oci::index::serialize_root;
 use crate::publisher::Publisher;
 
@@ -75,6 +77,13 @@ pub async fn announce(
     let package = request.package.repository().to_string();
     let root_path = format!("p/{package}.json");
     let branch = format!("indexbot-announce-{}", package.replace('/', "-"));
+    // The capability array is non-empty on **every** run, so it is seeded here
+    // rather than at the one path that probes: `ensure_push_access` is reached
+    // only from the fork-free commit arm, and `--out`, both unchanged arms and
+    // the whole fork path would otherwise report nothing at all. Held as the
+    // `PushAccess` itself — see `AnnounceOutcome::capability_checks` for why the
+    // rows are never copied out into a bare vector.
+    let mut capability_checks = PushAccess::skipped_all();
 
     // 0. Resolve the fork's REAL identity first, so every later endpoint is
     //    built from it — the announce branch lives on the fork, and `--fork
@@ -179,6 +188,11 @@ pub async fn announce(
                 written_paths,
                 reserved_tags_dropped: reserved_dropped,
                 desc_status,
+                // No branch is read and none is pushed, so none is reported —
+                // the name is derivable on every run, and naming it here would
+                // tell a consumer a branch was written.
+                branch: String::new(),
+                capability_checks,
             })
         }
         AnnounceTarget::Fork(_) | AnnounceTarget::Direct => {
@@ -206,6 +220,8 @@ pub async fn announce(
                         written_paths: Vec::new(),
                         reserved_tags_dropped: reserved_dropped,
                         desc_status,
+                        branch: branch.clone(),
+                        capability_checks: capability_checks.clone(),
                     });
                 }
                 if let Some(repo) = &branch_repo
@@ -229,6 +245,8 @@ pub async fn announce(
                         written_paths: Vec::new(),
                         reserved_tags_dropped: reserved_dropped,
                         desc_status,
+                        branch: branch.clone(),
+                        capability_checks: capability_checks.clone(),
                     });
                 }
                 return Ok(AnnounceOutcome {
@@ -239,6 +257,8 @@ pub async fn announce(
                     written_paths: Vec::new(),
                     reserved_tags_dropped: reserved_dropped,
                     desc_status,
+                    branch: branch.clone(),
+                    capability_checks: capability_checks.clone(),
                 });
             }
             // C8: reuse the already-resolved fork, else create one under the
@@ -267,7 +287,7 @@ pub async fn announce(
                     (coordinate, Some(fork))
                 }
                 None => {
-                    forge.ensure_push_access(&request.index_repo).await?;
+                    capability_checks = forge.ensure_push_access(&request.index_repo).await?;
                     (request.index_repo.clone(), None)
                 }
             };
@@ -289,7 +309,16 @@ pub async fn announce(
             // between our read and our commit, re-read the new head, re-run the
             // WHOLE regeneration against it, and retry exactly once so the
             // concurrent change is preserved, never overwritten.
-            match forge
+            //
+            // The commit and the pull request are **one unit of work** for the
+            // purposes of that race, because which of the two loses it depends
+            // on the transport. Under `api` the commit's compare-and-swap is
+            // rejected. Under `git`, `commit_files` performs no network write at
+            // all — objects and a local ref only — and the push happens inside
+            // `open_or_update_pull_request`, so the rejection arrives there.
+            // Retrying around the commit alone therefore lets a concurrent
+            // announce be lost under exactly the transport that needs it most.
+            let first_attempt = match forge
                 .commit_files(
                     &commit_repo,
                     &branch,
@@ -304,8 +333,33 @@ pub async fn announce(
                 )
                 .await
             {
-                Ok(_) => {}
-                Err(crate::forge::ForgeError::NonFastForward { .. }) => {
+                // Re-announce reuses the open request without patching
+                // title/body — the C4 branch-head commits carry the update.
+                Ok(_) => {
+                    forge
+                        .open_or_update_pull_request(
+                            &request.index_repo,
+                            &commit_repo,
+                            &branch,
+                            INDEX_BASE_REF,
+                            &message,
+                            &pull_request_body,
+                        )
+                        .await
+                }
+                Err(error) => Err(error),
+            };
+            let pull_request = match first_attempt {
+                Ok(pull_request) => pull_request,
+                // The two spellings of "the base moved under us", one per
+                // transport. `api` refuses the fast-forward. `git` pushes a
+                // `RefUpdate::Reset` rebuild with `--force-with-lease` (C-040)
+                // and loses the lease, which is `StaleLease` and never
+                // `NonFastForward`. Matching only the second would retry under
+                // `api` and give up under `git` for the identical race — and
+                // since both classify to exit 75, no assertion on the outcome
+                // could tell the two behaviours apart.
+                Err(crate::forge::ForgeError::NonFastForward { .. } | crate::forge::ForgeError::StaleLease { .. }) => {
                     // WHOSE head to re-read is the same question the first
                     // attempt already answered. An accumulating run raced
                     // another announce on the branch, so the branch head is the
@@ -369,6 +423,9 @@ pub async fn announce(
                         // branch: GitLab sends a per-file `last_commit_id` even
                         // under `Reset` and maps its rejection to
                         // `NonFastForward`.
+                        //
+                        // Control still falls through to the open call below, so
+                        // the winning commit is never stranded without a request.
                         refuse_if_unmergeable(forge, &request.index_repo, &branch_state, &branch).await?;
                     } else {
                         forge
@@ -397,21 +454,26 @@ pub async fn announce(
                             )
                             .await?;
                     }
+                    // One shot, by construction: a second rejection propagates
+                    // rather than starting a third pass (S-023 — still rejected
+                    // is exit 75, and the caller reruns the command).
+                    forge
+                        .open_or_update_pull_request(
+                            &request.index_repo,
+                            &commit_repo,
+                            &branch,
+                            INDEX_BASE_REF,
+                            &message,
+                            &pull_request_body,
+                        )
+                        .await?
                 }
+                // Every other failure is settled, not raced. Widening this to
+                // `Err(_)` once two calls feed one `match` is the natural
+                // mistake and the costly one: `MergeRequestUnconfirmed` means
+                // the push already landed, so retrying pushes a second time.
                 Err(other) => return Err(other.into()),
-            }
-            // Re-announce reuses the open PR without patching title/body — the
-            // C4 branch-head commits carry the update.
-            let pull_request = forge
-                .open_or_update_pull_request(
-                    &request.index_repo,
-                    &commit_repo,
-                    &branch,
-                    INDEX_BASE_REF,
-                    &message,
-                    &pull_request_body,
-                )
-                .await?;
+            };
             Ok(AnnounceOutcome {
                 package,
                 status,
@@ -420,6 +482,8 @@ pub async fn announce(
                 written_paths: Vec::new(),
                 reserved_tags_dropped: reserved_dropped,
                 desc_status,
+                branch: branch.clone(),
+                capability_checks: capability_checks.clone(),
             })
         }
     }
@@ -768,7 +832,12 @@ async fn branch_head_tags(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::Mutex;
+
     use super::*;
+    use crate::cli::{ExitCode, classify_error};
+    use crate::forge::{CapabilityName, CheckStatus, ForgeError, ForgeIdentity, ForkIdentity};
     use crate::oci;
     use crate::oci::client::test_transport::{StubTransport, StubTransportData};
 
@@ -809,12 +878,17 @@ mod tests {
         }
     }
 
-    /// Seed the stub with a one-platform image index served at `127.0.0.1/x:<tag>`.
+    /// Seed the stub with a one-platform image index served at
+    /// `127.0.0.1/x:<tag>`, returning the digest it resolves to.
     ///
     /// Pretty-printed for the same reason as `pipeline::tests::seed_manifest`:
     /// the served encoding must differ from serde's canonical one, or a
     /// re-serializing regression stays invisible to every byte assertion.
-    fn seed_index(data: &StubTransportData, tag: &str) {
+    ///
+    /// The digest is returned because a **C6 no-op needs it**: a committed root
+    /// whose tag already records exactly this digest is one that re-observes
+    /// byte-identically, which is the only honest way to drive an unchanged run.
+    fn seed_index(data: &StubTransportData, tag: &str) -> String {
         let manifest = oci::Manifest::ImageIndex(oci::ImageIndex {
             schema_version: oci::INDEX_SCHEMA_VERSION,
             media_type: Some(oci::OCI_IMAGE_INDEX_MEDIA_TYPE.to_string()),
@@ -841,6 +915,7 @@ mod tests {
         data.write()
             .manifests
             .insert(format!("127.0.0.1/x:{tag}"), (bytes, digest.to_string()));
+        digest.to_string()
     }
 
     /// Seed a `__ocx.desc` artifact (readme layer only) at `127.0.0.1/x`, and
@@ -1060,5 +1135,893 @@ mod tests {
             inner.calls
         );
         assert!(inner.auth_calls.is_empty(), "no auth call may precede the SSRF refusal");
+    }
+
+    // ── A scripted forge ─────────────────────────────────────────────────────
+
+    /// The announce branch every fixture below writes to, and the two refs the
+    /// orchestration resolves.
+    const BRANCH: &str = "indexbot-announce-acme-widget";
+    const BRANCH_REF: &str = "heads/indexbot-announce-acme-widget";
+    const MAIN_REF: &str = "heads/main";
+
+    /// A scripted [`Forge`] that records every call.
+    ///
+    /// The workspace's only two `impl Forge` are REST clients, and
+    /// [`announce`] takes `&dyn Forge`, so nothing here could drive the
+    /// orchestration end to end without this. It **counts** calls as well as
+    /// answering them because most of what has to be proved is *how many times*
+    /// a method ran: [`ForgeError::NonFastForward`] and
+    /// [`ForgeError::StaleLease`] classify to the same exit code, so a retry
+    /// that silently never fires for one of them is invisible to any assertion
+    /// on the outcome alone.
+    ///
+    /// The methods announce must never reach panic instead of answering, which
+    /// makes their absence an assertion rather than a silence.
+    struct FakeForge {
+        /// `<ref>` → the shas successive [`Forge::get_ref_sha`] calls answer
+        /// with, the last entry repeating. A two-entry ref is how "the base
+        /// moved between the first read and the retry's re-read" is expressed;
+        /// an absent key is a ref that does not exist.
+        refs: HashMap<String, Vec<Option<String>>>,
+        /// Commit sha → the root bytes [`Forge::get_file_contents`] serves at
+        /// it. An absent sha is an absent file, which is what an unclaimed
+        /// namespace looks like from here.
+        roots: HashMap<String, Vec<u8>>,
+        comparison: BranchComparison,
+        open_request: Option<PullRequest>,
+        mergeability: Mergeability,
+        fork: Option<ForkIdentity>,
+        state: Mutex<FakeState>,
+    }
+
+    /// What the double has recorded, and what it has left to answer with.
+    #[derive(Default)]
+    struct FakeState {
+        /// How many times each `<ref>` has been resolved so far.
+        ref_reads: HashMap<String, usize>,
+        /// Scripted [`Forge::commit_files`] failures, consumed in order. `None`
+        /// — and an exhausted queue — means the call succeeds.
+        commit_failures: VecDeque<Option<ForgeError>>,
+        /// The same for [`Forge::open_or_update_pull_request`].
+        open_failures: VecDeque<Option<ForgeError>>,
+        /// One entry per `commit_files` call: the atomic file set it carried and
+        /// the ref update it asked for.
+        commits: Vec<(BTreeMap<String, Vec<u8>>, RefUpdate)>,
+        opens: usize,
+        push_access_probes: usize,
+        mergeability_reads: usize,
+    }
+
+    impl FakeForge {
+        /// A forge that knows no ref and no root: every read answers "absent".
+        fn new() -> Self {
+            Self {
+                refs: HashMap::new(),
+                roots: HashMap::new(),
+                comparison: BranchComparison::Ahead,
+                open_request: None,
+                mergeability: Mergeability::Mergeable,
+                fork: None,
+                state: Mutex::new(FakeState::default()),
+            }
+        }
+
+        /// `r#ref` resolves to `shas` in call order; the last entry repeats.
+        fn with_ref(mut self, r#ref: &str, shas: &[Option<&str>]) -> Self {
+            self.refs.insert(
+                r#ref.to_string(),
+                shas.iter().map(|sha| sha.map(ToString::to_string)).collect(),
+            );
+            self
+        }
+
+        /// The canonical bytes of `root` are served at commit `sha` — canonical
+        /// because that is what a committed root is, and the C6 byte comparison
+        /// reads it directly.
+        fn with_root(mut self, sha: &str, root: &Value) -> Self {
+            self.roots.insert(sha.to_string(), serialize_root(root));
+            self
+        }
+
+        /// A diverged branch under an open request — [`BranchState::Stale`].
+        fn stale_with(mut self, pull_request: PullRequest) -> Self {
+            self.comparison = BranchComparison::Diverged;
+            self.open_request = Some(pull_request);
+            self
+        }
+
+        fn with_mergeability(mut self, mergeability: Mergeability) -> Self {
+            self.mergeability = mergeability;
+            self
+        }
+
+        fn with_fork(mut self, fork: ForkIdentity) -> Self {
+            self.fork = Some(fork);
+            self
+        }
+
+        fn failing_commits(mut self, failures: Vec<Option<ForgeError>>) -> Self {
+            self.state
+                .get_mut()
+                .expect("the fixture lock is uncontended")
+                .commit_failures = failures.into();
+            self
+        }
+
+        fn failing_opens(mut self, failures: Vec<Option<ForgeError>>) -> Self {
+            self.state
+                .get_mut()
+                .expect("the fixture lock is uncontended")
+                .open_failures = failures.into();
+            self
+        }
+
+        /// One entry per `commit_files` call, in call order.
+        fn commits(&self) -> Vec<(BTreeMap<String, Vec<u8>>, RefUpdate)> {
+            self.state
+                .lock()
+                .expect("the fixture lock is uncontended")
+                .commits
+                .clone()
+        }
+
+        fn opens(&self) -> usize {
+            self.state.lock().expect("the fixture lock is uncontended").opens
+        }
+
+        fn push_access_probes(&self) -> usize {
+            self.state
+                .lock()
+                .expect("the fixture lock is uncontended")
+                .push_access_probes
+        }
+
+        fn mergeability_reads(&self) -> usize {
+            self.state
+                .lock()
+                .expect("the fixture lock is uncontended")
+                .mergeability_reads
+        }
+    }
+
+    /// The root bytes one recorded `commit_files` call carried.
+    fn committed_root_bytes(commit: &(BTreeMap<String, Vec<u8>>, RefUpdate)) -> String {
+        String::from_utf8(
+            commit
+                .0
+                .get("p/acme/widget.json")
+                .expect("every commit carries the root")
+                .clone(),
+        )
+        .expect("the root is UTF-8")
+    }
+
+    #[async_trait::async_trait]
+    impl Forge for FakeForge {
+        async fn authenticated_identity(&self) -> Result<Option<ForgeIdentity>, ForgeError> {
+            unreachable!("announce resolves no identity — that is the claim command's ladder")
+        }
+
+        async fn resolve_user(&self, _login: &str) -> Result<Option<ForgeIdentity>, ForgeError> {
+            unreachable!("announce resolves no login")
+        }
+
+        async fn get_file_contents(
+            &self,
+            _repo: &RepoCoordinate,
+            _path: &str,
+            r#ref: &str,
+        ) -> Result<Option<Vec<u8>>, ForgeError> {
+            Ok(self.roots.get(r#ref).cloned())
+        }
+
+        async fn get_ref_sha(&self, _repo: &RepoCoordinate, r#ref: &str) -> Result<Option<String>, ForgeError> {
+            let position = {
+                let mut state = self.state.lock().expect("the fixture lock is uncontended");
+                let reads = state.ref_reads.entry(r#ref.to_string()).or_default();
+                let position = *reads;
+                *reads += 1;
+                position
+            };
+            let Some(answers) = self.refs.get(r#ref) else {
+                return Ok(None);
+            };
+            Ok(answers.get(position).or_else(|| answers.last()).cloned().flatten())
+        }
+
+        async fn compare_branch(
+            &self,
+            _repo: &RepoCoordinate,
+            _base: &str,
+            _head: &RepoCoordinate,
+            _head_branch: &str,
+        ) -> Result<BranchComparison, ForgeError> {
+            Ok(self.comparison)
+        }
+
+        async fn find_open_pull_request(
+            &self,
+            _index: &RepoCoordinate,
+            _head: &RepoCoordinate,
+            _branch: &str,
+        ) -> Result<Option<PullRequest>, ForgeError> {
+            Ok(self.open_request.clone())
+        }
+
+        async fn pull_request_mergeability(
+            &self,
+            _index: &RepoCoordinate,
+            _number: u64,
+        ) -> Result<Mergeability, ForgeError> {
+            self.state
+                .lock()
+                .expect("the fixture lock is uncontended")
+                .mergeability_reads += 1;
+            Ok(self.mergeability)
+        }
+
+        async fn find_fork(
+            &self,
+            _upstream: &RepoCoordinate,
+            _fork: &RepoCoordinate,
+        ) -> Result<Option<ForkIdentity>, ForgeError> {
+            Ok(self.fork.clone())
+        }
+
+        async fn ensure_fork(
+            &self,
+            _upstream: &RepoCoordinate,
+            _target_owner: Option<&str>,
+        ) -> Result<ForkIdentity, ForgeError> {
+            unreachable!("every fork fixture here resolves an existing fork, so C6 provokes no create")
+        }
+
+        async fn sync_fork(&self, _fork: &RepoCoordinate, _branch: &str) {}
+
+        async fn ensure_push_access(&self, _repo: &RepoCoordinate) -> Result<PushAccess, ForgeError> {
+            self.state
+                .lock()
+                .expect("the fixture lock is uncontended")
+                .push_access_probes += 1;
+            // A row only a real probe can produce, so "the outcome was seeded"
+            // and "the outcome was filled in by the preflight" are different
+            // observable states rather than the same all-skipped array.
+            let mut access = PushAccess::skipped_all();
+            access.record(CapabilityName::PushAccess, CheckStatus::Passed, None);
+            Ok(access)
+        }
+
+        async fn commit_files(
+            &self,
+            _repo: &RepoCoordinate,
+            _branch: &str,
+            _base: CommitBase<'_>,
+            _message: &str,
+            files: &BTreeMap<String, Vec<u8>>,
+            update: RefUpdate,
+        ) -> Result<String, ForgeError> {
+            let mut state = self.state.lock().expect("the fixture lock is uncontended");
+            state.commits.push((files.clone(), update));
+            let sequence = state.commits.len();
+            if let Some(Some(failure)) = state.commit_failures.pop_front() {
+                return Err(failure);
+            }
+            Ok(format!("commit-{sequence}"))
+        }
+
+        async fn open_or_update_pull_request(
+            &self,
+            _index: &RepoCoordinate,
+            _head: &RepoCoordinate,
+            _branch: &str,
+            _base: &str,
+            _title: &str,
+            _body: &str,
+        ) -> Result<PullRequest, ForgeError> {
+            let mut state = self.state.lock().expect("the fixture lock is uncontended");
+            state.opens += 1;
+            if let Some(Some(failure)) = state.open_failures.pop_front() {
+                return Err(failure);
+            }
+            Ok(PullRequest {
+                number: 7,
+                html_url: "https://example.invalid/pull/7".to_string(),
+                updated: false,
+            })
+        }
+    }
+
+    /// The default [`request`] with a different write target.
+    fn request_to(curated: TagSelection, target: AnnounceTarget) -> AnnounceRequest {
+        AnnounceRequest {
+            target,
+            ..request(curated)
+        }
+    }
+
+    /// Serve `tags` as one-platform image indices on the loopback physical
+    /// repository, and return the digest they all resolve to.
+    ///
+    /// One digest for every tag is not a simplification: [`seed_index`] builds
+    /// the same manifest whatever the tag, so the fixture genuinely serves one
+    /// blob under several names.
+    fn seed_tags(tags: &[&str]) -> (StubTransportData, String) {
+        let data = StubTransportData::new();
+        let mut digest = String::new();
+        for tag in tags {
+            digest = seed_index(&data, tag);
+        }
+        (data, digest)
+    }
+
+    /// A committed root that records `tag` at `digest` — what the registry
+    /// currently serves, so re-observing it moves no byte and the run is a C6
+    /// no-op.
+    fn unchanged_root(tag: &str, digest: &str) -> Value {
+        committed_root(serde_json::json!({
+            tag: { "content": digest, "observed": "2026-07-01T00:00:00Z" }
+        }))
+    }
+
+    /// Drive [`announce`] against `forge` and a seeded registry.
+    async fn run_announce(
+        forge: &FakeForge,
+        curated: TagSelection,
+        target: AnnounceTarget,
+        registry: StubTransportData,
+    ) -> Result<AnnounceOutcome, AnnounceError> {
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(registry))));
+        announce(&publisher, Some(forge as &dyn Forge), request_to(curated, target)).await
+    }
+
+    /// The whole declared capability set, in declaration order, with
+    /// `push-access` reading `expected` on this path.
+    ///
+    /// Asserting the names rather than merely `!is_empty()` is deliberate: a
+    /// truncated or reordered array is still non-empty, and the order is what a
+    /// report consumer indexes into.
+    fn assert_capability_rows(outcome: &AnnounceOutcome, expected: CheckStatus, path: &str) {
+        let names: Vec<CapabilityName> = outcome
+            .capability_checks
+            .checks()
+            .iter()
+            .map(|check| check.name)
+            .collect();
+        assert_eq!(
+            names,
+            CapabilityName::ALL.to_vec(),
+            "{path}: the rows are the declared set, in declaration order"
+        );
+        assert_eq!(
+            outcome.capability_checks.status(CapabilityName::PushAccess),
+            expected,
+            "{path}: the push-access row"
+        );
+    }
+
+    /// A base root whose one committed tag records a digest the registry no
+    /// longer serves, so re-observing it moves the bytes and the run is not a
+    /// C6 no-op.
+    fn root_with_a_moved_tag() -> Value {
+        committed_root(serde_json::json!({
+            "0.9.0": { "content": format!("sha256:{}", "b".repeat(64)), "observed": "2026-07-01T00:00:00Z" }
+        }))
+    }
+
+    fn pull_request(number: u64) -> PullRequest {
+        PullRequest {
+            number,
+            html_url: format!("https://example.invalid/pull/{number}"),
+            updated: true,
+        }
+    }
+
+    fn fork_identity() -> ForkIdentity {
+        ForkIdentity {
+            full_path: "forkuser/index".to_string(),
+            namespace: "forkuser".to_string(),
+            project: "index".to_string(),
+            id: None,
+        }
+    }
+
+    fn fork_target() -> AnnounceTarget {
+        AnnounceTarget::Fork(RepoCoordinate {
+            host: None,
+            namespace: "forkuser".to_string(),
+            project: "index".to_string(),
+        })
+    }
+
+    // ── C-055: the two new outcome fields ────────────────────────────────────
+
+    /// Every outcome carries the announce branch and the whole capability array,
+    /// on all five construction sites rather than only the committing one.
+    ///
+    /// Four of the five return before `ensure_push_access` is reached — `--out`,
+    /// both unchanged arms, and the whole fork path — so a test driving the
+    /// committing path alone stays green while the other four ship an empty
+    /// array and an empty branch. `--out` is the one path that reports **no**
+    /// branch: it reads none and pushes nothing, and the name is derivable on
+    /// every run, so reporting it there would claim a branch was written.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn announce_outcome_carries_branch_and_capability_checks() {
+        // `--out`: writes locally, touches no branch.
+        let directory = tempfile::TempDir::new().expect("a scratch directory");
+        let (registry, digest) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &unchanged_root("1.0.0", &digest));
+        let outcome = run_announce(
+            &forge,
+            TagSelection::Refresh,
+            AnnounceTarget::Out(directory.path().to_path_buf()),
+            registry,
+        )
+        .await
+        .expect("--out writes on every run");
+        assert!(
+            outcome.branch.is_empty(),
+            "--out reads no branch and pushes nothing, so it reports none: {:?}",
+            outcome.branch
+        );
+        assert!(!outcome.written_paths.is_empty(), "--out writes the root");
+        assert_capability_rows(&outcome, CheckStatus::Skipped, "--out");
+        assert_eq!(forge.push_access_probes(), 0, "--out demands no push permission");
+
+        // Unchanged with a stale branch: returns the request the branch already
+        // has, without committing.
+        let (registry, digest) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &unchanged_root("1.0.0", &digest))
+            .with_root("branch", &unchanged_root("1.0.0", &digest))
+            .stale_with(pull_request(3));
+        let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
+            .await
+            .expect("an unchanged stale branch reports its open request");
+        assert_eq!(outcome.status, AnnounceStatus::Unchanged);
+        assert_eq!(outcome.branch, BRANCH, "the stale-branch arm names the branch");
+        assert_capability_rows(&outcome, CheckStatus::Skipped, "unchanged, stale branch");
+
+        // Unchanged with a live branch: ensures the request the branch may be
+        // missing, still without committing.
+        let (registry, digest) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("branch", &unchanged_root("1.0.0", &digest));
+        let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
+            .await
+            .expect("an unchanged live branch ensures its request");
+        assert_eq!(outcome.branch, BRANCH, "the live-branch arm names the branch");
+        assert_capability_rows(&outcome, CheckStatus::Skipped, "unchanged, live branch");
+
+        // Unchanged with nothing unmerged: no request at all.
+        let (registry, digest) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &unchanged_root("1.0.0", &digest));
+        let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
+            .await
+            .expect("a pure no-op still reports");
+        assert!(outcome.pull_request.is_none(), "a pure no-op opens nothing");
+        assert_eq!(outcome.branch, BRANCH, "the no-op arm names the branch");
+        assert_capability_rows(&outcome, CheckStatus::Skipped, "unchanged, nothing unmerged");
+
+        // The fork-free commit path: the one path that probes push access, so
+        // the one path whose row is not `skipped`.
+        let (registry, _) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &committed_root(serde_json::json!({})));
+        let outcome = run_announce(
+            &forge,
+            TagSelection::Replace(vec!["1.0.0".to_string()]),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await
+        .expect("the direct path commits and opens");
+        assert_eq!(outcome.status, AnnounceStatus::Updated);
+        assert_eq!(outcome.branch, BRANCH, "the committing arm names the branch");
+        assert_eq!(forge.push_access_probes(), 1, "the fork-free path probes exactly once");
+        assert_capability_rows(&outcome, CheckStatus::Passed, "direct commit");
+
+        // The fork path reaches the same construction site and deliberately does
+        // not probe (C6: an unchanged run must demand no permission), so its row
+        // is the seeded `skipped` rather than an absent one.
+        let (registry, _) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("base", &committed_root(serde_json::json!({})))
+            .with_fork(fork_identity());
+        let outcome = run_announce(
+            &forge,
+            TagSelection::Replace(vec!["1.0.0".to_string()]),
+            fork_target(),
+            registry,
+        )
+        .await
+        .expect("the fork path commits and opens");
+        assert!(outcome.fork.is_some(), "the fork path reports its fork");
+        assert_eq!(outcome.branch, BRANCH, "the fork arm names the branch");
+        assert_eq!(forge.push_access_probes(), 0, "the fork path probes no push access");
+        assert_capability_rows(&outcome, CheckStatus::Skipped, "fork commit");
+    }
+
+    // ── C-056: the retry wraps the commit-and-open pair ──────────────────────
+
+    /// The rejection is scripted on **`open_or_update_pull_request`**, not on
+    /// `commit_files`, and that is the whole point.
+    ///
+    /// Under the `git` transport `commit_files` performs no network write at
+    /// all: the push — and therefore the rejection — happens inside
+    /// `open_or_update_pull_request`. With the retry wrapped around the commit
+    /// alone, that error escapes and a concurrent announce is silently lost. A
+    /// test scripting the rejection on `commit_files` instead passes against the
+    /// unwidened code and proves nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_fast_forward_retry_wraps_commit_and_open() {
+        let (registry, _) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base"), Some("moved")])
+            .with_root("base", &committed_root(serde_json::json!({})))
+            .with_root("moved", &committed_root(serde_json::json!({})))
+            .failing_opens(vec![Some(ForgeError::NonFastForward {
+                branch: BRANCH.to_string(),
+            })]);
+
+        let outcome = run_announce(
+            &forge,
+            TagSelection::Replace(vec!["1.0.0".to_string()]),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await
+        .expect("the run recovers from a rejection raised by the open call");
+
+        assert!(outcome.pull_request.is_some(), "the retry produced a request");
+        assert_eq!(
+            forge.commits().len(),
+            2,
+            "the retry re-ran the commit against the winning head"
+        );
+        assert_eq!(forge.opens(), 2, "the open call was retried, not abandoned");
+    }
+
+    /// A rejection on both attempts must **converge**: exactly one retry, then
+    /// the error.
+    ///
+    /// A fixture that rejects once cannot tell "retried once" from "retries
+    /// forever", so the call count is the assertion and the error is only the
+    /// corroboration. Turning the one-shot arm into a bounded loop keeps the
+    /// error identical and moves the count.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_persistent_race_converges_after_exactly_one_retry() {
+        let rejection = || {
+            Some(ForgeError::NonFastForward {
+                branch: BRANCH.to_string(),
+            })
+        };
+        let (registry, _) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base"), Some("moved")])
+            .with_root("base", &committed_root(serde_json::json!({})))
+            .with_root("moved", &committed_root(serde_json::json!({})))
+            .failing_opens(vec![rejection(), rejection()]);
+
+        let result = run_announce(
+            &forge,
+            TagSelection::Replace(vec!["1.0.0".to_string()]),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(AnnounceError::Forge(ForgeError::NonFastForward { .. }))),
+            "a still-rejected retry surfaces the race, not a generic failure"
+        );
+        assert_eq!(forge.opens(), 2, "exactly one retry, never a loop");
+        assert_eq!(forge.commits().len(), 2, "exactly one regeneration pass");
+    }
+
+    /// The retry regenerates against the head that **won** the race, rather than
+    /// re-proposing the pre-race bytes.
+    ///
+    /// A widened retry that merely re-calls the open request would republish the
+    /// content the race already superseded — the loss C-056 exists to prevent,
+    /// one layer down. The winner is distinguished by a non-tag field, so the
+    /// difference cannot be confused with the curated set being re-resolved.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_retry_regenerates_against_the_winning_head() {
+        let (registry, _) = seed_tags(&["1.0.0"]);
+        let mut winner = committed_root(serde_json::json!({}));
+        winner["created"] = serde_json::json!("2026-08-01");
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base"), Some("moved")])
+            .with_root("base", &committed_root(serde_json::json!({})))
+            .with_root("moved", &winner)
+            .failing_opens(vec![Some(ForgeError::NonFastForward {
+                branch: BRANCH.to_string(),
+            })]);
+
+        run_announce(
+            &forge,
+            TagSelection::Replace(vec!["1.0.0".to_string()]),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await
+        .expect("the retry succeeds");
+
+        let commits = forge.commits();
+        assert_eq!(commits.len(), 2, "the retry commits again");
+        assert_ne!(
+            commits[0].0, commits[1].0,
+            "the second commit carries different bytes from the first"
+        );
+        assert!(
+            committed_root_bytes(&commits[1]).contains("2026-08-01"),
+            "the second commit is built on the winner's root: {}",
+            committed_root_bytes(&commits[1])
+        );
+    }
+
+    /// A lost `--force-with-lease` drives the same retry as a lost
+    /// compare-and-swap.
+    ///
+    /// `Spent` and `Stale` branches are repointed with [`RefUpdate::Reset`],
+    /// which the git transport spells as a leased force-push; losing that race
+    /// surfaces as [`ForgeError::StaleLease`], never
+    /// [`ForgeError::NonFastForward`]. A predicate naming only the second would
+    /// retry under `api` and give up under `git` for the identical race — and
+    /// because both variants classify to exit 75, **only the call count can see
+    /// the difference**.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stale_lease_drives_the_same_retry_as_a_lost_compare_and_swap() {
+        let (registry, _) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base"), Some("moved")])
+            .with_root("base", &committed_root(serde_json::json!({})))
+            .with_root("moved", &committed_root(serde_json::json!({})))
+            .with_root("branch", &committed_root(serde_json::json!({})))
+            .stale_with(pull_request(4))
+            .failing_opens(vec![Some(ForgeError::StaleLease {
+                branch: BRANCH.to_string(),
+            })]);
+
+        let result = run_announce(
+            &forge,
+            TagSelection::Replace(vec!["1.0.0".to_string()]),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await;
+
+        // The count is asserted **before** the result, deliberately: narrowing
+        // the predicate back to `NonFastForward` alone leaves one commit and one
+        // exit-75 error, and an assertion that reads the outcome first would
+        // report the error rather than the missing retry.
+        assert_eq!(
+            forge.commits().len(),
+            2,
+            "a lost lease regenerates against the winning head, exactly as a lost compare-and-swap does"
+        );
+        let outcome = result.expect("a lost lease is a race, and a race is retried");
+        assert!(outcome.pull_request.is_some(), "the retry produced a request");
+    }
+
+    /// A failure that is **not** a race must not retry.
+    ///
+    /// [`ForgeError::MergeRequestUnconfirmed`] means the push already succeeded
+    /// and the server was slower than the poll, so retrying pushes a second
+    /// time. Widening the arm to `Err(_)` once two calls feed one `match` is the
+    /// natural mistake, and the exit code cannot catch it: 75 is shared with
+    /// both race variants.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_non_race_failure_never_retries() {
+        let (registry, _) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base"), Some("moved")])
+            .with_root("base", &committed_root(serde_json::json!({})))
+            .with_root("moved", &committed_root(serde_json::json!({})))
+            .failing_opens(vec![Some(ForgeError::MergeRequestUnconfirmed { deadline_secs: 30 })]);
+
+        let result = run_announce(
+            &forge,
+            TagSelection::Replace(vec!["1.0.0".to_string()]),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(AnnounceError::Forge(ForgeError::MergeRequestUnconfirmed { .. }))
+            ),
+            "an unconfirmed merge request surfaces as itself"
+        );
+        assert_eq!(forge.commits().len(), 1, "a settled push is never pushed again");
+        assert_eq!(forge.opens(), 1, "and the request is never re-opened");
+    }
+
+    /// When the regenerated bytes equal the winning head, the commit is skipped
+    /// — and the request must still be opened.
+    ///
+    /// Two identical racing announces both regenerate the same bytes, so a
+    /// second commit would push an empty diff (X7). That arm already has an
+    /// early-exit shape, which makes it the one place the widening can silently
+    /// drop the open call and strand the winner's commit with no request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_byte_identical_retry_still_opens_the_pull_request() {
+        let (registry, digest) = seed_tags(&["0.9.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base"), Some("moved")])
+            .with_root("base", &root_with_a_moved_tag())
+            .with_root("moved", &unchanged_root("0.9.0", &digest))
+            .failing_opens(vec![Some(ForgeError::NonFastForward {
+                branch: BRANCH.to_string(),
+            })]);
+
+        let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
+            .await
+            .expect("the byte-identical retry still reports a request");
+
+        assert_eq!(
+            outcome.status,
+            AnnounceStatus::Unchanged,
+            "re-applying C6 against the winner reports unchanged"
+        );
+        assert_eq!(forge.commits().len(), 1, "no empty-diff commit is pushed");
+        assert!(
+            outcome.pull_request.is_some(),
+            "the winning commit is never stranded without a request"
+        );
+        assert_eq!(forge.opens(), 2, "the open call still runs after the skipped commit");
+    }
+
+    /// The D2 tripwire survives the widening: an unmergeable open request is
+    /// refused from the **retry**'s byte-identical arm too, not only from the
+    /// first pass.
+    ///
+    /// That arm commits nothing, so a conflicting request stays conflicting and
+    /// would otherwise be reported as a benign `unchanged` — ocx-sh/ocx#399 in
+    /// the retry path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_conflicting_request_is_refused_from_the_retry_arm() {
+        let (registry, digest) = seed_tags(&["0.9.0"]);
+        let forge = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base"), Some("moved")])
+            .with_root("base", &root_with_a_moved_tag())
+            .with_root("moved", &unchanged_root("0.9.0", &digest))
+            .with_root("branch", &committed_root(serde_json::json!({})))
+            .stale_with(pull_request(5))
+            .with_mergeability(Mergeability::Conflicting)
+            .failing_opens(vec![Some(ForgeError::NonFastForward {
+                branch: BRANCH.to_string(),
+            })]);
+
+        let result = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry).await;
+
+        assert!(
+            matches!(result, Err(AnnounceError::PullRequestUnmergeable { .. })),
+            "a conflicting request on a write-nothing retry is refused, never reported as unchanged"
+        );
+        assert_eq!(forge.mergeability_reads(), 1, "the tripwire ran on the retry path");
+        assert_eq!(forge.commits().len(), 1, "the retry committed nothing");
+    }
+
+    /// S-025: the retry carries the stale branch's tag delta forward and keeps
+    /// repointing the ref with [`RefUpdate::Reset`].
+    ///
+    /// The retry is the arm the widening rewrites, and its carry is the one a
+    /// restructure loses: without it the re-read base has no tags at all, the
+    /// regenerated root equals the winning head, and the second commit is
+    /// skipped — so the tag already announced into the open request disappears.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_retry_carries_the_stale_branch_tags_and_resets_the_ref() {
+        let (registry, _) = seed_tags(&["0.9.0"]);
+        let forge = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base"), Some("moved")])
+            .with_root("base", &committed_root(serde_json::json!({})))
+            .with_root("moved", &committed_root(serde_json::json!({})))
+            .with_root("branch", &root_with_a_moved_tag())
+            .stale_with(pull_request(6))
+            .failing_commits(vec![Some(ForgeError::NonFastForward {
+                branch: BRANCH.to_string(),
+            })]);
+
+        run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
+            .await
+            .expect("the rebuild retries and lands");
+
+        let commits = forge.commits();
+        assert_eq!(commits.len(), 2, "the retry committed the carried delta");
+        assert!(
+            committed_root_bytes(&commits[1]).contains("0.9.0"),
+            "the branch's tag survives the retry: {}",
+            committed_root_bytes(&commits[1])
+        );
+        assert_eq!(
+            commits[1].1,
+            RefUpdate::Reset,
+            "a rebuilt branch is still repointed, not fast-forwarded"
+        );
+    }
+
+    /// S-024's half that announce controls: an unchanged run on a live branch
+    /// makes the open call and **no commit at all**.
+    ///
+    /// Whether that call then writes anything is the transport's contract
+    /// (C-042) and is proved at the acceptance layer; what the orchestration
+    /// owes is that it never commits on this path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unchanged_live_branch_opens_the_request_and_commits_nothing() {
+        let (registry, digest) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(BRANCH_REF, &[Some("branch")])
+            .with_ref(MAIN_REF, &[Some("base")])
+            .with_root("branch", &unchanged_root("1.0.0", &digest));
+
+        let outcome = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry)
+            .await
+            .expect("an unchanged live branch ensures its request");
+
+        assert_eq!(outcome.status, AnnounceStatus::Unchanged);
+        assert!(
+            outcome.pull_request.is_some(),
+            "the request the branch may lack is ensured"
+        );
+        assert_eq!(forge.opens(), 1, "exactly one open call");
+        assert!(forge.commits().is_empty(), "an unchanged run commits nothing");
+    }
+
+    // ── S-005: the unclaimed-namespace signal ────────────────────────────────
+
+    /// An absent committed root is an unclaimed namespace, raised from the
+    /// orchestration's own read rather than only from the classifier's table.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_absent_committed_root_is_an_unclaimed_namespace() {
+        let (registry, _) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new().with_ref(MAIN_REF, &[Some("base")]);
+
+        let result = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry).await;
+
+        assert!(
+            matches!(result, Err(AnnounceError::UnclaimedNamespace { .. })),
+            "a package with no committed root goes through the human lane"
+        );
+    }
+
+    /// The 79 a release wrapper branches on is produced by the **CLI
+    /// classifier**, not by `AnnounceError::classify` alone.
+    ///
+    /// Calling `classify()` directly proves only that the variant carries a
+    /// code; the process exits 79 only because `AnnounceError` is registered in
+    /// the downcast ladder, and deleting that registration leaves such a test
+    /// green while every real run drops to exit 1. Driving `classify_error` over
+    /// a **boxed** error is what exercises the registration, because that is the
+    /// shape the ladder actually receives.
+    #[test]
+    fn an_unclaimed_namespace_still_exits_not_found_through_the_cli_classifier() {
+        let error: Box<dyn std::error::Error + 'static> = Box::new(AnnounceError::UnclaimedNamespace {
+            package: "acme/widget".to_string(),
+            path: "p/acme/widget.json".to_string(),
+            base_ref: INDEX_BASE_REF.to_string(),
+        });
+
+        assert_eq!(
+            classify_error(error.as_ref()),
+            ExitCode::NotFound,
+            "announcing into an unclaimed namespace must stay discriminable from a crash"
+        );
     }
 }
