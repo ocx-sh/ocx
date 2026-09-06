@@ -32,9 +32,46 @@ import json
 import re
 import threading
 import urllib.parse
-from typing import Any
+from collections.abc import Sequence
+from email.message import Message as EmailMessage
+from typing import Any, NamedTuple
 
+# Plain imports of two SIBLING modules, resolved off `sys.path`. Nothing puts
+# `test/tests/` there except pytest, whose default `prepend` import mode inserts
+# a test file's own directory when the directory carries no `__init__.py` —
+# which is this tree's convention. `test/pyproject.toml`'s `pythonpath` entry is
+# `test/`, not `test/tests/`, so it does not cover these.
+#
+# **pytest is therefore the only supported loader of this module**, and that is
+# true of the whole `test/tests/` tree. It is not weakened by
+# `conftest._load_fake_forge_module` loading THIS file by path: that exists to
+# avoid the import-mode ambiguity of a session-root conftest importing out of a
+# non-package directory, and by the time it runs, collection has already put
+# `test/tests/` on the path. Importing `fake_forge` from a bare interpreter
+# needs that entry added first.
 from fake_gitlab import GitLabRoutes
+from git_http_fixture import GitFixtureError, GitHttpRoutes
+
+#: The request headers `FakeForge.record` keeps per REST request, in this order.
+#: All three of C-026's outcomes are decided by which of these is present:
+#: `JOB-TOKEN` under a job token, `PRIVATE-TOKEN` otherwise, none for an empty
+#: credential. `Authorization` is here too because the git half carries the
+#: credential that way (C-034) and S-040 asks whether it reached a project it
+#: should not have. Lookup is case-insensitive against `http.client.HTTPMessage`,
+#: which is what the handler passes.
+#:
+#: **A closed set of three, deliberately, and not "the whole header map".** The
+#: two questions the REST log has to answer — C-026's "which credential header
+#: did this read carry" and S-040's "did the credential reach a project it
+#: should not have" — are both fully served by these three names, and a full
+#: header map is a structure pytest may dump verbatim into a failure report. A
+#: `PRIVATE-TOKEN` value printed on a red build is a worse trade than a fourth
+#: name someone has to add here first. Widen it when a contract needs a fourth
+#: name, not in anticipation. (The git transport is the other side of this
+#: trade: `GitRequest.headers` keeps everything, because there the header map IS
+#: the observation point and nothing else records the request at all.)
+AUTH_HEADERS: Sequence[str] = ("Authorization", "PRIVATE-TOKEN", "JOB-TOKEN")
+
 
 # A repo/branch path segment (owner, repo names never contain '/').
 _SEGMENT = r"[^/]+"
@@ -66,6 +103,36 @@ _REFS_CREATE_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGMENT
 # calls it before every fork announce and once before each git-data replay, so a
 # fake without this route answers 404 and the client warns on every run.
 _MERGE_UPSTREAM_RE = re.compile(rf"^/repos/(?P<owner>{_SEGMENT})/(?P<repo>{_SEGMENT})/merge-upstream$")
+# `GET /users/<login>` — GitHub's user lookup (C-024). Distinct from GitLab's
+# `GET /users?username=<login>` (`fake_gitlab.py`), which is the bare `/users`
+# path with a query, so the two never collide.
+_USER_BY_LOGIN_RE = re.compile(rf"^/users/(?P<login>{_SEGMENT})$")
+
+
+class ForgeUser(NamedTuple):
+    """An account both user APIs answer from.
+
+    `login` is the CANONICAL spelling the forge holds, which is what C-048's
+    confirm step replaces a caller's `AliCe` with. `bot` carries the forge's own
+    assertion (GitHub's `type == "Bot"`, GitLab's `bot` field) — never a login
+    heuristic, so a test cannot accidentally prove the weak form (C-049) while
+    believing it proved the strong one.
+
+    **`NamedTuple`, and this module can hold nothing else.** `test/conftest.py`
+    loads this file with `spec_from_file_location` + `exec_module` and never
+    registers it in `sys.modules`; under `from __future__ import annotations`,
+    `dataclasses._process_class` resolves string annotations through
+    `sys.modules.get(cls.__module__).__dict__`, which is then `None`. A
+    `@dataclass` here — with or without `slots` — raises `AttributeError:
+    'NoneType' object has no attribute '__dict__'` at import and takes every
+    consumer of the `fake_forge` fixture down with it. `NamedTuple` resolves its
+    annotations lazily and is unaffected. Dataclasses belong in
+    `git_http_fixture.py` / `fake_gitlab.py`, which are imported normally.
+    """
+
+    login: str
+    id: int
+    bot: bool = False
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -107,25 +174,77 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _reply_stub(self, stub: NotImplementedError) -> None:
+        """Answer a deferred fixture stub as **501, with its message in the
+        body**.
+
+        A `NotImplementedError` raised inside a handler thread is not a message
+        to anybody: `socketserver` prints a traceback to the test's stderr and
+        drops the connection, so the eventual consumer sees a socket error and
+        has to go read the fixture to learn why. 501 puts the sentence the stub
+        author wrote where the caller will actually read it, and leaves the
+        request in `requests` rather than half-recorded.
+
+        `NotImplementedError` is caught as-is rather than through a private
+        subclass: in this file every one of them IS a deferred stub, and a
+        second exception type would have to be imported by `fake_gitlab` and
+        `git_http_fixture` to be raised there. The stubs all raise before any
+        byte of a response is written, which is what makes one reply here safe.
+
+        The stubs raised on the TEST thread — `auth_headers_for`, `seed_user` —
+        stay raises: there the exception is the right signal, and there is no
+        response to put it in.
+        """
+        self._reply_json(501, {"message": str(stub)})
+
     # ── dispatch ──────────────────────────────────────────────────────────
 
     def do_GET(self) -> None:
+        try:
+            self._route_get()
+        except NotImplementedError as stub:
+            self._reply_stub(stub)
+
+    def do_POST(self) -> None:
+        try:
+            self._route_post()
+        except NotImplementedError as stub:
+            self._reply_stub(stub)
+
+    def do_PATCH(self) -> None:
+        try:
+            self._route_patch()
+        except NotImplementedError as stub:
+            self._reply_stub(stub)
+
+    def _route_get(self) -> None:
         parts = urllib.parse.urlsplit(self.path)
         path = parts.path
         query = urllib.parse.parse_qs(parts.query)
-        self.server.record("GET", path, self.path)
+
+        # Git-transport traffic goes in its OWN log, dispatched BEFORE
+        # `record()`. `request_count` is matched exactly against `requests` and
+        # has 28 call sites in `test_announce.py`; folding clone/fetch/push
+        # requests into it would silently turn S-026's "zero REST writes on
+        # every git failure path" into an unfalsifiable assertion. A path is a
+        # git route only when its project segment names a repository created
+        # through `git_create_project`, so a test that creates none never
+        # reaches this branch at all.
+        if self.server.git_http_get(self, path, parts.query):
+            return
+
+        self.server.record("GET", path, self.path, self.headers)
 
         if path == "/user":
-            # One identity endpoint, two field names: GitHub reads `login`,
-            # GitLab reads `username`. Serving both keeps the two surfaces on one
-            # account rather than inventing a second test identity.
-            self._reply_json(
-                200,
-                {"login": self.server.token_identity_login, "username": self.server.token_identity_login},
-            )
+            self.server.handle_get_authenticated_user(self)
             return
 
         if self.server.gitlab_get(self, path, query):
+            return
+
+        match = _USER_BY_LOGIN_RE.fullmatch(path)
+        if match:
+            self.server.handle_get_user_by_login(self, match.group("login"))
             return
 
         match = _REPO_RE.fullmatch(path)
@@ -170,9 +289,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         self._reply_json(404, {"message": "not found"})
 
-    def do_POST(self) -> None:
-        path = urllib.parse.urlsplit(self.path).path
-        self.server.record("POST", path)
+    def _route_post(self) -> None:
+        parts = urllib.parse.urlsplit(self.path)
+        path = parts.path
+
+        # Before `record()` (see `do_GET`) AND before `_read_body()`: a
+        # `git-receive-pack` body is pack data, and `_read_body` would consume it
+        # as JSON and hand the CGI child an empty stdin.
+        if self.server.git_http_post(self, path, parts.query):
+            return
+
+        self.server.record("POST", path, headers=self.headers)
         body = self._read_body()
         self.server.record_body(path, body)
 
@@ -215,9 +342,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
         self._reply_json(404, {"message": "not found"})
 
-    def do_PATCH(self) -> None:
+    def _route_patch(self) -> None:
         path = urllib.parse.urlsplit(self.path).path
-        self.server.record("PATCH", path)
+        self.server.record("PATCH", path, headers=self.headers)
         body = self._read_body()
 
         match = _REF_UPDATE_RE.fullmatch(path)
@@ -228,9 +355,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._reply_json(404, {"message": "not found"})
 
 
-class FakeForge(GitLabRoutes, http.server.ThreadingHTTPServer):
-    """A per-test fake forge (GitHub and GitLab surfaces), bound to an ephemeral
-    loopback port."""
+class FakeForge(GitHttpRoutes, GitLabRoutes, http.server.ThreadingHTTPServer):
+    """A per-test fake forge (GitHub, GitLab and git-over-HTTP surfaces), bound
+    to an ephemeral loopback port."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -240,8 +367,51 @@ class FakeForge(GitLabRoutes, http.server.ThreadingHTTPServer):
         # WHICH ref a read named (a branch name versus a pinned commit) have
         # nowhere else to look.
         self.raw_requests: list[tuple[str, str]] = []
+        # The auth-bearing request headers of each recorded REST request, in
+        # `AUTH_HEADERS` order, ALIGNED to `requests` — its own list, never a
+        # field on `requests`, which `request_count` exact-matches at 28 sites.
+        # This is the only server-side observation point for C-026's header
+        # selection: without it "reads carry `JOB-TOKEN`" (S-014) and
+        # "the API half keeps its own token" are true in every state of the code.
+        # Each name maps to ALL of its values: a repeated header name is a
+        # regression worth reporting, not one worth silently keeping half of.
+        self.auth_headers: list[dict[str, list[str]]] = []
         self.bodies: list[tuple[str, dict[str, Any]]] = []
         self.token_identity_login = "test-forge-bot"
+        # The numeric id `/user` reports. `owners[]` is `login` + `id` on the
+        # wire (C-008), so an identity with no id cannot exercise the ladder at
+        # all.
+        self.token_identity_id = 1001
+        # When True `/user` reports `type: "Bot"` (GitHub) and `bot: true`
+        # (GitLab) — the forge's OWN assertion, which is the strong form C-049
+        # refuses on. Default False: every existing consumer reads this endpoint
+        # and none of them expects a bot.
+        self.token_identity_is_bot = False
+        # When True `/user` answers `403 {"message": "Resource not accessible by
+        # integration"}` — "there is no user behind this credential", the ONLY
+        # shape GitHub reads as `Ok(None)` (`github.rs::authenticated_login`,
+        # DX-42), and on the GitLab surface the same 403 under a job token is
+        # `UsersApiUnavailable` (`gitlab.rs::users_api_is_out_of_reach`). One
+        # field therefore serves both surfaces.
+        #
+        # SEPARATE from `users_api_status` on purpose, not as a second spelling
+        # of it (DX-71 / hunt K-5). `users_api_status`'s documented scope is all
+        # THREE user routes, so arming it also silences `/users/<login>` — and
+        # the tests that need "no token identity" (`resolve_author`'s rungs 2
+        # and 3, `::test_no_acting_identity_64`) still need the owner lookup to
+        # answer. This knob is narrow and named for the contract rather than for
+        # a status. Default False: the identity read every existing consumer
+        # makes is untouched.
+        self.token_identity_absent = False
+        # Accounts the two user-lookup routes answer from, keyed by LOWERCASED
+        # login so a supplied `AliCe` resolves and is answered with the
+        # canonical spelling (C-048). Seed through `seed_user`.
+        self.users: dict[str, ForgeUser] = {}
+        # When set, `/user`, `/users/<login>` and `/users?username=` all answer
+        # this status instead of a body — the credential that may not call the
+        # endpoint at all (`UsersApiUnavailable`, C-009/C-027). `None` (default)
+        # keeps every existing consumer's identity read working.
+        self.users_api_status: int | None = None
 
         # Repo metadata: "owner/repo" -> {"full_name", "owner", "parent"}.
         self.repos: dict[str, dict[str, Any]] = {}
@@ -295,6 +465,23 @@ class FakeForge(GitLabRoutes, http.server.ThreadingHTTPServer):
         # concurrent announce that advanced the branch between our read and our
         # commit (design register C4 amendment F2). Fires once, then clears.
         self.concurrent_ref_advance: dict[str, dict[str, bytes]] = {}
+        # "owner/repo/branch" keys whose `concurrent_ref_advance` entry is
+        # RE-ARMED after it fires, so every fast-forward-only ref update on that
+        # branch is refused for as long as the key is here (DX-87).
+        #
+        # A one-shot advance can never reach S-003's exit-75 cell: claim
+        # re-reads the winning head and regenerates EXACTLY once, and with the
+        # entry popped that single retry always succeeds — so "regenerate once,
+        # then 75" has no reachable state and an exit-code assertion on it would
+        # be unfalsifiable. A persistent racing writer is what the cell
+        # describes, and re-arming models one writer that keeps landing rather
+        # than a server that refuses unconditionally: each refusal injects a
+        # fresh commit, so the head genuinely moves under every attempt.
+        #
+        # Additive and empty by default, so every existing consumer of
+        # `concurrent_ref_advance` keeps the one-shot behaviour its convergence
+        # proofs depend on.
+        self.concurrent_ref_advance_persists: set[str] = set()
         # When True, the NEXT compare GET replies 404 — an INDETERMINATE
         # ancestry answer (a ref unresolvable or the compare inaccessible),
         # which the C6 ensure-PR gate must refuse rather than read as "not
@@ -339,18 +526,76 @@ class FakeForge(GitLabRoutes, http.server.ThreadingHTTPServer):
         self.gitlab_compare_malformed_once: bool = False
         # When True the NEXT merge-request create replies 500 once.
         self.gitlab_merge_request_fail_once: bool = False
+        # Project path -> the `ci_push_repository_for_job_token_allowed` value
+        # the project body reports. THREE states, not two (C-029): `True`
+        # passes, `False` refuses at 86 before any push, and a project ABSENT
+        # from this dict emits **no field at all** — the GitLab < 18.4 / hidden
+        # case that is the only one yielding `unknown`-and-proceed. Absence is
+        # the default, so every existing consumer sees the body it sees today.
+        self.gitlab_job_token_push_allowed: dict[str, bool] = {}
+        # Target project path -> the source project paths its job-token
+        # allowlist contains. An absent key is an EMPTY allowlist (a miss), not
+        # an unreadable one; unreadable is the separate knob below, because
+        # C-029 gives the two different exit codes.
+        self.gitlab_job_token_allowlist: dict[str, list[str]] = {}
+        # Target project paths whose allowlist read answers 403 — the field the
+        # credential may not read, which is `unknown`-and-proceed.
+        self.gitlab_job_token_allowlist_unreadable: set[str] = set()
+
+        self.git_http_init()
 
         super().__init__(("127.0.0.1", 0), _Handler)
+
+    def server_close(self) -> None:
+        """Close the socket, then drop the git scratch project root.
+
+        Implemented rather than stubbed: `test/conftest.py`'s `fake_forge`
+        fixture calls this on every teardown for all six existing consumer
+        modules, so a raising body here would fail them all.
+        """
+        super().server_close()
+        self.git_http_cleanup()
 
     @property
     def base_url(self) -> str:
         host, port = self.server_address[:2]
         return f"http://{host}:{port}"
 
-    def record(self, method: str, path: str, raw: str | None = None) -> None:
+    def record(
+        self,
+        method: str,
+        path: str,
+        raw: str | None = None,
+        headers: EmailMessage | None = None,
+    ) -> None:
+        """Log one REST request. `headers` is the request's whole header map;
+        only the `AUTH_HEADERS` names are kept, in `auth_headers`.
+
+        The capture is implemented rather than stubbed because every existing
+        consumer traverses this method, and an accessor over a list nothing
+        appends to is a green that can never go red.
+
+        Each kept name maps to **all** of its values, through `get_all`. A
+        request may legitimately carry a header name twice, and `headers[name]`
+        answers only the FIRST — the opposite collapse to the one a dict
+        comprehension over `.items()` makes, which is what the git transport
+        used to do. Two logs disagreeing about which duplicate survived is worse
+        than either collapse alone: the same regression then reads differently
+        depending on which log an assertion happened to consult.
+        """
+        captured = (
+            {
+                name: list(values)
+                for name in AUTH_HEADERS
+                if (values := headers.get_all(name))
+            }
+            if headers is not None
+            else {}
+        )
         with self.lock:
             self.requests.append((method, path))
             self.raw_requests.append((method, raw if raw is not None else path))
+            self.auth_headers.append(captured)
 
     def record_body(self, path: str, body: dict[str, Any]) -> None:
         with self.lock:
@@ -359,6 +604,29 @@ class FakeForge(GitLabRoutes, http.server.ThreadingHTTPServer):
     def request_count(self, method: str, path: str) -> int:
         with self.lock:
             return sum(1 for m, p in self.requests if m == method and p == path)
+
+    def auth_headers_for(self, method: str, path: str) -> list[dict[str, list[str]]]:
+        """The auth headers of every recorded `(method, path)` request, in order.
+
+        One entry per matching request, `{}` when a request carried none — an
+        empty dict and a missing entry are different answers, and C-026's
+        "empty credential sends no header" arm needs the first, not the second.
+        An accessor that skipped headerless requests would answer one element
+        where two were made, and the arm asserting "this read carried nothing"
+        would then be asserting about the wrong read.
+
+        `path` is matched against `requests`, which carries no query string, so
+        two reads of one endpoint under different queries are two entries here.
+        Values are lists for the reason `record` gives.
+        """
+        with self.lock:
+            return [
+                {name: list(values) for name, values in captured.items()}
+                for (seen_method, seen_path), captured in zip(
+                    self.requests, self.auth_headers, strict=True
+                )
+                if seen_method == method and seen_path == path
+            ]
 
     def read_file(self, owner: str, repo: str, path: str, *, branch: str = "main") -> bytes | None:
         """Test-assertion helper: reads a committed file directly from the
@@ -385,7 +653,19 @@ class FakeForge(GitLabRoutes, http.server.ThreadingHTTPServer):
         self.seed_files(owner, repo, {path: json.dumps(root).encode()}, branch=branch)
 
     def seed_files(self, owner: str, repo: str, files: dict[str, bytes], *, branch: str = "main") -> None:
+        """Commit `files` onto `branch`, advancing its head.
+
+        Refuses on a git-transport project — see `_reject_git_project_locked`.
+        The guard sits HERE, on the test-facing entry point, and not on
+        `_seed_files_locked`: two route handlers (`handle_patch_ref`'s
+        `concurrent_ref_advance` branch and `fake_gitlab`'s commit route) call
+        that helper to inject a racing writer, and a guard below them would raise
+        `GitFixtureError` inside a handler thread — a traceback on the test's
+        stderr and a dropped connection, not a status. `seed_root` routes through
+        here; `seed_branch_at` keeps its own call.
+        """
         with self.lock:
+            self._reject_git_project_locked(f"{owner}/{repo}")
             self._seed_files_locked(owner, repo, files, branch)
 
     def seed_branch_at(
@@ -401,12 +681,73 @@ class FakeForge(GitLabRoutes, http.server.ThreadingHTTPServer):
         """Point `owner/repo@branch` at another repo's branch head verbatim,
         creating no commit — the "the announce branch exists but is NOT ahead of
         the upstream base" state (a merged-and-not-deleted branch reads this way
-        too). Distinct from `seed_files`, which always advances the head."""
+        too). Distinct from `seed_files`, which always advances the head.
+
+        Refuses on a git-transport project for the same reason `seed_files`
+        does: it writes a ref the bare repository does not have. It mints no sha
+        of its own, so the guard is a SEPARATE call rather than something one
+        seeder could cover for the other — the two are the only test-facing
+        writers of `refs`, and a rule enforced at one of them is a rule the other
+        silently breaks."""
         source_full = f"{source_owner}/{source_repo}"
         full = f"{owner}/{repo}"
         with self.lock:
+            self._reject_git_project_locked(full)
             self.refs.setdefault(full, {})[branch] = self.refs[source_full][source_branch]
             self.repos.setdefault(full, {"full_name": full, "owner": owner, "parent": source_full})
+
+    def seed_user(self, login: str, user_id: int, *, bot: bool = False) -> ForgeUser:
+        """Register an account both user-lookup routes answer from.
+
+        `login` is stored as the CANONICAL spelling and matched
+        case-insensitively, so seeding `alice` and resolving `AliCe` returns
+        `alice` — C-048's confirm step replaces the caller's spelling with the
+        server's, and a case-sensitive store could never show that. The KEY is
+        lowercased and the VALUE keeps the spelling, which is the whole
+        mechanism: a store that keyed on the spelling as given would 404 the
+        caller's `AliCe`, and one that echoed the caller's spelling back would
+        turn C-048's case-fold into an echo.
+        """
+        user = ForgeUser(login=login, id=user_id, bot=bot)
+        with self.lock:
+            self.users[login.lower()] = user
+        return user
+
+    def seed_token_identity(self, *, bot: bool = False) -> ForgeUser:
+        """Register the CREDENTIAL's own identity as a lookup-able account.
+
+        `users` starts empty while `/user` always answers
+        `token_identity_login` / `token_identity_id` (DX-74). So the owner
+        ladder's token rung resolves `test-forge-bot`, `confirm_with_forge` then
+        asks `GET /users/test-forge-bot`, gets the 404, and the run exits **79**
+        (`OwnerUnknown`) — for a fixture reason, in a test that reads as if it
+        had exercised the rung. Every `ocx package claim` run without `--owner`
+        needs this seeding first.
+
+        It exists as its own call rather than as `seed_user("test-forge-bot",
+        1001)` at each site because the login and the id are the SERVER's, and a
+        test that restates them drifts the moment either default moves — the
+        same reason `seed_user` keys on the canonical spelling instead of the
+        caller's.
+
+        `bot=True` seeds the identity as a bot on the LOOKUP side only, which is
+        `confirm_with_forge`'s strong guard; `token_identity_is_bot` is the
+        detected-side twin. They are two guards at two lines, so
+        `::test_owner_bot_refused_64` arms them in SEPARATE rows and never both
+        on one run: a run carrying both is refused by whichever fires first, so
+        deleting either guard leaves the other still refusing and the row green
+        with its own mutation applied.
+
+        Consumed by every no-`--owner` row of `test_package_claim.py`, and
+        pinned by `::test_owner_unknown_79`, whose positive control is the same
+        run with the seeding present.
+
+        It routes through `seed_user` rather than writing `users` itself, so the
+        canonical-spelling rule has exactly one implementation: a second writer
+        keying on the caller's spelling would make `seed_user("AliCe", ...)` and
+        this call disagree about what the store holds.
+        """
+        return self.seed_user(self.token_identity_login, self.token_identity_id, bot=bot)
 
     def close_pull_request(self, owner: str, repo: str, head: str) -> None:
         """Drop the open pull request whose head is `head` (`"<owner>:<branch>"`),
@@ -428,8 +769,47 @@ class FakeForge(GitLabRoutes, http.server.ThreadingHTTPServer):
         with self.lock:
             return self.refs.get(f"{owner}/{repo}", {}).get(branch)
 
+    def _reject_git_project_locked(self, full: str) -> None:
+        """Refuse REST-side seeding on a project that also owns a bare repository
+        (caller holds `self.lock`).
+
+        The shas the REST seeders mint are synthetic; a git-registered project's
+        shas are real, and DX-5's whole premise is that a REST read and a
+        `--force-with-lease` answer the same one. Mixing the two writers makes
+        them disagree silently, and every C-042 / S-024 / S-025 assertion then
+        measures the fixture. Failing loudly at the seam is what keeps that from
+        needing per-test discipline — use `git_seed_files` on a git project.
+
+        Called from both test-facing **synthetic-sha** writers of `refs`,
+        `seed_files` (and so `seed_root`) and `seed_branch_at` — at the public
+        entry points, never from `_seed_files_locked`. The route handlers reach
+        that helper to inject a racing writer (`handle_patch_ref`'s
+        `concurrent_ref_advance` branch, and `fake_gitlab`'s commit route), and
+        raising inside a handler thread is a traceback and a dropped connection
+        rather than a status. Those handlers are also not what this guard is
+        about: they write `refs` as the surface under test, which is the thing
+        the tests exist to observe.
+
+        `git_import_ref` is the deliberate third test-facing writer of `refs`
+        and is **exempt** — it carries the bare repository's real sha, which is
+        the one thing this guard exists to keep `refs` agreeing with. Calling it
+        from there would make every git-registered project unseedable and take
+        the whole transport with it.
+        """
+        if full in self.git_http_projects:
+            raise GitFixtureError(
+                f"{full} is a git-transport project: seed it with git_seed_files, "
+                "not seed_files/seed_root/seed_branch_at — a synthetic sha here would "
+                "disagree with the bare repository's real one"
+            )
+
     def _seed_files_locked(self, owner: str, repo: str, files: dict[str, bytes], branch: str) -> None:
-        """Commit `files` onto `branch`, advancing its head (caller holds `self.lock`)."""
+        """Commit `files` onto `branch`, advancing its head (caller holds `self.lock`).
+
+        Unguarded, deliberately: the route handlers that inject a racing writer
+        call this, and `_reject_git_project_locked` sits on `seed_files` above
+        it. A test seeds through `seed_files` / `seed_root`.
+        """
         full = f"{owner}/{repo}"
         parent_sha = self.refs.get(full, {}).get(branch)
         base_tree = dict(self.trees[self.commits[parent_sha]["tree"]]) if parent_sha else {}
@@ -454,9 +834,21 @@ class FakeForge(GitLabRoutes, http.server.ThreadingHTTPServer):
         return sha
 
     def _store_commit_locked(self, tree_sha: str, parent_sha: str | None) -> str:
+        """Register a commit under a freshly minted SYNTHETIC sha."""
         self._commit_counter += 1
         key = f"commit:{tree_sha}:{parent_sha}:{self._commit_counter}".encode()
-        sha = hashlib.sha1(key).hexdigest()
+        return self._record_commit_locked(hashlib.sha1(key).hexdigest(), tree_sha, parent_sha)
+
+    def _record_commit_locked(self, sha: str, tree_sha: str, parent_sha: str | None) -> str:
+        """Register a commit and its per-path provenance under a CALLER-CHOSEN sha.
+
+        Split out of `_store_commit_locked` so `git_import_ref` can register a
+        bare repository's **real** sha under the same provenance rule instead of
+        restating it. That rule is GitLab's only compare-and-swap oracle
+        (`fake_gitlab.py::gl_post_commit`), and this file's own comment below
+        says getting it wrong makes the CAS either never fire or always fire —
+        which is exactly why it must have one writer, not two.
+        """
         self.commits[sha] = {"tree": tree_sha, "parent": parent_sha}
         # Per-path provenance: a path whose blob is unchanged from the parent
         # keeps the parent's answer, everything else was last changed here. This
@@ -472,6 +864,137 @@ class FakeForge(GitLabRoutes, http.server.ThreadingHTTPServer):
         return sha
 
     # ── route handlers ───────────────────────────────────────────────────
+
+    def handle_get_authenticated_user(self, handler: _Handler) -> None:
+        """`GET /user` -> the credential's own identity, on both surfaces.
+
+        One identity endpoint, two field names: GitHub reads `login` and
+        `type`, GitLab reads `username` and `bot`. Serving all four keeps the
+        two surfaces on one account rather than inventing a second test
+        identity.
+
+        **All three arms are now live**, because WP-16's rows arm them. The
+        default 200 body is unchanged byte for byte: `token_identity_is_bot`
+        defaults False, so `type` is `"User"` and `bot` is `false` exactly as
+        before, and both new fields default False too. The 200 body is on the
+        path every existing announce module traverses, so a raising body there
+        would fail all six — the same reason C-017 gives for `ForgeKind::client`.
+
+        `id`, `type` and `bot` DO appear in the default body: they are
+        unconditional projections of declared state, and both clients read one
+        named field off a `serde_json::Value` (`github.rs::authenticated_login`,
+        `gitlab.rs::authenticated_username`) with no `deny_unknown_fields`
+        anywhere under `crates/ocx_lib/src/forge/`, so the extra keys are inert.
+
+        **The consumers, one per arm.** `users_api_status` here is
+        `test_package_claim.py::test_owner_asserted_needs_a_gitlab_job_token`'s
+        GitLab row (DX-72: `asserted` is unreachable on GitHub, so every test
+        arming it is a GitLab test); `token_identity_is_bot` is
+        `::test_owner_bot_refused_64`'s detected row, the only one that reaches
+        `seed_logins`' strong guard (`claim/owners.rs`) rather than the
+        login-shape guard; `token_identity_absent` is
+        `::test_no_acting_identity_64` and
+        `::test_author_is_null_without_a_token_identity_or_a_ci_pair`, which is
+        `author`'s null rung AND the observation that this knob really is
+        narrower than `users_api_status` — it passes `--owner`, so the owner
+        lookup must still answer for that row to succeed at all.
+
+        The two 403s are NOT two spellings of one state. `token_identity_absent`
+        is narrow — this route only, with the sentence GitHub reads as "no user
+        behind this credential" — while `users_api_status` is the credential that
+        may not call the users API at all, and its scope is every user route the
+        client can express it on. A test needing the second without the first
+        exists (`asserted`); a test needing the first without the second exists
+        (`::test_author_is_null_without_a_token_identity_or_a_ci_pair`, whose
+        owner lookup must still answer — which is what makes the narrowness
+        observable rather than only asserted here).
+        """
+        if self.token_identity_absent:
+            # Checked FIRST, and answering the exact sentence rather than a bare
+            # 403: GitHub reads `Ok(None)` only from a 403 whose body carries
+            # this message, so a generic body would turn "no user behind this
+            # credential" into `Err(Status)` and move the run off the rung the
+            # test is aiming at.
+            handler._reply_json(403, {"message": "Resource not accessible by integration"})
+            return
+        if self.users_api_status is not None:
+            handler._reply_json(
+                self.users_api_status,
+                {"message": "the users API is not readable with this credential"},
+            )
+            return
+        handler._reply_json(
+            200,
+            {
+                "login": self.token_identity_login,
+                "username": self.token_identity_login,
+                "id": self.token_identity_id,
+                # The forge's OWN bot assertion, in both spellings: GitHub reads
+                # `type`, GitLab reads `bot`. Both move together or the same
+                # fixture state would mean "bot" on one surface and "human" on
+                # the other.
+                "type": "Bot" if self.token_identity_is_bot else "User",
+                "bot": self.token_identity_is_bot,
+            },
+        )
+
+    def handle_get_user_by_login(self, handler: _Handler, login: str) -> None:
+        """`GET /users/<login>` -> GitHub's user lookup (C-024).
+
+        404 when the forge has no such account — the client reads that as
+        `Ok(None)`, and `OwnerUnknown` (79) is decided above it, so answering
+        anything else here would move the decision into the fixture.
+
+        The lookup is a **transformation**, which is why it ships here: the
+        caller's spelling is case-folded to find the account and the CANONICAL
+        spelling is answered, so `GET /users/AliCe` returns `login == "alice"`.
+        That is C-048's confirm step. A case-sensitive store 404s it; a store
+        echoing the caller's spelling answers `AliCe` and turns the confirm into
+        an echo.
+
+        The `users_api_status` arm stays deferred, for the reason
+        `handle_get_authenticated_user` gives about its own two: it is a knob
+        echo whose meaning is the Rust client's reaction, no test in this tree
+        arms it, and its red state is unreachable until WP-9's consumer exists.
+        It reaches the caller as a 501 carrying this sentence (`_reply_stub`).
+
+        **This arm stays deferred, and now for a contract reason rather than a
+        scheduling one.** DX-72: `UsersApiUnavailable` is unreachable on GitHub.
+        `github.rs::resolve_user` maps 404 to `Ok(None)` and every other
+        non-success to `Err(Status)`, so no status this knob could answer
+        produces the error the arm is named for — only GitLab does, through
+        `gl_get_users`, and only under `api_is_job_token`. Arming it would ship a
+        knob whose documented meaning the client cannot express.
+
+        It is therefore also the target of `test_git_http_fixture.py::
+        test_a_deferred_stub_answers_501_with_its_message`, which proves the
+        deferred-stub MECHANISM and needs one live stub to point at (DX-76).
+        WP-16 armed `/user`'s and `gl_get_users`' arms, which is why that probe
+        moved here.
+
+        The 404-on-unknown arm below must survive unchanged — `OwnerUnknown`
+        (79) is decided above the client, and any other status for a missing
+        account turns it into a `ForgeError`.
+        """
+        if self.users_api_status is not None:
+            raise NotImplementedError(
+                "handle_get_user_by_login owes C-009/C-027's UsersApiUnavailable status"
+            )
+        with self.lock:
+            user = self.users.get(urllib.parse.unquote(login).lower())
+        if user is None:
+            handler._reply_json(404, {"message": "not found"})
+            return
+        handler._reply_json(
+            200,
+            {
+                "login": user.login,
+                "username": user.login,
+                "id": user.id,
+                "type": "Bot" if user.bot else "User",
+                "bot": user.bot,
+            },
+        )
 
     def handle_get_repo(self, handler: _Handler, owner: str, repo: str) -> None:
         full = f"{owner}/{repo}"
@@ -774,6 +1297,10 @@ class FakeForge(GitLabRoutes, http.server.ThreadingHTTPServer):
                 # commit: inject its commit (advancing the head), then reject our
                 # fast-forward-only update as non-fast-forward (design register
                 # C4 amendment F2). The retry re-reads this advanced head.
+                if key in self.concurrent_ref_advance_persists:
+                    # DX-87: the writer keeps landing, so the regenerated retry
+                    # is refused too and the run reaches S-003's exit 75.
+                    self.concurrent_ref_advance[key] = advance
                 self._seed_files_locked(owner, repo, advance, branch)
                 handler._reply_json(422, {"message": "Update is not a fast forward"})
                 return

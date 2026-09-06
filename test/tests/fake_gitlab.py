@@ -50,6 +50,16 @@ MERGE_REQUESTS_RE = re.compile(rf"^/projects/(?P<id>{_ID})/merge_requests$")
 MERGE_REQUEST_RE = re.compile(rf"^/projects/(?P<id>{_ID})/merge_requests/(?P<iid>\d+)$")
 FORK_RE = re.compile(rf"^/projects/(?P<id>{_ID})/fork$")
 FORKS_RE = re.compile(rf"^/projects/(?P<id>{_ID})/forks$")
+# `GET /projects/:id/job_token_scope/allowlist` — read ONLY when the push
+# credential is a job token and the publishing project differs from the index
+# project (C-029). A fake that answers it unconditionally would let
+# `allowlist_read_only_when_cross_project` pass while the client read it every
+# time.
+JOB_TOKEN_ALLOWLIST_RE = re.compile(rf"^/projects/(?P<id>{_ID})/job_token_scope/allowlist$")
+# `GET /users?username=<login>` — GitLab's user lookup (C-028). The bare
+# `/users` path with a query, never `/users/<login>`, which is GitHub's
+# (`fake_forge.py`).
+USERS_RE = re.compile(r"^/users$")
 
 #: GitLab's Developer access level — the lowest that may push a branch.
 ACCESS_LEVEL_DEVELOPER = 30
@@ -58,7 +68,15 @@ ACCESS_LEVEL_NONE = 10
 
 
 class GitLabRoutes:
-    """GitLab REST v4 handlers, mixed into `FakeForge`."""
+    """GitLab REST v4 handlers, mixed into `FakeForge`.
+
+    Besides `FakeForge`'s own state, `gl_get_merge_requests` requires
+    `git_http_fixture.GitHttpRoutes` on the host — it calls
+    `git_promote_ready_merge_requests_locked` under the lock to materialise the
+    merge requests an asynchronous push worker would have created (D-T4). A
+    `FakeForge` assembled without that mixin raises `AttributeError` on every
+    merge-request poll.
+    """
 
     # ── dispatch ─────────────────────────────────────────────────────────
 
@@ -102,6 +120,15 @@ class GitLabRoutes:
         match = MERGE_REQUEST_RE.fullmatch(path)
         if match:
             self.gl_get_merge_request(handler, match.group("id"), int(match.group("iid")))
+            return True
+
+        match = JOB_TOKEN_ALLOWLIST_RE.fullmatch(path)
+        if match:
+            self.gl_get_job_token_allowlist(handler, match.group("id"), query)
+            return True
+
+        if USERS_RE.fullmatch(path):
+            self.gl_get_users(handler, query)
             return True
 
         return False
@@ -172,6 +199,21 @@ class GitLabRoutes:
         }
         if parent is not None:
             body["forked_from_project"] = {"id": self._gl_project_id_locked(parent)}
+        # THREE states, and the third one is the absence of the key (C-029). A
+        # project not named in the knob emits no field at all — the GitLab <
+        # 18.4 / hidden-setting instance, which is the only case yielding
+        # `unknown`-and-proceed and therefore the only one C-044's promotion
+        # covers. Defaulting to `False` here would refuse every existing
+        # consumer at 86 before it pushed; defaulting to `True` would make the
+        # unreadable case unreachable.
+        #
+        #
+        # An empty knob is the state of every pre-existing test in this tree, and
+        # it stays byte-identical to the body they already see: the key is
+        # emitted only for a project the knob names.
+        allowed = self.gitlab_job_token_push_allowed.get(full_path)
+        if allowed is not None:
+            body["ci_push_repository_for_job_token_allowed"] = allowed
         return body
 
     # ── read routes ──────────────────────────────────────────────────────
@@ -295,10 +337,113 @@ class GitLabRoutes:
         # always empty, which is also what ends the client's walk.
         handler._reply_json(200, entries if page == 1 else [])
 
+    def gl_get_job_token_allowlist(
+        self, handler: _Handler, identifier: str, query: dict[str, list[str]]
+    ) -> None:
+        """`GET /projects/:id/job_token_scope/allowlist` -> the projects allowed
+        to push here with their own job token.
+
+        Three outcomes (C-029): a list CONTAINING the publishing project passes;
+        a list without it is a miss and refuses at 86 naming both project paths;
+        a 403 is `unreadable`, which proceeds. The miss and the unreadable case
+        are separate knobs precisely because they produce different exit codes,
+        and a single "absent means unreadable" rule would make the miss
+        unreachable.
+
+        **Offset-paginated, like the real endpoint**, and that is not decoration.
+        GitLab's default page is 20 while the client asks for 100 and walks to a
+        short page; a fake that answered every page in full would let a
+        single-page client pass, and a single-page client turns a publishing
+        project on page two into a false 86 before any push. Serving the
+        requested window is what makes the walk observable at all.
+
+        403 is modelled because it is the **production-common** answer, not an
+        edge case: the endpoint requires Maintainer or Owner on the index
+        project while the preflight's own bar is Developer, so the publisher this
+        check exists for reads `unknown` rather than a verdict. That makes the
+        86-miss path fixture-proved only, which the consuming tests say in their
+        own doc comments.
+        """
+        per_page = int((query.get("per_page") or ["20"])[0])
+        page = int((query.get("page") or ["1"])[0])
+        with self.lock:
+            target = self._gl_resolve_locked(identifier)
+            if target is None:
+                handler._reply_json(404, {"message": "404 Project Not Found"})
+                return
+            if target in self.gitlab_job_token_allowlist_unreadable:
+                handler._reply_json(403, {"message": "403 Forbidden"})
+                return
+            start = (page - 1) * per_page
+            window = self.gitlab_job_token_allowlist.get(target, [])[start : start + per_page]
+            entries = [
+                {"id": self._gl_project_id_locked(source), "path_with_namespace": source}
+                for source in window
+            ]
+        handler._reply_json(200, entries)
+
+    def gl_get_users(self, handler: _Handler, query: dict[str, list[str]]) -> None:
+        """`GET /users?username=<login>` -> GitLab's user lookup (C-028).
+
+        Answers a LIST, as the real API does: an empty list is `Ok(None)`, and
+        the entry's `bot` field is the forge's own assertion that sets
+        `ForgeIdentity::bot`.
+
+        Two things about the shape are load-bearing and neither is arbitrary. An
+        **unknown login is 200 with `[]`**, never a 404: GitLab answers a
+        collection here, `OwnerUnknown` (79) is decided above the client, and a
+        404 would move that decision into the fixture. And the answer is a
+        LIST — a dict-shaped body would deserialise for a client that reads one
+        field and diverge from the real API only under a second match.
+
+        The lookup case-folds and answers the CANONICAL spelling, sharing
+        `seed_user`'s store with GitHub's `/users/<login>`, so the same account
+        confirms identically on both surfaces (C-048).
+
+        `users_api_status` stays deferred — a knob echo, no consumer in this
+        package; it reaches the caller as a 501 (`_Handler._reply_stub`).
+
+        **This route is where the `asserted` vocabulary lives (DX-72).**
+        `owner_identity_source: "asserted"` requires `confirm_with_forge` to see
+        `Err(UsersApiUnavailable)`, and only GitLab produces it — GitHub's
+        `resolve_user` maps 404 to `Ok(None)` and every other non-success to
+        `Err(Status)`, so `asserted` is **unreachable on GitHub**. GitLab
+        produces it only under `users_api_is_out_of_reach`, which additionally
+        requires `api_is_job_token`, so arming this knob alone is not enough:
+        the run must also carry `OCX_ANNOUNCE_TOKEN` equal to a non-empty
+        `CI_JOB_TOKEN`. Consumers: `test_package_claim.py`'s `asserted` row and
+        `::test_owner_ci_environment`'s GitLab half. When this is implemented,
+        the status must be 401 or 403 — no other value satisfies the Rust
+        client's predicate — and the empty-list arm below must stay a **200**,
+        because a 404 there would move `OwnerUnknown` into the fixture.
+        """
+        if self.users_api_status is not None:
+            handler._reply_json(
+                self.users_api_status,
+                {"message": "the users API is not readable with this credential"},
+            )
+            return
+        login = (query.get("username") or [""])[0]
+        with self.lock:
+            user = self.users.get(login.lower()) if login else None
+        if user is None:
+            handler._reply_json(200, [])
+            return
+        handler._reply_json(
+            200, [{"username": user.login, "id": user.id, "bot": user.bot}]
+        )
+
     def gl_get_merge_requests(self, handler: _Handler, identifier: str, query: dict[str, list[str]]) -> None:
         source_branch = (query.get("source_branch") or [""])[0]
         source_project = (query.get("source_project_id") or [""])[0]
         with self.lock:
+            # The asynchronous worker D-T4 describes, as a LAZY gate: a push's
+            # `post-receive` hook wrote `ready_at` and exited immediately, and
+            # readiness is decided here, at read time. A sleeping hook would
+            # hold the CGI child and the HTTP response open and wedge the very
+            # push it is meant to complete. A no-op when no push has been
+            # recorded, which is every existing consumer.
+            self.git_promote_ready_merge_requests_locked()
             target = self._gl_resolve_locked(identifier)
             source = self._gl_resolve_locked(source_project) if source_project else None
             key = (target, source, source_branch)
@@ -484,6 +629,12 @@ class GitLabRoutes:
                 # The branch the request targets — what the single-request route
                 # compares the source branch against.
                 "target_branch": body.get("target_branch", "main"),
+                # And the branch it comes FROM. Carried so a request this route
+                # created is indistinguishable from one
+                # `git_promote_ready_merge_requests_locked` materialised out of
+                # a push option (D-T4): two shapes would let a poll assert on a
+                # key only one of the two writers emits.
+                "source_branch": source_branch,
             }
             self.gitlab_merge_requests[key] = record
         handler._reply_json(201, record)
