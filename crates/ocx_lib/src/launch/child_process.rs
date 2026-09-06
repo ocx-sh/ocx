@@ -311,9 +311,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_kill_that_fails_because_the_child_is_gone_is_not_an_escalation() {
-        let mut child = tokio::process::Command::new("/bin/true")
+        // `/usr/bin/true`, not `/bin/true`: macOS ships no `/bin/true`, while
+        // both platforms carry the `/usr/bin` spelling. The sibling tests reach
+        // for `/bin/sleep` and `/bin/mkdir`, which macOS does have.
+        let mut child = tokio::process::Command::new("/usr/bin/true")
             .spawn()
-            .expect("/bin/true is present on every unix");
+            .expect("/usr/bin/true is present on linux and macOS");
         child.wait().await.expect("the child exits immediately");
 
         // `start_kill` now fails; this must still return rather than hang on a

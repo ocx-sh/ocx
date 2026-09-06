@@ -1,14 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! REST-only forge client for `ocx package announce`.
+//! Forge client for `ocx package announce` and `ocx package claim`.
 //!
 //! Copy-and-own port of grimoire's forge module (`src/catalog/forge.rs`, same
-//! owner), transport-adjusted to REST-only and owned by OCX — no shared crate,
-//! no cross-repo dependency (design register S5). The git-subprocess transport
-//! and the tri-state push-permission probe are deliberately dropped (design
-//! register S1/S3); GitLab, dropped from the first cut, is back as a peer
+//! owner), owned by OCX — no shared crate, no cross-repo dependency (design
+//! register S5). GitLab, dropped from the first cut, is back as a peer
 //! implementation rather than a branch inside one client.
+//!
+//! **Two write transports, one trait.** REST is the default and is what every
+//! existing announce uses. A second, `git`, exists for the one credential shape
+//! REST refuses — a GitLab CI job token, which can push over HTTP but cannot
+//! open a merge request — and creates the request through push options carried
+//! on the push itself. Which transport a client was built for is chosen once, by
+//! [`ForgeKind::client`], and is invisible to the caller: the same trait answers
+//! either way. The per-operation differences are on the [`Forge`] signatures.
 //!
 //! The operation set announce drives is [`Forge`]; the public vocabulary types
 //! name no forge and expose no forge-specific flag grammar (design register S7).
@@ -25,8 +31,21 @@
 //! against the upstream, fork identity built only from API response bodies, and
 //! a bounded fork-readiness wait.
 
+// Every submodule is private and only the vocabulary a caller outside `forge`
+// speaks is re-exported below. The git-transport modules therefore reach each
+// other as `super::<module>::…` rather than through a qualified-visibility
+// marker, and nothing that handles a secret — the redactor, the workspace —
+// appears on this crate's public surface. `Redacted` is the one git-transport
+// type that does, and it is the opposite of a leak: it names a guarantee two
+// `ForgeError` variants carry, and it can hold nothing the redactor has not
+// already masked.
 mod api;
+mod credentials;
 mod error;
+mod git_command;
+mod git_push_options;
+mod git_stderr;
+mod git_workspace;
 mod github;
 mod gitlab;
 mod http;
@@ -34,11 +53,16 @@ mod identity;
 mod kind;
 mod poll;
 
-pub use api::{BranchComparison, CommitBase, Forge, Mergeability, RefUpdate};
+pub use api::{
+    BranchComparison, CapabilityCheck, CapabilityName, CheckStatus, CommitBase, Forge, ForgeIdentity, Mergeability,
+    PushAccess, RefUpdate,
+};
+pub use credentials::{ForgeCredentials, GitPushCredential};
 pub use error::ForgeError;
+pub use git_command::{GitBinary, GitVersion, Redacted, probe_git_binary};
 pub use github::GitHubForge;
 pub use gitlab::GitLabForge;
-pub use kind::ForgeKind;
+pub use kind::{ForgeKind, WriteTransport};
 
 /// Announce credential, sourced from `OCX_ANNOUNCE_TOKEN`.
 ///

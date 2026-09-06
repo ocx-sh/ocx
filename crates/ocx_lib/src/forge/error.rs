@@ -3,6 +3,7 @@
 
 //! Error taxonomy for the forge REST client.
 
+use super::{CapabilityName, ForgeKind, Redacted, WriteTransport};
 use crate::cli::{ClassifyExitCode, ExitCode};
 
 /// Failures raised by the forge client.
@@ -76,6 +77,14 @@ pub enum ForgeError {
     /// reader to the forge's web UI to find out what a 422 meant. Build it with
     /// [`status_detail`] so the body is trimmed, length-capped, and reduced to
     /// the empty string when there is nothing worth showing.
+    ///
+    /// **The REST client is not the only producer.** `git` is an HTTP client
+    /// too, so a credential the forge rejects over the git write transport is
+    /// the same 401/403 arriving through a different reader — see
+    /// `git_stderr::credential_rejection_status`, which recovers the status from
+    /// what `git` printed. That producer supplies a fixed `detail` of its own
+    /// rather than a response body it never sees, because the bytes it *does*
+    /// hold are the ones a credential can arrive inside.
     #[error("forge returned HTTP status {status} for {url}{detail}")]
     Status { url: String, status: u16, detail: String },
 
@@ -160,6 +169,159 @@ pub enum ForgeError {
         "git write onto fork {fork} failed with 404: the base commit is not reachable there, which is what a fork behind upstream looks like — syncing {branch} from upstream reported: {sync}"
     )]
     ForkBaseUnreachable { fork: String, branch: String, sync: String },
+
+    /// A write transport this forge cannot serve was selected.
+    ///
+    /// Pure and up front: refused by [`super::ForgeKind::validate_transport`]
+    /// before any client is built and before any network call, so the operator
+    /// learns it from the command line rather than from a failed write.
+    #[error("the {transport} write transport is not supported on {forge}; drop --transport to write over the API")]
+    TransportUnsupported {
+        forge: ForgeKind,
+        transport: WriteTransport,
+    },
+
+    /// An operation the selected transport cannot perform was reached.
+    ///
+    /// Distinct from [`Self::TransportUnsupported`], which refuses the transport
+    /// as a whole: here the transport is legitimate and one operation on it is
+    /// not. The fork operations under the git transport are the live case — the
+    /// credential that transport exists for cannot reach the fork API at all.
+    #[error("{operation} is not available over the {transport} write transport")]
+    TransportOperationUnsupported {
+        operation: String,
+        transport: WriteTransport,
+    },
+
+    /// The credential may not call the forge's users API at all.
+    ///
+    /// A GitLab CI job token reads repository content but no user identities.
+    /// Deliberately **not** the same answer as an account that does not exist:
+    /// there is no lookup to be had, so a bare `LOGIN` can never become an id
+    /// and the operator must write the pair out.
+    #[error(
+        "the forge users API is not reachable with this credential; give the owner as LOGIN:ID so no lookup is needed"
+    )]
+    UsersApiUnavailable,
+
+    /// `git` is absent, unusable, or older than the floor the git write
+    /// transport needs.
+    ///
+    /// Raised before any network call, so a run that cannot possibly succeed
+    /// costs nothing and reaches no forge.
+    #[error("the git write transport cannot run: {reason}")]
+    GitUnavailable { reason: String },
+
+    /// A rendered merge-request push option carried a value the git wire must
+    /// never be handed, and the push was refused before any process was spawned.
+    ///
+    /// Raised by the push-option renderer alone, so it is a *pre-spawn* refusal:
+    /// nothing reached a pkt-line, no ref moved, and no forge was contacted.
+    ///
+    /// **`reason` must never echo the offending value.** The guard fires exactly
+    /// when C-067's structured-values-only rule has already been broken upstream,
+    /// so at that moment the value is operator-influenced text — putting it in a
+    /// message re-injects it into the CI log, which for an ESC byte is a second,
+    /// actively hostile sink. Naming the key and the single offending codepoint
+    /// is diagnosis; reproducing the value is a leak.
+    ///
+    /// Deliberately **unclassified** (`classify` → `None` → exit 1), like
+    /// [`Self::GitCommandFailed`] and [`Self::GitPushFailed`]: under C-067 no
+    /// operator flag reaches this value, so a fire means an ocx-side invariant
+    /// broke. That is an internal error with no remedy a caller can branch on,
+    /// and emphatically not [`ExitCode::UsageError`] — telling an operator to fix
+    /// their command line would be a lie.
+    #[error("the push option {key} carries a value the git wire forbids: {reason}")]
+    PushOptionRefused { key: &'static str, reason: String },
+
+    /// A `git` plumbing step failed for a reason nothing models.
+    ///
+    /// `stderr` is [`Redacted`], not `String`, and that is the whole guarantee:
+    /// `redact` is its only constructor, so the masking cannot be forgotten at
+    /// a construction site the way a doc comment asking for it can. It matters
+    /// here more than anywhere else in this taxonomy because `git`'s stderr is
+    /// the one channel where a secret arrives *inside* forge-controlled bytes —
+    /// a credential helper or a server echoing a request header back — rather
+    /// than beside them. Length-capping stays the capturing helper's, which
+    /// bounds the volume; the type bounds the content.
+    #[error("git {command} failed with {status}: {stderr}")]
+    GitCommandFailed {
+        command: String,
+        status: String,
+        stderr: Redacted,
+    },
+
+    /// `git push` failed for a reason the stderr classifier does not recognise.
+    ///
+    /// The catch-all under the recognised refusals below, so an unmodelled
+    /// server message reaches the operator verbatim rather than being forced
+    /// into a category it does not belong to. "Verbatim" is exactly why the
+    /// type matters: `stderr` is [`Redacted`] and capped as for
+    /// [`Self::GitCommandFailed`], so the one variant that promises to pass a
+    /// server's own words through is also the one that cannot pass a secret
+    /// through with them.
+    #[error("git push failed: {stderr}")]
+    GitPushFailed { stderr: Redacted },
+
+    /// A leased force-push was refused because the branch moved since it was
+    /// read.
+    ///
+    /// The git transport's spelling of the compare-and-swap
+    /// [`Self::NonFastForward`] expresses over REST: a concurrent run advanced
+    /// the branch between the fetch and the push, so the rebuild is regenerated
+    /// against the winning head rather than overwriting it.
+    #[error("the branch {branch} moved since it was read, so the leased force-push was refused")]
+    StaleLease { branch: String },
+
+    /// The server refused the push for a reason that is not a capability gate —
+    /// a protected branch, or a pre-receive hook.
+    #[error("the push to {branch} was refused by the server: {reason}")]
+    PushRefused { branch: String, reason: String },
+
+    /// A capability the selected write transport needs is disabled on the
+    /// project or unavailable on the instance.
+    ///
+    /// The remedy is never in the caller's hands — an administrator changes a
+    /// project setting, or the instance is upgraded — which is what separates
+    /// this from a caller-side policy refusal and why it carries its own exit
+    /// code. `remedy` names the setting to change, and where the check compared
+    /// two projects it names both, since neither path alone tells an operator
+    /// which one to edit.
+    #[error("{capability} is unavailable on {repo}: {remedy}")]
+    WriteCapabilityUnavailable {
+        capability: CapabilityName,
+        repo: String,
+        remedy: String,
+    },
+
+    /// The push succeeded but no merge request appeared within the confirmation
+    /// bound.
+    ///
+    /// The server creates a push-option merge request asynchronously, so a slow
+    /// instance outruns the poll while the branch is already published. Rerunning
+    /// picks up a request that arrived late; nothing is lost and nothing is
+    /// duplicated.
+    #[error(
+        "the push succeeded but no merge request appeared within {deadline_secs}s; rerun the command to pick up one the server created late"
+    )]
+    MergeRequestUnconfirmed { deadline_secs: u64 },
+}
+
+/// Whether `status` is a forge-side fault — a 5xx the forge itself answered
+/// with, as opposed to a refusal of the request.
+///
+/// One range literal with two readers, deliberately. [`ForgeError::classify`]
+/// maps it to [`ExitCode::Unavailable`], which tells a CI wrapper the forge is
+/// down and the run never happened. The merge-request confirmation poll
+/// (`git_workspace::confirm_merge_request`) needs the *same* predicate to reach
+/// the opposite conclusion: there, the push has already landed, so a fault is
+/// folded into "not yet" and the poll's own
+/// [`ForgeError::MergeRequestUnconfirmed`] is the answer. Two spellings of
+/// `500..=599` would be two rules, free to drift into disagreeing about which
+/// statuses mean the forge broke.
+#[must_use]
+pub(super) fn is_server_fault(status: u16) -> bool {
+    (500..=599).contains(&status)
 }
 
 /// How many characters of a forge's error body [`status_detail`] keeps.
@@ -218,14 +380,36 @@ impl ClassifyExitCode for ForgeError {
             // `Transport`, but the forge is just as unavailable and a retry is
             // just as reasonable; without this it is indistinguishable from
             // malformed input at exit 1.
-            Self::Status { status, .. } if (500..=599).contains(status) => Some(ExitCode::Unavailable),
+            Self::Status { status, .. } if is_server_fault(*status) => Some(ExitCode::Unavailable),
             // A request never completed (connect, TLS, timeout, DNS, or read
             // failure) — the forge itself is unreachable.
             Self::Transport { .. } => Some(ExitCode::Unavailable),
             // A persistent non-fast-forward (heavy branch contention the one
             // in-announce retry did not clear) is a transient failure the
-            // caller may retry (design register C4).
-            Self::NonFastForward { .. } => Some(ExitCode::TempFail),
+            // caller may retry (design register C4). A stale lease is the git
+            // transport's spelling of the same race, and an unconfirmed merge
+            // request is a server that was simply slower than the poll — all
+            // three are answered by running the command again.
+            Self::NonFastForward { .. } | Self::StaleLease { .. } | Self::MergeRequestUnconfirmed { .. } => {
+                Some(ExitCode::TempFail)
+            }
+            // `git` is missing or too old. Nothing about the invocation is
+            // wrong and no credential is involved: the host lacks a tool the
+            // run needs, which is exactly what `EX_UNAVAILABLE` means. Raised
+            // before any network call.
+            Self::GitUnavailable { .. } => Some(ExitCode::Unavailable),
+            // A protected branch or a pre-receive hook said no. The credential
+            // authenticated fine and the request was well-formed; the caller
+            // simply may not write there — the same reading `EX_NOPERM` carries
+            // for a filesystem `EPERM`.
+            Self::PushRefused { .. } => Some(ExitCode::PermissionDenied),
+            // A capability the transport needs is disabled on the project or
+            // absent from the instance. Deliberately not 80 (the credential is
+            // valid), not 81 (no local policy refused anything) and not 69 (the
+            // forge is up and answering): the remedy is an administrator
+            // changing a setting, which is a state a pipeline must be able to
+            // tell apart from all three.
+            Self::WriteCapabilityUnavailable { .. } => Some(ExitCode::ForgeCapabilityUnavailable),
             // A malformed invocation, not a failure of the run: the operator
             // named a self-hosted host without saying which forge runs there,
             // asked GitHub for a nested namespace it cannot express, or pointed
@@ -233,13 +417,26 @@ impl ClassifyExitCode for ForgeError {
             // fixed by editing the command line, which is what `EX_USAGE` means
             // — and a CI wrapper must be able to tell "your flags are wrong"
             // from "the forge said no".
+            //
+            // The three transport-shaped refusals join them for the same
+            // reason. `TransportUnsupported` and `TransportOperationUnsupported`
+            // are both fixed by changing `--transport` or dropping `--fork`, and
+            // `UsersApiUnavailable` is fixed by writing the owner as `LOGIN:ID`
+            // — none of them is a failure of the forge or of the credential.
             Self::ForgeKindUnknown { .. }
             | Self::NestedNamespaceUnsupported { .. }
             | Self::SelfForkRefused { .. }
             | Self::ForkHostMismatch { .. }
-            | Self::InvalidRepoCoordinate { .. } => Some(ExitCode::UsageError),
+            | Self::InvalidRepoCoordinate { .. }
+            | Self::TransportUnsupported { .. }
+            | Self::TransportOperationUnsupported { .. }
+            | Self::UsersApiUnavailable => Some(ExitCode::UsageError),
             // Every other status code and every other variant is not yet
             // classified beyond the sysexits default (`ExitCode::Failure`).
+            // `GitCommandFailed` and `GitPushFailed` land here **deliberately**:
+            // each is an unrecognised failure of a plumbing step, with no remedy
+            // a caller could branch on, so inventing a code for either would be
+            // worse than exit 1 with git's own message attached.
             _ => None,
         }
     }
@@ -248,6 +445,11 @@ impl ClassifyExitCode for ForgeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The redactor is not re-exported from `forge` — only the type it produces
+    // is — so the fixture reaches it by module path. That it has to is the
+    // point: this is the only construction site either `stderr`-bearing variant
+    // has, and it goes through the masking like every later one will.
+    use super::super::git_command::redact;
 
     /// `reqwest::Error` exposes no public constructor; a malformed URL fails
     /// `RequestBuilder::build()` synchronously (no network access), giving a
@@ -390,5 +592,196 @@ mod tests {
             branch: "indexbot-announce-acme-widget".to_string(),
         };
         assert_eq!(error.classify(), Some(ExitCode::TempFail));
+    }
+
+    /// The eleven variants the git write transport adds — C-018's ten, plus
+    /// [`ForgeError::PushOptionRefused`] (DX-27) — each beside the exit code the
+    /// ADR's exit-code table names for it.
+    ///
+    /// One fixture, read by two tests. The exit-code table and the message
+    /// style guard must cover the same eleven variants, and a second
+    /// hand-written list is a second definition of "the eleven", free to drift
+    /// from this one.
+    fn new_variants_with_exit_codes() -> Vec<(ForgeError, Option<ExitCode>)> {
+        vec![
+            (
+                ForgeError::TransportUnsupported {
+                    forge: ForgeKind::GitHub,
+                    transport: WriteTransport::Git,
+                },
+                Some(ExitCode::UsageError),
+            ),
+            (
+                ForgeError::TransportOperationUnsupported {
+                    operation: "ensure_fork".to_string(),
+                    transport: WriteTransport::Git,
+                },
+                Some(ExitCode::UsageError),
+            ),
+            (ForgeError::UsersApiUnavailable, Some(ExitCode::UsageError)),
+            (
+                ForgeError::GitUnavailable {
+                    reason: "git 2.30.9 is below the 2.31 floor the git write transport needs".to_string(),
+                },
+                Some(ExitCode::Unavailable),
+            ),
+            (
+                ForgeError::GitCommandFailed {
+                    command: "fetch".to_string(),
+                    status: "exit status 128".to_string(),
+                    stderr: redact("fatal: could not read from the remote repository", &[]),
+                },
+                None,
+            ),
+            (
+                ForgeError::GitPushFailed {
+                    stderr: redact("remote: a refusal shape no classifier models", &[]),
+                },
+                None,
+            ),
+            // DX-27. Unclassified for the same reason as the two above, and
+            // asserted as `None` rather than omitted so that a later hand
+            // dropping it into the `UsageError` arm — the tempting wrong answer,
+            // because the message reads like bad input — reds here instead of
+            // shipping. The `reason` names the key and the codepoint and never
+            // the value; see the variant's own doc comment.
+            (
+                ForgeError::PushOptionRefused {
+                    key: "merge_request.title",
+                    reason: "byte 12 is U+001B, outside the printable ASCII the wire carries".to_string(),
+                },
+                None,
+            ),
+            (
+                ForgeError::StaleLease {
+                    branch: "indexbot-claim-acme".to_string(),
+                },
+                Some(ExitCode::TempFail),
+            ),
+            (
+                ForgeError::PushRefused {
+                    branch: "main".to_string(),
+                    reason: "the branch is protected".to_string(),
+                },
+                Some(ExitCode::PermissionDenied),
+            ),
+            (
+                ForgeError::WriteCapabilityUnavailable {
+                    capability: CapabilityName::JobTokenPush,
+                    repo: "acme/index".to_string(),
+                    remedy: "enable Settings > CI/CD > Job token permissions on acme/index".to_string(),
+                },
+                Some(ExitCode::ForgeCapabilityUnavailable),
+            ),
+            (
+                ForgeError::MergeRequestUnconfirmed { deadline_secs: 30 },
+                Some(ExitCode::TempFail),
+            ),
+        ]
+    }
+
+    /// Every one of the git write transport's eleven new variants against the
+    /// ADR's exit-code table.
+    ///
+    /// [`ForgeError::GitCommandFailed`], [`ForgeError::GitPushFailed`] and
+    /// [`ForgeError::PushOptionRefused`] are **deliberately unclassified** and
+    /// are asserted as `None` rather than omitted: each is an unrecognised
+    /// failure of a plumbing step or a broken ocx-side invariant, with no remedy
+    /// a caller could branch on, so a later accidental classification must red
+    /// here rather than ship silently.
+    ///
+    /// The two worth reading twice are 86 and 77.
+    /// [`ForgeError::WriteCapabilityUnavailable`] is exit 86, a *capability
+    /// gate* whose remedy is an administrator's; [`ForgeError::PushRefused`] is
+    /// exit 77, a *permission refusal* against a credential that authenticated
+    /// fine. Collapsing them would hide the one state a pipeline cannot act on
+    /// from the one it can.
+    ///
+    /// The arity is asserted over the very array the rows are read from — a
+    /// count written beside a separate enumeration is a budget, not a pairing,
+    /// and would not notice a dropped row.
+    ///
+    /// Reds on: dropping any row (proved), and on moving a variant to a
+    /// different arm of `classify` (proved with `PushRefused` 77 -> 86).
+    #[test]
+    fn forge_error_exit_code_table() {
+        let table = new_variants_with_exit_codes();
+        assert_eq!(
+            table.len(),
+            11,
+            "the git write transport adds eleven variants and every one of them is classified here, including the three unclassified"
+        );
+        for (error, expected) in table {
+            assert_eq!(error.classify(), expected, "{error} must classify as {expected:?}");
+        }
+    }
+
+    /// The style this repository already holds library error messages to, from
+    /// the Rust API Guidelines' `C-GOOD-ERR` and applied the same way by
+    /// `oci::sign::error`'s `sign_error_kind_display_rules`: a concise
+    /// lowercase message with no trailing punctuation, acronyms **and proper
+    /// nouns** keeping their canonical case, and no redundant `error:` prefix
+    /// (the `Error` trait already categorises the line).
+    ///
+    /// Read from the same fixture as the exit-code table so the two cannot
+    /// cover different sets of eleven.
+    ///
+    /// **This test is deliberately stricter than the rule it enforces, and the
+    /// gap is in the proper nouns.** [`is_sentence_case`] readmits an
+    /// all-uppercase acronym and nothing else, so the very messages the cited
+    /// precedent asserts as *compliant* — `"Fulcio rejected the CSR as
+    /// malformed"`, `"Rekor transparency log unavailable"` — would red here.
+    /// None of the eleven variants below opens with one today, which is why the
+    /// narrower predicate is green.
+    ///
+    /// The direction is the safe one: a false red, which an author sees and
+    /// must answer, rather than a false green, which ships. But the answer is
+    /// **not** to relax the assertion or drop the first-word check — either
+    /// silences the whole style guard to admit one word. Widen
+    /// [`is_sentence_case`] instead, with an explicit allowlist of the proper
+    /// nouns this taxonomy is permitted to open with (`GitHub`, `GitLab`,
+    /// `Fulcio`, `Rekor`), so that admitting a new one stays a decision someone
+    /// wrote down.
+    ///
+    /// Reds on: sentence-casing any of the eleven `#[error(...)]` strings, or
+    /// giving one a trailing period.
+    #[test]
+    fn new_error_messages_follow_style() {
+        let table = new_variants_with_exit_codes();
+        assert_eq!(
+            table.len(),
+            11,
+            "the style rule covers all eleven of the git write transport's new variants"
+        );
+        for (error, _) in table {
+            let message = error.to_string();
+            assert!(!message.is_empty(), "an error variant rendered nothing");
+            assert!(
+                !message.ends_with(['.', '!', '?']),
+                "C-GOOD-ERR wants no trailing punctuation: {message}"
+            );
+            let first_word = message.split_whitespace().next().unwrap_or_default();
+            assert!(
+                !is_sentence_case(first_word),
+                "C-GOOD-ERR wants a lowercase first word (an all-caps acronym is fine): {message}"
+            );
+            assert!(
+                !message.to_ascii_lowercase().starts_with("error:"),
+                "`Error` already categorises the line, so the prefix is redundant: {message}"
+            );
+        }
+    }
+
+    /// Whether `word` is Sentence-case: an initial capital followed by at least
+    /// one lowercase letter. An all-uppercase word (`HTTP`, `CI`, `I/O`) is an
+    /// acronym and keeps its canonical case, which the guideline allows.
+    ///
+    /// A proper noun (`GitLab`, `Fulcio`) is Sentence-case by this predicate and
+    /// so reads as a violation, even though the guideline permits it. That is a
+    /// deliberate narrowing, not an oversight — see the caller for why, and for
+    /// the allowlist that is the sanctioned way to widen it.
+    fn is_sentence_case(word: &str) -> bool {
+        let mut characters = word.chars();
+        characters.next().is_some_and(char::is_uppercase) && characters.any(char::is_lowercase)
     }
 }

@@ -196,6 +196,45 @@ pub mod keys {
     /// knowing call, made once, not a silent default.
     pub const OCX_SIGNING_KEY: &str = "OCX_SIGNING_KEY";
 
+    /// The API half of the forge credential pair — a forge personal, project or
+    /// group access token — read by the forge credential ladder
+    /// (`forge::credentials::ForgeCredentials::resolve`).
+    ///
+    /// **A documented non-member of [`CREDENTIAL_KEYS`]**, and the only
+    /// constant here that is one: see `# Known non-members` below for why it
+    /// stays out while its push-half sibling [`OCX_ANNOUNCE_GIT_TOKEN`] is in.
+    /// It lives here regardless because three sites need the *name* — the
+    /// ladder that reads it, the CLI refusal that tells an operator which
+    /// variable to set, and this module's own prose — and a name spelled three
+    /// times is a name that drifts.
+    ///
+    /// **One private copy survives**, and it is recorded rather than assumed
+    /// away: `ocx_cli::command::package_announce` still declares its own
+    /// `const OCX_ANNOUNCE_TOKEN` and reads the variable directly, so a rename
+    /// here compiles clean and leaves announce reading the old name. WP-15
+    /// deletes that copy when it moves announce onto the ladder. Not a scrub
+    /// gap — this variable is a documented non-member of [`CREDENTIAL_KEYS`],
+    /// so no `env_remove` loop depends on the spelling.
+    pub const OCX_ANNOUNCE_TOKEN: &str = "OCX_ANNOUNCE_TOKEN";
+
+    /// The push-only forge credential, read by the git write transport's
+    /// credential ladder (`forge::credentials::ForgeCredentials::resolve`).
+    ///
+    /// A bearer credential in the plain sense: it is presented as the secret
+    /// half of an HTTP Basic pair to a `git push`, so holding the string is
+    /// enough to write to the index repository. Its user half,
+    /// `OCX_ANNOUNCE_GIT_USERNAME`, is **not** a credential and is deliberately
+    /// absent from [`CREDENTIAL_KEYS`].
+    ///
+    /// **Asymmetric against its own sibling**, and the asymmetry is deliberate:
+    /// this variable is scrubbed from plugin child environments while
+    /// [`OCX_ANNOUNCE_TOKEN`] is not (see `# Known non-members`), so a
+    /// plugin-dispatched `ocx-mirror` inherits the API half and not the push
+    /// half. Benign today because that plugin drives no git transport; any
+    /// transport wiring there must pass the push credential explicitly rather
+    /// than relying on inheritance.
+    pub const OCX_ANNOUNCE_GIT_TOKEN: &str = "OCX_ANNOUNCE_GIT_TOKEN";
+
     /// Every env var that carries a **bearer credential** — the single source
     /// of truth for that property, and the set `apply_ocx_config` scrubs from
     /// any child env.
@@ -210,12 +249,15 @@ pub mod keys {
     ///
     /// # Adding one
     ///
-    /// Three edits, in the same change, or the set is a lie somewhere:
+    /// Four edits, in the same change, or the set is a lie somewhere:
     ///
     /// 1. Add the constant here and list it below.
-    /// 2. Add its row to the credential exemption table in
+    /// 2. If the new member has a sibling that stays **out**, update
+    ///    `# Known non-members` so it explains the asymmetry rather than a
+    ///    rationale the new member violates.
+    /// 3. Add its row to the credential exemption table in
     ///    `.claude/rules/subsystem-cli.md` (the reviewer-facing list).
-    /// 3. Document it in `website/src/docs/reference/environment.md`, stating
+    /// 4. Document it in `website/src/docs/reference/environment.md`, stating
     ///    that it is never forwarded to child processes (the user-facing list).
     ///
     /// # Members
@@ -225,18 +267,34 @@ pub mod keys {
     /// | [`OCX_IDENTITY_TOKEN`] | Short-lived OIDC bearer token | the shared sign/attest token resolver |
     /// | [`OCX_KEY_PASSWORD`] | Passphrase for an encrypted signing key | `oci::sign::key_backend::key_password` |
     /// | [`OCX_SIGNING_KEY`] | The signing key PEM itself | `oci::sign::key_backend::PemKeyBackend::open_env` |
+    /// | [`OCX_ANNOUNCE_GIT_TOKEN`] | The push half of the forge credential pair | `forge::credentials::ForgeCredentials::resolve` |
     ///
     /// # Known non-members
     ///
     /// Two variables satisfy the membership rule above and are **deliberately
-    /// not** in the set. Recorded here so the next contributor does not
+    /// not** in the set; a third is listed because its name makes it look as
+    /// though it should be. Recorded here so the next contributor does not
     /// re-derive the analysis, or add one without seeing what it costs.
     ///
-    /// - `OCX_ANNOUNCE_TOKEN` (read in `command/package_announce.rs`) — a forge
+    /// - [`OCX_ANNOUNCE_TOKEN`] (read by the forge credential ladder) — a forge
     ///   personal access token, so holding it authenticates you. **Open: a
     ///   cross-repo decision, not an oversight.** `ocx-mirror` announces from a
     ///   plugin process, and a plugin inherits the ambient environment, so
     ///   adding this entry would stop that working. The owner's call.
+    ///
+    ///   **This is now an asymmetry inside one family, not a blanket
+    ///   exclusion.** Its push-half sibling [`OCX_ANNOUNCE_GIT_TOKEN`] **is** a
+    ///   member and **is** scrubbed, so a plugin-dispatched `ocx-mirror`
+    ///   inherits the API half and not the push half. Benign only because that
+    ///   plugin drives no git write transport today; wiring one there means
+    ///   passing the push credential explicitly rather than relying on
+    ///   inheritance.
+    /// - `OCX_ANNOUNCE_GIT_USERNAME` (read by the same ladder) — the **user**
+    ///   half of the HTTP Basic pair, defaulting to `gitlab-ci-token`. It does
+    ///   **not** satisfy the membership rule: holding it authenticates nobody,
+    ///   and listing it would say that it did. Not open, and not a gap — a
+    ///   decided no, recorded only because it sits one underscore away from a
+    ///   member.
     /// - `OCX_AUTH_<slug>_TOKEN` (read by `crate::auth::get_env_auth`) — a name
     ///   *pattern*, not a name, so a `&[&str]` structurally cannot hold it. **Open: a gap
     ///   in the mechanism, not a missing row.** The repo already solves this
@@ -255,7 +313,12 @@ pub mod keys {
     /// an inherited credential straight through. Every such site must
     /// `env_clear()` or `env_remove` each entry here; `app/plugin_dispatch.rs`
     /// is the one that inherits deliberately and therefore removes explicitly.
-    pub const CREDENTIAL_KEYS: &[&str] = &[OCX_IDENTITY_TOKEN, OCX_KEY_PASSWORD, OCX_SIGNING_KEY];
+    pub const CREDENTIAL_KEYS: &[&str] = &[
+        OCX_IDENTITY_TOKEN,
+        OCX_KEY_PASSWORD,
+        OCX_SIGNING_KEY,
+        OCX_ANNOUNCE_GIT_TOKEN,
+    ];
 }
 
 /// Resolution-affecting policy snapshot, taken from the running ocx's parsed
@@ -1303,8 +1366,11 @@ pub fn var(key: impl AsRef<str>) -> Option<String> {
     match std::env::var(key.as_ref()) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(os_str)) => {
-            log::warn!("Environment variable '{}' is not valid: {:?}", key.as_ref(), os_str);
+        // The key alone, never the value: this reader is on the credential
+        // path (`CI_JOB_TOKEN`, `OCX_ANNOUNCE_GIT_TOKEN`), and a CI job log is
+        // durable and read by more parties than the process environment.
+        Err(std::env::VarError::NotUnicode(_)) => {
+            log::warn!("Environment variable '{}' is not valid UTF-8", key.as_ref());
             None
         }
     }
@@ -3176,6 +3242,41 @@ mod tests {
         assert!(
             keys::CREDENTIAL_KEYS.contains(&keys::OCX_SIGNING_KEY),
             "OCX_SIGNING_KEY holds a private key PEM and must be scrubbed from every child env"
+        );
+    }
+
+    /// C-066: `OCX_ANNOUNCE_GIT_TOKEN` is a credential; its sibling
+    /// `OCX_ANNOUNCE_GIT_USERNAME` is not.
+    ///
+    /// Both polarities in **one** function, so a builder cannot ship half the
+    /// rule. The membership rule is "if holding the string authenticates you":
+    /// the push token does, the user half of the HTTP Basic pair does not, and
+    /// putting a username on the credential list would say it did.
+    ///
+    /// Asserted **by name**, like `the_conventional_signing_key_variable_is_a_credential`
+    /// above and for the same reason: `apply_ocx_config_never_forwards_credential_tokens`
+    /// iterates `CREDENTIAL_KEYS`, so removing an entry leaves it green — it
+    /// simply tests one variable fewer.
+    ///
+    /// The names are spelled as literals rather than read from a `keys`
+    /// constant on purpose: a constant would be compared against itself, so a
+    /// typo in its value would satisfy both sides. The literal is the contract's
+    /// own spelling, quoted the way `exit_code_forge_capability_unavailable_is_86`
+    /// quotes 86.
+    ///
+    /// Red at the stub: the constant is not in the set.
+    /// Mutation once implemented: remove `OCX_ANNOUNCE_GIT_TOKEN` from the array
+    /// (the positive reds and the scrub test above does not); add
+    /// `OCX_ANNOUNCE_GIT_USERNAME` to it (the negative reds).
+    #[test]
+    fn credential_keys_contains_git_token_not_username() {
+        assert!(
+            keys::CREDENTIAL_KEYS.contains(&"OCX_ANNOUNCE_GIT_TOKEN"),
+            "OCX_ANNOUNCE_GIT_TOKEN is a push credential and must be scrubbed from every child env"
+        );
+        assert!(
+            !keys::CREDENTIAL_KEYS.contains(&"OCX_ANNOUNCE_GIT_USERNAME"),
+            "OCX_ANNOUNCE_GIT_USERNAME is the user half of an HTTP Basic pair, not a credential"
         );
     }
 

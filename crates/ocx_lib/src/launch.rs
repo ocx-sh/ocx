@@ -935,6 +935,16 @@ mod firewall_tests {
             "fixed macOS system utilities (`codesign`, `xattr`, `cc` in tests) during extraction",
         ),
         (
+            "ocx_lib/src/forge/git_command.rs",
+            "the git write transport — runs the operator's own `git` to announce an index tag. Not a \
+             tool launch: the program is resolved on `PATH` for ocx's own purposes rather than out of \
+             a package, and no environment is composed for it. The whole git-transport path routes \
+             through this one file so the exemption stays a single reviewable line; the child-process \
+             builder is private and the file exports only a *running* helper taking a resolved \
+             `GitBinary`, so a sibling never holds a `Command` it could re-arm and can run git and \
+             nothing else",
+        ),
+        (
             "ocx_lib/src/oci/host_capabilities.rs",
             "libc detection — runs a discovered loader with `--version` to classify its banner",
         ),
