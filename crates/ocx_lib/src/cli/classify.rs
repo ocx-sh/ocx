@@ -1396,7 +1396,7 @@ mod tests {
         use crate::claim::ClaimError;
         use crate::forge::ForgeError;
 
-        let already_claimed = ClaimError::NamespaceAlreadyClaimed {
+        let already_claimed = ClaimError::PackageAlreadyClaimed {
             package: "acme/widget".to_string(),
             path: "p/acme/widget.json".to_string(),
             base_ref: "main".to_string(),

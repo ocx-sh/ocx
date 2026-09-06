@@ -28,11 +28,11 @@ human looks: someone has to judge that whoever is claiming `acme` plausibly *is*
 
 | Command | When | Reviewed by |
 |---|---|---|
-| [`ocx package claim`][cmd-package-claim] | Once per namespace, before anything can be announced | A person, always |
+| [`ocx package claim`][cmd-package-claim] | Once per package, before its first announce | A person, always |
 | [`ocx package announce`][cmd-package-announce] | Every release afterwards | The index's auto-merge rule, once the owners match |
 
-`announce` never creates an entry — a package whose namespace has no committed entry exits 79
-and points you at `claim`. Neither command ever commits to the index's default branch: both
+`announce` never creates an entry — a package with no committed entry exits 79 and points you
+at `claim`. Neither command ever commits to the index's default branch: both
 arrive as a pull request (GitHub) or a merge request (GitLab).
 
 ::: warning A GitLab-sourced claim is a documented prerequisite, not yet a recommendation
@@ -54,7 +54,7 @@ Four things go in it, and only two come from you directly:
 | The logical name | `<namespace>/<package>`, prefixed with the default registry | What a consumer types: `ocx add acme/widget`, `ocx package install acme/widget` |
 | The physical repository | `--repository oci://HOST/PATH` | The registry repository every later announce resolves tags against |
 | The owners | `--owner`, else the CI environment, else the credential's identity | The governance key — see [below](#announcing-owners) |
-| The upstream block | `--upstream-org` and its two optional siblings | Only for a namespace that repackages someone else's software |
+| The upstream block | `--upstream-org` and its two optional siblings | Only for a package that repackages someone else's software |
 
 The `--repository` pointer names your **registry**, not the index. They are different
 systems: the registry holds the bytes, the index holds the mapping. A claim that points at
@@ -64,7 +64,7 @@ Every later announce rewrites the entry's tag set in place. The owners and the r
 pointer stay as the claim wrote them — changing either is a governance-sensitive edit that
 goes back to a person.
 
-## Claiming the namespace {#announcing-claim}
+## Claiming the package {#announcing-claim}
 
 ```sh
 ocx package claim --repository oci://ghcr.io/acme/widget acme/widget
@@ -73,7 +73,7 @@ ocx package claim --repository oci://ghcr.io/acme/widget acme/widget
 That is the whole minimum: a logical name and the registry repository behind it. `--owner`
 names the accounts recorded as owners and **replaces** the detected list rather than adding
 to it; `--upstream-org`, with its optional `--upstream-repository-url` and
-`--upstream-disclaimer`, marks a namespace that repackages someone else's software. Flags
+`--upstream-disclaimer`, marks a package that repackages someone else's software. Flags
 come before the positional; the full grammar and every flag is in the
 [`claim` reference][cmd-package-claim].
 
@@ -82,8 +82,11 @@ a malformed `--repository`, an `--upstream-*` flag with no anchor — is decided
 credential is resolved and before anything is dialled, so a bad invocation costs you no round
 trip through a token you did not need.
 
-You do this once. After the request merges, `announce` works and nobody looks at your
-releases again.
+The claimed unit is the **package**, not the namespace prefix: the entry lives at
+`p/<namespace>/<package>.json`, and the refusal that guards a second claim reads exactly that
+path. So `acme/gadget` needs its own claim run even after `acme/widget` merged — a shared
+namespace prefix grants nothing on the ocx side. What you do once per package is this; after
+its request merges, `announce` works and nobody looks at that package's releases again.
 
 ## Announcing tags {#announcing-tags}
 
@@ -182,7 +185,7 @@ push reuses whatever the API credential resolved to.
 
 ```yaml
 # .github/workflows/claim.yml — run once, by hand
-name: Claim the namespace
+name: Claim the package
 on: workflow_dispatch
 
 jobs:
@@ -333,7 +336,7 @@ Without `--owner`, ocx works down a short ladder: the CI environment's user vari
 (`GITLAB_USER_LOGIN` + `GITLAB_USER_ID`, or `GITHUB_ACTOR` + `GITHUB_ACTOR_ID`, both halves
 required), then the identity behind the credential. Passing `--owner` **replaces** that
 result rather than adding to it — the invoking identity is not appended, so a run that names
-owners names all of them. A bot account is refused at exit 64: a namespace owned by a
+owners names all of them. A bot account is refused at exit 64: a package owned by a
 service account has nobody to ask when something goes wrong.
 
 The report's `owner_identity_source` says which rule produced the list, and it is **not
@@ -352,7 +355,7 @@ Without it, a bare login with no reachable users API is a usage error naming the
 form, because guessing an id would write a stranger into a governance field.
 
 The report also carries `author`, which is who opened the request rather than who owns the
-namespace. **Do not read it as an attestation.** Only its first rung — the forge's answer
+package. **Do not read it as an attestation.** Only its first rung — the forge's answer
 about the credential — is the forge speaking; the second is an ordinary read of
 `GITLAB_USER_LOGIN` / `GITHUB_ACTOR`, which an earlier pipeline step can set to anything,
 and the key does not say which rung answered.
@@ -362,8 +365,10 @@ and the key does not say which rung answered.
 On the public [`ocx-sh/index`][index-repo] a claim request is labelled `new-package` and
 carries a red `governance/review-required` status that does not auto-resolve. A human
 approves and merges it. That review is the whole point of the human lane: judging whether
-the claimed namespace plausibly belongs to the entity it names is not automatable, and the
-claim command deliberately does not try.
+whoever is claiming a name under `acme` plausibly *is* ACME is not automatable, and the claim
+command deliberately does not try. ocx verifies no ownership of its own at any point — every
+privileged check runs in the index's CI. How much scrutiny a second package under an
+already-reviewed prefix gets is that index's policy, not something ocx decides.
 
 What the owner list buys you is everything *after* that merge. The index's auto-merge rule
 requires the announcing identity to own every root a request touches, so an
@@ -376,7 +381,7 @@ pipeline unattended later. A self-hosted index sets its own rules — check with
 it.
 
 Re-running a claim before its request merges is safe: the refusal that guards an
-already-claimed namespace reads the index's **base** branch, not the claim branch, so a
+already-claimed package reads the index's **base** branch, not the claim branch, so a
 second run reports `unchanged` rather than failing. Once the request merges, a further claim
 exits 65 and points you at `announce`.
 
@@ -428,14 +433,14 @@ Codes marked *claim* or *announce* are reachable from that command only; the res
 | 64 | *claim* — `--upstream-repository-url` must be an http or https URL without embedded credentials | The refusal never echoes the value, because the most likely one is a forwarded `CI_REPOSITORY_URL` whose userinfo is a live job token. Pass the public URL |
 | 64 | *claim* — `no acting identity`, `unknown owner … expected LOGIN:ID`, or `owner … is a bot account` | Pass `--owner LOGIN:ID` naming a human. On a job token the users API is closed, so the pair is required — as the [job-token recipe](#announcing-gitlab-job-token) shows |
 | 64 | *announce* — the curated set resolved to nothing but reserved tags | Every tag named was an OCX-internal `__ocx` or legacy keep tag. Name a real version |
-| 65 | *claim* — `namespace already claimed` | It merged. Publish tags with [`ocx package announce`][cmd-package-announce] instead |
+| 65 | *claim* — `package already claimed` | It merged. Publish tags with [`ocx package announce`][cmd-package-announce] instead |
 | 65 | *announce* — the recorded description no longer exists on the registry, or an unchanged run's open request can no longer merge | Republish the description with [`ocx package description push`][cmd-package-describe]; for the second, close the request or delete the branch and announce again |
 | 69 | the forge is unreachable or returned a 5xx; the registry could not be resolved; or no `git` was found, or it is older than 2.31.0 | Retry the first two; install a newer git for the third — the floor is checked before the forge is even constructed |
 | 74 | writing under `--out` failed, or `--tags-file` could not be read | Check the path's permissions. Parent directories are created for you; a parent that is a regular file is not |
 | 75 | rate-limited (429), or a concurrent run kept winning the branch | Retry with backoff |
 | 77 | the push was refused by the forge's own policy | A protected branch or a push rule on the index project. Its administrator has to relax it, or use `--transport api` with a token that may push |
 | 78 | *announce* — a curated tag's physical host resolves to a private, loopback, link-local or metadata address | Add it to that namespace's [`trusted_hosts`][config-registries-trusted-hosts] to allow it |
-| 79 | *announce* — a curated tag does not resolve on the registry, or the namespace is unclaimed | Check the tag for a typo; for the second, run [`ocx package claim`][cmd-package-claim] first |
+| 79 | *announce* — a curated tag does not resolve on the registry, or the package is unclaimed | Check the tag for a typo; for the second, run [`ocx package claim`][cmd-package-claim] first |
 | 79 | *claim* — `unknown owner …: the forge has no such account` | Check the spelling, or pass `LOGIN:ID` to skip the lookup |
 | 80 | no credential, a rejected one, or one that cannot push to `--index-repo` | Set [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token]. Without `--fork` the credential also needs push access, which ocx checks up front and names |
 | 86 | a capability the transport needs is absent | Job-token pushes are disabled on the index project, or the allowlist does not admit yours. Only an administrator of the index project can grant either; `--transport api` with a stored token is the way around it |

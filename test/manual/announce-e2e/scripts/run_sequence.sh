@@ -47,7 +47,7 @@ E2E_REG_TOKEN=""
 E2E_BINDINGS_VERIFIED=0
 E2E_OBJECTS_VERIFIED=0
 
-# (a0) Ruling R3: announce refuses an unclaimed namespace and never creates a
+# (a0) Ruling R3: announce refuses an unclaimed package and never creates a
 # root itself. The claim is a manual claim-a-namespace PR the operator opens
 # and the human lane (G-04) merges. This step waits on you; it does not fail
 # fast.

@@ -64,7 +64,7 @@ const INDEX_BASE_REF: &str = "main";
 ///
 /// # Errors
 ///
-/// Returns an [`AnnounceError`] for a missing forge, an unclaimed namespace, an
+/// Returns an [`AnnounceError`] for a missing forge, an unclaimed package, an
 /// SSRF-forbidden physical host, a curated tag that does not resolve, a
 /// yank/unyank input error, or any forge / filesystem failure. See
 /// [`AnnounceError`] for the full taxonomy.
@@ -1986,7 +1986,7 @@ mod tests {
 
     // ── S-005: the unclaimed-namespace signal ────────────────────────────────
 
-    /// An absent committed root is an unclaimed namespace, raised from the
+    /// An absent committed root is an unclaimed package, raised from the
     /// orchestration's own read rather than only from the classifier's table.
     #[tokio::test(flavor = "multi_thread")]
     async fn an_absent_committed_root_is_an_unclaimed_namespace() {
@@ -1996,7 +1996,7 @@ mod tests {
         let result = run_announce(&forge, TagSelection::Refresh, AnnounceTarget::Direct, registry).await;
 
         assert!(
-            matches!(result, Err(AnnounceError::UnclaimedNamespace { .. })),
+            matches!(result, Err(AnnounceError::UnclaimedPackage { .. })),
             "a package with no committed root goes through the human lane"
         );
     }
@@ -2012,7 +2012,7 @@ mod tests {
     /// shape the ladder actually receives.
     #[test]
     fn an_unclaimed_namespace_still_exits_not_found_through_the_cli_classifier() {
-        let error: Box<dyn std::error::Error + 'static> = Box::new(AnnounceError::UnclaimedNamespace {
+        let error: Box<dyn std::error::Error + 'static> = Box::new(AnnounceError::UnclaimedPackage {
             package: "acme/widget".to_string(),
             path: "p/acme/widget.json".to_string(),
             base_ref: INDEX_BASE_REF.to_string(),
@@ -2021,7 +2021,7 @@ mod tests {
         assert_eq!(
             classify_error(error.as_ref()),
             ExitCode::NotFound,
-            "announcing into an unclaimed namespace must stay discriminable from a crash"
+            "announcing into an unclaimed package must stay discriminable from a crash"
         );
     }
 }

@@ -394,7 +394,7 @@ Two things opt `ocx.sh` out: [`index = ""`][config-registries-index], and pinnin
 | `o/<algo>/<hex>.json` — the OCI image index this tag resolved to, verbatim | Immutable | Fetched once, verified against its own SHA-256 filename, cached forever. |
 | `c/index.json` catalog | Volatile | **Never copied.** The local `c/index.json` is authored: each entry is the hash of the local root document beside it, written in the same step that writes that root. The site's own catalog is fetched live only when you ask for it (`ocx index catalog --remote`) and nothing from it is stored. That is what keeps the local tree free of per-machine bookkeeping — there is no record of remote state in it to go stale. |
 
-A registry alias that drifted between announces — the case the first row above is built to tolerate, where the registry-side digest moves past what the index still has committed — is exactly what [`ocx package cascade check`][cmd-package-cascade-check] flags from the publisher's side: it compares a package's live registry tags against the namespace's committed root and reports the mismatch as index staleness. [`ocx package cascade repair`][cmd-package-cascade-repair] fixes a drifted registry alias itself; the follow-up [`ocx package announce --tags-file`][cmd-package-announce] then re-observes the repaired tags and re-publishes the moved digests into the index. Neither command touches any machine's local copy — that hop is still [`ocx index update`][cmd-index-update], run whenever a particular machine wants the newly announced root.
+A registry alias that drifted between announces — the case the first row above is built to tolerate, where the registry-side digest moves past what the index still has committed — is exactly what [`ocx package cascade check`][cmd-package-cascade-check] flags from the publisher's side: it compares a package's live registry tags against its committed root and reports the mismatch as index staleness. [`ocx package cascade repair`][cmd-package-cascade-repair] fixes a drifted registry alias itself; the follow-up [`ocx package announce --tags-file`][cmd-package-announce] then re-observes the repaired tags and re-publishes the moved digests into the index. Neither command touches any machine's local copy — that hop is still [`ocx index update`][cmd-index-update], run whenever a particular machine wants the newly announced root.
 
 ### Local layout for index.ocx.sh sources {#public-index-layout}
 
@@ -447,7 +447,7 @@ See [`[registries.<name>]`][config-registries] for the separate question of *whi
 ## Writing to an index {#writing}
 
 Both commands that write an index — [`ocx package claim`][cmd-package-claim] for a
-namespace's first entry, [`ocx package announce`][cmd-package-announce] for every tag update
+package's first entry, [`ocx package announce`][cmd-package-announce] for every tag update
 after it — arrive as a pull request (GitHub) or a merge request (GitLab). Neither ever
 commits to the index's default branch, so the index's history is always something a human
 or a bot decided to merge.

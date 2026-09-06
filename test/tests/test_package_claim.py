@@ -184,7 +184,7 @@ def seed_index_base(
     """Give the index repository a `main` that does NOT carry `p/<pkg>.json`.
 
     The starting state of every claim: the index exists and has a base commit
-    to parent on, and the namespace is unclaimed. Seeding an unrelated path is
+    to parent on, and the package is unclaimed. Seeding an unrelated path is
     enough — the point is a `main` that exists, so the C-050 read answers "no
     root" rather than "no branch", which are different failures.
 
@@ -1937,15 +1937,15 @@ def test_the_same_claim_outside_gitlab_ci_says_nothing(
 # ── the announce side of the pair (S-005, S-037) ──────────────────────────
 
 
-def test_announce_unclaimed_namespace_exits_79(
+def test_announce_unclaimed_package_exits_79(
     ocx: OcxRunner, fake_forge: FakeForge, tmp_path: Path
 ) -> None:
     """S-005/S-037: `ocx package announce acme/widget` on an UNCLAIMED namespace
-    is still **79**, and the message is the unclaimed-namespace one.
+    is still **79**, and the message is the unclaimed-package one.
 
     The signal a release wrapper branches on: 79 from announce means "claim
     first", 65 from claim means "already claimed, go announce". Two different
-    errors share 79 across the two commands — `UnclaimedNamespace` here and
+    errors share 79 across the two commands — `UnclaimedPackage` here and
     `OwnerUnknown` in the claim rows above — so the message assertion is what
     rules out the confusion the pair exists to prevent, and an exit-code-only
     row would pass for either.
@@ -1954,7 +1954,7 @@ def test_announce_unclaimed_namespace_exits_79(
     deprecated `--package` form is deliberately absent — it would be a
     hundredth in-repository invocation that WP-18's repo-wide check reds on.
 
-    Mutation: reclassify `UnclaimedNamespace` as a data error — the code moves
+    Mutation: reclassify `UnclaimedPackage` as a data error — the code moves
     off 79.
     """
     seed_index_base(fake_forge)
@@ -1972,6 +1972,6 @@ def test_announce_unclaimed_namespace_exits_79(
 
     assert result.returncode == 79, result.stderr
     assert "claim" in result.stderr.lower(), (
-        "the message must be the unclaimed-namespace one, not `OwnerUnknown`'s: "
+        "the message must be the unclaimed-package one, not `OwnerUnknown`'s: "
         f"{result.stderr!r}"
     )

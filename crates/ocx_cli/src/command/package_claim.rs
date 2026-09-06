@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx package claim` — claim a namespace in the index.
+//! `ocx package claim` — claim a package in the index.
 //!
 //! # Where each refusal lives
 //!
@@ -24,11 +24,11 @@ use ocx_lib::claim::{self, ClaimRequest, ClaimTarget, Upstream};
 use crate::api::data::claim::ClaimReport;
 use crate::options;
 
-/// Claim a namespace in the index so its packages can be announced.
+/// Claim a package in the index so its tags can be announced.
 ///
-/// Renders the namespace's index entry and opens a pull or merge request
+/// Renders the package's index entry and opens a pull or merge request
 /// against the index repository, or writes the entry to a local directory with
-/// `--out`. A namespace that is already claimed is refused: announce it with
+/// `--out`. A package that is already claimed is refused: announce it with
 /// `ocx package announce` instead.
 ///
 /// Owners default to the CI environment's user variables, else to the identity
@@ -44,7 +44,7 @@ pub struct PackageClaim {
     #[command(flatten)]
     forge: options::ForgeWriteOptions,
 
-    /// The physical OCI repository the namespace's packages live in, as
+    /// The physical OCI repository the package's bytes live in, as
     /// `oci://HOST/PATH`.
     ///
     /// This is the pointer every later `ocx package announce` resolves tags
@@ -60,7 +60,7 @@ pub struct PackageClaim {
     #[clap(long = "repository", value_name = "REPOSITORY", required = true)]
     repository: String,
 
-    /// An owner of the namespace, as `LOGIN` or `LOGIN:ID`. Repeat for
+    /// An owner of the package, as `LOGIN` or `LOGIN:ID`. Repeat for
     /// several, in the order they should be recorded.
     ///
     /// Giving any `--owner` replaces the detected list; the invoking identity
@@ -70,9 +70,9 @@ pub struct PackageClaim {
     #[clap(long = "owner", value_name = "OWNER")]
     owner: Vec<String>,
 
-    /// The upstream organization this namespace mirrors or repackages.
+    /// The upstream organization this package mirrors or repackages.
     ///
-    /// Give it for a third-party namespace so the index entry records who the
+    /// Give it for a third-party package so the index entry records who the
     /// software actually comes from. It is the anchor for the other two
     /// `--upstream-*` flags: neither is accepted without it.
     #[clap(long = "upstream-org", value_name = "ORGANIZATION")]
@@ -93,7 +93,7 @@ pub struct PackageClaim {
     #[clap(long = "upstream-repository-url", value_name = "URL", requires = "upstream_org")]
     upstream_repository_url: Option<String>,
 
-    /// A disclaimer recorded on the index entry, for a namespace that is not
+    /// A disclaimer recorded on the index entry, for a package that is not
     /// operated by the upstream project.
     ///
     /// The text reaches the index entry only. It is never interpolated into

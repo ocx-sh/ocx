@@ -1036,7 +1036,7 @@ mod tests {
         let detected = reachable_forge(Some(identity("dependabot[bot]", 99, true)));
         let error = resolve_owners(&detected, &[])
             .await
-            .expect_err("a detected bot cannot own a namespace");
+            .expect_err("a detected bot cannot own a package");
         assert!(
             matches!(&error, ClaimError::BotIdentity { login } if login == "dependabot[bot]"),
             "{error:?}"

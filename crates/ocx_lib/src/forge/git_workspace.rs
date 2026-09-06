@@ -3189,7 +3189,7 @@ mod tests {
 
         // The permissive half, through the same entry point: a multi-line body
         // reaches the wire as the two-character sequence GitLab converts back.
-        let body = "Namespace claim for `ocx.sh/acme/widget`.\n\n- name: ocx.sh/acme/widget\n";
+        let body = "Package claim for `ocx.sh/acme/widget`.\n\n- name: ocx.sh/acme/widget\n";
         workspace
             .push("claim", "main", "claim acme/widget", body, None, refusal(&access))
             .await

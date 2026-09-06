@@ -20,7 +20,7 @@ request URLs and live timestamps are scratch). The curated rollup lives in
 `package announce` (a dev-channel build — set `OCX_BIN` to point at it, or put
 it on `PATH`).
 
-**A claimed namespace.** Announce refuses an unclaimed namespace and never
+**A claimed package.** Announce refuses an unclaimed package and never
 creates a root itself (ruling R3). Before the first run, open a
 claim-a-namespace pull request against `ocx-sh/index` committing
 `p/<ns>/<pkg>.json` with your numeric `github_id` in `owners[]`, and get it

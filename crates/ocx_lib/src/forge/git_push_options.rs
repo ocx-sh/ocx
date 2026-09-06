@@ -573,9 +573,11 @@ mod tests {
     /// escaped first — and the escape leaves the guard's teeth in.
     ///
     /// The claim body is the real input: `claim/request.rs::request_body`
-    /// renders `"Namespace claim for `X`.\n\n- name: …"`, whose first LF is at
-    /// byte 41 — the exact byte that made every `ocx package claim
-    /// --transport git` exit 1 with `{"kind":"internal"}`.
+    /// renders `"Package claim for `X`.\n\n- name: …"`, whose first LF lands
+    /// deep inside the string — the shape that made every `ocx package claim
+    /// --transport git` exit 1 with `{"kind":"internal"}`. The offset asserted
+    /// below tracks that render: change the header and this row reds, which is
+    /// the point — it must keep measuring the body production actually sends.
     ///
     /// Reds on: deleting the escape (the render refuses U+000A); on escaping
     /// something the wire already accepts (the round-trip assertion below);
@@ -583,9 +585,9 @@ mod tests {
     /// assertion).
     #[test]
     fn a_multi_line_body_is_escaped_into_the_wire_alphabet() {
-        let body = "Namespace claim for `ocx.sh/acme/widget`.\n\n- name: ocx.sh/acme/widget\n";
+        let body = "Package claim for `ocx.sh/acme/widget`.\n\n- name: ocx.sh/acme/widget\n";
         assert_eq!(
-            body.as_bytes()[41],
+            body.as_bytes()[39],
             b'\n',
             "the fixture body must reproduce the reported offset, or this row measures a different string"
         );

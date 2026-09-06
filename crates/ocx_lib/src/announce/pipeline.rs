@@ -108,19 +108,19 @@ pub fn current_timestamp() -> String {
 }
 
 /// Require a committed root: a `None` read means the package has no root at
-/// `base_ref`, an unclaimed namespace that must go through the human lane
+/// `base_ref`, an unclaimed package that must go through the human lane
 /// (design register C10, reference parity).
 ///
 /// # Errors
 ///
-/// [`AnnounceError::UnclaimedNamespace`] when `bytes` is `None`.
+/// [`AnnounceError::UnclaimedPackage`] when `bytes` is `None`.
 pub fn require_root(
     package: &str,
     path: &str,
     base_ref: &str,
     bytes: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, AnnounceError> {
-    bytes.ok_or_else(|| AnnounceError::UnclaimedNamespace {
+    bytes.ok_or_else(|| AnnounceError::UnclaimedPackage {
         package: package.to_string(),
         path: path.to_string(),
         base_ref: base_ref.to_string(),
@@ -993,12 +993,12 @@ mod tests {
         assert_eq!(reserved_dropped, vec!["__ocx.patch".to_string()]);
     }
 
-    // ── require_root (unclaimed namespace, C10) ──────────────────────────────
+    // ── require_root (unclaimed package, C10) ────────────────────────────────
 
     #[test]
     fn require_root_errors_on_a_missing_committed_root() {
         let error = require_root("acme/widget", "p/acme/widget.json", "main", None).unwrap_err();
-        assert!(matches!(error, AnnounceError::UnclaimedNamespace { .. }));
+        assert!(matches!(error, AnnounceError::UnclaimedPackage { .. }));
     }
 
     #[test]
@@ -1771,7 +1771,7 @@ mod tests {
         assert!(files.contains_key(&format!("p/acme/widget/o/sha256/{hex}.json")));
     }
 
-    // ── unclaimed namespace + SSRF ordering ──────────────────────────────────
+    // ── unclaimed package + SSRF ordering ────────────────────────────────────
 
     fn stub_publisher(data: &StubTransportData) -> Publisher {
         Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))))

@@ -99,7 +99,7 @@ pub enum OwnerSpec {
     Resolved { login: String, id: u64 },
 }
 
-/// The `upstream` object a third-party namespace carries (C-047).
+/// The `upstream` object a third-party package carries (C-047).
 ///
 /// `repository_url` and `disclaimer` are **omitted, never `null`**, when their
 /// flags were not given: the live root schema sets `additionalProperties: false`
@@ -155,7 +155,7 @@ pub fn upstream_repository_url_is_publishable(value: &str) -> bool {
     matches!(url.scheme(), "http" | "https") && url.username().is_empty() && url.password().is_none()
 }
 
-/// One namespace claim.
+/// One package claim.
 #[derive(Debug, Clone)]
 pub struct ClaimRequest {
     /// The logical `<namespace>/<package>` identifier, already carrying its
@@ -266,7 +266,7 @@ pub fn request_body(
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "Namespace claim for `{name}`.\n\n\
+        "Package claim for `{name}`.\n\n\
          - name: {name}\n\
          - repository: {repository}\n\
          - branch: {branch}\n\

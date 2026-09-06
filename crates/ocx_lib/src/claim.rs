@@ -3,10 +3,10 @@
 
 //! `ocx package claim` orchestration (ADR `adr_index_claim_command.md`).
 //!
-//! A publisher claims a namespace once, before the first `ocx package announce`:
+//! A publisher claims a package once, before its first `ocx package announce`:
 //! claim renders the package's index root from structured flags, opens a pull
 //! request against `ocx-sh/index`, and leaves the merge to that repository's
-//! human governance gate. Announce refuses an unclaimed namespace at exit 79;
+//! human governance gate. Announce refuses an unclaimed package at exit 79;
 //! claim refuses an already-claimed one at exit 65 (C-050). The two codes are the
 //! pair a release wrapper branches on (S-037).
 //!
@@ -66,7 +66,7 @@ pub fn root_path(package: &str) -> String {
     format!("p/{package}.json")
 }
 
-/// Claim one namespace.
+/// Claim one package.
 ///
 /// `forge` is `Some` in every mode: `--out` still reads the committed root for the
 /// C-050 refusal and still resolves owners. S-011's `push-access: skipped` under
@@ -77,7 +77,7 @@ pub fn root_path(package: &str) -> String {
 /// # Errors
 ///
 /// Returns a [`ClaimError`] for a missing forge, a malformed `--repository`, an
-/// already-claimed namespace, any owner-ladder refusal, a missing base ref, a
+/// already-claimed package, any owner-ladder refusal, a missing base ref, a
 /// race lost twice (`NonFastForward` under `api`, `StaleLease` under `git`), an
 /// `--out` write failure, or any forge failure.
 pub async fn claim(forge: Option<&dyn Forge>, request: ClaimRequest) -> Result<ClaimOutcome, ClaimError> {
@@ -97,7 +97,7 @@ pub async fn claim(forge: Option<&dyn Forge>, request: ClaimRequest) -> Result<C
         .await?
         .is_some()
     {
-        return Err(ClaimError::NamespaceAlreadyClaimed {
+        return Err(ClaimError::PackageAlreadyClaimed {
             package,
             path: root_path,
             base_ref: INDEX_BASE_REF.to_string(),
@@ -875,7 +875,7 @@ pub(crate) mod tests {
         );
     }
 
-    // ── C-050: an already-claimed namespace ──────────────────────────────────
+    // ── C-050: an already-claimed package ────────────────────────────────────
 
     /// C-050 — a root already committed on the **index base ref** is refused at
     /// exit 65, naming `ocx package announce`, in every mode.
@@ -889,7 +889,7 @@ pub(crate) mod tests {
     /// unmerged claim then exits 65 instead of reporting `unchanged`), gating the
     /// check on `target != Out`, or dropping the remedy from the message.
     #[test]
-    fn namespace_already_claimed_is_refused_at_data_error() {
+    fn package_already_claimed_is_refused_at_data_error() {
         use crate::cli::{ClassifyExitCode, ExitCode};
 
         let output = tempfile::TempDir::new().expect("a temp dir is created");
@@ -902,7 +902,7 @@ pub(crate) mod tests {
 
             let error = block_on(claim(Some(&forge), request(target))).expect_err("a committed root refuses the claim");
             assert!(
-                matches!(&error, ClaimError::NamespaceAlreadyClaimed { path, base_ref, .. }
+                matches!(&error, ClaimError::PackageAlreadyClaimed { path, base_ref, .. }
                     if path == ROOT_PATH && base_ref == INDEX_BASE_REF),
                 "the refusal names the committed path on the base ref: {error:?}"
             );
@@ -922,7 +922,7 @@ pub(crate) mod tests {
     }
 
     /// The mirror image: a root sitting on the **claim branch** — an unmerged,
-    /// re-run claim — is not an already-claimed namespace.
+    /// re-run claim — is not an already-claimed package.
     ///
     /// This is the positive control for the assertion above. Without it, an
     /// implementation that reads neither ref passes the refusal test.

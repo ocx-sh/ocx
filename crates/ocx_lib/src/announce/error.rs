@@ -55,11 +55,11 @@ pub enum AnnounceError {
     NoCuratedTags { reserved_dropped: Vec<String> },
 
     /// No committed root exists for the package at `base_ref` — a new package
-    /// goes through the human namespace-claim lane, never announce.
+    /// goes through the human package-claim lane, never announce.
     #[error(
-        "unclaimed namespace: no committed root at {path} on {base_ref} for {package} — new packages go through the human lane"
+        "unclaimed package: no committed root at {path} on {base_ref} for {package} — new packages go through the human lane"
     )]
-    UnclaimedNamespace {
+    UnclaimedPackage {
         package: String,
         path: String,
         base_ref: String,
@@ -229,9 +229,9 @@ impl crate::cli::ClassifyExitCode for AnnounceError {
             // absent-resource shape as `UnresolvedTag`, and the likeliest
             // first-run outcome for a new publisher. Left unclassified it
             // exits 1, indistinguishable from a crash, so a release wrapper
-            // cannot tell "claim your namespace first" (a one-time human
+            // cannot tell "claim the package first" (a one-time human
             // action, register R3) from an unclassified failure.
-            Self::UnclaimedNamespace { .. } => Some(crate::cli::ExitCode::NotFound),
+            Self::UnclaimedPackage { .. } => Some(crate::cli::ExitCode::NotFound),
             // The tag resolved and the artifact exists — its *shape* is wrong.
             // `NotFound` (79) would be a lie (nothing is absent) and leaving it
             // unclassified exits 1, which a release wrapper cannot tell apart
@@ -288,13 +288,13 @@ mod tests {
     }
 
     /// Observed live on the publisher E2E (run 30133426034): announcing into a
-    /// namespace with no committed root is the likeliest first-run outcome for
+    /// package with no committed root is the likeliest first-run outcome for
     /// a new publisher, and register R3 makes claiming it a one-time human
     /// action. It must be discriminable from a generic failure so a release
     /// wrapper can say so, rather than surfacing exit 1.
     #[test]
-    fn unclaimed_namespace_classifies_as_not_found() {
-        let error = AnnounceError::UnclaimedNamespace {
+    fn unclaimed_package_classifies_as_not_found() {
+        let error = AnnounceError::UnclaimedPackage {
             package: "acme/widget".to_string(),
             path: "p/acme/widget.json".to_string(),
             base_ref: "main".to_string(),
@@ -323,7 +323,7 @@ mod tests {
 
     /// The D4(a) refusal is a verdict a release wrapper must be able to act on.
     /// Left unclassified it exits 1 — indistinguishable from a crash, the same
-    /// defect the `UnclaimedNamespace` comment above records.
+    /// defect the `UnclaimedPackage` comment above records.
     #[test]
     fn tag_is_not_an_image_index_classifies_as_data_error() {
         let error = AnnounceError::TagIsNotAnImageIndex {

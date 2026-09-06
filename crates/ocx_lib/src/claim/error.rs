@@ -55,8 +55,8 @@ pub enum ClaimError {
     /// The **base ref** is what is read, never the claim branch: an idempotent
     /// re-run of an unmerged claim must report `unchanged`, not 65. Holds in
     /// every mode, `--out` included, and before anything is written there.
-    #[error("namespace already claimed: {path} exists on {base_ref} for {package} — use `ocx package announce`")]
-    NamespaceAlreadyClaimed {
+    #[error("package already claimed: {path} exists on {base_ref} for {package} — use `ocx package announce`")]
+    PackageAlreadyClaimed {
         package: String,
         path: String,
         base_ref: String,
@@ -151,7 +151,7 @@ impl ClassifyExitCode for ClaimError {
     /// |---|---|
     /// | `ForgeRequired`, `MissingBaseRef`, `MissingHeadRoot` | `None` — broken invariant, exit 1 |
     /// | `MalformedRepository`, `NoActingIdentity`, `InvalidOwnerLogin`, `DuplicateOwner`, `OwnerIdMismatch`, `BotIdentity` | `UsageError` (64) |
-    /// | `NamespaceAlreadyClaimed` | `DataError` (65) — S-037's "already claimed, go announce" |
+    /// | `PackageAlreadyClaimed` | `DataError` (65) — S-037's "already claimed, go announce" |
     /// | `OwnerUnknown` | `NotFound` (79) |
     /// | `OutputWrite` | `IoError` (74) |
     /// | `Forge(inner)` | `inner.classify()` — explicit, see the module doc |
@@ -165,7 +165,7 @@ impl ClassifyExitCode for ClaimError {
             | Self::DuplicateOwner { .. }
             | Self::OwnerIdMismatch { .. }
             | Self::BotIdentity { .. } => Some(ExitCode::UsageError),
-            Self::NamespaceAlreadyClaimed { .. } => Some(ExitCode::DataError),
+            Self::PackageAlreadyClaimed { .. } => Some(ExitCode::DataError),
             Self::OwnerUnknown { .. } => Some(ExitCode::NotFound),
             Self::OutputWrite { .. } => Some(ExitCode::IoError),
             // Explicit, never inherited: `#[error(transparent)]` forwards
@@ -190,7 +190,7 @@ mod tests {
             ClaimError::MalformedRepository {
                 value: "ghcr.io/acme/widget".to_string(),
             },
-            ClaimError::NamespaceAlreadyClaimed {
+            ClaimError::PackageAlreadyClaimed {
                 package: "acme/widget".to_string(),
                 path: "p/acme/widget.json".to_string(),
                 base_ref: "main".to_string(),
