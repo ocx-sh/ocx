@@ -1,0 +1,9 @@
+site_name: Depth four
+theme:
+  name: material
+nav:
+  - Home: index.md
+  - Guide:
+      - Basics:
+          - Deeper:
+              - Page: guide/basics/deeper/page.md

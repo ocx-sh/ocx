@@ -1,0 +1,74 @@
+<!-- doc_type: explanation -->
+
+# Distribution architecture
+
+Documentation distribution architecture necessitates considerable
+deliberation. Repository configuration determines artifact identification
+resolution. Identification resolution consequently determines reproducibility
+characteristics. Reproducibility characteristics determine verification
+possibilities. Verification possibilities determine organisational confidence.
+
+Immutability considerations complicate configuration determination
+substantially. Mutable identification references invalidate reproducibility
+guarantees immediately. Immutable identification references necessitate
+periodic reconfiguration interventions. Reconfiguration interventions
+necessitate verification interventions. Verification interventions necessitate
+organisational coordination.
+
+Coordination requirements multiply combinatorially across repositories.
+Repositories accumulate configuration divergence progressively. Divergence
+accumulation complicates verification interventions. Complication accumulation
+diminishes organisational confidence. Diminished confidence discourages
+configuration modification.
+
+A myriad of interdependent considerations therefore constrain distribution
+architecture decisions. A plethora of alternative configuration approaches
+compete unsuccessfully.
+
+Consequently, distribution architecture decisions necessitate documentation.
+Documentation necessitates comprehension verification. Comprehension
+verification necessitates readability measurement. Readability measurement
+necessitates preprocessing standardisation. Preprocessing standardisation
+necessitates implementation consolidation.
+
+Implementation consolidation reduces measurement inconsistency. Measurement
+inconsistency invalidates comparative evaluation. Comparative evaluation
+substantiates configuration modification. Configuration modification
+necessitates organisational authorisation. Authorisation necessitates
+comprehensible documentation.
+
+Comprehensible documentation necessitates vocabulary simplification.
+Vocabulary simplification necessitates authorial discipline. Authorial
+discipline necessitates measurement instrumentation. Measurement
+instrumentation necessitates preprocessing consolidation. Preprocessing
+consolidation completes the argumentative circumference.
+
+Organisational reconsideration inevitably revisits distribution architecture.
+Revisitation necessitates historical documentation. Historical documentation
+necessitates decision justification. Decision justification necessitates
+evidence preservation. Evidence preservation necessitates repository
+discipline.
+
+Repository discipline necessitates automated verification. Automated
+verification necessitates deterministic preprocessing. Deterministic
+preprocessing necessitates implementation consolidation. Implementation
+consolidation necessitates authorial cooperation. Authorial cooperation
+necessitates comprehensible justification.
+
+Comprehensible justification necessitates terminological consistency.
+Terminological consistency necessitates glossary maintenance. Glossary
+maintenance necessitates editorial responsibility. Editorial responsibility
+necessitates organisational allocation. Organisational allocation necessitates
+budgetary justification.
+
+Budgetary justification necessitates measurable improvement. Measurable
+improvement necessitates instrumentation continuity. Instrumentation
+continuity necessitates infrastructural investment. Infrastructural investment
+necessitates architectural stability. Architectural stability concludes this
+demonstration fixture.
+
+Architectural stability necessitates periodic reassessment. Periodic
+reassessment necessitates instrumentation retention. Instrumentation retention
+necessitates operational documentation. Operational documentation necessitates
+authorial availability. Authorial availability necessitates organisational
+prioritisation.

@@ -1,0 +1,11 @@
+site_name: Flat nine
+nav:
+  - Home: index.md
+  - One: one.md
+  - Two: two.md
+  - Three: three.md
+  - Four: four.md
+  - Five: five.md
+  - Six: six.md
+  - Seven: seven.md
+  - Eight: eight.md

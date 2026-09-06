@@ -1,0 +1,41 @@
+# Example lychee config for the built-output link pass (DOC-OBS-01).
+# Run with: lychee --config checks/lychee.toml 'site/**/*.html'
+#
+# This file checks built HTML. The pre-build markdown pass is a separate job
+# with its own source root, and checks/links_raw.py runs that one (DOC-OBS-02).
+# A generator that already fails the build on a dead internal link satisfies
+# DOC-OBS-01 on its own. `mkdocs build --strict` is one such gate, so do not
+# wire this in as well without checking whether the build already covers it.
+
+# Resolve root-relative hrefs against the built site root, not the filesystem
+# root. Without this a raw pass reports every /docs/... link as dead.
+base = "site"
+
+# Fragments are the point of the pass. A link to a heading that moved is the
+# failure this catches.
+include_fragments = true
+
+# Network calls are opt-in. Keep the merge gate offline and run the external
+# pass on a schedule, so a third-party outage never blocks a merge.
+offline = true
+
+# Retry and pacing, used only when the external pass runs with --no-offline.
+max_retries = 2
+max_concurrency = 8
+timeout = 20
+
+# Hosts that rate limit or block automated requests. Every entry is a decision
+# to stop checking that host, so keep the list short and dated.
+exclude = [
+  "^https://twitter\\.com",
+  "^https://x\\.com",
+  "^https://www\\.linkedin\\.com",
+]
+
+# Pages whose anchors are written by the build. The raw pass cannot see them,
+# so name each one here rather than letting the pass report phantom failures.
+# One four-line generated stub produced 65 phantom dead links in one measured
+# tree, so this list is the difference between a useful pass and noise.
+exclude_path = [
+  "site/reference/api",
+]

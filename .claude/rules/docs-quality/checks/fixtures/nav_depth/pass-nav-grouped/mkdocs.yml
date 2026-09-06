@@ -1,0 +1,12 @@
+site_name: Grouped
+theme:
+  name: material
+  features:
+    - navigation.path
+nav:
+  - Home: index.md
+  - How-To:
+      - Quickstart: how-to/quickstart.md
+      - Configure: how-to/configure.md
+  - Reference:
+      - CLI: reference/cli.md

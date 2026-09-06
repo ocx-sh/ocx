@@ -1,12 +1,119 @@
-skill = []
 agent = []
 
 [metadata]
 lock_version = 1
 declaration_hash_version = 1
-declaration_hash = "sha256:ab336cd06935567b6ef67120a47077e51a8d34b7cceb3d3d4f93678d9ee96bbb"
-generated_by = "grim 0.13.0"
-generated_at = "2026-08-17T22:04:58Z"
+declaration_hash = "sha256:e4370dc135bbe1596c7c86c2cd930a736a68c54bcaa3e437fce8d76d7f242584"
+generated_by = "grim 0.14.0"
+generated_at = "2026-09-06T18:17:32Z"
+
+[[skill]]
+name = "bazel-adopt"
+pinned = "ghcr.io/ocx-sh/lore/bazel-adopt@sha256:680625f2d0edc08073da774d6e080ef326ea6abb60dbde7a67a1d80b309f3205"
+bundle = "ghcr.io/ocx-sh/lore/bazel-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "bazel-diagnose"
+pinned = "ghcr.io/ocx-sh/lore/bazel-diagnose@sha256:dc164748fdae83cc3dfa9d4f3c85d15149694c4e3220a23cd6bbae91220e0fd7"
+bundle = "ghcr.io/ocx-sh/lore/bazel-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "docs-instrument"
+pinned = "ghcr.io/ocx-sh/lore/docs-instrument@sha256:e6a5459c18f7d8192ec81efc70bc674809edfbdc305d96bc60bf3cb14b3b790d"
+bundle = "ghcr.io/ocx-sh/lore/docs-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "docs-plan"
+pinned = "ghcr.io/ocx-sh/lore/docs-plan@sha256:cbff12650842b27b1af5513caf447c516bb33b72735121902b48576fa0840778"
+bundle = "ghcr.io/ocx-sh/lore/docs-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-architect"
+pinned = "ghcr.io/michael-herwig/arcana/hex-architect@sha256:0c11bd63d965172ffe781e1d4f1ba238fa9cf272e925e04177cd4d6240a0628b"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-core"
+pinned = "ghcr.io/michael-herwig/arcana/hex-core@sha256:62148998888cbf5a18207319b3ffbb335fc65c0585a96eb867b97d32fe404ff8"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-discuss"
+pinned = "ghcr.io/michael-herwig/arcana/hex-discuss@sha256:e92146ce38924c507b5840d1c80641bff0aa5616d867b5cd1ff54a9b513f37d6"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-execute"
+pinned = "ghcr.io/michael-herwig/arcana/hex-execute@sha256:ff85b8c3fdfbceb606dd5f2819c138b4dea3957d8002c76328cbf5202c098103"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-finalize"
+pinned = "ghcr.io/michael-herwig/arcana/hex-finalize@sha256:357404a1fa4adfeb4f094ce999f2e0b65ac5a053d97f6b4e6f5a26ba16e9c493"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-init"
+pinned = "ghcr.io/michael-herwig/arcana/hex-init@sha256:975a56adb6c0ee3d201aa748fff3766e53b12be9cb692c649dd8d7528b09d72d"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-plan"
+pinned = "ghcr.io/michael-herwig/arcana/hex-plan@sha256:e631dce56c2ba0fcc4694d00c56413a34ecb2725a6bb35c22397cd19fb17ce37"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "hex-review"
+pinned = "ghcr.io/michael-herwig/arcana/hex-review@sha256:1bce65ec2f7c47b281cf33ceab4016dc4fef2d5d3d3ac6126c68e096019cb166"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[skill]]
+name = "nox-review"
+pinned = "ghcr.io/michael-herwig/arcana/nox-review@sha256:5c034b0a921f284f74fc43906c794203196670a2c032bde01c4562e47e56d3f6"
+bundle = "ghcr.io/michael-herwig/arcana/nox"
+bundle_tag = "latest"
+
+[[rule]]
+name = "bazel-quality"
+pinned = "ghcr.io/ocx-sh/lore/bazel-quality@sha256:4e7f68e3aa0b16387c1b0ef7091ab82cb25332010e70ff50bf9a24ccbdf89345"
+bundle = "ghcr.io/ocx-sh/lore/bazel-essentials"
+bundle_tag = "latest"
+
+[[rule]]
+name = "docs-quality"
+pinned = "ghcr.io/ocx-sh/lore/docs-quality@sha256:c31e99d6d45536c089f643dd96d3fe23540fbbd918530bd68497ab029f2d12bf"
+bundle = "ghcr.io/ocx-sh/lore/docs-essentials"
+bundle_tag = "latest"
+
+[[rule]]
+name = "hex-state"
+pinned = "ghcr.io/michael-herwig/arcana/hex-state@sha256:e2155d4951caa58b34e1b352a27988ef451dfcea9f6e379e3bcda2732c8994ed"
+bundle = "ghcr.io/michael-herwig/arcana/hex"
+bundle_tag = "latest"
+
+[[rule]]
+name = "python-packaging"
+pinned = "ghcr.io/ocx-sh/lore/python-packaging@sha256:83b48110ecdfdc874b6714e7c7ba10deb199f4bf0cdc3169631cb884d842c802"
+bundle = "ghcr.io/ocx-sh/lore/python-essentials"
+bundle_tag = "latest"
+
+[[rule]]
+name = "python-quality"
+pinned = "ghcr.io/ocx-sh/lore/python-quality@sha256:7ad282eaddce2add9f9fd7ef17dc6cbd547908a3d7f5cb1be47f751b8a360797"
+bundle = "ghcr.io/ocx-sh/lore/python-essentials"
+bundle_tag = "latest"
 
 [[rule]]
 name = "rust-cargo"
@@ -19,6 +126,138 @@ name = "rust-quality"
 pinned = "ghcr.io/ocx-sh/lore/rust-quality@sha256:39f5455aadd3ce6dff3b085aab28454b95a7a681ec3de6fadb14a84014a81e65"
 bundle = "ghcr.io/ocx-sh/lore/rust-essentials"
 bundle_tag = "latest"
+
+[[rule]]
+name = "typescript-packaging"
+pinned = "ghcr.io/ocx-sh/lore/typescript-packaging@sha256:aea500feedc681d161c96daf504d7e68638733e473dd0b8778ac72832190c503"
+bundle = "ghcr.io/ocx-sh/lore/typescript-essentials"
+bundle_tag = "latest"
+
+[[rule]]
+name = "typescript-quality"
+pinned = "ghcr.io/ocx-sh/lore/typescript-quality@sha256:88bcbc2540b71653ae9ea31760369e1e4eb8f7128fc09299325feb1467913b77"
+bundle = "ghcr.io/ocx-sh/lore/typescript-essentials"
+bundle_tag = "latest"
+
+[[bundle]]
+name = "bazel-essentials"
+repo = "ghcr.io/ocx-sh/lore/bazel-essentials"
+tag = "latest"
+pinned = "ghcr.io/ocx-sh/lore/bazel-essentials@sha256:2bfd71697149be6553e300acfd2e1c8086d9d9d3ec61de938654c197f4f13f6a"
+
+[[bundle.member]]
+kind = "skill"
+name = "bazel-adopt"
+id = "ghcr.io/ocx-sh/lore/bazel-adopt:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "bazel-diagnose"
+id = "ghcr.io/ocx-sh/lore/bazel-diagnose:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "bazel-quality"
+id = "ghcr.io/ocx-sh/lore/bazel-quality:latest"
+
+[[bundle]]
+name = "docs-essentials"
+repo = "ghcr.io/ocx-sh/lore/docs-essentials"
+tag = "latest"
+pinned = "ghcr.io/ocx-sh/lore/docs-essentials@sha256:f6ef95d3c3668716d443af0338ca9a38642e9758235cedc1209b4f1feaa3cafc"
+
+[[bundle.member]]
+kind = "skill"
+name = "docs-instrument"
+id = "ghcr.io/ocx-sh/lore/docs-instrument:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "docs-plan"
+id = "ghcr.io/ocx-sh/lore/docs-plan:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "docs-quality"
+id = "ghcr.io/ocx-sh/lore/docs-quality:latest"
+
+[[bundle]]
+name = "hex"
+repo = "ghcr.io/michael-herwig/arcana/hex"
+tag = "latest"
+pinned = "ghcr.io/michael-herwig/arcana/hex@sha256:d69f647dfa31ac3df25f2f84db30263db649a15b5b7a19e70602641c010347d4"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-architect"
+id = "ghcr.io/michael-herwig/arcana/hex-architect:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-core"
+id = "ghcr.io/michael-herwig/arcana/hex-core:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-discuss"
+id = "ghcr.io/michael-herwig/arcana/hex-discuss:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-execute"
+id = "ghcr.io/michael-herwig/arcana/hex-execute:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-finalize"
+id = "ghcr.io/michael-herwig/arcana/hex-finalize:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-init"
+id = "ghcr.io/michael-herwig/arcana/hex-init:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-plan"
+id = "ghcr.io/michael-herwig/arcana/hex-plan:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "hex-review"
+id = "ghcr.io/michael-herwig/arcana/hex-review:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "hex-state"
+id = "ghcr.io/michael-herwig/arcana/hex-state:latest"
+
+[[bundle]]
+name = "nox"
+repo = "ghcr.io/michael-herwig/arcana/nox"
+tag = "latest"
+pinned = "ghcr.io/michael-herwig/arcana/nox@sha256:a3916576ba85fe68646c03a31b6bc45f781a73cfffc34ac8e6f8ef9175586674"
+
+[[bundle.member]]
+kind = "skill"
+name = "nox-review"
+id = "ghcr.io/michael-herwig/arcana/nox-review:latest"
+
+[[bundle]]
+name = "python-essentials"
+repo = "ghcr.io/ocx-sh/lore/python-essentials"
+tag = "latest"
+pinned = "ghcr.io/ocx-sh/lore/python-essentials@sha256:e187285b34e5e6f10c62b6ddc6fd8daaa7b17858d3a1f4598d72cbd92f8b805e"
+
+[[bundle.member]]
+kind = "rule"
+name = "python-packaging"
+id = "ghcr.io/ocx-sh/lore/python-packaging:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "python-quality"
+id = "ghcr.io/ocx-sh/lore/python-quality:latest"
 
 [[bundle]]
 name = "rust-essentials"
@@ -35,3 +274,19 @@ id = "ghcr.io/ocx-sh/lore/rust-cargo:latest"
 kind = "rule"
 name = "rust-quality"
 id = "ghcr.io/ocx-sh/lore/rust-quality:latest"
+
+[[bundle]]
+name = "typescript-essentials"
+repo = "ghcr.io/ocx-sh/lore/typescript-essentials"
+tag = "latest"
+pinned = "ghcr.io/ocx-sh/lore/typescript-essentials@sha256:6c982240b307a4d5521311b0744d3fbf1796e9ec75c75924402f50e9eafb3662"
+
+[[bundle.member]]
+kind = "rule"
+name = "typescript-packaging"
+id = "ghcr.io/ocx-sh/lore/typescript-packaging:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "typescript-quality"
+id = "ghcr.io/ocx-sh/lore/typescript-quality:latest"

@@ -1,0 +1,51 @@
+// markdownlint config for the docs-quality rule set.
+// Run with: npx markdownlint-cli2 --config checks/markdownlint.jsonc "docs/**/*.md"
+// Every rule left at its default stays on. Only the rules below are tuned.
+{
+  // Heading levels increment by one. Owns heading order so no other tool does.
+  "MD001": true,
+
+  // One heading style per file, ATX in this set.
+  "MD003": { "style": "atx" },
+
+  // Exactly one H1 per page. front_matter_title "" stops markdownlint from
+  // counting a front matter "title:" key as a second H1, which it does by
+  // default and which makes every VitePress page fail.
+  "MD025": { "front_matter_title": "" },
+
+  // Bold text used as a heading. A page that fakes headings loses its outline.
+  "MD036": true,
+
+  // First line in a file must be a top-level heading. Off, because the
+  // doc_type declaration comment is line 1 on every page in this set.
+  "MD041": false,
+
+  // Every image carries alt text.
+  "MD045": true,
+
+  // Link style. Inline links only, so a reference-style definition block
+  // cannot drift away from the link that cites it. Note the shape: MD054
+  // takes one boolean per style and no "style" key.
+  "MD054": {
+    "autolink": true,
+    "inline": true,
+    "full": false,
+    "collapsed": false,
+    "shortcut": false,
+    "url_inline": true
+  },
+
+  // Fence language tags, DOC-EX-05. Replace this list with the project's own
+  // runnable tier list. A tier suffix is hyphen joined, so "bash-run" is a
+  // separate allowed value from "bash" (DOC-EX-20).
+  "MD040": {
+    "allowed_languages": [
+      "bash", "bash-run", "bash-norun",
+      "console", "diff", "html", "ini", "json", "jsonc",
+      "python", "python-run", "python-norun",
+      "rust", "rust-run", "sh", "shell", "sql",
+      "text", "toml", "ts", "ts-run", "tsx", "yaml"
+    ],
+    "language_only": true
+  }
+}

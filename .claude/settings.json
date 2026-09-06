@@ -1,7 +1,11 @@
 {
   "claudeMdExcludes": [
     "**/.claude/rules/rust-cargo/**",
-    "**/.claude/rules/rust-quality/**"
+    "**/.claude/rules/rust-quality/**",
+    "**/.claude/rules/bazel-quality/**",
+    "**/.claude/rules/docs-quality/**",
+    "**/.claude/rules/python-quality/**",
+    "**/.claude/rules/typescript-quality/**"
   ],
   "permissions": {
     "allow": [
