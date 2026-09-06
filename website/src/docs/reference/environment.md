@@ -114,9 +114,31 @@ This is **resolution-affecting**: it is forwarded to every subprocess `ocx`
 spawns via `apply_ocx_config`, so child invocations — generated launchers,
 nested `ocx exec` calls — honor the same opt-in.
 
+### `OCX_ANNOUNCE_GIT_TOKEN` {#ocx-announce-git-token}
+
+The **push** half of the forge credential pair, used only under `--transport git`. It authenticates every `git` invocation that talks to the index remote — the blobless fetch and the push that carries the branch and the merge-request options — while the REST reads keep using [`OCX_ANNOUNCE_TOKEN`](#ocx-announce-token). Set it when the identity allowed to write the repository is not the identity allowed to call the API: a deploy token for the write, a personal token for the reads.
+
+Leave it unset and the write reuses the resolved API credential. Set it to an empty string and it is treated as unset, so a wrapper that exports `OCX_ANNOUNCE_GIT_TOKEN=` cannot silently turn an authenticated write into one that authenticates as nobody.
+
+The secret travels as the password half of an HTTP Basic `Authorization` header injected through git's own configuration environment — never in a URL, never in `argv`, never in `.git/config`. The user half is [`OCX_ANNOUNCE_GIT_USERNAME`](#ocx-announce-git-username).
+
+**Never forwarded to child processes.** OCX reads this variable directly and strips it from the environment of every subprocess it spawns, plugins (`ocx-<name>`) included.
+
+::: warning The pair is split on purpose
+[`OCX_ANNOUNCE_TOKEN`](#ocx-announce-token) is **not** stripped — a plugin that announces from its own process inherits it deliberately. So a plugin inherits the API half and not the write half. A plugin that needs to write over the git transport must be handed this variable explicitly rather than relying on inheritance.
+:::
+
+### `OCX_ANNOUNCE_GIT_USERNAME` {#ocx-announce-git-username}
+
+The user half of the HTTP Basic pair the git write transport presents, defaulting to `gitlab-ci-token`. GitLab authenticates a job token under that conventional user and ignores which non-empty user carries a personal or project token, so the default is right unless a self-hosted instance says otherwise.
+
+A value containing `:`, and an empty one, are **ignored** — the default is used instead, and nothing fails. HTTP Basic has no escaping on the pair and a server splits the decoded text on the first colon, so `a:b` would re-partition it into user `a` and secret `b:<secret>`: a `401` that reads like a bad token. Setting a username the instance does not expect therefore fails at the push, not at the command line.
+
+This is **not** a credential — holding it authenticates nobody — so it is not stripped from the environment ocx spawns a plugin (`ocx-<name>`) with, while its secret sibling [`OCX_ANNOUNCE_GIT_TOKEN`](#ocx-announce-git-token) is. Note that ocx never *sets* it on a child either: a plugin inherits it from the ambient environment, the way it inherits anything ocx does not scrub.
+
 ### `OCX_ANNOUNCE_TOKEN` {#ocx-announce-token}
 
-A forge personal access token, read only by [`ocx package announce`][cmd-package-announce] when it opens or updates a pull or merge request against the index repository — from a fork with `--fork`, or from a branch on the index repository itself when `--fork` is omitted. Writing locally with `--out` does not need one.
+A forge personal access token, read by [`ocx package announce`][cmd-package-announce] and by `ocx package claim` when they open or update a pull or merge request against the index repository — from a fork with `--fork`, or from a branch on the index repository itself when `--fork` is omitted. Writing locally with `--out` does not need one.
 
 One variable serves both forges; which kind of token to put in it follows the forge the run targets:
 
@@ -125,7 +147,14 @@ One variable serves both forges; which kind of token to put in it follows the fo
 | GitHub, GitHub Enterprise Server | Personal access token | `repo` (or fine-grained: read + pull-request write on the index and the fork) |
 | GitLab, self-managed GitLab | Personal, project or group access token | `api` |
 
-A GitLab **CI job token** (`CI_JOB_TOKEN`) does not work here. GitLab's job-token access table covers packages, releases, artifacts and environments; it lists none of repository files, commits, branches, merge requests or forking — every endpoint announce needs. Announcing from GitLab CI needs a real access token in a masked variable.
+What this variable has to carry depends on the write transport:
+
+| Transport | This variable authenticates | Credential for the repository write |
+|---|---|---|
+| `--transport api` (default) | Every REST call: reading the committed entry, creating the branch and the commit, opening the request | none — nothing is written over git |
+| `--transport git` | The REST reads and the merge-request confirmation only | [`OCX_ANNOUNCE_GIT_TOKEN`](#ocx-announce-git-token) when set, otherwise this token |
+
+A GitLab **CI job token** (`CI_JOB_TOKEN`) has **no write access** through the API — it is read-only for branches, commits, raw files, merge requests and tags. That is the reason the `git` transport exists: a job token may write to the repository over HTTP **when the index project allows job-token pushes and its job-token allowlist admits the publishing project** — ocx checks both before it writes anything and exits `86` naming the missing capability — and GitLab then creates the merge request from the transmitted options rather than from an API call. Under `--transport git` inside a GitLab job (`GITLAB_CI` set to a non-empty value), an unset or empty `OCX_ANNOUNCE_TOKEN` falls through to `CI_JOB_TOKEN` automatically. Under `--transport api` it does not, because a job token cannot open the request there: that run needs a real access token in a masked variable.
 
 ```sh
 # GitHub
@@ -134,7 +163,7 @@ export OCX_ANNOUNCE_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 export OCX_ANNOUNCE_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
 ```
 
-This is the only credential surface for announce — the token never enters the registry credential store `ocx login` writes to, and is sent solely as a request header (`Authorization: Bearer` on GitHub, `PRIVATE-TOKEN` on GitLab), never logged and never placed in a URL. Redirects are disabled on the forge client, so a cross-host redirect cannot replay the header at another host. A forge's error body is echoed back in diagnostics, so the token is redacted out of it first — a reverse proxy that reflects request headers cannot put your credential in a CI log. The host in `--index-repo` and `--fork` must be a well-formed hostname; anything that could shift the URL's authority (userinfo, a query, a path) is refused rather than interpreted. Any mode other than `--out` fails immediately without this variable rather than falling back to an unauthenticated attempt. Without `--fork` the token must also carry push permission on the index repository, which announce verifies before writing anything.
+Together with [`OCX_ANNOUNCE_GIT_TOKEN`](#ocx-announce-git-token) this is the whole credential surface for a forge write — neither token ever enters the registry credential store `ocx login` writes to. This one is sent as a request header — `Authorization: Bearer` on GitHub, `PRIVATE-TOKEN` on GitLab, or `JOB-TOKEN` when the resolved credential is this job's own `CI_JOB_TOKEN` — never logged and never placed in a URL. Under `--transport git` with no [`OCX_ANNOUNCE_GIT_TOKEN`](#ocx-announce-git-token) set it is additionally presented to `git` as the secret half of an HTTP Basic pair, through git's own configuration environment. Redirects are disabled on the forge client, so a cross-host redirect cannot replay the header at another host. A forge's error body is echoed back in diagnostics, so the token is redacted out of it first — a reverse proxy that reflects request headers cannot put your credential in a CI log. The host in `--index-repo` and `--fork` must be a well-formed hostname; anything that could shift the URL's authority (userinfo, a query, a path) is refused rather than interpreted. Any mode other than `--out` fails immediately (exit `80`) when the credential ladder resolves nothing, rather than falling back to an unauthenticated attempt. Without `--fork` the credential must also carry write permission on the index repository, which the run verifies before writing anything.
 
 ### `OCX_AUTH_<REGISTRY>_TYPE` {#ocx-auth-registry-type}
 

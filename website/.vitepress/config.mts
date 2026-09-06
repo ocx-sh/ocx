@@ -71,6 +71,10 @@ export default defineConfig({
           link: "/docs/user-guide/attestations",
         },
         {
+          text: "Claiming a Namespace",
+          link: "/docs/user-guide/claiming-a-namespace",
+        },
+        {
           text: "Promoting",
           link: "/docs/user-guide/promoting-packages",
         },

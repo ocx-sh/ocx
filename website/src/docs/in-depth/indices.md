@@ -444,6 +444,43 @@ Same doctrine as the registry role: the value replaces the base URL wholesale, t
 
 See [`[registries.<name>]`][config-registries] for the separate question of *which* namespaces resolve through the ocx-index protocol at all — a mirror only redirects an already-selected protocol's traffic, it does not select the protocol.
 
+## Writing to an index {#writing}
+
+Both commands that write an index — [`ocx package claim`][cmd-package-claim] for a
+namespace's first entry, [`ocx package announce`][cmd-package-announce] for every tag update
+after it — arrive as a pull request (GitHub) or a merge request (GitLab). Neither ever
+commits to the index's default branch, so the index's history is always something a human
+or a bot decided to merge.
+
+How that request gets *written* is `--transport`, and the two values are not stylistic. The
+default, `api`, opens the request through the forge's REST API. `git` clones the index
+repository into a temporary directory, builds the commit there, and creates the request from
+a single authenticated push carrying [GitLab's merge-request push options][gitlab-push-options].
+It is GitLab-only, and it exists for one reason: a GitLab CI job token can push to a
+repository and read the API, but is read-only for merge requests — so the REST route is
+closed to the one credential a pipeline gets for free.
+
+That leaves four credential postures, and which one you are in decides the transport:
+
+| Posture | What is set | Transport |
+|---|---|---|
+| GitHub, access token | [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] holds a personal access token | `api` |
+| GitLab, access token | [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] holds a personal, project or group token | `api` |
+| GitLab CI job token | The runner's `GITLAB_CI` and `CI_JOB_TOKEN`; nothing stored | `git` |
+| GitLab, split pair | [`OCX_ANNOUNCE_GIT_TOKEN`][env-ocx-announce-git-token] carries the push, [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] the API reads | `git` |
+
+The split pair is not redundancy: the two halves are asked for different things, and a real
+deployment often answers with different identities. A deploy token can write the repository
+but has no API surface to call; a job token can read the API but cannot open the merge
+request. Setting both lets each carry only what it is able to.
+
+Under `git`, ocx checks two things on the **index** project before it writes — that the
+project accepts job-token pushes, and that its job-token allowlist admits the publishing
+project — and exits 86 naming whichever is missing, because only an administrator there can
+grant it. It also refuses to run on a `git` older than 2.31.0, checked before the forge is
+constructed. [Claiming a namespace][user-guide-claiming] walks a real pipeline through each
+posture.
+
 ## Keep tags {#keep-tags}
 
 A registry tag can be deleted by mistake, even when a digest it once pointed at is still pinned by someone's `ocx.lock`. Registry-side retention policies key on tags, not on which digests are "in use" somewhere — so a stray delete can leave a manifest orphaned and eligible for garbage collection on the registry side.
@@ -492,6 +529,7 @@ A fifth command belongs to the family without carrying the verb: [`ocx index syn
 [toolchains-llvm]: https://github.com/bazel-contrib/toolchains_llvm/blob/master/toolchain/internal/llvm_distributions.bzl
 [index-ocx-sh]: https://index.ocx.sh
 [index-wire-format]: https://index.ocx.sh/docs/reference/wire-format
+[gitlab-push-options]: https://docs.gitlab.com/user/project/push_options/
 
 <!-- security -->
 [cwe-345]: https://cwe.mitre.org/data/definitions/345.html
@@ -507,6 +545,7 @@ A fifth command belongs to the family without carrying the verb: [`ocx index syn
 [cmd-index-list]: ../reference/command-line.md#index-list
 [cmd-package-push]: ../reference/command-line.md#package-push
 [cmd-package-announce]: ../reference/command-line.md#package-announce
+[cmd-package-claim]: ../reference/command-line.md#package-claim
 [cmd-package-cascade-check]: ../reference/command-line.md#package-cascade-check
 [cmd-package-cascade-repair]: ../reference/command-line.md#package-cascade-repair
 [cmd-config-push]: ../reference/command-line.md#config-push
@@ -525,6 +564,8 @@ A fifth command belongs to the family without carrying the verb: [`ocx index syn
 [env-ocx-home]: ../reference/environment.md#ocx-home
 [env-ocx-index]: ../reference/environment.md#ocx-index
 [env-ocx-allow-yanked]: ../reference/environment.md#ocx-allow-yanked
+[env-ocx-announce-token]: ../reference/environment.md#ocx-announce-token
+[env-ocx-announce-git-token]: ../reference/environment.md#ocx-announce-git-token
 
 <!-- reference -->
 [config-mirrors]: ../reference/configuration.md#keys-mirrors
@@ -537,6 +578,7 @@ A fifth command belongs to the family without carrying the verb: [`ocx index syn
 
 <!-- internal -->
 [user-indices]: ../user-guide.md#offline
+[user-guide-claiming]: ../user-guide/claiming-a-namespace.md
 [user-patches-pins]: ../user-guide/patches.md#patches-pins
 [in-depth-storage]: ./storage.md
 [in-depth-storage-packages]: ./storage.md#packages

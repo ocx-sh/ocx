@@ -298,10 +298,10 @@ OCX exposes a stable, typed exit-code taxonomy so scripts can discriminate failu
 
 Most package tools return 0 on success and 1 on any failure. That forces downstream scripts to either ignore the error category or grep stderr — both are fragile. A CI wrapper cannot distinguish "registry unreachable, retry in 30 seconds" from "package not found, fail the build" without parsing error text that can change.
 
-OCX aligns with BSD [sysexits.h][sysexits-manpage] (codes 64–78) for the standard failure categories, and reserves 79–85 for OCX-specific cases. The numeric values are stable across releases — `case $?` works.
+OCX aligns with BSD [sysexits.h][sysexits-manpage] (codes 64–78) for the standard failure categories, and reserves 79–86 for OCX-specific cases. The numeric values are stable across releases — `case $?` works.
 
 :::info
-The sysexits.h convention originates in BSD Unix and is documented at [man.freebsd.org][sysexits-manpage]. It assigns semantic meaning to exit codes 64–78, leaving 79–127 free for tool-specific use. OCX occupies 79–85.
+The sysexits.h convention originates in BSD Unix and is documented at [man.freebsd.org][sysexits-manpage]. It assigns semantic meaning to exit codes 64–78, leaving 79–127 free for tool-specific use. OCX occupies 79–86.
 :::
 
 | Code | Name | Mnemonic | When used | Recovery |
@@ -322,6 +322,7 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 | 83 | TransparencyLogUnavailable | OCX | Rekor transparency log unreachable during sign or verify (5xx/timeout, or SET absent with only TSA present) | Retry later; check Rekor endpoint |
 | 84 | ReferrersUnsupported | OCX | Registry cannot hold a referrer — `sign` and `attest` also try the tag-schema fallback index first; `push` and `copy --referrers` require the API itself. Write path only; the read path lands on 79 instead | Use a registry with OCI 1.1 referrers support |
 | 85 | UnsupportedKeyBackend | OCX | A key reference named a KMS backend OCX recognises but has not implemented (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://`). Reachable from `--key`, from a `key = "…"` signer in a matched [`[[trust.policy]]`][config-trust], and from a managed-config payload carrying one. Distinct from 79 and 74: the reference is well-formed and the backend is real, it simply has no implementation here | Use a file key, or wait for the backend |
+| 86 | ForgeCapabilityUnavailable | OCX | A forge answered and refused a write because the instance or the target project lacks a capability the selected `--transport` needs — job-token pushes disabled on the index project, or the publishing project missing from that project's job-token allowlist. Distinct from 69 (the forge was reached), from 80 (the credential is valid and is not what was refused) and from 81 (the remedy is never in the caller's own hands). Sibling of 84: reachable, but a needed capability is absent with no fallback | Ask an administrator of the index project to enable job-token pushes and allowlist the publishing project, or announce over `--transport api` with an access token |
 
 **75 means the same command may succeed if run again; 69 does not.** That distinction is what makes automated retry safe: a wrapper loops on 75 and stops on 69, without parsing a single line of stderr. The per-command tables below still name 69 as "registry unreachable" — those rows exit 75 instead whenever the failure is transient (the connect never completed, the request timed out, or the registry answered 429/502/503/504).
 
@@ -342,6 +343,7 @@ case $? in
     83) echo "Rekor unavailable; retry signing or verification later" ;;
     84) echo "publish couldn't write a referrer; registry serves no referrers store" ;;
     85) echo "key backend recognised but not implemented; use a file key" ;;
+    86) echo "forge lacks a capability this transport needs; an admin must act" ;;
     *)  echo "unexpected failure (exit $?)"; exit 1 ;;
 esac
 ```
@@ -2676,7 +2678,7 @@ Because a host and a group are both just a leading segment, a **dotted top-level
 
 One self-hosted shape is **not** supported: an instance mounted under a path prefix, where the API lives at `https://example.com/gitlab/api/v4` rather than at the host root. The `[HOST/]NAMESPACE/PROJECT` grammar has nowhere to put the prefix, and GitLab's own `glab` has the same open gap. Instances served at the host root — the default for every standard install — work.
 
-Both forges use the same credential variable, [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] — a GitHub personal access token or a GitLab personal access token, depending on which forge the run targets.
+Both forges use the same credential variable, [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] — a GitHub personal access token or a GitLab personal access token, depending on which forge the run targets. Under `--transport git` that token still carries the REST reads, while the push can be split onto [`OCX_ANNOUNCE_GIT_TOKEN`][env-ocx-announce-git-token]; inside a GitLab job with neither set, the job's own `CI_JOB_TOKEN` carries both.
 
 A run that produces no change — the rebuilt entry is byte-identical to the one already committed — makes no commit, and the report's `status` reads `unchanged` instead of `updated`. Running `announce` again for a package already announced from the same branch updates the existing pull request in place rather than opening a second one. When the index repository's default branch has moved since that pull request opened, the run instead rebuilds the announce branch on the current base as a single commit that carries every tag already announced into the pull request, so the pull request stays mergeable and nothing already announced is lost — the branch's commit history is rewritten, but the pull request itself is reused.
 
@@ -2686,21 +2688,21 @@ An unchanged run normally opens no pull request either. Two exceptions exist. Th
 
 Every run also observes the package description published by [`ocx package description push`][cmd-package-describe]. When its artifact has moved since the last announce, the entry's description block is rebuilt — title, summary, keywords, and content-addressed copies of the README and logo — and the report's `desc_status` reads `updated`. An unmoved description costs one request and writes nothing. A description recorded in the index that the registry no longer serves stops the run rather than clearing it silently.
 
-Publishing tags for a package that has no entry in the index yet is out of scope for `announce` — a first-time claim goes through a manual pull request against the index repository.
+Publishing tags for a package that has no entry in the index yet is out of scope for `announce` — a namespace with no committed entry exits 79, and the first-time claim that creates one is [`ocx package claim`](#package-claim).
 
 A tag that is not a version — the OCX-internal `__ocx` namespace, which carries the keep tag from [`--keep-tag`][cmd-package-push], or the frozen legacy `sha256.<hex>` keep tag — is dropped from the curated set rather than failing the run, and reported in the JSON report's `reserved_tags_dropped`. The one exception: `--tags-from-registry` filters a reserved tag out of its listing silently, before it reaches that report, since keep tags are pushed by default and reporting one per published version would drown a real drop. A reserved tag already committed in the index root is still reported, from any mode. A curated set that resolves to nothing but reserved tags exits 64.
 
 **Usage**
 
 ```shell
-ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-file <PATH> | --tags-from-registry | --refresh) [--out <DIRECTORY> | --fork <REPOSITORY>] [OPTIONS]
+ocx package announce (--tags <TAGS> | --tags-file <PATH> | --tags-from-registry | --refresh) [--out <DIRECTORY> | --fork <REPOSITORY>] [OPTIONS] <NAMESPACE>/<NAME>
 ```
 
 **Options**
 
 | Name | Description | Default |
 |------|-------------|---------|
-| `--package <NAMESPACE>/<NAME>` | Package to announce, e.g. `acme/widget` (required). | — |
+| `<NAMESPACE>/<NAME>` | Package to announce, e.g. `acme/widget` (required, positional). Flags come before it. | — |
 | `--tags <TAGS>` | Comma-separated tag list that replaces the currently-committed curated set. A committed tag not named here is dropped. Mutually exclusive with `--tags-file`/`--tags-from-registry`/`--refresh`; exactly one is required. | — |
 | `--tags-file <PATH>` | Add the tags in this file (comma- or newline-separated) to the already-committed curated set. Never removes a committed tag. | — |
 | `--tags-from-registry` | Add every tag the package's registry repository currently holds to the already-committed curated set. Never removes a committed tag; a yanked tag stays yanked. Reserved tags are filtered out of the listing before the union. | — |
@@ -2709,10 +2711,13 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-file <
 | `--fork <REPOSITORY>` | Open (or update) the pull or merge request from this fork, as `[HOST/]NAMESPACE/PROJECT`. Omit it to push the announce branch straight to `--index-repo`, which needs push access on that repository. Requires [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token]. | — |
 | `--index-repo <REPOSITORY>` | Index repository the pull or merge request targets, as `[HOST/]NAMESPACE/PROJECT`. Give the host for a self-hosted instance; the namespace may be a nested GitLab group path. | `ocx-sh/index` |
 | `--forge <FORGE>` | Which forge hosts the index: `github` or `gitlab`. Inferred for `github.com` and `gitlab.com`; **required** for a self-hosted host. | inferred |
+| `--transport <TRANSPORT>` | How the request is written: `api` opens it through the forge's REST API, `git` clones the index repository and creates it from a single authenticated push. `git` is GitLab-only, and is the only way a GitLab CI job token can open a merge request — see [`claim`](#package-claim) for the same flag's full contract. | `api` |
 | `--yank <TAG>` | Mark a tag as yanked — a publisher signal that content should no longer be installed, not a delete. Repeatable. Requires `--yank-reason`; only applies to a tag already in the curated set. | — |
 | `--unyank <TAG>` | Clear the yanked marker from a tag. Repeatable. | — |
 | `--yank-reason <TEXT>` | Reason recorded on every tag named by `--yank` in this run. | — |
 | `-h`, `--help` | Print help information. | — |
+
+The package used to be named by a `--package` flag. That spelling is deprecated: it still runs, warns once on stderr, and is removed in 0.7. Naming the package both ways in one invocation is a usage error (exit 64).
 
 **Exit codes**
 
@@ -2731,6 +2736,7 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-file <
 | `--index-repo` or `--fork` names a nested namespace on GitHub, which has no nested organizations. Checked before any request | 64 |
 | The description recorded in the index no longer exists on the registry — republish it, or ask for it to be cleared in the index | 65 |
 | An unchanged run's open pull request can no longer merge against the index base — close the pull request or delete the branch; the next announce rebuilds it | 65 |
+| `--transport git` was selected and the forge answered, but the instance or the target project lacks a capability that transport needs — job-token pushes disabled on the index project, or the publishing project absent from its job-token allowlist. Checked before anything is written; an administrator of the index project has to act | 86 |
 
 **JSON report**
 
@@ -2738,45 +2744,179 @@ ocx package announce --package <NAMESPACE>/<NAME> (--tags <TAGS> | --tags-file <
 {
   "package": "acme/widget",
   "status": "updated",
+  "desc_status": "updated",
+  "forge": "github",
+  "transport": "api",
+  "credential_kind": "token",
+  "push_credential_kind": null,
+  "branch": "indexbot-announce-acme-widget",
   "pull_request_url": "https://github.com/ocx-sh/index/pull/42",
   "pull_request_number": 42,
   "fork": "forkuser/index",
-  "desc_status": "updated",
   "written_paths": [],
+  "capability_checks": [
+    { "name": "git-version", "status": "skipped", "detail": null },
+    { "name": "push-access", "status": "passed", "detail": null },
+    { "name": "job-token-push", "status": "skipped", "detail": null },
+    { "name": "job-token-allowlist", "status": "skipped", "detail": null }
+  ],
   "reserved_tags_dropped": []
 }
 ```
 
 `status` and `desc_status` are each `unchanged` or `updated`; `desc_status` reports the package description separately from the tags. `pull_request_url`/`pull_request_number`/`fork` are always `null` for `--out`; otherwise `pull_request_url`/`pull_request_number` are `null` only when the run made no pull request, so an unchanged run that ensured one still reports it, and `fork` is `null` whenever `--fork` was not given. `written_paths` lists the files written under `--out` — the whole entry on every run, `unchanged` included — and stays empty in every mode that opens a pull request. `reserved_tags_dropped` names the tags this run dropped for not being a version — always an array, empty rather than absent — except a reserved tag `--tags-from-registry` observed straight from the registry listing, which never enters it (see above).
 
+`forge`, `transport`, `credential_kind`, `push_credential_kind`, `branch` and `capability_checks` carry the same vocabularies and the same guarantees as they do on [`claim`](#package-claim) — including the one that matters most for a pipeline: `capability_checks` is non-empty on **every** run, so a wrapper can assert the preflight ran instead of trusting a bare exit 0. `branch` is `null` under `--out`, which opens no request and so has no branch.
+
 ::: tip
 [`ocx package push --tags-file`][cmd-package-push] appends the tag it just pushed (and any cascade tags) to a file in the same comma/newline format `--tags-file` reads, so a publish pipeline can feed one straight into the other:
 
 ```shell
 ocx package push -i acme/widget:1.2.3 -c --tags-file tags.txt widget.tar.xz
-ocx package announce --package acme/widget --tags-file tags.txt --fork myuser/index
+ocx package announce --tags-file tags.txt --fork myuser/index acme/widget
 ```
 
 Announce to a GitLab index, opening a merge request from a fork:
 
 ```shell
-ocx package announce --package acme/widget --tags 1.0.0 \
-  --index-repo gitlab.com/acme/index --fork gitlab.com/myuser/index
+ocx package announce --tags 1.0.0 \
+  --index-repo gitlab.com/acme/index --fork gitlab.com/myuser/index acme/widget
 ```
 
 Announce to a self-managed GitLab in a nested group, from a fork in another group:
 
 ```shell
-ocx package announce --package acme/widget --tags 1.0.0 --forge gitlab \
+ocx package announce --tags 1.0.0 --forge gitlab \
   --index-repo gitlab.example.com/acme/platform/tooling/index \
-  --fork gitlab.example.com/contrib/team/index
+  --fork gitlab.example.com/contrib/team/index acme/widget
 ```
 
 Announce to a GitHub Enterprise Server index, pushing the branch to the index itself:
 
 ```shell
-ocx package announce --package acme/widget --tags 1.0.0 --forge github \
-  --index-repo github.example.com/acme/index
+ocx package announce --tags 1.0.0 --forge github \
+  --index-repo github.example.com/acme/index acme/widget
+```
+
+Announce from a GitLab CI job, where the job token can push but cannot open a merge request through the API:
+
+```shell
+ocx package announce --tags 1.0.0 --transport git \
+  --index-repo gitlab.example.com/acme/index acme/widget
+```
+:::
+
+#### `claim` {#package-claim}
+
+Claims a namespace in the index so its packages can be announced. Renders the namespace's index entry — its logical name, the physical OCI repository its packages live in, and the accounts that own it — and opens a pull request (GitHub) or merge request (GitLab) against the index repository, or writes the entry to a local directory with `--out`.
+
+This is the first-time counterpart to [`announce`](#package-announce), and the two never overlap: `claim` creates the entry, `announce` publishes tags into one that already exists. A namespace whose entry is already committed is refused at exit 65 with a message naming `ocx package announce`; that refusal holds in every mode, `--out` included, because it reads the index's base branch rather than the claim branch — so re-running an unmerged claim reports `unchanged` rather than failing.
+
+Everything about forge selection, coordinates, nested GitLab groups and self-hosted instances reads exactly as it does for [`announce`](#package-announce) — `--index-repo`, `--forge`, `--fork` and `--out` are one shared grammar across both commands, so a pipeline that already announces needs no new vocabulary to claim.
+
+**Who the entry records as owners.** An owner is a `login:id` pair, and the numeric id is the part that matters: logins get renamed, ids do not. Without `--owner`, ocx takes the CI environment's user variables (`GITLAB_USER_LOGIN` + `GITLAB_USER_ID`, or `GITHUB_ACTOR` + `GITHUB_ACTOR_ID`, both halves required), and failing that the identity behind the credential. Passing `--owner` **replaces** that list rather than adding to it — the invoking identity is not appended. A bot account is refused at exit 64, both when the forge says so and when the login matches a documented bot shape.
+
+The report says which rule produced the list, in `owner_identity_source`. `resolved` means the forge's users API answered and its canonical spelling, id and bot flag were taken from it. `ci-environment` means the CI variables named the list and the users API confirmed it. `asserted` means the users API was out of reach and a `LOGIN:ID` pair was taken on your word — reachable **on GitLab only**, and only under a job token, since that is the one credential whose users API is closed; a GitHub run never produces it. An unreachable users API with a bare `LOGIN` is a usage error naming the `LOGIN:ID` form, because guessing an id would write the wrong account into a governance field.
+
+**`--transport git` writes over a clone instead of the API.** The default `api` transport opens the request through the forge's REST API. `git` clones the index repository into a temporary directory, builds the commit there, and creates the request from a single authenticated push — which is the only way a GitLab CI job token can open a merge request, because that credential can push to a repository and read the API but cannot open a merge request through it. It is GitLab-only and refused (exit 64, naming both) against a resolved GitHub forge, against `--fork`, and against `--out`. Before it writes, ocx checks that the index project allows job-token pushes and that its job-token allowlist admits the publishing project; a missing capability exits 86 naming it, because only an administrator of the index project can grant it.
+
+Claiming from GitLab is walked through end to end in [Claiming a namespace][user-guide-claiming].
+
+**Usage**
+
+```shell
+ocx package claim --repository oci://<HOST>/<PATH> [OPTIONS] <NAMESPACE>/<PACKAGE>
+```
+
+**Options**
+
+| Name | Description | Default |
+|------|-------------|---------|
+| `<NAMESPACE>/<PACKAGE>` | Namespace and package to claim, e.g. `acme/widget` (required, positional). Flags come before it. | — |
+| `--repository <REPOSITORY>` | The physical OCI repository the namespace's packages live in, as `oci://HOST/PATH` (required). This is the pointer every later `announce` resolves tags against, so it names the registry repository, never the index. | — |
+| `--owner <OWNER>` | An owner of the namespace, as `LOGIN` or `LOGIN:ID`. Repeatable, recorded in the order given. Giving any `--owner` replaces the detected list. A bare `LOGIN` is resolved against the forge's users API and needs it reachable; `LOGIN:ID` is taken on your word. | detected |
+| `--upstream-org <ORGANIZATION>` | The upstream organization this namespace mirrors or repackages, for a third-party namespace. Anchor for the two flags below — neither is accepted without it. | — |
+| `--upstream-repository-url <URL>` | The upstream project's repository URL, as an absolute `http` or `https` URL carrying **no embedded credentials**. Written verbatim into the entry, so a forwarded `CI_REPOSITORY_URL` — whose userinfo is a live job token — is refused. Requires `--upstream-org`. | — |
+| `--upstream-disclaimer <TEXT>` | A disclaimer recorded on the entry, for a namespace not operated by the upstream project. Reaches the entry only: never interpolated into the request, so it fires no mentions and renders no markdown where humans review it. Requires `--upstream-org`. | — |
+| `--index-repo <REPOSITORY>` | Index repository the request targets, as `[HOST/]NAMESPACE/PROJECT`. Give the host for a self-hosted instance; the namespace may be a nested GitLab group path. | `ocx-sh/index` |
+| `--forge <FORGE>` | Which forge hosts the index: `github` or `gitlab`. Inferred for `github.com` and `gitlab.com`; **required** for a self-hosted host. | inferred |
+| `--transport <TRANSPORT>` | How the request is written: `api` through the forge's REST API, `git` from one authenticated push over a temporary clone. `git` is GitLab-only. | `api` |
+| `--fork <REPOSITORY>` | Open (or update) the request from this fork, as `[HOST/]NAMESPACE/PROJECT`. Omit it to push the claim branch straight to `--index-repo`, which needs push access there. Mutually exclusive with `--out` and with `--transport git`. | — |
+| `--out <DIRECTORY>` | Write the rendered entry under this directory instead of opening a request. The one mode that needs no credential. Mutually exclusive with `--fork` and with `--transport git`. | — |
+| `-h`, `--help` | Print help information. | — |
+
+**Exit codes**
+
+| Condition | Exit code |
+|---|---|
+| `--out` with `--fork`; `--transport git` with `--fork`, with `--out`, or against a resolved GitHub forge; `--fork` on a different host than `--index-repo`; a self-hosted `--index-repo` host with no `--forge`; a nested namespace on GitHub; an `--upstream-*` flag without `--upstream-org` | 64 |
+| `--repository` is not `oci://host/path`; `--owner` is neither a `LOGIN` nor a `LOGIN:ID` pair; `--upstream-repository-url` is not an `http`/`https` URL, or carries embedded credentials (the message names the flag and the rule, never the value — it would be a live token) | 64 |
+| No acting identity at all — the credential has no account and the CI environment named none; an owner named twice; a supplied id that disagrees with the forge's; an owner login the forge reports as a bot, or whose shape is a documented bot form; a bare `LOGIN` while the users API is out of reach | 64 |
+| The namespace is already claimed — an entry is committed on the index's base branch. Holds in every mode, `--out` included; announce it with [`ocx package announce`](#package-announce) instead | 65 |
+| The forge is unreachable or returned a 5xx; or `--transport git` was selected and no `git` was found, or the one found is older than the floor the transport needs. Checked before the forge is constructed | 69 |
+| Writing under `--out` failed — permission denied, disk full, or a parent that is not a directory | 74 |
+| The forge rate-limited the run (429), or a concurrent claim kept winning the branch — retry | 75 |
+| The git push was refused by the forge's own policy — a protected branch, or a push rule the commit does not satisfy | 77 |
+| An owner login the forge has no account for — check the spelling, or pass `LOGIN:ID` | 79 |
+| Any mode other than `--out` run with no forge credential, the credential was rejected (401/403), or — without `--fork` — it cannot push to `--index-repo`. The last is checked before anything is written and names the repository and the missing permission | 80 |
+| `--transport git` was selected and the forge answered, but the instance or the target project lacks a capability that transport needs — job-token pushes disabled on the index project, or the publishing project absent from its job-token allowlist. An administrator of the index project has to act | 86 |
+
+**JSON report**
+
+```json
+{
+  "package": "acme/widget",
+  "name": "ocx.sh/acme/widget",
+  "status": "updated",
+  "forge": "gitlab",
+  "transport": "git",
+  "credential_kind": "job-token",
+  "push_credential_kind": "job-token",
+  "author": { "login": "release-bot-operator", "id": 4711 },
+  "author_identity_source": "resolved",
+  "owners": [{ "login": "alice", "id": 1001 }],
+  "owner_identity_source": "asserted",
+  "branch": "indexbot-claim-acme-widget",
+  "pull_request_url": "https://gitlab.example.com/acme/index/-/merge_requests/17",
+  "pull_request_number": 17,
+  "fork": null,
+  "written_paths": [],
+  "capability_checks": [
+    { "name": "git-version", "status": "passed", "detail": "2.47.1" },
+    { "name": "push-access", "status": "skipped", "detail": null },
+    { "name": "job-token-push", "status": "passed", "detail": null },
+    { "name": "job-token-allowlist", "status": "passed", "detail": null }
+  ]
+}
+```
+
+`status` is `unchanged` or `updated`, compared against the **open claim branch** — so an `--out` run always reports `updated`, unlike announce's, which compares against the committed entry. `credential_kind` is `job-token`, `token` or `none`; it says `job-token` only when the credential is this environment's own `CI_JOB_TOKEN`, because ocx cannot tell a personal from a project, group or OAuth token and reports no kind it cannot observe. `push_credential_kind` is `job-token`, `token`, `git-helper` or `null`, and is always `null` under `api`, which pushes nothing; `git-helper` means ocx injected nothing and git's own credential helpers authenticated the push. `owner_identity_source` is `resolved`, `ci-environment` or `asserted` (GitLab-only, see above). `author_identity_source` is `resolved`, `ci-environment` or `null`, and never `asserted`. `branch` is present on every run, `--out` included — it is derived from the package, not read from the forge. `fork` is `null` on the direct path and under `--transport git`. `capability_checks` carries one row per capability in a fixed order, `skipped` rows included, and is **non-empty on every run** — so a pipeline asserts the preflight ran rather than trusting a bare exit 0. There is no `failed` status: a check that fails raises the error instead.
+
+`author` records who authored the request, which is deliberately not who owns the namespace. **It is not an attestation.** Only its first rung — the forge's own answer about the credential — is the forge speaking; the second rung is an ordinary read of `GITLAB_USER_LOGIN`/`GITHUB_ACTOR`, which an earlier pipeline step can set to anything. `author_identity_source` says which rung answered: `resolved` for the forge's answer about the credential, `ci-environment` for the environment read, `null` when there is no author at all. Branch on that key rather than on `author` alone — the two rungs produce the same `{login, id}` shape and are not equally trustworthy.
+
+::: tip
+Claim a namespace with an explicit owner and write the entry locally first, to review it before anything opens a request:
+
+```shell
+ocx package claim --repository oci://ghcr.io/acme/widget \
+  --owner alice:1001 --out ./entry acme/widget
+```
+
+Claim from a GitLab CI job, where the job token can push but cannot open a merge request through the API:
+
+```shell
+ocx package claim --repository oci://registry.example.com/acme/widget \
+  --index-repo gitlab.example.com/acme/index --transport git acme/widget
+```
+
+Claim a namespace that repackages a third-party project, recording where the software comes from:
+
+```shell
+ocx package claim --repository oci://ghcr.io/acme/widget \
+  --upstream-org WidgetProject \
+  --upstream-repository-url https://github.com/WidgetProject/widget \
+  --upstream-disclaimer "Repackaged by ACME; not affiliated with the WidgetProject." \
+  --fork myuser/index acme/widget
 ```
 :::
 
@@ -2878,10 +3018,10 @@ For each broken alias, `repair` rebuilds the whole platform index entry from the
 
 ```shell
 ocx package cascade repair --announce-tags tags.txt acme/cmake
-ocx package announce --package acme/cmake --tags-file tags.txt --fork myuser/index
+ocx package announce --tags-file tags.txt --fork myuser/index acme/cmake
 ```
 
-The flag accepts **exactly one package per invocation** (usage error, exit 64, nothing written) — the follow-up `announce --package` names a single package, and a second package's tags landing in the same flat file would give it no way to tell whose they were. What a real run records is exactly the tags whose write **landed**: any alias a `raced`, `refused`, or `failed` outcome moved is left out, since announcing it would commit a digest this run never wrote. Landed tags are unioned with every tag an index-staleness finding names — the one class of drift a repair cannot close itself, announced even when the same run wrote nothing at all — so one file still covers both hops. `--dry-run` writes nothing to the registry, so its file records the whole computed plan instead — every tag it *would* repair — since that is the only content a preview has to report. Either way the file is written on every run, including one that changes nothing (an empty file) — a workflow can always feed it into `--tags-file` unconditionally, the same way [`ocx package push --tags-file`][cmd-package-push] chains into `announce`. `--tags-file`'s union semantics matter here: it never drops an already-committed tag, and it adds a tag that was never committed at all — an alias `repair` had to create from scratch — so one follow-up command covers a re-pointed alias and a brand-new one alike. When a run found index staleness on a logical identifier but had nothing of its own to repair, warming a particular machine's local copy is [`ocx index update`][cmd-index-update]'s job, not `repair`'s or `announce`'s — the report names that third hop when it applies.
+The flag accepts **exactly one package per invocation** (usage error, exit 64, nothing written) — the follow-up `announce` names a single package positionally, and a second package's tags landing in the same flat file would give it no way to tell whose they were. What a real run records is exactly the tags whose write **landed**: any alias a `raced`, `refused`, or `failed` outcome moved is left out, since announcing it would commit a digest this run never wrote. Landed tags are unioned with every tag an index-staleness finding names — the one class of drift a repair cannot close itself, announced even when the same run wrote nothing at all — so one file still covers both hops. `--dry-run` writes nothing to the registry, so its file records the whole computed plan instead — every tag it *would* repair — since that is the only content a preview has to report. Either way the file is written on every run, including one that changes nothing (an empty file) — a workflow can always feed it into `--tags-file` unconditionally, the same way [`ocx package push --tags-file`][cmd-package-push] chains into `announce`. `--tags-file`'s union semantics matter here: it never drops an already-committed tag, and it adds a tag that was never committed at all — an alias `repair` had to create from scratch — so one follow-up command covers a re-pointed alias and a brand-new one alike. When a run found index staleness on a logical identifier but had nothing of its own to repair, warming a particular machine's local copy is [`ocx index update`][cmd-index-update]'s job, not `repair`'s or `announce`'s — the report names that third hop when it applies.
 
 **Usage**
 
@@ -5746,6 +5886,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [env-ocx-records-dir]: ./environment.md#ocx-records-dir
 [env-ocx-records-name]: ./environment.md#ocx-records-name
 [user-guide-managed-config]: ../user-guide.md#managed-config
+[user-guide-claiming]: ../user-guide/claiming-a-namespace.md
 [env-composition-project-env]: ./env-composition.md#project-env
 [env-composition-list]: ./env-composition.md#composition-order-list
 [env-composition-list-separator]: ./env-composition.md#composition-order-list-separator
@@ -5857,6 +5998,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 <!-- commands (package announce) -->
 [cmd-package-announce]: #package-announce
 [env-ocx-announce-token]: ./environment.md#ocx-announce-token
+[env-ocx-announce-git-token]: ./environment.md#ocx-announce-git-token
 [config-registries-trusted-hosts]: ./configuration.md#keys-registries-trusted-hosts
 
 <!-- commands (package cascade) -->
