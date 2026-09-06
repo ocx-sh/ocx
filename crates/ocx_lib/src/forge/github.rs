@@ -19,6 +19,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use bytes::Bytes;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -28,8 +29,8 @@ use super::http::build_forge_http_client;
 use super::identity::{verify_fork_namespace, verify_github_fork};
 use super::poll::{PollSchedule, backoff_delays};
 use super::{
-    BranchComparison, CommitBase, Forge, ForgeError, ForgeToken, ForkIdentity, Mergeability, PullRequest, RefUpdate,
-    RepoCoordinate,
+    BranchComparison, CapabilityName, CheckStatus, CommitBase, Forge, ForgeCredentials, ForgeError, ForgeIdentity,
+    ForkIdentity, Mergeability, PullRequest, PushAccess, RefUpdate, RepoCoordinate,
 };
 
 /// Canonical github.com REST base URL — a dedicated API origin, not a path on
@@ -62,7 +63,7 @@ fn force_flag(update: RefUpdate) -> bool {
 /// bearer token is applied per request as a header and never appears in a URL.
 pub struct GitHubForge {
     client: reqwest::Client,
-    token: ForgeToken,
+    credentials: ForgeCredentials,
     base_url: String,
 }
 
@@ -79,13 +80,20 @@ impl GitHubForge {
     /// `__OCX_TESTING_FORGE_BASE_URL` env var redirects the client so the
     /// acceptance fake forge can intercept it; production ignores it.
     ///
+    /// This client is REST-only, and takes no write transport, because there is
+    /// no second one to take: the git transport creates its merge request
+    /// through push options, which GitHub has no equivalent of, so
+    /// [`super::ForgeKind::validate_transport`] refuses the pair before a client
+    /// is ever built. A stored transport here could never be anything but
+    /// `api`.
+    ///
     /// # Errors
     ///
     /// Returns [`ForgeError::ClientBuild`] when the hardened HTTP client cannot
     /// be constructed.
-    pub fn new(token: ForgeToken, host: Option<&str>) -> Result<Self, ForgeError> {
+    pub fn new(credentials: ForgeCredentials, host: Option<&str>) -> Result<Self, ForgeError> {
         let base_url = testing_base_url_override().unwrap_or_else(|| api_base_url(host));
-        Self::build(token, base_url)
+        Self::build(credentials, base_url)
     }
 
     /// Build a client against an explicit base URL (acceptance fake-forge seam).
@@ -95,14 +103,14 @@ impl GitHubForge {
     /// Returns [`ForgeError::ClientBuild`] when the hardened HTTP client cannot
     /// be constructed.
     #[cfg(any(test, feature = "__testing"))]
-    pub fn with_base_url(token: ForgeToken, base_url: String) -> Result<Self, ForgeError> {
-        Self::build(token, base_url)
+    pub fn with_base_url(credentials: ForgeCredentials, base_url: String) -> Result<Self, ForgeError> {
+        Self::build(credentials, base_url)
     }
 
-    fn build(token: ForgeToken, base_url: String) -> Result<Self, ForgeError> {
+    fn build(credentials: ForgeCredentials, base_url: String) -> Result<Self, ForgeError> {
         Ok(Self {
             client: build_forge_http_client(REQUEST_TIMEOUT)?,
-            token,
+            credentials,
             base_url: base_url.trim_end_matches('/').to_string(),
         })
     }
@@ -122,10 +130,10 @@ impl GitHubForge {
             .request(method, url)
             .header(ACCEPT, ACCEPT_JSON)
             .header("X-GitHub-Api-Version", API_VERSION);
-        if self.token.0.is_empty() {
+        if self.credentials.api().0.is_empty() {
             builder
         } else {
-            builder.header(AUTHORIZATION, format!("Bearer {}", self.token.0))
+            builder.header(AUTHORIZATION, format!("Bearer {}", self.credentials.api().0))
         }
     }
 
@@ -159,7 +167,7 @@ impl GitHubForge {
         ForgeError::Status {
             url: url.to_string(),
             status: status.as_u16(),
-            detail: status_detail(body, self.token.0.as_str()),
+            detail: status_detail(body, self.credentials.api().0.as_str()),
         }
     }
 
@@ -403,6 +411,53 @@ impl GitHubForge {
 /// contract, which lives on the trait.
 #[async_trait::async_trait]
 impl Forge for GitHubForge {
+    /// `GET /user`, whose `type` field carries GitHub's own bot assertion.
+    ///
+    /// C-009's `Ok(None)` — "the credential has no user" — is the GitHub App
+    /// installation token, and that credential answers this endpoint **403
+    /// with `Resource not accessible by integration`**, never 404. So the 403
+    /// is matched on its message, not on the bare status: an ordinary
+    /// permission failure (SAML enforcement, a missing scope) must stay an
+    /// error the operator sees at exit 80, not an absent account the owner
+    /// ladder silently falls through. A 404 answers `Ok(None)` as well — the
+    /// same "nothing behind this credential" reading.
+    ///
+    /// `UsersApiUnavailable` has no GitHub arm: it is scoped to a credential
+    /// forbidden the users API as a whole (a GitLab job token), and the one
+    /// GitHub credential without a user is the `Ok(None)` case above.
+    async fn authenticated_identity(&self) -> Result<Option<ForgeIdentity>, ForgeError> {
+        let url = self.url("/user");
+        let body = match self.get_json_optional(&url).await {
+            Ok(Some(body)) => body,
+            Ok(None) => return Ok(None),
+            Err(error) if no_user_behind_the_credential(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(Some(identity_from_body(&url, &body)?))
+    }
+
+    /// `GET /users/{login}`, `None` on 404.
+    async fn resolve_user(&self, login: &str) -> Result<Option<ForgeIdentity>, ForgeError> {
+        // `.` and `..` are the only two logins that cannot travel as a path
+        // segment at all: percent-encoded they become `%2E`/`%2E%2E`, which the
+        // URL parser still collapses as dot segments, retargeting the request at
+        // the API root — which answers 200 with no `login` field. Every other
+        // spelling is inert once escaped (`%2e%2e` typed literally becomes
+        // `%252e%252e`). The empty login is the third: it composes `/users/`,
+        // GitHub's *list-users* endpoint, whose 200 array carries no `login`
+        // field. No account carries any of the three names, so "no such
+        // account" is the honest answer rather than a new refusal the ladder
+        // would have to learn.
+        if matches!(login, "" | "." | "..") {
+            return Ok(None);
+        }
+        let url = self.url(&format!("/users/{}", encode_segment(login)));
+        let Some(body) = self.get_json_optional(&url).await? else {
+            return Ok(None);
+        };
+        Ok(Some(identity_from_body(&url, &body)?))
+    }
+
     /// Read a file's bytes at `r#ref`, or `None` when the path does not exist.
     ///
     /// # Errors
@@ -685,26 +740,46 @@ impl Forge for GitHubForge {
     /// repository's own `permissions.push` collapses all of that into a named
     /// error before any write is attempted.
     ///
-    /// `permissions` is only present on an authenticated read, and a repository
-    /// the credential cannot see answers 404 rather than 403 — both mean the same
-    /// thing to the caller, so both land on the same error.
+    /// A readable `permissions.push == false` is an ordinary denial and needs
+    /// no exception. The **exception** is the pair where the field cannot be
+    /// read at all: a repository the credential cannot see answers 404 rather
+    /// than 403, and an unauthenticated read omits `permissions` entirely.
+    /// C-011 says an unreadable field reports [`super::CheckStatus::Unknown`]
+    /// without failing the call; this probe predates that vocabulary and
+    /// refuses instead, because refusing before any write is the point of it,
+    /// and because neither shape can be told from "you may not push here".
+    ///
+    /// So GitHub's `push-access` row has two outcomes only — `Passed`, or a
+    /// raised error — and a caller that must report `skipped` (the
+    /// credential-free `--out` run) does so by not calling this at all and
+    /// seeding [`PushAccess::skipped_all`] itself.
+    ///
+    /// Only `push-access` is upgraded, and only from the read above. GitHub has
+    /// no job-token capability to report and this client carries no `git`
+    /// binary — the git write transport is refused for GitHub before a client
+    /// is built — so the other three rows stay
+    /// [`super::CheckStatus::Skipped`]. A row is `Passed` only where a probe
+    /// genuinely observed the capability; anything else would put a claim in
+    /// the report that nothing checked.
     ///
     /// # Errors
     ///
     /// Returns [`ForgeError::PushAccessDenied`] when the repository is invisible
     /// to the credential or reports no push permission, or any other
     /// [`ForgeError`] on transport, status, or decode failure.
-    async fn ensure_push_access(&self, repo: &RepoCoordinate) -> Result<(), ForgeError> {
+    async fn ensure_push_access(&self, repo: &RepoCoordinate) -> Result<PushAccess, ForgeError> {
         let url = self.url(&format!("/repos/{}", repo.full_path()));
         let allowed = self
             .get_json_optional(&url)
             .await?
             .and_then(|body| body.get("permissions")?.get("push")?.as_bool())
             .unwrap_or(false);
-        if allowed {
-            return Ok(());
+        if !allowed {
+            return Err(ForgeError::PushAccessDenied { repo: repo.full_path() });
         }
-        Err(ForgeError::PushAccessDenied { repo: repo.full_path() })
+        let mut access = PushAccess::skipped_all();
+        access.record(CapabilityName::PushAccess, CheckStatus::Passed, None);
+        Ok(access)
     }
 
     /// Commit `files` atomically onto `branch` at `base_sha`, returning the new
@@ -817,6 +892,69 @@ impl Forge for GitHubForge {
                 field: "pull_request".to_string(),
             })
     }
+}
+
+/// Everything that is not unreserved must be escaped in a path segment.
+///
+/// `NON_ALPHANUMERIC` less `-`, `_` and `~`. That is the RFC 3986 unreserved
+/// set **minus `.`**, which stays escaped on purpose: `.` is the one unreserved
+/// mark the URL parser gives structural meaning to, and leaving it raw would
+/// let a `.`/`..` login travel as a dot segment. Escaping does not defeat that
+/// on its own — [`GitHubForge::resolve_user`] refuses those two logins outright
+/// — but nothing here hands the parser a shortcut. A login is operator input
+/// (`--owner`) with no parse guard of its own, so interpolating it raw would
+/// also let `?` end the path and `/` retarget the request at a different
+/// endpoint.
+const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'~');
+
+/// Percent-encode one path segment.
+fn encode_segment(value: &str) -> String {
+    utf8_percent_encode(value, SEGMENT).to_string()
+}
+
+/// GitHub's own words for "this credential is an App installation token, and an
+/// installation has no user account behind it".
+const NO_INTEGRATION_USER: &str = "Resource not accessible by integration";
+
+/// Whether a failed `GET /user` is that refusal rather than a permission
+/// failure.
+///
+/// The body is already in hand: every non-success return carries it as
+/// [`ForgeError::Status`]'s `detail`, via `status_detail`, which redacts the
+/// credential and caps the text at 300 characters. GitHub puts `message` first
+/// in its error bodies, so the marker survives the cap — and reading the detail
+/// back costs nothing, where re-reading the response would need a second
+/// request path beside [`GitHubForge::get_json_optional`].
+fn no_user_behind_the_credential(error: &ForgeError) -> bool {
+    matches!(error, ForgeError::Status { status: 403, detail, .. } if detail.contains(NO_INTEGRATION_USER))
+}
+
+/// A [`ForgeIdentity`] from GitHub's user shape, shared by both identity reads.
+///
+/// `login` and `id` are required: `id` is what C-048 compares `--owner
+/// LOGIN:ID` against, and a defaulted zero would disagree with every real
+/// account and refuse for the wrong reason. `type` is **not** required — it is
+/// absent from some shapes and reads `Organization` in others, and neither is a
+/// bot, so demanding it would turn a legitimate account into a decode failure.
+///
+/// `bot` is that `type` field and nothing else (C-008): a login ending in
+/// `[bot]` is a naming convention, not the forge's assertion, and the value
+/// gates whether a claim may be authored at all.
+fn identity_from_body(url: &str, body: &Value) -> Result<ForgeIdentity, ForgeError> {
+    let missing = |field: &str| ForgeError::MissingField {
+        url: url.to_string(),
+        field: field.to_string(),
+    };
+    let login = body
+        .get("login")
+        .and_then(Value::as_str)
+        .ok_or_else(|| missing("login"))?;
+    let id = body.get("id").and_then(Value::as_u64).ok_or_else(|| missing("id"))?;
+    Ok(ForgeIdentity {
+        login: login.to_string(),
+        id,
+        bot: body.get("type").and_then(Value::as_str) == Some("Bot"),
+    })
 }
 
 /// The REST base URL for a GitHub host.
@@ -1016,6 +1154,7 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
 
+    use super::super::{CapabilityCheck, ForgeToken};
     use super::*;
 
     /// One recorded request against [`FakeForge`].
@@ -1075,8 +1214,11 @@ mod tests {
         }
 
         fn forge(&self) -> GitHubForge {
-            GitHubForge::with_base_url(ForgeToken::new("token".to_string()), self.base_url.clone())
-                .expect("client builds")
+            GitHubForge::with_base_url(
+                ForgeCredentials::new(ForgeToken::new("token".to_string())),
+                self.base_url.clone(),
+            )
+            .expect("client builds")
         }
 
         fn recorded(&self) -> Vec<Recorded> {
@@ -1584,7 +1726,7 @@ mod tests {
         // Construction under the test seam must succeed (embedded roots seeded,
         // redirects disabled inside the builder).
         let forge = GitHubForge::with_base_url(
-            ForgeToken::new("token".to_string()),
+            ForgeCredentials::new(ForgeToken::new("token".to_string())),
             "https://api.example.test/".to_string(),
         )
         .expect("client builds");
@@ -1594,8 +1736,11 @@ mod tests {
 
     #[test]
     fn request_omits_authorization_header_when_token_is_empty() {
-        let forge = GitHubForge::with_base_url(ForgeToken::new(String::new()), "https://api.example.test".to_string())
-            .expect("client builds");
+        let forge = GitHubForge::with_base_url(
+            ForgeCredentials::new(ForgeToken::new(String::new())),
+            "https://api.example.test".to_string(),
+        )
+        .expect("client builds");
         let request = forge
             .request(Method::GET, "https://api.example.test/user")
             .build()
@@ -1609,7 +1754,7 @@ mod tests {
     #[test]
     fn request_includes_bearer_authorization_header_when_token_is_present() {
         let forge = GitHubForge::with_base_url(
-            ForgeToken::new("secret-token".to_string()),
+            ForgeCredentials::new(ForgeToken::new("secret-token".to_string())),
             "https://api.example.test".to_string(),
         )
         .expect("client builds");
@@ -1624,5 +1769,581 @@ mod tests {
                 .expect("authorization header present"),
             "Bearer secret-token"
         );
+    }
+
+    // ---- WP-7: GitHub REST identity and the write preflight ----
+
+    /// The fake's answer to any route a test did not arm. A 500 rather than a
+    /// 404, so an unexpected request is never mistaken for "absent".
+    const UNEXPECTED: &str = r#"{"message":"unexpected request"}"#;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_authenticated_identity_reads_user() {
+        // C-023: the credential's own account comes from `GET /user` and from
+        // nowhere else.
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("GET", "/user") => (200, r#"{"login":"octocat","id":583231,"type":"User"}"#.to_string()),
+            _ => (500, UNEXPECTED.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        let identity = fake
+            .forge()
+            .authenticated_identity()
+            .await
+            .expect("the credential's account is readable")
+            .expect("a user token has an account behind it");
+
+        assert_eq!(
+            identity,
+            ForgeIdentity {
+                login: "octocat".to_string(),
+                id: 583_231,
+                bot: false,
+            }
+        );
+        assert_eq!(fake.routes(), ["GET /user".to_string()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_bot_type_sets_bot_flag() {
+        // C-008: `bot` carries GitHub's own `type` assertion and nothing else.
+        //
+        // The `[bot]`-suffixed login under `type: "User"` is the row that
+        // refuses a login heuristic — an implementation reading
+        // `login.ends_with("[bot]")` passes the `Bot` row and reds here.
+        // C-049's login shapes are WP-9's, at the point a login enters the
+        // claim body, and must not leak into this client.
+        //
+        // `Organization` and an absent `type` are legitimate identities rather
+        // than decode failures: making `type` required would turn a real
+        // account into an exit-1 decode error.
+        for (case, expected_bot) in [
+            (r#"{"login":"indexbot","id":1,"type":"Bot"}"#, true),
+            (r#"{"login":"octocat","id":2,"type":"User"}"#, false),
+            (r#"{"login":"dependabot[bot]","id":49699333,"type":"User"}"#, false),
+            (r#"{"login":"acme-corp","id":3,"type":"Organization"}"#, false),
+            (r#"{"login":"octocat","id":4}"#, false),
+        ] {
+            let body = case.to_string();
+            let fake = FakeForge::start(move |method, path| match (method, path) {
+                ("GET", "/user") => (200, body.clone()),
+                _ => (500, UNEXPECTED.to_string()),
+            })
+            .await
+            .expect("fake forge starts");
+
+            let identity = fake
+                .forge()
+                .authenticated_identity()
+                .await
+                .expect("every shape here is a readable account")
+                .expect("a user token has an account behind it");
+
+            assert_eq!(identity.bot, expected_bot, "for the wire shape {case}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_authenticated_identity_is_none_when_the_user_endpoint_is_absent() {
+        // The second half of C-009's `Ok(None)`: an absent `/user` is a
+        // credential with nothing behind it, which the owner ladder falls
+        // through rather than failing on. The installation token — the
+        // credential C-009 names — is the 403 arm below, not this one.
+        //
+        // Kept as its own arm because 404 cannot mean anything else here: this
+        // endpoint takes no path parameter, so there is no "wrong login" a 404
+        // could be reporting.
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("GET", "/user") => (404, r#"{"message":"Not Found"}"#.to_string()),
+            _ => (500, UNEXPECTED.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        assert!(
+            fake.forge()
+                .authenticated_identity()
+                .await
+                .expect("a credential with no account is not a failure")
+                .is_none(),
+            "an absent account is Ok(None), never an error the ladder cannot fall through"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_authenticated_identity_is_none_for_an_app_installation_token() {
+        // C-009's named `Ok(None)` case, on the wire shape it actually has.
+        // `GET /user` under a GitHub App installation token answers **403**
+        // with `Resource not accessible by integration` — the endpoint is
+        // simply not part of an installation's surface. Read as an error, the
+        // one credential the contract names by example exits 80 instead of
+        // falling through the owner ladder.
+        //
+        // **The real-server shape is unverified until release gate 4**: the
+        // status and message here are GitHub's documented text, not a recorded
+        // response, and `test/tests/fake_forge.py` models the users API as one
+        // `users_api_status` knob whose non-200 arms raise. If the live answer
+        // differs, the fix is here, not in the ladder above.
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("GET", "/user") => (
+                403,
+                r#"{"message":"Resource not accessible by integration","status":"403"}"#.to_string(),
+            ),
+            _ => (500, UNEXPECTED.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        assert!(
+            fake.forge()
+                .authenticated_identity()
+                .await
+                .expect("an installation token has no user, which is not a failure")
+                .is_none(),
+            "the installation-token 403 is Ok(None), never an error the ladder cannot fall through"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_authenticated_identity_surfaces_an_ordinary_403_as_a_status() {
+        // The falsifying half of the test above: only the installation-token
+        // *message* is `Ok(None)`. Every other 403 on this endpoint is a real
+        // permission failure — an org enforcing SAML, a token missing the
+        // scope — and must reach the operator as exit 80, not vanish into an
+        // absent account that sends the ladder looking for another owner.
+        //
+        // It also holds the `UsersApiUnavailable` boundary: that variant is
+        // scoped to a GitLab job token, and a builder porting the job-token arm
+        // across would turn exit 80 into exit 64, telling the operator to write
+        // `LOGIN:ID` for what is really a permission failure.
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("GET", "/user") => (
+                403,
+                r#"{"message":"Resource protected by organization SAML enforcement"}"#.to_string(),
+            ),
+            _ => (500, UNEXPECTED.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        let error = fake
+            .forge()
+            .authenticated_identity()
+            .await
+            .expect_err("a forbidden identity read is an error");
+
+        assert!(
+            matches!(error, ForgeError::Status { status: 403, .. }),
+            "an ordinary 403 stays a status, never Ok(None) and never UsersApiUnavailable: {error:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_identity_id_is_required_and_never_defaulted() {
+        // `ForgeIdentity.id` is the value C-048 compares `--owner LOGIN:ID`
+        // against, so a defaulted `0` would disagree with every real account and
+        // exit 64 for the wrong reason. `Value::as_u64` answers `None` for a
+        // JSON string and for a negative number, and both must be named
+        // failures rather than silent zeroes.
+        for (case, field) in [
+            (r#"{"login":"octocat","type":"User"}"#, "id"),
+            (r#"{"login":"octocat","id":"7","type":"User"}"#, "id"),
+            (r#"{"login":"octocat","id":-1,"type":"User"}"#, "id"),
+            (r#"{"id":7,"type":"User"}"#, "login"),
+        ] {
+            let body = case.to_string();
+            let fake = FakeForge::start(move |method, path| match (method, path) {
+                ("GET", "/user") => (200, body.clone()),
+                _ => (500, UNEXPECTED.to_string()),
+            })
+            .await
+            .expect("fake forge starts");
+
+            let error = fake
+                .forge()
+                .authenticated_identity()
+                .await
+                .expect_err("an unreadable identity field is a named failure");
+
+            assert!(
+                matches!(&error, ForgeError::MissingField { field: got, .. } if got == field),
+                "the wire shape {case} must name the missing {field}: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_resolve_user_404_is_none() {
+        // C-024: the forge has no such account. `OwnerUnknown` (79) is decided
+        // above this client, so a 404 must reach it as `Ok(None)`.
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("GET", "/users/nobody") => (404, r#"{"message":"Not Found"}"#.to_string()),
+            _ => (500, UNEXPECTED.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        assert!(
+            fake.forge()
+                .resolve_user("nobody")
+                .await
+                .expect("an unknown login is not an error here")
+                .is_none()
+        );
+        assert_eq!(fake.routes(), ["GET /users/nobody".to_string()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_resolve_user_surfaces_non_404_statuses() {
+        // Only 404 means "no such account". A `.ok()` or `unwrap_or(None)`
+        // collapse would report `OwnerUnknown` (79) — "the forge has no such
+        // account" — for a credential that may not look, or for an outage,
+        // instead of 80 / 80 / 69.
+        //
+        // The last row is the installation-token 403 that
+        // `authenticated_identity` reads as `Ok(None)`. It is an error *here*:
+        // that arm answers "this credential has no user of its own", which says
+        // nothing about whether `--owner LOGIN` names a real account. Hoisting
+        // the check into a shared helper reds this row.
+        for (status, body) in [
+            (401_u16, r#"{"message":"nope"}"#),
+            (403, r#"{"message":"nope"}"#),
+            (500, r#"{"message":"nope"}"#),
+            (403, r#"{"message":"Resource not accessible by integration"}"#),
+        ] {
+            let body = body.to_string();
+            let fake = FakeForge::start(move |_, _| (status, body.clone()))
+                .await
+                .expect("fake forge starts");
+
+            let error = fake
+                .forge()
+                .resolve_user("octocat")
+                .await
+                .expect_err("a non-404 failure is not an absent account");
+
+            assert!(
+                matches!(&error, ForgeError::Status { status: got, .. } if *got == status),
+                "a {status} must surface as itself: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_resolve_user_percent_encodes_the_login_into_one_path_segment() {
+        // `--owner` is operator input and reaches here unvalidated — a login is
+        // not a `RepoCoordinate` and has no parse guard. Interpolated raw, `?`
+        // would end the path and turn the rest into a query, and `/` would
+        // retarget the request at a different endpoint entirely.
+        //
+        // The assertion is on the **recorded path**, never on the response: a
+        // fake that 404s whatever it is asked answers the same in both states,
+        // so a response assertion here would be green with the encoding gone.
+        let fake = FakeForge::start(|_, _| (404, r#"{"message":"Not Found"}"#.to_string()))
+            .await
+            .expect("fake forge starts");
+
+        let absent = fake
+            .forge()
+            .resolve_user("x?a=1")
+            .await
+            .expect("an absent account is not an error");
+
+        assert!(absent.is_none());
+        assert_eq!(
+            fake.routes(),
+            ["GET /users/x%3Fa%3D1".to_string()],
+            "the login travels as one encoded path segment, never as a query or a second segment"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_resolve_user_refuses_a_login_that_cannot_be_a_path_segment() {
+        // Percent-encoding alone does not stop traversal: the URL parser pops
+        // `%2E%2E` exactly as it pops `..` (url-2.5.8 `parser.rs`), so
+        // `--owner ..` would request the API root, which answers 200 with no
+        // `login` field — a decode error where C-048 is owed "no such account".
+        // The empty login is the same failure by a different route: `/users/`
+        // is GitHub's list-users endpoint, whose 200 array has no `login`
+        // either. No account is named ``, `.` or `..`, so `Ok(None)` is the
+        // honest answer and nothing reaches the wire.
+        for login in ["", ".", ".."] {
+            let fake = FakeForge::start(|_, _| (200, r#"{"login":"root","id":1}"#.to_string()))
+                .await
+                .expect("fake forge starts");
+
+            assert!(
+                fake.forge()
+                    .resolve_user(login)
+                    .await
+                    .expect("a dot segment is an absent account, not an error")
+                    .is_none(),
+                "{login:?} must not resolve to an identity"
+            );
+            assert!(
+                fake.routes().is_empty(),
+                "{login:?} must never reach the wire: encoded it is still collapsed by the URL parser"
+            );
+        }
+
+        // The literal spelling is inert and must still travel — it is escaped
+        // to `%252E%252E`, which no parser reads as a dot segment, so refusing
+        // it would refuse a legal (if absent) login for no reason.
+        let fake = FakeForge::start(|_, _| (404, r#"{"message":"Not Found"}"#.to_string()))
+            .await
+            .expect("fake forge starts");
+
+        assert!(
+            fake.forge()
+                .resolve_user("%2E%2E")
+                .await
+                .expect("an absent account is not an error")
+                .is_none()
+        );
+        assert_eq!(fake.routes(), ["GET /users/%252E%252E".to_string()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_resolve_user_returns_the_canonical_login_spelling() {
+        // C-048's confirm step: the lookup is case-insensitive and the account's
+        // own spelling is what comes back. A client echoing its `login`
+        // argument would make WP-9's canonical-spelling test green against a
+        // lie, since that test can only see what this returns.
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("GET", "/users/AliCe") => (200, r#"{"login":"alice","id":7,"type":"User"}"#.to_string()),
+            _ => (500, UNEXPECTED.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        let identity = fake
+            .forge()
+            .resolve_user("AliCe")
+            .await
+            .expect("the account resolves")
+            .expect("the forge knows this account");
+
+        assert_eq!(
+            identity,
+            ForgeIdentity {
+                login: "alice".to_string(),
+                id: 7,
+                bot: false,
+            },
+            "the body's spelling wins over the caller's"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_ensure_push_access_emits_rows() {
+        // **Characterization, not contract-first.** `ensure_push_access` was
+        // shipped implemented in WP-5 (DX-22), so this test was green on
+        // arrival and never had a red of its own. Its red was produced by
+        // mutation instead, in review round 1: recording the upgrade against
+        // `CapabilityName::JobTokenPush` reds the slice assertion below with
+        // `assertion `left == right` failed` on the `push-access` and
+        // `job-token-push` rows. The mutation was reverted, not committed.
+        //
+        // It locks the row set C-025 promises, with one clause read as
+        // unreachable rather than implemented: C-025 reads `git-version` from
+        // "the held `GitBinary`", and this client holds none — GitHub plus the
+        // git write transport is refused before a client is built — so that row
+        // is `skipped` here, and GitHub has no job-token capability to report.
+        //
+        // The whole slice is asserted, order included: a single-row assertion
+        // on `push-access` stays green when the upgrade is recorded against the
+        // wrong capability.
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("GET", "/repos/forkuser/index") => (200, r#"{"permissions":{"push":true}}"#.to_string()),
+            _ => (500, UNEXPECTED.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        let access = fake
+            .forge()
+            .ensure_push_access(&test_repo())
+            .await
+            .expect("a pushable repository passes the preflight");
+
+        let expected: &[CapabilityCheck] = &[
+            CapabilityCheck {
+                name: CapabilityName::GitVersion,
+                status: CheckStatus::Skipped,
+                detail: None,
+            },
+            CapabilityCheck {
+                name: CapabilityName::PushAccess,
+                status: CheckStatus::Passed,
+                detail: None,
+            },
+            CapabilityCheck {
+                name: CapabilityName::JobTokenPush,
+                status: CheckStatus::Skipped,
+                detail: None,
+            },
+            CapabilityCheck {
+                name: CapabilityName::JobTokenAllowlist,
+                status: CheckStatus::Skipped,
+                detail: None,
+            },
+        ];
+        assert_eq!(access.checks(), expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_capability_detail_is_never_response_derived() {
+        // C-011: `detail` is drawn only from a closed set of values ocx already
+        // holds, never from a forge response body — widening that closure means
+        // routing the new source through the redactor first. GitHub's
+        // `push-access` row carries `None` because its permissions payload is a
+        // bare boolean with nothing further to report, and DX-22 rules that
+        // asymmetry with GitLab's `Some("access level {n}")` deliberate signal
+        // a later package must not reconcile.
+        const MARKER: &str = "detail-must-never-carry-this-9f3c";
+        let body = format!(r#"{{"description":"{MARKER}","permissions":{{"push":true}}}}"#);
+        let fake = FakeForge::start(move |method, path| match (method, path) {
+            ("GET", "/repos/forkuser/index") => (200, body.clone()),
+            _ => (500, UNEXPECTED.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        let access = fake
+            .forge()
+            .ensure_push_access(&test_repo())
+            .await
+            .expect("a pushable repository passes the preflight");
+
+        for check in access.checks() {
+            assert_eq!(check.detail, None, "GitHub reports no qualifier on {}", check.name);
+        }
+        assert!(
+            !format!("{access:?}").contains(MARKER),
+            "no part of the preflight may carry a response body: {access:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_unreadable_push_permission_is_denied_never_unknown() {
+        // **A stated exception to C-011 on this forge, not a defect** — and it
+        // covers only the rows where the field cannot be read. C-011 says a
+        // check whose field is unreadable reports `Unknown` and does not fail
+        // the call; GitHub's probe predates the capability vocabulary and
+        // refuses instead, for the three shapes below that carry no
+        // `permissions.push`: a repository invisible to the credential answers
+        // 404 rather than 403, an unauthenticated read omits the object, and a
+        // present object may still not carry the key. The last row needs no
+        // exception — `permissions.push == false` is a readable field saying
+        // no. All four land on `PushAccessDenied` (80) before any write.
+        //
+        // The consequence is a cross-package constraint: GitHub's `push-access`
+        // row has two outcomes only, `passed` or a raised error, so S-011's
+        // `push-access: skipped` under `--out` is satisfied by **not calling
+        // this at all** on that path and seeding `PushAccess::skipped_all()`
+        // above it, never by this returning `skipped`.
+        for (status, case) in [
+            (404_u16, r#"{"message":"Not Found"}"#),
+            (200, r#"{}"#),
+            (200, r#"{"permissions":{}}"#),
+            (200, r#"{"permissions":{"push":false}}"#),
+        ] {
+            let body = case.to_string();
+            let fake = FakeForge::start(move |method, path| match (method, path) {
+                ("GET", "/repos/forkuser/index") => (status, body.clone()),
+                _ => (500, UNEXPECTED.to_string()),
+            })
+            .await
+            .expect("fake forge starts");
+
+            let error = fake
+                .forge()
+                .ensure_push_access(&test_repo())
+                .await
+                .expect_err("an unreadable push permission refuses the write");
+
+            assert!(
+                matches!(&error, ForgeError::PushAccessDenied { repo } if repo == "forkuser/index"),
+                "{status} {case} must be a named refusal, never an Unknown row: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_ensure_push_access_without_a_credential_is_denied() {
+        // S-011's `--out` run: an empty token sends no `Authorization` header,
+        // and GitHub answers an unauthenticated repository read 200 **without**
+        // `permissions`. Pinned so that a later package which starts routing
+        // `--out` through the preflight reds here rather than shipping exit 80
+        // on a run that never intended to write.
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("GET", "/repos/forkuser/index") => (200, r#"{"full_name":"forkuser/index"}"#.to_string()),
+            _ => (500, UNEXPECTED.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        let forge = GitHubForge::with_base_url(
+            ForgeCredentials::new(ForgeToken::new(String::new())),
+            fake.base_url.clone(),
+        )
+        .expect("client builds");
+
+        let error = forge
+            .ensure_push_access(&test_repo())
+            .await
+            .expect_err("an unauthenticated read carries no push permission");
+
+        assert!(
+            matches!(&error, ForgeError::PushAccessDenied { repo } if repo == "forkuser/index"),
+            "{error:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn github_ensure_fork_names_the_missing_login_when_the_user_endpoint_is_absent() {
+        // `authenticated_login` and `authenticated_identity` read the same
+        // endpoint and answer an absent `/user` **differently on purpose**:
+        // C-009 owes `Ok(None)` so the owner ladder can fall through, while
+        // `ensure_fork` has no fallback — without a login there is no namespace
+        // to fork into, so it must stop with a named field. Folding the two
+        // would turn this into a fork attempt against an empty namespace.
+        let fake = FakeForge::start(|method, path| match (method, path) {
+            ("GET", "/user") => (404, r#"{"message":"Not Found"}"#.to_string()),
+            _ => (500, UNEXPECTED.to_string()),
+        })
+        .await
+        .expect("fake forge starts");
+
+        let upstream = RepoCoordinate {
+            host: None,
+            namespace: "ocx-sh".to_string(),
+            project: "index".to_string(),
+        };
+        let error = fake
+            .forge()
+            .ensure_fork(&upstream, None)
+            .await
+            .expect_err("a fork needs a namespace, and there is none");
+
+        assert!(
+            matches!(&error, ForgeError::MissingField { field, .. } if field == "login"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn api_base_url_is_the_dedicated_origin_for_github_com_and_api_v3_elsewhere() {
+        // The identity endpoints are the first ones a GitHub Enterprise Server
+        // publisher hits, and a wrong base reads as "user not found" rather than
+        // "wrong host". `api.github.com` is accepted as a spelling of github.com
+        // so a configured API host is not composed into
+        // `https://api.github.com/api/v3`.
+        assert_eq!(api_base_url(None), "https://api.github.com");
+        assert_eq!(api_base_url(Some("GitHub.com")), "https://api.github.com");
+        assert_eq!(api_base_url(Some("api.github.com")), "https://api.github.com");
+        assert_eq!(api_base_url(Some("ghe.acme.test")), "https://ghe.acme.test/api/v3");
     }
 }
