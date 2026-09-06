@@ -94,8 +94,13 @@ BASE_HEAD="$(glab api "projects/${ENCODED_INDEX}/repository/branches/${DEFAULT_B
 BRANCH="indexbot-announce-${PACKAGE//\//-}"
 
 announce() {
+    # The package is positional and goes LAST, after the caller's own flags:
+    # left in the slot the deprecated flag held it would render
+    # `announce <PKG> --tags 1.0.0`, which parses but puts a flag behind the
+    # positional. Every call site below passes complete flag/value pairs, so
+    # appending is safe.
     OCX_ANNOUNCE_TOKEN="$TOKEN" "$OCX_BIN" --format json package announce \
-        --forge gitlab --index-repo "$INDEX_COORDINATE" --package "$PACKAGE" "$@"
+        --forge gitlab --index-repo "$INDEX_COORDINATE" "$@" "$PACKAGE"
 }
 
 step "1. First announce opens a merge request"

@@ -147,9 +147,7 @@ impl Printable for PackageCascadeCheck {
                 continue;
             }
             let package = report.logical.as_ref().unwrap_or(&report.identifier).without_digest();
-            data.print_hint(&format!(
-                "index behind the registry - run: ocx package announce --package {package} --refresh"
-            ));
+            data.print_hint(&stale_index_hint(&package.to_string()));
             data.print_hint(&format!(
                 "then refresh the local copy - run: ocx index update {package}"
             ));
@@ -161,6 +159,37 @@ impl Printable for PackageCascadeCheck {
             ));
         }
     }
+}
+
+/// The remediation line both cascade subcommands print when the index is
+/// behind the registry.
+///
+/// A pure builder rather than an inline `format!` argument, and the reason is
+/// testability rather than reuse (DX-70, the same shape as the claim report's
+/// `plain_table`): [`ocx_lib::cli::DataInterface::print_hint`] writes the real
+/// stdout, so the four remediation strings the cascade commands print at an
+/// operator were covered by **no** assertion at all — migrating them to the
+/// positional `ocx package announce` grammar would have reded nothing. They are
+/// the reason C-062's sweep is correctness and not housekeeping: after the
+/// rename, ocx's own output would tell a user to run a form ocx warns about,
+/// and at 0.7 a form that does not exist.
+///
+/// Shared with `package_cascade_repair.rs`, which prints the byte-identical
+/// line, rather than duplicated there: one string means one migration, so
+/// "check migrated but repair did not" is unrepresentable instead of merely
+/// asserted against. Lives here because a stale index is a *finding*, and
+/// repair reports findings too.
+///
+/// The package is rendered **before** the flags here and in the two repair
+/// hints, which reads against C-057's "flags precede the positional" and is
+/// correct anyway (DX-84): C-057 governs the grammar the CLI accepts and how
+/// usage is documented, while a remediation hint is a line an operator
+/// copy-pastes — clap accepts flags after a positional, and the hint reads
+/// naturally with its subject first. Stated so it is not "fixed" into
+/// disagreement with the tests that pin it.
+#[must_use]
+pub fn stale_index_hint(package: &str) -> String {
+    format!("index behind the registry - run: ocx package announce {package} --refresh")
 }
 
 /// The wire spelling of a slot status, matching its `Serialize` form so a
@@ -411,6 +440,45 @@ mod tests {
                 "unrepairable",
             ],
             "pin the field set a --format json consumer actually parses: {value}"
+        );
+    }
+
+    /// C-062 / DX-70: the remediation line ocx prints at an operator names the
+    /// **positional** announce form.
+    ///
+    /// Asserted against the pure builder, which is why the builder exists
+    /// (E-21): the four remediation strings were inline `format!` arguments to
+    /// [`ocx_lib::cli::DataInterface::print_hint`], which writes the real
+    /// stdout, so they were covered by **no** assertion anywhere — the nearest
+    /// one, `test/tests/test_package_cascade.py:470`, checks `--tags-file` and
+    /// contains no `--package` at all. Migrating them would have reded nothing,
+    /// and they are the reason C-062's sweep is correctness rather than
+    /// housekeeping: leaving them behind makes ocx's own output tell a user to
+    /// run a form ocx warns about, and at 0.7 a form that does not exist.
+    ///
+    /// E-20 asked for a per-site assertion, because `check` and `repair` print
+    /// this line byte-identically and a shared assertion would pass with either
+    /// site un-migrated. The stub answered it one level better: there is one
+    /// builder, called from both, so "check migrated but repair did not" is
+    /// unrepresentable rather than merely asserted against.
+    ///
+    /// Red at the stub: `stale_index_hint` is `unimplemented!()`.
+    /// Mutation once implemented: write `announce --package {package}` back into
+    /// the builder.
+    #[test]
+    fn cascade_remediation_strings_use_the_positional_form() {
+        let hint = stale_index_hint("acme/widget");
+        assert!(
+            hint.contains("ocx package announce acme/widget"),
+            "the package is named positionally, flags after it: {hint}"
+        );
+        assert!(
+            !hint.contains("--package"),
+            "ocx must not tell an operator to run the spelling it deprecates: {hint}"
+        );
+        assert!(
+            hint.contains("--refresh"),
+            "a stale index is repaired by re-observing the committed set: {hint}"
         );
     }
 }

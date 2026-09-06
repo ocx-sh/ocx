@@ -10,6 +10,7 @@ use ocx_lib::package::cascade::apply::{RepairOutcome, WriteOutcome};
 use ocx_lib::package::cascade::graph::{CascadeReport, PlannedWrite, Unrepairable};
 use serde::Serialize;
 
+use super::package_cascade_check::stale_index_hint;
 use crate::api::Printable;
 
 /// One package's repair run: what was wrong, what the run planned, and what
@@ -158,17 +159,11 @@ impl PackageCascadeRepair {
                 continue;
             }
             let package = report.logical.as_ref().unwrap_or(&report.identifier).without_digest();
+            let package = package.to_string();
             match (wrote, &self.announce_tags_path) {
-                (true, Some(path)) => data.print_hint(&format!(
-                    "publish the moved tags - run: ocx package announce --package {package} --tags-file {}",
-                    path.display()
-                )),
-                (true, None) => data.print_hint(&format!(
-                    "publish the moved tags - re-run with --announce-tags <PATH>, then: ocx package announce --package {package} --tags-file <PATH>"
-                )),
-                (false, _) => data.print_hint(&format!(
-                    "index behind the registry - run: ocx package announce --package {package} --refresh"
-                )),
+                (true, Some(path)) => data.print_hint(&publish_moved_tags_hint(&package, path)),
+                (true, None) => data.print_hint(&publish_moved_tags_without_file_hint(&package)),
+                (false, _) => data.print_hint(&stale_index_hint(&package)),
             }
             // Announcing publishes the index; the local copy only learns of it
             // on the next sync, so a stale index is a two-hop follow-up.
@@ -211,6 +206,34 @@ impl Printable for PackageCascadeRepair {
 
         self.print_follow_up_hints(data);
     }
+}
+
+/// The remediation line a run that moved tags prints, naming the file
+/// `--announce-tags` wrote.
+///
+/// One of the three pure hint builders DX-70 extracts. They exist for
+/// testability rather than reuse: [`ocx_lib::cli::DataInterface::print_hint`]
+/// writes the real stdout, so these strings were covered by no assertion at all
+/// and migrating them to the positional `ocx package announce` grammar would
+/// have reded nothing. The `stale_index_hint` third one is
+/// [`super::package_cascade_check::stale_index_hint`], shared rather than
+/// duplicated, so `check` and `repair` cannot migrate apart.
+#[must_use]
+fn publish_moved_tags_hint(package: &str, tags_path: &std::path::Path) -> String {
+    format!(
+        "publish the moved tags - run: ocx package announce {package} --tags-file {}",
+        tags_path.display()
+    )
+}
+
+/// The remediation line a run that moved tags prints when it was given no
+/// `--announce-tags` destination, so the follow-up needs two commands.
+#[must_use]
+fn publish_moved_tags_without_file_hint(package: &str) -> String {
+    format!(
+        "publish the moved tags - re-run with --announce-tags <PATH>, then: \
+         ocx package announce {package} --tags-file <PATH>"
+    )
 }
 
 /// A landed write's detail cell.
@@ -503,5 +526,52 @@ mod tests {
         repair.announce_tags_path = Some(PathBuf::from("/tmp/tags.txt"));
         let value = serde_json::to_value(&repair).unwrap();
         assert_eq!(value["announce_tags_path"], "/tmp/tags.txt");
+    }
+
+    /// C-062 / DX-70: repair's own two remediation lines name the **positional**
+    /// announce form.
+    ///
+    /// The `repair` half of `cascade_remediation_strings_use_the_positional_form`
+    /// (whose `check` half lives beside `stale_index_hint`, the third builder,
+    /// which repair calls rather than duplicates). Split across two test
+    /// functions because both builders here are private to this module, and
+    /// widening their visibility to co-locate one test would trade a real
+    /// encapsulation for a cosmetic one.
+    ///
+    /// Each builder gets its own assertion (E-20): asserting one and trusting
+    /// the other passes with a site un-migrated.
+    ///
+    /// Red at the stub: both builders are `unimplemented!()`.
+    /// Mutation once implemented: write `announce --package {package}` back into
+    /// either builder — the other stays green and exactly one row reds.
+    #[test]
+    fn cascade_repair_remediation_strings_use_the_positional_form() {
+        let with_file = publish_moved_tags_hint("acme/widget", std::path::Path::new("tags.txt"));
+        assert!(
+            with_file.contains("ocx package announce acme/widget"),
+            "the package is named positionally, flags after it: {with_file}"
+        );
+        assert!(
+            !with_file.contains("--package"),
+            "ocx must not tell an operator to run the spelling it deprecates: {with_file}"
+        );
+        assert!(
+            with_file.contains("--tags-file tags.txt"),
+            "the follow-up names the file --announce-tags actually wrote: {with_file}"
+        );
+
+        let without_file = publish_moved_tags_without_file_hint("acme/widget");
+        assert!(
+            without_file.contains("ocx package announce acme/widget"),
+            "the package is named positionally here too: {without_file}"
+        );
+        assert!(
+            !without_file.contains("--package"),
+            "ocx must not tell an operator to run the spelling it deprecates: {without_file}"
+        );
+        assert!(
+            without_file.contains("--announce-tags"),
+            "with no destination the follow-up is two commands, and this is the first: {without_file}"
+        );
     }
 }

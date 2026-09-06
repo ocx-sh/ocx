@@ -273,9 +273,9 @@ jobs:
             fi
             echo "==> Announcing ${repo_path} into ocx-sh/index"
             ocx package announce \
-              --package "${repo_path}" \
               --tags-file "$tags_file" \
-              --index-repo ocx-sh/index
+              --index-repo ocx-sh/index \
+              "${repo_path}"
           }
 
           # variants is a JSON array of strings; iterate.

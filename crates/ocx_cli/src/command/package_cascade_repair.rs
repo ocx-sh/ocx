@@ -53,7 +53,7 @@ impl PackageCascadeRepair {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let audits = super::package_cascade::audit_all(&context, &self.packages).await?;
 
-        // `announce --tags-file` takes one `--package`, and the file it
+        // `announce --tags-file` takes one positional package, and the file it
         // reads is a bare list of tag names. Two packages' tags in one file
         // would be announced against whichever package the follow-up names,
         // moving the other's index entries to digests it never published.

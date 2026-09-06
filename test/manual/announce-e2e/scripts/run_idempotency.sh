@@ -41,11 +41,11 @@ main() {
 
     ocx_step "re-announcing $E2E_NAMESPACE/$E2E_PACKAGE with identical inputs"
     capture="$(announce_capture idempotency \
-        --package "$E2E_NAMESPACE/$E2E_PACKAGE" \
         --refresh \
         --fork "$INDEX_FORK" \
         --index-repo "$GH_REPO_INDEX" \
-        "$@")"
+        "$@" \
+        "$E2E_NAMESPACE/$E2E_PACKAGE")"
 
     status="$(evidence classify-report --file "$capture")"
     prs_after="$(pr_count)"
