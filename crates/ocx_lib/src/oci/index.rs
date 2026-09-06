@@ -33,6 +33,44 @@ mod regenerate;
 mod wire;
 pub mod wire_writer;
 
+// ── Shared clock ──
+//
+// One instant, two renderings (announce + claim design record, C-005/C-006).
+// `current_date` is defined in terms of `current_timestamp` rather than taking
+// its own reading, so the two never straddle midnight and disagree.
+
+/// The current instant, rendered in the index bot's `%Y-%m-%dT%H:%M:%SZ`
+/// seconds-Z form.
+///
+/// Used for the `observed` timestamp on new/changed tags (announce) and the
+/// analogous timestamp fields a claim writes. The `__OCX_TESTING_ANNOUNCE_CLOCK`
+/// env seam (test / `__testing` builds only) pins this so acceptance tests get
+/// byte-deterministic output; production reads the wall clock.
+pub fn current_timestamp() -> String {
+    #[cfg(any(test, feature = "__testing"))]
+    {
+        if let Ok(fixed) = std::env::var("__OCX_TESTING_ANNOUNCE_CLOCK") {
+            return fixed;
+        }
+    }
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// The current instant, rendered as a bare `%Y-%m-%d` date.
+///
+/// This is the first ten characters of [`current_timestamp`]'s own render of
+/// the *same* instant, never an independent `Utc::now()` read — two
+/// independent reads can straddle midnight and disagree, which is the defect
+/// this contract exists to prevent. Used for the claim root's `created` field.
+pub fn current_date() -> String {
+    let timestamp = current_timestamp();
+    // A pin shorter than ten ASCII bytes panics here by design: a malformed
+    // test pin must fail loudly at the seam, not silently yield a truncated
+    // "date" that then propagates into a written root. Unreachable outside a
+    // `__testing` build, where `__OCX_TESTING_ANNOUNCE_CLOCK` is the only source.
+    timestamp[..10].to_string()
+}
+
 /// Re-export the private `IndexImpl` trait for sibling-module tests.
 ///
 /// Sibling modules (e.g. `project::resolve` unit tests) that need to
@@ -1869,6 +1907,134 @@ mod tests {
         assert!(
             is_resolution_refusal(&error),
             "expected the direct route's lookup failure, got: {error:?}"
+        );
+    }
+    // ── Shared clock (C-005 / C-006) ─────────────────────────────────
+
+    /// The instant every clock test below pins the seam to.
+    ///
+    /// Deliberately **past-dated**: an implementation that ignores the pin
+    /// renders today's wall clock, which can never equal `2001-02-03…`, so the
+    /// assertions red. A "today at 23:59:59" pin would agree with an unpinned
+    /// read on the one day of the year it names — green for the wrong reason.
+    const PINNED_INSTANT: &str = "2001-02-03T04:05:06Z";
+
+    /// [`PINNED_INSTANT`]'s `%Y-%m-%d` rendering, written out rather than
+    /// sliced from it, so a `current_date` that slices the wrong window is
+    /// compared against a literal instead of against its own arithmetic.
+    const PINNED_DATE: &str = "2001-02-03";
+
+    /// Owns `__OCX_TESTING_ANNOUNCE_CLOCK` for the lifetime of one test.
+    ///
+    /// The variable's name is a **literal here**, never a constant shared with
+    /// production: renaming the name production reads leaves this pin inert and
+    /// reds every test holding the guard (C-006). A test that borrowed
+    /// production's own constant would follow the rename and prove nothing.
+    ///
+    /// The real process variable is written rather than
+    /// [`crate::test::env::EnvLock`]'s override map, because that map is only
+    /// consulted by `crate::env::var`, while a real variable is seen by both
+    /// `crate::env::var` (which falls through to it) and `std::env::var` — so
+    /// the pin lands whichever way production reads the seam, and this test does
+    /// not silently dictate that choice. `EnvLock` is still held, for the
+    /// process-wide serialisation it exists to provide.
+    struct ClockSeam {
+        _lock: crate::test::env::EnvLock,
+    }
+
+    impl ClockSeam {
+        /// Pins the seam to `instant` until the guard drops.
+        fn pinned(instant: &str) -> Self {
+            let lock = crate::test::env::lock();
+            // SAFETY: nextest (`taskfiles/rust.taskfile.yml:146`) gives every
+            // test its own process, and `EnvLock` serialises this write against
+            // every test that goes through `crate::test::env`. Two seams opt out
+            // of that serialisation instead — `oci::host_capabilities` and
+            // `file_structure::shim_bin_store` — each safe only because one test
+            // function owns its variable.
+            unsafe { std::env::set_var("__OCX_TESTING_ANNOUNCE_CLOCK", instant) };
+            Self { _lock: lock }
+        }
+
+        /// Holds the seam **unset**, so production renders the wall clock.
+        fn unset() -> Self {
+            let lock = crate::test::env::lock();
+            // SAFETY: see `ClockSeam::pinned`.
+            unsafe { std::env::remove_var("__OCX_TESTING_ANNOUNCE_CLOCK") };
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for ClockSeam {
+        fn drop(&mut self) {
+            // SAFETY: see `ClockSeam::pinned`. A struct's own `Drop` runs before
+            // its fields', so the variable is gone before `_lock` releases the
+            // mutex. Unconditional, so a stub that panics mid-test cannot leak
+            // the pin into a sibling — the Specify phase runs against
+            // `unimplemented!()`, where every one of these tests panics.
+            unsafe { std::env::remove_var("__OCX_TESTING_ANNOUNCE_CLOCK") };
+        }
+    }
+
+    /// C-005 — `current_date()` is the first ten characters of
+    /// `current_timestamp()`'s render of the **same** instant.
+    ///
+    /// The live-read form of this test is worthless and is deliberately not
+    /// written: two functions that each call `Utc::now()` independently agree on
+    /// their date component on every run but one that straddles midnight UTC, so
+    /// a bare `assert_eq!(current_date(), &current_timestamp()[..10])` passes
+    /// under the exact defect C-005 exists to prevent. The instant is therefore
+    /// pinned, and both renderings are asserted against that known value rather
+    /// than against each other alone.
+    #[test]
+    fn current_date_is_first_ten_chars_of_timestamp() {
+        let _seam = ClockSeam::pinned(PINNED_INSTANT);
+
+        let timestamp = current_timestamp();
+        let date = current_date();
+
+        assert_eq!(timestamp, PINNED_INSTANT, "the pinned instant is what gets rendered");
+        assert_eq!(
+            date, PINNED_DATE,
+            "the date must derive from the timestamp's instant, not from an independent clock read"
+        );
+        assert_eq!(date, timestamp[..10], "C-005: one instant, two renderings");
+    }
+
+    /// C-006 — the seam is spelled exactly `__OCX_TESTING_ANNOUNCE_CLOCK`, and
+    /// it overrides **both** renderings.
+    ///
+    /// Because [`PINNED_INSTANT`] is in the past, a production read of any other
+    /// spelling leaves the pin inert and both calls render today — which reds
+    /// every assertion below. That is what ties this test to the exact name
+    /// rather than to "some override exists".
+    #[test]
+    fn testing_clock_overrides_both() {
+        let _seam = ClockSeam::pinned(PINNED_INSTANT);
+
+        assert_eq!(current_timestamp(), PINNED_INSTANT, "the timestamp is overridden");
+        assert_eq!(current_date(), PINNED_DATE, "and so is the date");
+        assert_ne!(
+            current_date(),
+            chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            "the pin must displace the wall clock, not merely coexist with it"
+        );
+    }
+
+    /// C-005's format half, which no pinned test can reach: the seam returns its
+    /// value verbatim, so only an **unpinned** call observes the render that
+    /// production actually writes into an index root. The ten-character prefix
+    /// [`current_date_is_first_ten_chars_of_timestamp`] asserts is a date only
+    /// if this holds. Parsing is delegated to chrono, not hand-matched.
+    #[test]
+    fn current_timestamp_renders_the_seconds_z_form() {
+        let _seam = ClockSeam::unset();
+
+        let rendered = current_timestamp();
+
+        assert!(
+            chrono::NaiveDateTime::parse_from_str(&rendered, "%Y-%m-%dT%H:%M:%SZ").is_ok(),
+            "expected the index bot's %Y-%m-%dT%H:%M:%SZ seconds-Z form, got {rendered:?}"
         );
     }
 }

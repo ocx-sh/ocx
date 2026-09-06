@@ -99,18 +99,12 @@ pub struct Physical {
 
 /// The `observed` timestamp used for new/changed tags in this announce run.
 ///
-/// Computed once per run and threaded so a tag map is internally consistent. The
-/// `__OCX_TESTING_ANNOUNCE_CLOCK` env seam (test / `__testing` only) pins it so
-/// acceptance tests get byte-deterministic output; production reads the wall
-/// clock in the index bot's `%Y-%m-%dT%H:%M:%SZ` seconds-Z form.
+/// Computed once per run and threaded so a tag map is internally consistent.
+/// Delegates to [`oci::index::current_timestamp`] (C-005/C-007) — this module
+/// holds no clock of its own, so announce and a claim rendered in the same run
+/// carry the same instant.
 pub fn current_timestamp() -> String {
-    #[cfg(any(test, feature = "__testing"))]
-    {
-        if let Ok(fixed) = std::env::var("__OCX_TESTING_ANNOUNCE_CLOCK") {
-            return fixed;
-        }
-    }
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    oci::index::current_timestamp()
 }
 
 /// Require a committed root: a `None` read means the package has no root at
@@ -2036,5 +2030,82 @@ mod tests {
                 "{selection:?} must not adopt a discovered tag"
             );
         }
+    }
+    // ── Shared clock (C-007) ─────────────────────────────────────────────────
+
+    /// The instant the seam is pinned to. Past-dated on purpose: a renderer that
+    /// ignores the pin produces today, which can never equal it.
+    const PINNED_INSTANT: &str = "2001-02-03T04:05:06Z";
+
+    /// Owns `__OCX_TESTING_ANNOUNCE_CLOCK` for the lifetime of one test.
+    ///
+    /// The name is a literal here, never a constant shared with production, so
+    /// renaming what production reads leaves the pin inert and reds the test.
+    /// The real process variable is written rather than
+    /// [`crate::test::env::EnvLock`]'s override map, because a real variable is
+    /// visible to `std::env::var` and to `crate::env::var` alike — this test must
+    /// not dictate which of the two the shared clock reads through. `EnvLock` is
+    /// held for the process-wide serialisation it provides.
+    struct ClockSeam {
+        _lock: crate::test::env::EnvLock,
+    }
+
+    impl ClockSeam {
+        /// Pins the seam to `instant` until the guard drops.
+        fn pinned(instant: &str) -> Self {
+            let lock = crate::test::env::lock();
+            // SAFETY: nextest (`taskfiles/rust.taskfile.yml:146`) gives every
+            // test its own process, and `EnvLock` serialises this write against
+            // every test that goes through `crate::test::env`. Two seams opt out
+            // of that serialisation instead — `oci::host_capabilities` and
+            // `file_structure::shim_bin_store` — each safe only because one test
+            // function owns its variable.
+            unsafe { std::env::set_var("__OCX_TESTING_ANNOUNCE_CLOCK", instant) };
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for ClockSeam {
+        fn drop(&mut self) {
+            // SAFETY: see `ClockSeam::pinned`. A struct's own `Drop` runs before
+            // its fields', so the pin is gone before `_lock` releases the mutex.
+            // Unconditional, so a stub that panics mid-test cannot leak it into a
+            // sibling — the Specify phase runs against `unimplemented!()`.
+            unsafe { std::env::remove_var("__OCX_TESTING_ANNOUNCE_CLOCK") };
+        }
+    }
+
+    /// C-007 — announce and the index-root writer render the *same* instant.
+    ///
+    /// `ocx package claim` is WP-9's and does not exist yet, so the contract is
+    /// expressed over the two renderers that exist today: this module's
+    /// `current_timestamp`, [`oci::index::current_timestamp`], and
+    /// [`oci::index::current_date`] as that same instant's date. A future claim
+    /// call site rides on exactly this relation.
+    ///
+    /// Deliberately **behavioural**, never a source-text count of readers of the
+    /// env var: such a scan would live in the file it scans and match its own
+    /// needle (plan, "Two guards were deliberately not written").
+    ///
+    /// Its discrimination limit, stated so the guard is not read as more than it
+    /// is: the pin reds a `current_timestamp` here that reacquires a bare
+    /// `Utc::now()`, because that renders today. A verbatim copy of the old body
+    /// — its own clock *plus* its own read of the same seam — would still return
+    /// the pinned value; that shape is caught by this module holding no clock at
+    /// all, at review, not by this assertion.
+    #[test]
+    fn claim_and_announce_render_the_same_instant() {
+        let _seam = ClockSeam::pinned(PINNED_INSTANT);
+
+        let announce = current_timestamp();
+        let index = oci::index::current_timestamp();
+        let date = oci::index::current_date();
+
+        assert_eq!(announce, index, "one clock stands behind both renderers");
+        assert_eq!(
+            announce, PINNED_INSTANT,
+            "and it is the pinned instant, not a fresh reading either side made"
+        );
+        assert_eq!(date, PINNED_INSTANT[..10], "the date is that same instant's date");
     }
 }
