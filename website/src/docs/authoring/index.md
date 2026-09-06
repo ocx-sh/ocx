@@ -64,13 +64,14 @@ If your "binary" is a Python script, a JAR, or anything that needs an interprete
 
 ## The Publisher Journey {#journey}
 
-Most packages start as an upstream binary release on [GitHub][gh-releases] or a vendor's download page. The work between "I have a binary" and "consumers can `ocx package install` it" splits into seven decisions:
+Most packages start as an upstream binary release on [GitHub][gh-releases] or a vendor's download page. The work between "I have a binary" and "consumers can `ocx package install` it" splits into eight decisions:
 
 - **[Bundle anatomy][authoring-bundle-anatomy]** — what goes in the archive, whether to repack the upstream layout, which compression to pick. Reach for this when you have a directory and need to turn it into a `.tar.xz` ready for [`ocx package push`][cmd-package-push].
 - **[Declaring dependencies][authoring-dependencies]** — when to depend on another OCX package instead of bundling its bytes, how to pin by digest, what visibility to choose for the dependency edge. Reach for this when your tool needs to find another tool on disk at runtime.
 - **[Env surface][authoring-env-surface]** — which env vars to declare, how to mark each one (`private` / `public` / `interface`), when last-wins matters, how to migrate packages published before the entry-points release. Reach for this when designing the contract between you and consumers — and when retrofitting older `metadata.json` files.
 - **[Entry points][authoring-entry-points]** — when to ship named launchers instead of exposing `bin/` on PATH, how to pick non-colliding names, how the launcher resolves each name against the composed `PATH` from the package's `env` block. Reach for this when your tool depends on a shared runtime (Python, Node, JVM) and needs its dep graph encapsulated so two installed tools cannot fight over a single ambient interpreter.
 - **[Building and pushing][authoring-building-pushing]** — first push, `--cascade` for rolling tags, BYO archives, cross-package layer reuse by digest. Reach for this when ready to publish.
+- **[Announcing][authoring-announcing]** — claiming a namespace once, then publishing tags into the index on every release: the four credential postures, `--transport git` for a GitLab CI job token, and who reviews what. Reach for this when a pushed package still is not resolvable as `<ns>/<pkg>`.
 - **[Testing locally][authoring-testing]** — verify a package works before pushing: run the same install pipeline in a temp directory, exec a command in the composed env, inspect the layout with `--keep`. No registry round-trip, no new digest.
 - **[Multi-platform packages][authoring-multi-platform]** — pushing per platform under one tag, how OCX assembles the [OCI Image Index][oci-image-index]. Reach for this when supporting more than one OS/arch.
 - **[Migration patterns][authoring-migration]** — `ocx_mirror` specs, repackaging Homebrew and GitHub Releases, attaching description metadata. Reach for this when wrapping an upstream tool you do not own.
@@ -88,6 +89,8 @@ Common questions you will hit while authoring, and the page that answers each:
 | How do I verify a package works before pushing it to the registry? | [Testing locally][authoring-testing] |
 | How do I make rolling tags (`1.0`, `1`, `latest`) follow new releases? | [Building & pushing → cascade][authoring-cascade] |
 | How do I publish for amd64 + arm64 + darwin under one tag? | [Multi-platform packages][authoring-multi-platform] |
+| I pushed the package but `ocx package install acme/widget` cannot find it. | [Announcing → claiming the namespace][authoring-announcing-claim] |
+| Which credential does my CI job need to write the index? | [Announcing → choosing a posture][authoring-announcing-postures] |
 | How do I avoid re-uploading a base layer that's already in the registry? | [Building & pushing → layer reuse][authoring-layer-reuse] |
 | How do I add a README or logo to a published package? | [Migration patterns → describe][authoring-describe] |
 | How do I retrofit an older `metadata.json` for entry visibility? | [Env surface → migrating][authoring-env-migrating] |
@@ -132,6 +135,9 @@ Common questions you will hit while authoring, and the page that answers each:
 [authoring-entry-points]: ./entry-points.md
 [authoring-entry-points-when]: ./entry-points.md#when
 [authoring-building-pushing]: ./building-pushing.md
+[authoring-announcing]: ./announcing.md
+[authoring-announcing-claim]: ./announcing.md#announcing-claim
+[authoring-announcing-postures]: ./announcing.md#announcing-postures
 [authoring-cascade]: ./building-pushing.md#cascade
 [authoring-layer-reuse]: ./building-pushing.md#layer-reuse
 [authoring-testing]: ./testing.md

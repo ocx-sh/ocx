@@ -3014,7 +3014,7 @@ The report says which rule produced the list, in `owner_identity_source`. `resol
 
 **`--transport git` writes over a clone instead of the API.** The default `api` transport opens the request through the forge's REST API. `git` clones the index repository into a temporary directory, builds the commit there, and creates the request from a single authenticated push — which is the only way a GitLab CI job token can open a merge request, because that credential can push to a repository and read the API but cannot open a merge request through it. It is GitLab-only and refused (exit 64, naming both) against a resolved GitHub forge, against `--fork`, and against `--out`. Before it writes, ocx checks that the index project allows job-token pushes and that its job-token allowlist admits the publishing project; a missing capability exits 86 naming it, because only an administrator of the index project can grant it.
 
-Claiming from GitLab is walked through end to end in [Claiming a namespace][user-guide-claiming].
+Claiming from GitLab is walked through end to end in [Announcing a package][authoring-announcing].
 
 **Usage**
 
@@ -6095,7 +6095,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [env-ocx-records-name]: ./environment.md#ocx-records-name
 [user-guide-managed-config]: ../user-guide.md#managed-config
 [user-guide-toml]: ../user-guide.md#project
-[user-guide-claiming]: ../user-guide/claiming-a-namespace.md
+[authoring-announcing]: ../authoring/announcing.md
 [env-composition-project-env]: ./env-composition.md#project-env
 [env-composition-list]: ./env-composition.md#composition-order-list
 [env-composition-list-separator]: ./env-composition.md#composition-order-list-separator

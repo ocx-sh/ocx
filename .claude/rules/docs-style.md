@@ -155,6 +155,20 @@ All components globally registered — use directly in `.md` files without impor
 
 ---
 
+## Casts Show Work, Not Grammar
+
+Never record a `.cast` — or write a `test/doc_scripts/*.sh` to back one — whose output is a
+`--help` dump, a usage line, or a list of argv refusals. That duplicates
+`reference/command-line.md`, which is written against the clap definitions and is the one
+place a reader should look for grammar. Link the reference section instead.
+
+A cast earns its place only when it shows a command **doing** something whose output the
+reader could not predict from the flag list: an install that resolves a version, an env that
+composes, a push that reuses a layer. If the recording's value is "here is what the flags
+are", delete it and write a sentence with a link.
+
+---
+
 ## Before Writing
 
 1. Read source code to understand actual behavior — no documenting from memory.

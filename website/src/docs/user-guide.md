@@ -736,49 +736,11 @@ To export environment variables into CI runtime files (e.g. `$GITHUB_PATH` / `$G
 
 ## Publish and announce a package {#publish}
 
-[`ocx package push`][cmd-package-push] puts bytes in a registry — nothing more. It does not make `<ns>/<pkg>` resolvable to anyone who does not already know the exact registry coordinates. Announcing is the extra step that tells the [public index][in-depth-indices-public] a namespace, package, and tag combination exists, so [`ocx package install`][cmd-install] `<ns>/<pkg>` works for anyone, not just people you have personally handed a registry URL.
+[`ocx package push`][cmd-package-push] puts bytes in a registry, and a registry holds anything — container images, Helm charts, whatever else your org already stores there. Announcing writes the [public index][in-depth-indices-public] entry that turns one of those repositories into a catalogued package: which logical `<ns>/<pkg>` it answers to, which tags it carries, and which are yanked or deprecated. That entry is what makes [`ocx package install`][cmd-install] `<ns>/<pkg>` resolve for someone who was never told the host.
 
-Skip that step and the packages stay invisible outside your own config. Months of `ocx package push` to a private `ghcr.io` repository leave a registry full of correctly built packages and zero outside install-ability: nobody can resolve `<ns>/<pkg>` because nothing points at it. [winget-pkgs][winget-pkgs] solves the equivalent "make my thing discoverable" problem with a review-gated pull request against a central manifest repository — a publisher submits a manifest, an [automated pipeline validates it and tests the installer][winget-submit], and a moderator approves the merge; only then does the package show up in the catalogue `winget` resolves from.
+Two commands do it: [`ocx package claim`][cmd-package-claim] registers the namespace once, reviewed by a person, and [`ocx package announce`][cmd-package-announce] publishes tags into it on every release afterwards. Both open a pull request (GitHub) or a merge request (GitLab) against the index repository, and both read [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] from the environment only — never from a stored credential, and never from the [`~/.docker/config.json` that `ocx login` writes][authentication-storing]. Writing an index and authenticating to a registry are two separate trust boundaries with two separate credentials.
 
-OCX takes the same shape, minus the manifest-authoring step. [`ocx package push --tags-file <path>`][cmd-package-push] records which tags this push should announce, then [`ocx package announce --fork <repository>`][cmd-package-announce] opens an ordinary pull request — from the publisher's own forge account — against the [public index repository][index-repo]. It is the same trust model as any open-source contribution: no index-side credential is ever required. `OCX_ANNOUNCE_TOKEN` authenticates to the forge to open that request and nothing else: it is read from the environment only, never from a stored credential, and it never reaches the [`~/.docker/config.json` that `ocx login` writes][authentication-storing]. Announcing and registry authentication are two separate trust boundaries with two separate credentials.
-
-The index does not have to be on GitHub. `announce` speaks **GitHub and GitLab**, each on its public host and on self-hosted instances, and on GitLab it opens a merge request instead of a pull request. Name the host in `--index-repo` (`gitlab.com/acme/index`), and for a self-hosted instance add `--forge github` or `--forge gitlab` — a hostname says nothing about which forge runs behind it, so OCX asks rather than guessing where to send your credential. Nested GitLab group paths work as written: `--index-repo gitlab.example.com/acme/platform/tooling/index`. Everything else on this page — curation, yanking, the unchanged short-circuit — reads the same on either forge.
-
-### First-time setup {#publish-first-time-setup}
-
-Two one-time steps happen on the [index site][index-ocx-sh] itself, before the first announce:
-
-1. [Claim your namespace][index-claim-namespace] — a short, reviewed pull request that registers your GitHub account (or org) as the owner of a namespace prefix.
-2. Obtain [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token] and [set it up][index-announce-package] — a classic GitHub PAT for a single maintainer, or a machine-account token for a CI fleet publishing many packages. OCX reads it the same way it reads every other environment variable — see the [environment variable reference][env-ref].
-
-### Announcing from CI {#publish-announcing-from-ci}
-
-Most publishers already have a release workflow that builds and uploads binaries; slotting announce into it is additive, not a rewrite. The [copy-paste GitHub Actions snippet][index-announce-ci-snippet] on the index site shows where `push --tags-file` and `announce` go relative to your existing build steps, plus the `OCX_ANNOUNCE_TOKEN` secret wiring for both a classic-PAT and a machine-account setup. The snippet lives there, not here, so it stays in sync with the index bot's own contract instead of drifting out of two copies.
-
-### What your consumers need {#publish-consumer-prerequisite}
-
-Nothing. The [compiled-in defaults][config-registries-index] name
-`https://index.ocx.sh` as the index for the `ocx.sh` namespace, so
-[`ocx package install`][cmd-install] `<ns>/<pkg>` resolves through the [public
-index][in-depth-indices-public] on a machine with no OCX config at all. A
-consumer opts *out*, not in — `index = ""`, or a [`[mirrors]`][config-mirrors]
-entry pinning `ocx.sh` at a registry endpoint.
-
-That authority is exclusive, and it cuts both ways. The index is the sole
-resolver for `ocx.sh/…` — which is what lets a yank reach everyone who
-installs the package — so an `index.ocx.sh` outage fails those installs
-outright rather than falling through to whatever registry happens to serve a
-repository under the same name. An announced package inherits the index's
-availability along with its guarantees.
-
-### What happens after {#publish-what-happens-after}
-
-Once the pull request is open, one of two lanes picks it up. A routine refresh from a package's already-verified owner — a new tag, a moved digest, green checks — merges itself automatically; there is nothing to wait on. A first-time package, or any change touching a governance-sensitive field, always goes to a person: index maintainers review it as they would any other pull request. The [governance contracts reference][index-governance-contracts] documents which fields route to which lane.
-
-::: tip Learn more
-[Building and pushing packages][authoring-building-pushing] — the full push workflow: dependency pins, cascading rolling tags, layer reuse.
-[index.ocx.sh][in-depth-indices-public] — how the public index resolves an announced package back into an install.
-:::
+[Announcing a package][authoring-announcing] walks the whole thing end to end: what the index entry records, the four credential postures with a copy-paste CI recipe each, who reviews what, and every exit code either command can produce.
 
 ## Authenticate with a private registry {#authentication}
 
@@ -1373,7 +1335,6 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 
 <!-- authoring -->
 [authoring-libc]: ./authoring/multi-platform.md#libc
-[authoring-building-pushing]: ./authoring/building-pushing.md#first-push
 
 <!-- external -->
 [github-releases-ocx]: https://github.com/ocx-sh/ocx/releases
@@ -1434,13 +1395,6 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [schema-project]: https://ocx.sh/schemas/project/v1.json
 [oras]: https://oras.land/
 [index-ocx-sh]: https://index.ocx.sh
-[winget-pkgs]: https://github.com/microsoft/winget-pkgs
-[winget-submit]: https://learn.microsoft.com/en-us/windows/package-manager/package/repository
-[index-repo]: https://github.com/ocx-sh/index
-[index-claim-namespace]: https://index.ocx.sh/docs/how-to/claim-a-namespace
-[index-announce-package]: https://index.ocx.sh/docs/how-to/announce-a-package
-[index-announce-ci-snippet]: https://index.ocx.sh/docs/how-to/announce-a-package#copy-paste-github-actions-snippet
-[index-governance-contracts]: https://index.ocx.sh/docs/reference/governance-contracts
 
 <!-- github issues -->
 [gh-trust-policy]: https://github.com/ocx-sh/ocx/issues/98
@@ -1482,6 +1436,8 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [cmd-index-sync]: ./reference/command-line.md#index-sync
 [cmd-package-pull]: ./reference/command-line.md#package-pull
 [cmd-package-push]: ./reference/command-line.md#package-push
+[cmd-package-claim]: ./reference/command-line.md#package-claim
+[authoring-announcing]: ./authoring/announcing.md
 [cmd-package-announce]: ./reference/command-line.md#package-announce
 [cmd-deps]: ./reference/command-line.md#deps
 [cmd-env-root]: ./reference/command-line.md#env-root

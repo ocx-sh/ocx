@@ -478,7 +478,7 @@ Under `git`, ocx checks two things on the **index** project before it writes —
 project accepts job-token pushes, and that its job-token allowlist admits the publishing
 project — and exits 86 naming whichever is missing, because only an administrator there can
 grant it. It also refuses to run on a `git` older than 2.31.0, checked before the forge is
-constructed. [Claiming a namespace][user-guide-claiming] walks a real pipeline through each
+constructed. [Announcing a package][authoring-announcing] walks a real pipeline through each
 posture.
 
 ## Keep tags {#keep-tags}
@@ -578,7 +578,7 @@ A fifth command belongs to the family without carrying the verb: [`ocx index syn
 
 <!-- internal -->
 [user-indices]: ../user-guide.md#offline
-[user-guide-claiming]: ../user-guide/claiming-a-namespace.md
+[authoring-announcing]: ../authoring/announcing.md
 [user-patches-pins]: ../user-guide/patches.md#patches-pins
 [in-depth-storage]: ./storage.md
 [in-depth-storage-packages]: ./storage.md#packages
