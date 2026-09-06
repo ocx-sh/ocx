@@ -41,6 +41,7 @@ pub mod announce;
 pub mod archive;
 pub mod auth;
 pub mod ci;
+pub mod claim;
 pub mod cli;
 pub mod codesign;
 pub mod compression;

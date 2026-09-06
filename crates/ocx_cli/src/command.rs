@@ -42,6 +42,7 @@ pub mod package_attest;
 pub mod package_cascade;
 pub mod package_cascade_check;
 pub mod package_cascade_repair;
+pub mod package_claim;
 pub mod package_copy;
 pub mod package_create;
 pub mod package_description;
@@ -107,7 +108,11 @@ pub enum Command {
     Config(config::ConfigGroup),
     /// direnv integration (init writes .envrc; export emits the env block).
     Direnv(direnv::Direnv),
-    /// Operations related to the package index
+    /// Inspect the package index and refresh the local copy.
+    ///
+    /// None of these subcommands writes to a forge: proposing a namespace or a
+    /// new version into the shared index is `ocx package claim` and
+    /// `ocx package announce`.
     #[command(subcommand)]
     Index(index::Index),
     /// Print ocx version, registry, platform, shell, and home directory.
@@ -207,5 +212,107 @@ impl Command {
                 unreachable!("Command::External must be handled in App::run before reaching execute()")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Subcommand as _;
+
+    /// The `ocx index` group, as clap builds it.
+    fn index_group() -> clap::Command {
+        super::Command::augment_subcommands(clap::Command::new("ocx"))
+            .find_subcommand("index")
+            .expect("ocx index is a command group")
+            .clone()
+    }
+
+    /// The whole help text an operator sees for the group — the long form when
+    /// there is one, else the short.
+    fn index_help() -> String {
+        let group = index_group();
+        group
+            .get_long_about()
+            .or_else(|| group.get_about())
+            .expect("the index group carries help text")
+            .to_string()
+    }
+
+    /// S-035: no forge write may land under `ocx index`.
+    ///
+    /// **The reachable half of S-035, and a deliberate narrowing of it**
+    /// (DX-54). The scenario asks for a clap did-you-mean hint pointing
+    /// `ocx index claim` at `ocx package claim`; clap 4 emits none, because its
+    /// candidate set is one command's **own** subcommand list and `claim` is
+    /// within edit distance of none of `catalog`, `list`, `update`, `sync`,
+    /// `regenerate`. Measured, not reasoned: `ocx index catalo` does print
+    /// `tip: a similar subcommand exists: 'catalog'`, so the mechanism is live
+    /// and only similarity-gated, and clap exposes no cross-command hook. The
+    /// one thing that would emit a pointer is a hidden `claim` arm on
+    /// `enum Index`, which makes clap **parse** rather than suggest — so
+    /// `ocx index claim --help` would render a help page for a command that does
+    /// not exist, and this very assertion would invert.
+    ///
+    /// So the property actually protected is the one that matters for the life
+    /// of the repository: a later contributor must not put a forge write under
+    /// a group whose help says nothing writes to a forge.
+    ///
+    /// **Residual, recorded rather than hidden:** the pointer to
+    /// `ocx package claim` is one `--help` away, not inline — which is exactly
+    /// where clap's own `For more information, try '--help'` sends the operator.
+    ///
+    /// **Green on arrival, and no red is reachable from this package's file
+    /// set:** the mutation lives in `command/index.rs`, which no work package
+    /// owns. Control: the reviewer adds a `Claim` arm to `enum Index`, observes
+    /// this red, and reverts.
+    #[test]
+    fn index_group_declares_no_claim_subcommand() {
+        assert!(
+            index_group().find_subcommand("claim").is_none(),
+            "ocx index must declare no claim subcommand — claiming a namespace writes to a forge"
+        );
+    }
+
+    /// S-035: the group's own help states that no index subcommand writes to a
+    /// forge, and names `ocx package claim`.
+    ///
+    /// Read off the built `Command` rather than off this file's source text: a
+    /// source scan would live in the file it scans, which measures itself
+    /// (`quality-core.md` § Unchecked Green). The two clauses are asserted
+    /// separately so dropping either one reds.
+    ///
+    /// **Green on arrival** — the stub already wrote the sentence.
+    /// Mutation: restore the doc comment to
+    /// `Operations related to the package index`.
+    #[test]
+    fn index_group_help_states_no_forge_write() {
+        let help = index_help();
+        assert!(
+            help.contains("writes to a forge"),
+            "the index group's help must state that none of its subcommands writes to a forge; got: {help}"
+        );
+        assert!(
+            help.contains("ocx package claim"),
+            "and must name the command that does; got: {help}"
+        );
+    }
+
+    /// `quality-cli-help.md` § Forbidden: no incorrect statement of behaviour.
+    ///
+    /// The group's long help must not tell an operator that its subcommands
+    /// refresh the local copy from the registry. Three of the five do not:
+    /// `catalog` lists repositories **in the registry**, `list` only reads, and
+    /// `regenerate` re-derives `c/index.json` from the local `p/` walk and
+    /// consults no source at all.
+    ///
+    /// Red at the stub: the sentence is present verbatim (DX-60).
+    /// Mutation once implemented: restore it.
+    #[test]
+    fn index_group_help_does_not_claim_every_subcommand_refreshes() {
+        let help = index_help();
+        assert!(
+            !help.contains("refresh it from the registry"),
+            "three of the five index subcommands contact no registry; got: {help}"
+        );
     }
 }
