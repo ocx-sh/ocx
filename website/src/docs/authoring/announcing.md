@@ -146,9 +146,10 @@ gets written.
 
 The version column is the floor ocx enforces itself: under `--transport git` it runs
 `git --version` before it constructs the forge and exits 69 below 2.31.0. There is no
-GitLab version number ocx checks — instead it asks the instance the two questions that
-actually matter (does this project accept job-token pushes, and does its allowlist admit
-the publishing project) and exits 86 naming whichever answer is missing.
+GitLab version number ocx checks. Instead it asks the instance the two questions that
+actually matter — does this project accept job-token pushes, and do its allowlists admit
+the publishing project — and exits 86 naming whichever answer is missing. The second
+question has two answers, because GitLab keeps a project list and a group list.
 
 The index does not have to be on GitHub. Both commands speak **GitHub and GitLab**, each on
 its public host and on self-hosted instances, and on GitLab the change arrives as a merge
@@ -284,15 +285,19 @@ explicit on the claim on purpose — see [the owners section](#announcing-owners
 needs no `--owner`: the entry already records who owns it.
 
 This posture needs the index project to have enabled job-token pushes and to have
-allowlisted the publishing project. Both are settings on the **index** project, not yours;
-if either is missing the run exits 86 naming it, and an administrator there has to act.
+allowlisted the publishing project. Either allowlist is enough: the project by name, or
+any group it sits under. One group entry covers every publisher in that group, at any
+depth. Both are settings on the **index** project, not yours, and if either is missing the
+run exits 86; an administrator there has to act.
 
 A job token may read only [the endpoints GitLab opens to
 it](https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access), which does not include
-the settings above — so in this posture ocx cannot check them before it pushes. It pushes,
-and GitLab's refusal is what names the missing one. The exit code and the message are the
-same either way; only the moment differs. The [split pair](#announcing-split) below reads
-them up front, because its API half is an ordinary token.
+the settings above — so in this posture ocx cannot check them before it pushes. It pushes
+and lets GitLab's own rejection decide. The exit code is 86 either way, but the message is
+not: GitLab's rejection carries no field saying which setting was missing, so the message
+is generic rather than naming one. The [split pair](#announcing-split) below reads the same
+two settings up front, because its API half is an ordinary token — and gets the specific
+message this posture cannot.
 
 ### GitLab, with a split credential pair {#announcing-split}
 
@@ -450,7 +455,7 @@ Codes marked *claim* or *announce* are reachable from that command only; the res
 | 79 | *announce* — a curated tag does not resolve on the registry, or the package is unclaimed | Check the tag for a typo; for the second, run [`ocx package claim`][cmd-package-claim] first |
 | 79 | *claim* — `unknown owner …: the forge has no such account` | Check the spelling, or pass `LOGIN:ID` to skip the lookup |
 | 80 | no credential, a rejected one, or one that cannot push to `--index-repo` | Set [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token]. Without `--fork` the credential also needs push access, which ocx checks up front and names |
-| 86 | a capability the transport needs is absent | Job-token pushes are disabled on the index project, or the allowlist does not admit yours. Only an administrator of the index project can grant either; `--transport api` with a stored token is the way around it |
+| 86 | a capability the transport needs is absent | Job-token pushes are disabled on the index project, or neither of its allowlists admits your project or one of its groups. Only an administrator of the index project can grant either; `--transport api` with a stored token is the way around it |
 
 `--out` is the way to see what a run would commit without opening anything: it needs no
 credential and writes the whole entry every time, including on a run that changes nothing.

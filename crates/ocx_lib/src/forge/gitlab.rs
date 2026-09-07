@@ -45,6 +45,7 @@ use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
+use url::Url;
 
 use super::error::status_detail;
 use super::git_workspace::{GitWorkspace, RefusalContext, confirm_merge_request};
@@ -90,6 +91,17 @@ const JOB_TOKEN_PUSH_FIELD: &str = "ci_push_repository_for_job_token_allowed";
 const PUBLISHING_PROJECT_VARIABLE: &str = "CI_PROJECT_PATH";
 /// The allowlist endpoint, named as a `detail` when it cannot be read.
 const ALLOWLIST_ENDPOINT: &str = "job_token_scope/allowlist";
+/// GitLab's **second** admission list, read when the first does not admit.
+///
+/// A group entry admits every project under that group at any depth, so an index
+/// that admits its publishers by group — one entry for a whole `packages/` group
+/// rather than one per publisher — carries nobody in the projects list ([#430]).
+/// Same shape as the first: offset-paginated, Maintainer or Owner to read.
+///
+/// [#430]: https://github.com/ocx-sh/ocx/issues/430
+const GROUPS_ALLOWLIST_ENDPOINT: &str = "job_token_scope/groups_allowlist";
+/// The path segment every GitLab group URL carries before its full path.
+const GROUP_URL_MARKER: &str = "/groups/";
 /// The Projects API, named as a `detail` when the credential cannot read it.
 const PROJECT_ENDPOINT: &str = "projects/:id";
 /// Backoff delays before each replay of a failed commit.
@@ -103,26 +115,28 @@ const COMMIT_RETRY_DELAYS: [Duration; 3] = [Duration::from_secs(3), Duration::fr
 /// stricter than necessary and therefore never wrong.
 const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'~');
 
-/// How many branches one `branch_sha` search may answer with.
+/// Page size for the `branch_sha` prefix search, and the page ceiling that
+/// bounds its walk.
 ///
-/// ponytail: one page, not a walk. The search is a prefix of a *full* branch
-/// name — `main`, or `indexbot-announce-<ns>-<pkg>` — so more than this many
-/// collisions is not a state the index reaches. If it ever is, the upgrade is
-/// `regex=^…$` with re2 escaping: exact on the server, and no page at all.
+/// `search=^term` is a prefix filter, so the exact name can be on any page —
+/// and a page-one miss reads as "no such branch", which the caller reports as
+/// `MissingBaseRef` and exits 1. The walk therefore asks for the largest page
+/// the API serves and continues until a short one, the same bounded shape the
+/// fork enumeration and the allowlist walk already use.
+///
+/// ponytail: a walk, not `regex=^…$`. Exact on the server would need no page at
+/// all, at the cost of re2-escaping a ref name — and ref names may carry `.`,
+/// `+`, `(`, `|` and `$`. Upgrade there if a thousand prefix collisions ever
+/// becomes a state an index reaches.
 const BRANCH_SEARCH_PER_PAGE: u32 = 100;
-
-/// Whether a merge request was opened from the project it targets.
+/// Pages of prefix matches `branch_sha` will walk before reporting absence.
+const BRANCH_SEARCH_MAX_PAGES: u32 = 10;
+/// Page size for the open-merge-request lookup.
 ///
-/// The id-free spelling of `source_project_id=<this project>`: every entry
-/// carries both ids, so the comparison needs no numeric id of ocx's own. A body
-/// missing either field is **not** a match — announce then proposes its own
-/// request rather than adopting one whose provenance it could not read, which is
-/// the safe direction: the push updates a branch it already owns.
-fn opened_onto_its_own_project(request: &Value) -> bool {
-    let source = request.get("source_project_id").and_then(Value::as_u64);
-    let target = request.get("target_project_id").and_then(Value::as_u64);
-    matches!((source, target), (Some(source), Some(target)) if source == target)
-}
+/// The lookup filters by source branch but no longer by source project, so more
+/// than one entry can come back and GitLab's own default page is 20. A page-one
+/// miss opens a duplicate request.
+const MERGE_REQUEST_PER_PAGE: u32 = 100;
 
 /// Percent-encode one path segment.
 fn encode_segment(value: &str) -> String {
@@ -335,35 +349,72 @@ impl GitLabForge {
         self.transport == WriteTransport::Git && self.credentials.push_is_job_token()
     }
 
-    /// Whether the index project's job-token allowlist admits `publishing`.
+    /// Whether the index project's job-token scope admits `publishing`.
     ///
-    /// Walks the offset-paginated endpoint to a short page or the ceiling. Every
-    /// answer that is not a readable list is [`AllowlistAnswer::Unreadable`],
-    /// because the false-refusal direction is the one that costs a user a
-    /// working run: a 403 is the *production-common* answer (the endpoint wants
-    /// Maintainer or Owner on the index project, while this preflight's own bar
-    /// is Developer), a 404 is an instance older than the endpoint, and a body
-    /// that carries no `path_with_namespace` at all is a shape this client does
-    /// not understand. A 5xx is not a capability answer and propagates.
+    /// **Two lists, because GitLab has two.** A project may be admitted by name
+    /// in `job_token_scope/allowlist`, or by any of its ancestor groups in
+    /// `job_token_scope/groups_allowlist` — the setting an organisation reaches
+    /// for when it has a whole group of publishers ([#430]). Reading only the
+    /// first refused, at 86, announces GitLab would have accepted, and told the
+    /// operator to add a project entry their group entry already covered.
     ///
-    /// Entries are matched on `path_with_namespace` because that is the only
-    /// identity ocx holds — `CI_PROJECT_PATH`, never a numeric id — and
-    /// case-insensitively because the variable is operator-typed.
+    /// The groups list is read only when the projects list came back **readable
+    /// and without a hit**, which is exactly the rule that a refusal needs both
+    /// lists to have answered. An unreadable first list short-circuits: `Unknown`
+    /// and `Passed` both proceed to the push, so a second request could not
+    /// change the outcome.
+    ///
+    /// [#430]: https://github.com/ocx-sh/ocx/issues/430
     async fn job_token_allowlist_admits(
         &self,
         repo: &RepoCoordinate,
         publishing: &str,
     ) -> Result<AllowlistAnswer, ForgeError> {
+        match self
+            .allowlist_walk(repo, ALLOWLIST_ENDPOINT, project_entry_admits, publishing)
+            .await?
+        {
+            AllowlistAnswer::Absent => {
+                self.allowlist_walk(repo, GROUPS_ALLOWLIST_ENDPOINT, group_entry_admits, publishing)
+                    .await
+            }
+            // Spelled out rather than caught: `AllowlistAnswer` omits
+            // `#[non_exhaustive]` so a new variant breaks every match
+            // (`arch-principles.md`), and a catch-all here would silently route
+            // it to "already answered, skip the groups list".
+            other @ (AllowlistAnswer::Admits | AllowlistAnswer::Unreadable(_)) => Ok(other),
+        }
+    }
+
+    /// One admission list, walked to a verdict.
+    ///
+    /// Walks the offset-paginated endpoint to a short page or the ceiling. Every
+    /// answer that is not a readable list is [`AllowlistAnswer::Unreadable`],
+    /// because the false-refusal direction is the one that costs a user a
+    /// working run: a 403 is the *production-common* answer (both endpoints want
+    /// Maintainer or Owner on the index project, while this preflight's own bar
+    /// is Developer), a 404 is an instance older than the endpoint, and a body
+    /// whose entries carry no name this client understands is a shape it cannot
+    /// read. A 5xx is not a capability answer and propagates.
+    ///
+    /// `admits` is a plain `fn` pointer rather than a closure or a type
+    /// parameter: it keeps one monomorphisation of a method `async_trait` must
+    /// box as a `Send` future, and the two implementations differ only in which
+    /// field of an entry they read.
+    async fn allowlist_walk(
+        &self,
+        repo: &RepoCoordinate,
+        endpoint: &'static str,
+        admits: fn(&Value, &str) -> EntryVerdict,
+        publishing: &str,
+    ) -> Result<AllowlistAnswer, ForgeError> {
         let mut saw_entry = false;
         let mut saw_named_entry = false;
         for page in 1..=ALLOWLIST_MAX_PAGES {
-            let url = self.project_url(
-                repo,
-                &format!("/{ALLOWLIST_ENDPOINT}?per_page={ALLOWLIST_PER_PAGE}&page={page}"),
-            );
+            let url = self.project_url(repo, &format!("/{endpoint}?per_page={ALLOWLIST_PER_PAGE}&page={page}"));
             let (status, body) = self.send(self.request(Method::GET, &url), &url).await?;
             if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
-                return Ok(AllowlistAnswer::Unreadable);
+                return Ok(AllowlistAnswer::Unreadable(endpoint));
             }
             if !status.is_success() {
                 return Err(self.status_error(&url, status, &body));
@@ -372,27 +423,25 @@ impl GitLabForge {
             // which is byte-identical to an empty allowlist for any caller that
             // reads `None` as `[]` — and an empty allowlist IS a miss.
             let Some(entries) = Self::parse_json(&url, &body)?.as_array().cloned() else {
-                return Ok(AllowlistAnswer::Unreadable);
+                return Ok(AllowlistAnswer::Unreadable(endpoint));
             };
             for entry in &entries {
                 saw_entry = true;
-                let Some(path) = entry.get("path_with_namespace").and_then(Value::as_str) else {
-                    continue;
-                };
-                saw_named_entry = true;
-                if path.eq_ignore_ascii_case(publishing) {
-                    return Ok(AllowlistAnswer::Admits);
+                match admits(entry, publishing) {
+                    EntryVerdict::Unrecognised => continue,
+                    EntryVerdict::Miss => saw_named_entry = true,
+                    EntryVerdict::Admits => return Ok(AllowlistAnswer::Admits),
                 }
             }
             if entries.len() < ALLOWLIST_PER_PAGE as usize {
                 return Ok(if saw_entry && !saw_named_entry {
-                    AllowlistAnswer::Unreadable
+                    AllowlistAnswer::Unreadable(endpoint)
                 } else {
                     AllowlistAnswer::Absent
                 });
             }
         }
-        Ok(AllowlistAnswer::Unreadable)
+        Ok(AllowlistAnswer::Unreadable(endpoint))
     }
 
     fn json_request(&self, method: Method, url: &str, body: &Value) -> Result<reqwest::RequestBuilder, ForgeError> {
@@ -512,43 +561,46 @@ impl GitLabForge {
     /// [job-token endpoint list]: https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access
     /// [#429]: https://github.com/ocx-sh/ocx/issues/429
     async fn branch_sha(&self, repo: &RepoCoordinate, branch: &str) -> Result<Option<String>, ForgeError> {
-        let url = self.project_url(
-            repo,
-            &format!(
-                "/repository/branches?search=%5E{}&per_page={BRANCH_SEARCH_PER_PAGE}",
-                encode_segment(branch)
-            ),
-        );
-        let Some(body) = self.get_json_optional(&url).await? else {
-            return Ok(None);
-        };
-        // `search=^term` is a PREFIX filter, so the exact name is selected here
-        // rather than by taking `[0]`: `main` and `maintenance` both match `^main`
-        // and GitLab does not promise an order. A `regex=^…$` would be exact on
-        // the server, at the cost of re2-escaping a ref name — and ref names may
-        // carry `.`, `+`, `(`, `|` and `$`.
-        let Some(entry) = body
-            .as_array()
-            .ok_or_else(|| ForgeError::MissingField {
+        for page in 1..=BRANCH_SEARCH_MAX_PAGES {
+            let url = self.project_url(
+                repo,
+                &format!(
+                    "/repository/branches?search=%5E{}&per_page={BRANCH_SEARCH_PER_PAGE}&page={page}",
+                    encode_segment(branch)
+                ),
+            );
+            let Some(body) = self.get_json_optional(&url).await? else {
+                return Ok(None);
+            };
+            // `search=^term` is a PREFIX filter, so the exact name is selected
+            // here rather than by taking `[0]`: `main` and `maintenance` both
+            // match `^main` and GitLab does not promise an order — which is also
+            // why the search is walked rather than read one page deep.
+            let entries = body.as_array().ok_or_else(|| ForgeError::MissingField {
                 url: url.clone(),
-                field: "[]".to_string(),
-            })?
-            .iter()
-            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(branch))
-        else {
-            return Ok(None);
-        };
-        entry
-            .get("commit")
-            .and_then(|commit| commit.get("id"))
-            .and_then(Value::as_str)
-            .filter(|id| is_object_name(id))
-            .map(str::to_string)
-            .ok_or(ForgeError::MissingField {
-                url,
-                field: "commit.id".to_string(),
-            })
-            .map(Some)
+                field: "branches[]".to_string(),
+            })?;
+            if let Some(entry) = entries
+                .iter()
+                .find(|entry| entry.get("name").and_then(Value::as_str) == Some(branch))
+            {
+                return entry
+                    .get("commit")
+                    .and_then(|commit| commit.get("id"))
+                    .and_then(Value::as_str)
+                    .filter(|id| is_object_name(id))
+                    .map(str::to_string)
+                    .ok_or(ForgeError::MissingField {
+                        url,
+                        field: "commit.id".to_string(),
+                    })
+                    .map(Some);
+            }
+            if entries.len() < BRANCH_SEARCH_PER_PAGE as usize {
+                return Ok(None);
+            }
+        }
+        Ok(None)
     }
 
     /// The commit that last touched `path` at `r#ref`, or `None` when the path
@@ -973,9 +1025,20 @@ impl GitLabForge {
         // tokens. So the row is `unknown`, the push decides, and `git_stderr.rs`
         // promotes a real refusal on exactly that status.
         //
+        // **Only under the git transport**, because that is the whole premise:
+        // the deferred verdict is rendered by a push, and an `api` run performs
+        // none. `api_is_job_token` alone does not imply one — `ForgeCredentials`
+        // (`credentials.rs`) sets it by value-equality against `CI_JOB_TOKEN`,
+        // with no transport in sight, so an operator exporting
+        // `OCX_ANNOUNCE_TOKEN=$CI_JOB_TOKEN` reaches it under `--transport api`.
+        // There the tolerance would suppress the exit-80 refusal this preflight
+        // exists for and let the run die later on a bare 404 from `commit_files`,
+        // which matches no arm in `error.rs` and exits 1.
+        //
         // [job-token endpoint list]: https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access
         // [#429]: https://github.com/ocx-sh/ocx/issues/429
-        let unreadable_under_job_token = project.is_none() && self.credentials.api_is_job_token();
+        let unreadable_under_job_token =
+            project.is_none() && self.credentials.api_is_job_token() && self.transport == WriteTransport::Git;
         let access = project.as_ref().map_or(0, project_access_level);
         if access < ACCESS_LEVEL_DEVELOPER && !unreadable_under_job_token {
             return Err(ForgeError::PushAccessDenied { repo: repo.full_path() });
@@ -1057,17 +1120,23 @@ impl GitLabForge {
         }
         match self.job_token_allowlist_admits(repo, publishing).await? {
             AllowlistAnswer::Admits => checks.record(CapabilityName::JobTokenAllowlist, CheckStatus::Passed, None),
-            AllowlistAnswer::Unreadable => checks.record(
-                CapabilityName::JobTokenAllowlist,
-                CheckStatus::Unknown,
-                Some(ALLOWLIST_ENDPOINT.to_string()),
-            ),
+            AllowlistAnswer::Unreadable(endpoint) => {
+                checks.record(
+                    CapabilityName::JobTokenAllowlist,
+                    CheckStatus::Unknown,
+                    Some(endpoint.to_string()),
+                );
+            }
             AllowlistAnswer::Absent => {
                 return Err(ForgeError::WriteCapabilityUnavailable {
                     capability: CapabilityName::JobTokenAllowlist,
                     repo: repo.full_path(),
+                    // Both places, because GitLab admits from both and the group
+                    // entry is the one an organisation with many publishers
+                    // actually wants (#430). Naming only the project list sent
+                    // operators to duplicate a group policy one row at a time.
                     remedy: format!(
-                        "add {publishing} to Settings → CI/CD → Job token permissions on {}",
+                        "add {publishing}, or one of its groups, to Settings → CI/CD → Job token permissions on {}",
                         repo.full_path()
                     ),
                 });
@@ -1339,7 +1408,12 @@ impl Forge for GitLabForge {
         let url = self.project_url(
             index,
             &format!(
-                "/merge_requests?state=opened&source_branch={}{source_filter}",
+                // `per_page`, because dropping `source_project_id` turned a query
+                // that matched at most one entry by construction into a list: an
+                // index with more open requests onto this branch than GitLab's
+                // default page of 20 would miss the existing one and open a
+                // duplicate.
+                "/merge_requests?state=opened&per_page={MERGE_REQUEST_PER_PAGE}&source_branch={}{source_filter}",
                 encode_segment(branch)
             ),
         );
@@ -1774,7 +1848,7 @@ struct GitRun {
     push_attempted: bool,
 }
 
-/// What the index project's job-token allowlist said about the publishing
+/// What the index project's job-token allowlists said about the publishing
 /// project.
 ///
 /// Three answers because two would collapse the one distinction that matters:
@@ -1782,13 +1856,109 @@ struct GitRun {
 /// run, while an allowlist nobody could read must not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AllowlistAnswer {
-    /// The publishing project is listed.
+    /// The publishing project is admitted, by name or by one of its groups.
     Admits,
-    /// The list was read and does not carry it.
+    /// Both lists were read and neither admits it.
     Absent,
-    /// The list could not be read, or came back in a shape this client does not
-    /// understand.
-    Unreadable,
+    /// The named list could not be read, or came back in a shape this client
+    /// does not understand. It carries the endpoint so the recorded `detail`
+    /// names the list that went unreadable rather than always the first one.
+    Unreadable(&'static str),
+}
+
+/// What one allowlist entry says about the publishing project.
+///
+/// Three answers, because "no" and "I cannot read this entry" drive opposite
+/// verdicts: a list of misses is a refusal at 86, while a list this client
+/// cannot read is `unknown` and pushes anyway.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntryVerdict {
+    /// The entry carries no name this client understands.
+    Unrecognised,
+    /// The entry was read and names something else.
+    Miss,
+    /// The entry admits the publishing project.
+    Admits,
+}
+
+impl EntryVerdict {
+    /// The verdict a readable entry earned.
+    fn from_match(admits: bool) -> Self {
+        if admits { Self::Admits } else { Self::Miss }
+    }
+}
+
+/// Whether one entry of the **projects** allowlist admits `publishing`.
+///
+/// Matched on `path_with_namespace` because that is the only identity ocx holds
+/// — `CI_PROJECT_PATH`, never a numeric id — and case-insensitively because the
+/// variable is operator-typed. `None` is an entry with no path at all, which the
+/// walk reads as a shape it does not understand.
+fn project_entry_admits(entry: &Value, publishing: &str) -> EntryVerdict {
+    let Some(path) = entry.get("path_with_namespace").and_then(Value::as_str) else {
+        return EntryVerdict::Unrecognised;
+    };
+    EntryVerdict::from_match(path.eq_ignore_ascii_case(publishing))
+}
+
+/// Whether one entry of the **groups** allowlist admits `publishing`.
+///
+/// A groups entry carries `id`, `web_url` and `name` and nothing else — no
+/// `full_path`, no `path` — so the group's path comes out of the URL. `None` is
+/// an entry whose URL is not a group URL, which the walk reads as a shape it does
+/// not understand rather than as a miss.
+fn group_entry_admits(entry: &Value, publishing: &str) -> EntryVerdict {
+    let group = entry
+        .get("web_url")
+        .and_then(Value::as_str)
+        .and_then(group_path_from_web_url);
+    let Some(group) = group else {
+        return EntryVerdict::Unrecognised;
+    };
+    EntryVerdict::from_match(group_contains(&group, publishing))
+}
+
+/// The group's full path, taken out of the `web_url` GitLab renders for it.
+///
+/// Split out of the parsed **path**, never the raw string: a URL carrying a
+/// query or a fragment would otherwise fold it into the path
+/// (`…/groups/acme/packages?x=1` -> `acme/packages?x=1`), which `group_contains`
+/// reads as a named non-admitting entry — a false refusal at 86, the exact
+/// failure [#430] exists to remove.
+///
+/// ponytail: the segment after the first `/groups/`, which is how every GitLab
+/// group URL is shaped and costs no request. Deliberately **not** derived by
+/// stripping this client's own API base: a reverse-proxied instance whose web
+/// host differs from its API host would stop matching, and it would do so
+/// silently. Ceiling: a GitLab installed at a relative root that itself ends in
+/// `/groups`. The upgrade path is `GET /groups/:id`, whose body does carry
+/// `full_path`, at one request per entry.
+///
+/// [#430]: https://github.com/ocx-sh/ocx/issues/430
+fn group_path_from_web_url(web_url: &str) -> Option<String> {
+    let url = Url::parse(web_url).ok()?;
+    let (_, path) = url.path().split_once(GROUP_URL_MARKER)?;
+    let path = path.trim_end_matches('/');
+    (!path.is_empty()).then(|| path.to_string())
+}
+
+/// Whether `publishing` lies under `group`, at any depth.
+///
+/// A path-**component** prefix, never a string prefix: `acme/packages` admits
+/// `acme/packages/widget` and `acme/packages/tools/widget`, and must not admit
+/// `acme/packages-legacy/widget`. Getting that wrong over-admits — ocx would
+/// report the capability `passed` for a project GitLab's own scope check
+/// refuses, and the push would then fail naming something else.
+///
+/// Case-insensitive for the same reason the project match is: `CI_PROJECT_PATH`
+/// is operator-typed. Equality of the two paths is not a case: a project path is
+/// never a group path, and the caller has already returned when the publishing
+/// project *is* the index project.
+///
+/// The separator check runs first and proves `group.len()` is a char boundary,
+/// so the slice below cannot panic.
+fn group_contains(group: &str, publishing: &str) -> bool {
+    publishing.as_bytes().get(group.len()) == Some(&b'/') && publishing[..group.len()].eq_ignore_ascii_case(group)
 }
 
 /// The credential's access level on a project, as the **higher** of its project
@@ -1918,6 +2088,19 @@ fn is_retryable(error: &ForgeError) -> bool {
         ForgeError::Status { status, .. }
             if *status == StatusCode::TOO_MANY_REQUESTS.as_u16() || (500..600).contains(status)
     )
+}
+
+/// Whether a merge request was opened from the project it targets.
+///
+/// The id-free spelling of `source_project_id=<this project>`: every entry
+/// carries both ids, so the comparison needs no numeric id of ocx's own. A body
+/// missing either field is **not** a match — announce then proposes its own
+/// request rather than adopting one whose provenance it could not read, which is
+/// the safe direction: the push updates a branch it already owns.
+fn opened_onto_its_own_project(request: &Value) -> bool {
+    let source = request.get("source_project_id").and_then(Value::as_u64);
+    let target = request.get("target_project_id").and_then(Value::as_u64);
+    matches!((source, target), (Some(source), Some(target)) if source == target)
 }
 
 /// Build a [`PullRequest`] from a merge-request response body.
@@ -2350,6 +2533,21 @@ mod tests {
             "path_with_namespace": "acme/index",
             "permissions": { "project_access": { "access_level": ACCESS_LEVEL_DEVELOPER }, "group_access": null },
         })
+    }
+
+    /// An empty **groups** allowlist, for a handler whose own canned body
+    /// answers the projects list.
+    ///
+    /// The preflight asks two endpoints (#430), and a projects-shaped body
+    /// served for the groups list carries no `web_url` — which the walk reads as
+    /// a *shape* it does not understand, not as an empty list. That turns a miss
+    /// into `unknown` and makes the 86 unreachable, so a handler that answers
+    /// both endpoints with one body silently disarms its own assertion. Call
+    /// this first in any handler whose projects body must be a miss.
+    fn empty_groups_allowlist(target: &str) -> Option<(u16, String)> {
+        target
+            .contains(GROUPS_ALLOWLIST_ENDPOINT)
+            .then(|| (200, Value::Array(Vec::new()).to_string()))
     }
 
     /// One `(label, response body, expected identity)` row of the identity
@@ -3410,6 +3608,9 @@ mod tests {
         env.set("CI_PROJECT_PATH", "acme/widget");
         let credentials = job_token_credentials(&env);
         let fake = FakeGitLab::start(|_, target| {
+            if let Some(answer) = empty_groups_allowlist(target) {
+                return answer;
+            }
             if target.contains("job_token_scope") {
                 return (200, json!([{ "path_with_namespace": "acme/other" }]).to_string());
             }
@@ -3439,6 +3640,268 @@ mod tests {
             assert!(
                 rendered.contains(path),
                 "neither path alone tells an operator which project to edit: {rendered}"
+            );
+        }
+    }
+
+    // ── #430 the groups allowlist ────────────────────────────────────────
+
+    /// A group entry admits what is **under** it, and only that.
+    ///
+    /// A path-component prefix, never a string prefix. `starts_with` alone
+    /// over-admits `acme/packages-legacy/widget` — and over-admitting is not a
+    /// harmless direction: ocx would report the capability `passed` for a
+    /// project GitLab's own scope check refuses, then let the push fail naming
+    /// something else entirely.
+    #[test]
+    fn a_group_admits_by_path_component_never_by_string_prefix() {
+        let cases: [(&str, &str, &str, bool); 7] = [
+            ("the group's own child", "acme/packages", "acme/packages/widget", true),
+            ("a nested subgroup", "acme/packages", "acme/packages/tools/widget", true),
+            (
+                "a sibling namespace",
+                "acme/packages",
+                "acme/packages-legacy/widget",
+                false,
+            ),
+            ("operator-typed casing", "ACME/Packages", "acme/packages/widget", true),
+            ("a truncated group name", "acme/pack", "acme/packages/widget", false),
+            ("a top-level group", "acme", "acme/widget", true),
+            ("the group path itself", "acme/packages", "acme/packages", false),
+        ];
+        for (label, group, publishing, expected) in cases {
+            assert_eq!(
+                group_contains(group, publishing),
+                expected,
+                "{label}: {group} vs {publishing}"
+            );
+        }
+    }
+
+    /// The group's path comes out of its `web_url`, because the entry carries
+    /// nothing else that names it.
+    ///
+    /// GitLab's groups-allowlist entries are `id`, `web_url` and `name` — the
+    /// display name, not the path. A URL that is not a group URL yields `None`,
+    /// which the walk reads as an unreadable shape rather than as a miss.
+    ///
+    /// Reds on: splitting the raw string instead of the parsed path (the query
+    /// and fragment rows return `acme/packages?x=1`, which `group_contains`
+    /// reads as a named miss and refuses the run at 86); dropping the
+    /// empty-path guard (the bare-marker row returns `Some("")`, which is a
+    /// named entry that admits nothing rather than an unreadable shape).
+    #[test]
+    fn a_group_path_is_the_segment_after_the_first_groups_marker() {
+        let cases: [(&str, &str, Option<&str>); 10] = [
+            (
+                "a top-level group",
+                "https://gitlab.example.com/groups/acme",
+                Some("acme"),
+            ),
+            (
+                "a subgroup",
+                "https://gitlab.example.com/groups/acme/packages",
+                Some("acme/packages"),
+            ),
+            (
+                "an instance under a relative root",
+                "https://example.com/gitlab/groups/acme/packages",
+                Some("acme/packages"),
+            ),
+            (
+                "a group literally named groups",
+                "https://gitlab.example.com/groups/acme/groups/tools",
+                Some("acme/groups/tools"),
+            ),
+            (
+                "a trailing slash",
+                "https://gitlab.example.com/groups/acme/",
+                Some("acme"),
+            ),
+            (
+                "a project URL, which is not a group",
+                "https://gitlab.example.com/acme/widget",
+                None,
+            ),
+            (
+                "a query string, which is not part of the path",
+                "https://gitlab.example.com/groups/acme/packages?x=1",
+                Some("acme/packages"),
+            ),
+            (
+                "a fragment, likewise",
+                "https://gitlab.example.com/groups/acme/packages#members",
+                Some("acme/packages"),
+            ),
+            (
+                "the marker with nothing after it",
+                "https://gitlab.example.com/groups/",
+                None,
+            ),
+            // A relative reference is a shape this client cannot resolve, which
+            // is unreadable rather than a group named `acme`.
+            ("not an absolute URL", "/groups/acme", None),
+        ];
+        for (label, web_url, expected) in cases {
+            assert_eq!(
+                group_path_from_web_url(web_url).as_deref(),
+                expected,
+                "{label}: {web_url}"
+            );
+        }
+    }
+
+    /// The defect #430 reports: the projects list is readable and empty, a
+    /// group admits, and the run **proceeds**.
+    ///
+    /// An index that admits its publishers by group — one entry for a whole
+    /// `packages/` group rather than one per publisher — carries nobody in the
+    /// projects list, so reading only that list refused at 86 an announce
+    /// GitLab would have accepted, and told the operator to add an entry their
+    /// group entry already covered.
+    ///
+    /// The body served is the real one: `id`, `name` and `web_url`, with no
+    /// path field. A fake that invented `full_path` would let a client reading
+    /// the wrong key pass here and fail against an instance.
+    #[tokio::test]
+    async fn a_group_entry_admits_the_publishing_project() {
+        let env = isolated_env();
+        env.set("CI_PROJECT_PATH", "acme/packages/widget");
+        let credentials = job_token_credentials(&env);
+        let fake = FakeGitLab::start(|_, target| {
+            if target.contains(GROUPS_ALLOWLIST_ENDPOINT) {
+                return (
+                    200,
+                    json!([{
+                        "id": 18000,
+                        "name": "Packages",
+                        "web_url": "https://gitlab.example.com/groups/acme/packages",
+                    }])
+                    .to_string(),
+                );
+            }
+            if target.contains(ALLOWLIST_ENDPOINT) {
+                return (200, Value::Array(Vec::new()).to_string());
+            }
+            let mut body = pushable_project();
+            body["ci_push_repository_for_job_token_allowed"] = json!(true);
+            (200, body.to_string())
+        })
+        .await;
+
+        let access = fake
+            .git_forge(credentials)
+            .ensure_push_access(&index_repo())
+            .await
+            .expect("a group entry is an admission");
+        assert_eq!(
+            access.status(CapabilityName::JobTokenAllowlist),
+            CheckStatus::Passed,
+            "an admission read out of the second list is `passed`, not `unknown`"
+        );
+    }
+
+    /// The groups list is read **only** when the projects list answered without
+    /// a hit.
+    ///
+    /// Both halves matter. A build that always asks spends a request on every
+    /// cross-project announce and makes the reported request count a lie (DV-6);
+    /// a build that never asks is the defect. The two rows differ only in
+    /// whether the projects list carries the publisher.
+    #[tokio::test]
+    async fn the_groups_list_is_read_only_after_the_projects_list_misses() {
+        for (label, listed, expect_groups_read) in [
+            ("the projects list admits", "acme/widget", false),
+            ("the projects list misses", "acme/other", true),
+        ] {
+            let env = isolated_env();
+            env.set("CI_PROJECT_PATH", "acme/widget");
+            let credentials = job_token_credentials(&env);
+            let listed = listed.to_string();
+            let fake = FakeGitLab::start(move |_, target| {
+                if target.contains(GROUPS_ALLOWLIST_ENDPOINT) {
+                    return (200, Value::Array(Vec::new()).to_string());
+                }
+                if target.contains(ALLOWLIST_ENDPOINT) {
+                    return (200, json!([{ "path_with_namespace": listed }]).to_string());
+                }
+                let mut body = pushable_project();
+                body["ci_push_repository_for_job_token_allowed"] = json!(true);
+                (200, body.to_string())
+            })
+            .await;
+
+            // The miss row refuses; the admit row proceeds. Either way the
+            // routes are what this asserts.
+            let _ = fake.git_forge(credentials).ensure_push_access(&index_repo()).await;
+            let read = fake
+                .routes()
+                .iter()
+                .any(|route| route.contains(GROUPS_ALLOWLIST_ENDPOINT));
+            assert_eq!(read, expect_groups_read, "{label}: {:?}", fake.routes());
+        }
+    }
+
+    /// An unreadable **groups** list is `unknown`, never a miss — and the row
+    /// names the list that could not be read.
+    ///
+    /// The 403 is not an edge case: both endpoints want Maintainer or Owner on
+    /// the index project while this preflight's own bar is Developer. #430's
+    /// rule is that *either* list being unreadable leaves the question
+    /// unanswered, so a projects-list miss plus an unreadable groups list must
+    /// not refuse — refusing there is the false 86 the issue reports, one
+    /// endpoint further along.
+    #[tokio::test]
+    async fn an_unreadable_groups_list_is_unknown_never_a_miss() {
+        for (label, status, body) in [
+            ("403, the Maintainer bar", 403, json!({ "message": "403 Forbidden" })),
+            (
+                "404, an instance without the endpoint",
+                404,
+                json!({ "message": "404 Not Found" }),
+            ),
+            ("a body that is not a list", 200, json!({ "groups_allowlist": [] })),
+            (
+                "entries with no group URL",
+                200,
+                json!([{ "id": 18000, "name": "Packages" }]),
+            ),
+        ] {
+            let env = isolated_env();
+            env.set("CI_PROJECT_PATH", "acme/widget");
+            let credentials = job_token_credentials(&env);
+            let body = body.to_string();
+            let fake = FakeGitLab::start(move |_, target| {
+                if target.contains(GROUPS_ALLOWLIST_ENDPOINT) {
+                    return (status, body.clone());
+                }
+                if target.contains(ALLOWLIST_ENDPOINT) {
+                    return (200, json!([{ "path_with_namespace": "acme/other" }]).to_string());
+                }
+                let mut project = pushable_project();
+                project["ci_push_repository_for_job_token_allowed"] = json!(true);
+                (200, project.to_string())
+            })
+            .await;
+
+            let access = fake
+                .git_forge(credentials)
+                .ensure_push_access(&index_repo())
+                .await
+                .unwrap_or_else(|error| panic!("{label}: an unreadable groups list never refuses: {error:?}"));
+            assert_eq!(
+                access.status(CapabilityName::JobTokenAllowlist),
+                CheckStatus::Unknown,
+                "{label}: the question is unanswered, not answered no"
+            );
+            assert_eq!(
+                access
+                    .checks()
+                    .iter()
+                    .find(|check| check.name == CapabilityName::JobTokenAllowlist)
+                    .and_then(|check| check.detail.as_deref()),
+                Some(GROUPS_ALLOWLIST_ENDPOINT),
+                "{label}: the row names the list that went unreadable, not the one that answered"
             );
         }
     }
@@ -3759,6 +4222,9 @@ mod tests {
         env.set("CI_PROJECT_PATH", "acme/widget");
         let credentials = job_token_credentials(&env);
         let fake = FakeGitLab::start(|_, target| {
+            if let Some(answer) = empty_groups_allowlist(target) {
+                return answer;
+            }
             if target.contains("job_token_scope") {
                 return (200, json!([{ "path_with_namespace": SENTINEL }]).to_string());
             }
@@ -3825,7 +4291,8 @@ mod tests {
         assert_eq!(
             fake.routes(),
             vec![
-                "GET /projects/acme%2Findex/repository/branches?search=%5Eindexbot-claim-acme-widget&per_page=100"
+                "GET /projects/acme%2Findex/repository/branches\
+                 ?search=%5Eindexbot-claim-acme-widget&per_page=100&page=1"
                     .to_string();
                 2
             ],
@@ -4047,47 +4514,129 @@ mod tests {
         );
     }
 
-    /// A job token cannot read `GET /projects/:id`, so the push-access row is
-    /// `unknown` and the run proceeds ([#429]).
+    /// A prefix with more collisions than one page is walked, not truncated.
+    ///
+    /// `search=^main` is a prefix filter over a page GitLab caps at 100, so an
+    /// index whose base branch shares its prefix with a full page of others read
+    /// as *absent* — which the caller reports as `MissingBaseRef` and exits 1,
+    /// the same failure [#429] fixes by another cause.
+    ///
+    /// The fixture serves the wanted entry on page **two**, behind a page one
+    /// that is exactly full: a short page one would let a single-request read
+    /// pass, and a short page two proves the walk stops rather than spinning to
+    /// the ceiling.
+    ///
+    /// Reds on: dropping the walk (page one is all that is read, and the answer
+    /// is `None`); stopping on a full page.
+    ///
+    /// [#429]: https://github.com/ocx-sh/ocx/issues/429
+    #[tokio::test]
+    async fn a_prefix_search_walks_past_a_full_page() {
+        let env = isolated_env();
+        let credentials = job_token_credentials(&env);
+        let fake = FakeGitLab::start(|_, target| {
+            if target.contains("page=2") {
+                return (
+                    200,
+                    json!([{ "name": "main", "commit": { "id": BRANCH_HEAD } }]).to_string(),
+                );
+            }
+            let page = (0..BRANCH_SEARCH_PER_PAGE)
+                .map(|n| json!({ "name": format!("main-{n}"), "commit": { "id": "1111111111111111111111111111111111111111" } }))
+                .collect::<Vec<_>>();
+            (200, Value::Array(page).to_string())
+        })
+        .await;
+
+        assert_eq!(
+            fake.forge(credentials)
+                .get_ref_sha(&index_repo(), "heads/main")
+                .await
+                .expect("the branch read succeeds"),
+            Some(BRANCH_HEAD.to_string()),
+            "a full page of prefix collisions is not the end of the search"
+        );
+        assert_eq!(
+            fake.routes().len(),
+            2,
+            "the walk stops on the short page rather than running to the ceiling"
+        );
+    }
+
+    /// A job token cannot read `GET /projects/:id`, so under the **git**
+    /// transport the push-access row is `unknown` and the run proceeds ([#429])
+    /// — and under `api` the same 404 still refuses.
     ///
     /// The endpoint is not on GitLab's job-token list and answers 404 — the same
     /// status a project that is not there answers. Collapsing that to access
     /// level 0 exits 80 before a push GitLab would have accepted, which is the
     /// whole defect. And the level would be the wrong credential's anyway: it
     /// describes the API half, while the identity that pushes is the push half.
-    ///
     /// `JobTokenPush` folds to `unknown` off the same absent body, which is what
     /// `git_stderr.rs` promotes on — so a push GitLab really does refuse still
     /// lands as 86 naming the setting.
     ///
-    /// Reds on: refusing on an unreadable project under a job token; recording
-    /// the row as `passed` (86 would then never be promoted).
+    /// **Two cells, opposite verdicts, one predicate**, because the whole
+    /// tolerance rests on a push following to render the deferred verdict. An
+    /// `api` run performs none, and `api_is_job_token` does not imply one:
+    /// `ForgeCredentials` sets it by value-equality against `CI_JOB_TOKEN`
+    /// (`credentials.rs`), so `OCX_ANNOUNCE_TOKEN=$CI_JOB_TOKEN` reaches it
+    /// under `--transport api`. There the suppressed exit-80 becomes a bare 404
+    /// out of `commit_files`, which classifies to nothing and exits 1.
+    ///
+    /// Reds on: refusing on an unreadable project under a git-transport job
+    /// token; recording that row as `passed` (86 would then never be promoted);
+    /// dropping the `transport == Git` conjunct (the `api` cell then reports
+    /// `unknown` instead of refusing).
     ///
     /// [#429]: https://github.com/ocx-sh/ocx/issues/429
     #[tokio::test]
-    async fn an_unreadable_project_under_a_job_token_is_unknown_not_denied() {
-        let env = isolated_env();
-        env.set("CI_PROJECT_PATH", "acme/index");
-        let credentials = job_token_credentials(&env);
-        let fake = FakeGitLab::start(|_, _| (404, json!({ "message": "404 Project Not Found" }).to_string())).await;
+    async fn an_unreadable_project_under_a_job_token_is_unknown_only_where_a_push_decides() {
+        for (label, transport, denied) in [
+            (
+                "the api transport, where no push renders the verdict",
+                WriteTransport::Api,
+                true,
+            ),
+            ("the git transport, where the push decides", WriteTransport::Git, false),
+        ] {
+            let env = isolated_env();
+            env.set("CI_PROJECT_PATH", "acme/index");
+            let credentials = job_token_credentials(&env);
+            assert!(
+                credentials.api_is_job_token(),
+                "{label}: both cells run the same job-token credential"
+            );
+            let fake = FakeGitLab::start(|_, _| (404, json!({ "message": "404 Project Not Found" }).to_string())).await;
+            let forge = match transport {
+                WriteTransport::Git => fake.git_forge(credentials),
+                WriteTransport::Api => fake.forge(credentials),
+            };
 
-        let checks = fake
-            .git_forge(credentials)
-            .ensure_push_access(&index_repo())
-            .await
-            .expect("an unreadable project under a job token must not refuse the run");
-
-        assert_eq!(
-            checks.status(CapabilityName::PushAccess),
-            CheckStatus::Unknown,
-            "the access level is unreadable, not zero"
-        );
-        assert_eq!(
-            checks.status(CapabilityName::JobTokenPush),
-            CheckStatus::Unknown,
-            "the same absent body cannot answer the job-token-push question either — \
-             and this is the status the push-time promotion keys on"
-        );
+            let outcome = forge.ensure_push_access(&index_repo()).await;
+            if denied {
+                let error = outcome
+                    .err()
+                    .unwrap_or_else(|| panic!("{label}: an unreadable project must still refuse"));
+                assert!(
+                    matches!(error, ForgeError::PushAccessDenied { .. }),
+                    "{label}: the refusal is the push-access one; got {error:?}"
+                );
+                continue;
+            }
+            let checks = outcome.unwrap_or_else(|error| panic!("{label}: the run must not be refused: {error:?}"));
+            assert_eq!(
+                checks.status(CapabilityName::PushAccess),
+                CheckStatus::Unknown,
+                "{label}: the access level is unreadable, not zero"
+            );
+            assert_eq!(
+                checks.status(CapabilityName::JobTokenPush),
+                CheckStatus::Unknown,
+                "{label}: the same absent body cannot answer the job-token-push question either — \
+                 and this is the status the push-time promotion keys on"
+            );
+        }
     }
 
     /// The same 404, under a credential that is not a job token, still refuses.
@@ -4130,7 +4679,9 @@ mod tests {
     /// takes `[0]` adopts it.
     ///
     /// Reds on: resolving the project id (a `/projects/` route appears); reading
-    /// `[0]`; dropping the source/target comparison.
+    /// `[0]`; dropping the source/target comparison; dropping `per_page`, which
+    /// leaves GitLab's default of twenty on a query that is no longer narrowed
+    /// to one entry.
     ///
     /// [#429]: https://github.com/ocx-sh/ocx/issues/429
     #[tokio::test]
@@ -4170,6 +4721,19 @@ mod tests {
             projects,
             Vec::<String>::new(),
             "the Projects API is not readable with a job token, so nothing may need it"
+        );
+        // The same edit that removed `source_project_id` turned a query matching
+        // at most one entry into a list, and GitLab's own default page is 20 —
+        // so an index with more open requests onto this branch than that would
+        // miss the existing one and open a duplicate.
+        assert_eq!(
+            fake.routes(),
+            vec![
+                "GET /projects/acme%2Findex/merge_requests\
+                 ?state=opened&per_page=100&source_branch=indexbot-claim-acme-widget"
+                    .to_string()
+            ],
+            "the list is asked for a whole page, not GitLab's default of twenty"
         );
     }
 
@@ -4264,7 +4828,7 @@ mod tests {
             fake.routes(),
             vec![
                 "GET /projects/acme%2Findex/repository/branches\
-                 ?search=%5Eindexbot-claim-acme%2Fplatform-widget%2Eio&per_page=100"
+                 ?search=%5Eindexbot-claim-acme%2Fplatform-widget%2Eio&per_page=100&page=1"
                     .to_string()
             ],
             "the branch name must not split into further URL segments"

@@ -62,6 +62,14 @@ FORKS_RE = re.compile(rf"^/projects/(?P<id>{_ID})/forks$")
 # `allowlist_read_only_when_cross_project` pass while the client read it every
 # time.
 JOB_TOKEN_ALLOWLIST_RE = re.compile(rf"^/projects/(?P<id>{_ID})/job_token_scope/allowlist$")
+# `GET /projects/:id/job_token_scope/groups_allowlist` — GitLab's SECOND
+# admission list, read only after the projects list came back readable and
+# without a hit (#430). A group entry admits every project under it, so an index
+# that admits its publishers by group admits nobody as far as the projects list
+# is concerned.
+JOB_TOKEN_GROUPS_ALLOWLIST_RE = re.compile(
+    rf"^/projects/(?P<id>{_ID})/job_token_scope/groups_allowlist$"
+)
 # `GET /users?username=<login>` — GitLab's user lookup (C-028). The bare
 # `/users` path with a query, never `/users/<login>`, which is GitHub's
 # (`fake_forge.py`).
@@ -71,6 +79,9 @@ USERS_RE = re.compile(r"^/users$")
 ACCESS_LEVEL_DEVELOPER = 30
 #: What a project reports when it can push, and when it cannot.
 ACCESS_LEVEL_NONE = 10
+#: Where synthetic group ids start. Groups are their own id space on the real
+#: API, so they must not be drawn from the project counter.
+GROUP_ID_BASE = 9000
 
 
 class GitLabRoutes:
@@ -138,6 +149,11 @@ class GitLabRoutes:
             self.gl_get_job_token_allowlist(handler, match.group("id"), query)
             return True
 
+        match = JOB_TOKEN_GROUPS_ALLOWLIST_RE.fullmatch(path)
+        if match:
+            self.gl_get_job_token_groups_allowlist(handler, match.group("id"), query)
+            return True
+
         if USERS_RE.fullmatch(path):
             self.gl_get_users(handler, query)
             return True
@@ -166,20 +182,35 @@ class GitLabRoutes:
     # ── job-token endpoint scope ─────────────────────────────────────────
 
     def gl_job_token_refuses(self, handler: _Handler) -> bool:
-        """Whether this request is a job token reaching past its endpoint list.
+        """Whether this request is a job token reaching past what it may call.
 
         Keyed on the header the client actually sent rather than on a fixture
         flag naming the posture: `GitLabForge::request` selects `JOB-TOKEN` when
         the API credential IS the job token, so this asks the same question the
         real instance asks, of the same evidence.
 
-        The answer is a **404**, not a 403 — that is what a self-hosted 19.3 was
-        observed to answer, and the two are not interchangeable here: 404 is the
-        status the client cannot tell apart from "no such project", which is the
-        whole reason #429's failure named the wrong thing.
+        **Unconditional, with no knob to turn it off.** The permissive answer is
+        what let #429 ship — this fake served `GET /projects/:id` and the
+        single-branch endpoint to every credential, so the job-token posture
+        passed here and died against a real instance at the first read — and a
+        scope a row can switch off is one a row can be made to pass against.
+        What holds this predicate itself is the pair of `unknown` capability
+        statuses `test_transport_git.py`'s
+        `::test_job_token_run_reads_only_endpoints_a_job_token_may_call`
+        asserts: one per refused route, each red the moment a route starts
+        answering.
+
+        **The status is the caller's, and the two callers differ**, because the
+        two refusals have different causes. `GET /projects/:id` and the single
+        branch answer **404** — what a self-hosted 19.3 was observed to answer,
+        and the status the client cannot tell apart from "no such project",
+        which is the whole reason #429's failure named the wrong thing. Both
+        `job_token_scope` lists answer **403**: they are on the endpoint list,
+        and what refuses them is the Maintainer-or-Owner bar the credential does
+        not clear.
+
+        https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access
         """
-        if not self.gitlab_job_token_endpoint_scope:
-            return False
         return handler.headers.get("JOB-TOKEN") is not None
 
     # ── project identity ─────────────────────────────────────────────────
@@ -429,10 +460,10 @@ class GitLabRoutes:
 
         Three outcomes (C-029): a list CONTAINING the publishing project passes;
         a list without it is a miss and refuses at 86 naming both project paths;
-        a 403 is `unreadable`, which proceeds. The miss and the unreadable case
-        are separate knobs precisely because they produce different exit codes,
-        and a single "absent means unreadable" rule would make the miss
-        unreachable.
+        a 403 is `unreadable`, which proceeds. An absent key is an EMPTY list —
+        a miss — and never an unreadable one: a single "absent means unreadable"
+        rule would make the miss unreachable, and the two produce different exit
+        codes.
 
         **Offset-paginated, like the real endpoint**, and that is not decoration.
         GitLab's default page is 20 while the client asks for 100 and walks to a
@@ -441,13 +472,20 @@ class GitLabRoutes:
         project on page two into a false 86 before any push. Serving the
         requested window is what makes the walk observable at all.
 
-        403 is modelled because it is the **production-common** answer, not an
-        edge case: the endpoint requires Maintainer or Owner on the index
-        project while the preflight's own bar is Developer, so the publisher this
-        check exists for reads `unknown` rather than a verdict. That makes the
-        86-miss path fixture-proved only, which the consuming tests say in their
-        own doc comments.
+        403 is the **production-common** answer, not an edge case: the endpoint
+        requires Maintainer or Owner on the index project while the preflight's
+        own bar is Developer, so the publisher this check exists for reads
+        `unknown` rather than a verdict. That makes the 86-miss path reachable
+        only under a credential that clears the bar — the split pair — which the
+        consuming rows say in their own doc comments.
         """
+        # 403, not the 404 the project and branch routes answer: this endpoint
+        # IS on the job-token list and is still refused, by the Maintainer bar.
+        # Serving it would hand a client an admission no real instance would —
+        # which is exactly how #429 shipped out of this file.
+        if self.gl_job_token_refuses(handler):
+            handler._reply_json(403, {"message": "403 Forbidden"})
+            return
         per_page = int((query.get("per_page") or ["20"])[0])
         page = int((query.get("page") or ["1"])[0])
         with self.lock:
@@ -455,15 +493,67 @@ class GitLabRoutes:
             if target is None:
                 handler._reply_json(404, {"message": "404 Project Not Found"})
                 return
-            if target in self.gitlab_job_token_allowlist_unreadable:
-                handler._reply_json(403, {"message": "403 Forbidden"})
-                return
             start = (page - 1) * per_page
             window = self.gitlab_job_token_allowlist.get(target, [])[start : start + per_page]
             entries = [
                 {"id": self._gl_project_id_locked(source), "path_with_namespace": source}
                 for source in window
             ]
+        handler._reply_json(200, entries)
+
+    def gl_get_job_token_groups_allowlist(
+        self, handler: _Handler, identifier: str, query: dict[str, list[str]]
+    ) -> None:
+        """`GET /projects/:id/job_token_scope/groups_allowlist` -> the GROUPS
+        allowed to push here with a job token of any project under them (#430).
+
+        Same three outcomes and the same offset pagination as the projects list
+        above, deliberately — GitLab documents both endpoints identically, down
+        to the Maintainer-or-Owner bar that makes 403 the production-common
+        answer.
+
+        The pagination is walked by
+        `test_transport_git.py::test_allowlist_group_admission_is_walked_past_the_first_page`,
+        which puts the admitting group on page two; every other group row seeds
+        one entry and would pass against a handler that ignored the window.
+
+        **The body is the real one, and that is the load-bearing part.** A groups
+        entry carries `id`, `web_url` and `name` and NOTHING else: no
+        `full_path`, no `path`, no `path_with_namespace`. Emitting a path field
+        the API does not send would let a client that read the wrong key pass
+        here and fail against a real instance — which is precisely how #429
+        shipped out of this same file.
+
+        https://docs.gitlab.com/api/project_job_token_scopes/
+        """
+        # 403, not the 404 the project and branch routes answer: this endpoint
+        # IS on the job-token list and is still refused, by the Maintainer bar.
+        # Serving it would hand a client an admission no real instance would —
+        # which is exactly how #429 shipped out of this file.
+        if self.gl_job_token_refuses(handler):
+            handler._reply_json(403, {"message": "403 Forbidden"})
+            return
+        per_page = int((query.get("per_page") or ["20"])[0])
+        page = int((query.get("page") or ["1"])[0])
+        with self.lock:
+            target = self._gl_resolve_locked(identifier)
+            if target is None:
+                handler._reply_json(404, {"message": "404 Project Not Found"})
+                return
+            start = (page - 1) * per_page
+            window = self.gitlab_job_token_groups_allowlist.get(target, [])[start : start + per_page]
+        entries = [
+            {
+                # Positional, and deliberately not drawn from the project-id
+                # counter: groups are a separate id space on the real API, and
+                # the client reads neither — the only identity it holds is
+                # `CI_PROJECT_PATH`, which is the whole point of #430.
+                "id": GROUP_ID_BASE + start + offset,
+                "name": group.rsplit("/", 1)[-1],
+                "web_url": f"{self.base_url}/groups/{group}",
+            }
+            for offset, group in enumerate(window)
+        ]
         handler._reply_json(200, entries)
 
     def gl_get_users(self, handler: _Handler, query: dict[str, list[str]]) -> None:

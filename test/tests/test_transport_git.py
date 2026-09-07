@@ -103,6 +103,23 @@ ENCODED_INDEX = urllib.parse.quote(INDEX_FULL, safe="")
 #: Never the index path, so the allowlist read is a genuine cross-project one.
 PUBLISHING_PROJECT = "acme/publisher"
 
+#: The group `PUBLISHING_PROJECT` lives in — what an index admits when it
+#: allowlists by group rather than by project (#430).
+PUBLISHING_GROUP = PUBLISHING_PROJECT.split("/", 1)[0]
+
+#: A publisher in a namespace that merely *starts with* `PUBLISHING_GROUP`'s
+#: characters without being under it. The near-miss #430 names: a group entry is
+#: a path-component prefix, so `acme` admits `acme/publisher` and must not admit
+#: this. A bare `starts_with` cannot tell the two apart, which is exactly what
+#: makes this row a discriminating one rather than a restatement of the miss row.
+SIBLING_NAMESPACE_PUBLISHER = f"{PUBLISHING_GROUP}-legacy/publisher"
+
+#: `gitlab.rs`'s `ALLOWLIST_PER_PAGE` — the page the allowlist walk asks for.
+#: Spelled here so `::test_allowlist_group_admission_is_walked_past_the_first_page`
+#: can seed exactly one full page and one entry past it; a smaller number would
+#: make its second request depend on GitLab's default rather than on ocx's ask.
+ALLOWLIST_PAGE = 100
+
 #: A second project on the index's host (S-040). Registered as a git route so
 #: its URL is real: a synthetic path could not match the credential's prefix
 #: under any implementation, which would make "no header reached it" true by
@@ -429,11 +446,17 @@ def split_pair_env(**extra: str) -> dict[str, str]:
 def admit_publishing_project(fake_forge: FakeForge) -> None:
     """Put `CI_PROJECT_PATH` in the index project's job-token allowlist.
 
-    Every job-token row that must **succeed** needs this: the allowlist read only
-    happens on a cross-project push, and an absent key is an EMPTY allowlist —
-    which is a miss, and refuses at 86. A row that forgot it would measure
-    `::test_allowlist_miss_86_names_both_projects` a second time while reading as
-    a success row.
+    Every **split-pair** row that must succeed needs this: the allowlist read
+    only happens on a cross-project push, and an absent key is an EMPTY
+    allowlist — which is a miss, and refuses at 86. A row that forgot it would
+    measure `::test_allowlist_miss_86_names_both_projects` a second time while
+    reading as a success row.
+
+    A bare `job_token_env()` row must NOT call it, and that is the opposite
+    error rather than a harmless one. Both lists answer 403 to a job token, so
+    the seeding is never read and the row succeeds through `unknown` — but a
+    reader takes the call as the reason it succeeds, and the row then stops
+    depending on the refusal it is actually resting on.
     """
     fake_forge.gitlab_job_token_allowlist[INDEX_FULL] = [PUBLISHING_PROJECT]
 
@@ -1450,6 +1473,12 @@ def test_allowlist_miss_86_names_both_projects(
     happens when the push is cross-project, so a row whose publishing project IS
     the index measures the same-project fast path instead.
 
+    The **split pair**, for the reason the group row below gives: both admission
+    lists want Maintainer or Owner, so a bare job token is answered 403 on each
+    and the row is permanently `unknown` — a posture in which this refusal
+    cannot happen at all. A miss is only reachable by a credential that can read
+    the lists and finds the publisher in neither.
+
     Mutation: return `Admits` on an empty list — the run pushes and this reds.
     """
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
@@ -1457,7 +1486,7 @@ def test_allowlist_miss_86_names_both_projects(
     fake_forge.gitlab_job_token_allowlist[INDEX_FULL] = []
 
     result = announce_over_git(
-        ocx, fake_forge, package, shim, home, token=None, extra_env=job_token_env()
+        ocx, fake_forge, package, shim, home, extra_env=split_pair_env()
     )
 
     assert result.returncode == 86, f"an allowlist miss is a capability gate: {result.stderr}"
@@ -1472,6 +1501,138 @@ def test_allowlist_miss_86_names_both_projects(
     )
 
 
+def test_allowlist_admits_by_group_and_the_run_pushes(
+    ocx: OcxRunner, fake_forge: FakeForge, git_package: tuple[str, str, str], tmp_path: Path
+) -> None:
+    """#430: an index that admits its publishers by **group** admits them.
+
+    GitLab keeps two independent lists, and a group entry admits every project
+    under it at any depth. ocx read only `job_token_scope/allowlist` and refused
+    at 86 an announce GitLab would have accepted — telling the operator to add a
+    project entry that their group entry already covers.
+
+    The **split pair**, for the same reason
+    `::test_job_token_push_disabled_86_before_any_push` uses it: both allowlist
+    endpoints want Maintainer or Owner, so under a bare job token they answer 403
+    and the row is permanently `unknown` — the posture in which the defect is
+    unreachable. The Maintainer token is the one an operator reaches for first,
+    and reading the list is what turned a masked miss into a refusal.
+
+    The projects list is seeded **empty on purpose**: it is readable and it
+    genuinely does not carry the publisher, so a build that stops at it has all
+    the evidence it needs to refuse. Only the second list says otherwise.
+
+    Mutation: chain back to a single list — this reds at 86.
+    """
+    package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
+    fake_forge.gitlab_job_token_push_allowed[INDEX_FULL] = True
+    fake_forge.gitlab_job_token_allowlist[INDEX_FULL] = []
+    fake_forge.gitlab_job_token_groups_allowlist[INDEX_FULL] = [PUBLISHING_GROUP]
+
+    result = report(announce_over_git(ocx, fake_forge, package, shim, home, extra_env=split_pair_env()))
+
+    assert result["push_credential_kind"] == "job-token", (
+        f"the matrix is only armed when the PUSH half is the job token: {result}"
+    )
+    statuses = {check["name"]: check["status"] for check in result["capability_checks"]}
+    assert statuses["job-token-allowlist"] == "passed", (
+        "a group entry is an admission, not an absence of evidence — `unknown` "
+        f"here would mean the second list was never read: {result['capability_checks']}"
+    )
+    assert fake_forge.git_http_requests, "the control: an admitted run does reach the transport"
+
+
+def test_allowlist_group_entry_is_a_path_component_prefix(
+    ocx: OcxRunner, fake_forge: FakeForge, git_package: tuple[str, str, str], tmp_path: Path
+) -> None:
+    """#430's near-miss: `acme` admits `acme/publisher`, never `acme-legacy/…`.
+
+    A group entry admits what is **under** it, which is a path-component prefix
+    and not a string prefix. The publisher here shares the group's characters and
+    is in a different namespace, so it is the case a bare `starts_with` gets
+    wrong — and getting it wrong is a genuine over-admission: ocx would report
+    `passed` for a project GitLab's own scope check refuses, then let the push
+    fail with a message about the wrong thing.
+
+    Same fixture as the row above, one character changed in `CI_PROJECT_PATH`.
+
+    Mutation: relax the containment rule to `starts_with` — this reds at 0.
+    """
+    package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
+    fake_forge.gitlab_job_token_push_allowed[INDEX_FULL] = True
+    fake_forge.gitlab_job_token_allowlist[INDEX_FULL] = []
+    fake_forge.gitlab_job_token_groups_allowlist[INDEX_FULL] = [PUBLISHING_GROUP]
+
+    result = announce_over_git(
+        ocx,
+        fake_forge,
+        package,
+        shim,
+        home,
+        extra_env=split_pair_env(CI_PROJECT_PATH=SIBLING_NAMESPACE_PUBLISHER),
+    )
+
+    assert result.returncode == 86, (
+        f"a sibling namespace is not under the group: {result.stderr}"
+    )
+    assert SIBLING_NAMESPACE_PUBLISHER in result.stderr and INDEX_FULL in result.stderr, (
+        f"the refusal names the publisher and the index it needs adding to: {result.stderr!r}"
+    )
+    assert fake_forge.git_http_requests == [], f"before any push: {fake_forge.git_http_requests}"
+
+
+def test_allowlist_group_admission_is_walked_past_the_first_page(
+    ocx: OcxRunner, fake_forge: FakeForge, git_package: tuple[str, str, str], tmp_path: Path
+) -> None:
+    """#430: a group entry on page **two** of the groups list still admits.
+
+    Both admission lists are offset-paginated and GitLab's own default page is
+    20, which is why `allowlist_walk` asks for `per_page=100` and continues
+    until a short page. A client that read one page reports the admitting group
+    absent and refuses at **86** — a false refusal before any push, the
+    direction #430 exists to remove. Every other group row seeds a single entry,
+    so page one is the only page they reach and the walk is unfalsifiable there.
+
+    The filler entries are genuine **named misses**, not unrecognised ones: an
+    entry whose `web_url` carries no group path makes the whole list
+    `Unreadable`, which also proceeds — for the wrong reason, and with the walk
+    deleted. A full first page of real non-admitting groups is what forces the
+    second request.
+
+    The request count is asserted as well as the verdict, because the two catch
+    different failures. Measured: with the fake ignoring the requested window and
+    answering all 101 entries to page one, the admission still reads `passed` and
+    only the count reds. And a truncated walk never refuses — it runs out of
+    pages and reports `unknown`, which proceeds — so the exit code sees neither.
+
+    Mutations, both demonstrated: `ALLOWLIST_MAX_PAGES = 1` stops the walk on a
+    full page and lands this on `unknown`; returning from page one whatever its
+    length — the shape that has no walk at all — refuses at **86**, which is the
+    false refusal itself.
+    """
+    package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
+    fake_forge.gitlab_job_token_push_allowed[INDEX_FULL] = True
+    fake_forge.gitlab_job_token_allowlist[INDEX_FULL] = []
+    fake_forge.gitlab_job_token_groups_allowlist[INDEX_FULL] = [
+        *(f"{PUBLISHING_GROUP}-filler-{index:03d}" for index in range(ALLOWLIST_PAGE)),
+        PUBLISHING_GROUP,
+    ]
+
+    result = report(
+        announce_over_git(ocx, fake_forge, package, shim, home, extra_env=split_pair_env())
+    )
+
+    statuses = {check["name"]: check["status"] for check in result["capability_checks"]}
+    assert statuses["job-token-allowlist"] == "passed", (
+        "the admitting group is the 101st entry, so only a walk past the first "
+        f"page reaches it: {result['capability_checks']}"
+    )
+    pages = fake_forge.request_count(
+        "GET", f"/projects/{ENCODED_INDEX}/job_token_scope/groups_allowlist"
+    )
+    assert pages >= 2, f"one read is page one; the walk never walked: {pages}"
+
+
 def test_two_signal_old_instance_86(
     ocx: OcxRunner, fake_forge: FakeForge, git_package: tuple[str, str, str], tmp_path: Path
 ) -> None:
@@ -1482,10 +1643,17 @@ def test_two_signal_old_instance_86(
     absent from the project body entirely, as on GitLab < 18.4 or a hidden
     setting. Only that state admits C-044's promotion.
 
+    The **split pair**, and it is the premise rather than a detail: a bare job
+    token is answered 404 on the whole project body (`fake_gitlab.py`'s
+    `gl_job_token_refuses`), so `unknown` would come from a body that could not
+    be read at all instead of from a readable body with the key absent — a
+    different state, and not the one GitLab < 18.4 is in. Readable-project /
+    absent-field has no other acceptance row.
+
     Paired with `::test_same_line_with_passed_preflight_77` below: same fixture,
-    **same refusal string**, one knob different. That pairing is the whole
-    promotion proof — either row alone passes for a build that hardcoded its own
-    exit code.
+    same posture, **same refusal string**, one knob different. That pairing is
+    the whole promotion proof — either row alone passes for a build that
+    hardcoded its own exit code.
 
     Mutation: promote unconditionally — the 77 row reds. Never promote — this
     row reds.
@@ -1495,7 +1663,7 @@ def test_two_signal_old_instance_86(
     fake_forge.git_http_pre_receive_refusal = REFUSAL_LINE
 
     result = announce_over_git(
-        ocx, fake_forge, package, shim, home, token=None, extra_env=job_token_env()
+        ocx, fake_forge, package, shim, home, extra_env=split_pair_env()
     )
 
     assert result.returncode == 86, (
@@ -1553,10 +1721,15 @@ def test_unknown_preflight_with_successful_push_exits_0(
     fixture with the knob unset produces both a git-bridge request log and a shim
     invocation log.
 
+    No `admit_publishing_project`: under a bare job token both admission lists
+    answer 403, so `job-token-allowlist` is `unknown` here too and a seeded list
+    would never be read. Leaving it out is what makes this row depend on that
+    refusal — with the fake serving the lists instead, the empty one is a miss
+    and this reds at 86.
+
     Mutation: refuse on `unknown` — this reds.
     """
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
-    admit_publishing_project(fake_forge)
 
     result = report(
         announce_over_git(ocx, fake_forge, package, shim, home, token=None, extra_env=job_token_env())
@@ -1598,11 +1771,14 @@ def test_job_token_pickup_headers_and_push_user(
     "the push authors as the invoking human" — is GitLab-side attribution the
     fixture cannot model; the half ocx controls is this one.
 
+    No `admit_publishing_project`, for the reason
+    `::test_unknown_preflight_with_successful_push_exits_0` states: a bare job
+    token is refused both admission lists, so a seeded one is never read.
+
     Mutation: delete `GIT_AUTHOR_NAME`/`GIT_COMMITTER_NAME` from `SET` — git falls
     back to the fixture `HOME`'s identity and the commit half reds.
     """
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
-    admit_publishing_project(fake_forge)
 
     result = report(
         announce_over_git(ocx, fake_forge, package, shim, home, token=None, extra_env=job_token_env())
@@ -1665,15 +1841,22 @@ def test_job_token_run_reads_only_endpoints_a_job_token_may_call(
     fail as it fails in production rather than be served. The positives are what
     stop the negative from being a description of a run that did nothing.
 
+    **The two `unknown` statuses at the foot are what hold the fake to that
+    scope**, and they are the only thing that does — one per refused route. An
+    `assert fake_forge.<some scope flag>` premise cannot go red in any state a
+    row can author, so this row asserts the consequence instead: the project
+    read must leave the access level unreadable, and both admission lists must
+    leave the allowlist row unreadable. Either route quietly starting to answer
+    turns its `unknown` into a verdict and reds here.
+
+    No `admit_publishing_project` either, for the same reason: a list that is
+    403 is never read, so seeding it would only disguise where the `unknown`
+    comes from.
+
     Mutation: restore `branch_sha`'s single-branch URL — the run exits 1 with
     `MissingBaseRef`, and the branch assertions red.
     """
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
-    admit_publishing_project(fake_forge)
-    assert fake_forge.gitlab_job_token_endpoint_scope, (
-        "the fake must be holding the job token to its real scope, or every "
-        "assertion below is about a fixture that answers anything"
-    )
 
     result = report(
         announce_over_git(ocx, fake_forge, package, shim, home, token=None, extra_env=job_token_env())
@@ -1700,6 +1883,12 @@ def test_job_token_run_reads_only_endpoints_a_job_token_may_call(
     assert statuses["push-access"] == "unknown", (
         "the refused project read leaves the access level unreadable rather than "
         f"zero; zero is what exited 80 before the push: {result['capability_checks']}"
+    )
+    assert statuses["job-token-allowlist"] == "unknown", (
+        "both admission lists want Maintainer or Owner, which no job token "
+        "carries, so the probe buys `unreadable` and the run proceeds — the "
+        "branch this posture always takes and the one a miss would refuse at 86: "
+        f"{result['capability_checks']}"
     )
 
 
@@ -2721,9 +2910,12 @@ def test_claim_inside_a_gitlab_job_authors_with_the_job_token(
     reads' `JOB-TOKEN` header, the injected Basic pair decoded back out of the
     recorded child, and the identity read off the pushed commit.
 
-    `admit_publishing_project` is required, not decoration: `CI_PROJECT_PATH` is
-    a different project from the index, so the push is cross-project and an
-    unseeded allowlist is an EMPTY one, which refuses at 86.
+    No `admit_publishing_project`, and its absence is load-bearing rather than
+    an omission: `CI_PROJECT_PATH` is a different project from the index, so the
+    push is cross-project and the admission lists are read — and a bare job
+    token is answered 403 on both, which is `unknown` and proceeds. Seeding the
+    list would make the run pass without ever depending on that refusal; with
+    the lists served instead, the unseeded one is a miss and this reds at 86.
 
     S-014's remaining clause — "the push authors as the invoking human" — is
     GitLab-side attribution the fixture cannot model; the half ocx controls is
@@ -2734,7 +2926,6 @@ def test_claim_inside_a_gitlab_job_authors_with_the_job_token(
     falls back to the fixture `HOME`'s identity and the last clause reds.
     """
     shim, home = prepare_claim(fake_forge, tmp_path)
-    admit_publishing_project(fake_forge)
 
     claimed = report(claim_over_git(ocx, fake_forge, shim, home, token=None, extra_env=job_token_env()))
 
