@@ -1546,7 +1546,10 @@ fn publish_link_within(entry: &Path, target: &Path, dry_run: bool) -> RenderOutc
     {
         return RenderOutcome::Skipped {
             path: entry.to_path_buf(),
-            reason: refuse_symlink(parent).to_string(),
+            // `render_chain`, not `to_string`: `Error::InternalFile` carries its
+            // cause by `#[source]` alone, so `to_string` here would name the
+            // path and nothing else — a refusal the user cannot act on.
+            reason: crate::error::render_chain(&refuse_symlink(parent)),
         };
     }
     if dry_run {
@@ -1558,6 +1561,23 @@ fn publish_link_within(entry: &Path, target: &Path, dry_run: bool) -> RenderOutc
             // (R-W19(a)) — not the ambient umask.
             create_owner_only(parent)?;
         }
+        // C-082 — dispatch on the *observed* kind before renaming. A
+        // symlink-dereferencing copy (`cp -rL`, `unzip`, `rsync` without `-l`,
+        // Docker `COPY`) leaves a real directory at this name, and `rename(2)`
+        // fails `EISDIR` against one whether it is empty or not — so without
+        // this the entry reports `Skipped` on every render forever and the
+        // composing lane degrades to digest paths (C-067) with no route back.
+        //
+        // `remove_dir`, never `remove_dir_all`: both components come from
+        // `ocx.lock`, so RUL-32 applies in full. An empty directory therefore
+        // heals; a real package copy is left byte-for-byte intact and earns the
+        // remedy below. Every other kind — a symlink (which
+        // `symlink_metadata` does not follow), a regular file, an unstattable
+        // path — falls through untouched, because `rename` already replaces a
+        // non-directory and no observation alone may become a refusal.
+        if occupied_by_directory(entry) {
+            let _ = std::fs::remove_dir(entry);
+        }
         // `replace_atomic`, never `symlink::update`: the update is
         // remove-then-create, which drops the link for an instant and makes
         // C-067's per-entry degrade fire on a link that is merely mid-repoint.
@@ -1567,9 +1587,47 @@ fn publish_link_within(entry: &Path, target: &Path, dry_run: bool) -> RenderOutc
         Ok(()) => RenderOutcome::Written,
         Err(error) => RenderOutcome::Skipped {
             path: entry.to_path_buf(),
-            reason: error.to_string(),
+            // Re-observed rather than remembered, so the rename stays the
+            // authority: an entry that became a directory after the check
+            // above still earns the remedy, and one that stopped being one
+            // gets its real error instead.
+            reason: if occupied_by_directory(entry) {
+                refuse_dereferenced_copy(entry)
+            } else {
+                crate::error::render_chain(&error)
+            },
         },
     }
+}
+
+/// A **real** directory at `path` — not a symlink to one, and not a path that
+/// could not be stat'd.
+///
+/// `symlink_metadata` does not follow, which is the whole point: a link
+/// pointing at a directory is publishable by the rename and must never be
+/// removed, and `remove_dir` is therefore never reachable for a path whose
+/// target is someone else's tree. A failed stat reads as "no", so a permission
+/// error keeps today's diagnostic instead of gaining a remedy nothing observed.
+fn occupied_by_directory(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+}
+
+/// C-082's remedy for a `<group>/<entry>` a dereferencing copy turned into a
+/// real directory that a non-recursive `remove_dir` could not take.
+///
+/// A plain `String`, not a [`crate::Error`]: the reason has to *be* the remedy,
+/// and `Error::InternalFile`'s `Display` names only its path. The path is
+/// interpolated bare because
+/// [`skipped_render_warnings`](crate::package_manager::skipped_render_warnings)
+/// escapes the whole reason exactly once (RUL-52) — escaping it here too would
+/// double it.
+fn refuse_dereferenced_copy(entry: &Path) -> String {
+    format!(
+        "a directory occupies this link's name — the mark of a symlink-dereferencing copy \
+         (`cp -rL`, `unzip`, `rsync` without `-l`, Docker `COPY`); it is left in place rather \
+         than deleted recursively. Remove '{}' and run `ocx pull` again",
+        entry.display()
+    )
 }
 
 /// The digest root one locked tool's link must name on this host, or `None`

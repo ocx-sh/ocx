@@ -463,6 +463,194 @@ def test_pull_dry_run_performs_no_heal_on_a_poisoned_link(
 
 
 # ---------------------------------------------------------------------------
+# C-082 / S-002 — a dereferencing copy leaves a real directory where a link
+# belongs
+# ---------------------------------------------------------------------------
+
+
+def test_a_dereferenced_copy_of_an_entry_link_is_skipped_with_its_remedy_and_an_empty_one_heals(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """C-082 / S-002 — the ``<group>/<entry>`` publish dispatches on the
+    **observed kind** before it renames.
+
+    ``cp -rL``, ``unzip``, ``rsync`` without ``-l`` and Docker ``COPY`` all
+    dereference symlinks, so a copied checkout carries a full *directory copy of
+    the package* at every entry name. ``rename(2)`` fails ``EISDIR`` against a
+    real directory — measured on an **empty** one too — so before C-082 neither
+    arm healed and the skip said only ``internal file error for '<path>'``: no
+    cause, no remedy, forever, with the composing lane degraded to digest paths
+    (C-067) and no route back.
+
+    Both arms in one case, for the reason
+    ``test_an_empty_orphan_group_directory_is_removed_and_a_populated_one_is_only_skipped``
+    states: "the publish heals a directory" must not be readable as "the publish
+    deletes whatever it finds". The removal is ``remove_dir``, non-recursive,
+    because both path components come from ``ocx.lock`` (RUL-32) — so the empty
+    arm heals and the populated arm is *named*, not repaired.
+
+    RED, one mutation per arm, both run: drop the kind dispatch from
+    ``publish_link_within`` and the empty directory survives every later render;
+    key the ``Skipped`` reason on anything but the re-observed kind and the
+    populated one falls back to ``Is a directory (os error 21)`` with no remedy.
+    """
+    label = uuid4().hex[:8]
+    copied_package = make_package(
+        ocx, f"t_{label}_copy", "1.0.0", tmp_path, cascade=False, bins=[f"cpbin{label}"]
+    )
+    empty_package = make_package(
+        ocx, f"t_{label}_mt", "1.0.0", tmp_path, cascade=False, bins=[f"mtbin{label}"]
+    )
+    project = tmp_path / f"proj-{label}"
+    project.mkdir()
+    write_ocx_toml(
+        project,
+        f"[tools]\n"
+        f'cpkey{label} = "{copied_package.fq}"\n'
+        f'mtkey{label} = "{empty_package.fq}"\n',
+    )
+    assert run_in(ocx, project, "lock").returncode == EXIT_SUCCESS
+    assert run_in(ocx, project, "pull").returncode == EXIT_SUCCESS
+
+    home = toolchain_home(project)
+    copied = home / DEFAULT_GROUP / f"cpkey{label}"
+    emptied = home / DEFAULT_GROUP / f"mtkey{label}"
+    assert copied.is_symlink() and emptied.is_symlink(), (
+        f"the control: both entries render as links first; got {link_entries(home)}"
+    )
+
+    # Arm 1 — the `cp -rL` outcome, reproduced exactly: the link is replaced by
+    # a real directory copy of the package it named.
+    package_root = copied.resolve()
+    copied.unlink()
+    shutil.copytree(package_root, copied, symlinks=False)
+    payload = sorted(p for p in copied.rglob("*") if p.is_file())
+    assert payload, "the control: a dereferenced copy must carry real files"
+    contents_before = {p: p.read_bytes() for p in payload}
+
+    # Arm 2 — the same kind, with nothing in it.
+    emptied.unlink()
+    emptied.mkdir()
+
+    result = run_in(ocx, project, "pull")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"C-050 — one unhealable entry never fails the render; "
+        f"rc={result.returncode}\n{result.stderr}"
+    )
+
+    assert {p: p.read_bytes() for p in payload} == contents_before, (
+        "RUL-32 — the populated copy is never removed recursively"
+    )
+    assert copied.is_dir() and not copied.is_symlink(), (
+        "…and it is not removed at all: WP-0 names this state, it does not heal it"
+    )
+    assert str(copied) in result.stderr, (
+        f"C-082 — the skip names the exact path to delete; stderr:\n{result.stderr}"
+    )
+    assert "cp -rL" in result.stderr, (
+        f"C-082 — …and names what put it there; stderr:\n{result.stderr}"
+    )
+    assert "ocx pull" in result.stderr, (
+        f"C-082 — …and what to run once it is gone; stderr:\n{result.stderr}"
+    )
+    assert str(copied) not in result.stdout, (
+        f"the skip warning belongs on stderr only; stdout:\n{result.stdout}"
+    )
+
+    assert emptied.is_symlink(), (
+        f"C-082 — an empty directory is removed with a non-recursive `remove_dir` "
+        f"and the link written; `{emptied}` is still "
+        f"{'a directory' if emptied.is_dir() else 'absent'}"
+    )
+    assert Path(os.readlink(emptied)).is_dir(), (
+        "…and the healed link names a real digest root, not a dangling path"
+    )
+    assert sorted(bin_entries(home)) == sorted([f"cpbin{label}", f"mtbin{label}"]), (
+        f"…and the render continued past the skip; bin/ holds {bin_entries(home)}"
+    )
+
+
+def test_a_regular_file_where_an_entry_link_belongs_is_still_replaced(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """C-082 — the kind dispatch is kind-*specific*: only a real directory is
+    treated as unhealable.
+
+    ``rename(2)`` already replaces an existing regular file, so this arm needs
+    no removal and must not acquire one — an explicit ``remove_file`` would open
+    a window in which the entry is absent, which is the whole reason this
+    publish uses ``replace_atomic`` rather than ``symlink::update``.
+
+    RED: refuse on the observation alone, widened to every pre-existing
+    non-link — the file is reported ``Skipped`` and the entry never recovers.
+    The stale-link half of the same property is held by
+    ``test_a_branch_switch_leaves_a_stale_link_that_the_next_composing_emit_heals``.
+    """
+    project = locked_project(ocx, tmp_path)
+    entry = project.default_link
+    target_before = os.readlink(entry)
+    entry.unlink()
+    entry.write_text("not a link\n")
+
+    result = run_in(ocx, project.directory, "pull")
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+
+    assert entry.is_symlink(), (
+        f"C-082 — a regular file at an entry name is replaced, not refused; "
+        f"stderr:\n{result.stderr}"
+    )
+    assert os.readlink(entry) == target_before, (
+        "…by the link the lock derives, unchanged"
+    )
+    assert "cp -rL" not in result.stderr, (
+        f"…and no directory remedy is printed for it; stderr:\n{result.stderr}"
+    )
+
+
+def test_an_entry_that_cannot_be_written_for_any_other_reason_names_its_cause(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """C-082 / C-050 — the arm that is *not* a directory still says why.
+
+    ``Error::InternalFile`` carries its io cause by ``#[source]`` alone and its
+    ``Display`` names only the path, so ``error.to_string()`` in a ``reason``
+    field produced ``internal file error for '<path>'`` and stopped there — the
+    defect C-082 describes, in its non-directory half. ``error::render_chain``
+    exists for exactly this ("a warn line, a machine-readable ``reason`` field")
+    and is what the skip now walks.
+
+    A read-only group directory is the cheapest reachable instance: the staging
+    symlink cannot be created inside it.
+
+    RED: put ``error.to_string()`` back — the errno vanishes from the warning
+    and the user is told a path they can already see.
+    """
+    project = locked_project(ocx, tmp_path)
+    entry = project.default_link
+    entry.unlink()
+    group = entry.parent
+    os.chmod(group, 0o555)
+    try:
+        result = run_in(ocx, project.directory, "pull")
+        assert result.returncode == EXIT_SUCCESS, (
+            f"C-050 — the render continues; rc={result.returncode}\n{result.stderr}"
+        )
+        assert not entry.exists(), (
+            "the control: the entry really must have stayed unwritten, or this "
+            "case never exercised the skip"
+        )
+        assert "Permission denied" in result.stderr, (
+            f"C-082 — a skip that is not a directory names its own cause; "
+            f"stderr:\n{result.stderr}"
+        )
+        assert "cp -rL" not in result.stderr, (
+            f"…and never borrows the directory remedy; stderr:\n{result.stderr}"
+        )
+    finally:
+        os.chmod(group, 0o755)
+
+
+# ---------------------------------------------------------------------------
 # Item 17 — the `bin` reservation and the name charset (C-013, C-014)
 # ---------------------------------------------------------------------------
 
