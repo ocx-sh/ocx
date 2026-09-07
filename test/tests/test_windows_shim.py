@@ -17,6 +17,15 @@ test here builds a *fake* `pkg_root` on disk (metadata.json + content/ +
 generated entrypoints/) WITHOUT a registry, then drives the compiled
 `ocx-shim` directly. No `ocx`/registry round-trip.
 
+⚠ Every test here executes a **locally built** `ocx-shim` — `_find_shim_binary`
+resolves `OCX_SHIM_BINARY` or a `target/` build, and CI sets the former to
+`target/debug/ocx-shim.exe`. None of them touches
+`crates/ocx_lib/src/shims/ocx-shim-*.exe`, the committed blob `include_bytes!`
+ships and a user's trampoline slot is a hardlink of. That blob is executed only
+by `test_trampoline_exec.py`'s Windows cases, which deliberately do NOT use
+`OCX_SHIM_BINARY` or the `shim_entrypoint` fixture below. Do not "unify" the two
+fixtures: folding them would silently un-test the shipped artefact again.
+
 The whole module is `skipif` non-Windows so the suite still PARSES and
 collects on Linux CI (`pytest --collect-only`) while the Win32 behaviours
 run only on `windows-latest`. Individual tests additionally skip if the

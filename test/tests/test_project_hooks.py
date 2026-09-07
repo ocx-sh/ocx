@@ -183,7 +183,7 @@ def test_run_default_path_precedes_inherited(
     short = uuid4().hex[:8]
     repo = f"t_{short}_pathprec"
     tag = "1.0.0"
-    make_package(ocx, repo, tag, tmp_path, cascade=False)
+    pkg = make_package(ocx, repo, tag, tmp_path, cascade=False)
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -209,38 +209,30 @@ def test_run_default_path_precedes_inherited(
 
     inherited_path = f"{sentinel_dir}:{os.environ.get('PATH', '')}"
 
-    # `ocx run -- env` dumps PATH; we assert the project's bin dir
-    # appears before the sentinel dir in the composed PATH.
+    # Run `hello` and see which one answers. The property is *resolution*,
+    # not the spelling of a directory: comparing PATH indices needs a marker
+    # for "the project tool dir", and every spelling of that marker goes stale
+    # the day the tree moves — which is what happened when the project
+    # toolchain left `$OCX_HOME` for `<project>/.ocx/toolchain/`.
     result = _run_in(
         ocx,
         project,
         "exec",
         "--",
-        "env",
+        "hello",
         extra_env={"PATH": inherited_path},
     )
     assert result.returncode == EXIT_SUCCESS, (
-        f"ocx run -- env failed: stderr={result.stderr!r}"
+        f"ocx exec -- hello failed: stderr={result.stderr!r}"
     )
-
-    # Find PATH= line in the env dump.
-    path_lines = [
-        line for line in result.stdout.splitlines() if line.startswith("PATH=")
-    ]
-    assert path_lines, f"PATH must appear in composed env dump; stdout:\n{result.stdout[:800]}"
-    composed_path = path_lines[0].removeprefix("PATH=")
-    sentinel_idx = composed_path.find(str(sentinel_dir))
-    # The project's bin dir lives under OCX_HOME's symlinks tree; use the
-    # OCX_HOME root as a coarse marker for "project tool dir".
-    ocx_home_idx = composed_path.find(str(ocx.ocx_home))
-
-    assert ocx_home_idx >= 0, (
-        f"project tool bin dir (under OCX_HOME) must appear in composed PATH; "
-        f"PATH={composed_path!r}"
+    assert "from_inherited" not in result.stdout, (
+        f"the sentinel `hello` on the inherited PATH won the lookup, so the "
+        f"project's bin dir did not precede it; stdout={result.stdout!r}"
     )
-    if sentinel_idx >= 0:
-        assert ocx_home_idx < sentinel_idx, (
-            f"project bin dir must precede inherited PATH entry; "
-            f"OCX_HOME idx={ocx_home_idx}, sentinel idx={sentinel_idx}; "
-            f"PATH={composed_path!r}"
-        )
+    # The positive half: "not the sentinel" alone would also hold if nothing
+    # ran at all. The marker is this package's own, so it names exactly the
+    # binary the project declares.
+    assert pkg.marker in result.stdout, (
+        f"the project's `hello` must be the one that ran; expected marker "
+        f"{pkg.marker!r}, stdout={result.stdout!r}"
+    )

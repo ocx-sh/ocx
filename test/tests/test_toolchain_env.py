@@ -21,7 +21,9 @@ context-format model (format reversal, no longer "backend-first JSON default"):
 from __future__ import annotations
 
 import json
+import os
 import re as _re_te
+import shutil
 import subprocess
 from pathlib import Path
 from uuid import uuid4
@@ -32,6 +34,7 @@ from src.helpers import make_package
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner
 from src.shell_eval import run_after_sourcing
+from src.toolchain_fixtures import locked_project, resolved_toolchain_home, run_in
 
 # ---------------------------------------------------------------------------
 # Exit code constants — mirror crates/ocx_lib/src/cli/exit_code.rs
@@ -1628,7 +1631,11 @@ def _make_project_with_binaries(
 
     project = tmp_path / f"proj_{label}"
     project.mkdir()
-    _write_ocx_toml(project, f'[tools]\n{bin_name} = "{pkg.fq}"\n')
+    # Keyed on `repo`, never on `bin_name`: C-065 makes the lock entry name a
+    # path component of every emitted path, so a table keyed on the declared
+    # binary name puts that name in the output and any "the claim did not leak"
+    # assertion below matches the path instead of a claim.
+    _write_ocx_toml(project, f'[tools]\n{repo} = "{pkg.fq}"\n')
 
     assert _run(ocx, project, "lock").returncode == EXIT_SUCCESS
     assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
@@ -1689,6 +1696,63 @@ def test_env_json_binaries_attribution_for_transitive_interface_dep(
         f"transitive interface dep's claim must attribute to the dep, not the root; got: {names}"
     )
     assert data["entrypoints"] == [], data["entrypoints"]
+
+
+def test_env_shell_output_excludes_binaries_when_the_binding_equals_the_claim(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``--shell`` carries no ``binaries`` claim even when the lock entry and the
+    declared binary share one name — the common real configuration.
+
+    ``_make_project_with_binaries`` keys ``[tools]`` on ``repo`` so the two
+    substring assertions in the sibling tests can discriminate at all: C-065
+    makes a lock entry's name a path component of every emitted value, so a
+    fixture that spells them identically matches its own path. This case keeps
+    that configuration covered by asserting on the claim's **shape** instead —
+    the JSON ``binaries`` array is where a leak would be visible, and it must be
+    absent from the eval-safe channel while present in the report.
+    """
+    short = uuid4().hex[:8]
+    repo = f"t_{short}_bindingclaim"
+    pkg = make_package(
+        ocx, repo, "1.0.0", tmp_path, cascade=False, bins=["roottool"], binaries=["roottool"]
+    )
+    project = tmp_path / "proj_bindingclaim"
+    project.mkdir()
+    # Binding == claim, deliberately: `[tools] roottool = ...` over a package
+    # claiming `roottool`.
+    _write_ocx_toml(project, f'[tools]\nroottool = "{pkg.fq}"\n')
+    assert _run(ocx, project, "lock").returncode == EXIT_SUCCESS
+    assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
+
+    shell = _run(ocx, project, "env", "--shell=bash")
+    assert shell.returncode == EXIT_SUCCESS, shell.stderr
+    assert "export" in shell.stdout, shell.stdout
+    # Shape, not substring. Not "no braces or brackets": the bash PATH-prepend
+    # idiom is built from `${PATH-}`, `${PATH//…}` and `[ "$PATH" != … ]`, so
+    # both characters are ordinary shell syntax here. The discriminating shape is
+    # the attribution array's own JSON key spellings, which no export line has.
+    assert "binaries" not in shell.stdout.lower(), shell.stdout
+    for key in ('"name"', '"package"', '"entrypoints"'):
+        assert key not in shell.stdout, (
+            f"the eval-safe channel carries no claim-attribution JSON key {key}: {shell.stdout!r}"
+        )
+
+    # The positive half: the claim exists and the report does carry it, so the
+    # negative above is not passing for want of a claim to leak.
+    report = subprocess.run(
+        [str(ocx.binary), "--format", "json", "env"],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=dict(ocx.env),
+        check=False,
+    )
+    assert report.returncode == EXIT_SUCCESS, report.stderr
+    names = {entry["name"] for entry in json.loads(report.stdout)["binaries"]}
+    assert "roottool" in names, (
+        f"precondition: the claim is admitted, so `--shell` had something to leak; got {names}"
+    )
 
 
 def test_env_shell_output_excludes_binaries_and_entrypoints(
@@ -1771,3 +1835,194 @@ def test_env_plain_omits_hint_without_claims(ocx: OcxRunner, tmp_path: Path) -> 
 
     assert result.returncode == EXIT_SUCCESS, result.stderr
     assert "available" not in result.stdout.lower(), result.stdout
+
+
+# ---------------------------------------------------------------------------
+# The composing-emitter parity oracle (WP-12b; RUL-106, RUL-107)
+# ---------------------------------------------------------------------------
+#
+# Three commands compose the *same* toolchain environment through
+# `resolve_env_with_attribution`, and each hands it to the caller over its own
+# channel: `ocx env` reports it, `ocx exec` puts it in a child process, and
+# `ocx direnv export` writes it as POSIX source. One code path, three exits, so
+# what has to be pinned is that the exits stay agreed — and, crucially, that
+# each of them still *listens* to the two inputs that are allowed to change the
+# answer (`pinned`) and to the one that is not (`activate`).
+#
+# Why this lives here and not in `test_env.py`: that file is the OCI/package
+# tier (`EnvScope::Package`), where `toolchain_links()` returns `None`
+# unconditionally — and `None` **is** the digest lane. A following-vs-pinned
+# oracle written there would emit digest paths in *both* lanes and pass in
+# either state (RUL-106). `ocx direnv export` is driven from here for the same
+# reason it is a toolchain-tier emitter; `test_direnv.py` is not touched
+# (RUL-107).
+#
+# The lane lever is the **flag**, never a `pinned = …` file flip plus a
+# re-pull: flipping the file suppresses the link pass entirely, so the next
+# lane would consult links the previous render left stale, and the oracle would
+# compare one lane against a fixture artefact.
+
+
+def _real_dirs(directories: list[str]) -> list[str]:
+    """The identities of ``directories`` — what they name, not how they spell it."""
+    return [os.path.realpath(directory) for directory in directories]
+
+
+def _env_path_dirs(
+    ocx: OcxRunner, project: Path, *args: str, extra_env: dict[str, str] | None = None
+) -> list[str]:
+    """``ocx env``'s composed ``PATH`` directories, as spelled.
+
+    Read off the structured report: the emitted shell source says the same
+    thing, but a substring search over it can be satisfied by the command text
+    the stream carries rather than by a composed value.
+    """
+    result = run_in(ocx, project, "--format", "json", "env", *args, env_extra=extra_env)
+    assert result.returncode == EXIT_SUCCESS, f"`ocx env` failed:\n{result.stderr}"
+    payload = json.loads(result.stdout)
+    return [entry["value"] for entry in payload["entries"] if entry["key"] == "PATH"]
+
+
+def _exec_path_dirs(
+    ocx: OcxRunner, project: Path, *args: str, extra_env: dict[str, str] | None = None
+) -> list[str]:
+    """What ``ocx exec`` **contributes** to a child's ``PATH``, as spelled.
+
+    The child sees the composition prepended to the ambient value, so the
+    ambient segments are subtracted rather than an ordering being assumed —
+    `ocx env` has no ambient half to report and the two lists would otherwise
+    never be comparable.
+    """
+    printenv = shutil.which("printenv")
+    assert printenv, "printenv is required to read a child process's PATH back"
+    result = run_in(ocx, project, "exec", *args, "--", printenv, "PATH", env_extra=extra_env)
+    assert result.returncode == EXIT_SUCCESS, f"`ocx exec` failed:\n{result.stderr}"
+    ambient = set((extra_env or {}).get("PATH", ocx.env["PATH"]).split(os.pathsep))
+    return [segment for segment in result.stdout.strip().split(os.pathsep) if segment and segment not in ambient]
+
+
+def _direnv_path_dirs(
+    ocx: OcxRunner, project: Path, *args: str, extra_env: dict[str, str] | None = None
+) -> list[str]:
+    """``ocx direnv export``'s composed ``PATH`` directories, as spelled.
+
+    This emitter has no structured form — ``--format json`` is ignored, because
+    its product *is* shell source for direnv to evaluate — so the values are
+    read out of the stream. Safe here in a way it would not be inside a shell
+    session: this is the command's own stdout, which carries only what it
+    emitted, never a shell's echo of the command that produced it.
+    """
+    result = run_in(ocx, project, "direnv", "export", *args, env_extra=extra_env)
+    assert result.returncode == EXIT_SUCCESS, f"`ocx direnv export` failed:\n{result.stderr}"
+    return _re_te.findall(r"__ocx_p='([^']*)'", result.stdout)
+
+
+_COMPOSING_EMITTERS = {
+    "env": _env_path_dirs,
+    "exec": _exec_path_dirs,
+    "direnv-export": _direnv_path_dirs,
+}
+
+
+def test_env_and_exec_agree_in_both_lanes(ocx: OcxRunner, tmp_path: Path) -> None:
+    """C-070: one composer, two exits, two lanes — and the lanes stay distinct.
+
+    String equality between ``ocx env`` and ``ocx exec`` would be nearly
+    tautological (they share ``resolve_env_with_attribution``) *and* a spelling
+    comparison, so the oracle is built from three assertions that fail for
+    different reasons:
+
+    * **identity parity** — the two emitters' directories are equal after
+      ``realpath``, per lane. This is the property a caller has: whichever
+      command they reach for, the same content is on ``PATH``.
+    * **a mandatory raw-spelling difference** — ``--pinned`` and ``--no-pinned``
+      must produce *different strings* for each emitter. Without it the whole
+      row passes when one lane is never selected: ``<home>/<group>/<entry>`` is
+      a symlink into the package store, so the following lane and the pinned
+      lane ``realpath`` to the **same** directory and identity parity alone
+      cannot tell "both lanes work" from "the flag is ignored".
+    * **structure** — the following lane names paths under the resolved
+      toolchain home; the pinned lane names digest paths in the package store
+      and nothing under the home.
+    """
+    project = locked_project(ocx, tmp_path, label="oracle")
+    home = str(resolved_toolchain_home(ocx, project.directory))
+    store = str(Path(ocx.env["OCX_HOME"]) / "packages")
+
+    lanes = {
+        lane: {name: reader(ocx, project.directory, lane) for name, reader in (("env", _env_path_dirs), ("exec", _exec_path_dirs))}
+        for lane in ("--no-pinned", "--pinned")
+    }
+    for lane, emitters in lanes.items():
+        for name, directories in emitters.items():
+            assert directories, f"`ocx {name} {lane}` composed no PATH directory at all; the row would be vacuous"
+
+    for lane, emitters in lanes.items():
+        assert _real_dirs(emitters["env"]) == _real_dirs(emitters["exec"]), (
+            f"`ocx env` and `ocx exec` must name the same content in the {lane} lane: "
+            f"env={emitters['env']} exec={emitters['exec']}"
+        )
+
+    for name in ("env", "exec"):
+        following = lanes["--no-pinned"][name]
+        pinned = lanes["--pinned"][name]
+        assert following != pinned, (
+            f"`ocx {name}` produced the same strings for both lanes, so one of `--pinned` / "
+            f"`--no-pinned` was never selected and every equality above is vacuous: {following}"
+        )
+        assert _real_dirs(following) == _real_dirs(pinned), (
+            f"the two lanes are two spellings of one content; `ocx {name}` made them different "
+            f"directories: following={following} pinned={pinned}"
+        )
+        assert all(directory.startswith(home + os.sep) for directory in following), (
+            f"the following lane must go through the toolchain home: {following}"
+        )
+        assert all(directory.startswith(store + os.sep) for directory in pinned), (
+            f"the pinned lane must name digest paths in the package store: {pinned}"
+        )
+        assert not any(directory.startswith(home + os.sep) for directory in pinned), (
+            f"the pinned lane must consult no `<group>/<entry>` link: {pinned}"
+        )
+
+
+@pytest.mark.parametrize("emitter", sorted(_COMPOSING_EMITTERS))
+def test_the_activate_mode_is_not_an_input_to_the_composing_emitters(
+    ocx: OcxRunner, tmp_path: Path, emitter: str
+) -> None:
+    """``activate`` decides what a *shell prompt* does, never what a command composes.
+
+    ``ocx env``, ``ocx exec`` and ``ocx direnv export`` are asked explicitly;
+    the ``activate`` ladder governs the per-prompt session, and a composer that
+    consulted it would make ``activate = "none"`` silently empty an explicit
+    ``ocx exec``.
+
+    The positive half is asserted from the binary, not assumed: ``ocx shell
+    state`` reports the **effective** mode past the whole ladder, and it must
+    read back as the value this run set. Without that, three identical results
+    would also be what a lever that never moved produces. The project states no
+    ``activate`` key of its own, because C-007 makes the file tier win and would
+    make the environment lever inert.
+    """
+    project = locked_project(ocx, tmp_path, label="modefree")
+    assert "activate" not in (project.directory / "ocx.toml").read_text(), (
+        "the fixture must state no `activate` key, or the file tier wins and the lever is inert"
+    )
+    reader = _COMPOSING_EMITTERS[emitter]
+
+    observed: dict[str, list[str]] = {}
+    for mode in ("env", "bin", "none"):
+        extra_env = {"OCX_TOOLCHAIN_ACTIVATE": mode}
+        state = run_in(
+            ocx, project.directory, "--format", "json", "shell", "state", env_extra=extra_env
+        )
+        assert state.returncode == EXIT_SUCCESS, f"`ocx shell state` failed:\n{state.stderr}"
+        assert json.loads(state.stdout)["activate"] == mode, (
+            f"the lever did not move: `ocx shell state` reports "
+            f"{json.loads(state.stdout)['activate']!r} while OCX_TOOLCHAIN_ACTIVATE={mode!r}"
+        )
+        observed[mode] = _real_dirs(reader(ocx, project.directory, extra_env=extra_env))
+
+    assert observed["env"], f"`ocx {emitter}` composed nothing, so the comparison below is vacuous"
+    assert observed["env"] == observed["bin"] == observed["none"], (
+        f"`ocx {emitter}` must compose the same environment in every activate mode: {observed}"
+    )

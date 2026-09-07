@@ -81,6 +81,7 @@ from __future__ import annotations
 import copy
 import importlib.metadata
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -91,10 +92,14 @@ from in_toto_attestation.v1.resource_descriptor import ResourceDescriptor
 from in_toto_attestation.v1.statement import Statement
 from packageurl import PackageURL
 
-from src.helpers import make_package, make_package_with_entrypoints, write_ocx_toml
+from src.helpers import (
+    assert_shim_dir_exists,
+    make_package,
+    make_package_with_entrypoints,
+    write_ocx_toml,
+)
 from src.registry import fetch_platform_manifest_digest
 from src.runner import OcxRunner, PackageInfo
-from src.shell_eval import run_after_sourcing
 from tests.test_execution_records import (
     BARE_SHA256,
     EXIT_SUCCESS,
@@ -392,7 +397,6 @@ def test_launcher_exec_degraded_frame_is_standards_compliant(
     _assert_packages_are_standards_compliant(record, "launcher exec / degraded identity")
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase")
 def test_launcher_shim_frame_is_standards_compliant(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -430,14 +434,22 @@ def test_launcher_shim_frame_is_standards_compliant(
     assert lock.returncode == EXIT_SUCCESS, (
         f"ocx lock --no-pull failed: rc={lock.returncode}\nstderr:\n{lock.stderr}"
     )
-    export = _run_in(ocx, project, "env", "--shell=sh")
-    assert export.returncode == EXIT_SUCCESS, f"ocx env --shell=sh failed:\n{export.stderr}"
+    composed = _run_in(ocx, project, "--format", "json", "env")
+    assert composed.returncode == EXIT_SUCCESS, f"ocx env failed:\n{composed.stderr}"
+    shim_bin = assert_shim_dir_exists(ocx, pkg.repo, "the cold tool composes as a shim")
+
+    # Exec'd directly, no shell: the invocation is only a trigger — every
+    # assertion is on the record — and the `.exe` half of the slot is what a
+    # Windows host can run. Mirrors the sibling test in test_execution_records.py.
+    launcher = shim_bin / ("hello.exe" if sys.platform == "win32" else "hello")
 
     def trigger(sink: Path) -> None:
         env = dict(ocx.env)
         env["OCX_BINARY_PIN"] = str(ocx.binary)
         env["OCX_RECORDS_DIR"] = str(sink)
-        result = run_after_sourcing(export.stdout, "hello", cwd=project, env=env)
+        result = subprocess.run(
+            [str(launcher)], cwd=project, capture_output=True, text=True, env=env, check=False
+        )
         assert result.returncode == EXIT_SUCCESS, (
             f"the shim trigger failed; rc={result.returncode}\nstderr:\n{result.stderr}"
         )

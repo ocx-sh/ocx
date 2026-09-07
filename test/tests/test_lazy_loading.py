@@ -8,8 +8,9 @@ content materializes on the first invocation of one of its declared names.
 
 Two families live here, both from `plan_lazy_package_loading.md`:
 
-- one test per user-experience scenario **S-001 … S-012** (S-011 is the direnv
-  scenario and lives in `test_lazy_direnv.py`);
+- one test per user-experience scenario **S-001 … S-013** (S-011 is the direnv
+  scenario and lives in `test_lazy_direnv.py`; S-010 was "Windows composes
+  eagerly", retired by C-027 and replaced by S-013, which asserts the opposite);
 - eight **state sequences** — compose / invoke / `clean` / recompose orders that
   no single scenario covers, because each one is about what the *previous* step
   left on disk.
@@ -50,7 +51,6 @@ from src.helpers import (
     assert_shim_dir_exists,
     make_package,
     make_package_with_entrypoints,
-    shim_bin_dirs,
     write_ocx_toml,
 )
 from src.shell_eval import run_after_sourcing
@@ -188,6 +188,37 @@ def _shell_env(ocx: OcxRunner, pin: Path | None = None, **extra: str) -> dict[st
     return env
 
 
+def _trigger_the_shim(
+    ocx: OcxRunner, project: Path, shim_bin: Path, name: str
+) -> subprocess.CompletedProcess[str]:
+    """Execute a generated launcher directly — no shell in between.
+
+    For the tests where the invocation is only a **trigger**: the assertion is
+    about what materialization left behind (a store probe, a `which` answer, a
+    second compose's bytes), never about what a caller saw. A shell there buys
+    nothing and costs the test every non-POSIX host, since the fixtures reach
+    the name through `bash` and a sourced `ocx env --shell=sh`.
+
+    That PATH reaches exactly this path is proven once, by
+    `test_s004_a_second_invocation_of_the_same_name_does_not_re_enter_the_shim`,
+    which reads `command -v` out of a real bash and compares it to
+    `shim_bin / name`. Every trigger here execs the launcher that test resolved.
+
+    On Windows the executable half of the slot is `<name>.exe` — the hardlinked
+    shim blob `prepare_lazy::write_windows_shim_slot` publishes beside the
+    extensionless `#!/bin/sh` body, which no Windows host can run.
+    """
+    launcher = shim_bin / (f"{name}.exe" if sys.platform == "win32" else name)
+    return subprocess.run(
+        [str(launcher)],
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env=_shell_env(ocx),
+        check=False,
+    )
+
+
 def _observed_shim_calls(log: Path) -> list[str]:
     """Every `launcher shim` re-entry recorded by an `_observer` script."""
     if not log.exists():
@@ -312,7 +343,11 @@ def test_s001_lazy_mode_always_puts_a_shim_dir_on_path_with_no_content(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
+@pytest.mark.skipif(
+    os.pathsep != ":",
+    reason="the trigger sources 'ocx env --shell=sh' lines into bash; os.pathsep is not ':' "
+    "here, so what those lines export is not a PATH this host's loader reads",
+)
 def test_s002_invoking_a_shimmed_binary_materializes_and_execs_the_target(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -342,7 +377,11 @@ def test_s002_invoking_a_shimmed_binary_materializes_and_execs_the_target(
     )
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
+@pytest.mark.skipif(
+    not hasattr(os, "killpg"),
+    reason="the deadline kills the whole process group; os.killpg is missing here, so an "
+    "execve loop would outlive the timeout and pin a core at 100% instead of failing",
+)
 def test_c011_a_claimed_name_the_package_does_not_ship_exits_instead_of_looping(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -401,7 +440,11 @@ def test_c011_a_claimed_name_the_package_does_not_ship_exits_instead_of_looping(
     )
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
+@pytest.mark.skipif(
+    not hasattr(os, "killpg"),
+    reason="the deadline kills the whole process group; os.killpg is missing here, so an "
+    "execve loop would outlive the timeout and pin a core at 100% instead of failing",
+)
 def test_c011_a_shim_tree_reached_by_a_second_spelling_exits_instead_of_looping(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -468,7 +511,11 @@ def test_c011_a_shim_tree_reached_by_a_second_spelling_exits_instead_of_looping(
     )
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
+@pytest.mark.skipif(
+    os.pathsep != ":",
+    reason="the trigger sources 'ocx env --shell=sh' lines into bash; os.pathsep is not ':' "
+    "here, so what those lines export is not a PATH this host's loader reads",
+)
 def test_s002_invoking_a_shimmed_binary_offline_exits_81(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -503,7 +550,11 @@ def test_s002_invoking_a_shimmed_binary_offline_exits_81(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
+@pytest.mark.skipif(
+    not Path("/bin/sh").exists(),
+    reason="the observation point is an OCX_BINARY_PIN wrapper written with a '#!/bin/sh' "
+    "line; /bin/sh is absent here, so nothing would execute it and no re-entry is logged",
+)
 def test_s003_invoking_a_shimmed_entrypoint_applies_the_real_launcher_dispatch(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -565,7 +616,11 @@ def _pinned(ocx: OcxRunner, project: Path, pkg: PackageInfo) -> str:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
+@pytest.mark.skipif(
+    not Path("/bin/sh").exists(),
+    reason="the observation point is an OCX_BINARY_PIN wrapper written with a '#!/bin/sh' "
+    "line; /bin/sh is absent here, so nothing would execute it and no re-entry is logged",
+)
 def test_s004_a_second_invocation_of_the_same_name_does_not_re_enter_the_shim(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -618,7 +673,6 @@ def test_s004_a_second_invocation_of_the_same_name_does_not_re_enter_the_shim(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
 def test_s005_env_output_is_byte_identical_cold_store_and_warm(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -637,8 +691,8 @@ def test_s005_env_output_is_byte_identical_cold_store_and_warm(
     assert cold.returncode == EXIT_SUCCESS, f"cold compose failed:\n{cold.stderr}"
     assert not _is_materialized(ocx, project, pkg), "precondition: the first compose is cold"
 
-    export = _run(ocx, project, "env", "--shell=sh")
-    triggered = run_after_sourcing(export.stdout, "hello", cwd=project, env=_shell_env(ocx))
+    shim_bin = assert_shim_dir_exists(ocx, pkg.repo, "S-005: the cold compose deferred the tool")
+    triggered = _trigger_the_shim(ocx, project, shim_bin, "hello")
     assert triggered.returncode == EXIT_SUCCESS, f"trigger failed:\n{triggered.stderr}"
     assert _is_materialized(ocx, project, pkg), "precondition: the second compose is warm"
 
@@ -654,7 +708,6 @@ def test_s005_env_output_is_byte_identical_cold_store_and_warm(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
 def test_s006_frozen_run_materializes_by_digest_and_writes_nothing_under_index(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path, registry: str
 ) -> None:
@@ -699,7 +752,6 @@ def test_s006_frozen_run_materializes_by_digest_and_writes_nothing_under_index(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
 def test_s007_which_answers_all_four_policy_and_state_cells(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -728,7 +780,7 @@ def test_s007_which_answers_all_four_policy_and_state_cells(
         f"rc={cold.returncode}\nstderr:\n{cold.stderr}"
     )
 
-    export = _run(ocx, project, "env", "--shell=sh")
+    assert _run(ocx, project, "--format", "json", "env").returncode == EXIT_SUCCESS
     shim_bin = assert_shim_dir_exists(ocx, pkg.repo, "S-007: the tool under test is deferred")
 
     # Cell 2 — a shim tree and no content: the lazy policy answers with the shim.
@@ -748,7 +800,7 @@ def test_s007_which_answers_all_four_policy_and_state_cells(
         f"got {located['path']}, expected {shim_bin.parent}"
     )
 
-    triggered = run_after_sourcing(export.stdout, "hello", cwd=project, env=_shell_env(ocx))
+    triggered = _trigger_the_shim(ocx, project, shim_bin, "hello")
     assert triggered.returncode == EXIT_SUCCESS, f"trigger failed:\n{triggered.stderr}"
 
     # Cells 3 and 4 — once content exists it outranks the shim under either policy.
@@ -853,21 +905,29 @@ def test_s009_no_pull_composes_shims_for_local_metadata_and_omits_the_rest(
 
 
 # ---------------------------------------------------------------------------
-# S-010 — Windows composes eagerly in this phase
+# S-013 — every host defers; the Windows slot has its own shape
 # ---------------------------------------------------------------------------
 
 
-def test_s010_windows_composes_eagerly_while_other_hosts_compose_a_shim(
+def test_s013_lazy_mode_always_defers_on_every_host(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """S-010: on Windows `lazy-mode = "always"` composes eagerly — no user-visible break.
+    """S-013: `lazy-mode = "always"` defers everywhere — Windows included.
 
-    Two host-gated arms rather than one expectation parameterised by
-    `sys.platform`: an assertion that restates the production platform gate
-    agrees with the code on every host, including a host where the code is
-    wrong. Each arm below asserts a literal outcome and runs on the host it
-    describes. On this suite's Linux/macOS legs only the second arm executes;
-    the first is live on the `windows-latest` leg.
+    The Windows floor this scenario was written around is **gone** (C-027).
+    `LazyModeLadder::resolve_for_host` is now a plain passthrough to `resolve`,
+    because C-026 gave `prepare_lazy` the Windows half of the producer — so the
+    host split that used to be the subject is itself the stale artefact, and a
+    test that branched on `sys.platform` would only restate a gate the code no
+    longer has. One expectation, asserted on every host.
+
+    What is still host-specific is the *shape* of a slot, and that is what the
+    Windows clause below pins: `write_windows_shim_slot` hardlinks `<name>.exe`
+    from the committed blob and writes a `<name>.shimref` sidecar beside the
+    extensionless `#!/bin/sh` body. Never `<name>.shim` — that extension names
+    an installed package's `entrypoints/` sidecar, and `materialize_lazy`'s
+    dispatch probes `shim` before `shimref`, so one stray `.shim` in a shim
+    tree's `bin/` would be read by the wrong reader.
     """
     pkg = make_package(
         ocx, unique_repo, "1.0.0", tmp_path, bins=["hello"], binaries=["hello"], env=PUBLIC_BIN_PATH
@@ -876,22 +936,23 @@ def test_s010_windows_composes_eagerly_while_other_hosts_compose_a_shim(
 
     payload = _env_json(ocx, project)
 
+    shim_bin = assert_shim_dir_exists(ocx, pkg.repo, "S-013: every host defers")
+    assert str(shim_bin) in _path_values(payload), (
+        f"S-013: the shim slot must be emitted on every host; got {_path_values(payload)}"
+    )
+    assert not _is_materialized(ocx, project, pkg), (
+        "S-013: a deferred tool has no content until its first invocation"
+    )
+
     if sys.platform == "win32":
-        assert shim_bin_dirs(ocx, pkg.repo) == [], (
-            "S-010: Windows has no shim producer in this phase, so a tool asking "
-            f"for lazy-mode=always must compose eagerly; found {shim_bin_dirs(ocx, pkg.repo)}"
+        present = sorted(entry.name for entry in shim_bin.iterdir())
+        assert {"hello.exe", "hello.shimref"} <= set(present), (
+            f"S-013: the Windows slot is the shim `.exe` plus its `.shimref` sidecar; "
+            f"{shim_bin} holds {present}"
         )
-        assert _is_materialized(ocx, project, pkg), (
-            "S-010: composing eagerly means the content is materialized, not deferred"
-        )
-    else:
-        shim_bin = assert_shim_dir_exists(ocx, pkg.repo, "S-010: a non-Windows host defers")
-        assert str(shim_bin) in _path_values(payload), (
-            f"S-010: the host floor is Windows-only; elsewhere the shim slot must be "
-            f"emitted; got {_path_values(payload)}"
-        )
-        assert not _is_materialized(ocx, project, pkg), (
-            "S-010: a deferred tool has no content on a host that supports shims"
+        assert "hello.shim" not in present, (
+            f"S-013: `.shim` names an installed package's entrypoint sidecar, never a shim "
+            f"tree's — the dispatch probes it first and would read the wrong one; got {present}"
         )
 
 
@@ -900,7 +961,11 @@ def test_s010_windows_composes_eagerly_while_other_hosts_compose_a_shim(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
+@pytest.mark.skipif(
+    not hasattr(os, "setsid"),
+    reason="the scenario is a session with no controlling terminal; os.setsid is missing "
+    "here, so start_new_session cannot produce the state whose degrade is the subject",
+)
 def test_s012_progress_report_degrades_silently_without_a_controlling_terminal(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -949,7 +1014,11 @@ def test_s012_progress_report_degrades_silently_without_a_controlling_terminal(
     assert _is_materialized(ocx, project, pkg), "S-012: materialization must complete normally"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
+@pytest.mark.skipif(
+    not hasattr(os, "setsid"),
+    reason="the scenario is a session with no controlling terminal; os.setsid is missing "
+    "here, so start_new_session cannot produce the state whose degrade is the subject",
+)
 def test_s012_errors_still_reach_stderr_under_progress_reporting(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -986,7 +1055,11 @@ def test_s012_errors_still_reach_stderr_under_progress_reporting(
     )
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
+@pytest.mark.skipif(
+    not hasattr(pexpect, "spawn"),
+    reason="the assertion is on bytes written to a controlling terminal; pexpect imports "
+    "here but defines no spawn, so there is no pty to attach the trigger to",
+)
 @pytest.mark.parametrize(
     ("report", "renders"),
     [("progress", True), ("silent", False)],
@@ -1089,7 +1162,6 @@ def test_sequence_1_compose_clean_compose_keeps_one_shim_tree_throughout(
     )
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
 def test_sequence_2_clean_after_materialization_keeps_both_the_package_and_the_shim(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -1104,12 +1176,13 @@ def test_sequence_2_clean_after_materialization_keeps_both_the_package_and_the_s
         ocx, unique_repo, "1.0.0", tmp_path, bins=["hello"], binaries=["hello"], env=PUBLIC_BIN_PATH
     )
     project = _lazy_project(ocx, tmp_path, _toolchain_lazy(pkg))
-    export = _run(ocx, project, "env", "--shell=sh")
     before = _run(ocx, project, "--format", "json", "env")
+    composed = assert_shim_dir_exists(ocx, pkg.repo, "sequence 2: composed before the trigger")
 
-    triggered = run_after_sourcing(export.stdout, "hello", cwd=project, env=_shell_env(ocx))
+    triggered = _trigger_the_shim(ocx, project, composed, "hello")
     assert triggered.returncode == EXIT_SUCCESS, f"trigger failed:\n{triggered.stderr}"
     shim_bin = assert_shim_dir_exists(ocx, pkg.repo, "sequence 2: the shim survives materialization")
+    assert shim_bin == composed, "sequence 2: materialization must not republish the shim tree"
     assert _is_materialized(ocx, project, pkg), "sequence 2: the trigger materialized the package"
 
     assert _run(ocx, project, "--format", "json", "clean").returncode == EXIT_SUCCESS
@@ -1225,7 +1298,6 @@ def test_sequence_5_clean_collects_neither_an_eager_package_nor_a_lazy_shim(
     )
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
 def test_sequence_6_force_clean_after_materialization_returns_the_tool_to_shim_only(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -1241,8 +1313,9 @@ def test_sequence_6_force_clean_after_materialization_returns_the_tool_to_shim_o
         ocx, unique_repo, "1.0.0", tmp_path, bins=["hello"], binaries=["hello"], env=PUBLIC_BIN_PATH
     )
     project = _lazy_project(ocx, tmp_path, _toolchain_lazy(pkg))
-    export = _run(ocx, project, "env", "--shell=sh")
-    triggered = run_after_sourcing(export.stdout, "hello", cwd=project, env=_shell_env(ocx))
+    assert _run(ocx, project, "--format", "json", "env").returncode == EXIT_SUCCESS
+    composed = assert_shim_dir_exists(ocx, pkg.repo, "sequence 6: composed before the trigger")
+    triggered = _trigger_the_shim(ocx, project, composed, "hello")
     assert triggered.returncode == EXIT_SUCCESS, f"trigger failed:\n{triggered.stderr}"
     original = assert_shim_dir_exists(ocx, pkg.repo, "sequence 6: shim present after the trigger")
     assert _is_materialized(ocx, project, pkg), "sequence 6: package present after the trigger"

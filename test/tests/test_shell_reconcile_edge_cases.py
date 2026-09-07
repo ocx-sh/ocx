@@ -642,7 +642,13 @@ def test_ec_list_001_move_to_front_idempotent_under_repeated_eval(arena: Arena) 
 
 
 def test_ec_list_002_revert_commutes_with_a_foreign_prepend(arena: Arena) -> None:
-    """EC-LIST-002 — leaving deletes only ocx's element; a foreign prepend survives in place and in order."""
+    """EC-LIST-002 — leaving deletes only ocx's element; a foreign prepend survives, in order, behind the session block.
+
+    Under C-059 the two session directories are desired on every prompt, so the
+    leave prompt re-prepends them and the foreign element is no longer segment
+    zero. What EC-LIST-002 guards is unchanged: ocx deletes its own element and
+    nothing else, and the foreign one keeps its position relative to the tail.
+    """
     project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
     (project / "binA").mkdir()
     outside = arena.projects / "outside"
@@ -661,7 +667,9 @@ def test_ec_list_002_revert_commutes_with_a_foreign_prepend(arena: Arena) -> Non
     )
     assert result.returncode == 0
     segments = matrix.path_segments(_read(result, "path"))
-    assert segments[0] == "/foo/bin", f"the foreign element must stay in front: {segments}"
+    session = matrix.session_path_dirs(arena.ocx_home)
+    assert segments[: len(session)] == session, f"C-059/C-060: the session block leads every prompt: {segments}"
+    assert segments[len(session)] == "/foo/bin", f"the foreign element must survive, in front of the tail: {segments}"
     assert str(project / "binA") not in segments, f"ocx's element must be gone: {segments}"
 
 
@@ -1027,7 +1035,10 @@ def test_ec_rec_001_in_process_versus_emitted_parity_per_arm(shell: str, arena: 
     assert result.returncode == 0, f"stderr:\n{result.stderr}"
     segments = matrix.path_segments(_read(result, "path"))
     assert segments[0] == str(project / "binA"), f"{shell}: emitted move-to-front must prepend, matching in-process order: {segments}"
-    assert segments[1:] == ["/x", "/y"], f"{shell}: the untouched ambient tail must survive byte-identically: {segments}"
+    expected = matrix.session_path_dirs(arena.ocx_home) + ["/x", "/y"]
+    assert segments[1:] == expected, (
+        f"{shell}: the session block (C-059) then the untouched ambient tail, byte-identically: {segments}"
+    )
 
 
 def test_ec_rec_005_shell_state_is_read_only(arena: Arena) -> None:
@@ -1910,7 +1921,13 @@ def test_ec_path_004_bash_export_path_strips_empty_ambient_segments(arena: Arena
 
 @pytest.mark.parametrize("shell", ("bash", "zsh"))
 def test_ec_path_005_removing_the_entire_value_yields_empty_not_a_bare_separator(shell: str, arena: Arena) -> None:
-    """EC-PATH-005 — when ocx's element is the ENTIRE PATH, revert yields the empty string, never a bare separator.
+    """EC-PATH-005 — when ocx's element is the ENTIRE PATH, revert leaves the session pair, never a bare separator.
+
+    Under C-059 ``PATH`` can no longer be emptied: the two session directories
+    are desired on every prompt, so the residue after the revert is exactly
+    that pair. The guard itself is unchanged — the assertion below splits on
+    the separator and compares element for element, so a bare separator (or any
+    empty segment the POSIX emit left behind) still fails it.
 
     fish and pwsh are excluded: fish's ``PATH`` is a builtin list variable
     that this host's fish never reports fully empty via the shared probe
@@ -1934,7 +1951,9 @@ def test_ec_path_005_removing_the_entire_value_yields_empty_not_a_bare_separator
     )
     assert result.returncode == 0, f"{shell}: stderr:\n{result.stderr}"
     raw = _read(result, "path")
-    assert raw in ("", matrix.ABSENT), f"{shell}: emptying PATH entirely must yield '' (or unset), never a bare separator: {raw!r}"
+    assert raw.split(os.pathsep) == matrix.session_path_dirs(arena.ocx_home), (
+        f"{shell}: retiring ocx's only element must leave exactly the session pair, never a bare separator: {raw!r}"
+    )
 
 
 def test_ec_path_006_adjacent_duplicates_collapse_on_fish(arena: Arena) -> None:

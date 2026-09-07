@@ -243,15 +243,20 @@ def test_direnv_export_is_idempotent(ocx: OcxRunner, tmp_path: Path):
 
     # Source the export block twice in a clean bash (no ocx on PATH) and count
     # how many PATH segments point at the project tool's bin dir.
+    seed = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
     script = (
-        "export PATH=/usr/bin:/bin:/usr/sbin:/sbin\n"
+        f"export PATH={SEP.join(seed)}\n"
         f"{exports}\n{exports}\n"
         'printf "%s" "$PATH"'
     )
     final = _run(RECIPES["bash"], script)
-    # The toolchain bin dir is the content-addressed package path (it contains
-    # the object store's `packages/.../content` segment), not the seed dirs.
-    tool_dirs = [seg for seg in final.split(SEP) if "packages" in seg]
+    # The segments this project contributed are the ones the seed did not.
+    # Identifying them by exclusion rather than by either path spelling keeps
+    # the idempotency property this test owns independent of which lane
+    # composed the value — a project-tier emitter follows the rendered
+    # `<home>/toolchain/<group>/<entry>` links (C-065), so the digest spelling
+    # this once matched on is no longer what reaches PATH.
+    tool_dirs = [seg for seg in final.split(SEP) if seg not in seed]
     assert tool_dirs, f"tool bin dir missing from PATH after direnv export: {final!r}"
     # Each distinct tool dir must appear exactly once across the two evals.
     for directory in set(tool_dirs):
@@ -259,6 +264,21 @@ def test_direnv_export_is_idempotent(ocx: OcxRunner, tmp_path: Path):
             f"direnv export is not idempotent: {directory} appears {tool_dirs.count(directory)}x "
             f"in PATH={final!r}"
         )
+
+    # C-065, positively: `ocx direnv export` is one of the four composing
+    # emitters, so in the following lane every package path it emits resolves
+    # through the project's rendered toolchain home and none keeps the object
+    # store's `packages/.../content` spelling. Asserting both halves is what
+    # makes a regression to digest paths red here rather than silently leaving
+    # the idempotency half green.
+    home = project / ".ocx" / "toolchain"
+    packages_root = Path(ocx.env["OCX_HOME"]) / "packages"
+    assert any(seg.startswith(str(home)) for seg in tool_dirs), (
+        f"C-065: `ocx direnv export` must emit paths under {home}; got {tool_dirs!r}"
+    )
+    assert not any(seg.startswith(str(packages_root)) for seg in tool_dirs), (
+        f"C-065: no emitted package path may keep the digest spelling; got {tool_dirs!r}"
+    )
 
 
 def _run_in(ocx: OcxRunner, cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:

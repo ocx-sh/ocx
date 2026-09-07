@@ -17,12 +17,12 @@ watch-file re-firing, or export-diff bookkeeping — nothing here observes
 direnv, so read no evidence about it into a green.
 
 Related coverage: `test_direnv.py` (the `ocx direnv init` / `export`
-subcommands themselves) and `test_lazy_loading.py` (S-001…S-012 minus S-011).
+subcommands themselves) and `test_lazy_loading.py` (S-001…S-013 minus S-011).
 """
 from __future__ import annotations
 
+import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -73,7 +73,11 @@ def _is_materialized(ocx: OcxRunner, project: Path, pkg: PackageInfo) -> bool:
     return result.returncode == EXIT_SUCCESS
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
+@pytest.mark.skipif(
+    os.pathsep != ":",
+    reason="the trigger sources 'ocx direnv export' lines into bash; os.pathsep is not ':' "
+    "here, so what those lines export is not a PATH this host's loader reads",
+)
 def test_s011_direnv_export_composes_a_deferred_tool_and_the_first_call_materializes(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -209,7 +213,6 @@ def test_s011_direnv_export_accepts_the_lazy_mode_flag(
     assert_shim_dir_exists(ocx, pkg.repo, "C-021: without the flag the toolchain tier defers")
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the shim producer is POSIX-only in this phase (S-010)")
 def test_direnv_export_pull_retry_keeps_every_root_in_request_order(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
@@ -286,6 +289,8 @@ def test_direnv_export_pull_retry_keeps_every_root_in_request_order(
         assert str(shim_bin) in partial.stdout, (
             f"the deferred tool's shim `bin/` {shim_bin} must survive the retry; got:\n{partial.stdout}"
         )
-    assert "/content/bin" in partial.stdout, (
-        f"the pulled eager tool must contribute its real `bin/`; got:\n{partial.stdout}"
+    content_bin = os.path.join("content", "bin")
+    assert content_bin in partial.stdout, (
+        f"the pulled eager tool must contribute its real `bin/` ({content_bin}); "
+        f"got:\n{partial.stdout}"
     )

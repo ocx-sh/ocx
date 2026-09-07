@@ -1255,11 +1255,18 @@ def test_run_package_composed_env_byte_identical_with_and_without_clean(
     _write_ocx_toml(project, f'[tools]\n{repo} = "{ocx.registry}/{repo}:{tag}"\n')
     assert _run_lock(ocx, project).returncode == EXIT_SUCCESS
 
-    dirty = _run(ocx, project, "exec", "--", "env")
+    # Absolute path, not a bare `env`: `--clean` starts from an empty ambient
+    # env, so PATH carries only what the toolchain composes, and this package
+    # declares none — a bare name has nothing to resolve against (exit 65).
+    # Same idiom as the sibling above.
+    env_binary = shutil.which("env")
+    assert env_binary is not None, "the POSIX `env` binary must be available"
+
+    dirty = _run(ocx, project, "exec", "--", env_binary)
     assert dirty.returncode == EXIT_SUCCESS, (
         f"ocx run (no --clean) must succeed; rc={dirty.returncode}\nstderr:\n{dirty.stderr}"
     )
-    clean = _run(ocx, project, "exec", "--clean", "--", "env")
+    clean = _run(ocx, project, "exec", "--clean", "--", env_binary)
     assert clean.returncode == EXIT_SUCCESS, (
         f"ocx run --clean must succeed; rc={clean.returncode}\nstderr:\n{clean.stderr}"
     )
