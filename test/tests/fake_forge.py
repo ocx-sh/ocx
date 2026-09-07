@@ -541,6 +541,17 @@ class FakeForge(GitHttpRoutes, GitLabRoutes, http.server.ThreadingHTTPServer):
         # Target project paths whose allowlist read answers 403 — the field the
         # credential may not read, which is `unknown`-and-proceed.
         self.gitlab_job_token_allowlist_unreadable: set[str] = set()
+        # Whether the GitLab surface holds a `JOB-TOKEN` request to the scope a
+        # real CI job token has. ON by default, because the permissive answer is
+        # what let #429 ship: this fake served `GET /projects/:id` and the
+        # single-branch endpoint to every credential, so the job-token posture
+        # passed here and died against a real instance at the first read. A knob
+        # rather than a constant only so a row can *demonstrate* the difference —
+        # turning it off is how the pre-fix failure is reproduced, never how a
+        # row is made to pass.
+        #
+        # https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access
+        self.gitlab_job_token_endpoint_scope: bool = True
 
         self.git_http_init()
 

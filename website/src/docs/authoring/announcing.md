@@ -287,6 +287,13 @@ This posture needs the index project to have enabled job-token pushes and to hav
 allowlisted the publishing project. Both are settings on the **index** project, not yours;
 if either is missing the run exits 86 naming it, and an administrator there has to act.
 
+A job token may read only [the endpoints GitLab opens to
+it](https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access), which does not include
+the settings above — so in this posture ocx cannot check them before it pushes. It pushes,
+and GitLab's refusal is what names the missing one. The exit code and the message are the
+same either way; only the moment differs. The [split pair](#announcing-split) below reads
+them up front, because its API half is an ordinary token.
+
 ### GitLab, with a split credential pair {#announcing-split}
 
 ```yaml

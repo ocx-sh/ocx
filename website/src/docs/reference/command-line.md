@@ -2938,7 +2938,7 @@ The package used to be named by a `--package` flag. That spelling is deprecated:
 | `--index-repo` or `--fork` names a nested namespace on GitHub, which has no nested organizations. Checked before any request | 64 |
 | The description recorded in the index no longer exists on the registry — republish it, or ask for it to be cleared in the index | 65 |
 | An unchanged run's open pull request can no longer merge against the index base — close the pull request or delete the branch; the next announce rebuilds it | 65 |
-| `--transport git` was selected and the forge answered, but the instance or the target project lacks a capability that transport needs — job-token pushes disabled on the index project, or the publishing project absent from its job-token allowlist. Checked before anything is written; an administrator of the index project has to act | 86 |
+| `--transport git` was selected and the forge answered, but the instance or the target project lacks a capability that transport needs — job-token pushes disabled on the index project, or neither of its allowlists (the publishing project by name, or one of its groups) admits it. A [split credential pair][authoring-announcing-split] checks this before anything is written and names the missing one; a bare job token cannot read either setting, so it pushes and GitLab's own rejection decides instead — same exit code, a generic message. An administrator of the index project has to act either way | 86 |
 
 **JSON report**
 
@@ -3020,7 +3020,7 @@ Everything about forge selection, coordinates, nested GitLab groups and self-hos
 
 The report says which rule produced the list, in `owner_identity_source`. `resolved` means the forge's users API answered and its canonical spelling, id and bot flag were taken from it. `ci-environment` means the CI variables named the list and the users API confirmed it. `asserted` means the users API was out of reach and a `LOGIN:ID` pair was taken on your word — reachable **on GitLab only**, and only under a job token, since that is the one credential whose users API is closed; a GitHub run never produces it. An unreachable users API with a bare `LOGIN` is a usage error naming the `LOGIN:ID` form, because guessing an id would write the wrong account into a governance field.
 
-**`--transport git` writes over a clone instead of the API.** The default `api` transport opens the request through the forge's REST API. `git` clones the index repository into a temporary directory, builds the commit there, and creates the request from a single authenticated push — which is the only way a GitLab CI job token can open a merge request, because that credential can push to a repository and read the API but cannot open a merge request through it. It is GitLab-only and refused (exit 64, naming both) against a resolved GitHub forge, against `--fork`, and against `--out`. Before it writes, ocx checks that the index project allows job-token pushes and that its job-token allowlist admits the publishing project; a missing capability exits 86 naming it, because only an administrator of the index project can grant it.
+**`--transport git` writes over a clone instead of the API.** The default `api` transport opens the request through the forge's REST API. `git` clones the index repository into a temporary directory, builds the commit there, and creates the request from a single authenticated push — which is the only way a GitLab CI job token can open a merge request, because that credential can push to a repository and read the API but cannot open a merge request through it. It is GitLab-only and refused (exit 64, naming both) against a resolved GitHub forge, against `--fork`, and against `--out`. A [split credential pair][authoring-announcing-split] checks that the index project allows job-token pushes and that one of its allowlists (the publishing project by name, or one of its groups) admits it before anything is written, and names the missing one; a bare job token cannot read either setting, so it pushes instead and lets GitLab's own rejection decide — same exit code, 86, but a generic message rather than a named one. Either way, only an administrator of the index project can grant it.
 
 Claiming from GitLab is walked through end to end in [Announcing a package][authoring-announcing].
 
@@ -3061,7 +3061,7 @@ ocx package claim --repository oci://<HOST>/<PATH> [OPTIONS] <NAMESPACE>/<PACKAG
 | The git push was refused by the forge's own policy — a protected branch, or a push rule the commit does not satisfy | 77 |
 | An owner login the forge has no account for — check the spelling, or pass `LOGIN:ID` | 79 |
 | Any mode other than `--out` run with no forge credential, the credential was rejected (401/403), or — without `--fork` — it cannot push to `--index-repo`. The last is checked before anything is written and names the repository and the missing permission | 80 |
-| `--transport git` was selected and the forge answered, but the instance or the target project lacks a capability that transport needs — job-token pushes disabled on the index project, or the publishing project absent from its job-token allowlist. An administrator of the index project has to act | 86 |
+| `--transport git` was selected and the forge answered, but the instance or the target project lacks a capability that transport needs — job-token pushes disabled on the index project, or neither of its allowlists (the publishing project by name, or one of its groups) admits it. A [split credential pair][authoring-announcing-split] names the missing one; a bare job token cannot read either setting, so the message is generic instead. An administrator of the index project has to act either way | 86 |
 
 **JSON report**
 
@@ -3085,14 +3085,14 @@ ocx package claim --repository oci://<HOST>/<PATH> [OPTIONS] <NAMESPACE>/<PACKAG
   "written_paths": [],
   "capability_checks": [
     { "name": "git-version", "status": "passed", "detail": "2.47.1" },
-    { "name": "push-access", "status": "skipped", "detail": null },
-    { "name": "job-token-push", "status": "passed", "detail": null },
-    { "name": "job-token-allowlist", "status": "passed", "detail": null }
+    { "name": "push-access", "status": "unknown", "detail": "projects/:id" },
+    { "name": "job-token-push", "status": "unknown", "detail": "ci_push_repository_for_job_token_allowed" },
+    { "name": "job-token-allowlist", "status": "unknown", "detail": "job_token_scope/allowlist" }
   ]
 }
 ```
 
-`status` is `unchanged` or `updated`, compared against the **open claim branch** — so an `--out` run always reports `updated`, unlike announce's, which compares against the committed entry. `credential_kind` is `job-token`, `token` or `none`; it says `job-token` only when the credential is this environment's own `CI_JOB_TOKEN`, because ocx cannot tell a personal from a project, group or OAuth token and reports no kind it cannot observe. `push_credential_kind` is `job-token`, `token`, `git-helper` or `null`, and is always `null` under `api`, which pushes nothing; `git-helper` means ocx injected nothing and git's own credential helpers authenticated the push. `owner_identity_source` is `resolved`, `ci-environment` or `asserted` (GitLab-only, see above). `author_identity_source` is `resolved`, `ci-environment` or `null`, and never `asserted`. `branch` is present on every run, `--out` included — it is derived from the package, not read from the forge. `fork` is `null` on the direct path and under `--transport git`. `capability_checks` carries one row per capability in a fixed order, `skipped` rows included, and is **non-empty on every run** — so a pipeline asserts the preflight ran rather than trusting a bare exit 0. There is no `failed` status: a check that fails raises the error instead.
+`status` is `unchanged` or `updated`, compared against the **open claim branch** — so an `--out` run always reports `updated`, unlike announce's, which compares against the committed entry. `credential_kind` is `job-token`, `token` or `none`; it says `job-token` only when the credential is this environment's own `CI_JOB_TOKEN`, because ocx cannot tell a personal from a project, group or OAuth token and reports no kind it cannot observe. `push_credential_kind` is `job-token`, `token`, `git-helper` or `null`, and is always `null` under `api`, which pushes nothing; `git-helper` means ocx injected nothing and git's own credential helpers authenticated the push. `owner_identity_source` is `resolved`, `ci-environment` or `asserted` (GitLab-only, see above). `author_identity_source` is `resolved`, `ci-environment` or `null`, and never `asserted`. `branch` is present on every run, `--out` included — it is derived from the package, not read from the forge. `fork` is `null` on the direct path and under `--transport git`. `capability_checks` carries one row per capability in a fixed order, `skipped` rows included, and is **non-empty on every run** — so a pipeline asserts the preflight ran rather than trusting a bare exit 0. There is no `failed` status: a check that fails raises the error instead — `unknown` is a bare job token's normal answer for a capability it cannot read, and the push it still allows decides the outcome instead.
 
 `author` records who authored the request, which is deliberately not who owns the package. **It is not an attestation.** Only its first rung — the forge's own answer about the credential — is the forge speaking; the second rung is an ordinary read of `GITLAB_USER_LOGIN`/`GITHUB_ACTOR`, which an earlier pipeline step can set to anything. `author_identity_source` says which rung answered: `resolved` for the forge's answer about the credential, `ci-environment` for the environment read, `null` when there is no author at all. Branch on that key rather than on `author` alone — the two rungs produce the same `{login, id}` shape and are not equally trustworthy.
 
@@ -6104,6 +6104,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [user-guide-managed-config]: ../user-guide.md#managed-config
 [user-guide-toml]: ../user-guide.md#project
 [authoring-announcing]: ../authoring/announcing.md
+[authoring-announcing-split]: ../authoring/announcing.md#announcing-split
 [env-composition-project-env]: ./env-composition.md#project-env
 [env-composition-list]: ./env-composition.md#composition-order-list
 [env-composition-list-separator]: ./env-composition.md#composition-order-list-separator

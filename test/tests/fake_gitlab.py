@@ -38,6 +38,12 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 _ID = r"[^/]+"
 
 PROJECT_RE = re.compile(rf"^/projects/(?P<id>{_ID})$")
+# `GET /projects/:id/repository/branches` — the LIST endpoint, and the ONLY
+# branch read a CI job token may make. The single-branch route below is not on
+# GitLab's job-token endpoint list and answers 404 there, which is the defect
+# #429 reports: the client read that 404 as "no such branch" and the caller as
+# "no base ref found to commit onto".
+BRANCHES_RE = re.compile(rf"^/projects/(?P<id>{_ID})/repository/branches$")
 BRANCH_RE = re.compile(rf"^/projects/(?P<id>{_ID})/repository/branches/(?P<branch>.+)$")
 FILE_RAW_RE = re.compile(rf"^/projects/(?P<id>{_ID})/repository/files/(?P<path>.+)/raw$")
 FILE_RE = re.compile(rf"^/projects/(?P<id>{_ID})/repository/files/(?P<path>.+)$")
@@ -85,6 +91,11 @@ class GitLabRoutes:
         match = PROJECT_RE.fullmatch(path)
         if match:
             self.gl_get_project(handler, match.group("id"))
+            return True
+
+        match = BRANCHES_RE.fullmatch(path)
+        if match:
+            self.gl_get_branches(handler, match.group("id"), query)
             return True
 
         match = BRANCH_RE.fullmatch(path)
@@ -151,6 +162,25 @@ class GitLabRoutes:
             return True
 
         return False
+
+    # ── job-token endpoint scope ─────────────────────────────────────────
+
+    def gl_job_token_refuses(self, handler: _Handler) -> bool:
+        """Whether this request is a job token reaching past its endpoint list.
+
+        Keyed on the header the client actually sent rather than on a fixture
+        flag naming the posture: `GitLabForge::request` selects `JOB-TOKEN` when
+        the API credential IS the job token, so this asks the same question the
+        real instance asks, of the same evidence.
+
+        The answer is a **404**, not a 403 — that is what a self-hosted 19.3 was
+        observed to answer, and the two are not interchangeable here: 404 is the
+        status the client cannot tell apart from "no such project", which is the
+        whole reason #429's failure named the wrong thing.
+        """
+        if not self.gitlab_job_token_endpoint_scope:
+            return False
+        return handler.headers.get("JOB-TOKEN") is not None
 
     # ── project identity ─────────────────────────────────────────────────
 
@@ -219,6 +249,10 @@ class GitLabRoutes:
     # ── read routes ──────────────────────────────────────────────────────
 
     def gl_get_project(self, handler: _Handler, identifier: str) -> None:
+        # The Projects API is not on the job-token endpoint list at all.
+        if self.gl_job_token_refuses(handler):
+            handler._reply_json(404, {"message": "404 Project Not Found"})
+            return
         with self.lock:
             full_path = self._gl_resolve_locked(identifier)
             if full_path is None:
@@ -235,6 +269,15 @@ class GitLabRoutes:
         handler._reply_json(200, body)
 
     def gl_get_branch(self, handler: _Handler, identifier: str, branch: str) -> None:
+        """`GET /projects/:id/repository/branches/:branch` — the SINGLE branch.
+
+        The Branches API opens only its list endpoint to a job token; this one
+        answers 404 there. Keeping the route means a client that regresses to it
+        fails here the way it fails in production, instead of being served.
+        """
+        if self.gl_job_token_refuses(handler):
+            handler._reply_json(404, {"message": "404 Branch Not Found"})
+            return
         branch = urllib.parse.unquote(branch)
         with self.lock:
             full_path = self._gl_resolve_locked(identifier)
@@ -243,6 +286,47 @@ class GitLabRoutes:
             handler._reply_json(404, {"message": "404 Branch Not Found"})
             return
         handler._reply_json(200, {"name": branch, "commit": {"id": sha}})
+
+    def gl_get_branches(self, handler: _Handler, identifier: str, query: dict[str, list[str]]) -> None:
+        """`GET /projects/:id/repository/branches?search=&per_page=` -> a LIST.
+
+        `search` is GitLab's own filter, and `^term` is its PREFIX form — not an
+        anchor and not a regex, so `^main` returns `maintenance` and `main-old`
+        alongside `main`. Modelled faithfully because the exact-name selection is
+        the client's, and a fake that answered only the exact match would make
+        that selection unfalsifiable — a `[0]` implementation would pass.
+
+        A project that is not visible is 404; a search that matches nothing is
+        **200 with an empty list**. Those are different answers, and the client
+        folds only the second one to "the branch does not exist".
+        """
+        search = (query.get("search") or [""])[0]
+        try:
+            per_page = int((query.get("per_page") or ["20"])[0])
+        except ValueError:
+            per_page = 20
+        with self.lock:
+            full_path = self._gl_resolve_locked(identifier)
+            if full_path is None:
+                handler._reply_json(404, {"message": "404 Project Not Found"})
+                return
+            refs = dict(self.refs.get(full_path, {}))
+        if not search:
+            matched = list(refs)
+        elif search.startswith("^"):
+            matched = [name for name in refs if name.startswith(search[1:])]
+        else:
+            matched = [name for name in refs if search in name]
+        # Reverse order, deliberately. GitLab orders by name, under which the
+        # exact match sorts FIRST among its own prefixes (`main` before
+        # `main-old` before `maintenance`) — and a fixture that hands the wanted
+        # entry back first lets a client that reads `[0]` pass every row here
+        # while picking a neighbouring branch against a real instance. The
+        # ordering is not part of the contract; the client's exact-name selection
+        # is, so this answers in the order that can falsify it.
+        names = sorted(matched, reverse=True)
+        entries = [{"name": name, "commit": {"id": refs[name]}} for name in names[:per_page]]
+        handler._reply_json(200, entries)
 
     def gl_get_file(self, handler: _Handler, identifier: str, path: str, query: dict[str, list[str]], *, raw: bool) -> None:
         path = urllib.parse.unquote(path)
@@ -445,10 +529,27 @@ class GitLabRoutes:
             # recorded, which is every existing consumer.
             self.git_promote_ready_merge_requests_locked()
             target = self._gl_resolve_locked(identifier)
-            source = self._gl_resolve_locked(source_project) if source_project else None
-            key = (target, source, source_branch)
-            record = self.gitlab_merge_requests.get(key)
-        handler._reply_json(200, [record] if record else [])
+            if source_project:
+                source = self._gl_resolve_locked(source_project)
+                found = self.gitlab_merge_requests.get((target, source, source_branch))
+                records = [found] if found else []
+            else:
+                # An ABSENT `source_project_id` is no narrowing, exactly as on the
+                # real API: every open request onto this target from a branch of
+                # this name, whatever project it came from. Answering `[]` here —
+                # which keying the lookup on `source=None` amounts to — would let
+                # a client that stopped sending the filter see no request at all,
+                # and it stopped sending it on purpose: resolving the numeric id
+                # the filter needs costs a `GET /projects/:id`, which a CI job
+                # token may not call (ocx#429). The narrowing moved into the
+                # client, which compares each entry's own source and target ids,
+                # so this route has to hand it the entries to compare.
+                records = [
+                    record
+                    for (record_target, _source, record_branch), record in self.gitlab_merge_requests.items()
+                    if record_target == target and record_branch == source_branch
+                ]
+        handler._reply_json(200, records)
 
     def gl_get_merge_request(self, handler: _Handler, identifier: str, iid: int) -> None:
         """`GET /projects/:id/merge_requests/:iid` -> the merge request, with the
@@ -635,6 +736,13 @@ class GitLabRoutes:
                 # a push option (D-T4): two shapes would let a poll assert on a
                 # key only one of the two writers emits.
                 "source_branch": source_branch,
+                # The provenance pair. Carried by every real merge-request body,
+                # and the only thing that distinguishes this request from one a
+                # stranger's fork opened onto the same index on the same branch
+                # name — the client compares them rather than resolving a numeric
+                # project id, which a CI job token cannot read (ocx#429).
+                "source_project_id": self._gl_project_id_locked(source),
+                "target_project_id": self._gl_project_id_locked(target),
             }
             self.gitlab_merge_requests[key] = record
         handler._reply_json(201, record)
