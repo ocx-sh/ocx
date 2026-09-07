@@ -333,9 +333,12 @@ distinguishable from a measurement that never ran. :func:`measure_reentry` runs
 all four as interleaved min-of-N series and :func:`_reentry_gates` holds both
 ends — the control must read ~zero on two spawns of the *same* payload, and the
 trampoline must cost measurably more than that payload. The overhead itself is
-**recorded**, against :data:`REENTRY_OWNER_TRIGGER_MS`: the NFR row accepts the
-cost and asks for an escalation on measurement, and the escalation is a decision
-to file an issue, which no exit code can take.
+**asserted**, against :data:`REENTRY_OWNER_TRIGGER_MS` and **above this
+machine's bare-exec floor** — a trampoline `exec`s a whole ocx, so the raw
+figure carries one process spawn the code cannot influence and a macOS runner
+charges 11.2 ms for. The raw figure is recorded beside it and keeps the owner's
+issue-filing meaning: the NFR row asks for an escalation on measurement, and
+that escalation is a decision to file an issue, which no exit code can take.
 
 This is also the only row here that ever observes C-069's per-resolution cost —
 one `stat` and one bounded read per candidate on every bare-name resolution
@@ -742,6 +745,40 @@ CAPABILITY_RECORD = Path("state") / "host" / "capabilities.json"
 #: rather than a second, CI-specific ceiling. That is deliberate — a flaky
 #: latency gate gets disabled by the next person who hits it, and then the
 #: budget is unguarded while looking guarded.
+#:
+#: **⚠ That protection is against noise, and a platform tax is not noise.** The
+#: paragraph above was falsified by the first macOS run the gate ever saw
+#: ([run 34115369610](https://github.com/ocx-sh/ocx/actions/runs/34115369610),
+#: `macos-26-arm64`, 2026-09-07): a 20.651 ms raw overhead over an **11.242 ms
+#: bare-exec floor**, missing this budget by 10.651 ms against 5.406 ms of
+#: scatter — resolvable, so rule 3 correctly declined to excuse it and the gate
+#: went red. It could not have gone any other way. A trampoline `exec`s a whole
+#: ocx, so its overhead contains one bare-exec floor by construction, and on a
+#: runner whose floor alone is 11.2 ms **no ocx change of any size can put the
+#: raw figure under 10 ms**. A gate whose green is unreachable on the platform
+#: it runs on is the same defect as one whose red is unreachable: it stops
+#: measuring the code and starts measuring the machine.
+#:
+#: **So the assert is floor-relative and the report is not.** The gate observes
+#: ``trampoline_overhead_ms - floor_ms`` against this constant — the same
+#: ``exec_floor + Δ`` form every other wall-clock budget in this file takes, and
+#: the form `shell-activation-deep.yml` already names as the reason C-044
+#: measures its floor per platform in the same job. What that number contains is
+#: the trampoline's own `/bin/sh` and ocx's work *above* a bare `ocx version`:
+#: exactly the part a composed-env cache could remove, which is the decision
+#: this constant informs. The macOS run reads **9.409 ms** on it, inside budget.
+#:
+#: The **raw** overhead keeps this constant's original meaning and is recorded
+#: beside the gated one, with ``over_owner_trigger`` unchanged: above 10 ms of
+#: raw ocx-side re-entry the owner files the composed-env-cache issue. A green
+#: gate with that flag set is a real state, not a contradiction — it is what a
+#: slow platform looks like — and the self-check pins it as a case.
+#:
+#: The cost of the change is one bare-exec floor of headroom on every platform:
+#: on the quiet box the 8.604 / 9.261 / 9.442 ms observations came from, a
+#: low-single-digit-millisecond loosening; on the macOS runner, 11.2 ms. That is
+#: the platform tax being excused by name rather than by an abstention that was
+#: never going to fire.
 REENTRY_OWNER_TRIGGER_MS = 10.0
 
 #: The band the item-37 **red control** has to land in. Two identical spawns of
@@ -1233,7 +1270,7 @@ def _bin_arena_gates(bin_arena: Mapping[str, float]) -> list[Gate]:
     ]
 
 
-def _reentry_gates(reentry: Mapping[str, float], spread: float) -> list[Gate]:
+def _reentry_gates(reentry: Mapping[str, float], spread: float, floor: float) -> list[Gate]:
     """Validation item 37's two controls — the instrument, in both colours.
 
     Item 37 measures the **ocx-side** cost of a trampoline invocation against a
@@ -1259,11 +1296,21 @@ def _reentry_gates(reentry: Mapping[str, float], spread: float) -> list[Gate]:
 
     The **number** item 37 exists to produce — the overhead against the owner's
     :data:`REENTRY_OWNER_TRIGGER_MS` trigger — is the third gate, and is
-    asserted since #423 was answered without a cache: see that constant for what
-    changed and why the budget rather than the mechanism is what gets pinned.
+    asserted since #423 was answered without a cache. It is asserted **above the
+    bare-exec floor**, because the raw figure contains one whole ocx spawn and is
+    therefore unmeetable on a platform whose spawn alone costs more than the
+    budget: see that constant for the macOS run that proved it, for why the
+    budget rather than the mechanism is what gets pinned, and for why the raw
+    number is still reported.
     """
     control = reentry.get("control_delta_ms", 0.0)
     overhead = reentry.get("trampoline_overhead_ms", 0.0)
+    # What the trigger is asserted against: the overhead a composed-env cache
+    # could still remove, i.e. everything above the one irreducible ocx spawn
+    # this machine charges for any invocation at all. See
+    # `REENTRY_OWNER_TRIGGER_MS` for why the raw figure is reported and this one
+    # is gated.
+    above_floor = overhead - floor
     return [
         _budget_gate(
             name="the re-entry instrument reads ~zero on two identical payload spawns",
@@ -1289,12 +1336,13 @@ def _reentry_gates(reentry: Mapping[str, float], spread: float) -> list[Gate]:
             ),
         ),
         _budget_gate(
-            name="trampoline re-entry stays under the owner's composed-env-cache trigger",
-            observed=overhead,
+            name="trampoline re-entry <= exec_floor + owner trigger",
+            observed=above_floor,
             budget=REENTRY_OWNER_TRIGGER_MS,
             spread=spread,
             breach=(
-                f"trampoline re-entry cost {overhead:.3f} ms, over the "
+                f"trampoline re-entry cost floor + {above_floor:.3f} ms ({overhead:.3f} ms over its "
+                f"payload, against a {floor:.3f} ms bare-exec floor), over the "
                 f"{REENTRY_OWNER_TRIGGER_MS:.3f} ms owner trigger. Two things hold this number down and "
                 "either one regressing shows up here: `PackageManager::find` answering an "
                 "already-stored digest without resolving (#424), and `oci::Client` / `OcxIndex` "
@@ -1444,8 +1492,9 @@ def evaluate(
         ``bin`` row measuring an empty directory — see :func:`_bin_arena_gates`.
     reentry:
         :func:`measure_reentry`' mapping (validation item 37). Its two controls
-        are gated; the overhead number itself is recorded — see
-        :data:`REENTRY_OWNER_TRIGGER_MS`.
+        are gated, and so is the overhead **above the bare-exec floor**; the raw
+        overhead is recorded beside it and carries the owner's issue-filing
+        signal — see :data:`REENTRY_OWNER_TRIGGER_MS`.
     capability_record:
         Whether a host-capability record existed to delete, i.e. whether
         ``cold_reconcile_samples`` measured a genuinely colder path. Recorded
@@ -1577,7 +1626,7 @@ def evaluate(
         *_composition_gates(streams),
         *_consent_gates(consent),
         *_bin_arena_gates(bin_arena),
-        *_reentry_gates(reentry, spread),
+        *_reentry_gates(reentry, spread, floor),
     ]
 
     records = {
@@ -1618,7 +1667,10 @@ def evaluate(
         "eval": dict(streams),
         "consent": dict(consent),
         "bin_arena": dict(bin_arena),
-        "reentry": dict(reentry),
+        # The gated figure travels with the raw ones. A reader comparing two
+        # runs on different platforms cannot recompute it without the floor,
+        # and the verdict is taken on this number, not on the raw overhead.
+        "reentry": {**reentry, "overhead_over_floor_ms": reentry["trampoline_overhead_ms"] - floor},
         "samples": len(floor_samples),
         "quiet_prompts": quiet,
     }
@@ -1666,9 +1718,14 @@ def format_report(report: LatencyReport) -> str:
         ),
         (
             f"  trampoline re-entry overhead         {rec['reentry']['trampoline_overhead_ms']:>9.3f} ms  "
-            f"(item 37, over a {rec['reentry']['payload_ms']:.3f} ms payload; owner trigger "
+            f"(item 37, over a {rec['reentry']['payload_ms']:.3f} ms payload; raw owner trigger "
             f"{REENTRY_OWNER_TRIGGER_MS:.1f} ms -> "
-            f"{'OVER — see the gate below' if rec['reentry']['over_owner_trigger'] else 'within budget'})"
+            f"{'OVER — recorded, file the follow-up' if rec['reentry']['over_owner_trigger'] else 'within budget'})"
+        ),
+        (
+            f"  ... minus the bare-exec floor        {rec['reentry']['overhead_over_floor_ms']:>9.3f} ms  "
+            f"(what the gate asserts against the {REENTRY_OWNER_TRIGGER_MS:.1f} ms trigger — the one ocx "
+            "spawn no cache can remove is the platform's, not ocx's)"
         ),
         (
             f"  ... `ocx exec` for the same tool     {rec['reentry']['exec_overhead_ms']:>9.3f} ms  "
@@ -3275,9 +3332,10 @@ def _summarize(artifact: dict[str, Any]) -> None:
                     ),
                     (
                         f"- trampoline re-entry overhead (item 37): "
-                        f"**{artifact['reentry']['trampoline_overhead_ms']:.3f} ms** against the "
-                        f"{REENTRY_OWNER_TRIGGER_MS:.1f} ms owner trigger — "
-                        f"{'**over — the gate reds**' if artifact['reentry']['over_owner_trigger'] else 'within budget'}"
+                        f"**{artifact['reentry']['trampoline_overhead_ms']:.3f} ms** raw, "
+                        f"**{artifact['reentry']['overhead_over_floor_ms']:.3f} ms** above the bare-exec floor "
+                        f"(the gated figure) against the {REENTRY_OWNER_TRIGGER_MS:.1f} ms owner trigger — "
+                        f"{'**raw is over: file the follow-up**' if artifact['reentry']['over_owner_trigger'] else 'within budget'}"
                     ),
                     (
                         f"- steady-state apply lines: **{artifact['eval']['steady_applies']:.0f}** "
@@ -3819,22 +3877,53 @@ def self_check() -> None:
         red_gate="a trampoline costs measurably more than its own payload",
         reentry={**_GREEN["reentry"], "trampoline_overhead_ms": 0.05},  # type: ignore[dict-item]
     )
-    # The owner's trigger is a gate since #423 closed without a cache, so a
-    # green run is by construction under it and the recorded flag must agree.
-    # The flag stays in the artifact — it is what a report reader sees — and
-    # this keeps it from drifting away from the gate that now decides the same
-    # question.
+    # The owner's trigger is a gate since #423 closed without a cache, and the
+    # `_GREEN` fixture is under it on both readings — raw and above the floor —
+    # so the recorded flag must agree with the gate here even though the two
+    # answer different questions (see below).
     assert green.records["reentry"]["over_owner_trigger"] == 0.0, (
         "the _GREEN fixture is under the owner trigger; the flag beside it must agree"
+    )
+    assert abs(green.records["reentry"]["overhead_over_floor_ms"] - (8.1 - 3.0)) < 1e-9, (
+        "the gated figure is the raw overhead minus the bare-exec floor, and the record must carry "
+        "the number the gate decided on rather than a second opinion about it"
     )
     # And the red half, which is the whole point of gating it: an overhead over
     # the trigger must FAIL rather than be reported and shrugged at. Without
     # this the gate is indistinguishable from the advisory print it replaced.
+    # Stated as `floor + trigger + 0.6`, never as an absolute: an absolute here
+    # would silently stop being a breach the moment the fixture's floor moved,
+    # which is the shape the `_budget_gate` probes below already refuse.
     case(
         expect_pass=False,
         why="re-entry over the owner trigger must fail: the budget is asserted, not reported",
-        red_gate="trampoline re-entry stays under the owner's composed-env-cache trigger",
-        reentry={**_GREEN["reentry"], "trampoline_overhead_ms": 10.6},  # type: ignore[dict-item]
+        red_gate="trampoline re-entry <= exec_floor + owner trigger",
+        reentry={
+            **_GREEN["reentry"],
+            "trampoline_overhead_ms": min(_GREEN["floor_samples"]) + REENTRY_OWNER_TRIGGER_MS + 0.6,
+        },  # type: ignore[dict-item]
+    )
+    # The platform-tax shape, and the reason the gate is floor-relative at all:
+    # a raw overhead OVER the trigger that is under it once the machine's own
+    # bare-exec floor is taken out. It passes, and the recorded flag still says
+    # OVER — the two are deliberately allowed to disagree, because the flag
+    # answers the owner's issue-filing question about what a user pays and the
+    # gate answers the regression question about what ocx costs. Measured on
+    # macos-26-arm64 in run 34115369610: a 20.651 ms raw overhead over an
+    # 11.242 ms floor, which the raw form redded and no ocx change could ever
+    # have made green.
+    tax = case(
+        expect_pass=True,
+        why="a raw overhead over the trigger but within floor + trigger is the platform's cost, not a regression",
+        reentry={
+            **_GREEN["reentry"],
+            "trampoline_overhead_ms": min(_GREEN["floor_samples"]) + REENTRY_OWNER_TRIGGER_MS - 0.6,
+            "over_owner_trigger": 1.0,
+        },  # type: ignore[dict-item]
+    )
+    assert tax.records["reentry"]["over_owner_trigger"] == 1.0, (
+        "the issue-filing flag must survive a green gate — it is the owner's escalation signal and "
+        "not a duplicate of the verdict"
     )
 
     # The margin, not the budget, is what the floor has to be able to resolve.
