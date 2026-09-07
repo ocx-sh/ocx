@@ -24,6 +24,7 @@ not copies. Team-shared — commit it.
 - Worktrees: default `.agents/worktrees/` (gitignored, `.gitignore:50`).
 - Constitution: `.claude/rules/arch-principles.md` (optional gate; plans
   checked against it when present).
+
 - Discussions: `.agents/discussions/<slug>.md` (hex-discuss artifacts; no
   project convention documented, default home).
 
@@ -206,6 +207,46 @@ research-axes:
   `function global:__ocxReconcile` so the wrapper and the prompt share one guarded entry
   point) made it pass. Re-run the failing leg against the new tip before opening an
   investigation into it.
+
+- **A doc comment that states a guarantee the code does not have is this codebase's
+  most repeatable defect — caught THREE times in one wave.** A serde paragraph claimed a
+  truncated stamp "cannot deserialize into a valid-looking one" while an `Option` field
+  read a dropped key as a valid tier; a floor doc claimed "every caller passes one of the
+  named constants" when there were zero callers and the file's own test passed arbitrary
+  floors; a join doc claimed "no failure mode at all — none of them can contain the
+  separator" when Windows `split_paths` reads `"` as a quote and can emit a segment
+  containing `;`. Each was written by a careful worker and each survived one review round.
+  **Add "read your doc comments back against the code" to every builder brief**, and have
+  reviewers treat a doc-asserted invariant as a claim to falsify, not as context.
+- **My own instruction caused a Block.** Round 1 told a builder to delete `std::env::join_paths`
+  for a manual `PATH_SEPARATOR` join; that tore quoted Windows segments and widened the
+  search path in the one function whose subject is narrowing it. The reviewer caught it.
+  **Orchestrator instructions are a defect source with no review stage of their own** — when
+  a brief tells a worker to replace a stdlib call with a hand-rolled one, that is exactly
+  the `quality-core.md` *Don't Own Non-Domain Code* case, and the brief should have to
+  justify it the way a diff would.
+- **The cross-model gate is not the only adversarial layer that earns its keep — the
+  *researcher* perspective did, decisively.** Six reviewers ran on one work package; four
+  independently found the same Block (a `Err(_)` arm swallowing a security guard's refusal).
+  The researcher was the one that made it un-arguable, with three projects that shipped the
+  identical loop: asdf#2166, opencodex#1439 (same PID, `execve` in place, ~31 h CPU over
+  3.7 days) and claude-code#47978 (2,171 processes, kernel OOM). It also found that pyenv
+  *proposed and rejected* the exact marker-in-file identity check this design adopted, and
+  that the directory-list alternative pyenv chose instead is what pyenv#2696 reports as a bug.
+  Ecosystem evidence turns "I think this is a defect" into "three projects shipped it".
+- **Two concurrent `task rust:verify` runs are not a trustworthy gate on this host.** The
+  same single `shell::tests::live_*` test failed in two **file-disjoint** worktrees in one
+  concurrent pair, with `pwsh` SIGABRT and a .NET `FileLoadException` naming a *truncated*
+  PublicKeyToken — while an earlier concurrent pair of the same two trees was fully green.
+  Discriminated, not assumed: passes 3/3 alone on base and in both trees, and both full
+  verifies pass **serially** (6826/6826, 6843/6843), as does the merged branch (6890/6890).
+  Run verifies one at a time. And note the shape: `task rust:verify --force > log 2>&1; echo $?`
+  reports the **`echo`'s** status — the verdict is `Failed to run task` inside the log, the
+  same wrapper-exit-code trap the CI lesson already records.
+- **A `pub fn` in a library crate that is never called triggers no `dead_code` lint**, so a
+  security predicate can ship fully written, fully documented, fully tested — and wired to
+  nothing. Two reviewers had to read the call graph to find it. When a contract says
+  "X refuses", the review question is *where is X called*, not *does X exist*.
 
 - **Design record (hex-architect, 2026-08-24/25):**
   `.claude/artifacts/adr_shell_env_overhaul.md` — tier high, Status `Proposed`,
@@ -683,6 +724,45 @@ research-axes:
   your decision" while the grant was already in their inbox, costing a round trip each. When a
   worker parks on a decision, assume the next message it sends crossed yours and re-state the
   answer in one short paragraph rather than referring back to it.
+- **2026-09-04/05 `/hex-architect high` — toolchain activation** (branch `goat`). Artifacts:
+  `.claude/artifacts/adr_toolchain_activation.md` (Proposed), `system_design_toolchain_activation.md`
+  (Draft), amended `adr_project_toolchain_links.md`, research `research_toolchain_activation_{competitive,shell_session,security}.md`.
+  Panel: spec/quality/security (opus) + SOTA (sonnet) → 5 Block, 12 High, ~19 Warn/Suggest, all
+  applied; spec re-validation raised 6 precision items, applied without a further pass (disclosed
+  in handoff). Cross-model gate: Codex `sol`, plan-artifact scope.
+  - **`hex.md › Preferences` names `adversary: codex:rescue`, which is a rescue delegate, not a
+    reviewer.** The project's cross-model review skill is `codex-adversary` (`--scope plan-artifact`).
+    Propose at the next `/hex-init`: `adversary: codex-adversary`.
+  - **Agents addressed the orchestrator as `team-lead` and their full reports never arrived** —
+    only the idle summary did. Pull with `SendMessage` asking for a resend to `main` in numbered
+    parts; long reviews truncate at ~6k chars in the idle notification.
+  - **The federation `Federation lead:` bullet was removed on owner instruction** (mirror-signing
+    merged); the lead's plan file still said `landing` — the plan state, not the bullet, was stale.
+
+- **Active plan: `.claude/state/plans/plan_toolchain_activation.md`** (hex-plan, tier high,
+  2026-09-05). State `plan-approved`; `Next: /hex-execute` on that path. Pointer also written
+  to `.claude/state/current_plan.md` (gitignored, per-worktree). 19 work packages, 6 waves,
+  critical path WP-1 → WP-5 → WP-7 → WP-8 → WP-12a → WP-12d. Consumes the Accepted
+  `adr_toolchain_activation.md` and `system_design_toolchain_activation.md`; the plan does not
+  re-design and records nine divergences (D-V1…D-V9) with reasons.
+
+- **The two structural gates over `.claude/state/plans/` are both vacuous there, and both look
+  green.** `TestPlanStatusBlock` enforces only on **git-tracked** plans, and `.claude/state/` is
+  gitignored (`.gitignore:39`) — so all three of its tests SKIP, not pass, on every plan in that
+  directory. `task claude:lint:links` likewise never scans the directory (675 links checked, zero
+  from the plan). A reviewer read the test's assertion and reported "PASS"; the test had not run.
+  For any plan artifact, re-run the assertion directly against the file and show it red on a
+  mutated copy — the field-removal and the past-line-30 mutations both red cleanly.
+
+- **A same-family review panel found the two defects that would have shipped, and both were in
+  the ORCHESTRATOR's own judgment calls, not the ADR's.** hex-plan high on toolchain activation:
+  the spec reviewer found an ADR shipping break (`ocx env` emitting link paths) with a commit
+  subject but no contract, no test and no file in any work package — `composer.rs` appeared in no
+  Expected Files cell, so no package could have implemented it. The architect reviewer refuted the
+  orchestrator's own loop-guard deferral with a concrete two-project scenario the guard could not
+  see: the exclusion set names only *this* invocation's homes, so two projects each carrying a
+  stale trampoline loop A → B → A forever. Both findings were in text the orchestrator wrote after
+  the ADR, which is where to look first — the Accepted record had been reviewed four times.
 - **Active plan (hex-plan tier `high`, 2026-09-05): `.claude/artifacts/plan_index_claim_command.md`**
   — `ocx package claim`, the `--transport api|git` forge write seam, forge-neutral `owners[]`.
   19 work packages / 7 waves, 75 contracts, 40 scenarios, 7 ADR deviations. `State: plan-approved`,

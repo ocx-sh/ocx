@@ -123,4 +123,9 @@ test/manual/announce-e2e/results/*
 
 # Agent scratch: worktrees, logs, tmp — never committed
 .agents/
+
+# Rendered project toolchain home (`activate`): derived from `ocx.lock` by any
+# lock-reading trigger, so it is a cache, never a source. Relocatable via
+# `toolchain-dir`; this covers the default `<project>/.ocx/toolchain`.
+.ocx/
 .tmp/

@@ -274,8 +274,9 @@ the one published-root writer, and it merges within `RootScope`:
 
 | Scope | Written by | Adopts | Leaves alone |
 |---|---|---|---|
-| `RootScope::Tag(t)` | `ocx index update pkg:t`, every grow-on-resolve | `tags[t]` | every sibling pin, `repository`, every package-level field |
+| `RootScope::Tags(&'a [&'a str])` | `ocx index update pkg:t`, every grow-on-resolve, `refresh_published`'s partial-success commit | `tags[t]` for each named tag | every sibling pin, `repository`, every package-level field |
 | `RootScope::Package` | `ocx index update pkg` (bare), and `ocx index sync <REGISTRY>` for every package the registry's catalog names | every tag the remote lists + package-level fields (routing) | any tag only the local copy holds |
+| `RootScope::Routing` | a digest-addressed `Resolve`, via `record_routing_pointer` | package-level fields only, **first sight only** — a committed root is left exactly as committed | every tag, and every field of an already-committed root |
 
 **Neither scope deletes.** A tag the remote stopped listing survives locally with its pinned
 digest, both provenance kinds — `commit_root_tags` (derived) always upserted, and
