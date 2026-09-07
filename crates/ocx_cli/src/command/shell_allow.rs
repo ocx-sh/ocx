@@ -48,6 +48,14 @@ pub struct ShellAllow {
 impl ShellAllow {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         let (config_path, lock_path) = resolve_project_paths(&context, self.path.as_deref()).await?;
+        // Whether the project consented to is the one *this* shell's prompt
+        // resolves. It is, exactly when no selector redirected the resolution:
+        // `resolve_project_paths` then makes the same walk from the same cwd
+        // the prompt does. A `PATH`, `--project` or `--global` names some other
+        // project, whose consent stamp is no member of this shell's watch set
+        // — so the stamp fires nothing here, and the success line must not
+        // claim it does.
+        let is_this_shells_project = self.path.is_none() && context.project_path().is_none() && !context.global();
         // A-30's canonical directory, through the one helper that derives it —
         // the stamp's identity has to be the same value the prompt keys on.
         let identity = ProjectIdentity::resolve(config_path).await?;
@@ -70,9 +78,12 @@ impl ShellAllow {
 
         match recorded {
             Recorded::Stamped => {
-                context
-                    .ui()
-                    .success(format!("consented to {} - open a new shell prompt", dir.display()));
+                let when = if is_this_shells_project {
+                    "active at the next prompt in this shell"
+                } else {
+                    "active at the next prompt there"
+                };
+                context.ui().success(format!("consented to {} - {when}", dir.display()));
                 Ok(ExitCode::SUCCESS)
             }
             // Not a write failure: A-44 makes the ocx home permanently
