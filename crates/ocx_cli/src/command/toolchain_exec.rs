@@ -523,27 +523,43 @@ fn reconcile_run_entries(entries: &mut [Entry], project_env: &mut [Entry]) -> Re
 }
 
 /// The trampoline directories this invocation's **lookup** `PATH` excludes
-/// (C-058, C-010) — the project's `<home>/toolchain/bin` and the global
-/// `$OCX_HOME/toolchain/bin`.
+/// (C-058, C-010) — **four** paths: the PATH-facing `<home>/toolchain/active/bin`
+/// and the physical `<home>/toolchain/shells/default/bin`, for the project tree
+/// and for the global one.
 ///
 /// # Derived, never joined
 ///
-/// Both entries come from the resolver that produced the home —
-/// [`ToolchainStore::bin`](ocx_lib::file_structure::ToolchainStore::bin) for the
-/// global tree, [`ToolchainHome::bin`](ocx_lib::file_structure::ToolchainHome::bin)
-/// for the project's, the latter through
+/// Every entry comes from the resolver that produced the home —
+/// [`ToolchainStore::bin`](ocx_lib::file_structure::ToolchainStore::bin) and
+/// [`ToolchainStore::shell_bin`](ocx_lib::file_structure::ToolchainStore::shell_bin)
+/// for the global tree, the matching
+/// [`ToolchainHome`](ocx_lib::file_structure::ToolchainHome) accessors for the
+/// project's, the latter through
 /// [`PackageManager::toolchain_home`](ocx_lib::package_manager::PackageManager::toolchain_home)
 /// so `toolchain-dir` is honoured. A literal `join("toolchain").join("bin")`
 /// would compile, pass every fixture, and drift silently the day the tree shape
 /// moves — which is the whole of what C-010 forbids.
 ///
-/// # Why both, and why only the lookup copy
+/// # Why both spellings per home (C-078)
+///
+/// The two are equal only *through* the `active` link, never by string
+/// equality, and this exclusion is **segment-exact**:
+/// `utility::path::remove_segment` compares segments and "is therefore not a
+/// containment check and must not be read as one". A composed `PATH` carrying
+/// the *physical* spelling — from a hand-written `.envrc`, an IDE recipe, or a
+/// `$GITHUB_PATH` line — would otherwise survive the exclusion, so this lookup
+/// could answer with a trampoline and that trampoline would re-enter itself:
+/// the fork loop asdf#2166, opencodex#1439 and claude-code#47978 each shipped.
+/// Listing one spelling would also leave C-069's `is_ocx_trampoline` as the
+/// only guard, against this record's rule that deleting either guard must leave
+/// the other observably firing.
+///
+/// # Why only the lookup copy
 ///
 /// The child's `PATH` is untouched: a tool that spawns a sibling tool still
 /// resolves it through a trampoline, which is the re-entry the trampolines exist
 /// to provide. Excluding the directories here only stops **this** lookup from
-/// answering with one. The exclusion is segment-exact and therefore not a
-/// containment check; C-069's `is_ocx_trampoline` re-check over the resolved
+/// answering with one. C-069's `is_ocx_trampoline` re-check over the resolved
 /// answer — already shipped inside `Env::resolve_command_in` — is the second,
 /// independent guard that closes the alias gap.
 ///
@@ -560,7 +576,18 @@ fn trampoline_lookup_exclusions(
     file_structure: &ocx_lib::file_structure::FileStructure,
     project_home: &ocx_lib::file_structure::ToolchainHome,
 ) -> Vec<std::path::PathBuf> {
-    vec![file_structure.toolchain.bin(), project_home.bin()]
+    // Spelled out rather than imported: a function-local `use` would go unused
+    // the moment either physical entry is dropped, so the drop would red as an
+    // unused-import lint before this function's own test could red on the
+    // answer — a check whose red state is the compiler's, not the check's.
+    vec![
+        file_structure.toolchain.bin(),
+        project_home.bin(),
+        file_structure
+            .toolchain
+            .shell_bin(ocx_lib::file_structure::DEFAULT_SHELL),
+        project_home.shell_bin(ocx_lib::file_structure::DEFAULT_SHELL),
+    ]
 }
 
 /// Re-attribute a project-resolution failure to the project the invocation
@@ -772,8 +799,15 @@ mod tests {
 
     // ── C-058 / RUL-69 — the exclusion set is derived, never joined ──────────
 
-    /// **C-058 / C-010** — both entries come from the resolvers that produced
-    /// the trees, so the exclusion cannot drift from the tree shape.
+    /// **C-058 / C-010 / C-078** — four entries, all from the resolvers that
+    /// produced the trees, so the exclusion cannot drift from the tree shape.
+    ///
+    /// Two homes x two spellings. The PATH-facing `active/bin` is what this
+    /// process put on `PATH`; the physical `shells/<shell>/bin` is what the
+    /// renderer wrote, and a composed `PATH` can carry it from outside ocx
+    /// entirely. `remove_segment` is segment-exact, so a spelling that is not
+    /// listed is not excluded, and a lookup that answers with a trampoline
+    /// re-enters itself.
     ///
     /// The discriminating input is a project home whose root does **not** end
     /// in `toolchain` — which is exactly what a `toolchain-dir` relocation
@@ -782,8 +816,14 @@ mod tests {
     /// for. Reachable only because RUL-69 took `&Context` out of the signature:
     /// a `Context` is constructible solely through the async `try_init`, which
     /// installs the global tracing subscriber.
+    ///
+    /// RED: drop either physical entry from the returned vector — the set
+    /// assertion, the literal assertion and the count all red, and the
+    /// surviving spelling proves nothing about the one that left.
     #[test]
     fn the_exclusion_set_is_both_trees_own_bin_directories() {
+        use ocx_lib::file_structure::DEFAULT_SHELL;
+
         let home = std::path::PathBuf::from("/w/.ocx-home");
         let file_structure = ocx_lib::file_structure::FileStructure::with_root(home);
         // A relocated project home: the segment before `bin` is a project key,
@@ -794,17 +834,36 @@ mod tests {
 
         assert_eq!(
             excluded,
-            vec![file_structure.toolchain.bin(), project_home.bin()],
-            "both entries must be the store's and the home's own `bin()`"
+            vec![
+                file_structure.toolchain.bin(),
+                project_home.bin(),
+                file_structure.toolchain.shell_bin(DEFAULT_SHELL),
+                project_home.shell_bin(DEFAULT_SHELL),
+            ],
+            "C-078 — every entry must be a resolver's own accessor, both spellings, both tiers"
         );
+
+        // Literals beside the derivation: a derivation compared only against
+        // itself agrees with any accessor, including a wrong one.
         assert_eq!(
-            excluded[1],
-            std::path::PathBuf::from("/w/toolchains/0123456789abcdef/toolchain/bin"),
-            "C-010 — the project entry is `<home root>/bin`, never `<something>/toolchain/bin` re-joined"
+            excluded
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                "/w/.ocx-home/toolchain/active/bin",
+                "/w/toolchains/0123456789abcdef/toolchain/active/bin",
+                "/w/.ocx-home/toolchain/shells/default/bin",
+                "/w/toolchains/0123456789abcdef/toolchain/shells/default/bin",
+            ],
+            "C-010 — each entry is `<home root>/...`, never `<something>/toolchain/bin` re-joined"
         );
-        assert_ne!(
-            excluded[0], excluded[1],
-            "the two tiers are two directories; collapsing them would leave one unexcluded"
+
+        let unique: std::collections::BTreeSet<_> = excluded.iter().collect();
+        assert_eq!(
+            unique.len(),
+            4,
+            "four distinct directories; collapsing any two would leave one unexcluded"
         );
     }
 
