@@ -70,6 +70,39 @@ use super::escape::{fish_single_quoted, posix_single_quoted, single_quoted_doubl
 /// [`POSIX_STAMP_CLEANUP`] / [`FISH_STAMP_CLEANUP`] when the shell exits.
 const STAMP_TEMPLATE: &str = "ocx-env-stamp.XXXXXXXX";
 
+/// The project file the guard tests for at the shell's **live** `$PWD`
+/// ([ocx-sh/ocx#397](https://github.com/ocx-sh/ocx/issues/397)).
+///
+/// Every other file term in the guard is a path *baked in at emission time*,
+/// taken from the watch set the last reconcile recorded — and
+/// [`super::reconcile::watch_paths`] contributes the project tier only when a
+/// project **resolved**. So in a directory that had no `ocx.toml`, the guard
+/// names none of the files a project is made of, and creating one moves nothing
+/// the guard can see: `ocx init` (and the `ocx shell allow` after it) left the
+/// shell inert until the next `cd` or a new terminal. The `$PWD` term does not
+/// cover it either — the directory did not change, the project did.
+///
+/// This term is a **trigger, not a staleness member**. The fingerprint stays the
+/// one definition of *what* changed (C-019); the guard only decides *whether to
+/// exec*, which is why `$PWD` and [`YIELD_SIGNALS`] are already terms with no
+/// watch-set member of their own. A fire that turns out to change nothing costs
+/// one reconcile, which emits a checkpoint and goes quiet again.
+///
+/// Evaluated against the live `$PWD` rather than baked, so it needs no
+/// re-emission to follow the shell around. Absent reads as older than the stamp
+/// in every arm — `-nt` is false when the left path does not exist,
+/// `GetLastWriteTimeUtc` returns 1601 — so the common case is one `stat` by a
+/// builtin and no exec (C-044).
+///
+/// **Ceiling**: an `ocx.toml` appearing in an *ancestor* of `$PWD` still waits
+/// for the next `cd`. Walking the chain would put one `stat` per ancestor on
+/// every prompt to catch a case the `$PWD` term already catches a moment later.
+///
+/// elvish has no term here and needs none: it has no in-shell mtime, but its
+/// `ocx` wrapper clears the recorded directory after **every** ocx invocation,
+/// so `ocx init` and `ocx shell allow` already reconcile at its next prompt.
+const PROJECT_FILE: &str = "ocx.toml";
+
 /// The bash/zsh shell-exit cleanup for the `mktemp` stamp.
 ///
 /// One temp file per shell start accumulates without bound where nothing reaps
@@ -602,7 +635,7 @@ fn posix_reconcile(quoted_binary: &str, shell_name: &str, watch_paths: &[PathBuf
         })
         .collect();
     format!(
-        "if [ -x '{quoted_binary}' ] && {{ [ -z \"${{__OCX_ENV_STATE-}}\" ] || [ \"${{__ocx_pwd-}}\" != \"$PWD\" ] || [ \"${{__ocx_yield-}}\" != \"{yielded}\" ] || [ -z \"${{__ocx_stamp-}}\" ] || [ ! -f \"${{__ocx_stamp-}}\" ]{newer}; }}; then\n\
+        "if [ -x '{quoted_binary}' ] && {{ [ -z \"${{__OCX_ENV_STATE-}}\" ] || [ \"${{__ocx_pwd-}}\" != \"$PWD\" ] || [ \"${{__ocx_yield-}}\" != \"{yielded}\" ] || [ -z \"${{__ocx_stamp-}}\" ] || [ ! -f \"${{__ocx_stamp-}}\" ]{newer} || [ \"$PWD/{PROJECT_FILE}\" -nt \"${{__ocx_stamp-}}\" ]; }}; then\n\
          {apply}\n\
          fi",
         yielded = posix_yield_signal(),
@@ -689,7 +722,7 @@ fn fish_reconcile(quoted_binary: &str, watch_paths: &[PathBuf]) -> String {
         })
         .collect();
     format!(
-        "if test -x '{quoted_binary}'; and begin; test -z \"$__OCX_ENV_STATE\"; or test \"$__ocx_pwd\" != \"$PWD\"; or test \"$__ocx_yield\" != \"{yielded}\"; or test -z \"$__ocx_stamp\"; or not test -f \"$__ocx_stamp\"{newer}; end\n\
+        "if test -x '{quoted_binary}'; and begin; test -z \"$__OCX_ENV_STATE\"; or test \"$__ocx_pwd\" != \"$PWD\"; or test \"$__ocx_yield\" != \"{yielded}\"; or test -z \"$__ocx_stamp\"; or not test -f \"$__ocx_stamp\"{newer}; or test \"$PWD/{PROJECT_FILE}\" -nt \"$__ocx_stamp\"; end\n\
          {apply}\n\
          end",
         yielded = fish_yield_signal(),
@@ -808,9 +841,18 @@ fn power_shell_reconcile(quoted_binary: &str, watch_paths: &[PathBuf]) -> String
             )
         })
         .collect();
+    // [`PROJECT_FILE`]'s term reads `CurrentFileSystemLocation` and not `$PWD`,
+    // which is the *provider* location: under `Set-Location HKLM:` a `$PWD.Path`
+    // of `HKLM:\Software` is not a filesystem path at all, and PS 5.1's
+    // `[System.IO.Path]::Combine` on it raises `ArgumentException` — swallowed by
+    // the prompt's `catch`, but it takes the whole reconcile with it. The
+    // filesystem location is also, by construction, the working directory the
+    // reconcile process itself is launched with, so it is the one the walk sees.
+    // `[System.IO.Path]::Combine` and not `Join-Path` on C-045's rule: a static
+    // .NET call is not a name a user function could own.
     format!(
         "if (Test-Path -LiteralPath '{quoted_binary}' -PathType Leaf) {{\n\
-         if ([string]::IsNullOrEmpty($env:__OCX_ENV_STATE) -or $global:__ocxPwd -ne $PWD.Path -or $global:__ocxYield -ne \"{yielded}\"{newer}) {{\n\
+         if ([string]::IsNullOrEmpty($env:__OCX_ENV_STATE) -or $global:__ocxPwd -ne $PWD.Path -or $global:__ocxYield -ne \"{yielded}\"{newer} -or [System.IO.File]::GetLastWriteTimeUtc([System.IO.Path]::Combine($ExecutionContext.SessionState.Path.CurrentFileSystemLocation.Path, '{PROJECT_FILE}')) -gt $global:__ocxStamp) {{\n\
          {apply}\n\
          }}\n\
          }}",
@@ -1170,7 +1212,7 @@ mod tests {
                  if [ -n \"${__ocx_stamp-}\" ] && [ -z \"$(trap -p EXIT 2>/dev/null)\" ]; then trap 'command rm -f \"${__ocx_stamp-}\" 2>/dev/null' EXIT; fi\n\
                  __ocx_prompt_hook() {\n\
                  local __ocx_status=$?\n\
-                 if [ -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' ] && { [ -z \"${__OCX_ENV_STATE-}\" ] || [ \"${__ocx_pwd-}\" != \"$PWD\" ] || [ \"${__ocx_yield-}\" != \"${DIRENV_DIR-}|${MISE_SHELL-}|${__MISE_ORIG_PATH-}\" ] || [ -z \"${__ocx_stamp-}\" ] || [ ! -f \"${__ocx_stamp-}\" ] || [ '/w/ocx.toml' -nt \"${__ocx_stamp-}\" ] || [ '/w/ocx.lock' -nt \"${__ocx_stamp-}\" ]; }; then\n\
+                 if [ -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' ] && { [ -z \"${__OCX_ENV_STATE-}\" ] || [ \"${__ocx_pwd-}\" != \"$PWD\" ] || [ \"${__ocx_yield-}\" != \"${DIRENV_DIR-}|${MISE_SHELL-}|${__MISE_ORIG_PATH-}\" ] || [ -z \"${__ocx_stamp-}\" ] || [ ! -f \"${__ocx_stamp-}\" ] || [ '/w/ocx.toml' -nt \"${__ocx_stamp-}\" ] || [ '/w/ocx.lock' -nt \"${__ocx_stamp-}\" ] || [ \"$PWD/ocx.toml\" -nt \"${__ocx_stamp-}\" ]; }; then\n\
                  eval \"$('/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=bash 2>/dev/null)\" || true\n\
                  fi\n\
                  return $__ocx_status\n\
@@ -1204,7 +1246,7 @@ mod tests {
                  __ocx_stamp=\"$(command mktemp -t ocx-env-stamp.XXXXXXXX 2>/dev/null)\" || __ocx_stamp=''\n\
                  __ocx_prompt_hook() {\n\
                  local __ocx_status=$?\n\
-                 if [ -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' ] && { [ -z \"${__OCX_ENV_STATE-}\" ] || [ \"${__ocx_pwd-}\" != \"$PWD\" ] || [ \"${__ocx_yield-}\" != \"${DIRENV_DIR-}|${MISE_SHELL-}|${__MISE_ORIG_PATH-}\" ] || [ -z \"${__ocx_stamp-}\" ] || [ ! -f \"${__ocx_stamp-}\" ] || [ '/w/ocx.toml' -nt \"${__ocx_stamp-}\" ] || [ '/w/ocx.lock' -nt \"${__ocx_stamp-}\" ]; }; then\n\
+                 if [ -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' ] && { [ -z \"${__OCX_ENV_STATE-}\" ] || [ \"${__ocx_pwd-}\" != \"$PWD\" ] || [ \"${__ocx_yield-}\" != \"${DIRENV_DIR-}|${MISE_SHELL-}|${__MISE_ORIG_PATH-}\" ] || [ -z \"${__ocx_stamp-}\" ] || [ ! -f \"${__ocx_stamp-}\" ] || [ '/w/ocx.toml' -nt \"${__ocx_stamp-}\" ] || [ '/w/ocx.lock' -nt \"${__ocx_stamp-}\" ] || [ \"$PWD/ocx.toml\" -nt \"${__ocx_stamp-}\" ]; }; then\n\
                  eval \"$('/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=zsh 2>/dev/null)\" || true\n\
                  fi\n\
                  return $__ocx_status\n\
@@ -1231,7 +1273,7 @@ mod tests {
                  end\n\
                  function __ocx_prompt_hook --on-event fish_prompt\n\
                  set -l __ocx_status $status\n\
-                 if test -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx'; and begin; test -z \"$__OCX_ENV_STATE\"; or test \"$__ocx_pwd\" != \"$PWD\"; or test \"$__ocx_yield\" != \"$DIRENV_DIR|$MISE_SHELL|$__MISE_ORIG_PATH\"; or test -z \"$__ocx_stamp\"; or not test -f \"$__ocx_stamp\"; or test '/w/ocx.toml' -nt \"$__ocx_stamp\"; or test '/w/ocx.lock' -nt \"$__ocx_stamp\"; end\n\
+                 if test -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx'; and begin; test -z \"$__OCX_ENV_STATE\"; or test \"$__ocx_pwd\" != \"$PWD\"; or test \"$__ocx_yield\" != \"$DIRENV_DIR|$MISE_SHELL|$__MISE_ORIG_PATH\"; or test -z \"$__ocx_stamp\"; or not test -f \"$__ocx_stamp\"; or test '/w/ocx.toml' -nt \"$__ocx_stamp\"; or test '/w/ocx.lock' -nt \"$__ocx_stamp\"; or test \"$PWD/ocx.toml\" -nt \"$__ocx_stamp\"; end\n\
                  '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=fish 2>/dev/null | source\n\
                  end\n\
                  return $__ocx_status\n\
@@ -1253,7 +1295,7 @@ mod tests {
                  $global:__ocxYield = ''\n\
                  function global:__ocxReconcile {\n\
                  if (Test-Path -LiteralPath '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' -PathType Leaf) {\n\
-                 if ([string]::IsNullOrEmpty($env:__OCX_ENV_STATE) -or $global:__ocxPwd -ne $PWD.Path -or $global:__ocxYield -ne \"$($env:DIRENV_DIR)|$($env:MISE_SHELL)|$($env:__MISE_ORIG_PATH)\" -or [System.IO.File]::GetLastWriteTimeUtc('/w/ocx.toml') -gt $global:__ocxStamp -or [System.IO.File]::GetLastWriteTimeUtc('/w/ocx.lock') -gt $global:__ocxStamp) {\n\
+                 if ([string]::IsNullOrEmpty($env:__OCX_ENV_STATE) -or $global:__ocxPwd -ne $PWD.Path -or $global:__ocxYield -ne \"$($env:DIRENV_DIR)|$($env:MISE_SHELL)|$($env:__MISE_ORIG_PATH)\" -or [System.IO.File]::GetLastWriteTimeUtc('/w/ocx.toml') -gt $global:__ocxStamp -or [System.IO.File]::GetLastWriteTimeUtc('/w/ocx.lock') -gt $global:__ocxStamp -or [System.IO.File]::GetLastWriteTimeUtc([System.IO.Path]::Combine($ExecutionContext.SessionState.Path.CurrentFileSystemLocation.Path, 'ocx.toml')) -gt $global:__ocxStamp) {\n\
                  & '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=powershell 2>$null | Out-String | Invoke-Expression\n\
                  }\n\
                  }\n\
@@ -1521,6 +1563,39 @@ mod tests {
                      moves: {checkpoint}"
                 );
             }
+        }
+    }
+
+    // ── #397: a project that appears under an unchanged $PWD ─────────────
+
+    /// EC-HOOK-018 — every watch-guarded arm tests the **live** `$PWD` for
+    /// [`PROJECT_FILE`].
+    ///
+    /// The baked watch set names a project's files only when a project resolved,
+    /// so without this term `ocx init` in a project-free directory moves nothing
+    /// the guard can see and the shell stays inert until the next `cd`
+    /// (ocx-sh/ocx#397).
+    ///
+    /// What is asserted is the **live** spelling, not the file name: `watch()`
+    /// already puts `/w/ocx.toml` in every guarded body, so a `contains("ocx.toml")`
+    /// would pass against the very emission this term exists to repair. A term
+    /// baked at emission time answers for the directory the *last* reconcile ran
+    /// in — the value that is already stale in this case.
+    #[test]
+    fn every_watch_guarded_arm_tests_the_live_pwd_for_a_project_file() {
+        for shell in shells_where(GuardKind::WatchGuarded) {
+            let guard = registration(shell, &binary(), &watch()).expect("a guarded arm registers");
+            // pwsh reads the provider-independent filesystem location; the POSIX
+            // family and fish read `$PWD` directly.
+            let term = match shell {
+                Shell::PowerShell => format!("CurrentFileSystemLocation.Path, '{PROJECT_FILE}')"),
+                _ => format!("\"$PWD/{PROJECT_FILE}\""),
+            };
+            assert!(
+                guard.contains(&term),
+                "{shell}'s guard never tests the live $PWD for {PROJECT_FILE}, so a project created \
+                 in place stays inert until the next `cd` (#397); looked for `{term}` in: {guard}"
+            );
         }
     }
 

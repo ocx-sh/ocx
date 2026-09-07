@@ -1696,6 +1696,82 @@ def test_ec_hook_014_bash_no_op_prompt_costs_zero_execs_under_live_direnv(arena:
     )
 
 
+def test_ec_hook_018_a_project_created_in_place_activates_at_the_next_prompt(arena: Arena) -> None:
+    """EC-HOOK-018 (ocx-sh/ocx#397) — a project that appears under an unchanged ``$PWD`` reaches the next prompt.
+
+    The guard's file terms are paths **baked at emission time**, taken from the
+    watch set the last reconcile recorded — and that set carries a project's
+    ``ocx.toml``, ``ocx.lock`` and consent stamp only when a project *resolved*.
+    So in a directory that had none, `ocx init` (or a `git checkout` that brings
+    one in) moves nothing the guard can see: the carrier is set, the stamp is
+    fresh, ``$PWD`` did not change, and the shell stays inert until the next
+    ``cd`` or a new terminal. `ocx shell allow` inherits the same hole, because
+    the stamp it writes is not a baked term either.
+
+    Driven on a pty with the **real** registration, so what is measured is the
+    emitted guard rather than a hand-written prompt: :func:`shell_matrix.prompt`
+    invokes ``--reconcile`` unconditionally, which would score this green with
+    or without the term. The two transitions are asserted in sequence, because
+    each unlocks the next — the project files firing the live-``$PWD`` term is
+    what re-gates the guard onto the consent stamp that `ocx shell allow` then
+    writes.
+
+    Red state: drop ``|| [ "$PWD/ocx.toml" -nt "${__ocx_stamp-}" ]`` from
+    ``posix_reconcile`` and ``after`` reads absent. The bash arm stands for the
+    four watch-guarded shells here; the fish and PowerShell terms are pinned by
+    ``hook.rs``'s exact-emission tests, and elvish needs no term of its own —
+    it has no in-shell mtime, and its ``ocx`` wrapper clears the recorded
+    directory after every ocx invocation.
+    """
+    shell_abs = _require("bash")
+    source = _locked_project(arena, "alpha", _ENV_BLOCK_A)
+    (source / "binA").mkdir()
+    # The shell starts, and stays, in a directory with no project — the state
+    # that leaves the guard with no project term to fire on.
+    empty = arena.projects / "empty"
+    empty.mkdir()
+
+    env = arena.env(shell_abs)
+    env["TERM"] = "dumb"
+    env["PS1"] = ""
+    stamps = arena.ocx_home / "state" / "projects"
+    output = matrix.pty_session(
+        [shell_abs, "--norc", "-i"],
+        [
+            f'eval "$("{arena.ocx}" --offline self activate --shell=bash --hook --no-completion)"',
+            f"cd '{empty}'",
+            'printf "%s\n" "@@before@@${WP15_CONST-__OCX_ABSENT__}"',
+            # The project appears where the shell already is. `cp` and not an
+            # ocx command on purpose: nothing here may depend on the `ocx`
+            # wrapper having run.
+            f"cp '{source}/ocx.toml' '{source}/ocx.lock' .",
+            "mkdir -p binA",
+            'printf "%s\n" "@@created@@${WP15_CONST-__OCX_ABSENT__}"',
+            f"'{arena.ocx}' --offline shell allow >/dev/null 2>&1",
+            'printf "%s\n" "@@after@@${WP15_CONST-__OCX_ABSENT__}"',
+        ],
+        cwd=arena.projects,
+        env=env,
+    )
+    found = matrix.probes(output)
+    assert found.get("before") == matrix.ABSENT, (
+        f"the shell must start with no project applied, or nothing below proves anything\n"
+        f"pty transcript:\n{output}"
+    )
+    assert found.get("created") == matrix.ABSENT, (
+        "an unconsented project must stay inert — a value here would mean consent was never the gate\n"
+        f"pty transcript:\n{output}"
+    )
+    assert list(stamps.glob("*/consent.json")), (
+        f"`ocx shell allow` must have written a stamp, or the last probe tests nothing\n"
+        f"pty transcript:\n{output}"
+    )
+    assert found.get("after") == "alpha", (
+        "a project created under an unchanged $PWD, then consented, must apply at the very next "
+        f"prompt of the SAME shell (#397)\npty transcript:\n{output}"
+    )
+
+
 def test_ec_hook_002_bash_5_1_array_prompt_command_is_appended_as_element(arena: Arena) -> None:
     """EC-HOOK-002 — the Bash 5.1+ array ``PROMPT_COMMAND`` gets ``+=(__ocx_prompt_hook)``, never a string append."""
     shell_abs = _require("bash")
@@ -4348,8 +4424,9 @@ def test_traceability_every_pytest_and_manual_row_names_a_real_covering_test() -
     # the release-enforced canonical-`project_dir` refusal, and the
     # never-matching-entry diagnostic)
     # + EC-GRANT-025 and EC-GRANT-026 (round 3: the per-platform ASCII-case
-    # fold, and the single-wildcard rule).
-    assert len(register) == 234, f"the register must still parse to exactly 234 rows; got {len(register)}"
+    # fold, and the single-wildcard rule)
+    # + EC-HOOK-018 (ocx#397: a project created under an unchanged `$PWD`).
+    assert len(register) == 235, f"the register must still parse to exactly 235 rows; got {len(register)}"
     test_to_ids = _this_modules_test_to_ids()
     known_test_names = set(test_to_ids.keys()) | _shell_module_test_names()
     known_manual_procedures = {

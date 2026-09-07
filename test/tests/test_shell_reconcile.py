@@ -1681,6 +1681,54 @@ def _consent(arena: Arena, verb: str, cwd: Path, *args: str) -> subprocess.Compl
     )
 
 
+def test_shell_allow_only_claims_this_shell_for_this_shells_project(arena: Arena) -> None:
+    """The success line's promise is scoped to the project this shell resolves.
+
+    A consent stamp reaches a running shell because the stamp is a member of
+    *that* shell's watch set, which holds the project its own prompt walk
+    resolved. Consent to any other project — an explicit ``PATH``, a
+    ``--project`` selector — moves nothing this shell watches, so promising
+    "the next prompt in this shell" would be false.
+
+    Three runs, so neither half can pass vacuously: the walk-from-cwd case must
+    say "in this shell", and both redirected cases must not.
+    """
+    project = _locked_project(arena, "alpha", _ENV_BLOCK_A)
+    outside = arena.projects / "elsewhere"
+    outside.mkdir()
+
+    def allow(cwd: Path, *args: str) -> str:
+        result = subprocess.run(
+            [str(arena.ocx), "--offline", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            check=False,
+            text=True,
+            env=arena.env(),
+        )
+        assert result.returncode == 0, f"`ocx {' '.join(args)}` must succeed:\n{result.stderr}"
+        # Status lines go to stderr; stdout stays the data channel.
+        return result.stderr
+
+    own = allow(project, "shell", "allow")
+    assert "active at the next prompt in this shell" in own, (
+        f"consenting to the project the cwd resolves reaches this shell's next prompt; got {own!r}"
+    )
+
+    by_path = allow(outside, "shell", "allow", str(project))
+    assert "in this shell" not in by_path, (
+        f"an explicit PATH consents to a project this shell does not watch; got {by_path!r}"
+    )
+    assert "active at the next prompt there" in by_path, (
+        f"the line must still say when the grant takes effect; got {by_path!r}"
+    )
+
+    by_selector = allow(outside, "--project", str(project / "ocx.toml"), "shell", "allow")
+    assert "in this shell" not in by_selector, (
+        f"`--project` redirects the resolution just as a PATH does; got {by_selector!r}"
+    )
+
+
 def test_shell_allow_consents_a_clone_and_revoke_takes_it_back(arena: Arena) -> None:
     """Finding 9(b) — the consent gesture, and its undo, as a round trip.
 
@@ -2217,7 +2265,7 @@ def test_a_read_only_command_never_writes_a_consent_stamp(command: list[str], ar
         env=granted,
     )
     assert not stamp.exists(), (
-        f"`ocx {' '.join(command)}` must not create {stamp} — it is a named non-member of the six-writer allowlist"
+        f"`ocx {' '.join(command)}` must not create {stamp} — it is a named non-member of the stamp-writer allowlist"
     )
 
 
@@ -2229,7 +2277,7 @@ def test_ocx_lock_does_write_a_consent_stamp(arena: Arena) -> None:
     matrix.run_lock(arena.ocx, project, key_env)
     key = matrix.shell_state(arena.ocx, project, key_env)["project_key"]
     assert matrix.stamp_dir(arena.ocx_home, key).joinpath("consent.json").is_file(), (
-        "`ocx lock` is on the six-writer allowlist and MUST stamp — otherwise every negative stamp "
+        "`ocx lock` is on the stamp-writer allowlist and MUST stamp — otherwise every negative stamp "
         "assertion in this module is unfalsifiable"
     )
 
