@@ -161,6 +161,45 @@ pub enum ProjectErrorKind {
     #[error("[group.{name}] is reserved; {hint}")]
     ReservedGroupName { name: String, hint: &'static str },
 
+    /// A `[tools]` key, a `[group.<g>].tools` key, or a `[group.<g>]` name is
+    /// the reserved keyword `bin` (ASCII-case-folded — C-015).
+    ///
+    /// Reserved as both a group name and a tool name (plan contract C-013,
+    /// `plan_toolchain_activation.md`), like `default` and `all`, so a
+    /// future per-group `<group>/bin/` render layout stays possible without
+    /// a layout break; today `bin` is also the rendered toolchain's own
+    /// launcher directory name.
+    ///
+    /// `scope` names where the offending name was found (`"tools"`,
+    /// `"group.<g>.tools"`, or `"group"`); `name` preserves the as-written
+    /// casing so the message can echo the user's own spelling.
+    #[error("[{scope}] name '{name}' is reserved; `bin` is reserved for a future per-group launcher directory")]
+    ReservedToolchainName { scope: String, name: String },
+
+    /// A `[tools]` key, a `[group.<g>].tools` key, or a `[group.<g>]` name
+    /// does not match the toolchain name charset (plan contract C-014,
+    /// `plan_toolchain_activation.md`): `^[A-Za-z0-9][A-Za-z0-9._-]*$`, at
+    /// most 64 bytes.
+    ///
+    /// Both namespaces become path components of the rendered toolchain
+    /// tree, and in following mode `ocx env` emits those paths as
+    /// environment values — this is a security control, not a style rule.
+    /// `scope` names where the offending name was found, same vocabulary as
+    /// [`Self::ReservedToolchainName`].
+    ///
+    /// One variant covers both the charset failure and the length-cap
+    /// failure by design (see [`validate_toolchain_name`](super::config::validate_toolchain_name)'s
+    /// doc) — callers never need to tell them apart programmatically. The
+    /// message still names which one `name` actually broke, via
+    /// [`super::config::describe_toolchain_name_charset_violation`], so a
+    /// human reading it is not left guessing between a bad character and an
+    /// over-long name (review finding W-2).
+    #[error(
+        "[{scope}] name '{name}' must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ and be at most 64 bytes ({})",
+        super::config::describe_toolchain_name_charset_violation(name)
+    )]
+    InvalidToolchainNameCharset { scope: String, name: String },
+
     /// A `[group.<name>]` table declares a tool binding directly, the form
     /// removed in favour of `[group.<name>.tools]`.
     ///
@@ -488,12 +527,18 @@ pub enum ProjectErrorKind {
     #[error("ocx.toml already exists at '{path}'")]
     ConfigAlreadyExists { path: PathBuf },
 
-    /// The `--group` name passed to `ocx add` contains characters that are
-    /// invalid for a TOML table key in `ocx.toml`. Valid group names consist
-    /// solely of alphanumeric characters, `-`, and `_`, must be non-empty,
-    /// and must not be a reserved keyword (`default`, `all`).
+    /// A CLI-supplied `--group` name is a reserved selector, or does not
+    /// match the toolchain name charset. Valid group names match C-014's
+    /// `^[A-Za-z0-9][A-Za-z0-9._-]*$`, are at most 64 bytes, and are not a
+    /// reserved keyword (`default`, `all`).
+    ///
+    /// The charset half arrives here by re-attribution (RUL-73): a `--group`
+    /// value is *argv*, so its refusal is a usage error (64), where the same
+    /// name read out of `ocx.toml` is
+    /// [`Self::InvalidToolchainNameCharset`] — malformed config (78). One
+    /// rule, two exit codes, chosen by where the name came from.
     #[error(
-        "invalid group name '{name}': must be non-empty, contain only alphanumeric characters, '-', or '_', and not be a reserved keyword (`default`, `all`)"
+        "invalid group name '{name}': must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ and be at most 64 bytes, and must not be a reserved keyword (`default`, `all`)"
     )]
     InvalidGroupName { name: String },
 
@@ -554,6 +599,8 @@ impl ClassifyExitCode for Error {
                 ProjectErrorKind::TomlParse(_)
                 | ProjectErrorKind::TomlSerialize(_)
                 | ProjectErrorKind::ReservedGroupName { .. }
+                | ProjectErrorKind::ReservedToolchainName { .. }
+                | ProjectErrorKind::InvalidToolchainNameCharset { .. }
                 | ProjectErrorKind::ShellSectionInProject
                 | ProjectErrorKind::UnsupportedDeclarationHashVersion { .. }
                 | ProjectErrorKind::FileTooLarge { .. }

@@ -508,7 +508,26 @@ async fn query_installed_version(manager: &PackageManager, identifier: &oci::Ide
     //    the env PATH. No apply_ocx_config: version query reads no OCX_* config.
     let mut env = crate::env::Env::new();
     env.apply_entries(&entries);
-    let bin = env.resolve_command("ocx");
+    // C-011: `resolve_command` is fallible since C-009, and the fallback to the
+    // literal `ocx` is now *this* caller's stated choice rather than an ambient
+    // default — a name the composed environment does not provide is exactly the
+    // bootstrap state this function reports.
+    //
+    // `NotFound` **only**, never a blanket `unwrap_or_else`. This site composes
+    // an environment in which a package legally claiming the name `ocx` renders
+    // a launcher trampoline (C-024, S-012); mapping every error back to the
+    // literal would discard C-069's `TrampolineRefused` and re-arm the precise
+    // self-reference that guard exists to stop. A refusal is not bootstrap —
+    // it is `None`, and the caller routes to `Skipped(Bootstrap)` all the same,
+    // without spawning anything.
+    let bin = match env.resolve_command("ocx") {
+        Ok(bin) => bin,
+        Err(crate::env::CommandResolutionError::NotFound { .. }) => std::path::PathBuf::from("ocx"),
+        Err(error) => {
+            crate::log::debug!("Skipping the installed-version probe: {error}");
+            return None;
+        }
+    };
 
     // 4. Subprocess with captured output, wrapped in a 5-second timeout so a hung
     //    binary cannot stall update-check on every command. `env_clear + envs(env)`

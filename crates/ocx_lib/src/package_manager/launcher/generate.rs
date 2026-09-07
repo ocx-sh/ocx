@@ -17,12 +17,12 @@ use std::path::{Path, PathBuf};
 
 use tokio::task::JoinSet;
 
-use crate::file_structure::ShimBinStore;
+use crate::file_structure::{FileStructure, ShimBinStore};
 use crate::package::metadata::entrypoint::Entrypoints;
 
 #[cfg(windows)]
 use super::body::shim_sidecar_body;
-use super::body::unix_launcher_body;
+use super::body::{unix_launcher_body, utf8_baked_path};
 use super::safety::LauncherSafeString;
 
 /// Generates Unix and Windows launchers for all declared entrypoints.
@@ -64,7 +64,11 @@ pub async fn generate(
         return Ok(());
     }
 
-    let pkg_root_str = LauncherSafeString::new(pkg_root.to_string_lossy().into_owned())?;
+    // The third door onto a baked path (RUL-37): `to_string_lossy` here would
+    // substitute U+FFFD for an invalid byte, sail through `LauncherSafeString`
+    // — U+FFFD is not in its rejection set — and bake a package root that names
+    // nothing, in BOTH the `.sh` launcher and the `.shim` sidecar.
+    let pkg_root_str = LauncherSafeString::new(utf8_baked_path(pkg_root)?)?;
 
     tokio::fs::create_dir_all(dest)
         .await
@@ -130,6 +134,101 @@ pub async fn generate(
     }
 
     Ok(())
+}
+
+/// Resolves the absolute `ocx` a rendered trampoline re-enters through, or
+/// `None` when no absolute path can be established at all (R-W12).
+///
+/// # The ladder
+///
+/// Two rungs, tried in order, each a *different* way of knowing where `ocx`
+/// lives — and the third answer is "we do not know":
+///
+/// 1. **The install tree.** `$OCX_HOME/symlinks/<ocx cli
+///    id>/current/content/bin/ocx` — the same value `ocx self setup`'s private
+///    `ocx_install_bin_path` computes from
+///    [`crate::file_structure::SymlinkStore::current`] and
+///    [`crate::oci::ocx_cli_identifier`], joined with the platform's binary
+///    name. Derived from those two, never spelled as a literal: the identifier
+///    carries a test seam (`__OCX_SELF_IMAGE`) and the symlink layout is the
+///    store's to change, so a hard-coded string would be a second source of
+///    truth that drifts silently and only on the machines where it matters.
+///    Preferred over rung 2 because it *floats*: `ocx self update` swaps
+///    `current` and every already-rendered trampoline follows, where a baked
+///    `current_exe()` would pin the version that happened to render it.
+/// 2. **The running binary.** [`std::env::current_exe`] — the ocx that is
+///    rendering this trampoline right now. This is the rung for the
+///    bare-binary population: someone who downloaded one `ocx`, never ran `ocx
+///    self setup`, and therefore has no install tree at all. Their `ocx` still
+///    has an absolute path, and baking it is strictly better than emitting a
+///    bare name (see below). Same fallback shape `app::context::try_init`
+///    already uses to fill `OCX_BINARY_PIN`.
+///
+/// # Why each rung is probed rather than trusted
+///
+/// A trampoline that baked a path to a binary that is not there would fail with
+/// a bare `No such file or directory` from `/bin/sh` — worse than the `PATH`
+/// lookup it replaced. Each rung therefore has to answer two questions before
+/// it wins: is the path **absolute** (a relative one baked into a body that
+/// runs from an arbitrary CWD names an arbitrary file), and does it **exist**?
+///
+/// The probe is a single `stat` and it deliberately does **not** dereference
+/// further: `current` is a symlink, so `try_exists` follows it and answers
+/// `false` for a dangling one — which is the state a half-uninstalled tree is
+/// in, and the state the next rung is right for. `current_exe()` gets the same
+/// treatment, and needs it: on Linux a deleted-under-a-running-process binary
+/// still yields a path, spelled `<path> (deleted)`, that names nothing.
+///
+/// # What `None` actually means now
+///
+/// Not "the user never ran `ocx self setup`" — rung 2 covers that population.
+/// `None` is reached only when [`std::env::current_exe`] itself fails or
+/// answers something non-absolute or absent: a platform without the syscall, a
+/// binary unlinked out from under a long-running process, a `/proc` that is not
+/// mounted. There, [`super::body::unix_trampoline_body`] degrades to the
+/// bare-name fallback and R-W12's self-resolution loop is accepted — for a
+/// population that is now a rounding error rather than every bare-binary user.
+// WP-7's `render_toolchain` is the sole consumer and lands one wave later, so this
+// surface has no non-test caller yet. `expect`, not `allow`: the moment WP-7 wires
+// it up the expectation goes unfulfilled and the compiler forces this line out —
+// an `allow` would linger silently. `not(test)` because the goldens below DO use
+// it, so the lint never fires in the test build.
+pub(crate) async fn trampoline_ocx_binary(file_structure: &FileStructure) -> Option<PathBuf> {
+    // One spelling of the install `bin/` directory, workspace-wide (RUL-63,
+    // RUL-86, R-W29): a second derivation here and in `setup` would drift the
+    // day the store layout moves, and the per-prompt repair — which owns every
+    // segment under `$OCX_HOME` — would then delete one spelling and add the
+    // other on every prompt.
+    let installed =
+        crate::setup::ocx_install_bin_path(file_structure).join(if cfg!(windows) { "ocx.exe" } else { "ocx" });
+    // `current_exe()` failing is rung 2 declining, not an error: the ladder has
+    // a defined answer below it, and a warn here would fire on every render.
+    let running = std::env::current_exe()
+        .inspect_err(|e| crate::log::debug!("Could not resolve the running ocx binary: {e}"))
+        .ok();
+    first_bakeable_ocx(installed, running).await
+}
+
+/// The rung ladder of [`trampoline_ocx_binary`], with both candidates supplied
+/// rather than read from the process — the seam that lets a test drive rung 2
+/// declining, which `std::env::current_exe()` cannot be made to do in-process.
+///
+/// Each candidate must be **absolute** and must **exist** to win. Absoluteness
+/// is not belt-and-braces: the winner is interpolated into a body that runs
+/// from an arbitrary working directory, where a relative path names an
+/// arbitrary file. `try_exists` errors answer "this rung declines" — a probe
+/// that cannot read a path cannot recommend baking it, and the next rung (or
+/// the bare-name fallback) is always renderable.
+async fn first_bakeable_ocx(installed: PathBuf, running: Option<PathBuf>) -> Option<PathBuf> {
+    for candidate in [Some(installed), running].into_iter().flatten() {
+        if !candidate.is_absolute() {
+            continue;
+        }
+        if tokio::fs::try_exists(&candidate).await.unwrap_or(false) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Writes a launcher file at `path` with the supplied body.
@@ -300,7 +399,7 @@ mod tests {
 
     // ── W1: pkg_root rejection on launcher-unsafe characters ──────────────
     //
-    // `generate()` validates `pkg_root.to_string_lossy()` against
+    // `generate()` validates `pkg_root`'s text against
     // `LauncherSafeString::new` before any file is written. A path containing
     // any character in `LAUNCHER_UNSAFE_CHARS` (e.g. `'`, `%`, `"`, `\n`,
     // `\r`, `\0`) must surface the rejection and never produce a launcher with
@@ -349,6 +448,73 @@ mod tests {
         assert!(
             !dest.join("cmake.shim").exists(),
             "no `.shim` sidecar must be written when pkg_root rejected at the entry boundary"
+        );
+    }
+
+    /// RUL-37's **third door**: the package root every ordinary launcher bakes.
+    ///
+    /// The trampoline's two doors are guarded in `body.rs`; this is the one an
+    /// `ocx package install` reaches. `to_string_lossy` here would substitute
+    /// U+FFFD, sail through `LauncherSafeString` (U+FFFD is not in its
+    /// rejection set) and bake a package root naming nothing — into the `.sh`
+    /// launcher **and** the `.shim` sidecar, which share the one value.
+    ///
+    /// Unix-only because only there can a path be arbitrary bytes; on Windows
+    /// the equivalent input is an unpaired surrogate, which no `PathBuf`
+    /// constructor in safe Rust will build from a `&str`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn generate_rejects_a_pkg_root_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let tmp = tempdir().unwrap();
+        // 0x80 is a bare continuation byte — a valid path component, not valid
+        // UTF-8, and lossily rendered as U+FFFD.
+        let pkg_root = tmp.path().join(std::ffi::OsStr::from_bytes(b"pkg-\x80-not-utf8"));
+        assert!(
+            pkg_root.to_str().is_none(),
+            "precondition: the fixture root really is un-decodable"
+        );
+        assert!(
+            super::LauncherSafeString::new(pkg_root.to_string_lossy().into_owned()).is_ok(),
+            "precondition: the lossy rendering passes the unsafe-character gate, which is why \
+             the UTF-8 refusal has to exist at all"
+        );
+        if let Err(refused) = tokio::fs::create_dir_all(pkg_root.join("content")).await {
+            // APFS validates filenames as UTF-8 and rejects these bytes
+            // outright, so the input under test cannot exist on a macOS volume.
+            // Observed, not assumed via `target_os`: the row still runs on any
+            // filesystem that accepts the name, and a refusal for any other
+            // reason (a vanished tempdir) reds here rather than passing as this
+            // carve-out. Same shape as `index_store`'s two non-UTF-8 rows.
+            assert!(
+                tmp.path().exists(),
+                "only the non-UTF-8 component may be refused; the tempdir must exist: {refused}"
+            );
+            eprintln!("skipped: this filesystem refuses a non-UTF-8 filename: {refused}");
+            return;
+        }
+        let dest = pkg_root.join("entrypoints");
+        let entrypoints = entries_for(&["cmake"]);
+        let shim_bin = shim_bin_store(&tmp);
+
+        let err = super::generate(&pkg_root, &entrypoints, &dest, &shim_bin)
+            .await
+            .expect_err("a non-UTF-8 pkg_root must be refused, not lossily baked");
+        match err {
+            crate::Error::LauncherPathNotUtf8 { path } => {
+                assert!(
+                    path.contains('\u{FFFD}'),
+                    "the refusal carries the lossy rendering, the only printable form the \
+                     value has: {path:?}"
+                );
+            }
+            other => panic!("expected LauncherPathNotUtf8, got {other:?}"),
+        }
+        assert!(
+            !dest.join("cmake").exists(),
+            "and no launcher is written: the refusal fires at the entry boundary, before any \
+             file is created"
         );
     }
 
@@ -623,6 +789,188 @@ mod tests {
         assert!(
             crate::shim::SHIM_BYTES.is_empty(),
             "`ocx` must carry zero shim weight off Windows (SHIM_BYTES empty)"
+        );
+    }
+
+    // ── R-W12: the absolute `ocx` a trampoline re-enters through ──────────
+    //
+    // Every rung is driven to both a winning and a declining outcome, because
+    // the whole value of the ladder is telling the rungs apart — a test that
+    // only ever saw one outcome would be indistinguishable from a resolver
+    // that always answered the same way. The two rungs that read the real
+    // filesystem run against a real tempdir; the rung whose declining branch
+    // no in-process test can produce (`current_exe()` failing) is driven
+    // through the `first_bakeable_ocx` seam.
+
+    /// The store layout the resolver must reproduce, derived the same way it
+    /// derives it — never the literal string, which is the drift R-W12 names.
+    fn installed_ocx_path(file_structure: &crate::file_structure::FileStructure) -> std::path::PathBuf {
+        file_structure
+            .symlinks
+            .current(&crate::oci::ocx_cli_identifier())
+            .join("content")
+            .join("bin")
+            .join(if cfg!(windows) { "ocx.exe" } else { "ocx" })
+    }
+
+    /// Rung 1 declines on an empty `$OCX_HOME`, and rung 2 answers: the
+    /// bare-binary population gets the absolute path of the ocx that is
+    /// rendering, never a path to nothing under a store that was never built.
+    #[tokio::test]
+    async fn trampoline_ocx_binary_falls_back_to_the_running_binary_when_ocx_is_not_installed() {
+        let tmp = tempdir().unwrap();
+        let file_structure = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
+        let resolved = super::trampoline_ocx_binary(&file_structure)
+            .await
+            .expect("rung 2 answers whenever the test binary itself is on disk");
+
+        assert_eq!(
+            resolved,
+            std::env::current_exe().expect("the test binary has a path"),
+            "an empty OCX_HOME has no install tree, so the ladder must drop to the running \
+             binary rather than bake a path to nothing"
+        );
+        assert!(
+            !resolved.starts_with(tmp.path()),
+            "…and must not answer anything under the store it just found empty: {resolved:?}"
+        );
+    }
+
+    /// Rung 2 declining leaves the bare-name fallback — the only state in which
+    /// R-W12's self-resolution loop is accepted.
+    ///
+    /// Driven through the [`super::first_bakeable_ocx`] seam because
+    /// `std::env::current_exe()` cannot be made to fail in-process, and a rung
+    /// whose declining branch is unreachable in test is a branch nobody has
+    /// seen run.
+    #[tokio::test]
+    async fn no_path_is_bakeable_when_neither_the_install_tree_nor_a_running_binary_answers() {
+        let tmp = tempdir().unwrap();
+        assert!(
+            super::first_bakeable_ocx(tmp.path().join("absent-ocx"), None)
+                .await
+                .is_none(),
+            "with no install tree and no running-binary answer, the body must degrade to the \
+             bare-name PATH lookup"
+        );
+    }
+
+    /// Neither rung may bake a **relative** path: the body runs from an
+    /// arbitrary working directory, where `ocx/bin/ocx` names an arbitrary
+    /// file — the one failure a plain existence probe cannot see, since a
+    /// relative candidate can exist perfectly well relative to the *test's*
+    /// CWD.
+    #[tokio::test]
+    async fn a_relative_candidate_is_never_bakeable_even_when_it_exists() {
+        let relative = std::path::PathBuf::from("Cargo.toml");
+        assert!(
+            tokio::fs::try_exists(&relative).await.unwrap_or(false),
+            "precondition: the relative candidate resolves from the crate's CWD, so only the \
+             absoluteness clause can refuse it"
+        );
+
+        assert!(
+            super::first_bakeable_ocx(relative.clone(), None).await.is_none(),
+            "rung 1 must refuse a relative install path"
+        );
+        assert!(
+            super::first_bakeable_ocx(std::path::PathBuf::from("absent"), Some(relative))
+                .await
+                .is_none(),
+            "…and rung 2 must refuse a relative running-binary path"
+        );
+    }
+
+    /// The rungs are **ordered**, and the order is load-bearing: `current`
+    /// floats across `ocx self update`, a baked `current_exe()` does not. With
+    /// both candidates present and distinct, the install tree wins.
+    #[tokio::test]
+    async fn the_install_tree_outranks_the_running_binary_when_both_exist() {
+        let tmp = tempdir().unwrap();
+        let installed = tmp.path().join("installed-ocx");
+        let running = tmp.path().join("running-ocx");
+        tokio::fs::write(&installed, b"#!/bin/sh\n").await.unwrap();
+        tokio::fs::write(&running, b"#!/bin/sh\n").await.unwrap();
+
+        assert_eq!(
+            super::first_bakeable_ocx(installed.clone(), Some(running)).await,
+            Some(installed),
+            "rung 1 must win while it answers — `ocx self update` swaps `current` and every \
+             rendered trampoline follows, which a baked running path would not"
+        );
+    }
+
+    #[tokio::test]
+    async fn trampoline_ocx_binary_resolves_the_installed_path_under_the_symlink_store() {
+        let tmp = tempdir().unwrap();
+        let file_structure = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
+        let expected = installed_ocx_path(&file_structure);
+        tokio::fs::create_dir_all(expected.parent().expect("the binary has a parent"))
+            .await
+            .unwrap();
+        tokio::fs::write(&expected, b"#!/bin/sh\n").await.unwrap();
+
+        assert_eq!(
+            super::trampoline_ocx_binary(&file_structure).await,
+            Some(expected.clone()),
+            "the resolver must answer the store-derived path once it exists"
+        );
+        assert!(
+            expected.starts_with(tmp.path().join("symlinks")),
+            "and that path must sit under $OCX_HOME/symlinks, not somewhere invented: {expected:?}"
+        );
+        assert!(
+            expected.ends_with(std::path::Path::new("current/content/bin").join(if cfg!(windows) {
+                "ocx.exe"
+            } else {
+                "ocx"
+            })),
+            "…and end at `current/content/bin/<ocx>`, the same tail `ocx self setup` \
+             computes: {expected:?}"
+        );
+    }
+
+    /// R-W12 (E-18): a **dangling** `current` — the state a half-uninstalled
+    /// tree is in. `try_exists` follows the link and answers `false`, so rung 1
+    /// declines and the ladder drops to the running binary.
+    ///
+    /// The third state, and the one neither shipped row reaches: `current`
+    /// exists as a directory entry, so a probe written with `symlink_metadata`
+    /// — or with a bare `Path::exists()` on the link itself — would answer
+    /// `true` and bake a path to nothing, which `/bin/sh` reports as a naked
+    /// ENOENT.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn trampoline_ocx_binary_skips_a_dangling_current() {
+        let tmp = tempdir().unwrap();
+        let file_structure = crate::file_structure::FileStructure::with_root(tmp.path().to_path_buf());
+        let current = file_structure.symlinks.current(&crate::oci::ocx_cli_identifier());
+        tokio::fs::create_dir_all(current.parent().expect("`current` has a parent"))
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("collected-by-clean"), &current).expect("create a dangling link");
+
+        assert!(
+            tokio::fs::symlink_metadata(&current).await.is_ok(),
+            "precondition: the link itself exists, which is what makes this distinct from \
+             the not-installed row"
+        );
+        assert!(
+            !tokio::fs::try_exists(&current).await.unwrap_or(false),
+            "precondition: …and it resolves to nothing"
+        );
+        let resolved = super::trampoline_ocx_binary(&file_structure)
+            .await
+            .expect("rung 2 answers whenever the test binary itself is on disk");
+        assert!(
+            !resolved.starts_with(&current),
+            "a dangling `current` is not an install tree — baking a path through it would \
+             make every trampoline fail with a bare ENOENT from /bin/sh: {resolved:?}"
+        );
+        assert_eq!(
+            resolved,
+            std::env::current_exe().expect("the test binary has a path"),
+            "…so the ladder must drop to the running binary instead"
         );
     }
 }

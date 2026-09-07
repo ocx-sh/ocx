@@ -175,8 +175,39 @@ impl Add {
             }
         };
 
-        // Commit: lock-first, manifest-second, both atomic.
-        let commit = guard.commit(staged, new_lock.clone()).await?;
+        // Commit: lock-first, manifest-second, both atomic — then re-render the
+        // toolchain home the new lock describes (C-054, D-V8). Both steps are
+        // the one shared `commit_and_render`; a call site that reached
+        // `MutationGuard::commit` directly would write a correct lock and leave
+        // the tree describing the previous one. The scope is derived while the
+        // guard still exists; a render failure after the commit never rolls it
+        // back (RUL-53).
+        // `--no-pull` promises this invocation downloads nothing, and the
+        // render's metadata closure walk is a download. It therefore runs
+        // against the offline view (the shipped `--no-pull` idiom, as in
+        // `ocx env --no-pull`): a warm store still re-renders, a cold one
+        // degrades quietly and the deferred `ocx pull` renders instead.
+        let eager = self.pull.enabled(true);
+        let render_manager = if eager {
+            context.manager().clone()
+        } else {
+            context.manager().offline_view(context.local_index().clone())
+        };
+        let scope = context.toolchain_render_scope(guard.config_path()).await?;
+        let platform = conventions::platform_or_default(self.platform.platform.clone());
+        let commit = render_manager
+            .commit_and_render(
+                guard,
+                staged,
+                new_lock.clone(),
+                ocx_lib::package_manager::ToolchainRender {
+                    scope: &scope,
+                    toolchain_root: context.toolchain_root(),
+                    platform: &platform,
+                },
+            )
+            .await?
+            .commit;
 
         // Consent write seam (C-024, A-29) — one of the six commands allowed to
         // stamp, opting in explicitly. AFTER the commit, so the stamp records
@@ -201,8 +232,6 @@ impl Add {
         //
         // `--no-pull` opts out: lock write happens regardless; only the
         // object-store materialization is deferred.
-        let eager = self.pull.enabled(true);
-        let platform = conventions::platform_or_default(self.platform.platform.clone());
         materialize_lock(&context, &new_lock, eager, platform.clone()).await?;
 
         // Report the full resulting lock to the user, keyed on the requested

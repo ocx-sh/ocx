@@ -356,6 +356,26 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
 /// by one rather than wildcarded so a new subcommand is not skipped by
 /// default; `should_check_for_update_skips_all_shell_variants_canary` makes
 /// that decision a compile error.
+///
+/// **The machine-driven surfaces are skipped for the same reason `self
+/// activate` is**, and they were the omission this list was carrying. The
+/// probe is a live tag listing through the index chain plus an `ocx --format
+/// json version` subprocess spawn — measured at 264.5 ms when it fires against
+/// 63.8 ms throttled — and it lands on whichever invocation happens to be the
+/// first in a 24-hour window. That is fine on a command a human typed and
+/// wrong on one a machine issues:
+///
+/// - `Exec` (and its deprecated `run` spelling) is what every rendered
+///   `<home>/toolchain/bin/<name>` trampoline `exec`s — the user typed `cmake`,
+///   not `ocx`, and a quarter-second stall on the first build of the day is
+///   attributed to the tool, not to ocx.
+/// - `Env` and `Direnv` compose an environment for a shell to evaluate:
+///   `.envrc`'s `eval "$(ocx direnv export)"` re-runs on every directory change
+///   and on every `ocx.toml` / `ocx.lock` touch.
+///
+/// Every command a user reaches for deliberately — `install`, `pull`, `add`,
+/// `lock`, `update`, `status`, the `package` group — still carries the check,
+/// so the notification still happens; it just no longer rides a hot path.
 fn should_check_for_update(command: &Option<command::Command>) -> bool {
     !matches!(
         command,
@@ -370,6 +390,10 @@ fn should_check_for_update(command: &Option<command::Command>) -> bool {
                 )
                 | command::Command::Self_(_)
                 | command::Command::Config(_)
+                | command::Command::Exec(_)
+                | command::Command::DeprecatedRun(_)
+                | command::Command::Env(_)
+                | command::Command::Direnv(_)
         )
     )
 }
@@ -820,6 +844,47 @@ mod tests {
         assert!(
             !should_check_for_update(&cmd),
             "Config group must not trigger update check (config test promises no network)"
+        );
+    }
+
+    /// Every machine-driven surface must be in the skip list, and one ordinary
+    /// command must NOT be — the pair, so a green here cannot come from a
+    /// predicate that skips everything.
+    ///
+    /// `Exec` is what a rendered `<home>/toolchain/bin/<name>` trampoline
+    /// `exec`s (`package_manager::launcher::body`), `DeprecatedRun` is its
+    /// still-shipped `ocx run` spelling, and `Env`/`Direnv` are what a shell
+    /// evaluates — `.envrc` re-runs `ocx direnv export` on every directory
+    /// change. On any of them the probe's live tag listing plus `ocx --format
+    /// json version` subprocess spawn lands on a command the user never typed.
+    ///
+    /// `Status` is the negative half: it is an ordinary command, it must keep
+    /// the check, and a regression that widened the skip list to everything
+    /// would red here rather than passing quietly.
+    #[test]
+    fn should_check_for_update_skips_the_machine_driven_surfaces() {
+        use clap::Parser as _;
+        let exec = command::toolchain_exec::ToolchainExec::parse_from(["exec", "--", "true"]);
+        let deprecated_run = command::toolchain_exec::ToolchainExec::parse_from(["run", "--", "true"]);
+        let env = command::toolchain_env::ToolchainEnv::parse_from(["env"]);
+        let direnv = command::direnv::Direnv::parse_from(["direnv"]);
+
+        for (label, cmd) in [
+            ("exec", command::Command::Exec(exec)),
+            ("run", command::Command::DeprecatedRun(deprecated_run)),
+            ("env", command::Command::Env(env)),
+            ("direnv", command::Command::Direnv(direnv)),
+        ] {
+            assert!(
+                !should_check_for_update(&Some(cmd)),
+                "`ocx {label}` is issued by a trampoline or a shell, not typed — it must not trigger the update check"
+            );
+        }
+
+        let status = command::status::Status::parse_from(["status"]);
+        assert!(
+            should_check_for_update(&Some(command::Command::Status(status))),
+            "an ordinary command must still carry the check — otherwise the skip list above proves nothing"
         );
     }
 

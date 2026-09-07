@@ -953,6 +953,12 @@ mod firewall_tests {
             "test-only `cc` invocation building the ELF fixtures this lint classifies",
         ),
         (
+            "ocx_lib/src/package_manager/launcher/body.rs",
+            "test-only `/bin/sh` harness — runs the emitted trampoline body against a stub `ocx` to \
+             prove C-033's `unset` really strips the caller's tier selectors and that the baked \
+             absolute path is exec'd verbatim; no production path in this file spawns anything",
+        ),
+        (
             "ocx_lib/src/package_manager/tasks/update_check.rs",
             "hermetic self re-entry (`ocx --format json version`) to read the installed version",
         ),
@@ -966,6 +972,13 @@ mod firewall_tests {
         (
             "ocx_lib/src/setup/profiles.rs",
             "shell detection — asks a candidate shell what it is",
+        ),
+        (
+            "ocx_lib/src/setup/session_path/macos.rs",
+            "the `launchctl` calls that load, unload and read the session-PATH LaunchAgent, plus a \
+             test-only load-time harness — runs the emitted LaunchAgent merge script under /bin/sh \
+             against a fake launchctl, the only way to prove ADR item 6 (the composed PATH is a \
+             function of the then-current session value) off macOS",
         ),
         (
             "ocx_lib/src/shell.rs",

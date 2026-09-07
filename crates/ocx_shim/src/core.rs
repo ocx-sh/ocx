@@ -48,11 +48,13 @@ pub(super) fn derive_stem(module_path: &OsStr) -> Result<String, ShimError> {
 
 /// A parsed sidecar: which one was read, and the single value it carries.
 ///
-/// The two variants bind a wire verb to the payload that verb consumes, so a
+/// The three variants bind a wire verb to the payload that verb consumes, so a
 /// pinned identifier can never be emitted under `launcher exec` (which assumes
-/// the package already exists) and a package root can never be emitted under
-/// `launcher shim` (which assumes it does not). That pairing is the reason this
-/// is an enum rather than a `String` plus a separately-carried verb.
+/// the package already exists), a package root can never be emitted under
+/// `launcher shim` (which assumes it does not), and a toolchain home — the only
+/// payload that precedes its verb, as a root flag — can never be emitted as
+/// either. That pairing is the reason this is an enum rather than a `String`
+/// plus a separately-carried verb.
 #[derive(Debug)]
 pub(super) enum Sidecar {
     /// `<stem>.shim` — the absolute package root of an **installed** package.
@@ -62,6 +64,47 @@ pub(super) enum Sidecar {
     /// package is deliberately absent. Dispatches [`WIRE_SUBCOMMAND_SHIM`],
     /// which materializes it before dispatching (C-017).
     PinnedIdentifier(String),
+    /// `<stem>.exec` — the toolchain home a rendered **trampoline** re-enters
+    /// ocx for, plus the absolute `ocx` the render resolved. Dispatches
+    /// [`WIRE_SUBCOMMAND_EXEC`] behind a **root flag**, the one grammar here
+    /// whose selector precedes the verb (C-031, C-032).
+    ///
+    /// The second field is the optional baked program (V-9) and it is `None`
+    /// for the one-line form, which stays valid — see [`parse_exec_sidecar`].
+    ToolchainHome(ToolchainHome, Option<String>),
+}
+
+/// The two homes a `<stem>.exec` sidecar can name, and the reason that sidecar
+/// parses into a typed value rather than a bare `String`: `--global` takes **no
+/// value token**, so a string carrying `"global"` would have to be
+/// re-discriminated at the emit site — the same string-vs-verb coupling
+/// [`Sidecar`]'s own shape exists to prevent.
+#[derive(Debug)]
+pub(super) enum ToolchainHome {
+    /// An absolute project root, emitted as `--project "<root>"`.
+    Project(String),
+    /// The global home, emitted as a valueless `--global`.
+    Global,
+}
+
+impl ToolchainHome {
+    /// The literal a `.exec` sidecar carries for the global home, matched by
+    /// **byte equality** (C-031).
+    ///
+    /// Paired with `ocx_lib`'s `package_manager::launcher::body`
+    /// `EXEC_SIDECAR_GLOBAL`, which writes it; the two are bound only by the
+    /// C-034 paired golden, since `ocx_lib` cannot depend on this crate.
+    pub(super) const GLOBAL: &'static str = "global";
+
+    /// The sidecar line this home was parsed from — the inverse of
+    /// [`parse_exec_sidecar`]'s clause, so [`Sidecar::value`] stays total
+    /// without any variant having to invent a value it does not carry.
+    pub(super) fn as_line(&self) -> &str {
+        match self {
+            ToolchainHome::Project(root) => root,
+            ToolchainHome::Global => Self::GLOBAL,
+        }
+    }
 }
 
 impl Sidecar {
@@ -70,14 +113,36 @@ impl Sidecar {
         match self {
             Sidecar::PackageRoot(_) => WIRE_SUBCOMMAND,
             Sidecar::PinnedIdentifier(_) => WIRE_SUBCOMMAND_SHIM,
+            Sidecar::ToolchainHome(..) => WIRE_SUBCOMMAND_EXEC,
         }
     }
 
-    /// The single value the sidecar carries, emitted as the first positional
-    /// after the wire subcommand.
+    /// The absolute `ocx` a rendered trampoline baked, when it has one (V-9).
+    ///
+    /// Only `.exec` can carry it: the two positional grammars are read by a
+    /// shim in an *installed package's* tree, where the co-resident-`ocx.exe`
+    /// hazard this exists to close does not arise — nothing renders an `ocx`
+    /// beside them. `None` for the one-line `.exec` form, and the caller then
+    /// falls back to the literal `ocx`, which is the accepted narrow risk the
+    /// POSIX body records at `launcher/generate.rs`'s rung ladder.
+    pub(super) fn baked_ocx(&self) -> Option<&str> {
+        match self {
+            Sidecar::ToolchainHome(_, ocx) => ocx.as_deref(),
+            Sidecar::PackageRoot(_) | Sidecar::PinnedIdentifier(_) => None,
+        }
+    }
+
+    /// The single value the sidecar carries.
+    ///
+    /// For the two positional grammars this is the first token after the wire
+    /// subcommand. For `.exec` it is the sidecar **line** — which the emitter
+    /// places *before* the verb, as the root flag's argument, and omits
+    /// entirely for [`ToolchainHome::Global`]. Position is
+    /// [`build_child_command_line`]'s to decide; this only reports the value.
     pub(super) fn value(&self) -> &str {
         match self {
             Sidecar::PackageRoot(value) | Sidecar::PinnedIdentifier(value) => value,
+            Sidecar::ToolchainHome(home, _) => home.as_line(),
         }
     }
 
@@ -93,33 +158,70 @@ impl Sidecar {
     /// performs is addressed by the digest baked into the identifier and is
     /// content-verified on fetch — the same integrity the sidecar's own write
     /// access already bounds.
+    ///
+    /// `.exec` returns `None` for a **different** reason, and conflating the
+    /// two would be a mistake (C-031): its value IS a local absolute path, but
+    /// it is a project *selector*, not a package root. `pkg_root_allowed`'s
+    /// allow-list is `$OCX_HOME/packages` plus two scratch roots, and a project
+    /// directory is under none of them — a containment check here would refuse
+    /// every legitimate trampoline. What stands in its place is that `ocx`
+    /// re-resolves the selector through the ordinary project chain, which
+    /// validates the home on its own terms.
     pub(super) fn containment_path(&self) -> Option<&str> {
         match self {
             Sidecar::PackageRoot(root) => Some(root),
-            Sidecar::PinnedIdentifier(_) => None,
+            Sidecar::PinnedIdentifier(_) | Sidecar::ToolchainHome(..) => None,
         }
     }
 }
 
+/// Whether dispatching `sidecar` must clear `OCX_GLOBAL` and `OCX_PROJECT`
+/// from the child's environment (C-033, S-009) — the Windows counterpart of the
+/// POSIX trampoline body's `unset OCX_GLOBAL OCX_PROJECT`.
+///
+/// True for `.exec` and **only** for `.exec` (RUL-14 / D-V20). A trampoline's
+/// baked selector is the only selector, so one exported `OCX_GLOBAL` would
+/// otherwise make every trampoline on that `PATH` exit 64 from
+/// `check_global_project_exclusivity`, for a flag nobody typed. The two
+/// positional grammars bake no tier selector at all, so they have nothing to
+/// shadow — and stripping there would change what `launcher exec` /
+/// `launcher shim` resolve for a caller who deliberately exported a tier.
+///
+/// Extracted rather than written inline at the spawn site because that site is
+/// `#[cfg(windows)]`: the scope decision is the whole of RUL-14, and inside the
+/// Win32 arm no test on this host can observe it (RUL-39).
+pub(super) fn strips_tier_selectors(sidecar: &Sidecar) -> bool {
+    matches!(sidecar, Sidecar::ToolchainHome(..))
+}
+
 /// The sidecars a shim probes for, in precedence order, each paired with the
-/// parser for its own grammar: `<stem>.shim` (an installed package) is tried
-/// before `<stem>.shimref` (a deferred tool).
+/// parser for its own grammar: `<stem>.shim` (an installed package), then
+/// `<stem>.shimref` (a deferred tool), then `<stem>.exec` (a toolchain
+/// trampoline).
 ///
 /// The order is a tie-break for a state that cannot arise from ocx's own
-/// writes — the two sidecars are produced into different trees
+/// writes — the three sidecars are produced into different trees
 /// (`entrypoints/` by the launcher generator, a shim tree's `bin/` by
-/// `prepare_lazy`) and never into the same directory. If both are somehow
-/// present, the installed package wins: it is the state that needs no
-/// download, so preferring it is the fail-safe reading.
-pub(super) const SIDECAR_PROBE_ORDER: [(&str, SidecarParser); 2] =
-    [("shim", parse_shim_sidecar), ("shimref", parse_shimref_sidecar)];
+/// `prepare_lazy`, `<home>/toolchain/bin/` by the toolchain renderer) and never
+/// into the same directory. If more than one is somehow present, the installed
+/// package wins: it is the state that needs no download and no re-resolution,
+/// so preferring it is the fail-safe reading. `.exec` is last for the same
+/// reason it is the most indirect: it does not name what to run, it names a
+/// home ocx must compose first.
+pub(super) const SIDECAR_PROBE_ORDER: [(&str, SidecarParser); 3] = [
+    ("shim", parse_shim_sidecar),
+    ("shimref", parse_shimref_sidecar),
+    ("exec", parse_exec_sidecar),
+];
 
 /// The read side of one sidecar grammar: raw file bytes in, a [`Sidecar`] out,
 /// or [`ShimError::MalformedSidecar`] (E2, exit 78).
 type SidecarParser = fn(&[u8]) -> Result<Sidecar, ShimError>;
 
-/// Hard upper bound on a sidecar file, applied by the read side of **both**
-/// grammars before any further work. Defends against a corrupt/huge file.
+/// Hard upper bound on a sidecar file, applied by the read side of **all
+/// three** grammars before any further work — `.shim`, `.shimref` and `.exec`,
+/// through the one [`parse_one_line`] they share. Defends against a
+/// corrupt/huge file.
 ///
 /// Deliberately stricter than the write side, which imposes no length cap at
 /// all (`launcher/body.rs`, `launcher/safety.rs`): the reader re-validates
@@ -129,9 +231,9 @@ const MAX_LEN: usize = 32 * 1024;
 /// The shared read-side rules of every sidecar grammar, applied before the
 /// per-grammar clause. Returns the single line with its terminator stripped.
 ///
-/// Stated in full rather than by reference, because both grammars are frozen
-/// on-disk contracts and neither inherits from the other by assumption
-/// (C-017):
+/// Stated in full rather than by reference, because all three grammars —
+/// `.shim`, `.shimref`, `.exec` — are frozen on-disk contracts and none
+/// inherits from another by assumption (C-017, C-031):
 ///
 /// 1. Input larger than [`MAX_LEN`] (32 KiB) → [`ShimError::MalformedSidecar`].
 /// 2. Exactly ONE trailing terminator is stripped: `\r\n`, `\n`, or none. A
@@ -244,6 +346,119 @@ pub(super) fn parse_shimref_sidecar(raw: &[u8]) -> Result<Sidecar, ShimError> {
     Ok(Sidecar::PinnedIdentifier(identifier.to_string()))
 }
 
+/// Parses + validates the raw bytes of a `<stem>.exec` sidecar, returning the
+/// toolchain home a trampoline re-enters ocx for and the absolute `ocx` the
+/// render baked (C-031, V-9).
+///
+/// # The grammar, written out rather than inherited
+///
+/// `.exec` is a frozen on-disk contract in its own right, so its rules are
+/// stated here rather than referred to. It is the only one of the three that
+/// is **not** one line:
+///
+/// 1. **Line one — the home clause.** Byte equality with
+///    [`ToolchainHome::GLOBAL`], **or** [`is_absolute_path`]. Byte equality,
+///    not a case-insensitive or trimmed compare: the writer emits one
+///    spelling, and a tolerant reader here would be a second grammar nobody
+///    specified. The two clauses cannot collide — `global` is not an absolute
+///    path, and `/global` is — so the order they are tried in carries no
+///    meaning.
+/// 2. **Line two — the baked `ocx`, OPTIONAL.** [`is_absolute_path`], with no
+///    `global` alternative: it names a program, not a home. Absent is the
+///    degraded arm and stays valid, because an ocx that cannot resolve its own
+///    path still has to render (`launcher/generate.rs`'s rung ladder).
+///
+/// A third line is refused: the split takes the FIRST newline only, so
+/// everything after it is line two, and line two carrying an interior newline
+/// fails rule 4 below.
+///
+/// Each line is then put through the five read-side rules of
+/// [`parse_one_line`] **verbatim** — 32 KiB cap, exactly one stripped
+/// terminator, non-empty after the strip, no `0x00`/`0x0A`/`0x0D`, valid UTF-8.
+/// The cap is applied to the whole file first, so two lines cannot buy more
+/// than one.
+///
+/// # Why the second line exists at all (V-9)
+///
+/// Without it the shim resolves the literal `ocx` and spawns with
+/// `lpApplicationName = NULL` — and that search begins at the directory the
+/// calling image loaded from, i.e. `<home>/toolchain/bin` itself. A package
+/// claiming the name `ocx` is admitted by design (ADR D-4 removed
+/// `ShimNameShadowsOcx`), so `bin\ocx.exe` lands beside every other
+/// trampoline and captures all of their spawns. This line is the Windows half
+/// of the absolute `__ocx_binary` the POSIX trampoline body has always baked.
+///
+/// # No containment, and that is not an omission
+///
+/// The home is a project **selector**, not a package root, so
+/// [`Sidecar::containment_path`] returns `None` for it and the E3 allow-list
+/// never sees it. See that method for why applying the allow-list here would
+/// refuse every legitimate trampoline. The baked `ocx` is not containment-
+/// checked either, and for a stronger reason: it is the program the sidecar
+/// exists to name, so a check would only re-ask the question its own writer
+/// answered. What bounds it is the same thing that bounds every other byte
+/// here — write access to `<home>/toolchain/bin`, which is owner-only at
+/// create time.
+///
+/// Anything rejected is [`ShimError::MalformedSidecar`], exit 78 (E2).
+pub(super) fn parse_exec_sidecar(raw: &[u8]) -> Result<Sidecar, ShimError> {
+    if raw.len() > MAX_LEN {
+        return Err(ShimError::MalformedSidecar {
+            reason: format!("sidecar larger than {MAX_LEN} bytes"),
+        });
+    }
+
+    // One trailing terminator off the FILE, exactly as `parse_one_line` takes
+    // one off a line — so `<home>\n<ocx>\n` and `<home>\n<ocx>` are the same
+    // document, and a second trailing newline stays an empty line two rather
+    // than becoming invisible.
+    let body = raw
+        .strip_suffix(b"\r\n")
+        .or_else(|| raw.strip_suffix(b"\n"))
+        .unwrap_or(raw);
+
+    let (home_line, baked_line) = match body.iter().position(|&byte| byte == b'\n') {
+        // The `\r` belongs to line one's CRLF terminator; stripping it is what
+        // `parse_one_line` would have done had the line arrived alone. Done
+        // ONLY on a split, so a lone trailing CR on a one-line sidecar stays
+        // the interior byte the shared rules refuse.
+        Some(at) => (
+            body[..at].strip_suffix(b"\r").unwrap_or(&body[..at]),
+            Some(&body[at + 1..]),
+        ),
+        None => (body, None),
+    };
+
+    let home = parse_one_line(home_line)?;
+    let home = if home == ToolchainHome::GLOBAL {
+        ToolchainHome::Global
+    } else if is_absolute_path(home) {
+        ToolchainHome::Project(home.to_string())
+    } else {
+        return Err(ShimError::MalformedSidecar {
+            reason: format!(
+                "toolchain home is neither an absolute path nor `{}`: {home}",
+                ToolchainHome::GLOBAL
+            ),
+        });
+    };
+
+    let baked = match baked_line {
+        Some(line) => {
+            let ocx = parse_one_line(line)?;
+            if !is_absolute_path(ocx) {
+                return Err(ShimError::MalformedSidecar {
+                    reason: format!("baked ocx is not absolute: {ocx}"),
+                });
+            }
+            Some(ocx.to_string())
+        }
+        None => None,
+    };
+
+    Ok(Sidecar::ToolchainHome(home, baked))
+}
+
 /// The `.shimref` read side's substitution for `.shim`'s absolute-path clause:
 /// a **structural admissibility check**, deliberately not an OCI reference
 /// parser.
@@ -311,9 +526,11 @@ fn is_pinned_identifier(value: &str) -> bool {
         && hex.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Absolute-path check for a sidecar `pkg_root`. Recognises Windows
-/// absolute forms (`C:\...`, `\\server\share`, `\\?\...`) and a leading
-/// `/` so the parser is host-runnable on the Linux CI without depending on
+/// Absolute-path check for the two sidecar payloads that name a directory: a
+/// `.shim` package root, and a `.exec` project home (the clause that tells one
+/// from [`ToolchainHome::GLOBAL`]). Recognises Windows absolute forms
+/// (`C:\...`, `C:/...`, `\\server\share`, `\\?\...`) and a leading `/` so the
+/// parser is host-runnable on the Linux CI without depending on
 /// `std::path::Path::is_absolute`'s platform-conditional behaviour.
 fn is_absolute_path(p: &str) -> bool {
     let bytes = p.as_bytes();
@@ -354,22 +571,77 @@ pub(crate) fn pkg_root_allowed(canon_home: &std::path::Path, canon_root: &std::p
         .any(|allowed| canon_root.starts_with(allowed))
 }
 
-/// Resolves the program to spawn, applying the Windows
-/// `IF DEFINED OCX_BINARY_PIN` semantics the ADR §Error Taxonomy E5/E6
-/// mandates: if `OCX_BINARY_PIN` is **defined at all** (present, even as
-/// an empty string) → that value; **only when unset** → the literal
-/// `"ocx"` (PATH lookup).
+/// The program a shim will spawn, and how `CreateProcessW` must receive it.
+///
+/// One value rather than a token plus a loose boolean, because the two answers
+/// are one decision: every rung that produces a real filesystem path must be
+/// passed explicitly, and the single rung that produces a bare name must not
+/// be. Splitting them let the second half be recomputed at the spawn site,
+/// which is `#[cfg(windows)]` and therefore unreachable to any test on the
+/// Linux CI host (RUL-39).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ResolvedProgram {
+    /// The leading token of the child command line.
+    pub(super) token: String,
+    /// Whether `token` is also passed as an explicit `lpApplicationName`.
+    pub(super) explicit: bool,
+}
+
+impl ResolvedProgram {
+    /// What `CreateProcessW` receives as `lpApplicationName`: `Some(program)`
+    /// to resolve it explicitly, or `None` for the command-line program search.
+    ///
+    /// SECURITY (B2 / CWE-428): a real filesystem path may contain spaces
+    /// (`C:\Program Files\…\ocx.exe`), so it MUST be passed as its own
+    /// NUL-terminated buffer — otherwise `CreateProcessW` parses the command
+    /// line and mis-resolves it to `C:\Program.exe`.
+    ///
+    /// SECURITY (V-9): `None` is also the *dangerous* answer, which is why
+    /// only [`resolve_program`]'s last rung produces it. With a NULL
+    /// `lpApplicationName`, `CreateProcessW` searches **the directory the
+    /// calling image loaded from first** — `<home>/toolchain/bin` for every
+    /// rendered trampoline — then the working directory, the system
+    /// directories, and only then `PATH`. A co-resident `bin\ocx.exe`
+    /// therefore wins before `PATH` is consulted at all.
+    pub(super) fn application_name(&self) -> Option<&str> {
+        self.explicit.then_some(self.token.as_str())
+    }
+}
+
+/// Resolves the program a shim spawns, over three rungs.
+///
+/// 1. **`OCX_BINARY_PIN`**, applying the Windows `IF DEFINED` semantics the
+///    ADR §Error Taxonomy E5/E6 mandates: defined **at all** (present, even as
+///    an empty string) → that value. Empty must NOT collapse to `ocx` — that
+///    is the Unix `${VAR:-ocx}` behaviour, deliberately out of scope, and an
+///    empty `lpApplicationName` then fails the spawn deterministically rather
+///    than silently parsing the command line.
+/// 2. **The baked `ocx`** from a `.exec` sidecar's second line (V-9) — the
+///    Windows counterpart of the absolute `__ocx_binary` the POSIX trampoline
+///    body bakes. Below the pin for the same reason POSIX puts it there:
+///    `exec "${OCX_BINARY_PIN:-${__ocx_binary}}"` — the pin is the operator's
+///    override and must win on both platforms.
+/// 3. **The literal `ocx`**, spawned with `lpApplicationName = NULL`.
+///
+/// Rung 3 is the accepted narrow risk, not the ordinary case: it is reached
+/// only by the two positional grammars (whose trees never hold a rendered
+/// `ocx`) and by a one-line `.exec` — written when `trampoline_ocx_binary`'s
+/// own ladder could resolve no absolute, existing `ocx` at render time.
+/// `launcher/generate.rs` records that acceptance from the POSIX side and it
+/// is the same population here.
 ///
 /// `pin` models the env lookup result: `None` = unset, `Some(value)` =
-/// defined (value may be empty).
-pub(super) fn resolve_program(pin: Option<&str>) -> String {
-    // `IF DEFINED OCX_BINARY_PIN` semantics (ADR §Error Taxonomy E5/E6):
-    // *defined at all* (even empty) → use its value; *only unset* →
-    // literal `ocx`. Empty must NOT collapse to `ocx` (that is the Unix
-    // `${VAR:-ocx}` behaviour, deliberately out of scope).
-    match pin {
-        Some(value) => value.to_string(),
-        None => "ocx".to_string(),
+/// defined (value may be empty). `baked` is [`Sidecar::baked_ocx`].
+pub(super) fn resolve_program(pin: Option<&str>, baked: Option<&str>) -> ResolvedProgram {
+    match pin.or(baked) {
+        Some(value) => ResolvedProgram {
+            token: value.to_string(),
+            explicit: true,
+        },
+        None => ResolvedProgram {
+            token: "ocx".to_string(),
+            explicit: false,
+        },
     }
 }
 
@@ -397,10 +669,42 @@ pub(super) const WIRE_SUBCOMMAND: &str = "launcher exec";
 /// (`subsystem-package-manager.md` canary rule).
 pub(super) const WIRE_SUBCOMMAND_SHIM: &str = "launcher shim";
 
-/// Assembles the child command line reproducing the frozen wire ABI:
-/// `<program> <verb> "<value>" -- "<stem>" <argv...>`, where the verb/value
-/// pair comes from the parsed [`Sidecar`] — `launcher exec` with a package
-/// root, or `launcher shim` with a pinned identifier.
+/// The wire-ABI vocabulary the shim emits for a **toolchain trampoline**:
+/// `<root flag> [<root>] exec -- "<stem>" <argv...>` (C-032).
+///
+/// The third frozen wire token, and the one that breaks the shape of the other
+/// two: the selector is a **root flag** and it comes FIRST, before the verb,
+/// because `--project` / `--global` are root-level flags on `ocx` itself rather
+/// than arguments of the subcommand. `exec [-- ] <name>` is then the ordinary
+/// project-tier verb; the trampoline adds nothing to it.
+///
+/// Same two-producer problem as its siblings, and the same remedy: `ocx_lib`
+/// cannot depend on this binary crate, so the binding to
+/// `package_manager::launcher::body::unix_trampoline_body` is a PAIRED GOLDEN —
+/// `body.rs`'s `trampoline_wire_tokens_are_bound_to_shim_producer` restates the
+/// token, the two root flags and the `global` sidecar literal from the `.sh`
+/// side, and [`super::tests::trampoline_wire_tokens_match_the_sh_trampoline_body`]
+/// restates them from here (`subsystem-package-manager.md` canary rule).
+pub(super) const WIRE_SUBCOMMAND_EXEC: &str = "exec";
+
+/// Assembles the child command line reproducing the frozen wire ABI.
+///
+/// Two shapes, decided by the parsed [`Sidecar`] and never by inspecting a
+/// value:
+///
+/// - `<program> <verb> "<value>" -- "<stem>" <argv...>` — `launcher exec` with
+///   a package root, or `launcher shim` with a pinned identifier.
+/// - `<program> --project "<root>" exec -- "<stem>" <argv...>`, and
+///   `<program> --global exec -- "<stem>" <argv...>` with **no value token**,
+///   for a `.exec` toolchain home (C-032). The root flag precedes the verb
+///   because it is a root-level flag on `ocx`, not an argument of `exec`.
+///
+/// The quotes in both shapes above denote **argument boundaries, not emitted
+/// bytes** — the house convention the two shipped grammars already use.
+/// [`append_quoted_arg`] quotes only what needs it (empty, or carrying a space,
+/// tab, `"` or an ASCII control byte), so a root without a space renders bare:
+/// `--project C:\w\proj exec -- cmake`. What is contractual is that every token
+/// passes *through* the quoter, not that every token comes back wrapped.
 ///
 /// SECURITY (B1/B2): `program`, the sidecar value, and `stem` are all routed
 /// through the [`append_quoted_arg`] `CommandLineToArgvW` quoter — NOT
@@ -412,12 +716,13 @@ pub(super) const WIRE_SUBCOMMAND_SHIM: &str = "launcher shim";
 /// argv-boundary collapse, CWE-88). Forwarded argv uses the same quoter.
 /// The shim NEVER routes through `cmd.exe`.
 ///
-/// `program` is emitted as the leading command-line token ONLY for the
-/// unset-`OCX_BINARY_PIN` → literal `ocx` PATH-search case (see
-/// [`spawn_application_name`]); a pinned program is passed to
-/// `CreateProcessW` via `lpApplicationName` and is NOT parsed from this
-/// string (CWE-428). It is still quoted here so the leading token is
-/// well-formed when it IS used.
+/// `program` is *resolved from* the leading command-line token ONLY for
+/// [`resolve_program`]'s last rung — the literal `ocx`, spawned with a NULL
+/// `lpApplicationName` (see [`ResolvedProgram::application_name`]). A pinned
+/// or baked program is passed to `CreateProcessW` via `lpApplicationName` and
+/// is NOT parsed from this string (CWE-428). It is still quoted here so the
+/// leading token is well-formed in every case — `CreateProcessW` hands the
+/// whole command line to the child either way.
 pub(super) fn build_child_command_line(program: &str, sidecar: &Sidecar, stem: &str, argv: &[String]) -> String {
     let (subcommand, value) = (sidecar.wire_subcommand(), sidecar.value());
     // Argv-aware capacity estimate: the shim is on every-invocation hot
@@ -425,12 +730,31 @@ pub(super) fn build_child_command_line(program: &str, sidecar: &Sidecar, stem: &
     // separating space plus a quote pair in the common quoted case.
     let argv_estimate: usize = argv.iter().map(|a| a.len() + 3).sum();
     let mut line =
-        String::with_capacity(program.len() + subcommand.len() + value.len() + stem.len() + 12 + argv_estimate);
+        String::with_capacity(program.len() + subcommand.len() + value.len() + stem.len() + 22 + argv_estimate);
     append_quoted_arg(&mut line, program);
-    line.push(' ');
-    line.push_str(subcommand);
-    line.push(' ');
-    append_quoted_arg(&mut line, value);
+    match sidecar {
+        // Root-flag-first arm (C-032). The flag belongs to `ocx`, not to
+        // `exec`, so it precedes the verb; `--global` emits no value token at
+        // all, and a `""` in its place would make `ocx` read the verb as the
+        // flag's argument.
+        Sidecar::ToolchainHome(home, _) => {
+            match home {
+                ToolchainHome::Project(root) => {
+                    line.push_str(" --project ");
+                    append_quoted_arg(&mut line, root);
+                }
+                ToolchainHome::Global => line.push_str(" --global"),
+            }
+            line.push(' ');
+            line.push_str(subcommand);
+        }
+        Sidecar::PackageRoot(_) | Sidecar::PinnedIdentifier(_) => {
+            line.push(' ');
+            line.push_str(subcommand);
+            line.push(' ');
+            append_quoted_arg(&mut line, value);
+        }
+    }
     line.push_str(" -- ");
     append_quoted_arg(&mut line, stem);
     for arg in argv {
@@ -438,31 +762,6 @@ pub(super) fn build_child_command_line(program: &str, sidecar: &Sidecar, stem: &
         append_quoted_arg(&mut line, arg);
     }
     line
-}
-
-/// Decides what `CreateProcessW` receives as `lpApplicationName`.
-///
-/// SECURITY (B2 / CWE-428): a pinned `OCX_BINARY_PIN` (a real filesystem
-/// path that may contain spaces, e.g. `C:\Program Files\…\ocx.cmd`) MUST
-/// be passed as an explicit, NUL-terminated `lpApplicationName` so
-/// `CreateProcessW` performs **no** command-line program-name parsing
-/// (otherwise `C:\Program Files\…` mis-resolves to `C:\Program.exe`).
-///
-/// `lpApplicationName = NULL` (command-line program search) is acceptable
-/// **only** for the unset-`OCX_BINARY_PIN` → literal `"ocx"` case, which
-/// legitimately needs a PATH/`PATHEXT` search that `lpApplicationName`
-/// does not perform. `pin_defined` is `true` when `OCX_BINARY_PIN` is
-/// present in the environment (even empty) — `IF DEFINED` semantics
-/// (ADR §Error Taxonomy E5/E6): a defined-but-empty pin still takes the
-/// pin branch and resolves explicitly (an empty `lpApplicationName` then
-/// fails the spawn deterministically rather than silently parsing the
-/// command line).
-///
-/// Returns `Some(program)` to pass explicitly via `lpApplicationName`,
-/// or `None` to leave `lpApplicationName = NULL` (literal `ocx` PATH
-/// search only).
-pub(super) fn spawn_application_name(program: &str, pin_defined: bool) -> Option<&str> {
-    if pin_defined { Some(program) } else { None }
 }
 
 /// Whether `STARTF_USESTDHANDLES` may be set: `true` **only** when all three

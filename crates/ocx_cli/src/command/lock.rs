@@ -124,7 +124,35 @@ impl Lock {
         };
 
         let config_path = guard.config_path().to_path_buf();
-        let commit = guard.commit(staged, new_lock.clone()).await?;
+        // C-054 / D-V8 — commit, then re-render the toolchain home the new lock
+        // describes, through the one shared orchestration. RUL-59: `-g` scoped
+        // *resolution* above; the re-render is whole-home.
+        // `--no-pull` promises this invocation downloads nothing, and the
+        // render's metadata closure walk is a download. It therefore runs
+        // against the offline view (the shipped `--no-pull` idiom, as in
+        // `ocx env --no-pull`): a warm store still re-renders, a cold one
+        // degrades quietly and the deferred `ocx pull` renders instead.
+        let eager = self.pull.enabled(true);
+        let render_manager = if eager {
+            context.manager().clone()
+        } else {
+            context.manager().offline_view(context.local_index().clone())
+        };
+        let scope = context.toolchain_render_scope(&config_path).await?;
+        let platform = conventions::platform_or_default(self.platform.platform.clone());
+        let commit = render_manager
+            .commit_and_render(
+                guard,
+                staged,
+                new_lock.clone(),
+                ocx_lib::package_manager::ToolchainRender {
+                    scope: &scope,
+                    toolchain_root: context.toolchain_root(),
+                    platform: &platform,
+                },
+            )
+            .await?
+            .commit;
 
         // Consent write seam (C-024, A-29) — one of the six commands allowed to
         // stamp, opting in explicitly. AFTER the commit, so the stamp records
@@ -136,8 +164,6 @@ impl Lock {
         // does not roll back the lock — the declaration is committed; only
         // the object-store population is deferred. Matches `add` semantics.
         // `--no-pull` opts out: defers to `ocx pull` or the first direnv hit.
-        let eager = self.pull.enabled(true);
-        let platform = conventions::platform_or_default(self.platform.platform.clone());
         materialize_lock(&context, &new_lock, eager, platform.clone()).await?;
 
         // Non-fatal advisory note when `.gitattributes` lacks

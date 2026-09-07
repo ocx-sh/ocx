@@ -113,12 +113,19 @@ fn take_header(document: &mut DocumentMut) -> String {
 /// Apply `candidate`'s binding surfaces to `document`.
 ///
 /// `None` signals a document shape the sync cannot express — the caller turns
-/// that into [`ProjectErrorKind::ManifestEditDiverged`]. The `[env]` and
-/// `[package]` surfaces are deliberately not synced: no mutator touches them,
-/// and the round-trip check in [`render_preserving`] is what catches it if one
-/// ever starts.
+/// that into [`ProjectErrorKind::ManifestEditDiverged`]. The `[env]`,
+/// `[package]` and `pinned` surfaces are deliberately not synced: no mutator
+/// touches them, and the round-trip check in [`render_preserving`] is what
+/// catches it if one ever starts.
+///
+/// `activate` **is** synced, because a mutator does touch it:
+/// `ocx self setup --toolchain-activate` writes it through
+/// [`crate::project::mutate::set_activate`]. Without this the round-trip gate
+/// fires on every such invocation — the guard working exactly as designed, on
+/// a mutation this module had no way to express.
 fn apply(document: &mut DocumentMut, candidate: &ProjectConfig) -> Option<()> {
     let root: &mut dyn TableLike = document.as_table_mut();
+    sync_activate(root, candidate.activate);
     sync_section(root, "tools", &candidate.tools)?;
 
     if candidate.groups.is_empty() {
@@ -146,6 +153,28 @@ fn apply(document: &mut DocumentMut, candidate: &ProjectConfig) -> Option<()> {
         sync_section(group_table, "tools", &group.tools)?;
     }
     Some(())
+}
+
+/// Sync the root-level `activate` scalar.
+///
+/// `Some` writes it through [`write_binding`], so a key the file already
+/// carries keeps its comment and its spacing and only its value changes.
+/// `None` removes it — the typed model's absence has to be expressible in the
+/// document too, or the round-trip gate would refuse a mutation that unset the
+/// key.
+///
+/// No hoisting is needed to keep it above `[tools]`: TOML renders a table's own
+/// key/value pairs before its sub-tables, so a scalar inserted into the root
+/// table lands above every table header by construction. (That is what
+/// `shell_config::hoist_above_every_table` has to work around — it moves a
+/// *table*, which has no such guarantee.)
+fn sync_activate(root: &mut dyn TableLike, activate: Option<crate::activate::ActivateMode>) {
+    match activate {
+        Some(mode) => write_binding(root, "activate", mode.to_string()),
+        None => {
+            root.remove("activate");
+        }
+    }
 }
 
 /// Sync one `tools` table under `parent`, creating it only when there is
@@ -250,7 +279,81 @@ mod tests {
         render_preserving(original, &candidate, &path()).expect("render succeeds")
     }
 
+    /// Parse `original`, set `activate`, and render — the `set_activate` path.
+    fn render_after_activate(original: &str, mode: crate::activate::ActivateMode) -> String {
+        let mut candidate = ProjectConfig::from_toml_str(original).expect("fixture parses");
+        candidate.activate = Some(mode);
+        render_preserving(original, &candidate, &path()).expect("render succeeds")
+    }
+
     const SCHEMA: &str = "#:schema https://ocx.sh/schemas/project/v1.json";
+
+    /// C-042: `activate` is a synced surface. Without the sync the round-trip
+    /// gate refuses every `--toolchain-activate` invocation with
+    /// `ManifestEditDiverged` — the guard firing on a mutation this module had
+    /// no way to express.
+    #[test]
+    fn the_activate_key_round_trips_through_the_gate() {
+        use crate::activate::ActivateMode;
+
+        let rendered = render_after_activate("[tools]\ncmake = \"example.com/cmake:3.28\"\n", ActivateMode::Bin);
+        assert!(rendered.contains("activate = \"bin\""), "rendered: {rendered}");
+        assert_eq!(
+            ProjectConfig::from_toml_str(&rendered).expect("re-parses").activate,
+            Some(ActivateMode::Bin)
+        );
+    }
+
+    /// A top-level scalar must lead the file: TOML renders a table's own
+    /// key/value pairs before its sub-tables, so no hoisting is needed — but a
+    /// regression here would produce a file that parses and reads wrongly, so
+    /// the ordering is pinned rather than assumed.
+    #[test]
+    fn the_activate_key_renders_above_the_first_table() {
+        use crate::activate::ActivateMode;
+
+        let rendered = render_after_activate("[tools]\ncmake = \"example.com/cmake:3.28\"\n", ActivateMode::Env);
+        let activate = rendered.find("activate").expect("the key is present");
+        let table = rendered.find("[tools]").expect("the table is present");
+        assert!(activate < table, "activate must precede [tools]: {rendered}");
+    }
+
+    /// C-042's create-when-absent case, at the render layer: an empty document
+    /// plus one scalar is a file carrying only that key — no `[tools]` table
+    /// and no template.
+    #[test]
+    fn an_empty_document_gains_only_the_activate_key() {
+        use crate::activate::ActivateMode;
+
+        let rendered = render_after_activate("", ActivateMode::None);
+        assert_eq!(rendered, "activate = \"none\"\n");
+    }
+
+    /// A re-set changes the value and nothing else — the comment above the key
+    /// and the one trailing it both survive, because the sync goes through
+    /// `write_binding` rather than `Table::insert`.
+    #[test]
+    fn re_setting_activate_keeps_the_decor_around_it() {
+        use crate::activate::ActivateMode;
+
+        let original = "# how the toolchain reaches PATH\nactivate = \"env\"  # for now\n\n[tools]\n";
+        let rendered = render_after_activate(original, ActivateMode::Bin);
+        assert!(
+            rendered.contains("# how the toolchain reaches PATH\nactivate = \"bin\"  # for now"),
+            "rendered: {rendered}"
+        );
+    }
+
+    /// The typed model's *absence* must be expressible too, or the gate would
+    /// refuse a mutation that unset the key.
+    #[test]
+    fn clearing_activate_removes_the_key() {
+        let original = "activate = \"bin\"\n\n[tools]\n";
+        let mut candidate = ProjectConfig::from_toml_str(original).expect("fixture parses");
+        candidate.activate = None;
+        let rendered = render_preserving(original, &candidate, &path()).expect("render succeeds");
+        assert!(!rendered.contains("activate"), "rendered: {rendered}");
+    }
 
     #[test]
     fn add_preserves_every_comment() {

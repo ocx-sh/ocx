@@ -241,11 +241,18 @@ fn open_controlling_terminal() -> Option<console::Term> {
 ///
 /// `console::Term` exposes no constructor over an arbitrary console handle
 /// (`read_write_pair` is `#[cfg(unix)]`), and hand-rolling a VT `TermLike` over
-/// `CONOUT$` would mean owning terminal rendering. Unreachable in this phase
-/// regardless: `LazyModeLadder::resolve_for_host` forces `LazyMode::Never` on
-/// Windows, so nothing is ever deferred and no shim can trigger a
-/// materialization that would render. Give it its `CONOUT$` arm in the same
-/// change that lands the Windows shim producer and lifts that floor.
+/// `CONOUT$` would mean owning terminal rendering — which is exactly what
+/// `quality-core.md` § *Don't Own Non-Domain Code* argues against.
+///
+/// **This is the end state, not a placeholder.** An earlier version of this
+/// comment deferred the `CONOUT$` arm to "the change that lands the Windows
+/// shim producer", on the premise that `LazyModeLadder::resolve_for_host`
+/// forced `LazyMode::Never` on Windows and nothing could ever be deferred
+/// there. That floor is gone (C-027), so the premise is false and the arm stays
+/// closed on its own merits: returning `None` degrades progress to
+/// `LazyReport::Silent`, which `LazyReport`'s own contract sanctions
+/// ("degrades to Silent on failure, never to an error"). A Windows user loses a
+/// progress bar during a deferred materialization, and nothing else.
 #[cfg(windows)]
 fn open_controlling_terminal() -> Option<console::Term> {
     crate::log::debug!("Progress disabled: this phase opens no controlling terminal on Windows");

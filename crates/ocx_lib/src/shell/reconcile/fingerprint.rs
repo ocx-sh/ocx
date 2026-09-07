@@ -172,13 +172,14 @@ pub fn watch_paths(
     // `current` to a different binary carrying the same version string — so the
     // binary the `current` symlink resolves to is watched directly. Its mtime
     // and size move whenever the symlink is repointed.
-    paths.push(
-        file_structure
-            .symlinks
-            .current(&crate::oci::ocx_cli_identifier())
-            .join("content")
-            .join("bin"),
-    );
+    //
+    // One spelling of that directory, workspace-wide (RUL-63, RUL-90, R-W29).
+    // It is also the directory the desired set contributes under C-059, and
+    // `repair_owned_segments` owns every segment under `$OCX_HOME`: a second
+    // derivation that drifted from `setup`'s would make the watch set and the
+    // desired set name two different paths, so the prompt would delete one and
+    // add the other for the shell's whole life.
+    paths.push(crate::setup::ocx_install_bin_path(file_structure));
 
     // Member 8 — the config tiers (A-13, A-33).
     //

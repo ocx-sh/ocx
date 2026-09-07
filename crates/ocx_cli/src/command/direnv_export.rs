@@ -231,9 +231,24 @@ impl DirenvExport {
         // `[env]`, each selected group's `[env]` in `-g` order, then `--env`.
         let mut project_env = ocx_lib::project::project_env_entries(&project.config, &project.config_path, &expanded);
         project_env.extend(env_overrides);
+        // C-065/C-070, same derivation as `ocx env` and `ocx exec`: this is a
+        // composing emitter, so it heals the groups it is about to emit before
+        // emitting any link path. No `--pinned` flag on this command (C-055
+        // gives it to `env` and `exec` only), so the CLI tier is `None` and
+        // `ocx.toml` / `OCX_TOOLCHAIN_PINNED` decide.
+        let toolchain = crate::app::project_context::toolchain_links(
+            &context,
+            &project.config_path,
+            &project.config,
+            &project.lock,
+            &expanded,
+            None,
+        )
+        .await?;
         let scope = ocx_lib::package_manager::EnvScope::Project {
             no_patches: project.config.no_patches_repositories(),
             env: project_env,
+            toolchain: Some(Box::new(toolchain)),
         };
         let (mut entries, _, _) = offline
             .resolve_env_with_patch_boundary(&composed.roots, false, scope, &platform)

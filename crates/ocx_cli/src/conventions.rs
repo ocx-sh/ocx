@@ -497,11 +497,51 @@ pub fn manager_with_verify_flag(
     manager.with_auto_verify(Some(auto_verify.with_user_opted_out(opted_out)))
 }
 
+/// The "default output is not eval-safe" advisory for a composed-env report, or
+/// `None` when this invocation must stay silent.
+///
+/// # Why this is a tty question and not a "did you ask for plain" one
+///
+/// The warning guards one real footgun: `eval "$(ocx env)"` silently breaks,
+/// because the aligned table is not sourceable. But a command substitution is
+/// exactly the case where stdout is NOT a terminal — and the invocation that
+/// pays for the warning today, a human typing `ocx env` to read the composed
+/// environment, is the case where it is. Firing on an interactive read warns
+/// the one person who was never going to `eval` it, on the single most common
+/// benign use of the command.
+///
+/// So the condition is "stdout is not a terminal": piped, captured, or command
+/// substituted. That makes the warning strictly more useful than deleting it
+/// would — it now fires in the case it exists for, and only there.
+///
+/// JSON stays silent as it always has: it is already a machine channel, nobody
+/// evals it, and its own structure says so.
+///
+/// # Why the caller passes the answer in
+///
+/// The same shape `package_sbom::refuse_tty_output` uses: the probe belongs to
+/// the call site (`std::io::stdout().is_terminal()`), so the decision stays a
+/// pure function both states of which a test can reach. A test process's stdout
+/// is never a terminal, so a predicate that probed for itself could only ever
+/// be observed in one state.
+///
+/// Deliberately NOT `ColorModeConfig::stdout`: that field is a *colour*
+/// decision, not a tty probe — `CLICOLOR_FORCE=1` makes it `true` with no
+/// terminal anywhere, which would suppress this warning in precisely the piped
+/// case it exists for, and `NO_COLOR` makes it `false` on a real terminal.
+#[must_use]
+pub const fn not_eval_safe_advisory(is_json: bool, stdout_is_terminal: bool) -> Option<&'static str> {
+    if is_json || stdout_is_terminal {
+        return None;
+    }
+    Some("default output is not eval-safe; use --shell=bash to activate")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        emit_line, export_ci, infer_metadata_file, infer_receipt_file, merge_tags_file, parse_tags_file,
-        resolve_ci_arg, resolve_receipt_path, resolve_shell_arg, resolved_lazy_mode,
+        emit_line, export_ci, infer_metadata_file, infer_receipt_file, merge_tags_file, not_eval_safe_advisory,
+        parse_tags_file, resolve_ci_arg, resolve_receipt_path, resolve_shell_arg, resolved_lazy_mode,
     };
     use ocx_lib::ci::CiFlavor;
     use ocx_lib::cli::UsageError;
@@ -509,6 +549,43 @@ mod tests {
     use ocx_lib::package::metadata::env::{entry::Entry, modifier::ModifierKind};
     use ocx_lib::publisher::LayerRef;
     use ocx_lib::shell::Shell;
+
+    // ── The "not eval-safe" advisory fires only where the footgun is ─────────
+
+    /// The whole point of the change: a human reading the table on a terminal
+    /// is not about to `eval` it, and warning them fires on the single most
+    /// common benign invocation of the command.
+    #[test]
+    fn a_terminal_read_is_silent() {
+        assert_eq!(
+            not_eval_safe_advisory(false, true),
+            None,
+            "plain output to a terminal is a human reading it, and must not warn"
+        );
+    }
+
+    /// And the case the warning exists for: stdout that is piped, captured or
+    /// command-substituted is the one about to be `eval`ed.
+    #[test]
+    fn a_captured_read_still_warns() {
+        assert_eq!(
+            not_eval_safe_advisory(false, false),
+            Some("default output is not eval-safe; use --shell=bash to activate"),
+            "a non-terminal stdout is the `eval \"$(ocx env)\"` case and must still warn"
+        );
+    }
+
+    /// JSON is already a machine channel that says so structurally — silent in
+    /// both directions, exactly as before this predicate existed.
+    #[test]
+    fn json_is_silent_on_either_stream() {
+        assert_eq!(
+            not_eval_safe_advisory(true, true),
+            None,
+            "JSON to a terminal stays silent"
+        );
+        assert_eq!(not_eval_safe_advisory(true, false), None, "JSON to a pipe stays silent");
+    }
 
     // ── `--self` refuses a contradiction, not a co-occurrence ──────────────
     //
@@ -541,30 +618,17 @@ mod tests {
 
     /// Without `--self`, an explicit `always` is exactly what the flag is for.
     ///
-    /// Host-gated, with its Windows half below rather than a `cfg!(windows)`
-    /// expectation inside one row: an assertion that restates the production
-    /// `cfg!` agrees with the code on every host, including one where the code
-    /// is wrong (the convention `ocx_lib::lazy` establishes for the floor).
-    #[cfg(not(windows))]
+    /// **One row, on every host.** This used to be a host-gated pair, because
+    /// `LazyModeLadder::resolve_for_host` forced `LazyMode::Never` on Windows
+    /// while nothing there could write a deferred tool's shim slot. C-026 ships
+    /// that producer and C-027 removed the floor, so `always` is `always`
+    /// everywhere and a Windows half asserting `Never` would only re-state a
+    /// removed rule.
     #[test]
     fn lazy_mode_always_survives_when_the_self_view_is_not_selected() {
         assert_eq!(
             resolved_lazy_mode(Some(LazyMode::Always), false).expect("no --self, no contradiction"),
             LazyMode::Always
-        );
-    }
-
-    /// The Windows half of the row above. Nothing composes lazily there this
-    /// phase (S-010: the `.shimref` reader ships, the producer does not), and
-    /// that floor is applied by the ladder before `--self` is even consulted —
-    /// so an explicit `always` composes eagerly whether or not `--self` was
-    /// passed, and the sibling's `Always` is simply not a reachable answer.
-    #[cfg(windows)]
-    #[test]
-    fn lazy_mode_always_composes_eagerly_on_windows_without_the_self_view() {
-        assert_eq!(
-            resolved_lazy_mode(Some(LazyMode::Always), false).expect("no --self, no contradiction"),
-            LazyMode::Never
         );
     }
 

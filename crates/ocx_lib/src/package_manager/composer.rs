@@ -19,14 +19,15 @@
 //! `adr_declared_binaries_metadata.md` §4.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::future::join_all;
 use tokio::task::JoinSet;
 
 use crate::{
-    file_structure::{PackageDir, PackageStore, ShimDir, SymlinkKind},
+    file_structure::{FileStructure, PackageDir, PackageStore, RenderStampScope, ShimDir, SymlinkKind, ToolchainHome},
+    ladder::Ladder,
     lazy::{LazyMode, LazyModeLadder},
     oci,
     package::{
@@ -49,10 +50,12 @@ use crate::{
         resolved_package::{ResolvedDependency, ResolvedPackage},
     },
     package_manager::error::{DependencyError, PackageErrorKind},
+    project::{ProjectConfig, ProjectLock},
 };
 
 use super::tasks::common;
 use super::tasks::common::ClosureNode;
+use super::tasks::render_toolchain::HealOutcome;
 use super::{
     Arrival, LazyAdvisory, PackageManager,
     concurrency::{Concurrency, acquire_permit},
@@ -239,12 +242,17 @@ pub(crate) fn integrations_cross(self_view: bool) -> bool {
 /// [`check_entrypoints`]), or if the active surface resolves a single
 /// repository to two or more distinct digests (version conflict — see
 /// [`check_repo_digest_conflicts`]).
+///
+/// `paths` is the install-path producer (C-065): [`ComposePaths::digest_only`]
+/// for a composition with no toolchain tree in scope, otherwise the probed
+/// answer [`ComposePaths::resolve`] returned.
 pub(crate) async fn compose(
     roots: &[Arc<InstallInfo>],
     store: &PackageStore,
     self_view: bool,
+    paths: &ComposePaths,
 ) -> crate::Result<ComposeOutput> {
-    compose_gated(roots, store, self_view, integrations_cross(self_view)).await
+    compose_gated(roots, store, self_view, integrations_cross(self_view), paths).await
 }
 
 /// Compose ONE package as a standalone root whose output is overlaid onto a
@@ -277,11 +285,16 @@ pub(crate) async fn compose_companion(
     store: &PackageStore,
     collect_integrations: bool,
 ) -> crate::Result<ComposeOutput> {
+    // The digest lane, unconditionally, and not for want of an input: a
+    // companion is not a lock entry, so no `<group>/<entry>` link names it and
+    // no trust test can be asked of it — [`PathLane::Digest`]'s rule (RUL-78)
+    // applied to the overlay's single root.
     compose_gated(
         std::slice::from_ref(companion),
         store,
         /* self_view = */ false,
         collect_integrations,
+        &crate::package_manager::composer::ComposePaths::digest_only(),
     )
     .await
 }
@@ -292,11 +305,19 @@ pub(crate) async fn compose_companion(
 /// Private: every caller goes through [`compose`] (gate derived from the
 /// surface, the normal case) or [`compose_companion`] (gate supplied by the
 /// outer composition).
+///
+/// `paths` is the install-path producer both of them share (C-065, RUL-82).
+/// Every emitted package path in this function — a root's content directory,
+/// a root's synthetic `entrypoints/` entry, a dependency's, and every
+/// `${deps.NAME.installPath}` — is routed through
+/// [`ComposePaths::install_path_for`], so "digest or link" is answered in one
+/// place for all four composing emitters.
 async fn compose_gated(
     roots: &[Arc<InstallInfo>],
     store: &PackageStore,
     self_view: bool,
     collect_integrations: bool,
+    paths: &ComposePaths,
 ) -> crate::Result<ComposeOutput> {
     // Multi-root collision gate. Single-root case is already covered at
     // install time by `check_entrypoints`; cross-root collisions can only
@@ -432,7 +453,10 @@ async fn compose_gated(
 
         // Step 3: emit in topological order using pre-loaded metadata.
         for (meta, dep_resolved, dep_id) in loaded.into_iter().flatten() {
-            let dep_pkg = store.package_dir(&dep_id);
+            // [`PathLane::Digest`]: a dependency is not a lock entry, so no
+            // `<group>/<entry>` link names it (RUL-78). Routed through the seam
+            // anyway so the digest spelling has one producer too (RUL-82).
+            let dep_pkg = paths.install_path_for(&store.package_dir(&dep_id), PathLane::Digest);
             let dep_content = dep_pkg.content();
 
             // This dep already passed the surface gate (`dep_admitted`) to
@@ -455,7 +479,7 @@ async fn compose_gated(
             // `${deps.NAME.installPath}` interpolation. Scoped to the dep's
             // own declared deps, not the root's — each package resolves its
             // own dep paths independently.
-            let dep_dep_contexts = build_dep_context_map(&meta, &dep_resolved, store);
+            let dep_dep_contexts = build_dep_context_map(&meta, &dep_resolved, store, paths);
 
             // The edge term stays algebraic (ADR §4.4): a dep contributes
             // integrations iff `dep_admitted(effective, /* self_view = */
@@ -529,9 +553,18 @@ async fn compose_gated(
 
             // Build root's direct-dep context map for `${deps.NAME.installPath}`
             // interpolation in root's own env vars.
-            let root_dep_contexts = build_dep_context_map(root.metadata(), root.resolved(), store);
+            let root_dep_contexts = build_dep_context_map(root.metadata(), root.resolved(), store, paths);
 
-            let root_content = root.dir().content();
+            // [`PathLane::Following`]: an explicit root of a project
+            // composition *is* a lock entry, so the rendered tree may hold a
+            // `<group>/<entry>` link for it. `install_path_for` yields that
+            // link when the probe trusted it and the digest root otherwise, per
+            // entry (C-065 / C-067). Everything downstream — the content
+            // directory the root's own vars resolve against, its integrations
+            // payloads, and its synthetic `entrypoints/` PATH entry — derives
+            // from this one answer.
+            let root_pkg = paths.install_path_for(root.dir(), PathLane::Following);
+            let root_content = root_pkg.content();
 
             // Structural, not algebraic: no `Visibility` constant reproduces
             // "interface surface at every depth" (ADR §4.1), so the root's
@@ -559,7 +592,7 @@ async fn compose_gated(
 
             emit_root_path_block(
                 root.metadata(),
-                root.dir(),
+                &root_pkg,
                 &root_content,
                 &root_dep_contexts,
                 self_view,
@@ -675,10 +708,22 @@ pub async fn check_entrypoints(roots: &[Arc<InstallInfo>], store: &PackageStore)
 ///
 /// This is a pure function: no I/O, no async. Called for both TC dep entries
 /// and root packages, replacing two formerly duplicate inline blocks.
+///
+/// # `${deps.*}` stays on digest paths (RUL-78)
+///
+/// The install path is routed through [`ComposePaths::install_path_for`] on
+/// [`PathLane::Digest`] — through the seam, so the digest spelling has one
+/// producer (RUL-82), but never onto the link lane. C-065 says "every
+/// dereference value", and a dependency is the one dereference value it cannot
+/// reach: a dependency is not a lock entry, so no `<group>/<entry>` link exists
+/// for it and no trust test can be asked. This is not a scope cut — there is no
+/// link to emit — and inventing one through a lock lookup would mint a second
+/// producer of the platform selection RUL-31 keeps single.
 fn build_dep_context_map(
     metadata: &metadata::Metadata,
     resolved: &ResolvedPackage,
     store: &PackageStore,
+    paths: &ComposePaths,
 ) -> HashMap<DependencyName, DependencyContext> {
     let resolved_id_map: HashMap<oci::Repository, &oci::PinnedIdentifier> = resolved
         .dependencies
@@ -692,7 +737,9 @@ fn build_dep_context_map(
             let name = d.name();
             let key = oci::Repository::from(d.identifier.as_identifier());
             let install_id = resolved_id_map.get(&key).copied().unwrap_or(&d.identifier);
-            let install_path = store.content(install_id);
+            let install_path = paths
+                .install_path_for(&store.package_dir(install_id), PathLane::Digest)
+                .content();
             (name, DependencyContext::path_only(install_id.clone(), install_path))
         })
         .collect()
@@ -1040,6 +1087,389 @@ fn synth_entrypoints_path_for(pkg: &PackageDir) -> Entry {
         kind: ModifierKind::Path,
         separator: None,
     }
+}
+
+// ── Following-lane install paths (C-065 / C-066 / C-067 / C-070) ────────────
+//
+// Two spellings name one directory: the digest root
+// `<packages>/<registry>/<shard>/<digest>`, and the rendered link
+// `<home>/toolchain/<group>/<entry>` that points at it. The digest root
+// **pins** — an `ocx update` that repoints the link leaves an already-composed
+// digest path running the previous package. The link **follows**.
+//
+// Which of the two a composition emits is `pinned` (C-007): `true` pins to
+// digest roots (C-066), `false` follows the links (C-065). It is a property of
+// every composing emitter — `ocx env`, `ocx exec`, `ocx direnv export` and the
+// `env`-mode hook — never of a mode, which is why it is answered once here
+// rather than four times at the emitters.
+//
+// What is **not** in this lane, and must stay digest (RUL-82):
+//
+//   - `synth_shim_path_for` — a shim store, not a package. No lock entry names
+//     it and no link points at it.
+//   - `tc_entry_object_data` and `PackageManager::compose_roots`' own
+//     `store.package_dir` — **read** paths for `metadata.json` / `resolve.json`,
+//     answered before any composition exists.
+//   - `${deps.NAME.installPath}` — RUL-78, restated on [`PathLane::Digest`].
+//   - Every persisted artifact: `packages/**/*.json`, `refs/**`, generated
+//     launcher bodies, the render stamp, the execution record. A link path
+//     baked into a file outlives the tree it was probed against.
+
+/// Which producer answers for one package's install path.
+///
+/// Both arms go through [`ComposePaths::install_path_for`], so the *digest*
+/// spelling has one producer too (RUL-82). Before this seam the digest path had
+/// six spellings emitted from two producers — [`InstallInfo::dir`] for a root
+/// and [`PackageStore::package_dir`] for a dependency — and C-065's "one code
+/// path in `composer.rs` serves all four consumers" was not true of the code it
+/// described.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PathLane {
+    /// Follow the rendered `<group>/<entry>` link when this package has one and
+    /// it was trustworthy at probe time; degrade to the digest root **per
+    /// entry** otherwise (C-067).
+    ///
+    /// The lane of an explicit **root**: a root of a project composition is a
+    /// lock entry, and a lock entry is exactly what the rendered tree contains.
+    Following,
+
+    /// The digest root, always; no link is consulted.
+    ///
+    /// The lane of a **dependency** (RUL-78). A dependency is not a lock entry,
+    /// so no `<group>/<entry>` link exists for it and no trust test can be
+    /// asked — inventing one would need a lock lookup keyed on the dependency's
+    /// platform, which is a second producer of the selection RUL-31 exists to
+    /// keep single. Also the lane of every composition with no toolchain tree
+    /// in scope, and of every composition under `pinned = true` (C-066), both
+    /// of which reach it through an empty [`ComposePaths`] instead.
+    Digest,
+}
+
+/// The composition's install-path producer — the single code path C-065 names
+/// (RUL-82).
+///
+/// Carries the **already-probed** answer: one entry per `<group>/<entry>` link
+/// that was trustworthy at compose time, keyed by the digest root it names.
+///
+/// Empty means "digest paths for everything", and four states share that one
+/// answer with no branch between them: `pinned = true` (C-066), the OCI tier
+/// (`ocx package env` / `ocx package exec`, which have no toolchain tree),
+/// a project that has never been pulled, and a render C-050 skipped.
+pub(crate) struct ComposePaths {
+    /// Digest root → the `<home>/toolchain/<group>/<entry>` link naming it.
+    ///
+    /// Keyed by the digest root because that is what the composer holds: an
+    /// [`InstallInfo`] carries a pinned identifier, never a group and a name.
+    ///
+    /// **Two lock entries may share one digest** — the same tool listed in two
+    /// selected groups resolves to one `packages/` directory and therefore to
+    /// one key. The map keeps the entry from the **first** selected group in
+    /// `groups` order, then the first `lock.tools` order within it, so a
+    /// two-group invocation composes deterministically rather than by hash
+    /// order. Both links point at the same directory, so the choice is
+    /// observable only in the emitted spelling.
+    trusted: HashMap<PathBuf, PathBuf>,
+}
+
+/// The toolchain tree one composing invocation may follow, as the emitter
+/// resolved it (C-007, C-070).
+///
+/// Owned rather than borrowed because it travels on `EnvScope::Project`, which
+/// four commands construct and hand to `resolve_env_with_attribution` — the one
+/// place a `ComposePaths` is built, so no emitter can disagree with another
+/// about which groups were healed.
+///
+/// `None` on that scope, rather than a variant here, is "no toolchain tree in
+/// scope" — the OCI tier and the launcher's baked `pkg_root`.
+#[derive(Debug, Clone)]
+pub struct ToolchainLinks {
+    /// The resolved `pinned` value (C-007), from [`pinned_for_project`].
+    ///
+    /// `true` short-circuits the entire lane before any I/O: no heal, no probe,
+    /// no link consulted, and the answer is [`ComposePaths::digest_only`]
+    /// (C-066).
+    pub pinned: bool,
+
+    /// The resolved toolchain home whose `<group>/<entry>` tree is probed,
+    /// from [`PackageManager::toolchain_home`](super::PackageManager::toolchain_home)
+    /// — never a hand-joined path.
+    pub home: ToolchainHome,
+
+    /// The security input, not an arithmetic one (RUL-47): what lets the heal
+    /// run `refuse_symlinked_project_path`, which a [`ToolchainHome`] alone
+    /// cannot answer.
+    pub scope: RenderStampScope,
+
+    /// The lock the links are compared against. Pure lock arithmetic — the
+    /// probe never reads metadata and never touches the network.
+    pub lock: ProjectLock,
+
+    /// The groups **this invocation selected** (`-g`, else `DEFAULT_GROUP`) —
+    /// the groups about to be emitted, never the default group alone. C-062's
+    /// default-group narrowing belongs to the non-composing `bin`-mode prompt
+    /// path and must not leak here (C-070).
+    pub groups: Vec<String>,
+}
+
+impl ComposePaths {
+    /// Digest paths for everything; no link is consulted and no filesystem is
+    /// touched.
+    ///
+    /// The correct composition for `pinned = true` (C-066) and for every
+    /// composition with no toolchain tree in scope.
+    pub(crate) fn digest_only() -> Self {
+        Self {
+            trusted: HashMap::new(),
+        }
+    }
+
+    /// Heal the selected groups, then probe each of their entries, and keep the
+    /// ones this composition may follow (C-067 / C-070).
+    ///
+    /// # Heal first, and here rather than at each emitter
+    ///
+    /// C-070 requires every composing emitter to heal **the groups it is about
+    /// to emit**. Four emitters healing independently is four chances to pass
+    /// the wrong group set, which is C-070's exact failure mode; healing inside
+    /// the one code path C-065 already makes them share means the group set is
+    /// supplied once, as [`ToolchainLinks::groups`], and no emitter can
+    /// disagree with another about it.
+    ///
+    /// # The heal's return value is not the trust answer (RUL-81)
+    ///
+    /// [`heal_links`](super::tasks::render_toolchain::heal_links)'
+    /// [`HealOutcome::Healed`] carries a count of *repairs*, not of trustworthy
+    /// entries, and it calls `ensure_home_root`, which **creates** the root —
+    /// so neither that count nor `home.root().exists()` can answer "is there a
+    /// rendered tree". Its [`HealOutcome::Refused`] *is* consulted, and it is
+    /// the one thing about the tree the heal does answer: not "these links are
+    /// good" but "I never entered this tree", which ends the composition at
+    /// digest paths before a single entry is probed.
+    /// The question is asked once per entry, after the heal, by
+    /// [`link_is_trustworthy`], and an entry that cannot answer "a link naming
+    /// the lock-derived digest root" is simply absent from the map: C-067's
+    /// per-entry degrade is a map miss, never a branch.
+    ///
+    /// A mismatch is treated as **absent, never as usable** — this is the belt
+    /// behind the heal, so a link the heal could not repair degrades to a
+    /// correct digest path instead of silently resolving the wrong package.
+    ///
+    /// # Errors
+    ///
+    /// [`PackageErrorKind::ToolchainPath`], and nothing else — a group key from
+    /// `ocx.lock` or a selected group name that cannot become a path component
+    /// (exit 78), raised by this function's own
+    /// [`ToolchainHome::entry`](crate::file_structure::ToolchainHome::entry)
+    /// call. Every I/O condition degrades: a missing tree, an unreadable entry,
+    /// a repair that could not land, and a home or group directory the symlink
+    /// guards refuse all leave entries out of the map rather than failing an
+    /// emission (C-067).
+    ///
+    /// `file_structure` supplies both the `packages/` root the digest path is
+    /// built from and the `locks/` root the heal's `lock_scoped` requires;
+    /// `platform` selects which of a [`LockedTool`](crate::project::LockedTool)'s
+    /// per-platform leaf digests the link must name (RUL-31). Three arguments of
+    /// three distinct types rather than a parameters struct: none of them can be
+    /// transposed without a type error.
+    pub(crate) async fn resolve(
+        links: &ToolchainLinks,
+        file_structure: &FileStructure,
+        platform: &oci::Platform,
+    ) -> Result<Self, PackageErrorKind> {
+        // C-066, before any I/O: `pinned` is answered without touching the tree,
+        // so a pinned composition cannot be slowed — or failed — by a home it
+        // was never going to read.
+        if links.pinned {
+            return Ok(Self::digest_only());
+        }
+
+        // C-070 — heal **the groups this invocation selected**, before a single
+        // link is probed. `ocx exec -g ci` repairs `ci`, not `default`.
+        //
+        // A refusal ends the composition here, at digest paths. The heal's
+        // gates are the *read* path's gates too: a tree the heal would not
+        // enter is a tree this function must not probe, because probing it is
+        // what puts an attacker's link on `PATH` and in `${installPath}`. The
+        // repair count is deliberately not consulted — RUL-81 — since a count
+        // of repairs is not a count of trustworthy entries; only the refusal
+        // is a verdict on the tree.
+        if let HealOutcome::Refused { reason } = super::tasks::render_toolchain::heal_links(
+            file_structure,
+            &links.home,
+            &links.scope,
+            &links.lock,
+            &links.groups,
+            platform,
+        )
+        .await?
+        {
+            crate::log::debug!(
+                "Toolchain links under '{}' were not followed: {reason}",
+                links.home.root().display()
+            );
+            return Ok(Self::digest_only());
+        }
+
+        // Pure arithmetic, in `groups` order and then `lock.tools` order, so the
+        // tie-break RUL-98 names is a property of this walk rather than of a
+        // hash iteration. An entry with no compatible leaf has no link to name
+        // (RUL-31) and is simply left out — never a target invented for it.
+        let mut candidates: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for group in &links.groups {
+            for tool in links.lock.tools.iter().filter(|tool| &tool.group == group) {
+                let entry = links.home.entry(&tool.group, &tool.name)?;
+                if let Some(target) = super::tasks::render_toolchain::link_target(file_structure, tool, platform) {
+                    candidates.push((target, entry));
+                }
+            }
+        }
+
+        // One blocking unit for the whole probe pass: `read_link` and
+        // `symlink_metadata` run on every composing emitter's per-prompt path.
+        let guarded_home = links.home.clone();
+        let guarded_scope = links.scope.clone();
+        let trusted = tokio::task::spawn_blocking(move || {
+            // The heal's two guards, taken again on the READ path — the
+            // second, independent guard, kept now that `heal_links` reports a
+            // `Refused` the caller above acts on. Two reasons it stays. The
+            // refusal above is computed *before* this probe pass is scheduled,
+            // so this is the check that sees the tree as the probe finds it
+            // rather than as the heal left it; and a guard that lives only at
+            // a call site is the arrangement that produced the original
+            // defect, one caller at a time. A refusal degrades the whole
+            // composition to digest paths, exactly as an unrendered tree does
+            // (C-067).
+            if let Err(error) = super::tasks::render_toolchain::refuse_symlinked_home(&guarded_scope, &guarded_home) {
+                crate::log::debug!(
+                    "Toolchain links under '{}' were not followed: {error}",
+                    guarded_home.root().display()
+                );
+                return HashMap::new();
+            }
+
+            let mut trusted: HashMap<PathBuf, PathBuf> = HashMap::new();
+            for (target, entry) in candidates {
+                // RUL-98 — the first *trustworthy* candidate keeps the slot. Two
+                // lock entries sharing one digest name the same directory, so
+                // the loser differs only in spelling; a refused first candidate
+                // is not a candidate at all and must not shadow its sibling.
+                if trusted.contains_key(&target) {
+                    continue;
+                }
+                // The one component between the guarded root and the probed
+                // leaf. A symlinked `<home>/<group>` whose entry happens to read
+                // back the correct target never reaches `repoint_link`'s
+                // refusal — the heal has nothing to repair — so the write path
+                // never sees it and only this check stands between it and
+                // `PATH`. `is_link`, not `Path::is_symlink`: an NTFS junction
+                // (RUL-80).
+                if entry.parent().is_some_and(crate::symlink::is_link) {
+                    continue;
+                }
+                if link_is_trustworthy(&entry, &target) {
+                    trusted.insert(target, entry);
+                }
+            }
+            trusted
+        })
+        .await
+        // A join failure resolves to "nothing is trustworthy" — the same answer
+        // every unreadable entry gives, and the one C-067 prescribes: the whole
+        // composition degrades to digest paths rather than failing an emission.
+        .unwrap_or_else(|error| {
+            crate::log::debug!("The toolchain link probe did not complete: {error}");
+            HashMap::new()
+        });
+
+        Ok(Self { trusted })
+    }
+
+    /// The install path one package composes to.
+    ///
+    /// The whole of C-065 and C-067 at one call: a [`PathLane::Following`]
+    /// package with a trustworthy link composes through it, and everything
+    /// else — a dependency, a package with no link, a link the probe refused,
+    /// and every entry under `pinned = true` — composes through its digest
+    /// root.
+    ///
+    /// Returns a [`PackageDir`] rather than a path so `content/` and
+    /// `entrypoints/` keep their single spelling: a caller joining `"content"`
+    /// onto the answer would be a second producer of a store path.
+    pub(crate) fn install_path_for(&self, package: &PackageDir, lane: PathLane) -> PackageDir {
+        match lane {
+            PathLane::Digest => package.clone(),
+            PathLane::Following => self
+                .trusted
+                .get(package.root())
+                .map_or_else(|| package.clone(), |link| PackageDir::with_root(link.clone())),
+        }
+    }
+}
+
+/// Whether the link at `entry` is one this composition may follow — the
+/// per-entry trust test C-067 names (RUL-80).
+///
+/// `target` is the lock-derived digest root, from
+/// [`link_target`](super::tasks::render_toolchain::link_target) — the same
+/// arithmetic the render and the heal use, so the three cannot disagree about a
+/// compatible-but-non-identical platform key (RUL-31).
+///
+/// Three properties, each load-bearing:
+///
+/// - **Compared un-canonicalised.** The heal compares raw `read_link` targets;
+///   a composer that canonicalised would disagree with the repairer, and would
+///   follow *through* a hostile target the heal refused to touch.
+/// - **Link-ness probed with [`crate::symlink::is_link`]**, never
+///   `Path::is_symlink`: a Windows link here is an NTFS junction, which
+///   `Path::is_symlink` does not report.
+/// - **Never errors.** Every unreadable, absent, mismatched or wrong-shaped
+///   entry is `false`, and `false` degrades that one entry to a digest path.
+///   A missing or stale link is a path that is not stable yet, not a failure.
+///
+/// Blocking: `read_link` and `symlink_metadata` run on the composing emitter's
+/// per-prompt path, so the caller owns putting this on `spawn_blocking`.
+fn link_is_trustworthy(entry: &Path, target: &Path) -> bool {
+    // Both halves are load-bearing and neither implies the other: `is_link`
+    // refuses the regular file or directory the heal has no authority to
+    // remove, and the raw `read_link` compare — the heal's own test, verbatim —
+    // refuses the stale target a branch switch leaves behind.
+    crate::symlink::is_link(entry) && std::fs::read_link(entry).is_ok_and(|current| current == target)
+}
+
+/// Fill the project-tier `pinned` ladder (C-007), unresolved.
+///
+/// Three tiers: `--pinned` / `--no-pinned` ▸ `ocx.toml`'s `pinned` key ▸
+/// `OCX_TOOLCHAIN_PINNED`. **The environment tier is the weakest**, below the
+/// file tier — an exported `OCX_TOOLCHAIN_PINNED` loses to a project that
+/// states a value and decides only for one that states none.
+///
+/// Split from [`pinned_for_project`] for the reason
+/// [`lazy_mode_ladder_for_package`] is split from [`lazy_mode_for_package`]:
+/// the tier order is worth asserting without also asserting the floor.
+///
+/// `cli` is `ocx_cli`'s `options::Pinned::pinned` — an `Option<bool>` whose
+/// `None` means "neither flag was given", never `false`. Collapsing the two
+/// would delete `--no-pinned`, whose entire job is overriding an `ocx.toml` or
+/// an `OCX_TOOLCHAIN_PINNED` that asked to pin.
+pub fn pinned_ladder_for_project(cli: Option<bool>, config: &ProjectConfig) -> Ladder<bool> {
+    Ladder {
+        cli,
+        file: config.pinned,
+        environment: crate::activate::pinned_from_env(),
+    }
+}
+
+/// Resolve the `pinned` ladder for one project — the form every composing
+/// emitter uses (C-007, C-066).
+///
+/// The floor is [`crate::activate::PINNED_FLOOR`] (`false`, the following
+/// lane), passed as [`Ladder::resolve`]'s parameter and never re-spelled as a
+/// literal: the floor of a setting is defined once, at
+/// [`crate::activate`](crate::activate), where a reader looking for it will be.
+///
+/// Feeds [`ToolchainLinks::pinned`].
+pub fn pinned_for_project(cli: Option<bool>, config: &ProjectConfig) -> bool {
+    pinned_ladder_for_project(cli, config).resolve(crate::activate::PINNED_FLOOR)
 }
 
 // ── Lazy package loading: the shim slot ─────────────────────────────────────
@@ -1604,8 +2034,10 @@ pub fn lazy_mode_ladder_for_package(cli: Option<LazyMode>) -> LazyModeLadder {
 /// lives with the config it reads. This one reads none, so it stays with its
 /// caller.
 ///
-/// Resolution goes through [`LazyModeLadder::resolve_for_host`], so on Windows
-/// the answer is [`LazyMode::Never`] whatever the tiers say — scenario S-010.
+/// Resolution goes through [`LazyModeLadder::resolve_for_host`] rather than a
+/// bare `resolve()` — the one host-aware entry point, kept for a future
+/// platform floor. It is a passthrough today: S-010's Windows floor is gone
+/// (C-027), because C-026 ships the shim producer whose absence justified it.
 pub fn lazy_mode_for_package(cli: Option<LazyMode>) -> LazyMode {
     lazy_mode_ladder_for_package(cli).resolve_for_host()
 }
@@ -1813,7 +2245,14 @@ mod tests {
         // Sanity: must succeed (no env vars in any package, but should still
         // not panic). The deps have no env vars and no entrypoints, so the
         // composed env is empty.
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         assert!(
             out.entries.is_empty(),
             "no env vars or entrypoints declared; composed env must be empty"
@@ -1842,7 +2281,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // SEALED.has_interface() = false → skip in default exec.
         assert!(
             out.entries.is_empty(),
@@ -1867,7 +2313,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, true).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            true,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // SEALED.has_private() = false → skip under --self too.
         assert!(
             out.entries.is_empty(),
@@ -1903,7 +2356,14 @@ mod tests {
                 .any(|e| e.key == "PATH" && e.value.contains("entrypoints"))
         };
 
-        let consumer = compose(std::slice::from_ref(&root), &store, false).await.unwrap();
+        let consumer = compose(
+            std::slice::from_ref(&root),
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             consumer.admitted_entrypoints.len(),
             1,
@@ -1914,7 +2374,14 @@ mod tests {
             "interface surface must put the root's entrypoints/ on PATH"
         );
 
-        let self_view = compose(&[root], &store, true).await.unwrap();
+        let self_view = compose(
+            &[root],
+            &store,
+            true,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         assert!(
             self_view.admitted_entrypoints.is_empty(),
             "root launcher must not be claimed under --self: {:?}",
@@ -1958,7 +2425,14 @@ mod tests {
 
         // c, a, b have no env vars + no entrypoints → composed env is empty
         // even when traversed twice. Guards against duplicate emission.
-        let out = compose(&[a, b], &store, false).await.unwrap();
+        let out = compose(
+            &[a, b],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         assert!(
             out.entries.is_empty(),
             "no env vars + no entrypoints declared; composed env must be empty regardless of dedup"
@@ -2009,7 +2483,14 @@ mod tests {
         let a = Arc::new(make_install_info("a", 'a', a_resolved));
         let b = Arc::new(make_install_info("b", 'b', b_resolved));
 
-        let out = compose(&[a, b], &store, false).await.unwrap();
+        let out = compose(
+            &[a, b],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         let binary_claims: Vec<_> = out.admitted_binaries.iter().filter(|(id, _)| *id == c_id).collect();
         let entrypoint_claims: Vec<_> = out.admitted_entrypoints.iter().filter(|(id, _)| *id == c_id).collect();
         assert_eq!(
@@ -2058,7 +2539,14 @@ mod tests {
         let a = Arc::new(make_install_info("a", 'a', a_resolved));
         let b = Arc::new(make_install_info("b", 'b', b_resolved));
 
-        match compose(&[a, b], &store, false).await {
+        match compose(
+            &[a, b],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        {
             Err(crate::Error::Dependency(DependencyError::Conflict {
                 repository,
                 identifiers,
@@ -2096,7 +2584,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // PRIVATE.has_interface()=false → skip in default exec.
         assert!(
             out.entries.is_empty(),
@@ -2124,7 +2619,14 @@ mod tests {
         // INTERFACE.has_interface()=true → visit; dep has no env vars,
         // so env is empty but visit happened (no panic from missing
         // store entry).
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         assert!(out.entries.is_empty(), "no env vars on the dep, so output is empty");
     }
 
@@ -2147,7 +2649,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, true).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            true,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // PRIVATE.has_private()=true → emit dep contributions; dep has no
         // env vars so output is empty but visit happened.
         assert!(out.entries.is_empty(), "no env vars on the dep, so output is empty");
@@ -2172,7 +2681,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, true).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            true,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // INTERFACE.has_private()=false → skip under --self.
         assert!(
             out.entries.is_empty(),
@@ -2206,7 +2722,14 @@ mod tests {
             "cmake",
         ));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // Synth-PATH for root's entrypoints/ present in default exec.
         let path_entries: Vec<_> = out
             .entries
@@ -2239,7 +2762,14 @@ mod tests {
             "cmake",
         ));
 
-        let out = compose(&[root], &store, true).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            true,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // No synth-PATH in the --self output (root must not see its own launchers).
         let path_entries: Vec<_> = out
             .entries
@@ -2284,7 +2814,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // PUBLIC.has_interface()=true → dep's synth-PATH emitted.
         let path_entries: Vec<_> = out
             .entries
@@ -2341,7 +2878,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // dep's Interface-tagged var present.
         assert!(
             out.entries.iter().any(|e| e.key == "DEP_IFACE"),
@@ -2368,7 +2912,14 @@ mod tests {
             Visibility::INTERFACE,
         ));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // root's Interface var present in default exec.
         assert!(
             out.entries.iter().any(|e| e.key == "PKG_CONFIG_PATH"),
@@ -2394,7 +2945,14 @@ mod tests {
             Visibility::PRIVATE,
         ));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // root's Private var absent in default exec.
         assert!(
             !out.entries.iter().any(|e| e.key == "PRIVATE_FLAG"),
@@ -2422,7 +2980,14 @@ mod tests {
             Visibility::PRIVATE,
         ));
 
-        let out = compose(&[root], &store, true).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            true,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // root's Private var present under --self.
         assert!(
             out.entries.iter().any(|e| e.key == "PRIVATE_FLAG"),
@@ -2451,7 +3016,14 @@ mod tests {
             Visibility::INTERFACE,
         ));
 
-        let out = compose(&[root], &store, true).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            true,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // root's Interface var absent under --self.
         assert!(
             !out.entries.iter().any(|e| e.key == "PKG_CONFIG_PATH"),
@@ -2485,7 +3057,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // dep's contributions absent in consumer surface.
         assert!(out.entries.is_empty());
     }
@@ -2511,7 +3090,14 @@ mod tests {
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
         // dep present in --self surface — but has no env vars, so output empty.
-        let out = compose(&[root], &store, true).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            true,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         assert!(
             out.entries.is_empty(),
             "dep has no env vars; visit happened but output is empty"
@@ -2538,7 +3124,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // sealed excluded.
         assert!(out.entries.is_empty());
     }
@@ -2568,7 +3161,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, true).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            true,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // PUBLIC.has_private()=true → leaf visited; no env vars, so empty.
         assert!(out.entries.is_empty());
     }
@@ -2622,7 +3222,14 @@ mod tests {
             crate::file_structure::PackageDir { dir: pkg_root },
         ));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         let keys: Vec<&str> = out.entries.iter().map(|e| e.key.as_str()).collect();
         assert!(
             keys.contains(&"PUBLIC_VAR"),
@@ -2681,7 +3288,14 @@ mod tests {
             crate::file_structure::PackageDir { dir: pkg_root },
         ));
 
-        let out = compose(&[root], &store, true).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            true,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         let keys: Vec<&str> = out.entries.iter().map(|e| e.key.as_str()).collect();
         assert!(
             keys.contains(&"PUBLIC_VAR"),
@@ -2740,7 +3354,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // No deps declare env vars or entrypoints, so output is empty.
         // The gating is observable via the load_object_data calls — sealed
         // and private deps should NOT be visited, while public and iface
@@ -2789,7 +3410,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, true).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            true,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         assert!(out.entries.is_empty());
     }
 
@@ -2839,7 +3467,14 @@ mod tests {
         let a = Arc::new(make_install_info("a", 'a', a_resolved));
         let b = Arc::new(make_install_info("b", 'b', b_resolved));
 
-        let out = compose(&[a, b], &store, false).await.unwrap();
+        let out = compose(
+            &[a, b],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // shared's contributions emitted exactly once (cross-root dedup).
         let shared_count = out.entries.iter().filter(|e| e.key == "SHARED_VAR").count();
         assert_eq!(
@@ -2857,7 +3492,14 @@ mod tests {
     async fn compose_empty_roots_returns_empty_env() {
         let dir = tempfile::tempdir().unwrap();
         let store = make_store(dir.path());
-        let out = compose(&[], &store, false).await.unwrap();
+        let out = compose(
+            &[],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         assert!(out.entries.is_empty(), "compose(&[], ...) must return empty Env");
     }
 
@@ -2879,7 +3521,14 @@ mod tests {
             Visibility::PUBLIC,
         ));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // ROOT_VAR present, no dep contributions.
         assert_eq!(
             out.entries.len(),
@@ -3226,7 +3875,13 @@ mod tests {
             "foo",
         ));
 
-        let result = compose(&[a.clone(), b.clone()], &store, false).await;
+        let result = compose(
+            &[a.clone(), b.clone()],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await;
         let err = match result {
             Ok(_) => panic!("expected EntrypointCollision, got Ok"),
             Err(e) => e,
@@ -3311,7 +3966,14 @@ mod tests {
         };
         let a = Arc::new(make_install_info("a", 'a', a_resolved));
 
-        let out = compose(&[a, b_root], &store, false).await.unwrap();
+        let out = compose(
+            &[a, b_root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         let keys: Vec<&str> = out.entries.iter().map(|e| e.key.as_str()).collect();
         assert!(
             keys.contains(&"B_OWN_VAR"),
@@ -3362,7 +4024,14 @@ mod tests {
             Visibility::PUBLIC,
         ));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         // dep's contributions appear before ROOT_OWN_VAR in the Env.
         let dep_pos = out
             .entries
@@ -3428,7 +4097,14 @@ mod tests {
         // Store is needed by compose but root has no deps, so it stays empty.
         let store = make_store(dir.path());
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
 
         let var_pos = out
             .entries
@@ -3664,7 +4340,14 @@ mod tests {
         let a = Arc::new(make_install_info("d", '1', ResolvedPackage::new()));
         let b = Arc::new(make_install_info("d", '2', ResolvedPackage::new()));
 
-        match compose(&[a, b], &store, false).await {
+        match compose(
+            &[a, b],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        {
             Err(crate::Error::Dependency(DependencyError::Conflict { identifiers, .. })) => {
                 assert_eq!(identifiers.len(), 2, "both colliding versions must be named");
             }
@@ -3732,7 +4415,14 @@ mod tests {
         // Compose with both b and a as explicit roots. b's TC includes a, but
         // the root-emission pass must handle a exactly once (not from b's TC
         // walk AND again from the explicit-root pass).
-        let out = compose(&[b, a], &store, false).await.unwrap();
+        let out = compose(
+            &[b, a],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
 
         let a_var_count = out.entries.iter().filter(|e| e.key == "A_VAR").count();
         assert_eq!(
@@ -4081,7 +4771,14 @@ mod tests {
         ));
         let root_id = root.identifier().clone();
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         let claimed: Vec<&str> = out
             .admitted_entrypoints
             .iter()
@@ -4121,7 +4818,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         let claimed: Vec<&str> = out
             .admitted_entrypoints
             .iter()
@@ -4171,7 +4875,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         assert!(
             out.admitted_entrypoints.is_empty(),
             "PRIVATE and SEALED deps' claims must never be admitted on the default (interface) surface: {:?}",
@@ -4215,7 +4926,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, true).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            true,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         let claimed: Vec<&str> = out.admitted_entrypoints.iter().map(|(_, name)| name.as_str()).collect();
         assert_eq!(
             claimed,
@@ -4243,7 +4961,14 @@ mod tests {
             crate::file_structure::PackageDir { dir: pkg_root },
         ));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         let claimed: Vec<&str> = out
             .admitted_binaries
             .iter()
@@ -4283,7 +5008,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         let claimed: Vec<&str> = out
             .admitted_binaries
             .iter()
@@ -4332,7 +5064,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         assert!(
             out.admitted_binaries.is_empty(),
             "PRIVATE and SEALED deps' binaries claims must never be admitted on the default (interface) surface: {:?}",
@@ -4375,7 +5114,14 @@ mod tests {
         };
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
-        let out = compose(&[root], &store, true).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            true,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         let claimed: Vec<&str> = out.admitted_binaries.iter().map(|(_, name)| name.as_str()).collect();
         assert_eq!(
             claimed,
@@ -4436,7 +5182,14 @@ mod tests {
             Visibility::PUBLIC,
         ));
 
-        let out = compose(&[root], &store, false).await.unwrap();
+        let out = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
 
         assert!(
             out.admitted_binaries.is_empty(),
@@ -5073,7 +5826,14 @@ mod tests {
         let root = Arc::new(make_install_info("root", 'r', root_resolved));
 
         // `let Err(..) else`, not `expect_err`: `ComposeOutput` is not `Debug`.
-        let Err(err) = compose(&[root], &store, /* self_view = */ false).await else {
+        let Err(err) = compose(
+            &[root],
+            &store,
+            /* self_view = */ false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        else {
             panic!("a self-env token in a dependency's payload must be refused");
         };
         let message = err.to_string();
@@ -5643,7 +6403,14 @@ mod tests {
                 .with_deferred(DeferredComposition::new(shim.clone(), Vec::new())),
         );
 
-        let out = compose(std::slice::from_ref(&root), &store, false).await.unwrap();
+        let out = compose(
+            std::slice::from_ref(&root),
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
 
         let mut resolved_order = path_values(&out.entries);
         // Consumers prepend, so the resolved PATH is the reverse of emit order.
@@ -5680,14 +6447,28 @@ mod tests {
         );
         let shim_bin = shim.bin().to_string_lossy().into_owned();
 
-        let consumer = compose(std::slice::from_ref(&root), &store, false).await.unwrap();
+        let consumer = compose(
+            std::slice::from_ref(&root),
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         assert!(
             path_values(&consumer.entries).contains(&shim_bin),
             "the interface surface must route through the deferred tool's launchers: {:?}",
             consumer.entries
         );
 
-        let self_view = compose(&[root], &store, true).await.unwrap();
+        let self_view = compose(
+            &[root],
+            &store,
+            true,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         assert!(
             !path_values(&self_view.entries).contains(&shim_bin),
             "--self bypasses launchers, and a shim is nothing but a launcher: {:?}",
@@ -5741,9 +6522,14 @@ mod tests {
             )),
         );
 
-        let out = compose(&[eager, deferred], &store, false)
-            .await
-            .expect("a deferred root's TC entry has no package directory, and that is not a failure");
+        let out = compose(
+            &[eager, deferred],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .expect("a deferred root's TC entry has no package directory, and that is not a failure");
 
         assert_eq!(
             out.admitted_entrypoints.len(),
@@ -5838,13 +6624,25 @@ mod tests {
             !root.dir().content().exists(),
             "the cold leg must genuinely have no content tree"
         );
-        let cold = compose(std::slice::from_ref(&root), &store, false)
-            .await
-            .expect("a required path var must not make a deferred compose depend on content state");
+        let cold = compose(
+            std::slice::from_ref(&root),
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .expect("a required path var must not make a deferred compose depend on content state");
 
         // Warm: the first invocation materialized the package.
         std::fs::create_dir_all(root.dir().content().join("bin")).unwrap();
-        let warm = compose(&[root], &store, false).await.expect("warm compose succeeds");
+        let warm = compose(
+            &[root],
+            &store,
+            false,
+            &crate::package_manager::composer::ComposePaths::digest_only(),
+        )
+        .await
+        .expect("warm compose succeeds");
 
         assert_eq!(
             format!("{:?}", cold.entries),
@@ -6291,34 +7089,19 @@ mod tests {
     // ── S-010: both tier wrappers resolve through the HOST form ─────────────
     //
     // The rows above drive the ladder assemblers, so nothing there would notice
-    // a wrapper that called `resolve()` instead of `resolve_for_host()`. These
-    // two do, and they are host-gated halves rather than one `cfg!(windows)`
-    // expectation: an assertion that restates the production `cfg!` agrees with
-    // the code on every host, including one where the code is wrong. Each half
-    // asserts a literal and runs on the host it describes (the convention
-    // `lazy.rs` establishes for the floor itself).
+    // a wrapper that called `resolve()` instead of `resolve_for_host()`. This
+    // one does.
+    //
+    // **One row, on every host.** It used to be a host-gated pair, because
+    // `resolve_for_host` forced `LazyMode::Never` on Windows while nothing
+    // there could write a deferred tool's shim slot. C-026 ships that producer
+    // and C-027 removed the floor, so `resolve_for_host` is now a passthrough
+    // and both halves assert the same literal — a Windows half saying `Never`
+    // would only re-state a removed rule.
     //
     // The ladder asks for `always` at the toolchain tier, which outranks
-    // `OCX_LAZY_MODE`, so neither half depends on ambient process state.
+    // `OCX_LAZY_MODE`, so this does not depend on ambient process state.
 
-    #[cfg(windows)]
-    #[test]
-    fn both_tier_wrappers_compose_eagerly_on_windows() {
-        let config = ladder_config(Some(LazyMode::Always), None, None);
-
-        assert_eq!(
-            lazy_mode_for_tool(&config, &tool_identifier(), None, None),
-            LazyMode::Never,
-            "S-010: the project tier composes eagerly until the Windows shim producer lands"
-        );
-        assert_eq!(
-            lazy_mode_for_package(Some(LazyMode::Always)),
-            LazyMode::Never,
-            "S-010: and so does the OCI tier, even for the most specific tier there is"
-        );
-    }
-
-    #[cfg(not(windows))]
     #[test]
     fn both_tier_wrappers_answer_the_ladder_where_a_shim_producer_exists() {
         let config = ladder_config(Some(LazyMode::Always), None, None);
@@ -6326,12 +7109,12 @@ mod tests {
         assert_eq!(
             lazy_mode_for_tool(&config, &tool_identifier(), None, None),
             LazyMode::Always,
-            "the host floor is Windows-only; elsewhere the project tier answers its ladder"
+            "the project tier answers its ladder"
         );
         assert_eq!(
             lazy_mode_for_package(Some(LazyMode::Always)),
             LazyMode::Always,
-            "and so does the OCI tier"
+            "and so does the OCI tier, even for the most specific tier there is"
         );
     }
 
@@ -6599,6 +7382,1119 @@ mod tests {
             keys,
             vec!["DEP_APP_HOME".to_string()],
             "the member's carriers must come from its config blob"
+        );
+    }
+}
+
+// ── WP-15 specification tests (Specify phase) ───────────────────────────────
+//
+// Written from `plan_toolchain_activation.md` (C-065, C-066, C-067, C-070,
+// S-005, S-006, D-V9) and the wave-3b rulings RUL-78…RUL-84 / RUL-96…RUL-99,
+// against the WP-15 **stub**. Every case names the contract it traces to and
+// the mutation that must red it.
+//
+// The fixture platform is a constant, never the host's: `ComposePaths::resolve`
+// takes the platform as a parameter, so a host-derived one would make every
+// link assertion answer differently on the Windows leg for a reason that has
+// nothing to do with the contract under test. Same choice WP-7's render tests
+// made, for the same reason.
+#[cfg(test)]
+mod wp15_following_lane_spec_tests {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use tempfile::TempDir;
+
+    use super::{
+        ComposePaths, PathLane, ToolchainLinks, compose, link_is_trustworthy, pinned_for_project,
+        pinned_ladder_for_project,
+    };
+    use crate::file_structure::{FileStructure, PackageDir, RenderStampScope, ToolchainHome};
+    use crate::oci;
+    use crate::package::install_info::InstallInfo;
+    use crate::package::metadata::{
+        self, bundle, dependency,
+        entrypoint::Entrypoints,
+        env::{
+            self as metadata_env,
+            var::{Modifier, Var},
+        },
+        visibility::Visibility,
+    };
+    use crate::package::resolved_package::ResolvedPackage;
+    use crate::project::{
+        DECLARATION_HASH_VERSION, DEFAULT_GROUP, LockMetadata, LockVersion, LockedTool, ProjectConfig, ProjectLock,
+    };
+
+    const REGISTRY: &str = "example.com";
+
+    /// The platform every lock leaf in this module is keyed by.
+    const PLATFORM_KEY: &str = "linux/amd64";
+
+    fn platform() -> oci::Platform {
+        PLATFORM_KEY.parse().expect("the fixture platform key is canonical")
+    }
+
+    fn digest_of(seed: char) -> oci::Digest {
+        oci::Digest::Sha256(seed.to_string().repeat(64))
+    }
+
+    fn locked_tool(name: &str, group: &str, repository: &str, seed: char) -> LockedTool {
+        LockedTool {
+            name: name.to_string(),
+            group: group.to_string(),
+            repository: oci::Identifier::new_registry(repository, REGISTRY),
+            platforms: BTreeMap::from([(PLATFORM_KEY.to_string(), digest_of(seed))]),
+        }
+    }
+
+    /// A tool whose only leaf is keyed by a platform the composition never
+    /// targets — the "no compatible leaf" input `link_target` answers `None`
+    /// for (RUL-31).
+    fn locked_tool_for_another_platform(name: &str, group: &str, repository: &str, seed: char) -> LockedTool {
+        LockedTool {
+            name: name.to_string(),
+            group: group.to_string(),
+            repository: oci::Identifier::new_registry(repository, REGISTRY),
+            platforms: BTreeMap::from([("windows/arm64".to_string(), digest_of(seed))]),
+        }
+    }
+
+    fn lock_of(tools: Vec<LockedTool>) -> ProjectLock {
+        ProjectLock {
+            metadata: LockMetadata {
+                lock_version: LockVersion::V3,
+                declaration_hash_version: DECLARATION_HASH_VERSION,
+                declaration_hash: "0".repeat(64),
+                generated_by: "wp-15 specification fixture".to_string(),
+                generated_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+            tools,
+        }
+    }
+
+    fn groups_of(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    fn config_with_pinned(value: Option<bool>) -> ProjectConfig {
+        let mut config = ProjectConfig::default();
+        config.pinned = value;
+        config
+    }
+
+    /// One project tree under one tempdir: an `$OCX_HOME`, a project directory
+    /// and the `<project>/.ocx/toolchain` home the links live in.
+    struct Tree {
+        // Every reader is a `#[cfg(unix)]` symlink test; off Unix the field is
+        // still needed to keep the directory alive for the fixture's lifetime,
+        // which is a use `dead_code` does not count. `expect` rather than
+        // `allow` so the day a Windows test reads it, this line fails.
+        #[cfg_attr(
+            not(unix),
+            expect(dead_code, reason = "lifetime anchor; read only by cfg(unix) tests")
+        )]
+        tmp: TempDir,
+        file_structure: FileStructure,
+        project_dir: PathBuf,
+        home: ToolchainHome,
+    }
+
+    impl Tree {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().expect("a tempdir is creatable");
+            let file_structure = FileStructure::with_root(tmp.path().join("ocx-home"));
+            let project_dir = tmp.path().join("proj");
+            std::fs::create_dir_all(&project_dir).expect("the project directory is creatable");
+            let home = ToolchainHome::new(project_dir.join(".ocx").join("toolchain"));
+            Self {
+                tmp,
+                file_structure,
+                project_dir,
+                home,
+            }
+        }
+
+        fn scope(&self) -> RenderStampScope {
+            RenderStampScope::Project(self.project_dir.clone())
+        }
+
+        /// The digest root one lock entry's link must name, derived the way the
+        /// renderer and the heal derive it — through the shared `select_best`
+        /// helper (RUL-31), never by an exact key lookup.
+        fn digest_root(&self, tool: &LockedTool) -> PathBuf {
+            let identifier = crate::project::compose::host_leaf_identifier(tool, &platform())
+                .expect("the fixture lock ships a leaf compatible with the fixture platform");
+            let pinned = oci::PinnedIdentifier::try_from(identifier).expect("a resolved host leaf is digest-bearing");
+            self.file_structure.packages.path(&pinned)
+        }
+
+        /// The digest root, materialised. A mismatch case must plant a link at
+        /// a **different real digest root**, never a dangling one — those are
+        /// two different arms of C-067.
+        fn seed_digest_root(&self, tool: &LockedTool) -> PathBuf {
+            let root = self.digest_root(tool);
+            std::fs::create_dir_all(root.join("content").join("bin")).expect("a digest root is creatable");
+            root
+        }
+
+        fn entry(&self, group: &str, name: &str) -> PathBuf {
+            self.home.entry(group, name).expect("the fixture names are admitted")
+        }
+
+        fn plant_link(&self, group: &str, name: &str, target: &std::path::Path) -> PathBuf {
+            let entry = self.entry(group, name);
+            crate::symlink::create(target, &entry).expect("the fixture link is creatable");
+            entry
+        }
+
+        fn links(&self, pinned: bool, lock: ProjectLock, groups: &[&str]) -> ToolchainLinks {
+            ToolchainLinks {
+                pinned,
+                home: self.home.clone(),
+                scope: self.scope(),
+                lock,
+                groups: groups_of(groups),
+            }
+        }
+
+        async fn resolve(&self, links: &ToolchainLinks) -> ComposePaths {
+            ComposePaths::resolve(links, &self.file_structure, &platform())
+                .await
+                .expect("C-067 — a missing, absent or stale link degrades; it never fails an emission")
+        }
+
+        /// What one package's install path composes to on the following lane.
+        fn following(&self, paths: &ComposePaths, digest_root: &std::path::Path) -> PathBuf {
+            paths
+                .install_path_for(&PackageDir::with_root(digest_root.to_path_buf()), PathLane::Following)
+                .root()
+                .to_path_buf()
+        }
+    }
+
+    // ── C-007 / RUL-83: the `pinned` ladder WP-15 assembles ──────────────────
+    //
+    // The resolved value is the single input C-066 gates the whole lane on, so
+    // each precedence case sets its own tier to one value and EVERY weaker tier
+    // to a different one: a resolver that consults the tiers in the wrong order
+    // returns the other value and reds. The floor case and the single-tier case
+    // populate at most one tier, so a transposition cannot reach them.
+
+    /// C-007 — `--pinned` / `--no-pinned` outranks `ocx.toml` and
+    /// `OCX_TOOLCHAIN_PINNED`.
+    ///
+    /// RED: transposing the `cli` and `file` operands of the resolution chain.
+    #[test]
+    fn the_cli_pinned_flag_outranks_the_config_and_the_environment() {
+        let env = crate::test::env::lock();
+        env.set(crate::env::keys::OCX_TOOLCHAIN_PINNED, "false");
+
+        assert!(
+            pinned_for_project(Some(true), &config_with_pinned(Some(false))),
+            "C-007 — the flag on the invoked command is the strongest tier"
+        );
+    }
+
+    /// C-007 — `ocx.toml`'s `pinned` key outranks `OCX_TOOLCHAIN_PINNED`: an
+    /// exported variable loses to a project that states a value.
+    ///
+    /// RED: transposing the `file` and `environment` operands.
+    #[test]
+    fn the_config_tier_outranks_the_environment() {
+        let env = crate::test::env::lock();
+        env.set(crate::env::keys::OCX_TOOLCHAIN_PINNED, "false");
+
+        assert!(
+            pinned_for_project(None, &config_with_pinned(Some(true))),
+            "C-007 — the environment tier is the weakest, below the file tier"
+        );
+    }
+
+    /// C-007 — `OCX_TOOLCHAIN_PINNED` is the last tier above the floor.
+    ///
+    /// RED: dropping the environment tier entirely. Without this row that
+    /// implementation passes every other ladder case.
+    #[test]
+    fn the_environment_tier_answers_when_the_cli_and_the_config_are_absent() {
+        let env = crate::test::env::lock();
+        env.set(crate::env::keys::OCX_TOOLCHAIN_PINNED, "true");
+
+        assert!(
+            pinned_for_project(None, &config_with_pinned(None)),
+            "C-007 — an exported value decides for a project that states none"
+        );
+    }
+
+    /// C-007 — every tier absent means `crate::activate::PINNED_FLOOR`, and the
+    /// floor is the **following** lane (C-065's default).
+    ///
+    /// RED: a re-spelled `true` literal in place of `PINNED_FLOOR`, which would
+    /// pin every un-configured project and make C-065 unreachable in practice.
+    #[test]
+    fn an_all_absent_pinned_ladder_resolves_to_the_following_lane_floor() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        assert!(
+            !pinned_for_project(None, &config_with_pinned(None)),
+            "C-007 — the floor is `false`: follow the links"
+        );
+    }
+
+    /// C-007 — `--no-pinned` overrides an `ocx.toml` that asked to pin. Its
+    /// entire job.
+    ///
+    /// RED: collapsing the CLI tier's `Option<bool>` into a bare `bool`, which
+    /// makes `Some(false)` indistinguishable from "no flag given" and deletes
+    /// `--no-pinned`. The sibling precedence case cannot catch that mutation —
+    /// it passes `Some(true)`.
+    #[test]
+    fn no_pinned_overrides_a_config_that_asked_to_pin() {
+        let env = crate::test::env::lock();
+        env.set(crate::env::keys::OCX_TOOLCHAIN_PINNED, "true");
+
+        assert!(
+            !pinned_for_project(Some(false), &config_with_pinned(Some(true))),
+            "C-007 — `--no-pinned` is an explicit `false`, never an absent tier"
+        );
+    }
+
+    /// C-007 — the unresolved form reports one tier per source, so the tier
+    /// order is assertable without also asserting the floor.
+    ///
+    /// RED: filling `file` from the environment reader (or `environment` from
+    /// the config), which every resolving case above would still pass whenever
+    /// the two sources happen to agree.
+    #[test]
+    fn the_unresolved_pinned_ladder_reports_one_tier_per_source() {
+        let env = crate::test::env::lock();
+        env.set(crate::env::keys::OCX_TOOLCHAIN_PINNED, "false");
+
+        let ladder = pinned_ladder_for_project(Some(true), &config_with_pinned(Some(true)));
+
+        assert_eq!(ladder.cli, Some(true), "the CLI tier carries the flag");
+        assert_eq!(ladder.file, Some(true), "the file tier carries `ocx.toml`'s key");
+        assert_eq!(
+            ladder.environment,
+            Some(false),
+            "the environment tier carries `OCX_TOOLCHAIN_PINNED`"
+        );
+    }
+
+    // ── C-067 / RUL-80: the per-entry trust probe ───────────────────────────
+
+    /// C-067 — a link naming the lock-derived digest root is one the
+    /// composition may follow.
+    ///
+    /// RED: a probe that answers `false` unconditionally, which would collapse
+    /// the whole following lane into C-066's digest lane.
+    #[test]
+    fn a_link_naming_the_lock_derived_target_is_trustworthy() {
+        let tree = Tree::new();
+        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let target = tree.seed_digest_root(&tool);
+        let entry = tree.plant_link(DEFAULT_GROUP, "cmake", &target);
+
+        assert!(link_is_trustworthy(&entry, &target));
+    }
+
+    /// C-067 — an absent entry is not trustworthy, and asking is not an error.
+    ///
+    /// RED: a probe that answers `true` unconditionally.
+    #[test]
+    fn an_absent_entry_is_not_trustworthy() {
+        let tree = Tree::new();
+        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let target = tree.seed_digest_root(&tool);
+        let entry = tree.entry(DEFAULT_GROUP, "cmake");
+
+        assert!(!entry.exists(), "precondition: nothing was rendered for this entry");
+        assert!(!link_is_trustworthy(&entry, &target));
+    }
+
+    /// C-067 — **a mismatch is treated as absent, not as usable.** The link
+    /// names a *different real digest root*, which is the state a branch switch
+    /// leaves behind and the exact input a "the link exists, so follow it"
+    /// implementation resolves to the previous package on.
+    ///
+    /// RED: probing existence instead of the target. Both roots are real
+    /// directories on disk, so no existence check can tell them apart.
+    #[test]
+    fn a_link_naming_a_different_real_digest_root_is_not_trustworthy() {
+        let tree = Tree::new();
+        let current = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let previous = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'b');
+        let current_target = tree.seed_digest_root(&current);
+        let previous_target = tree.seed_digest_root(&previous);
+        assert_ne!(current_target, previous_target, "precondition: two distinct digests");
+        assert!(previous_target.is_dir(), "precondition: the stale target is real");
+
+        let entry = tree.plant_link(DEFAULT_GROUP, "cmake", &previous_target);
+
+        assert!(
+            !link_is_trustworthy(&entry, &current_target),
+            "C-067 — a stale link degrades to a digest path instead of resolving the previous package"
+        );
+    }
+
+    /// C-067 / RUL-80 — a real directory where a link belongs is not
+    /// trustworthy. This is the shape the heal is forbidden to repair (it has
+    /// no delete authority), so the composing side has to refuse it.
+    ///
+    /// RED: `Path::exists()` as the probe, or `read_link`'s error being
+    /// swallowed into `true`.
+    #[test]
+    fn a_real_directory_where_a_link_belongs_is_not_trustworthy() {
+        let tree = Tree::new();
+        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let target = tree.seed_digest_root(&tool);
+        let entry = tree.entry(DEFAULT_GROUP, "cmake");
+        std::fs::create_dir_all(entry.join("content")).expect("the impostor directory is creatable");
+
+        assert!(entry.is_dir(), "precondition: an ordinary directory, not a link");
+        assert!(!link_is_trustworthy(&entry, &target));
+    }
+
+    /// C-067 / RUL-79 — the comparison is against the **lock**, never against
+    /// the filesystem: a link naming a digest root that is not materialised is
+    /// still the correct link, and that is a lazily-loaded tool's ordinary
+    /// state. Paired with the mismatch case above, which is where a "the target
+    /// must exist" implementation would still pass.
+    ///
+    /// RED: adding a `target.exists()` conjunct to the probe.
+    #[test]
+    fn a_link_naming_the_target_is_trustworthy_even_when_the_target_does_not_exist() {
+        let tree = Tree::new();
+        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let target = tree.digest_root(&tool);
+        let entry = tree.plant_link(DEFAULT_GROUP, "cmake", &target);
+
+        assert!(!target.exists(), "precondition: the package is not materialised");
+        assert!(link_is_trustworthy(&entry, &target));
+    }
+
+    /// RUL-80 — the target comparison is made on the **raw** `read_link`
+    /// answer, un-canonicalised, because `heal_links` compares raw targets: a
+    /// composer that canonicalised would disagree with the repairer and would
+    /// follow *through* a target the heal refused to touch.
+    ///
+    /// The planted link names the same directory by a different spelling, so a
+    /// canonicalising probe answers `true` — the precondition below proves that
+    /// red is reachable — while the contract's probe answers `false`.
+    ///
+    /// Unix-only: a Windows junction stores a normalised absolute target, so
+    /// the two spellings are indistinguishable at `read_link` there and the
+    /// case has no reachable red on that leg.
+    #[cfg(unix)]
+    #[test]
+    fn the_target_comparison_is_not_canonicalised() {
+        let tree = Tree::new();
+        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let target = tree.seed_digest_root(&tool);
+
+        let alias = tree.tmp.path().join("alias");
+        crate::symlink::create(target.parent().expect("a digest root has a shard parent"), &alias)
+            .expect("the alias link is creatable");
+        let aliased = alias.join(target.file_name().expect("a digest root has a final component"));
+
+        assert_eq!(
+            std::fs::canonicalize(&aliased).expect("the alias resolves"),
+            std::fs::canonicalize(&target).expect("the target resolves"),
+            "precondition: a canonicalising probe would call this link trustworthy"
+        );
+
+        let entry = tree.plant_link(DEFAULT_GROUP, "cmake", &aliased);
+
+        assert!(
+            !link_is_trustworthy(&entry, &target),
+            "RUL-80 — the raw `read_link` answer is compared, so the composer and the heal cannot disagree"
+        );
+    }
+
+    // ── C-066: the pinned lane ──────────────────────────────────────────────
+
+    /// C-066 + C-007 — under a project that asked to pin, every emitter yields
+    /// digest paths, **no link is consulted, and no tree is touched**.
+    ///
+    /// `home.root()` is the assertion because RUL-81 names it: `heal_links`
+    /// calls `ensure_home_root`, which *creates* the root. A pinned composition
+    /// that reached the heal would leave one behind.
+    ///
+    /// RED: deleting `resolve`'s `pinned` short-circuit, or a ladder that
+    /// resolves `pinned = true` to the following lane.
+    #[tokio::test]
+    async fn a_pinned_project_composes_on_digest_paths_and_never_creates_the_home_root() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        let tree = Tree::new();
+        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let digest_root = tree.seed_digest_root(&tool);
+        let links = tree.links(
+            pinned_for_project(None, &config_with_pinned(Some(true))),
+            lock_of(vec![tool]),
+            &[DEFAULT_GROUP],
+        );
+
+        let paths = tree.resolve(&links).await;
+
+        assert_eq!(
+            tree.following(&paths, &digest_root),
+            digest_root,
+            "C-066 — a pinned emitter yields the digest root"
+        );
+        assert!(
+            !tree.home.root().exists(),
+            "C-066 / RUL-81 — a pinned composition performs no heal, so nothing creates the home root"
+        );
+    }
+
+    // ── C-065 / C-067 / C-070: the following lane ───────────────────────────
+
+    /// C-065 — a selected group's entry composes through
+    /// `<home>/<group>/<entry>`, not through its digest root. The link is
+    /// absent to begin with, which is the ordinary post-`git pull` state, and
+    /// C-070's heal creates it (RUL-29) before the probe runs.
+    ///
+    /// RED: `resolve` returning `ComposePaths::digest_only()` on the following
+    /// lane, or `install_path_for` ignoring the map.
+    #[tokio::test]
+    async fn an_entry_of_a_selected_group_composes_through_its_home_link() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        let tree = Tree::new();
+        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let digest_root = tree.seed_digest_root(&tool);
+        let links = tree.links(
+            pinned_for_project(None, &config_with_pinned(Some(false))),
+            lock_of(vec![tool]),
+            &[DEFAULT_GROUP],
+        );
+
+        let paths = tree.resolve(&links).await;
+
+        assert_eq!(
+            tree.following(&paths, &digest_root),
+            tree.entry(DEFAULT_GROUP, "cmake"),
+            "C-065 — the following lane emits `<home>/<group>/<entry>`"
+        );
+    }
+
+    /// C-070, **the discriminating case** — `ocx exec -g ci` heals the group it
+    /// is about to emit, not the default one. The `ci/cmake` link is stale, the
+    /// shape a branch switch leaves behind (S-006), and the default group holds
+    /// a correct link so that a narrowed heal still finds work to do and still
+    /// returns a non-zero repair count.
+    ///
+    /// RED: narrowing the heal back to `[DEFAULT_GROUP]` (C-062's prompt-path
+    /// scope leaking here). The stale `ci` link then survives, the probe refuses
+    /// it (C-067), and the emitted path degrades to the digest root — so both
+    /// assertions red, and the on-disk one names the previous package.
+    #[tokio::test]
+    async fn a_stale_link_in_a_non_default_selected_group_is_healed_before_it_is_probed() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        let tree = Tree::new();
+        let default_tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let current = locked_tool("cmake", "ci", "ns/cmake", 'b');
+        let previous = locked_tool("cmake", "ci", "ns/cmake", 'c');
+
+        let default_root = tree.seed_digest_root(&default_tool);
+        let current_root = tree.seed_digest_root(&current);
+        let previous_root = tree.seed_digest_root(&previous);
+        tree.plant_link("ci", "cmake", &previous_root);
+
+        let links = tree.links(
+            pinned_for_project(None, &config_with_pinned(Some(false))),
+            lock_of(vec![default_tool, current]),
+            &["ci"],
+        );
+
+        let paths = tree.resolve(&links).await;
+
+        assert_eq!(
+            tree.following(&paths, &current_root),
+            tree.entry("ci", "cmake"),
+            "C-070 — the selected group's stale link is repaired, so the emitted path is the link"
+        );
+        assert_eq!(
+            std::fs::read_link(tree.entry("ci", "cmake")).expect("the healed entry is a link"),
+            current_root,
+            "C-070 / S-006 — the repaired link names the current lock's digest, never the previous package"
+        );
+        assert_ne!(
+            previous_root, current_root,
+            "precondition: the stale target is a different real digest root"
+        );
+        assert!(
+            !tree.entry(DEFAULT_GROUP, "cmake").exists(),
+            "C-070 — the heal is scoped to the groups this invocation selected, and `default` is not one of them"
+        );
+        assert_eq!(
+            tree.following(&paths, &default_root),
+            default_root,
+            "C-070 — an unselected group contributes no link to follow"
+        );
+    }
+
+    /// C-067 — the belt behind C-070's heal: an entry the heal is not permitted
+    /// to repair degrades to a **correct digest path**, per entry, and never
+    /// fails the emission. A regular file where a link belongs is the shape
+    /// `heal_links` leaves exactly as it found it, because it has no delete
+    /// authority inside a repository-controlled tree.
+    ///
+    /// RED: emitting the `<home>/<group>/<entry>` spelling for every lock entry
+    /// of a selected group regardless of what the probe answered — the emitted
+    /// path would then name a regular file and every consumer would break.
+    #[tokio::test]
+    async fn an_entry_the_heal_cannot_repair_composes_on_the_digest_path() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        let tree = Tree::new();
+        let repairable = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let blocked = locked_tool("ninja", DEFAULT_GROUP, "ns/ninja", 'b');
+        let repairable_root = tree.seed_digest_root(&repairable);
+        let blocked_root = tree.seed_digest_root(&blocked);
+
+        let blocked_entry = tree.entry(DEFAULT_GROUP, "ninja");
+        std::fs::create_dir_all(blocked_entry.parent().expect("an entry has a group parent"))
+            .expect("the group directory is creatable");
+        std::fs::write(&blocked_entry, b"not a link").expect("the impostor file is writable");
+
+        let links = tree.links(
+            pinned_for_project(None, &config_with_pinned(Some(false))),
+            lock_of(vec![repairable, blocked]),
+            &[DEFAULT_GROUP],
+        );
+
+        let paths = tree.resolve(&links).await;
+
+        assert_eq!(
+            tree.following(&paths, &blocked_root),
+            blocked_root,
+            "C-067 — the degrade is per entry and yields the digest root"
+        );
+        assert_eq!(
+            tree.following(&paths, &repairable_root),
+            tree.entry(DEFAULT_GROUP, "cmake"),
+            "C-067 — its sibling in the same group still follows its link"
+        );
+    }
+
+    /// C-067 / RUL-31 — a lock entry with no leaf compatible with the target
+    /// platform has no link to name, so it composes on its digest path rather
+    /// than failing the emission.
+    ///
+    /// RED: inventing a target for an incompatible entry (an exact-key lookup
+    /// with a fallback, or a `unwrap_or_default` on `link_target`), which would
+    /// emit a link path that nothing ever writes.
+    #[tokio::test]
+    async fn an_entry_with_no_lock_leaf_for_the_target_platform_composes_on_the_digest_path() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        let tree = Tree::new();
+        let reachable = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let foreign = locked_tool_for_another_platform("ninja", DEFAULT_GROUP, "ns/ninja", 'b');
+        let reachable_root = tree.seed_digest_root(&reachable);
+        let foreign_root = tree.file_structure.packages.path(
+            &oci::PinnedIdentifier::try_from(
+                oci::Identifier::new_registry("ns/ninja", REGISTRY).clone_with_digest(digest_of('b')),
+            )
+            .expect("a digest-bearing identifier is pinned"),
+        );
+
+        let links = tree.links(
+            pinned_for_project(None, &config_with_pinned(Some(false))),
+            lock_of(vec![reachable, foreign]),
+            &[DEFAULT_GROUP],
+        );
+
+        let paths = tree.resolve(&links).await;
+
+        assert_eq!(
+            tree.following(&paths, &foreign_root),
+            foreign_root,
+            "C-067 — no compatible leaf means no link, and no link means the digest path"
+        );
+        assert!(
+            !tree.entry(DEFAULT_GROUP, "ninja").exists(),
+            "RUL-31 — nothing was written for an entry the lock does not ship here"
+        );
+        assert_eq!(
+            tree.following(&paths, &reachable_root),
+            tree.entry(DEFAULT_GROUP, "cmake"),
+            "the compatible sibling still follows its link"
+        );
+    }
+
+    /// C-070 — the map is built from **the groups this invocation selected**,
+    /// never from every group the lock happens to carry. A correct `ci` link on
+    /// disk is not enough to put `ci` on the following lane for an invocation
+    /// that selected only the default group.
+    ///
+    /// RED: iterating `lock.tools` wholesale instead of intersecting with
+    /// `links.groups`.
+    #[tokio::test]
+    async fn a_group_the_invocation_did_not_select_composes_on_the_digest_path() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        let tree = Tree::new();
+        let selected = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let unselected = locked_tool("shellcheck", "ci", "ns/shellcheck", 'b');
+        let selected_root = tree.seed_digest_root(&selected);
+        let unselected_root = tree.seed_digest_root(&unselected);
+        tree.plant_link("ci", "shellcheck", &unselected_root);
+
+        let links = tree.links(
+            pinned_for_project(None, &config_with_pinned(Some(false))),
+            lock_of(vec![selected, unselected]),
+            &[DEFAULT_GROUP],
+        );
+
+        let paths = tree.resolve(&links).await;
+
+        assert_eq!(
+            tree.following(&paths, &unselected_root),
+            unselected_root,
+            "C-070 — an unselected group is not on the following lane, correct link or not"
+        );
+        assert_eq!(
+            tree.following(&paths, &selected_root),
+            tree.entry(DEFAULT_GROUP, "cmake"),
+            "the selected group still follows its link"
+        );
+    }
+
+    /// RUL-98 — two selected groups whose entries collapse to one digest key
+    /// keep the entry from the **first group in `groups` order**, not the first
+    /// in sorted order. Both links name the same directory, so the choice is
+    /// observable only in the emitted spelling — which is exactly why it has to
+    /// be deterministic rather than left to hash order.
+    ///
+    /// RED: last-write-wins insertion, or sorting the group set before the map
+    /// is built (the heal's own `BTreeSet` ordering leaking into the map).
+    #[tokio::test]
+    async fn two_selected_groups_sharing_one_digest_keep_the_first_selected_groups_link() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        let tree = Tree::new();
+        let alpha = locked_tool("cmake", "alpha", "ns/cmake", 'a');
+        let beta = locked_tool("cmake", "beta", "ns/cmake", 'a');
+        let shared_root = tree.seed_digest_root(&alpha);
+        assert_eq!(
+            shared_root,
+            tree.digest_root(&beta),
+            "precondition: both lock entries collapse to one digest key"
+        );
+
+        let links = tree.links(
+            pinned_for_project(None, &config_with_pinned(Some(false))),
+            lock_of(vec![alpha, beta]),
+            &["beta", "alpha"],
+        );
+
+        let paths = tree.resolve(&links).await;
+
+        assert_eq!(
+            tree.following(&paths, &shared_root),
+            tree.entry("beta", "cmake"),
+            "RUL-98 — the first group in `groups` order wins the tie"
+        );
+    }
+
+    /// RUL-98, the discriminating leg — the slot goes to the first
+    /// **trustworthy** candidate, not to the first candidate.
+    ///
+    /// The two cases above plant no links, so C-070's heal makes *both*
+    /// candidates trustworthy and a slot-reserving implementation — one that
+    /// records the first candidate it walks and never revisits the key — passes
+    /// them. Here the first selected group's entry is a regular file, the shape
+    /// the heal has no authority to repair, so the two implementations disagree:
+    /// reserving the slot emits the digest path, refusing a non-candidate emits
+    /// the second group's link.
+    ///
+    /// RED: hoisting the `trusted.contains_key` skip above the trust probe, or
+    /// inserting the key unconditionally.
+    #[tokio::test]
+    async fn a_refused_first_candidate_does_not_shadow_its_trustworthy_sibling() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        let tree = Tree::new();
+        let alpha = locked_tool("cmake", "alpha", "ns/cmake", 'a');
+        let beta = locked_tool("cmake", "beta", "ns/cmake", 'a');
+        let shared_root = tree.seed_digest_root(&alpha);
+        assert_eq!(
+            shared_root,
+            tree.digest_root(&beta),
+            "precondition: both lock entries collapse to one digest key"
+        );
+
+        // A regular file where `alpha`'s link belongs: `heal_links` leaves it
+        // exactly as it found it, so the probe refuses it (C-067).
+        let blocked = tree.entry("alpha", "cmake");
+        std::fs::create_dir_all(blocked.parent().expect("an entry has a group parent"))
+            .expect("the group directory is creatable");
+        std::fs::write(&blocked, b"not a link").expect("the impostor file is writable");
+
+        let links = tree.links(
+            pinned_for_project(None, &config_with_pinned(Some(false))),
+            lock_of(vec![alpha, beta]),
+            &["alpha", "beta"],
+        );
+
+        let paths = tree.resolve(&links).await;
+
+        assert_eq!(
+            tree.following(&paths, &shared_root),
+            tree.entry("beta", "cmake"),
+            "RUL-98 — a candidate the probe refused is not a candidate, so the slot stays open for its sibling"
+        );
+    }
+
+    // ── Block-1: the read path takes the heal's guards too ──────────────────
+
+    /// C-067 / RUL-44 — a home reached through a symlinked project component is
+    /// refused on the **read** path, not merely on the write path.
+    ///
+    /// `heal_links` reports `refuse_symlinked_project_path`'s refusal as
+    /// [`HealOutcome::Refused`], which `resolve` turns into a digest-only
+    /// composition. This test pins the **second**, independent guard inside
+    /// `resolve`'s own blocking unit: without it a repository that commits
+    /// `.ocx` as a symlink would need only the heal's verdict to go stale
+    /// between the two for all four emitters to resolve `PATH` and
+    /// `${installPath}` *through* that symlink.
+    ///
+    /// The link planted below is correct by every other test in this module, so
+    /// only the guard can refuse it.
+    ///
+    /// RED: deleting the `refuse_symlinked_home` call from `resolve`'s blocking
+    /// unit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_home_behind_a_symlinked_project_component_composes_on_the_digest_path() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        let tree = Tree::new();
+        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let digest_root = tree.seed_digest_root(&tool);
+
+        // `<project>/.ocx` as a symlink — one component above the home root, the
+        // hole `ensure_home_root` cannot see from where it stands (RUL-44).
+        let elsewhere = tree.tmp.path().join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("toolchain").join(DEFAULT_GROUP))
+            .expect("the relocated tree is creatable");
+        crate::symlink::create(&elsewhere, tree.project_dir.join(".ocx")).expect("the hostile link is creatable");
+
+        let entry = tree.entry(DEFAULT_GROUP, "cmake");
+        crate::symlink::create(&digest_root, &entry).expect("the fixture link is creatable");
+        assert_eq!(
+            std::fs::read_link(&entry).expect("the planted entry is a link"),
+            digest_root,
+            "precondition: the link is correct, so only the guard can refuse it"
+        );
+
+        let links = tree.links(
+            pinned_for_project(None, &config_with_pinned(Some(false))),
+            lock_of(vec![tool]),
+            &[DEFAULT_GROUP],
+        );
+
+        let paths = tree.resolve(&links).await;
+
+        assert_eq!(
+            tree.following(&paths, &digest_root),
+            digest_root,
+            "C-067 — a home the heal refuses to write is a home the composer refuses to read"
+        );
+    }
+
+    /// C-067 — a symlinked `<home>/<group>` directory is refused per entry.
+    ///
+    /// The sibling hole one level down, and the one `repoint_link`'s own
+    /// refusal cannot close: when the entry underneath already reads back the
+    /// correct target the heal has nothing to repair, so it never reaches that
+    /// refusal and the group link is never examined by any write path.
+    /// `link_is_trustworthy` probes only the leaf.
+    ///
+    /// RED: deleting the `entry.parent().is_some_and(is_link)` skip.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_entry_under_a_symlinked_group_directory_composes_on_the_digest_path() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        let tree = Tree::new();
+        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let digest_root = tree.seed_digest_root(&tool);
+
+        let elsewhere = tree.tmp.path().join("elsewhere-group");
+        std::fs::create_dir_all(&elsewhere).expect("the relocated group is creatable");
+        std::fs::create_dir_all(tree.home.root()).expect("the home root is creatable");
+        crate::symlink::create(&elsewhere, tree.home.root().join(DEFAULT_GROUP))
+            .expect("the hostile group link is creatable");
+
+        let entry = tree.entry(DEFAULT_GROUP, "cmake");
+        crate::symlink::create(&digest_root, &entry).expect("the fixture link is creatable");
+        assert_eq!(
+            std::fs::read_link(&entry).expect("the planted entry is a link"),
+            digest_root,
+            "precondition: the leaf is correct, so the heal has nothing to repair and only this guard can refuse it"
+        );
+
+        let links = tree.links(
+            pinned_for_project(None, &config_with_pinned(Some(false))),
+            lock_of(vec![tool]),
+            &[DEFAULT_GROUP],
+        );
+
+        let paths = tree.resolve(&links).await;
+
+        assert_eq!(
+            tree.following(&paths, &digest_root),
+            digest_root,
+            "C-067 — an entry the composer reaches through a symlinked group directory degrades"
+        );
+    }
+
+    /// RUL-98, second leg — within one group, the tie-break is the first entry
+    /// in `lock.tools` order.
+    ///
+    /// RED: sorting the tools by name, or last-write-wins insertion. The names
+    /// are deliberately in reverse alphabetical order in the lock, so either
+    /// mutation returns `alpha`.
+    #[tokio::test]
+    async fn two_entries_of_one_group_sharing_one_digest_keep_the_first_in_lock_order() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        let tree = Tree::new();
+        let zeta = locked_tool("zeta", DEFAULT_GROUP, "ns/cmake", 'a');
+        let alpha = locked_tool("alpha", DEFAULT_GROUP, "ns/cmake", 'a');
+        let shared_root = tree.seed_digest_root(&zeta);
+
+        let links = tree.links(
+            pinned_for_project(None, &config_with_pinned(Some(false))),
+            lock_of(vec![zeta, alpha]),
+            &[DEFAULT_GROUP],
+        );
+
+        let paths = tree.resolve(&links).await;
+
+        assert_eq!(
+            tree.following(&paths, &shared_root),
+            tree.entry(DEFAULT_GROUP, "zeta"),
+            "RUL-98 — first in `lock.tools` order, not first alphabetically"
+        );
+    }
+
+    /// RUL-78 — `${deps.*}` stays on digest paths. A dependency is not a lock
+    /// entry, so no `<group>/<entry>` link exists for it and no trust test can
+    /// be asked; the digest lane goes through the same seam (RUL-82) but never
+    /// consults the map, **even when the dependency's digest root happens to be
+    /// one a selected group's link names**.
+    ///
+    /// RED: routing `build_dep_context_map` onto `PathLane::Following`. That
+    /// mutation is invisible to every other case here, because every other case
+    /// asks the following lane.
+    #[tokio::test]
+    async fn a_dependency_composes_on_the_digest_path_even_when_its_digest_root_carries_a_link() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        let tree = Tree::new();
+        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let digest_root = tree.seed_digest_root(&tool);
+        let links = tree.links(
+            pinned_for_project(None, &config_with_pinned(Some(false))),
+            lock_of(vec![tool]),
+            &[DEFAULT_GROUP],
+        );
+
+        let paths = tree.resolve(&links).await;
+
+        assert_eq!(
+            tree.following(&paths, &digest_root),
+            tree.entry(DEFAULT_GROUP, "cmake"),
+            "precondition: this very digest root is on the following lane"
+        );
+        assert_eq!(
+            paths
+                .install_path_for(&PackageDir::with_root(digest_root.clone()), PathLane::Digest)
+                .root(),
+            digest_root,
+            "RUL-78 — the digest lane never consults the map"
+        );
+    }
+
+    // ── C-065 through the emitters ──────────────────────────────────────────
+
+    /// C-065 — "a package's real bin directory **and every dereference value**"
+    /// composed through the link: the root's declared `${installPath}/bin`
+    /// carrier and its synthetic `entrypoints/` entry both name
+    /// `<home>/<group>/<entry>/…` rather than the digest root.
+    ///
+    /// This is the case that proves the seam is wired into the emitters rather
+    /// than merely computed: `ComposePaths` could resolve a perfect map and
+    /// `compose` could still emit digest paths.
+    ///
+    /// RED: `compose_gated` passing `root.dir()` to the root's path block
+    /// instead of `install_path_for(root.dir(), PathLane::Following)`.
+    #[tokio::test]
+    async fn a_following_root_emits_its_carrier_and_entrypoints_paths_under_the_home_link() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        let tree = Tree::new();
+        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let digest_root = tree.seed_digest_root(&tool);
+
+        let identifier = oci::PinnedIdentifier::try_from(
+            crate::project::compose::host_leaf_identifier(&tool, &platform()).expect("a compatible leaf"),
+        )
+        .expect("a resolved host leaf is digest-bearing");
+
+        let mut builder = metadata_env::EnvBuilder::new();
+        builder.add_var(Var {
+            key: "PATH".to_string(),
+            modifier: Modifier::Path(crate::package::metadata::env::path::Path {
+                required: false,
+                value: "${installPath}/bin".to_string(),
+            }),
+            visibility: Visibility::PUBLIC,
+        });
+        let root = std::sync::Arc::new(InstallInfo::new(
+            identifier,
+            metadata::Metadata::Bundle(bundle::Bundle {
+                binaries: None,
+                version: bundle::Version::V1,
+                strip_components: None,
+                env: builder.build(),
+                dependencies: dependency::Dependencies::default(),
+                entrypoints: Entrypoints::from_names(["cmake"]),
+                integrations: Default::default(),
+            }),
+            ResolvedPackage::new(),
+            PackageDir::with_root(digest_root.clone()),
+        ));
+
+        let links = tree.links(
+            pinned_for_project(None, &config_with_pinned(Some(false))),
+            lock_of(vec![tool]),
+            &[DEFAULT_GROUP],
+        );
+        let paths = tree.resolve(&links).await;
+
+        let out = compose(&[root], &tree.file_structure.packages, false, &paths)
+            .await
+            .expect("the fixture composes");
+        let path_values: Vec<String> = out
+            .entries
+            .iter()
+            .filter(|entry| entry.key == "PATH")
+            .map(|entry| entry.value.clone())
+            .collect();
+
+        let link = PackageDir::with_root(tree.entry(DEFAULT_GROUP, "cmake"));
+        // Built the way the code builds each value: the carrier is a template
+        // substitution, so its separator is the template's own `/`; the
+        // synthetic entry is a `join`, so its separator is the host's.
+        let expected_carrier = format!("{}/bin", link.content().display());
+        let expected_entrypoints = link.entrypoints().to_string_lossy().into_owned();
+
+        assert!(
+            path_values.contains(&expected_carrier),
+            "C-065 — the declared `${{installPath}}/bin` carrier resolves under the home link; got {path_values:?}"
+        );
+        assert!(
+            path_values.contains(&expected_entrypoints),
+            "C-065 — the synthetic `entrypoints/` entry names the home link; got {path_values:?}"
+        );
+        assert!(
+            !path_values
+                .iter()
+                .any(|value| value.starts_with(&*digest_root.to_string_lossy())),
+            "C-065 — no emitted path keeps the digest spelling on the following lane; got {path_values:?}"
+        );
+    }
+
+    /// RUL-97 — an **integrations payload** is a dereference value too, so a
+    /// root's `${installPath}` inside one resolves under the home link like
+    /// every other emitted path. Integrations are not on RUL-82's
+    /// must-stay-digest list; a consumer that *persists* a payload pins it at
+    /// that consumer, not here.
+    ///
+    /// The sibling case above proves the PATH block follows the link;
+    /// `admitted_integrations` is resolved at a **different** site in
+    /// `compose_gated` — its own `TemplateResolver`, built from its own content
+    /// directory — so only this case can red on that site.
+    ///
+    /// RED: rebuilding the payload resolver's content directory from
+    /// `root.dir()` instead of the `install_path_for` answer.
+    #[tokio::test]
+    async fn a_following_roots_integrations_payload_resolves_under_the_home_link() {
+        let env = crate::test::env::lock();
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_PINNED);
+
+        let tree = Tree::new();
+        let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", 'a');
+        let digest_root = tree.seed_digest_root(&tool);
+
+        let identifier = oci::PinnedIdentifier::try_from(
+            crate::project::compose::host_leaf_identifier(&tool, &platform()).expect("a compatible leaf"),
+        )
+        .expect("a resolved host leaf is digest-bearing");
+
+        let metadata: metadata::Metadata = serde_json::from_str(
+            &serde_json::json!({
+                "type": "bundle",
+                "version": 1,
+                "integrations": { "vendor.example": { "toolPath": "${installPath}/bin/cmake" } },
+            })
+            .to_string(),
+        )
+        .expect("the fixture metadata parses");
+
+        let root = std::sync::Arc::new(InstallInfo::new(
+            identifier,
+            metadata,
+            ResolvedPackage::new(),
+            PackageDir::with_root(digest_root.clone()),
+        ));
+
+        let links = tree.links(
+            pinned_for_project(None, &config_with_pinned(Some(false))),
+            lock_of(vec![tool]),
+            &[DEFAULT_GROUP],
+        );
+        let paths = tree.resolve(&links).await;
+
+        let out = compose(&[root], &tree.file_structure.packages, false, &paths)
+            .await
+            .expect("the fixture composes");
+
+        let link = PackageDir::with_root(tree.entry(DEFAULT_GROUP, "cmake"));
+        // Built the way the code builds it: the payload is a template
+        // substitution, so its separator is the template's own `/`.
+        let expected = format!("{}/bin/cmake", link.content().display());
+        let payloads: Vec<serde_json::Value> = out
+            .admitted_integrations
+            .iter()
+            .map(|(_, entry)| entry.payload.clone())
+            .collect();
+
+        assert_eq!(
+            payloads,
+            vec![serde_json::json!({ "toolPath": expected })],
+            "RUL-97 — the payload's `${{installPath}}` names the home link, not the digest root"
         );
     }
 }

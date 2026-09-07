@@ -18,6 +18,7 @@ pub mod mutation;
 mod project_lock;
 pub mod registry;
 pub mod resolve;
+pub mod toolchain_home;
 
 pub use compose::{
     Origin, PositionalPackage, ResolvedTool, SelectedTool, ToolSource, check_duplicate_selection, compose_tool_set,
@@ -32,12 +33,13 @@ pub use hook::{MissingState, ProjectState, load_project_state};
 pub use lock::{LockCurrency, LockMetadata, LockVersion, LockedTool, ProjectLock, locked_tool_content_equal};
 pub use mutate::{
     add_binding, add_binding_in_memory, binding_key, init_project, init_project_at_default, remove_binding,
-    remove_binding_in_memory,
+    remove_binding_in_memory, set_activate,
 };
 pub use mutation::{ManifestSnapshot, MutationCommit, MutationGuard, StagedMutation};
 pub use project_lock::{acquire_project_lock, acquire_project_lock_for_file};
 pub use registry::ProjectRegistry;
 pub use resolve::{ResolveLockOptions, lookup_host_leaf, resolve_lock, resolve_lock_touched};
+pub use toolchain_home::resolve_toolchain_home;
 
 /// Reserved group name for the implicit default group (the top-level
 /// `[tools]` table in `ocx.toml`, the `"default"` group key in lock

@@ -95,6 +95,7 @@ impl Pull {
         //
         // `--platform` omitted → the host native platform.
         let platform = conventions::platform_or_default(self.platform.platform.clone());
+        let render_groups = render_groups(&self.groups, &ctx);
         let selected: Vec<&ocx_lib::project::LockedTool> = if self.groups.is_empty() {
             ctx.lock.tools.iter().collect()
         } else {
@@ -121,6 +122,10 @@ impl Pull {
         // Dry-run runs after the staleness gate so a stale lock still
         // exits 65 before any preview prints. No network, no store writes.
         if self.dry_run {
+            // Threaded into the request rather than short-circuited (S-007):
+            // the render's own dry-run arm reports the delta, performs no heal,
+            // and writes nothing — so the poisoned link is still there after.
+            render_and_warn(&context, &ctx, &render_groups, &platform, true).await;
             return run_dry_run(&context, &pinned, platform).await;
         }
 
@@ -225,6 +230,11 @@ impl Pull {
             )
             .await?;
 
+        // C-054 — the whole-compose pass, after the roots this invocation
+        // selected have resolved and after the lock's mtime bump, so the render
+        // stamp is the last thing written.
+        render_and_warn(&context, &ctx, &render_groups, &platform, false).await;
+
         let paths = api::data::warmed_paths::WarmedPaths::new(warmed)
             .with_advisories(api::data::env::LazyAdvisoryReport::from_advisories(&advisories));
         context.api().report(&paths)?;
@@ -254,6 +264,100 @@ fn host_pull_pinned(
             tool.name
         )
     })
+}
+
+/// Which groups this invocation's render covers (C-045, RUL-25).
+///
+/// A bare `ocx pull` is a **whole-home** pass: every group the lock declares,
+/// plus the default group unconditionally. The unconditional default is what
+/// makes `bin/` reconcilable when the lock declares nothing there — a lock whose
+/// last default-group tool was dropped by a hand edit would otherwise keep its
+/// trampolines forever, since the only group set derived from it is empty.
+///
+/// `-g` narrows, and narrowing away the default group leaves `bin/` **entirely
+/// untouched** rather than emptied (RUL-25): reconciling it would force the
+/// default group's metadata to resolve, growing a network dependency the user
+/// did not ask for.
+fn render_groups(selected: &[String], project: &crate::app::project_context::ProjectContext) -> Vec<String> {
+    if !selected.is_empty() {
+        return expand_all_keyword(selected, &project.config);
+    }
+    let mut groups = vec![ocx_lib::project::DEFAULT_GROUP.to_owned()];
+    for tool in &project.lock.tools {
+        if !groups.iter().any(|group| group == &tool.group) {
+            groups.push(tool.group.clone());
+        }
+    }
+    groups
+}
+
+/// Render, then say on **stderr** what the render could not do (C-050, RUL-53).
+///
+/// A render outcome is never `ocx pull`'s exit code. The command's product is a
+/// warmed object store, and it is finished before this runs; a read-only
+/// checkout, a foreign-owned `.ocx/`, or a metadata closure this offline
+/// invocation cannot walk are all states where warming still succeeded. Failing
+/// the pull over the tree would refuse a command whose work already landed.
+///
+/// stderr, via the user interface, and never stdout: `--quiet` and
+/// `OCX_QUIET` are contracts about the *payload*, and a warning is not one.
+///
+/// # What is here and what is in the library
+///
+/// The **sink** and the offline-quiet degradation are `ocx pull`'s alone — this
+/// command has a user interface and the four mutation commands do not (RUL-53).
+/// Everything else is [`PackageManager::render_home`](ocx_lib::package_manager::PackageManager::render_home),
+/// which is D-V8 applied to the render half: `ocx pull` is the command D4 names
+/// the *primary* render trigger, so a second `RenderRequest` producer here
+/// would be the one out of reach of every non-CLI consumer and of unit test —
+/// on the exact contract `RenderRequest::surface`'s own doc says its type
+/// cannot express.
+///
+/// `groups` is what the invocation selected (C-045) and `dry_run` is S-007's
+/// flag; `pinned` resolves through the shared ladder with `None` for the `cli`
+/// tier, because `ocx pull` declares no `--pinned` (C-066, RUL-72) — the flag
+/// is inert on the tree, so an override here would read as if it changed
+/// something.
+async fn render_and_warn(
+    context: &crate::app::Context,
+    project: &crate::app::project_context::ProjectContext,
+    groups: &[String],
+    platform: &oci::Platform,
+    dry_run: bool,
+) {
+    let rendered = async {
+        let scope = context.toolchain_render_scope(&project.config_path).await?;
+        let render = ocx_lib::package_manager::ToolchainRender {
+            scope: &scope,
+            toolchain_root: context.toolchain_root(),
+            platform,
+        };
+        let pinned = ocx_lib::package_manager::pinned_for_project(None, &project.config);
+        anyhow::Ok(
+            context
+                .manager()
+                .render_home(&project.lock, pinned, &render, groups, dry_run)
+                .await?,
+        )
+    }
+    .await;
+
+    match rendered {
+        Ok(report) => {
+            for line in ocx_lib::package_manager::skipped_render_warnings(&report) {
+                context.ui().warn(line);
+            }
+        }
+        // Quiet under `--offline`: a store that has never been warmed cannot
+        // resolve a surface, and that is the ordinary state there rather than a
+        // fault worth a line on every prompt.
+        Err(error) if context.manager().is_offline() => {
+            ocx_lib::log::debug!("The toolchain home was not rendered: {error:#}");
+        }
+        Err(error) => context
+            .ui()
+            .warn(format!("The toolchain home was not rendered: {error:#}")),
+    }
 }
 
 /// Walks `pinned` and reports cached / would-fetch status without
@@ -376,5 +480,62 @@ mod tests {
     fn parses_all_group_keyword() {
         let pull = Pull::try_parse_from(["pull", "-g", "all"]).unwrap();
         assert_eq!(pull.groups, vec!["all".to_owned()]);
+    }
+
+    // ── RUL-54 — `--dry-run` stays `ocx pull`-only ───────────────────────────
+
+    /// The four mutation commands C-054 routes through the shared
+    /// `commit_and_render`. None of them grows a `--dry-run` implicitly by
+    /// coming through it (RUL-54): a dry run of a *mutation* would have to
+    /// decide what "wrote nothing" means for `ocx.toml` and `ocx.lock` as well
+    /// as for the tree, and no contract says.
+    const MUTATION_COMMANDS: [(&[&str], &[&str]); 4] = [
+        (&["add"], &["example.com/cmake:1.0.0"]),
+        (&["remove"], &["cmake"]),
+        (&["lock"], &[]),
+        (&["update"], &[]),
+    ];
+
+    /// RUL-54 — `--dry-run` is `ocx pull`'s alone.
+    ///
+    /// `UnknownArgument`, not merely "an error": that is what separates "there
+    /// is no such flag here" from "this invocation was rejected for some other
+    /// reason". The positive control on `ocx pull` is what stops the whole case
+    /// passing because the flag was renamed out from under it.
+    ///
+    /// Reachable red by construction: flattening a `--dry-run` onto the shared
+    /// mutation path — the tempting reading of "the four commands call that one
+    /// function and nothing else" — turns each of these into a parse success.
+    #[test]
+    fn only_pull_declares_dry_run() {
+        // Positive control first.
+        let pull = Pull::try_parse_from(["pull", "--dry-run"]).expect("`ocx pull --dry-run` must parse");
+        assert!(pull.dry_run, "the control must actually set the flag");
+
+        for (path, operands) in MUTATION_COMMANDS {
+            let base: Vec<String> = std::iter::once("ocx")
+                .chain(path.iter().copied())
+                .chain(operands.iter().copied())
+                .map(str::to_string)
+                .collect();
+            crate::app::Cli::try_parse_from(&base)
+                .unwrap_or_else(|error| panic!("`ocx {}` base invocation must parse: {error}", path.join(" ")));
+
+            let with_flag: Vec<String> = std::iter::once("ocx")
+                .chain(path.iter().copied())
+                .chain(std::iter::once("--dry-run"))
+                .chain(operands.iter().copied())
+                .map(str::to_string)
+                .collect();
+            let error = crate::app::Cli::try_parse_from(&with_flag)
+                .err()
+                .unwrap_or_else(|| panic!("RUL-54 — `ocx {} --dry-run` must not parse", path.join(" ")));
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "RUL-54 — `ocx {}` must reject --dry-run as an unknown argument",
+                path.join(" ")
+            );
+        }
     }
 }

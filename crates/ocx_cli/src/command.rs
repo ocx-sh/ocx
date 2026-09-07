@@ -100,6 +100,11 @@ pub enum Command {
     /// emits JSON. `--shell[=NAME]` is the only eval-safe form.
     Env(toolchain_env::ToolchainEnv),
     /// Add one or more tool bindings to ocx.toml.
+    ///
+    /// Resolves each new binding, records it in `ocx.lock`, and re-renders the
+    /// project toolchain into `<project>/.ocx/toolchain/` - or under the
+    /// `toolchain-dir` root, when one is configured. That directory carries
+    /// its own `.gitignore`, so `git status` stays clean.
     Add(add::Add),
     /// Remove unreferenced objects from the local object store.
     Clean(clean::Clean),
@@ -120,6 +125,11 @@ pub enum Command {
     /// Create a minimal ocx.toml in the current directory.
     Init(init::Init),
     /// Resolve tool tags to digests and write ocx.lock.
+    ///
+    /// Re-renders the project toolchain into `<project>/.ocx/toolchain/` - or
+    /// under the `toolchain-dir` root, when one is configured - so the link
+    /// tree and its `bin/` launchers match the lock just written. That
+    /// directory carries its own `.gitignore`, so `git status` stays clean.
     Lock(lock::Lock),
     /// Authenticate to a registry and persist credentials.
     Login(login::Login),
@@ -138,6 +148,11 @@ pub enum Command {
     /// `ocx update -g ci` advances a whole group. A scoped update needs an
     /// existing `ocx.lock` (exit 78), refuses a drifted `ocx.toml` (exit 65),
     /// and rejects an unknown group or name (exit 64).
+    ///
+    /// Re-renders the project toolchain into `<project>/.ocx/toolchain/` - or
+    /// under the `toolchain-dir` root, when one is configured - so the link
+    /// tree and its `bin/` launchers follow the advanced lock. That directory
+    /// carries its own `.gitignore`, so `git status` stays clean.
     Update(update::Update),
     /// Internal subcommands used by generated entry-point launchers (hidden).
     #[command(subcommand)]
@@ -148,9 +163,27 @@ pub enum Command {
     /// Manage patch overlays for a project.
     #[command(subcommand)]
     Patch(patch::PatchGroup),
-    /// Pre-warm the object store from the project ocx.lock without creating symlinks.
+    /// Pre-warm the object store, then render the project toolchain.
+    ///
+    /// Fetches every digest-pinned entry the project `ocx.lock` declares into
+    /// the local object store, then renders the project toolchain into
+    /// `<project>/.ocx/toolchain/` - or under the `toolchain-dir` root, when
+    /// one is configured: one link per `<group>/<entry>`, plus the `bin/`
+    /// launchers for the default group. That directory carries its own
+    /// `.gitignore`, so `git status` stays clean. This is the primary way a
+    /// project toolchain is rendered; `--dry-run` reports the delta and writes
+    /// nothing.
+    ///
+    /// The package store's own `candidate` and `current` symlinks are left
+    /// alone: those move only when you install or select a package.
     Pull(pull::Pull),
     /// Remove one or more tool bindings from ocx.toml.
+    ///
+    /// Drops each binding from `ocx.lock` as well, then re-renders the project
+    /// toolchain into `<project>/.ocx/toolchain/` - or under the
+    /// `toolchain-dir` root, when one is configured - so the removed tools
+    /// leave the link tree and its `bin/` launchers. That directory carries
+    /// its own `.gitignore`, so `git status` stays clean.
     #[command(visible_alias = "rm")]
     Remove(remove::Remove),
     /// Run a command with the composed environment from the project toolchain.

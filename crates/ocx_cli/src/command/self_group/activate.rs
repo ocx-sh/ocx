@@ -9,9 +9,10 @@ use ocx_lib::activation::{self, Outcome, ProjectIdentity, SessionError, SessionI
 use ocx_lib::cli::{ColorModeConfig, Theme};
 use ocx_lib::env::Env;
 use ocx_lib::file_structure::FileStructure;
+use ocx_lib::setup::ocx_install_bin_path;
 use ocx_lib::shell::reconcile::{self, CARRIER_KEY, Ledger, Plan, ScopeId};
 use ocx_lib::shell::{escape, hook};
-use ocx_lib::{ConfigInputs, ConfigLoader, ShellConfig, log, oci, shell::Shell};
+use ocx_lib::{ConfigInputs, ConfigLoader, ShellConfig, log, shell::Shell};
 
 use crate::app::ContextOptions;
 use crate::conventions::resolve_shell_arg;
@@ -312,9 +313,7 @@ impl SelfActivate {
         // login exporter owns it — `--env` overrides and group selection are
         // argv concerns a prompt never has.
         let target = crate::conventions::platform_or_default(None);
-        let global = crate::command::toolchain_env::resolve_global_pinned_env(&context, &target, &[], &[])
-            .await?
-            .map_or_else(Vec::new, |(entries, ..)| entries);
+        let global = global_prompt_entries(&context, &target).await?;
         let session = activation::session(SessionInput {
             global,
             manager: context.manager(),
@@ -352,7 +351,19 @@ impl SelfActivate {
         let owned_root = file_structure.root().to_path_buf();
         let (plan, ledger, outcome, current) = tokio::task::spawn_blocking(move || {
             let current = Env::new();
-            let plan = activation::plan_for(&ledger, &outcome, &[owned_root.as_path()], &current);
+            // C-063 — the owned set is `$OCX_HOME` plus the consented, in-scope
+            // project's own toolchain home, and nothing else. `owned_prefixes` is
+            // read by `repair_owned_segments` as a **deletion authority over a
+            // live shell's PATH**, so a prefix listed here is a promise that
+            // every segment under it either comes from this prompt's desired set
+            // or is removed. `Outcome::owned_home` is `None` on every arm that
+            // did not reach a `ConsentProof`, which is what keeps the widening
+            // strictly after consent rather than merely usually after it.
+            let plan = {
+                let mut owned: Vec<&Path> = vec![owned_root.as_path()];
+                owned.extend(outcome.owned_home.as_deref());
+                activation::plan_for(&ledger, &outcome, &owned, &current)
+            };
             (plan, ledger, outcome, current)
         })
         .await?;
@@ -609,6 +620,94 @@ fn message_lines(
         .collect()
 }
 
+/// The global toolchain tier's contribution to one prompt, gated on the global
+/// toolchain's own `activate` mode (ADR `adr_toolchain_activation.md` D-3).
+///
+/// D-3 makes the user's own `$OCX_HOME/ocx.toml` the control for the clean-shell
+/// case, so `activate` governs this tier exactly as a project's own file governs
+/// the project tier.
+///
+/// # The gate is here, not in the resolver
+///
+/// [`resolve_global_pinned_env`](crate::command::toolchain_env::resolve_global_pinned_env)
+/// has a second caller — `ocx --global env` / `ocx --global exec`, an **explicit
+/// user request**. `activate` decides how a toolchain reaches a shell
+/// *automatically*; it never decides what a command the user typed prints. So
+/// the gate sits at this call site, the automatic one, and the resolver keeps
+/// both its second caller and its never-fail posture unchanged.
+///
+/// # `bin` and `none` are the same `PATH` at this tier
+///
+/// C-059 makes the two global session directories
+/// ([`ocx_install_bin_path`] and `$OCX_HOME/toolchain/bin`) desired
+/// unconditionally, in every mode — they are session-level facts, and dropping
+/// them would have `repair_owned_segments` delete the registration `ocx self
+/// setup` just wrote. So at the **global** tier `bin` and `none` both compose
+/// nothing and produce an identical `PATH`: under either, a global tool resolves
+/// through its trampoline in `$OCX_HOME/toolchain/bin`. The two modes differ
+/// only at the project tier. That is a consequence of C-059, not a gap.
+///
+/// # Cost
+///
+/// Skipping the resolver also skips the global lock read, the offline manager
+/// clone and the per-tool `find`, so a `bin`/`none` prompt is strictly cheaper
+/// than an `env` one.
+async fn global_prompt_entries(
+    context: &crate::app::Context,
+    target: &ocx_lib::oci::Platform,
+) -> anyhow::Result<Vec<ocx_lib::package::metadata::env::entry::Entry>> {
+    // The `env` arm parses `$OCX_HOME/ocx.toml` a second time, inside
+    // `resolve_global_pinned_env`, and that is deliberate. Threading this
+    // parsed config into that resolver would change its signature and its
+    // never-fail contract — the two things that keep the explicit-request path
+    // (`ocx --global env` / `ocx --global exec`) and this gate's regression
+    // guard honest about where the gate sits. The `bin`/`none` arm meanwhile
+    // *removes* a lock read, an offline manager clone and the per-tool `find`,
+    // so the net per-prompt cost is favourable; one more small TOML parse is
+    // noise against `RECONCILE_BUDGET_MS`. Do not "optimise" this away.
+    match global_activate_mode(context.file_structure().root()).await {
+        ocx_lib::activate::ActivateMode::Env => {
+            Ok(
+                // No CLI tier: the per-prompt hook is not an invocation of
+                // `ocx --global env`, so it has no `--pinned`/`--no-pinned` to
+                // pass. `None` is "neither flag was given", which leaves the
+                // global `ocx.toml`'s `pinned` key and `OCX_TOOLCHAIN_PINNED`
+                // deciding the lane exactly as they did before the resolver
+                // took the argument at all.
+                crate::command::toolchain_env::resolve_global_pinned_env(context, target, &[], &[], None)
+                    .await?
+                    .map_or_else(Vec::new, |(entries, ..)| entries),
+            )
+        }
+        ocx_lib::activate::ActivateMode::Bin | ocx_lib::activate::ActivateMode::None => Ok(Vec::new()),
+    }
+}
+
+/// Resolve the `activate` ladder over `$OCX_HOME/ocx.toml` — the global tier's
+/// own file, read through the one resolver both tiers share.
+///
+/// [`activation::activate_mode`] is called rather than a re-spelled
+/// `Ladder { .. }.resolve(ACTIVATE_FLOOR)`: `ocx_lib::activate`'s module doc
+/// names a second spelling of the floor as drift, and one resolver with two
+/// callers is the point.
+///
+/// # Never fails
+///
+/// A missing, unreadable or unparseable global `ocx.toml` yields
+/// [`ProjectConfig::default`], whose `activate` is `None` — so the **file tier
+/// is absent** and the ladder falls through to `OCX_TOOLCHAIN_ACTIVATE` and then
+/// to `ACTIVATE_FLOOR` (`env`), so a corrupt global file still composes — the
+/// same posture `resolve_global_pinned_env` takes over the very same bytes
+/// (`Err(_) =>` empty). This is the per-prompt path: it must not turn a
+/// malformed file into an error, a warning on the prompt, or a silent `none`.
+async fn global_activate_mode(home: &Path) -> ocx_lib::activate::ActivateMode {
+    let config =
+        ocx_lib::project::ProjectConfig::from_path(&ocx_lib::project::ProjectConfig::global_manifest_path(home))
+            .await
+            .unwrap_or_default();
+    activation::activate_mode(&config)
+}
+
 /// Print one optional emitted line.
 fn emit(line: Option<String>) {
     if let Some(line) = line {
@@ -791,16 +890,6 @@ fn seed_carrier(tiers: &[PathBuf], watch: &[PathBuf]) -> Option<String> {
 /// mechanism and structurally cannot consult it.
 fn ocx_binary_path(bin_path: &Path) -> PathBuf {
     bin_path.join(if cfg!(windows) { "ocx.exe" } else { "ocx" })
-}
-
-/// Returns the absolute path to the OCX CLI binary directory.
-///
-/// Resolves `$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin` using the
-/// file structure's symlink store.  The path is derived from the runtime-known
-/// `OCX_HOME`, not from a shell variable reference.
-fn ocx_install_bin_path(fs: &ocx_lib::file_structure::FileStructure) -> PathBuf {
-    let ocx_cli_id = oci::ocx_cli_identifier();
-    fs.symlinks.current(&ocx_cli_id).join("content").join("bin")
 }
 
 /// Emit all activation lines to stdout for the given shell.
@@ -1056,10 +1145,9 @@ mod tests {
 
     use ocx_lib::shell::Shell;
 
-    use super::{
-        completion_clap_shell, format_global_env_eval, generate_completion_inline, ocx_install_bin_path,
-        path_prepend_line,
-    };
+    use ocx_lib::setup::ocx_install_bin_path;
+
+    use super::{completion_clap_shell, format_global_env_eval, generate_completion_inline, path_prepend_line};
 
     /// The resolved absolute binary every emitted invocation must name (C-045).
     fn test_binary() -> PathBuf {
@@ -1405,7 +1493,7 @@ mod reconcile_tests {
     use ocx_lib::shell::reconcile::{CARRIER_KEY, Ledger, Prior, Verdict};
 
     use ocx_lib::activation::{
-        Outcome, ProjectIdentity, SessionError, is_stat_only, next_ledger, plan_for, yield_messages,
+        Outcome, ProjectIdentity, SessionError, SessionPath, is_stat_only, next_ledger, plan_for, yield_messages,
     };
 
     use super::{SelfActivate, activation_lines, ocx_binary_path, reconcile_lines};
@@ -1450,8 +1538,17 @@ mod reconcile_tests {
 
     fn outcome(global: Vec<Entry>, project: Vec<Entry>, slot: Option<ProjectIdentity>) -> Outcome {
         Outcome {
+            // C-059's two session directories, spelled as literals here on
+            // purpose: these tests own no `FileStructure`, and what they assert
+            // is the *rendering* of an outcome, never how one is minted.
+            session: SessionPath {
+                global_bin: PathBuf::from("/tmp/ocx_home/toolchain/bin"),
+                project_bin: None,
+                install_bin: bin_dir(),
+            },
             global,
             project,
+            owned_home: None,
             resolved: slot.is_some(),
             slot,
             inert: false,
@@ -1461,6 +1558,28 @@ mod reconcile_tests {
 
     fn bin_dir() -> PathBuf {
         PathBuf::from("/tmp/ocx_home/symlinks/ocx_sh/ocx/cli/current/content/bin")
+    }
+
+    /// The `PATH` a shell holds once C-059's two session directories are
+    /// already applied — i.e. every prompt after a session's first, and what
+    /// `ocx self setup` leaves behind at session level.
+    ///
+    /// Spelled in the order the desired set's fold leaves them (`install_bin`
+    /// frontmost, C-060/RUL-62), because that is what makes the fold a genuine
+    /// no-op: `plan`'s settling test asks whether applying the desired set to
+    /// this environment changes it, and an environment holding the same two
+    /// directories in the other order still moves.
+    fn settled_env() -> Env {
+        let mut env = Env::clean();
+        env.set(
+            "PATH",
+            std::env::join_paths([
+                bin_dir().as_os_str(),
+                std::ffi::OsStr::new("/tmp/ocx_home/toolchain/bin"),
+            ])
+            .expect("the seed joins"),
+        );
+        env
     }
 
     fn startup_stream(shell: Shell, hook: bool) -> Vec<String> {
@@ -2770,10 +2889,17 @@ mod reconcile_tests {
 
     /// C-051 / A-21 — a reconcile that changed nothing emits no summary line;
     /// the summary exists to explain a change, not to narrate a no-op.
+    ///
+    /// The live environment is [`settled_env`], not `Env::clean()`: C-059 makes
+    /// the two session directories part of the desired set on **every** prompt,
+    /// so a shell that does not already hold them is one this reconcile
+    /// genuinely changes — the premise the assertion needs is "nothing left to
+    /// do", and an empty `PATH` is not that shell.
     #[test]
     fn a021_a_no_op_reconcile_emits_no_summary() {
         let empty = outcome(Vec::new(), Vec::new(), None);
-        let plan = plan_for(&Ledger::empty(), &empty, &[Path::new("/tmp/ocx_home")], &Env::clean());
+        let current = settled_env();
+        let plan = plan_for(&Ledger::empty(), &empty, &[Path::new("/tmp/ocx_home")], &current);
         let lines = reconcile_lines(
             Shell::Bash,
             &Ledger::empty(),
@@ -2781,7 +2907,7 @@ mod reconcile_tests {
             None,
             &empty,
             &plan,
-            &Env::clean(),
+            &current,
             &plain(),
         );
 
@@ -3365,5 +3491,464 @@ mod ordering_tests {
             !walk_is_indeterminate(recorded_dir(&Ledger::empty()), Some(&inside)),
             "with no recorded scope there is nothing to retain"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WP-9 — Specify phase: the emitted `PATH`, read out of a real shell
+// ---------------------------------------------------------------------------
+
+/// C-059, C-060, RUL-62, RUL-87 — the session directories as a live shell sees
+/// them.
+///
+/// **The assertion is the `PATH` a real `bash` ends up holding**, not the
+/// desired vector and not the plan. RUL-62 is explicit about why: `export_path`
+/// prepends, so the desired vector runs backwards relative to `PATH`, and an
+/// implementation that copied `setup::session_path_directories`' slice verbatim
+/// satisfies every assertion made on the vector while emitting exactly the
+/// order C-060 forbids. The only operand that cannot lie is the shell's own
+/// answer.
+///
+/// `bash` is required rather than skipped-when-absent: it is present on every
+/// unix cargo leg, and a skip here would make the C-059 red — a live defect on
+/// `goat` — indistinguishable from a run that never happened.
+#[cfg(test)]
+#[cfg(unix)]
+mod emitted_path_tests {
+    use std::path::{Path, PathBuf};
+
+    use ocx_lib::activation::{Outcome, ProjectIdentity, SessionPath, next_ledger, plan_for};
+    use ocx_lib::env::Env;
+    use ocx_lib::package::metadata::env::entry::Entry;
+    use ocx_lib::package::metadata::env::modifier::ModifierKind;
+    use ocx_lib::shell::Shell;
+    use ocx_lib::shell::reconcile::Ledger;
+
+    use super::plan_lines;
+
+    const OCX_HOME: &str = "/tmp/ocx-home";
+    const PROJECT_DIR: &str = "/work/acme";
+    const PROJECT_HOME: &str = "/work/acme/.ocx/toolchain";
+
+    fn install_bin() -> PathBuf {
+        PathBuf::from(OCX_HOME).join("symlinks/ocx.sh/ocx/cli/current/content/bin")
+    }
+
+    fn global_bin() -> PathBuf {
+        PathBuf::from(OCX_HOME).join("toolchain/bin")
+    }
+
+    fn project_bin() -> PathBuf {
+        PathBuf::from(PROJECT_HOME).join("bin")
+    }
+
+    fn path_entry(value: &str) -> Entry {
+        Entry {
+            key: "PATH".to_owned(),
+            value: value.to_owned(),
+            kind: ModifierKind::Path,
+            separator: None,
+        }
+    }
+
+    fn identity() -> ProjectIdentity {
+        ProjectIdentity {
+            config_path: PathBuf::from(PROJECT_DIR).join("ocx.toml"),
+            dir: PathBuf::from(PROJECT_DIR),
+            key: "a1b2c3d4e5f60718".to_owned(),
+        }
+    }
+
+    fn outcome(session: SessionPath, global: Vec<Entry>, project: Vec<Entry>) -> Outcome {
+        Outcome {
+            session,
+            global,
+            project,
+            owned_home: Some(PathBuf::from(PROJECT_HOME)),
+            resolved: true,
+            slot: Some(identity()),
+            inert: false,
+            messages: Vec::new(),
+        }
+    }
+
+    fn env_with_path(segments: &[&Path]) -> Env {
+        let mut env = Env::clean();
+        env.set(
+            "PATH",
+            std::env::join_paths(segments.iter().map(|path| path.as_os_str())).expect("the seed joins"),
+        );
+        env
+    }
+
+    /// Run `lines` under `bash` over a `PATH` seeded with `seed`, and answer the
+    /// `PATH` segments the shell is left holding.
+    ///
+    /// The emitted statements are the product here, so they are executed rather
+    /// than pattern-matched: `export_path`'s bash arm is a colon-sentinel
+    /// dedupe loop whose *effect* is the contract, and a substring assertion on
+    /// it would pass for a line that removed the segment it was supposed to
+    /// prepend.
+    fn path_after(seed: &[&Path], lines: &[String]) -> Vec<String> {
+        let seeded = std::env::join_paths(seed.iter().map(|path| path.as_os_str())).expect("the seed joins");
+        let script = format!(
+            "PATH='{}'; export PATH\n{}\nprintf '%s' \"$PATH\"\n",
+            ocx_lib::shell::escape::posix_single_quoted(&seeded.to_string_lossy()),
+            lines.join("\n")
+        );
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("bash must be present on every unix cargo leg; a skip here would hide the red");
+        assert!(
+            output.status.success(),
+            "the emitted stream must be valid bash; stderr: {}\nscript:\n{script}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .split(':')
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn position(path: &[String], needle: &Path) -> usize {
+        let needle = needle.to_string_lossy();
+        path.iter()
+            .position(|segment| segment.as_str() == &*needle)
+            .unwrap_or_else(|| panic!("{needle} must be on PATH; got {path:#?}"))
+    }
+
+    /// **C-059 — the live defect on `goat`, driven through the shell.**
+    ///
+    /// `ocx self setup` registers `ocx_install_bin_path` at session level; the
+    /// per-prompt reconciler owns `$OCX_HOME` and removes every segment under it
+    /// the desired set does not contribute. Only the *startup* stream emits the
+    /// install directory, so the **first prompt of any shell strips it** — the
+    /// user's `ocx` stops resolving.
+    ///
+    /// Red state — today's `goat`: `desired_entries` returns `global ++ project`
+    /// and never splices [`Outcome::session`], so the emitted stream carries a
+    /// `remove_list_element` for the install directory and `bash` drops it.
+    #[test]
+    fn c059_the_first_prompt_of_a_shell_does_not_strip_the_install_directory() {
+        let live = [
+            install_bin(),
+            global_bin(),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/bin"),
+        ];
+        let seed: Vec<&Path> = live.iter().map(PathBuf::as_path).collect();
+        let current = env_with_path(&seed);
+
+        // `activate = "none"` — the arm that composes nothing for the project,
+        // with one global package so `PATH` is a key the repair examines.
+        let applied = outcome(
+            SessionPath {
+                global_bin: global_bin(),
+                project_bin: None,
+                install_bin: install_bin(),
+            },
+            vec![path_entry(&format!("{OCX_HOME}/packages/gg/global/content/bin"))],
+            Vec::new(),
+        );
+        let ledger = next_ledger(&Ledger::empty(), "fp-1", &applied, &Env::clean());
+        let owned: Vec<&Path> = vec![Path::new(OCX_HOME), Path::new(PROJECT_HOME)];
+        let plan = plan_for(&ledger, &applied, &owned, &current);
+
+        let path = path_after(&seed, &plan_lines(Shell::Bash, &plan));
+        position(&path, &install_bin());
+        position(&path, &global_bin());
+    }
+
+    /// **C-060, RUL-62, RUL-87 — the order, read off the shell's own `PATH`.**
+    ///
+    /// Front to back: the project's composed entries, then
+    /// `ocx_install_bin_path`, then the project's `<home>/toolchain/bin`, then
+    /// `$OCX_HOME/toolchain/bin`, then the global tier's composed entries.
+    ///
+    /// The last comparison is RUL-87's: a splice that put the global tier after
+    /// the session block would let a globally installed tool shadow the
+    /// project's own trampoline.
+    ///
+    /// Red state: emit the session directories in their documented `PATH` order
+    /// rather than reversed — i.e. hand the splice
+    /// `setup::session_path_directories`' slice.
+    #[test]
+    fn c060_rul62_rul87_the_shells_path_orders_the_five_contributors() {
+        let global_tool = format!("{OCX_HOME}/packages/gg/global/content/bin");
+        let project_tool = format!("{OCX_HOME}/packages/pp/project/content/bin");
+        let seed = [Path::new("/usr/bin")];
+
+        let applied = outcome(
+            SessionPath {
+                global_bin: global_bin(),
+                project_bin: Some(project_bin()),
+                install_bin: install_bin(),
+            },
+            vec![path_entry(&global_tool)],
+            vec![path_entry(&project_tool)],
+        );
+        let plan = plan_for(
+            &Ledger::empty(),
+            &applied,
+            &[Path::new(OCX_HOME), Path::new(PROJECT_HOME)],
+            &env_with_path(&seed),
+        );
+
+        let path = path_after(&seed, &plan_lines(Shell::Bash, &plan));
+        let composed_project = position(&path, Path::new(&project_tool));
+        let install = position(&path, &install_bin());
+        let project = position(&path, &project_bin());
+        let global = position(&path, &global_bin());
+        let composed_global = position(&path, Path::new(&global_tool));
+
+        assert!(
+            composed_project < install && install < project && project < global && global < composed_global,
+            "C-060/RUL-87: project-composed ▸ install_bin ▸ project bin/ ▸ global toolchain bin ▸ \
+             global-composed; got {path:#?}"
+        );
+    }
+
+    /// C-059 — a shell whose `PATH` lost both session directories gets them
+    /// back on the next prompt. The reconciler contributes them; it does not
+    /// merely refrain from deleting them.
+    ///
+    /// Red state: make the splice conditional on anything at all.
+    #[test]
+    fn c059_a_shell_that_lost_the_session_directories_has_them_restored() {
+        let seed = [Path::new("/usr/bin")];
+        let applied = outcome(
+            SessionPath {
+                global_bin: global_bin(),
+                project_bin: None,
+                install_bin: install_bin(),
+            },
+            Vec::new(),
+            Vec::new(),
+        );
+        let plan = plan_for(
+            &Ledger::empty(),
+            &applied,
+            &[Path::new(OCX_HOME)],
+            &env_with_path(&seed),
+        );
+
+        let path = path_after(&seed, &plan_lines(Shell::Bash, &plan));
+        assert_eq!(
+            position(&path, &global_bin()),
+            position(&path, &install_bin()) + 1,
+            "C-059/C-060: both come back, install_bin in front; got {path:#?}"
+        );
+    }
+}
+
+/// D-3 — the global toolchain tier honours its own `activate` setting.
+///
+/// Two halves, split by what they need: the ladder over `$OCX_HOME/ocx.toml`
+/// (pure, a path and a tempdir), and the gate that consumes it (a real
+/// [`crate::app::Context`], so the resolver it skips is the production one).
+#[cfg(test)]
+mod global_activate_tests {
+    use clap::Parser as _;
+    use ocx_lib::activate::ActivateMode;
+    use ocx_lib::cli::ColorModeConfig;
+
+    use super::{global_activate_mode, global_prompt_entries};
+    use crate::app::{Cli, Context, ManagedConfigGate};
+
+    /// Write `$OCX_HOME/ocx.toml` and resolve the global tier's mode over it.
+    async fn mode_for(home: &std::path::Path, body: Option<&str>) -> ActivateMode {
+        let file = home.join("ocx.toml");
+        match body {
+            Some(body) => std::fs::write(&file, body).expect("write the global ocx.toml"),
+            None => {
+                let _ = std::fs::remove_file(&file);
+            }
+        }
+        global_activate_mode(home).await
+    }
+
+    /// A global file that **states** a mode decides, for each of the three.
+    ///
+    /// Every case states a value, so the environment tier — the weakest — can
+    /// never reach the result and this test needs no process-env mutation.
+    ///
+    /// Red state: collapse the `Bin | None` arm of `global_prompt_entries`'
+    /// match into `Env`, or drop `config.activate` from
+    /// `ocx_lib::activation::activate_mode`'s `Ladder`.
+    #[tokio::test]
+    async fn d3_a_global_file_that_states_a_mode_decides() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        for (body, expected) in [
+            ("activate = \"env\"\n", ActivateMode::Env),
+            ("activate = \"bin\"\n", ActivateMode::Bin),
+            ("activate = \"none\"\n", ActivateMode::None),
+        ] {
+            assert_eq!(
+                mode_for(home.path(), Some(body)).await,
+                expected,
+                "the global tier reads its own `activate` key: {body:?}"
+            );
+        }
+    }
+
+    /// The ladder's other three tiers on this tier: leniency, the floor, and
+    /// `OCX_TOOLCHAIN_ACTIVATE` as the **weakest** rung.
+    ///
+    /// The only test in this module that touches `OCX_TOOLCHAIN_ACTIVATE`.
+    /// A sibling below writes and removes `OCX_HOME`, so "the only test that
+    /// mutates the environment" would be false; what holds — and what the
+    /// ordering guarantee actually needs — is that no other test in this crate
+    /// writes *this key* (precedent: `crate::options::hook`'s
+    /// `each_ladder_reads_its_own_environment_key`).
+    ///
+    /// Red state: replace `.unwrap_or_default()` in `global_activate_mode` with
+    /// `.map(|c| ...).unwrap_or(ActivateMode::None)` and the corrupt-file
+    /// assertions flip — a malformed global file would silently stop composing.
+    #[tokio::test]
+    async fn d3_the_ladder_is_lenient_and_the_environment_tier_is_the_weakest() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let key = ocx_lib::env::keys::OCX_TOOLCHAIN_ACTIVATE;
+        // SAFETY: `OCX_TOOLCHAIN_ACTIVATE` has no other writer in this crate —
+        // the sibling below writes `OCX_HOME`, a different key — and nextest
+        // runs one test per process, so no concurrent reader of this key exists
+        // to race.
+        unsafe { std::env::remove_var(key) };
+
+        assert_eq!(
+            mode_for(home.path(), None).await,
+            ActivateMode::Env,
+            "no global ocx.toml at all: the file tier is absent and the floor decides"
+        );
+        assert_eq!(
+            mode_for(home.path(), Some("[tools]\n")).await,
+            ActivateMode::Env,
+            "a global file that states no `activate`: the floor decides"
+        );
+        assert_eq!(
+            mode_for(home.path(), Some("this is not = = valid toml\n")).await,
+            ActivateMode::Env,
+            "leniency: an unparseable global ocx.toml leaves the file tier ABSENT and still \
+             composes - a prompt must never fail, warn, or silently fall to `none` over it"
+        );
+
+        // SAFETY: see above.
+        unsafe { std::env::set_var(key, "bin") };
+        assert_eq!(
+            mode_for(home.path(), Some("[tools]\n")).await,
+            ActivateMode::Bin,
+            "with no key in the global file, OCX_TOOLCHAIN_ACTIVATE decides"
+        );
+        assert_eq!(
+            mode_for(home.path(), Some("this is not = = valid toml\n")).await,
+            ActivateMode::Bin,
+            "a corrupt file falls THROUGH to the environment tier, it does not short-circuit"
+        );
+        assert_eq!(
+            mode_for(home.path(), Some("activate = \"env\"\n")).await,
+            ActivateMode::Env,
+            "and it loses to a global file that states a value - the weakest-tier rule holds on \
+             this tier too"
+        );
+
+        // SAFETY: see above.
+        unsafe { std::env::remove_var(key) };
+    }
+
+    /// The gate itself, against a real [`Context`]: `bin` composes nothing while
+    /// the **explicit** `ocx --global env` path over the same home still
+    /// composes.
+    ///
+    /// The observable is the global file's own `[env]`, which
+    /// `resolve_global_pinned_env` reads on its own authority (Q2) — so this
+    /// needs no lock, no registry and no materialised package.
+    ///
+    /// The `env`-mode re-read at the end is the positive control: without it an
+    /// empty vector under `bin` is indistinguishable from a build that composes
+    /// nothing in any mode.
+    ///
+    /// Red state: replace `global_prompt_entries`' `Bin | None` arm with the
+    /// `Env` arm's body (i.e. move the gate away, or into the resolver) and the
+    /// first assertion fails.
+    #[tokio::test]
+    async fn d3_bin_mode_gates_the_prompt_and_leaves_the_explicit_request_alone() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: `OCX_HOME` is read through `ocx_lib::env::var`, whose
+        // `#[cfg(test)]` override seam is internal to `ocx_lib` and therefore
+        // unavailable from this crate; the process variable is the only seam.
+        // nextest runs one test per process, so this cannot race a sibling.
+        unsafe { std::env::set_var("OCX_HOME", home.path()) };
+
+        let global_config = home.path().join("ocx.toml");
+        std::fs::write(&global_config, "activate = \"bin\"\n[env]\nWP16 = \"composed\"\n").expect("write ocx.toml");
+
+        let cli = Cli::parse_from(["ocx", "self", "activate", "--shell=bash", "--reconcile"]);
+        let color = ColorModeConfig {
+            stdout: false,
+            stderr: false,
+            relayed: false,
+        };
+        let context = Context::try_init(
+            &cli.context,
+            color,
+            ManagedConfigGate {
+                enforce_required: false,
+                onboarding: false,
+            },
+        )
+        .await
+        .expect("a context over an empty ocx home");
+        assert_eq!(
+            context.file_structure().root(),
+            home.path(),
+            "the context must resolve the tempdir as its home, or this test reads someone else's \
+             ocx.toml and proves nothing"
+        );
+        let target = crate::conventions::platform_or_default(None);
+
+        let keys = |entries: &[ocx_lib::package::metadata::env::entry::Entry]| -> Vec<String> {
+            entries.iter().map(|entry| entry.key.clone()).collect()
+        };
+
+        assert!(
+            global_prompt_entries(&context, &target)
+                .await
+                .expect("the gate never fails on a well-formed home")
+                .is_empty(),
+            "D-3: with `activate = \"bin\"` the global tier contributes nothing to a prompt"
+        );
+
+        // The regression guard for the whole design: the gate is at the hook,
+        // not in the shared resolver, so an EXPLICIT `ocx --global env` over the
+        // very same home still composes. Moving the gate into
+        // `resolve_global_pinned_env` reds here and nowhere else.
+        let explicit = crate::command::toolchain_env::resolve_global_pinned_env(&context, &target, &[], &[], None)
+            .await
+            .expect("the explicit path never fails on a declared [env]")
+            .expect("a declared [env] is a contribution")
+            .0;
+        assert_eq!(
+            keys(&explicit),
+            vec!["WP16".to_owned()],
+            "`activate` governs automatic activation, never what a typed command prints"
+        );
+
+        // Positive control: the same home in `env` mode does compose, so the
+        // empty vector above is the gate's doing and not a home that had
+        // nothing to give.
+        std::fs::write(&global_config, "activate = \"env\"\n[env]\nWP16 = \"composed\"\n").expect("rewrite ocx.toml");
+        assert_eq!(
+            keys(
+                &global_prompt_entries(&context, &target)
+                    .await
+                    .expect("the gate never fails on a well-formed home")
+            ),
+            vec!["WP16".to_owned()],
+            "`env` mode composes the global tier, exactly as it always has"
+        );
+
+        // SAFETY: see above.
+        unsafe { std::env::remove_var("OCX_HOME") };
     }
 }

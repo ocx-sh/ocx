@@ -10,6 +10,17 @@ mod safety;
 
 pub use generate::generate;
 
+/// R-W18(a) — a `pub(crate)` item inside a private `mod` does not escape it,
+/// so WP-6's trampoline surface is unreachable without a re-export here.
+///
+/// Exactly the four items `package_manager::tasks::render_toolchain` calls, and
+/// no more: re-exporting an item nothing imports is an `unused_imports` error
+/// under `-D warnings`, so this line grows with its consumers rather than ahead
+/// of them. `EXEC_SIDECAR_GLOBAL` is deliberately still absent — the renderer
+/// never spells that literal, [`body::exec_sidecar_body`] does.
+pub(crate) use body::{TrampolineTarget, exec_sidecar_body, unix_trampoline_body};
+pub(crate) use generate::trampoline_ocx_binary;
+
 /// The generated Unix shim body for one declared interface name of a
 /// **deferred** tool — a tool composed onto `PATH` without its content being
 /// materialized.

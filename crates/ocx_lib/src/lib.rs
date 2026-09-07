@@ -28,7 +28,9 @@ pub use config::shell::{
     ShellConsent, consent_entry_defect, consent_path_matches, effective_consent, env_channel,
     normalize_consent_pattern, validate_consent_pattern,
 };
-pub use config::{Config, ConfigTier, RegistryConfig, RegistryDefaults};
+pub use config::{
+    Config, ConfigTier, RegistryConfig, RegistryDefaults, ToolchainRoot, ToolchainRootError, ToolchainRootTier,
+};
 
 #[cfg(test)]
 #[path = "../test/mod.rs"]
@@ -36,6 +38,7 @@ pub(crate) mod test;
 
 pub(crate) use media_type::*;
 
+pub mod activate;
 pub mod activation;
 pub mod announce;
 pub mod archive;
@@ -50,6 +53,7 @@ pub mod error;
 pub mod file_structure;
 pub mod forge;
 pub mod hardlink;
+pub mod ladder;
 pub mod launch;
 pub mod lazy;
 pub mod log;

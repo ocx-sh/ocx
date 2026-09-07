@@ -19,16 +19,48 @@
 //! The committed blobs and their recorded [`SHIM_SHA256`] digests are
 //! refreshed in a **dedicated PR** whenever `crates/ocx_shim` source changes:
 //!
-//! 1. `cargo xwin build -p ocx_shim --profile shim --target x86_64-pc-windows-msvc`
-//! 2. `cargo xwin build -p ocx_shim --profile shim --target aarch64-pc-windows-msvc`
-//!    (the `shim` profile in the workspace `Cargo.toml` strips symbols)
+//! 1. `task rust:shim:build TARGET=x86_64-pc-windows-gnullvm`
+//! 2. `task rust:shim:build TARGET=aarch64-pc-windows-gnullvm`
+//!    (cargo-zigbuild; the `shim` profile in the workspace `Cargo.toml` strips
+//!    symbols. The task sets `RUSTFLAGS` on the command line, not through
+//!    `env:`, because a task-level `env:` loses to an inherited variable —
+//!    see the comment on `shim:build` for the `/Brepro` trap that cost.)
 //! 3. Copy each `target/<triple>/shim/ocx-shim.exe` to
 //!    `crates/ocx_lib/src/shims/ocx-shim-<arch>.exe`.
 //! 4. Record `sha256sum` of each blob in the per-arch `SHIM_SHA256` below.
-//! 5. CI (`build-windows-shims.yml`) reproducibly rebuilds and asserts
-//!    byte-equality + `gh attestation verify` (the real provenance control;
-//!    the SHA here is only a corruption canary — see ADR §"SHA256 = corruption
-//!    canary").
+//! 5. CI (`build-windows-shims.yml`) rebuilds hermetically — the fresh build
+//!    must succeed — then validates the *committed* blob as a PE within
+//!    `SHIM_SIZE_BUDGET` whose `sha256` equals `SHIM_SHA256`, and attests it
+//!    with `actions/attest-build-provenance`. It does **not** compare bytes:
+//!    the gnullvm PE link is not reproducible run-to-run even with a pinned
+//!    Zig + rustc, so integrity rests on SLSA attestation, this SHA canary
+//!    and the job's build-input path filter (see
+//!    `adr_shim_hermetic_zigbuild.md` addendum 2, "gate redesign").
+//!
+//! # Toolchain that produced the committed blobs
+//!
+//! Recorded because nothing else in the tree names it: `rust-toolchain.toml`
+//! pins rustc, but **no file pins Zig**, and the `zig` a dev box happens to
+//! have on `PATH` may be a dev build whose tarball stops being downloadable.
+//!
+//! - rustc 1.95.0 (`59807616e1fa2540724bfbac14d7976d7e4a3860`), per
+//!   `rust-toolchain.toml`.
+//! - cargo-zigbuild 0.22.3, per `install:cargo-zigbuild`.
+//! - **Zig 0.16.0** — the version `build-windows-shims.yml` resolved on
+//!   2026-09-04. Obtained from the PyPI `ziglang==0.16.0` wheel (the Zig
+//!   project's own repackage), **not** from a shasum-verified
+//!   `ziglang.org` tarball; the binary used has
+//!   `sha256 = 2317bbb91798556d9d0f38aabdac23db83f0979b25f767259ae474546724087c`.
+//!   Selected via `CARGO_ZIGBUILD_ZIG_PATH`, since the only `zig` on the
+//!   builder's `PATH` was `0.16.0-dev`.
+//!
+//! This record makes the choice auditable; it is not itself a provenance
+//! control. The provenance control is the SLSA statement
+//! `actions/attest-build-provenance` signs over the committed blob on the pull
+//! request to `main` — that attestation covers these bytes, not this build.
+//! CI's Zig is still resolved as "latest stable at run time"; hard-pinning it
+//! is `adr_shim_hermetic_zigbuild.md`'s open implementation-plan item 2 and
+//! edits a workflow this crate does not own.
 //!
 //! See `.claude/artifacts/adr_windows_exe_shim.md` Contract 3 and
 //! `system_design_windows_exe_shim.md` §5.
@@ -36,13 +68,14 @@
 /// Hard upper bound on the embedded shim size, enforced fail-closed by the
 /// compile-time assertion below (Windows builds only).
 ///
-/// 512 KiB ceiling: the hermetic cargo-zigbuild output with the pinned
-/// stable Zig is ~208–284 KiB (x86_64 is the larger; build-std/strip is
-/// less aggressive on stable Zig than on the dev toolchain used in the
-/// PoC). Reproducibility is the priority — the size is an accepted
-/// trade-off (see adr_shim_hermetic_zigbuild.md); shrinking it (verify
-/// build-std/immediate-abort efficacy on stable Zig) is a tracked
-/// follow-up, not a blocker.
+/// 512 KiB ceiling: the cargo-zigbuild output is ~238–333 KiB (x86_64 is the
+/// larger). **Hermeticity** is what buys that size — Zig bundles its own
+/// clang/lld/libc, so no floating Microsoft SDK manifest can move the bytes
+/// (the cargo-xwin treadmill), and the toolchain's prebuilt std ships as-is
+/// because `-Zbuild-std` is neither reproducible nor available without a
+/// nightly bootstrap. Byte reproducibility is *not* claimed and was abandoned
+/// in `adr_shim_hermetic_zigbuild.md` addendum 2. Shrinking the blob is a
+/// tracked follow-up, not a blocker.
 pub const SHIM_SIZE_BUDGET: usize = 512 * 1024;
 
 /// Verbatim bytes of the prebuilt `ocx-shim` executable for the target arch.
@@ -60,13 +93,13 @@ pub const SHIM_BYTES: &[u8] = include_bytes!("shims/ocx-shim-x86_64.exe");
 /// `shim_blob_matches_recorded_sha256_fail_closed_on_windows` test fails
 /// closed if this drifts from `sha256(SHIM_BYTES)`.
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const SHIM_SHA256: &str = "f4ec623a601e08efd544c1add68416685c37f3fcc540922a141c9069ec6935b8";
+pub const SHIM_SHA256: &str = "b47c045ebf437aaaca332b0e296a82ab0443dc12ebc87407f0e3b05fe901e215";
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
 pub const SHIM_BYTES: &[u8] = include_bytes!("shims/ocx-shim-aarch64.exe");
 
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-pub const SHIM_SHA256: &str = "9aebb7516449ec146b6ccbf3cb971e95cc57f82cbfafa4d605d7e96cae74ee2a";
+pub const SHIM_SHA256: &str = "ce06f4f43a7b754de3aae80ce87f4adb9c2eb452efd84d2d83999c612780161a";
 
 #[cfg(not(target_os = "windows"))]
 pub const SHIM_BYTES: &[u8] = &[];
@@ -411,6 +444,114 @@ mod tests {
         // would still pass — the exact shape the canary exists to avoid. A
         // membership check rather than an equality one, so a third arch added
         // later is scanned by the loop without having to be listed twice.
+        for required in ["ocx-shim-x86_64.exe", "ocx-shim-aarch64.exe"] {
+            assert!(
+                scanned.iter().any(|name| name == required),
+                "the canary must have scanned {required}; it scanned {scanned:?}"
+            );
+        }
+    }
+
+    // ── C-035 blob-freshness canary ───────────────────────────────────────
+
+    /// The committed blobs must carry the `.exec` grammar `crates/ocx_shim`
+    /// gained in WP-6 (`plan_toolchain_activation.md` C-035, D-V4).
+    ///
+    /// # Why a canary is needed at all
+    ///
+    /// The blobs are committed binaries embedded by `include_bytes!`, so
+    /// **changing `crates/ocx_shim/src/{core,main}.rs` changes nothing that
+    /// ships** until the blob is rebuilt. Every existing check passes on an
+    /// untouched blob beside changed source: the PE magic is unchanged, the
+    /// size budget is unchanged, and `sha256(blob) == SHIM_SHA256` holds
+    /// precisely *because* nothing was rebuilt. Worse, all three are
+    /// `_on_windows`-gated and do not run on the Linux leg at all. Without this
+    /// row, a Windows trampoline would silently keep the two-sidecar shim: no
+    /// `.exec` probe, no root-flag arm, no `OCX_GLOBAL` strip, and no test
+    /// anywhere would notice.
+    ///
+    /// # Both states were observed on the real artifact
+    ///
+    /// It was **red on the blobs WP-6 inherited** (exit 101: neither literal
+    /// present in either arch) and went green the moment WP-14 rebuilt them
+    /// through `task rust:shim:build`, so no mutation is needed to prove it
+    /// discriminates (D-V4). It carried `#[ignore]` for exactly that window —
+    /// a born-red canary in the default set would have left `task rust:verify`
+    /// red for every work package between WP-6 and WP-14. That window closed
+    /// with the refresh, and the attribute went with it: nothing in
+    /// `taskfiles/` or `.github/workflows/` passes `--ignored`, so leaving it
+    /// would have made this the one check whose green is indistinguishable
+    /// from never having run (`quality-core.md` "Unchecked Green").
+    ///
+    /// # What reds it from here on
+    ///
+    /// A future `crates/ocx_shim` source change with no blob refresh — the
+    /// exact drift this row exists for. Also a truncated or zero-byte blob, a
+    /// deleted `ocx-shim-{x86_64,aarch64}.exe` (the required-filename loop),
+    /// an unreadable `src/shims`, and any rebuild whose root-flag arm stops
+    /// emitting either literal.
+    ///
+    /// # What it scans for
+    ///
+    /// Two `&'static str` literals `build_child_command_line`'s root-flag arm
+    /// emits and no earlier shim could contain, in their plain-ASCII rodata
+    /// form. Deliberately not a PE parser and not a symbol table walk — the
+    /// same "few lines with no edge cases" rung
+    /// [`contains_version_resource`] takes, and for the same reason.
+    ///
+    /// Read from disk rather than from [`SHIM_BYTES`], and fail-closed on an
+    /// empty file, so it scans **both** arches on every host instead of only
+    /// the one the running build embeds — off Windows that constant is `&[]`,
+    /// and a canary applied to it would be green on the only host CI runs
+    /// (`quality-core.md` "Unchecked Green").
+    #[test]
+    fn committed_shim_blobs_carry_the_exec_sidecar_grammar() {
+        /// Literals introduced by C-032's root-flag arm. Both, not either: a
+        /// single short needle could match by coincidence in a 200 KiB image,
+        /// and requiring both makes a partial rebuild visible too.
+        const EXEC_GRAMMAR_LITERALS: [&str; 2] = [" --project ", " --global"];
+
+        let shims_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shims");
+        let mut scanned: Vec<String> = Vec::new();
+
+        for entry in std::fs::read_dir(&shims_dir).unwrap_or_else(|e| {
+            panic!(
+                "FAIL-CLOSED: the committed shim blobs must be readable at {}: {e}",
+                shims_dir.display()
+            )
+        }) {
+            let path = entry.expect("readable directory entry").path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("exe") {
+                continue;
+            }
+            let image = std::fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+            assert!(
+                !image.is_empty(),
+                "FAIL-CLOSED: {} is empty, so scanning it proves nothing",
+                path.display()
+            );
+            for literal in EXEC_GRAMMAR_LITERALS {
+                let needle = literal.as_bytes();
+                assert!(
+                    image.windows(needle.len()).any(|window| window == needle),
+                    "{} predates the `.exec` sidecar grammar: it carries no `{literal}`. \
+                     The shim SOURCE changed but the committed blob did not, so Windows \
+                     trampolines still run the two-sidecar shim — no `.exec` probe, no \
+                     root-flag arm, no OCX_GLOBAL strip. Rebuild both arches via \
+                     `task rust:shim:build` and re-record SHIM_SHA256.",
+                    path.display()
+                );
+            }
+            scanned.push(
+                path.file_name()
+                    .expect("a file has a name")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+
+        // Without this the loop body could execute zero times and the test
+        // would still pass — the exact shape the canary exists to avoid.
         for required in ["ocx-shim-x86_64.exe", "ocx-shim-aarch64.exe"] {
             assert!(
                 scanned.iter().any(|name| name == required),

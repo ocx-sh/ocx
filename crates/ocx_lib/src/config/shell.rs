@@ -865,7 +865,7 @@ fn expanded_entry(entry: &Path) -> Result<PathBuf, EntryDefect> {
 /// Only a **leading** `~` component expands: `/w/~/dev` names a directory
 /// literally called `~`, which is a legal name, and rewriting it would be the
 /// same class of widening as rewriting `\` on Unix.
-fn expand_against(entry: &Path, home: Option<&Path>) -> Result<PathBuf, EntryDefect> {
+pub(crate) fn expand_against(entry: &Path, home: Option<&Path>) -> Result<PathBuf, EntryDefect> {
     let mut components = entry.components();
     let Some(Component::Normal(first)) = components.next() else {
         return Ok(entry.to_path_buf());

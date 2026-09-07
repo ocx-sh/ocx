@@ -242,32 +242,24 @@ impl LazyModeLadder {
     /// Resolves the ladder, then applies the host's shim-support floor —
     /// the form every production caller uses.
     ///
-    /// Identical to [`Self::resolve`] except on Windows, where the resolved
-    /// mode is forced to [`LazyMode::Never`]: scenario S-010 of
-    /// `plan_lazy_package_loading.md` has Windows composing **eagerly** in
-    /// this phase. A user who set `lazy-mode = "always"` there gets a working
-    /// eager environment and a debug line — never a warning, never an error.
+    /// **The Windows floor this method once applied is gone (plan contract
+    /// C-027, removed in the same change as C-026's producer).** Windows
+    /// composed eagerly regardless of `lazy-mode` only because nothing wrote
+    /// the Windows half of a deferred tool's shim slot; C-026 gives
+    /// `prepare_lazy::write_shim_launchers` that producer (its `.exe` +
+    /// `.shimref` pair, `crate::package_manager::tasks::prepare_lazy::write_windows_shim_slot`),
+    /// so the floor's premise no longer holds and this is now a plain
+    /// passthrough to [`Self::resolve`].
     ///
-    /// [`Self::resolve`] stays the pure precedence function so the C-006
-    /// ladder tests assert precedence on every host.
+    /// Kept as its own named method rather than deleted or inlined at every
+    /// call site: `composer.rs` and `project/config.rs` both route through
+    /// `resolve_for_host` deliberately (their own comments say so, contrasting
+    /// it with a bare `resolve()`), and collapsing the two would touch files
+    /// outside this change's own set for a rename with no behavioural
+    /// payoff. It remains the one host-aware entry point in case a future
+    /// platform needs a floor of its own.
     pub fn resolve_for_host(self) -> LazyMode {
-        let resolved = self.resolve();
-        // Deleted in the same change that adds the Windows shim PRODUCER.
-        // Only half the Windows path exists today: `ocx launcher shim` reads
-        // a `.shimref` sidecar (WP-11), but nothing writes one —
-        // `prepare_lazy::write_shim_launchers` emits an extensionless
-        // `#!/bin/sh` body on every platform, so a lazily composed tool would
-        // put a directory of non-executable shell scripts on a Windows `PATH`.
-        // `cfg!(windows)` and not a probe of the shim tree: the tree may not
-        // exist yet at resolution time, and the platform rule has to be
-        // greppable rather than inferred from a runtime directory listing.
-        if cfg!(windows) && resolved == LazyMode::Always {
-            crate::log::debug!(
-                "Composing eagerly: lazy-mode resolved to always, but this phase has no Windows shim producer"
-            );
-            return LazyMode::Never;
-        }
-        resolved
+        self.resolve()
     }
 }
 
@@ -290,11 +282,22 @@ impl LazyModeLadder {
 /// than four positional `Option<LazyReport>` parameters) so a caller cannot
 /// transpose two same-typed tiers by accident.
 ///
-// Deliberately a second concrete struct, not `Ladder<T>`: `LazyMode` and
-// `LazyReport` are two unrelated vocabularies, so sharing a generic here
-// would be incidental similarity, not shared logic. A generic ladder would
-// also need its own floor mechanism — `T: Default` re-creates exactly the
-// hazard the derive removal above eliminates.
+// Deliberately a second concrete struct, not `crate::ladder::Ladder<T>`
+// (plan_toolchain_activation.md C-005, shipped after this comment was first
+// written). That type already answers the floor-mechanism half of the
+// argument this comment used to make here — `Ladder::resolve` takes the
+// floor as a parameter, never `T::default()`, so reusing it would not
+// re-create the hazard the derive removal above eliminates. The reason
+// `LazyModeLadder` and `LazyReportLadder` stay unshared is shape, not floor
+// safety: `Ladder<T>` is three tiers (`cli` / `file` / `environment`), sized
+// for `activate` and `pinned`, neither of which has a per-tool
+// (`[package."<id>"]`) or per-group (`[group.<g>]`) equivalent.
+// `LazyModeLadder` carries five tiers and `LazyReportLadder` four, both with
+// tool- and/or group-scoped fields `Ladder<T>` has no slot for. Folding them
+// in would mean widening `Ladder<T>` past what its other consumer needs, or
+// leaving fields on it unused by every other caller — incidental similarity,
+// not shared logic (`crate::ladder`'s own doc comment makes the same point
+// from the other side).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LazyReportLadder {
     /// `--lazy-report` on the invoked command.
@@ -458,18 +461,22 @@ mod tests {
         );
     }
 
-    // ── S-010: the host's shim-support floor ────────────────────────────────
+    // ── C-027: `resolve_for_host` has no floor left ─────────────────────────
     //
-    // Two host-gated halves rather than one `cfg!(windows)` expectation: an
-    // assertion that restates the production `cfg!` is tautological — it agrees
-    // with the code on every host, including a host where the code is wrong.
-    // Each arm below asserts a literal, and each runs on the host it describes.
+    // Superseded by C-026/C-027 (D-V6): the two host-gated halves this section
+    // used to carry (`windows_composes_eagerly_whatever_tier_asked_for_always`,
+    // gated `#[cfg(windows)]`, and its non-Windows inverse) each asserted one
+    // side of a floor that no longer exists. Replaced by one universal test —
+    // no `cfg`, so it runs on every host this workspace's gate touches — that
+    // pins the new invariant directly: `resolve_for_host` is a passthrough,
+    // identical to `resolve` for every tier combination, everywhere.
 
-    /// `--lazy-mode always` is the MOST specific tier, so forcing `Never` here
-    /// proves the host floor overrides every tier, not just the weak ones.
-    #[cfg(windows)]
+    /// `--lazy-mode always` is the MOST specific tier; asserting parity here
+    /// (not just at the floor's default) proves the passthrough holds however
+    /// the ladder resolves, not only in the `Never` case a stale floor would
+    /// also produce by coincidence.
     #[test]
-    fn windows_composes_eagerly_whatever_tier_asked_for_always() {
+    fn resolve_for_host_matches_resolve_on_every_host() {
         let ladder = LazyModeLadder {
             cli: Some(LazyMode::Always),
             package: Some(LazyMode::Always),
@@ -478,30 +485,82 @@ mod tests {
             environment: Some(LazyMode::Always),
         };
         assert_eq!(
+            ladder.resolve_for_host(),
             ladder.resolve(),
-            LazyMode::Always,
-            "the pure ladder still answers the configured value"
+            "C-027: the Windows floor is gone, so resolve_for_host is a plain passthrough"
         );
         assert_eq!(
             ladder.resolve_for_host(),
-            LazyMode::Never,
-            "S-010: Windows composes eagerly until the shim producer lands"
+            LazyMode::Always,
+            "and the passthrough must actually carry the configured value, not just agree with itself"
         );
     }
 
-    /// The inverse, and the one that reds if the gate is written to fire
-    /// everywhere: off Windows, `resolve_for_host` must be `resolve`.
-    #[cfg(not(windows))]
+    /// C-027 (E-43, the other half): parity must hold where the ladder
+    /// resolves to `Never` too — at the floor, with every tier absent, and at
+    /// an explicit mid-ladder `Never`. Its sibling above pins `Always`; a
+    /// passthrough that only agreed on one of the two values is not a
+    /// passthrough.
     #[test]
-    fn a_non_windows_host_composes_lazily_when_a_tier_asked_for_always() {
-        let ladder = LazyModeLadder {
-            toolchain: Some(LazyMode::Always),
-            ..LazyModeLadder::default()
-        };
-        assert_eq!(
-            ladder.resolve_for_host(),
-            LazyMode::Always,
-            "the host floor is Windows-only; elsewhere it must not touch the resolved mode"
+    fn resolve_for_host_matches_resolve_when_the_ladder_answers_never() {
+        for ladder in [
+            LazyModeLadder::default(),
+            LazyModeLadder {
+                group: Some(LazyMode::Never),
+                environment: Some(LazyMode::Always),
+                ..LazyModeLadder::default()
+            },
+        ] {
+            assert_eq!(ladder.resolve_for_host(), ladder.resolve(), "{ladder:?}");
+            assert_eq!(ladder.resolve_for_host(), LazyMode::Never, "{ladder:?}");
+        }
+    }
+
+    /// C-027 (E-44a): proof that the Windows floor is **gone**, not merely
+    /// unreachable on the host running this test.
+    ///
+    /// # What it discriminates, and why the behavioural test cannot
+    ///
+    /// `resolve_for_host_matches_resolve_on_every_host` is green on the base
+    /// commit too: on Linux the floor's `cfg!(windows)` guard was already
+    /// false, so that test returns the same answer whether the floor is
+    /// present or absent. It is `quality-core.md`'s Unchecked Green — a check
+    /// whose red state is not reachable here. This one is: restoring the
+    /// deleted floor puts `cfg!(windows)` back into this file, and this test
+    /// reds on every host while the behavioural one stays green on Linux.
+    /// That difference is the whole point.
+    ///
+    /// It proves the *shape*, not the behaviour. The behavioural half is the
+    /// `#[cfg(windows)]` arm of `test/tests/test_lazy_loading.py`, live only
+    /// on the `windows-latest` leg — routed to WP-12d (R-W22), whose file set
+    /// owns it. Neither is sufficient alone.
+    ///
+    /// Two anti-self-measurement precautions, both load-bearing and both
+    /// observed to matter: the needle is assembled from two fragments at
+    /// compile time, so this test's own source cannot satisfy the search it
+    /// performs; and comment lines are stripped first, because the paragraphs
+    /// above name the deleted construct in prose and the guard red on its own
+    /// documentation the first time it ran. The filter is itself pinned — a
+    /// filter that removed everything would leave an empty haystack that
+    /// passes for the wrong reason.
+    #[test]
+    fn lazy_carries_no_host_floor_macro() {
+        const SOURCE: &str = include_str!("lazy.rs");
+        const NEEDLE: &str = concat!("cfg", "!(");
+
+        let code: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            code.contains("pub fn resolve_for_host"),
+            "the comment filter must leave this module's code behind, or the guard proves nothing"
+        );
+        assert!(
+            !code.contains(NEEDLE),
+            "C-027: the Windows shim floor is deleted, so no {NEEDLE} branch may decide a lazy-mode answer here"
         );
     }
 

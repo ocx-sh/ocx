@@ -988,8 +988,9 @@ fn managed_config(inputs: &RecordInputs<'_>) -> Option<ManagedConfigReference> {
 /// both would be libelled `external` by a root-only test.
 fn executable_block(inputs: &RecordInputs<'_>) -> BTreeMap<String, String> {
     let mut block = BTreeMap::new();
-    let in_shim_store = inputs.executable.starts_with(inputs.shim_root);
-    if !in_shim_store && !inputs.executable.starts_with(inputs.store_root) {
+    let in_shim_store = relative_to(inputs.executable, inputs.shim_root).is_some();
+    let store_relative = relative_to(inputs.executable, inputs.store_root);
+    if !in_shim_store && store_relative.is_none() {
         block.insert("sh.ocx.provenance".to_string(), "external".to_string());
         return block;
     }
@@ -1001,7 +1002,7 @@ fn executable_block(inputs: &RecordInputs<'_>) -> BTreeMap<String, String> {
     let kind = if in_shim_store {
         Some("shim")
     } else {
-        executable_kind(inputs.executable, inputs.store_root)
+        store_relative.as_deref().and_then(executable_kind)
     };
     if let Some(kind) = kind {
         block.insert("sh.ocx.kind".to_string(), kind.to_string());
@@ -1018,6 +1019,42 @@ fn executable_block(inputs: &RecordInputs<'_>) -> BTreeMap<String, String> {
     block
 }
 
+/// `executable` relative to `root`, tested on the raw spelling first and on the
+/// canonical form only if that misses.
+///
+/// # Why the canonical retry exists (RUL-82, RUL-97)
+///
+/// C-065 makes a following-lane composition emit
+/// `<home>/toolchain/<group>/<entry>/…` on `PATH`, and `which::which_in` keeps
+/// whichever spelling it resolved through — so from this function's side every
+/// project-tier `ocx exec` arrives holding a link path. A raw containment test
+/// answers "not in the store" for all of them, which would record
+/// `sh.ocx.provenance = "external"`, drop `sh.ocx.kind` and drop the
+/// `sh.ocx.package` purl, on an invocation that ran an ocx package.
+///
+/// The record is on RUL-82's must-stay-digest list, so the *record* resolves the
+/// link. The launch does not: the caller still executes the raw path, and this
+/// canonicalisation is read-only.
+///
+/// # Both sides, or neither
+///
+/// The raw test runs first and costs no syscall, which is what every
+/// digest-spelled invocation hits — and keeps the pre-C-065 answer bit-identical.
+/// The retry canonicalises **both** operands, never one: `store_root` under a
+/// symlinked prefix (macOS `/tmp`) would otherwise stop matching a canonical
+/// executable, turning a working containment test into a silent `external`.
+/// A canonicalisation failure — a deferred root's package directory, which is
+/// path arithmetic over a digest and does not exist yet — answers "not
+/// contained", and `owning_root`'s shim-tree arm covers that case instead.
+fn relative_to(executable: &Path, root: &Path) -> Option<PathBuf> {
+    if let Ok(relative) = executable.strip_prefix(root) {
+        return Some(relative.to_path_buf());
+    }
+    let executable = dunce::canonicalize(executable).ok()?;
+    let root = dunce::canonicalize(root).ok()?;
+    executable.strip_prefix(root).ok().map(Path::to_path_buf)
+}
+
 /// Which of a package's two executable trees the resolved path sits in.
 ///
 /// The store's two; the third kind, `shim`, is not a tree inside a package at
@@ -1031,9 +1068,13 @@ fn executable_block(inputs: &RecordInputs<'_>) -> BTreeMap<String, String> {
 ///
 /// Scanned forward from the store root, so a package that ships its own
 /// `content/entrypoints/` directory still reports the package-level tree.
-fn executable_kind(executable: &Path, store_root: &Path) -> Option<&'static str> {
-    let relative = executable.strip_prefix(store_root).ok()?;
-    relative
+///
+/// Takes the **already store-relative** path from [`relative_to`] rather than
+/// stripping the prefix itself: that strip is where C-065's link spelling has to
+/// be resolved, and one producer of it means the containment answer and the kind
+/// answer can never be derived from two different spellings.
+fn executable_kind(store_relative: &Path) -> Option<&'static str> {
+    store_relative
         .components()
         .find_map(|component| match component.as_os_str().to_str()? {
             "entrypoints" => Some("launcher"),
@@ -1049,12 +1090,17 @@ fn executable_kind(executable: &Path, store_root: &Path) -> Option<&'static str>
 /// pinned identifier and does not exist yet, and the generated shim tree its
 /// launchers actually run from. Matching only the first would drop
 /// `sh.ocx.package` from every lazily composed tool.
+///
+/// Both arms go through [`relative_to`], for the same reason the store
+/// containment test does: on the following lane the executable arrives spelled
+/// as a `<home>/toolchain/<group>/<entry>` link, and a raw `starts_with` against
+/// the digest root would drop `sh.ocx.package` from every project-tier frame.
 fn owning_root<'a>(inputs: &'a RecordInputs<'_>) -> Option<&'a Arc<InstallInfo>> {
     inputs.packages.iter().find(|info| {
-        inputs.executable.starts_with(info.dir().root())
+        relative_to(inputs.executable, info.dir().root()).is_some()
             || info
                 .deferred()
-                .is_some_and(|deferred| inputs.executable.starts_with(deferred.shim().root()))
+                .is_some_and(|deferred| relative_to(inputs.executable, deferred.shim().root()).is_some())
     })
 }
 
@@ -1835,6 +1881,68 @@ mod tests {
         assert!(
             !block.contains_key("sh.ocx.package"),
             "only a root carries a directory to match an identity against: {block:?}",
+        );
+    }
+
+    /// RUL-82 / RUL-97 — a following-lane executable, spelled as the
+    /// `<home>/toolchain/<group>/<entry>` link C-065 puts on `PATH`, still
+    /// records as an ocx package.
+    ///
+    /// `which::which_in` keeps whichever spelling it resolved through, so from
+    /// `executable_block`'s side every project-tier `ocx exec` now arrives
+    /// holding a link path. A raw `starts_with` against the store root answers
+    /// "not contained" for all of them — `sh.ocx.provenance = "external"`, no
+    /// `sh.ocx.kind`, and no `sh.ocx.package` purl, the field the record's own
+    /// doc calls the one an auditor reads first.
+    ///
+    /// Real directories and a real symlink, because the assertion is about what
+    /// `dunce::canonicalize` resolves; the sibling fixtures use synthetic
+    /// absolute paths and cannot reach the retry at all.
+    ///
+    /// RED: reverting either containment test in `executable_block` or
+    /// `owning_root` to a raw `starts_with`.
+    #[test]
+    #[cfg(unix)]
+    fn a_following_lane_link_spelling_still_records_as_an_ocx_package() {
+        let tmp = tempfile::tempdir().expect("a tempdir is creatable");
+        let store_root = tmp.path().join("packages");
+        let package_root = store_root.join("cmake");
+        std::fs::create_dir_all(package_root.join("entrypoints")).expect("the package tree is creatable");
+        std::fs::write(package_root.join("entrypoints").join("cmake"), b"#!/bin/sh\n")
+            .expect("the launcher is writable");
+
+        let group = tmp.path().join("toolchain").join("default");
+        std::fs::create_dir_all(&group).expect("the group directory is creatable");
+        crate::symlink::create(&package_root, group.join("cmake")).expect("the rendered link is creatable");
+
+        let mut frame = Frame::project();
+        frame.store_root = store_root;
+        frame.shim_root = tmp.path().join("shims");
+        // Exactly what a following-lane `PATH` resolves to.
+        frame.executable = group.join("cmake").join("entrypoints").join("cmake");
+        frame.packages[0] = install(
+            pinned("ocx/cmake", "index.ocx.sh", None, LEAF_HEX),
+            package_root.to_str().expect("a UTF-8 fixture path"),
+            Vec::new(),
+        );
+
+        let block = executable_block(&frame.inputs(project_scope()));
+
+        assert_eq!(
+            block.get("sh.ocx.provenance").map(String::as_str),
+            Some("ocx-package"),
+            "RUL-82 — the record resolves the link even though the launch does not: {block:?}",
+        );
+        assert_eq!(
+            block.get("sh.ocx.kind").map(String::as_str),
+            Some("launcher"),
+            "the kind scan runs on the same resolved spelling as the containment test: {block:?}",
+        );
+        assert!(
+            block
+                .get("sh.ocx.package")
+                .is_some_and(|purl| purl.starts_with("pkg:oci/cmake@")),
+            "`owning_root` must see through the link too, or the purl is dropped: {block:?}",
         );
     }
 

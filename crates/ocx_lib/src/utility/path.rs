@@ -77,6 +77,68 @@ fn comparison_operand(value: &OsStr) -> &OsStr {
     }
 }
 
+/// Re-join `PATH` segments with [`std::env::join_paths`], the exact inverse of
+/// the [`split_paths`](std::env::split_paths) both public functions split with —
+/// the same pairing [`Env::lookup_path`](crate::env::Env::lookup_path) uses, for
+/// the same reason.
+///
+/// On Windows `split_paths` reads `"` as a quote and **strips it**, so a segment
+/// it yields can legally contain the separator: std's own example is
+/// `c:\foo;c:\som"e;di"r;c:\bar`, whose middle segment is `c:\some;dir`.
+/// `join_paths` re-quotes exactly such a segment. The manual
+/// `push(PATH_SEPARATOR)` join this replaced re-emitted it bare, so the next
+/// consumer split `C:\Tools;Legacy\bin` back into `C:\Tools` and a **relative**
+/// `Legacy\bin` — a directory nobody put on `PATH`, resolved against the working
+/// directory (CWE-426).
+///
+/// That planting happened on the **first** application, and once. The torn value
+/// re-splits into separator-free segments the bare join re-emits unchanged, so
+/// the old code did reach a fixed point and did satisfy `f(f(a)) == f(a)` — its
+/// idempotence was never the defect, and no argument here rests on it. What it
+/// broke besides the relative segment is emit parity: `export_path`'s pwsh arm
+/// splits and re-joins on the same separator without ever stripping a `"`, so it
+/// returns the ambient's quoted bytes verbatim, and the in-process half then
+/// diverged from it byte for byte for the same input — the flapping
+/// [`move_to_front`]'s own parity paragraph exists to prevent.
+///
+/// Both callers are infallible by contract, so a rejection degrades to that bare
+/// join rather than to a `Result`; the fallback's output is byte-identical to the
+/// pre-fix behaviour. The arm is unreachable through either caller, because
+/// `join_paths` rejects only what its own `split_paths` cannot emit — a `"` on
+/// Windows, where every `"` is consumed as a quote, and the separator on Unix,
+/// where every occurrence is a split point.
+fn join_segments(segments: &[OsString]) -> OsString {
+    std::env::join_paths(segments).unwrap_or_else(|_| {
+        let mut joined = OsString::new();
+        for segment in segments {
+            if !joined.is_empty() {
+                joined.push(crate::env::PATH_SEPARATOR);
+            }
+            joined.push(segment);
+        }
+        joined
+    })
+}
+
+/// The segments of `existing` that survive — non-empty, and not the same element
+/// as `value` — re-joined by [`join_segments`].
+///
+/// The shared body of both public functions: they differ only in how they
+/// normalise the operand before comparing, and in whether they prepend.
+fn retained(existing: &OsStr, value: &OsStr) -> OsString {
+    // `split_paths` uses the platform path separator (`:` on Unix, `;` on
+    // Windows) — identical to `crate::env::PATH_SEPARATOR` — is `OsStr` native,
+    // so no lossy conversion happens, and unquotes on Windows, which is the
+    // ambient half of A-19's quote normalisation. `same_element` compares raw
+    // bytes rather than via `Path` equality, which would normalise trailing
+    // slashes and diverge from the emitted shell snippets.
+    let segments: Vec<OsString> = std::env::split_paths(existing)
+        .map(std::path::PathBuf::into_os_string)
+        .filter(|segment| !segment.is_empty() && !same_element(segment, value))
+        .collect();
+    join_segments(&segments)
+}
+
 /// Drops every occurrence of `value` from a `PATH`-style value.
 ///
 /// The inverse of [`move_to_front`] minus the prepend, and it shares that
@@ -104,26 +166,16 @@ fn comparison_operand(value: &OsStr) -> &OsStr {
 /// *resolved* answer against the resolved directory, which is the only
 /// comparison those spellings collapse under.
 pub fn remove_segment(existing: &OsStr, value: &OsStr) -> OsString {
-    let value = strip_one_quote_pair(value);
-    let mut result = OsString::with_capacity(existing.len());
-    for segment in std::env::split_paths(existing) {
-        let segment = segment.into_os_string();
-        if segment.is_empty() || same_element(&segment, value) {
-            continue;
-        }
-        if !result.is_empty() {
-            result.push(crate::env::PATH_SEPARATOR);
-        }
-        result.push(segment);
-    }
-    result
+    retained(existing, strip_one_quote_pair(value))
 }
 
 /// Move-to-front dedup for a `PATH`-style value.
 ///
 /// Splits `existing` on the platform path separator, drops empty segments and
 /// every segment exactly equal to `value`, then returns `value` followed by the
-/// survivors, re-joined with the separator. Infallible.
+/// survivors, re-joined by [`join_segments`] — which re-quotes a survivor that
+/// legally contains the separator, so the survivors re-split one for one.
+/// Infallible.
 ///
 /// Re-applying the result is a no-op (idempotent), and re-adding a segment that
 /// is already present removes the stale occurrence and moves it to the front —
@@ -142,9 +194,13 @@ pub fn remove_segment(existing: &OsStr, value: &OsStr) -> OsString {
 /// applier normalises what it compares against, never what it writes.
 ///
 /// **Precondition:** `value` is a single directory containing no
-/// `PATH_SEPARATOR` (the env resolver yields one resolved `bin/` dir per
-/// entry). A value embedding the separator is treated as one opaque segment and
-/// would not round-trip a re-apply. As a defensive measure an empty `value` is
+/// `PATH_SEPARATOR`, and on Windows no `"` (the env resolver yields one resolved
+/// `bin/` dir per entry). A value embedding the separator is treated as one
+/// opaque segment and would not round-trip a re-apply. The `"` half is the price
+/// of writing `value` verbatim: it bypasses [`join_segments`], so on Windows an
+/// unbalanced `"` inside it leaves `split_paths` mid-quote at the separator that
+/// follows, swallowing it and merging `value` with the first survivor — one
+/// segment *fewer*, not more. As a defensive measure an empty `value` is
 /// simply not prepended (the survivors are still de-duplicated), so the result
 /// never carries a leading empty segment.
 ///
@@ -163,26 +219,22 @@ pub fn move_to_front(existing: &OsStr, value: &OsStr) -> OsString {
     // between them is the whole contract: normalise what you compare against,
     // never what you write.
     let operand = comparison_operand(value);
-
-    let mut result = OsString::with_capacity(existing.len() + value.len() + 1);
-    if !value.is_empty() {
-        result.push(value);
+    let survivors = retained(existing, operand);
+    if value.is_empty() {
+        return survivors;
     }
-    // `split_paths` uses the platform path separator (`:` on Unix, `;` on
-    // Windows) — identical to `crate::env::PATH_SEPARATOR` — is `OsStr` native,
-    // so no lossy conversion happens, and unquotes on Windows, which is the
-    // ambient half of A-19's quote normalisation. `same_element` compares raw
-    // bytes rather than via `Path` equality, which would normalise trailing
-    // slashes and diverge from the emitted shell snippets.
-    for segment in std::env::split_paths(existing) {
-        let segment = segment.into_os_string();
-        if segment.is_empty() || same_element(&segment, operand) {
-            continue;
-        }
-        if !result.is_empty() {
-            result.push(crate::env::PATH_SEPARATOR);
-        }
-        result.push(segment);
+
+    // `value` is prepended outside [`join_segments`] on purpose, twice over. It
+    // is written byte for byte (the E3 contract above), and routing it through
+    // `join_paths` would also make a `"`-bearing value reject the join on
+    // Windows — dropping the re-quoting from every *survivor* to preserve one
+    // operand. Its precondition already forbids a separator inside it, which is
+    // the only thing the join would have had to add.
+    let mut result = OsString::with_capacity(value.len() + 1 + survivors.len());
+    result.push(value);
+    if !survivors.is_empty() {
+        result.push(crate::env::PATH_SEPARATOR);
+        result.push(survivors);
     }
     result
 }
@@ -192,6 +244,7 @@ mod tests {
     use super::{move_to_front, remove_segment};
     use crate::env::PATH_SEPARATOR as SEP;
     use std::ffi::{OsStr, OsString};
+    use std::path::PathBuf;
 
     /// Build a separator-joined path string for the host platform so the
     /// assertions read naturally on both Unix (`:`) and Windows (`;`).
@@ -435,6 +488,13 @@ mod tests {
         // shim guard relies on: the composer adds the slot, the guard drops it.
         let with = mtf(&join(&["/a", "/b"]), "/shim");
         assert_eq!(remove_segment(&with, OsStr::new("/shim")), join(&["/a", "/b"]));
+
+        // …and inverses **byte for byte**, not merely segment for segment, which
+        // the bare join lost: a quoted separator-bearing ambient came back torn,
+        // so the guard handed `execvp` a `PATH` the composer had never been given.
+        let ambient = OsString::from(REJOIN_AMBIENT);
+        let with = move_to_front(&ambient, OsStr::new("/shim"));
+        assert_eq!(remove_segment(&with, OsStr::new("/shim")), ambient);
     }
 
     /// E3's rule, asserted on **either** host: the operand is normalised
@@ -502,5 +562,117 @@ mod tests {
         let once = mtf(&join(&["/x"]), "\"/opt/b in\"");
         let twice = move_to_front(&once, OsStr::new("\"/opt/b in\""));
         assert_eq!(once, twice, "one copy, however many prompts fire");
+    }
+
+    // ══ R-W40 — the re-join preserves the segment list ════════════════════
+    //
+    // `split_paths` strips the quotes off a Windows segment that legally
+    // contains `;`, so re-emitting it bare turns one directory into two and
+    // plants the tail as a **relative** entry on `PATH` (CWE-426).
+    // `join_segments` re-quotes it.
+
+    /// An ambient `PATH` whose every element is absolute **on the host**, and
+    /// which — on Windows, the only platform where such an element can exist —
+    /// holds one quoted element embedding the separator. std's own
+    /// `c:\foo;c:\som"e;di"r;c:\bar` shape.
+    ///
+    /// Spelled per platform for the same reason `CASE_PAIR` above is: a
+    /// `C:\`-rooted fixture is torn into two segments off Windows, and a
+    /// `/`-rooted one is not absolute on Windows (it has a root but no drive
+    /// prefix), so neither spelling states the property on both hosts.
+    #[cfg(windows)]
+    const REJOIN_AMBIENT: &str = "\"C:\\Tools;Legacy\\bin\";C:\\other";
+    #[cfg(not(windows))]
+    const REJOIN_AMBIENT: &str = "/opt/tools:/other";
+
+    fn segments_of(value: &OsStr) -> Vec<PathBuf> {
+        std::env::split_paths(value).collect()
+    }
+
+    /// A quoted, separator-bearing segment survives a `move_to_front` round
+    /// trip as **one** segment: re-splitting the result yields the prepended
+    /// value followed by exactly the ambient's own segment list, never one more.
+    ///
+    /// **Off Windows this proves nothing about quoting, and is not claimed to**
+    /// — `split_paths` splits on every `:` there, so no segment can contain the
+    /// separator and the bare join was byte-identical to `join_paths` for every
+    /// input. There is no Linux-observable red for the tearing. What runs here
+    /// off Windows is the plain round trip. It is unconditional rather than
+    /// `#[cfg(windows)]` because `task rust:check:windows-cfg` is scoped to
+    /// `ocx_shim`, so a Windows-gated test in this crate would not even be
+    /// compiled by the gate, let alone run.
+    #[test]
+    fn move_to_front_re_splits_to_exactly_the_segments_it_kept() {
+        let ambient = OsString::from(REJOIN_AMBIENT);
+        let before = segments_of(&ambient);
+
+        let after = segments_of(&mtf(&ambient, "/v"));
+
+        assert_eq!(after.first(), Some(&PathBuf::from("/v")), "the value is prepended");
+        assert_eq!(
+            &after[1..],
+            &before[..],
+            "a segment that legally contains the separator must be re-emitted quoted, \
+             so the survivors re-split one for one"
+        );
+    }
+
+    /// The removal direction of the same rule: `remove_segment` never hands the
+    /// next `PATH` consumer a segment the ambient did not already have — in
+    /// particular never a **relative** one, which resolves against the working
+    /// directory (CWE-426) and is what tearing `C:\Tools;Legacy\bin` produces.
+    ///
+    /// The first assertion is the positive control for the second: it pins that
+    /// the fixture is all-absolute to begin with, so the absoluteness assertion
+    /// cannot pass vacuously on a fixture that never was.
+    ///
+    /// **That control establishes non-vacuity, not a red.** Off Windows only the
+    /// segment-list equality can go red: no Unix segment can hold the separator,
+    /// so nothing tears, and a result segment can only turn relative by way of a
+    /// list that already changed — the absoluteness assertion has no independent
+    /// Unix red and none is claimed. Where it reds is the `windows-latest` leg of
+    /// `.github/workflows/verify-deep.yml`'s "Build & Unit Test" matrix, which
+    /// runs this same `cargo nextest run --workspace` on `x86_64-pc-windows-msvc`.
+    #[test]
+    fn remove_segment_plants_no_segment_the_ambient_did_not_have() {
+        let ambient = OsString::from(REJOIN_AMBIENT);
+        assert!(
+            segments_of(&ambient).iter().all(|segment| segment.is_absolute()),
+            "control: every ambient segment is absolute on this host, so the assertion below bites"
+        );
+
+        let result = rm(&ambient, "/absent");
+
+        assert!(
+            segments_of(&result).iter().all(|segment| segment.is_absolute()),
+            "removing an absent segment must not split an absolute one into a relative tail"
+        );
+        assert_eq!(
+            segments_of(&result),
+            segments_of(&ambient),
+            "and must not change the list at all"
+        );
+    }
+
+    /// A separator-bearing segment takes a different arm on each platform, and
+    /// the name says both because the assertion covers both: Windows **quotes**
+    /// it (`join_paths` succeeds and nothing falls back), Unix **refuses** it and
+    /// the bare separator join runs, byte-identical to the pre-fix behaviour —
+    /// the infallibility both public functions promise.
+    ///
+    /// Neither arm is reachable through those functions, since `join_paths`
+    /// rejects only what its own `split_paths` cannot emit, so `join_segments` is
+    /// called directly. **The Unix arm is the one assertion in this group with a
+    /// red state on this host**: `join_paths` rejects a segment containing `:`
+    /// there, so the fallback runs and its output is observable.
+    #[test]
+    fn the_rejoin_quotes_a_separator_bearing_segment_on_windows_and_falls_back_off_it() {
+        let segments = [OsString::from(format!("/a{SEP}b")), OsString::from("/x")];
+        let expected = if cfg!(windows) {
+            format!("\"/a{SEP}b\"{SEP}/x")
+        } else {
+            format!("/a{SEP}b{SEP}/x")
+        };
+        assert_eq!(super::join_segments(&segments), OsString::from(expected));
     }
 }

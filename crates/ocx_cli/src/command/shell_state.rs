@@ -175,11 +175,16 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
         None => None,
     };
     let priors = ShellStateReport::priors_for(ledger.as_ref());
+    let toolchain = toolchain_state(context, project).await?;
+    notes.extend(toolchain.note);
 
     Ok(ShellStateReport {
         ocx_home,
         ocx_home_present,
         shell_integration_installed,
+        toolchain_home: toolchain.home,
+        activate: toolchain.activate,
+        pinned: toolchain.pinned,
         lock_refusal: project.and_then(|project| project.lock_refusal.clone()),
         carrier_present,
         carrier_bytes,
@@ -203,6 +208,186 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
         inert_reason,
         notes,
     })
+}
+
+/// The three toolchain facts C-056 adds to the report, plus the row a manifest
+/// that will not parse owes the user.
+///
+/// One struct rather than a tuple: three values of two types, two of which are
+/// `bool`-adjacent, is exactly the shape a positional return gets transposed in.
+struct ToolchainState {
+    /// The resolved home — see [`ShellStateReport::toolchain_home`].
+    home: PathBuf,
+    /// The effective `activate` mode, past the whole ladder.
+    activate: ocx_lib::activate::ActivateMode,
+    /// The effective `pinned` value, past the same ladder.
+    pinned: bool,
+    /// [`Note::ToolchainManifestUnparsed`], when the `ocx.toml` that answers
+    /// for the reported scope exists but will not parse.
+    note: Option<Note>,
+}
+
+/// Resolve the home and the two effective toolchain settings (C-056).
+///
+/// # The two tiers
+///
+/// With a project in effect the home is
+/// [`resolve_toolchain_home`](ocx_lib::project::resolve_toolchain_home) over its
+/// canonical directory and the validated `toolchain-dir` root. With no project
+/// the home is the global `$OCX_HOME/toolchain`, which ignores `toolchain-dir`
+/// (C-016). Either way the `file` tier is **that scope's own `ocx.toml`** —
+/// [`scope_and_config_path`] mints the two together for the reason its own doc
+/// gives.
+///
+/// The **effective** values, never a tier's raw value: a report that echoed
+/// `ocx.toml` would answer a different question from the one a user asking why
+/// their shell does nothing is asking.
+///
+/// Read-only, like everything else here: one `ocx.toml` read and one
+/// canonicalisation, no write.
+///
+/// # Errors
+///
+/// The home's own canonicalisation failure, with the offending path attached —
+/// the same class as [`read_ocx_home`]'s unreadable `$OCX_HOME` (exit 74). A
+/// refused `toolchain-dir` cannot surface here: it was refused at config load
+/// (RUL-51).
+async fn toolchain_state(
+    context: &crate::app::Context,
+    project: Option<&ResolvedProject>,
+) -> anyhow::Result<ToolchainState> {
+    let (scope, config_path) = scope_and_config_path(
+        context.file_structure().root(),
+        project.map(|project| &project.identity),
+        context.global(),
+    );
+    let home = context.manager().toolchain_home(&scope, context.toolchain_root())?;
+    let (activate, pinned, note) = toolchain_settings(&config_path).await;
+
+    Ok(ToolchainState {
+        home: home.root().to_path_buf(),
+        activate,
+        pinned,
+        note,
+    })
+}
+
+/// The scope in effect **and** the `ocx.toml` that answers for it, minted in one
+/// expression so the two can never name different tiers.
+///
+/// That pairing is the whole point. The report used to derive the scope here but
+/// take its `file` tier from the resolved project alone — and
+/// [`ProjectConfig::resolve`](ocx_lib::project::ProjectConfig::resolve) makes a
+/// CWD-walk miss a hard `None` with no home-tier fallback, so a project-free
+/// shell reported `scope: global` and `toolchain_home: $OCX_HOME/toolchain`
+/// beside an `activate` resolved with **no file tier at all**. Meanwhile the
+/// per-prompt hook reads `$OCX_HOME/ocx.toml` and behaves by it
+/// (`adr_toolchain_activation.md` D-3), so after `ocx self setup
+/// --toolchain-activate bin` the prompt composed nothing while the one command
+/// whose product is the explanation answered `activate: env`.
+///
+/// Under `--global` the resolved project *is* `$OCX_HOME/ocx.toml` —
+/// `ProjectConfig::resolve` retargets on the selector — so the global arm names
+/// the same file whether it was reached by the selector or by a walk that found
+/// nothing.
+///
+/// Takes the home and the `--global` selector as limbs rather than reading them
+/// off `Context`, the same way [`walked_to_project`] takes its three, so the
+/// pairing is testable without one.
+fn scope_and_config_path(
+    ocx_home: &Path,
+    project: Option<&ProjectIdentity>,
+    global: bool,
+) -> (ocx_lib::file_structure::RenderStampScope, PathBuf) {
+    use ocx_lib::file_structure::RenderStampScope;
+
+    match project {
+        // `identity.dir` is already `canonical_project_dir`'s answer, so the
+        // scope is built rather than re-derived.
+        Some(project) if !global => (
+            RenderStampScope::Project(project.dir.clone()),
+            project.config_path.clone(),
+        ),
+        Some(_) | None => (
+            RenderStampScope::Global,
+            ocx_lib::project::ProjectConfig::global_manifest_path(ocx_home),
+        ),
+    }
+}
+
+/// The two effective toolchain settings for one `file` tier, and the note that
+/// tier owes when its file exists but will not parse.
+///
+/// Three returned values of three distinct types, so there is no positional
+/// transposition for a tuple to make.
+///
+/// `activate` resolves through [`activation::activate_mode`] — the **one**
+/// site that owns that ladder, and the same call the per-prompt hook's
+/// `global_activate_mode` makes over these very bytes. A re-spelled
+/// `Ladder { .. }.resolve(ACTIVATE_FLOOR)` here would be a second floor no
+/// reader of `ocx_lib::activate::ACTIVATE_FLOOR` can see, which is the drift
+/// `ocx_lib::activate`'s module doc names. `pinned` resolves through
+/// [`pinned_for_project`](ocx_lib::package_manager::pinned_for_project) for
+/// exactly the same reason, and through the same call every other resolving
+/// site makes: `ocx shell state` declares no `--pinned`, so the `cli` tier is
+/// `None` here, and an inline `Ladder { .. }.resolve(PINNED_FLOOR)` would be a
+/// second floor beside the shared one.
+///
+/// # A manifest that will not parse leaves the `file` tier absent
+///
+/// Not an error, on either tier. Reporting "your activate mode is `env`" beside
+/// the note is the honest answer — that *is* what the ladder resolves to when
+/// the file cannot speak, and it is what the prompt itself does with the same
+/// bytes (`global_activate_mode`'s `unwrap_or_default`). Refusing here would
+/// break C-051's exit-0-in-every-reportable-state contract for the one command
+/// whose product is the explanation, the same reasoning `lock_refusal` states
+/// for its own tolerant read.
+///
+/// An **absent** file is not a broken one and owes no note: no `ocx.toml` in
+/// `$OCX_HOME` is the ordinary state of every machine that never ran `ocx self
+/// setup --toolchain-activate`.
+async fn toolchain_settings(config_path: &Path) -> (ocx_lib::activate::ActivateMode, bool, Option<Note>) {
+    let (config, note) = match ocx_lib::project::ProjectConfig::from_path(config_path).await {
+        Ok(config) => (config, None),
+        Err(error) if is_absent(&error) => (ocx_lib::project::ProjectConfig::default(), None),
+        Err(error) => {
+            // `log::debug!` alone would go to a stderr the hook discards
+            // (A-21), which is exactly how a typo'd `activate` came to fail
+            // open in silence: the prompt must stay lenient, so the diagnostic
+            // is where the user gets told.
+            ocx_lib::log::debug!("the toolchain manifest did not parse, so its settings are absent: {error}");
+            (
+                ocx_lib::project::ProjectConfig::default(),
+                Some(Note::ToolchainManifestUnparsed {
+                    manifest: config_path.to_path_buf(),
+                    detail: error.to_string(),
+                }),
+            )
+        }
+    };
+
+    (
+        activation::activate_mode(&config),
+        ocx_lib::package_manager::pinned_for_project(None, &config),
+        note,
+    )
+}
+
+/// Whether a project-tier read failed because the file simply is not there.
+///
+/// The one distinction [`toolchain_settings`] owes its note: an absent
+/// `$OCX_HOME/ocx.toml` is the ordinary state of a machine that never set the
+/// key, and a note on every such report would be a warning on the commonest
+/// benign state.
+fn is_absent(error: &ocx_lib::project::Error) -> bool {
+    use ocx_lib::project::error::ProjectErrorKind;
+
+    match error {
+        ocx_lib::project::Error::Project(error) => {
+            matches!(&error.kind, ProjectErrorKind::Io(io) if io.kind() == std::io::ErrorKind::NotFound)
+        }
+        _ => false,
+    }
 }
 
 /// Whether `ocx self setup` has wired this machine's shell.
@@ -1256,6 +1441,136 @@ mod tests {
         assert!(
             matches!(notes.as_slice(), [Note::PathsDefect { .. }]),
             "a malformed entry is a config error regardless of what granted the project: {notes:?}"
+        );
+    }
+
+    // ── C-056 / D-3 — the file tier is the reported scope's own manifest ────
+
+    /// **The defect this pairing exists to prevent.** With no project and no
+    /// `--global`, the report says `scope: global` and
+    /// `toolchain_home: $OCX_HOME/toolchain` — so its `activate` must come from
+    /// `$OCX_HOME/ocx.toml`, the very file the per-prompt hook reads
+    /// (`ocx_cli::command::self_group::activate`'s `global_activate_mode`,
+    /// `adr_toolchain_activation.md` D-3).
+    ///
+    /// Before this, the `file` tier was built from the resolved project alone
+    /// and `ProjectConfig::resolve` makes a CWD-walk miss a hard `None` with no
+    /// home-tier fallback — so after `ocx self setup --toolchain-activate bin`
+    /// a project-free shell composed nothing while this command answered
+    /// `activate: env`, from `OCX_TOOLCHAIN_ACTIVATE` ▸ floor. The one command
+    /// whose product is *"why does my shell do nothing"* contradicted the
+    /// reconciler in exactly the clean-shell case D-3 shipped for.
+    ///
+    /// `pinned` rides along: it is the same file tier, resolved from the same
+    /// read.
+    ///
+    /// Red state: return `PathBuf::new()` from `scope_and_config_path`'s global
+    /// arm (the pre-fix "no file tier at all") — the read then misses, the
+    /// ladder falls to its floors and both assertions flip.
+    #[tokio::test]
+    async fn d3_a_project_free_report_answers_from_the_ocx_home_manifest() {
+        let home = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            home.path().join(PROJECT_FILE),
+            "activate = \"bin\"\npinned = true\n[tools]\n",
+        )
+        .expect("write the global manifest");
+
+        let (scope, config_path) = scope_and_config_path(home.path(), None, false);
+        assert_eq!(
+            scope,
+            ocx_lib::file_structure::RenderStampScope::Global,
+            "no project and no --global is the global tier"
+        );
+        assert_eq!(
+            config_path,
+            home.path().join(PROJECT_FILE),
+            "and the global tier's own manifest is what answers for it"
+        );
+
+        let (activate, pinned, note) = toolchain_settings(&config_path).await;
+        assert_eq!(
+            activate,
+            ocx_lib::activate::ActivateMode::Bin,
+            "the global file states `bin`, and the hook obeys it, so the report must say it"
+        );
+        assert!(pinned, "the same read answers `pinned` for the same tier");
+        assert!(note.is_none(), "a manifest that parses owes no note; got {note:#?}");
+    }
+
+    /// The other two arms of the same pairing, so the global one above is not
+    /// the function's only demonstrated behaviour.
+    ///
+    /// Under `--global` the resolved project *is* `$OCX_HOME/ocx.toml`
+    /// (`ProjectConfig::resolve` retargets on the selector), so the global arm
+    /// names the same file whichever route reached it.
+    ///
+    /// Red state: drop the `if !global` guard and the third assertion reports
+    /// the project's manifest for a `--global` invocation.
+    #[tokio::test]
+    async fn the_file_tier_follows_the_reported_scope_on_every_arm() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let project = home.path().join("proj");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let manifest = project.join(PROJECT_FILE);
+        std::fs::write(&manifest, "activate = \"none\"\n").expect("write the project manifest");
+        let identity = ProjectIdentity::resolve(manifest).await.expect("resolve the fixture");
+
+        let (scope, config_path) = scope_and_config_path(home.path(), Some(&identity), false);
+        assert_eq!(
+            scope,
+            ocx_lib::file_structure::RenderStampScope::Project(identity.dir.clone())
+        );
+        assert_eq!(config_path, identity.config_path);
+        assert_eq!(
+            toolchain_settings(&config_path).await.0,
+            ocx_lib::activate::ActivateMode::None,
+            "a project in effect answers from its own manifest"
+        );
+
+        let (scope, config_path) = scope_and_config_path(home.path(), Some(&identity), true);
+        assert_eq!(
+            scope,
+            ocx_lib::file_structure::RenderStampScope::Global,
+            "--global reports the global tier even standing in a project"
+        );
+        assert_eq!(
+            config_path,
+            home.path().join(PROJECT_FILE),
+            "--global's file tier is the home's manifest, never the project's"
+        );
+    }
+
+    /// A typo'd `activate` fails **open** on the prompt path — the hook must
+    /// stay lenient over `$OCX_HOME/ocx.toml`, so the ladder falls to `env`,
+    /// the most-composing mode — and the hook discards the binary's stderr
+    /// (A-21). This note is therefore the user's only route to the answer.
+    ///
+    /// An **absent** manifest is not a broken one: it is the ordinary state of
+    /// every machine that never set the key, and a note there would be a
+    /// warning on the commonest benign state.
+    ///
+    /// Red state: return `None` instead of the `Some(Note::..)` in
+    /// `toolchain_settings`' error arm, and the second assertion flips.
+    #[tokio::test]
+    async fn an_unparseable_manifest_falls_to_the_floor_and_says_so() {
+        let home = tempfile::tempdir().expect("tempdir");
+
+        let (absent, pinned, note) = toolchain_settings(&home.path().join(PROJECT_FILE)).await;
+        assert_eq!(absent, ocx_lib::activate::ActivateMode::Env, "the floor answers");
+        assert!(!pinned, "the `pinned` floor answers too");
+        assert!(note.is_none(), "an absent manifest is benign; got {note:#?}");
+
+        std::fs::write(home.path().join(PROJECT_FILE), "activate = \"nnone\"\n").expect("write");
+        let (activate, _, note) = toolchain_settings(&home.path().join(PROJECT_FILE)).await;
+        assert_eq!(
+            activate,
+            ocx_lib::activate::ActivateMode::Env,
+            "the prompt fails open here, so the report must report the mode that actually applies"
+        );
+        assert!(
+            matches!(note, Some(Note::ToolchainManifestUnparsed { .. })),
+            "a restriction silently ignored is the state the note exists for; got {note:#?}"
         );
     }
 }

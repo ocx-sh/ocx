@@ -190,24 +190,14 @@ impl LauncherShim {
             process_env.set("PATH", pruned);
         }
 
-        let resolved = process_env.resolve_command(name.as_str());
-        // Two signals, because `remove_segment` compares segments exactly: the
-        // bare-name fallback `resolve_command` returns when `PATH` yields
-        // nothing, and — belt for a segment the strip could not recognize —
-        // any answer that *resolves* back inside the shim tree. Either way the
-        // claim went unfulfilled; neither may be allowed to reach `exec`.
-        if resolved == std::path::Path::new(name.as_str())
-            || resolves_inside(resolved.clone(), shim_bin.clone()).await?
-        {
-            // Reported as an unfulfilled claim rather than left to the exec's
-            // bare `ENOENT`, so a wrong `binaries` claim is attributed to the
-            // publisher instead of reading as a missing package.
-            return Err(anyhow::Error::new(PackageErrorKind::ShimClaimUnfulfilled(Box::new(
-                ShimClaim {
-                    package: self.identifier.clone(),
-                    name,
-                },
-            ))));
+        // Two signals, because `remove_segment` compares segments exactly: a
+        // name the composed `PATH` does not provide at all (`resolve_claimed`),
+        // and — belt for a segment the strip could not recognize — any answer
+        // that *resolves* back inside the shim tree. Either way the claim went
+        // unfulfilled; neither may be allowed to reach `exec`.
+        let resolved = resolve_claimed(&process_env, &self.identifier, name.clone())?;
+        if resolves_inside(resolved.clone(), shim_bin.clone()).await? {
+            return Err(shim_claim_unfulfilled(&self.identifier, name));
         }
 
         // Resolved once above, then handed to both the record and the launch: a
@@ -273,6 +263,47 @@ impl LauncherShim {
         }
         .resolve()
     }
+}
+
+/// Resolves the claimed `name` on the already-pruned composed `PATH`, mapping
+/// **only** a total miss back to the claim refusal.
+///
+/// The seam exists because `execute` needs a full `Context` and ends in
+/// `execvp`, so the mapping has no other place a test can drive it — and the
+/// property is worth a test rather than a source scan: `ShimClaimUnfulfilled`
+/// and `CommandResolutionError::NotFound` both classify to 65, so replacing
+/// this with a bare `?` keeps the exit code and loses the attribution that
+/// names the publisher and quotes the claim.
+///
+/// `NotFound` is that first signal. **Any other kind — C-069's
+/// `TrampolineRefused` — is not a claim failure and propagates as itself**: the
+/// package did provide the name, an ocx trampoline answered for it, and calling
+/// that an unfulfilled claim would blame the publisher for a loop guard firing.
+fn resolve_claimed(
+    process_env: &env::Env,
+    identifier: &PinnedIdentifier,
+    name: BinaryName,
+) -> anyhow::Result<std::path::PathBuf> {
+    match process_env.resolve_command(name.as_str()) {
+        Ok(resolved) => Ok(resolved),
+        Err(env::CommandResolutionError::NotFound { .. }) => Err(shim_claim_unfulfilled(identifier, name)),
+        Err(error) => Err(anyhow::Error::new(error)),
+    }
+}
+
+/// The claim-unfulfilled refusal, built at both of the guard's signals.
+///
+/// Reported as an unfulfilled claim rather than left to the exec's bare
+/// `ENOENT`, so a wrong `binaries` claim is attributed to the publisher instead
+/// of reading as a missing package. One function because C-009 split the guard
+/// into a `match` arm and an `if`, and the error must be byte-identical from
+/// both — the message is the only thing distinguishing this from a generic
+/// resolution failure, since the two share an exit code.
+fn shim_claim_unfulfilled(package: &PinnedIdentifier, name: BinaryName) -> anyhow::Error {
+    anyhow::Error::new(PackageErrorKind::ShimClaimUnfulfilled(Box::new(ShimClaim {
+        package: package.clone(),
+        name,
+    })))
 }
 
 /// Whether `resolved` lands inside `shim_bin` once both paths are resolved.
@@ -821,5 +852,105 @@ mod tests {
         let config = project("lazy-report = \"progress\"\n\n[tools]\ncmake = \"ocx.sh/tool/cmake:3.28\"\n");
         let parsed = shim(&[], &[PINNED, "--", "cmake"]);
         assert_eq!(parsed.report(Some(&config)), ocx_lib::lazy::LazyReport::Progress);
+    }
+
+    // ── C-057 / S-010: an unresolvable claim keeps its own message ─────────
+
+    /// C-057: an unresolvable claimed name still produces the
+    /// `ShimClaimUnfulfilled` message **naming the package and the claim**.
+    ///
+    /// Both this error and `CommandResolutionError::NotFound` classify to 65,
+    /// so the exit code cannot catch a regression here — replacing the mapping
+    /// with a bare `?` keeps the code and loses the attribution. The assertion
+    /// is therefore on the rendered message text.
+    #[test]
+    fn an_unfulfilled_claim_renders_a_message_naming_the_package_and_the_name() {
+        let name = BinaryName::try_from("cmake").expect("fixture is a valid binary name");
+        let error = shim_claim_unfulfilled(&pinned(), name);
+        let message = format!("{error:#}");
+
+        assert!(
+            message.contains("cmake"),
+            "the message must name the claim, got: {message}"
+        );
+        assert!(
+            message.contains(&pinned().to_string()),
+            "the message must name the package that made the claim, got: {message}"
+        );
+        assert!(
+            message.contains("claims the name"),
+            "the message must attribute the failure to the publisher, got: {message}"
+        );
+        assert_eq!(
+            ocx_lib::cli::classify_error(error.as_ref()),
+            ocx_lib::cli::ExitCode::DataError,
+            "C-057: the refusal is 65, the same code a bare resolution failure carries"
+        );
+    }
+
+    /// C-057, through the seam `execute` resolves on: a name the composed
+    /// `PATH` does not provide keeps the `ShimClaimUnfulfilled` attribution
+    /// rather than degrading to a generic resolution error.
+    ///
+    /// Both errors classify to 65, so only the message can catch a bare `?`
+    /// here — which is why the assertion is on the rendered text.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_claimed_maps_a_total_miss_back_to_the_claim_refusal() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        let mut process_env = env::Env::clean();
+        process_env.set("PATH", empty.path());
+
+        let name = BinaryName::try_from("cmake").expect("fixture is a valid binary name");
+        let error = resolve_claimed(&process_env, &pinned(), name).expect_err("an empty PATH provides no claim");
+        let message = format!("{error:#}");
+
+        assert!(
+            message.contains("claims the name"),
+            "a total miss must stay attributed to the publisher, got: {message}"
+        );
+        assert!(
+            message.contains("cmake") && message.contains(&pinned().to_string()),
+            "the message must name both the claim and the package, got: {message}"
+        );
+    }
+
+    /// C-069 through the same seam: a **trampoline** answer propagates as
+    /// itself, never as an unfulfilled claim.
+    ///
+    /// The package did provide the name — an ocx trampoline answered for it —
+    /// so blaming the publisher would misattribute a loop guard firing. This is
+    /// the half a blanket `Err(_) => claim refusal` arm would swallow.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_claimed_propagates_a_trampoline_refusal_as_itself() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let trampoline = dir.path().join("cmake");
+        std::fs::write(
+            &trampoline,
+            format!("#!/bin/sh\n{}\nexec ocx exec -- cmake \"$@\"\n", env::TRAMPOLINE_MARKER),
+        )
+        .expect("write the trampoline fixture");
+        std::fs::set_permissions(&trampoline, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let mut process_env = env::Env::clean();
+        process_env.set("PATH", dir.path());
+
+        let name = BinaryName::try_from("cmake").expect("fixture is a valid binary name");
+        let error = resolve_claimed(&process_env, &pinned(), name).expect_err("a trampoline answer is refused");
+
+        assert!(
+            matches!(
+                error.downcast_ref::<env::CommandResolutionError>(),
+                Some(env::CommandResolutionError::TrampolineRefused { .. })
+            ),
+            "C-069's refusal must reach the caller as itself, got: {error:#}"
+        );
+        assert!(
+            !format!("{error:#}").contains("claims the name"),
+            "a refused trampoline is not an unfulfilled claim"
+        );
     }
 }

@@ -5,6 +5,7 @@ pub mod composer;
 pub mod concurrency;
 pub mod error;
 pub mod launcher;
+pub mod mutate;
 
 pub mod tasks;
 
@@ -278,8 +279,10 @@ mod install_info_identifier_tests {
 }
 
 // Re-export types needed by other modules and CLI commands.
+pub use composer::{ToolchainLinks, pinned_for_project, pinned_ladder_for_project};
 pub use concurrency::Concurrency;
 pub use error::DependencyError;
+pub use mutate::{MutationOutcome, ToolchainRender, default_group_roots, skipped_render_warnings};
 pub use tasks::attest::{AttestOptions, AttestReport};
 pub use tasks::auto_verify::{AutoVerify, AutoVerifyInput};
 pub use tasks::clean::{CleanResult, CleanedObject};
@@ -293,6 +296,11 @@ pub use tasks::managed_config::{ManagedConfigRefreshOutcome, ManagedConfigUpdate
 pub use tasks::patch_discovery::PatchDiscoveryMode;
 pub use tasks::patch_publish::PatchPublishReport;
 pub use tasks::patch_sync::PatchSyncReport;
+// The request/report vocabulary `ocx_cli` needs to spell a `render_toolchain`
+// call. Every other task's types are re-exported here; these five were the
+// omission (RUL-48) that made `PackageManager::render_toolchain` unreachable
+// from outside the crate.
+pub use tasks::render_toolchain::{RenderOutcome, RenderReport, RenderRequest, RenderedArtifact, RenderedItem};
 pub use tasks::resolve::{
     AdmittedClaims, ChainBlob, ChainRole, EnvScope, PatchOverlay, PatchProvenance, PatchRootScope, ResolvedChain,
     SitePatchRoots,

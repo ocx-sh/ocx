@@ -30,34 +30,24 @@
 //!   consumer key on one fact.
 //!
 //! Refusals live in [`PackageErrorKind`] and are shared with the consuming half
-//! (`ocx launcher shim`, WP-7): a closure whose names are not enumerable, and a
-//! claimed name equal to ocx's own (C-009).
+//! (`ocx launcher shim`, WP-7): a closure whose names are not enumerable. A
+//! claimed name equal to ocx's own is **not** a refusal (plan contract C-024,
+//! [`toolchain_names`](super::toolchain_names) D-4) — it renders like any
+//! other name, and the self-resolution hazard that once justified refusing it
+//! is closed on the trampoline's own re-entry path instead (WP-6).
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use crate::file_structure::{FileStructure, ShimDir};
 use crate::oci;
-use crate::package::metadata::{self, BinaryName};
-use crate::package_manager::composer;
-use crate::package_manager::error::{PackageErrorKind, ShimClaim};
+use crate::package::metadata::BinaryName;
+use crate::package_manager::error::PackageErrorKind;
 
 use super::super::PackageManager;
 use super::common::ClosureNode;
 use super::lazy_advisory::{LazyAdvisory, classify_lazy_advisories};
-
-/// The surface a shim directory is generated from: a deferred tool is composed
-/// onto a **consumer's** `PATH`, never into its own private view, so every
-/// admission and crossing decision here reads the interface axis (C-008).
-const INTERFACE_SURFACE: bool = false;
-
-/// The one name a shim may never carry (C-009).
-///
-/// The literal, not `current_exe()`'s stem: the generated body resolves
-/// `${OCX_BINARY_PIN:-ocx}`, whose *fallback* is this string on every build
-/// however the running binary is named, so a shim called `ocx` ahead on `PATH`
-/// re-invokes itself whenever the pin is unset.
-const OCX_BINARY_NAME: &str = "ocx";
+use super::toolchain_names::{NotEnumerablePolicy, exposed_names};
 
 /// Everything one [`PackageManager::prepare_lazy`] call produced (plan
 /// contract C-008, F-5).
@@ -115,9 +105,7 @@ impl PackageManager {
     ///
     /// - [`PackageErrorKind::ShimNamesNotEnumerable`] — a closure node claims
     ///   neither `binaries` nor entry points, so there is no name set to
-    ///   generate from (C-009).
-    /// - [`PackageErrorKind::ShimNameShadowsOcx`] — a claimed name is ocx's own
-    ///   binary name; a shim for it would re-invoke itself (C-009).
+    ///   generate from (C-022, [`NotEnumerablePolicy::Refuse`]).
     /// - [`PackageErrorKind::ShimNameInvalid`] — a declared entry point name is
     ///   a valid `EntrypointName` but not a valid [`BinaryName`] (every
     ///   Windows-reserved device name is one: `nul`, `con`, `com1`…), so no
@@ -188,17 +176,15 @@ impl PackageManager {
             .map_err(PackageErrorKind::Internal)?;
         link_closure_config_blobs(fs, &staged_dir, &nodes).await?;
 
-        // C-008 (A2): the name set is the *interface surface*, so the closure
-        // is pre-filtered by the composer's own admission rule before
-        // `interface_shim_names` — which stays a pure function over whatever it
-        // is handed — and a sealed or private dependency's `binaries` claim
-        // therefore gets no launcher, exactly as under eager composition.
-        let admitted: Vec<&ClosureNode> = nodes
-            .iter()
-            .filter(|node| super::inspect::admitted_on_surface(node, INTERFACE_SURFACE))
-            .collect();
-        let names = interface_shim_names(admitted)?;
-        write_shim_launchers(&staged_dir.bin(), &resolved.pinned, &names).await?;
+        // C-021 / C-023: `exposed_names` does its own admission filtering (a
+        // sealed or private dependency's `binaries` claim gets no launcher,
+        // exactly as under eager composition), so `nodes` is handed over
+        // whole. A deferred tool has no fallback if a node in its closure
+        // turns out unenumerable — `Refuse` (C-022) — and only the keys go on;
+        // ownership/shadow tracking is for `ocx inspect`, not this call site.
+        let names = exposed_names(&nodes, NotEnumerablePolicy::Refuse)?;
+        let names: BTreeSet<BinaryName> = names.into_keys().collect();
+        write_shim_launchers(&staged_dir.bin(), &resolved.pinned, &names, &fs.shim_bin).await?;
 
         publish_shim_dir(&staged_dir, &destination).await?;
 
@@ -246,76 +232,6 @@ async fn stage_shim_dir(file_structure: &FileStructure) -> Result<tempfile::Temp
     .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(&root, e)))
 }
 
-/// The interface-surface name set a shim tree is generated from: every
-/// `binaries` claim and every entry point name on the closure's interface
-/// surface, deduplicated (C-008).
-///
-/// One set, not two lists: the generated body does not branch on name kind
-/// (ADR D-b) and a single flat `bin/` holds the result, so a name claimed on
-/// both axes yields exactly one launcher. PATH precedence is pre-applied in the
-/// sense that it is settled elsewhere and needs no encoding here — the real
-/// `entrypoints/` and `bin/` directories both outrank `shims/` at compose time
-/// (C-012), and the trigger re-resolves the name on the materialized PATH
-/// (C-011).
-///
-/// # Errors
-///
-/// - [`PackageErrorKind::ShimNamesNotEnumerable`] — a node declares neither
-///   `binaries` nor entry points (C-009).
-/// - [`PackageErrorKind::ShimNameShadowsOcx`] — a claimed name is the literal
-///   `ocx`, which is what the generated body's `${OCX_BINARY_PIN:-ocx}`
-///   fallback resolves to on every build, however this binary is named (C-009).
-/// - [`PackageErrorKind::ShimNameInvalid`] — a declared entry point name does
-///   not survive conversion to a [`BinaryName`] (see the method's `# Errors`).
-fn interface_shim_names<'a>(
-    nodes: impl IntoIterator<Item = &'a ClosureNode>,
-) -> Result<BTreeSet<BinaryName>, PackageErrorKind> {
-    let mut names = BTreeSet::new();
-    for node in nodes {
-        // `Some(empty)` is enumerable — the publisher asserted zero interface
-        // executables — and yields an empty `bin/`, which is still a complete
-        // tree: `PATH` is not all a shim dir provides, the ref-linked config
-        // blobs carry the env (C-020). Only `None` *and* no entry points
-        // leaves nothing to enumerate.
-        if node.binaries.is_none() && node.entrypoints.is_empty() {
-            return Err(PackageErrorKind::ShimNamesNotEnumerable {
-                package: node.identifier.clone(),
-            });
-        }
-
-        let mut claimed: Vec<BinaryName> = Vec::new();
-        if composer::carrier_crosses(metadata::Binaries::IMPLICIT_VISIBILITY, node.is_root, INTERFACE_SURFACE)
-            && let Some(claim) = &node.binaries
-        {
-            claimed.extend(claim.iter().cloned());
-        }
-        if composer::carrier_crosses(
-            metadata::Entrypoints::IMPLICIT_VISIBILITY,
-            node.is_root,
-            INTERFACE_SURFACE,
-        ) {
-            for entrypoint in &node.entrypoints {
-                // Not total: every Windows-reserved device name is a valid
-                // slug and none is a valid `BinaryName`. Refusing beats
-                // skipping — a quietly incomplete shim set is the failure
-                // C-009 exists to prevent.
-                claimed.push(BinaryName::try_from(entrypoint.as_str()).map_err(PackageErrorKind::ShimNameInvalid)?);
-            }
-        }
-
-        for name in claimed {
-            if name.as_str() == OCX_BINARY_NAME {
-                return Err(PackageErrorKind::ShimNameShadowsOcx(Box::new(ShimClaim {
-                    package: node.identifier.clone(),
-                    name,
-                })));
-            }
-            names.insert(name);
-        }
-    }
-    Ok(names)
-}
-
 /// Writes one generated launcher per name into `bin_dir`, each dispatching to
 /// `ocx launcher shim '<package>' -- "$(basename "$0")" "$@"` (C-008, C-010).
 ///
@@ -327,13 +243,26 @@ fn interface_shim_names<'a>(
 /// valid entry point names (`c++`, `python3.13`, `MSBuild`), which is the whole
 /// point of the looser grammar (C-008 (b), ADR D8).
 ///
+/// On Windows this also writes each name's `.exe`/`.shimref` pair (C-026): the
+/// extensionless body above is a shell script, and a directory of those on a
+/// Windows `PATH` is a directory of non-executables. See
+/// [`write_windows_shim_slot`].
+///
 /// # Errors
 ///
 /// Returns an error if creating `bin_dir` or writing any launcher fails.
+#[cfg_attr(
+    not(windows),
+    expect(
+        unused_variables,
+        reason = "shim_bin feeds the Windows shim-slot producer only (C-026)"
+    )
+)]
 async fn write_shim_launchers(
     bin_dir: &Path,
     package: &oci::PinnedIdentifier,
     names: &BTreeSet<BinaryName>,
+    shim_bin: &crate::file_structure::ShimBinStore,
 ) -> Result<(), PackageErrorKind> {
     // Created even for an empty name set: `bin/` is the completeness marker,
     // and a package claiming zero executables still has a complete tree.
@@ -358,7 +287,84 @@ async fn write_shim_launchers(
                 .await
                 .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(&path, e)))?;
         }
+        #[cfg(windows)]
+        write_windows_shim_slot(bin_dir, name, package, shim_bin).await?;
     }
+    Ok(())
+}
+
+/// Windows producer for a single name's shim slot (C-026): hardlinks
+/// `<name>.exe` from `shim_bin` (the same committed blob
+/// [`crate::package_manager::launcher::generate`] hardlinks for an installed
+/// package's `entrypoints/`) and writes its `<name>.shimref` sidecar — one
+/// line, the pinned identifier, newline-terminated (RUL-35) — so
+/// `ocx launcher shim`'s Windows dispatch (`materialize_lazy`'s
+/// `GENERATED_SIBLING_EXTENSIONS`) can find it. `.shimref`, never `.shim`:
+/// `.shim` names an installed package's sidecar under `entrypoints/`, and a
+/// shim tree's `bin/` is a different grammar (`materialize_lazy.rs`).
+///
+/// The `.exe` is linked before the `.shimref` is written, mirroring the
+/// sibling `.shim` producer's write-ordering postcondition (ADR Contract 2):
+/// the only recoverable partial state on a mid-write fault is
+/// exe-present/sidecar-absent, never a `.shimref` whose `.exe` is missing.
+///
+/// `hardlink::create`, never `hardlink::update` (RUL-33): the tree is staged
+/// fresh into a `TempDir` and published by one atomic rename (C-022), so a
+/// slot can never land on an occupied path — an occupied slot is a bug in the
+/// caller, and this surfaces it as `EEXIST` rather than converging on it.
+///
+/// Not exercised by this workspace's `cargo check` gate: `#[cfg(windows)]`
+/// code compiles only when cross-compiling for a Windows target, which this
+/// repository's toolchain cannot do without an MSVC host (tracked separately,
+/// R-W9). The Implement stage's merge gate (RUL-36) type-checks this arm by
+/// hand via a local flip, applied to **every** `cfg` in this file, not only
+/// the `#[cfg(windows)]` attributes: `cfg(windows)` → `cfg(unix)` **and**
+/// `not(windows)` → `not(unix)`. The second rewrite is load-bearing, not
+/// cosmetic — `write_shim_launchers` carries a sibling
+/// `#[cfg_attr(not(windows), expect(unused_variables, …))]` on its `shim_bin`
+/// parameter, and `not(windows)` does not contain the substring `cfg(windows)`,
+/// so a flip that only rewrites the latter leaves that attribute evaluating
+/// true on Linux. Once the flip makes this arm's call site live, `shim_bin` is
+/// used, the `expect`'s lint no longer fires, and an unfulfilled `#[expect]`
+/// is itself a hard error under `-D warnings`
+/// (`unfulfilled_lint_expectations`) — so the doc names both halves because
+/// running only the first produces a clippy failure, not a clean type-check.
+/// The flip proves the arm compiles under the same borrow/type rules the
+/// Windows target would apply, and nothing more: `crate::hardlink::create` is
+/// a plain `std::fs::hard_link` on the flipped host's real filesystem and
+/// `crate::shim::SHIM_BYTES` is `&[]` off Windows, so the flip *does* write a
+/// real (zero-byte-sourced) `.shimref` to that filesystem — it cannot observe
+/// Windows-only failure modes (`ERROR_*` codes, NTFS/ReFS/FAT/network-share
+/// path length limits, file locking). Actual Windows behaviour is unverified
+/// until this arm runs on a real Windows host or CI runner.
+///
+/// # Errors
+///
+/// Returns an error if publishing the shared shim blob, hardlinking it, or
+/// writing the `.shimref` sidecar fails — including an occupied `.exe` slot
+/// (`EEXIST`) and a cross-device `shim_bin` store (`CrossesDevices`, no copy
+/// fallback, matching [`crate::hardlink::create`]'s own contract).
+#[cfg(windows)]
+async fn write_windows_shim_slot(
+    bin_dir: &Path,
+    name: &BinaryName,
+    package: &oci::PinnedIdentifier,
+    shim_bin: &crate::file_structure::ShimBinStore,
+) -> Result<(), PackageErrorKind> {
+    let exe_path = bin_dir.join(format!("{}.exe", name.as_str()));
+    let shimref_path = bin_dir.join(format!("{}.shimref", name.as_str()));
+
+    let shim_bin_path = shim_bin.ensure().await.map_err(PackageErrorKind::Internal)?;
+    crate::hardlink::create(&shim_bin_path, &exe_path).map_err(PackageErrorKind::Internal)?;
+
+    // Exactly `<pinned identifier>\n` — the whole grammar RUL-35's golden
+    // literal pins, and the exact shape `ocx_shim::core::parse_shimref_sidecar`
+    // reads back (see `assert_shimref_grammar` and the byte-exact test below).
+    let body = format!("{package}\n");
+    tokio::fs::write(&shimref_path, body.as_bytes())
+        .await
+        .map_err(|e| PackageErrorKind::Internal(crate::error::file_error(&shimref_path, e)))?;
+
     Ok(())
 }
 
@@ -480,7 +486,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
-    use crate::package::metadata::{Binaries, EntrypointName};
+    use crate::package::metadata::Binaries;
 
     /// An arbitrary valid SHA-256 hex, built from a one-byte seed so each
     /// fixture node can carry a digest distinguishable from its neighbours'.
@@ -495,40 +501,30 @@ mod tests {
         .expect("digest-bearing identifier is pinned")
     }
 
+    /// The exact pinned identifier WP-6's `ocx_shim::core` test module names
+    /// `PINNED_IDENTIFIER` — `ocx.sh/tool/cmake:3.28@sha256:0000…0001`. A
+    /// dedicated fixture rather than a call through [`pinned`]/[`digest_from`]:
+    /// those two build a `ns/<repo>@example.com` identifier with no tag and a
+    /// seed-repeated digest, which cannot express this literal's registry,
+    /// repository, tag, or trailing-`1` digest without widening a helper every
+    /// other test in this module also uses.
+    #[cfg(windows)]
+    fn golden_pinned() -> oci::PinnedIdentifier {
+        let digest = oci::Digest::Sha256(format!("{}1", "0".repeat(63)));
+        oci::PinnedIdentifier::try_from(
+            oci::Identifier::new_registry("tool/cmake", "ocx.sh")
+                .clone_with_tag("3.28")
+                .clone_with_digest(digest),
+        )
+        .expect("digest-bearing identifier is pinned")
+    }
+
     fn binaries(names: &[&str]) -> Binaries {
         let set: BTreeSet<BinaryName> = names
             .iter()
             .map(|n| BinaryName::try_from(*n).expect("fixture binary name is valid"))
             .collect();
         Binaries::try_from(set).expect("fixture binaries claim is valid")
-    }
-
-    fn entrypoints(names: &[&str]) -> Vec<EntrypointName> {
-        names
-            .iter()
-            .map(|n| EntrypointName::try_from((*n).to_string()).expect("fixture entrypoint name is valid"))
-            .collect()
-    }
-
-    /// A closure node carrying only what the interface-surface name set is
-    /// derived from; every other field is the inert value for this axis.
-    fn node(
-        identifier: oci::PinnedIdentifier,
-        claimed: Option<&[&str]>,
-        entries: &[&str],
-        is_root: bool,
-    ) -> ClosureNode {
-        ClosureNode {
-            config_digest: identifier.digest(),
-            identifier,
-            effective_visibility: None,
-            binaries: claimed.map(binaries),
-            entrypoints: entrypoints(entries),
-            env: Vec::new(),
-            integrations: Vec::new(),
-            dependencies: Vec::new(),
-            is_root,
-        }
     }
 
     /// Same as [`node`] but with the config-blob digest decoupled from the
@@ -552,12 +548,15 @@ mod tests {
         }
     }
 
-    fn names(set: &BTreeSet<BinaryName>) -> Vec<&str> {
-        set.iter().map(BinaryName::as_str).collect()
-    }
-
     fn shim_dir_at(path: PathBuf) -> ShimDir {
         ShimDir { dir: path }
+    }
+
+    /// A scratch [`crate::file_structure::ShimBinStore`] rooted under the
+    /// test's own tempdir — never the real `$OCX_HOME`, matching
+    /// `launcher::generate`'s own test fixture.
+    fn shim_bin_store(tmp: &Path) -> crate::file_structure::ShimBinStore {
+        crate::file_structure::ShimBinStore::new(tmp.join("shim_bin"))
     }
 
     /// Stages a shim tree at `dir` whose `bin/` holds one file named `marker`,
@@ -587,141 +586,6 @@ mod tests {
         found
     }
 
-    // ── C-008: the interface-surface name set ───────────────────────────────
-
-    /// C-008: the name set is `binaries ∪ entrypoints`.
-    #[test]
-    fn interface_shim_names_unions_binaries_and_entrypoint_names() {
-        let nodes = vec![node(pinned("ns/cmake", "a"), Some(&["cmake"]), &["ctest"], true)];
-
-        let set = interface_shim_names(&nodes).expect("an enumerable closure yields a name set");
-
-        assert_eq!(names(&set), vec!["cmake", "ctest"]);
-    }
-
-    /// C-008: "a name claimed on both axes yields exactly one launcher" — the
-    /// set is flat, so `bin/` never holds two entries for one name.
-    #[test]
-    fn interface_shim_names_yields_one_name_when_both_axes_claim_it() {
-        let nodes = vec![node(pinned("ns/cmake", "a"), Some(&["cmake"]), &["cmake"], true)];
-
-        let set = interface_shim_names(&nodes).expect("an enumerable closure yields a name set");
-
-        assert_eq!(names(&set), vec!["cmake"], "a doubly-claimed name must appear once");
-    }
-
-    /// C-008: the set is the *closure's* interface surface, so a dependency's
-    /// claims are in it too — not just the root's.
-    #[test]
-    fn interface_shim_names_unions_across_every_closure_node() {
-        let nodes = vec![
-            node(pinned("ns/zlib", "b"), Some(&["zlib-flate"]), &[], false),
-            node(pinned("ns/cmake", "a"), Some(&["cmake"]), &[], true),
-        ];
-
-        let set = interface_shim_names(&nodes).expect("an enumerable closure yields a name set");
-
-        assert_eq!(names(&set), vec!["cmake", "zlib-flate"]);
-    }
-
-    // ── C-009: the two refusals, plus the F-5 conversion refusal ────────────
-
-    /// C-009: a node claiming neither `binaries` nor entry points makes the
-    /// name set non-enumerable, and the error names *that node* — which may be
-    /// a dependency, not the tool the user asked for.
-    #[test]
-    fn interface_shim_names_refuses_a_node_claiming_neither_binaries_nor_entrypoints() {
-        let silent = pinned("ns/zlib", "b");
-        let nodes = vec![
-            node(silent.clone(), None, &[], false),
-            node(pinned("ns/cmake", "a"), Some(&["cmake"]), &[], true),
-        ];
-
-        let error = interface_shim_names(&nodes).expect_err("a non-enumerable closure is refused");
-
-        match error {
-            PackageErrorKind::ShimNamesNotEnumerable { package } => {
-                assert_eq!(package, silent, "the refusal must name the node that claims nothing");
-            }
-            other => panic!("expected ShimNamesNotEnumerable, got {other:?}"),
-        }
-    }
-
-    /// C-009 / F-8: the refusal fires only when a node has **no** `binaries`
-    /// **and** no entry points. A node declaring entry points and no `binaries`
-    /// claim is perfectly enumerable — keying the refusal on
-    /// `Surface::binaries_complete` would over-refuse it.
-    #[test]
-    fn interface_shim_names_admits_a_node_with_entrypoints_and_no_binaries_claim() {
-        let nodes = vec![node(pinned("ns/cmake", "a"), None, &["cmake"], true)];
-
-        let set = interface_shim_names(&nodes).expect("entry points alone make the set enumerable");
-
-        assert_eq!(names(&set), vec!["cmake"]);
-    }
-
-    /// C-009: a claimed `ocx` would re-resolve to itself through the generated
-    /// body's `${OCX_BINARY_PIN:-ocx}` fallback.
-    #[test]
-    fn interface_shim_names_refuses_the_literal_ocx_name() {
-        let shadowing = pinned("ns/tool", "a");
-        let nodes = vec![node(shadowing.clone(), Some(&["ocx"]), &[], true)];
-
-        let error = interface_shim_names(&nodes).expect_err("a claimed 'ocx' is refused");
-
-        match error {
-            PackageErrorKind::ShimNameShadowsOcx(claim) => {
-                assert_eq!(claim.package, shadowing);
-                assert_eq!(claim.name.as_str(), "ocx");
-            }
-            other => panic!("expected ShimNameShadowsOcx, got {other:?}"),
-        }
-    }
-
-    /// C-009 F-7: the predicate is the **literal** `ocx`, not
-    /// `current_exe()`'s stem. This test binary is not named `ocx`, so an
-    /// implementation that compared against the running binary's own stem
-    /// would refuse this name — and would permit `ocx` on a renamed build,
-    /// which is backwards.
-    #[test]
-    fn interface_shim_names_admits_a_name_equal_to_this_binarys_own_stem() {
-        let current = std::env::current_exe().expect("the test binary has a path");
-        let stem = current
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .expect("the test binary's stem is UTF-8")
-            .to_string();
-        let stem = BinaryName::try_from(stem).expect("a cargo test binary's stem is a valid BinaryName");
-        assert_ne!(stem.as_str(), "ocx", "this test binary must not itself be named 'ocx'");
-
-        let nodes = vec![node(pinned("ns/tool", "a"), Some(&[stem.as_str()]), &[], true)];
-
-        let set = interface_shim_names(&nodes).expect("only the literal 'ocx' shadows");
-
-        assert_eq!(names(&set), vec![stem.as_str()]);
-    }
-
-    /// C-008 (F-5 decision): every Windows-reserved device name is a valid
-    /// slug — hence a valid `EntrypointName` — and none is a valid
-    /// `BinaryName`. Such a name **refuses the package**; skipping it would
-    /// publish a quietly incomplete shim set, the failure C-009 exists to
-    /// prevent.
-    #[test]
-    fn interface_shim_names_refuses_an_entrypoint_name_that_is_not_a_valid_binary_name() {
-        // Guards the premise: `nul` really is a legal entry point name today.
-        EntrypointName::try_from("nul".to_string()).expect("'nul' is a valid slug, hence a valid EntrypointName");
-        assert!(BinaryName::try_from("nul").is_err(), "'nul' must not be a BinaryName");
-
-        let nodes = vec![node(pinned("ns/tool", "a"), Some(&["tool"]), &["nul"], true)];
-
-        let error = interface_shim_names(&nodes).expect_err("an unconvertible entry point name refuses the package");
-
-        assert!(
-            matches!(error, PackageErrorKind::ShimNameInvalid(_)),
-            "expected ShimNameInvalid, got {error:?}"
-        );
-    }
-
     // ── C-008 / C-003: the generated launchers ──────────────────────────────
 
     /// C-008: one artifact per name, written into `bin/` — and C-003: never at
@@ -735,8 +599,9 @@ mod tests {
             .into_iter()
             .map(|n| BinaryName::try_from(n).unwrap())
             .collect();
+        let shim_bin = shim_bin_store(tempdir.path());
 
-        write_shim_launchers(&staged.bin(), &package, &set)
+        write_shim_launchers(&staged.bin(), &package, &set, &shim_bin)
             .await
             .expect("launchers are written");
 
@@ -762,8 +627,9 @@ mod tests {
         let staged = shim_dir_at(tempdir.path().join("staged"));
         let package = pinned("ns/cmake", "a");
         let set: BTreeSet<BinaryName> = std::iter::once(BinaryName::try_from("cmake").unwrap()).collect();
+        let shim_bin = shim_bin_store(tempdir.path());
 
-        write_shim_launchers(&staged.bin(), &package, &set)
+        write_shim_launchers(&staged.bin(), &package, &set, &shim_bin)
             .await
             .expect("launchers are written");
 
@@ -790,8 +656,9 @@ mod tests {
         let staged = shim_dir_at(tempdir.path().join("staged"));
         let package = pinned("ns/cmake", "a");
         let set: BTreeSet<BinaryName> = std::iter::once(BinaryName::try_from("cmake").unwrap()).collect();
+        let shim_bin = shim_bin_store(tempdir.path());
 
-        write_shim_launchers(&staged.bin(), &package, &set)
+        write_shim_launchers(&staged.bin(), &package, &set, &shim_bin)
             .await
             .expect("launchers are written");
 
@@ -800,6 +667,292 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o111, 0o111, "a generated launcher must be executable");
+    }
+
+    // ── C-026: the Windows shim slot ────────────────────────────────────────
+    //
+    // EVERY test in this section is `#[cfg(windows)]`, because
+    // `write_windows_shim_slot` is. **No gate in this repository compiles
+    // them** (R-W9): `task rust:check:windows-cfg` is scoped to `ocx_shim`,
+    // and `cargo check -p ocx_lib --target x86_64-pc-windows-msvc` dies in
+    // `aws-lc-sys` on a non-MSVC host. They are written from C-026 and the
+    // `.shimref` grammar `ocx_shim::core::parse_shimref_sidecar` already
+    // enforces, and the Implement stage must type-check the arm by hand
+    // before merging (see the Specify report's R-W9 procedure).
+
+    /// The five read-side rules `ocx_shim::core::parse_one_line` applies to a
+    /// `.shimref`, plus its pinned-identifier clause, asserted against the
+    /// bytes this producer writes.
+    ///
+    /// Restated here rather than imported: `ocx_lib` cannot depend on
+    /// `ocx_shim` (the shim is a standalone binary crate with no library
+    /// surface `ocx_lib` may link), so producer and reader are bound by a
+    /// paired golden, exactly as C-034 prescribes for the `launcher shim`
+    /// wire token. See the report's E-36 gap.
+    #[cfg(windows)]
+    fn assert_shimref_grammar(raw: &[u8], expected: &oci::PinnedIdentifier) {
+        assert!(raw.len() <= 32 * 1024, "a .shimref must fit the reader's 32 KiB cap");
+        let (line, terminator) = raw.split_at(raw.len() - 1);
+        assert_eq!(
+            terminator, b"\n",
+            "exactly one trailing newline, and it is the last byte"
+        );
+        assert!(!line.is_empty(), "non-empty after the terminator is stripped");
+        assert!(
+            !line.iter().any(|b| matches!(b, 0x00 | 0x0A | 0x0D)),
+            "no NUL and no interior line terminator"
+        );
+        let line = std::str::from_utf8(line).expect("valid UTF-8");
+        assert!(
+            line.bytes().all(|b| (0x21..=0x7E).contains(&b)),
+            "printable ASCII only — no space, no DEL, nothing non-ASCII: {line}"
+        );
+        assert!(!line.starts_with('-'), "no leading dash, or ocx reads it as a flag");
+        let (_, digest) = line.rsplit_once('@').expect("digest-bearing");
+        let (algorithm, hex) = digest.split_once(':').expect("<algorithm>:<hex>");
+        assert!(
+            !algorithm.is_empty() && algorithm.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()),
+            "algorithm is [a-z0-9]+, got {algorithm}"
+        );
+        assert!(
+            !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "hex is [0-9a-f]+, got {hex}"
+        );
+        assert_eq!(
+            line,
+            expected.to_string(),
+            "the sidecar names the pinned identifier it was given"
+        );
+    }
+
+    /// C-026 (E-35, E-37): the slot is `<name>.exe` — a hardlink of the
+    /// published shim blob — plus `<name>.shimref` holding one line, the
+    /// pinned identifier. And **no `<name>.shim`**: `SIDECAR_PROBE_ORDER`
+    /// probes `shim` before `shimref`, so one stray `.shim` in a shim tree's
+    /// `bin/` silently switches dispatch to `launcher exec` against a package
+    /// root that does not exist.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_windows_shim_slot_writes_an_exe_and_a_shimref_and_never_a_shim() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let bin_dir = tempdir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let package = pinned("ns/cmake", "a");
+        let shim_bin = shim_bin_store(tempdir.path());
+
+        write_windows_shim_slot(&bin_dir, &BinaryName::try_from("cmake").unwrap(), &package, &shim_bin)
+            .await
+            .expect("the slot is written");
+
+        assert!(bin_dir.join("cmake.exe").is_file(), "the slot needs its .exe");
+        assert_shimref_grammar(
+            &std::fs::read(bin_dir.join("cmake.shimref")).expect("the sidecar exists"),
+            &package,
+        );
+        assert!(
+            !bin_dir.join("cmake.shim").exists(),
+            "a .shim here would divert dispatch to `launcher exec` (C-026)"
+        );
+    }
+
+    /// RUL-35 (C-034's paired-golden treatment, WP-5's half): the produced
+    /// `.shimref` bytes against a literal, not merely against `expected`'s own
+    /// `to_string()` (as `assert_shimref_grammar` does above) — a producer
+    /// that quietly changed the wire shape while staying consistent with
+    /// itself would still pass that check. The literal is [`golden_pinned`]'s
+    /// own value, converged onto WP-6's `ocx_shim::core::tests::PINNED_IDENTIFIER`
+    /// so the two halves of the paired golden assert the same bytes; WP-6
+    /// restates it independently on the reader side
+    /// (`ocx_shim::core::parse_shimref_sidecar`), byte-for-byte.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_windows_shim_slot_shimref_is_byte_exact_against_the_golden_literal() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let bin_dir = tempdir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let package = golden_pinned();
+        let shim_bin = shim_bin_store(tempdir.path());
+
+        write_windows_shim_slot(&bin_dir, &BinaryName::try_from("cmake").unwrap(), &package, &shim_bin)
+            .await
+            .expect("the slot is written");
+
+        let raw = std::fs::read(bin_dir.join("cmake.shimref")).expect("the sidecar exists");
+        assert_eq!(
+            raw, b"ocx.sh/tool/cmake:3.28@sha256:0000000000000000000000000000000000000000000000000000000000000001\n",
+            "byte-exact golden (RUL-35) — WP-6 restates this literal on the reader side"
+        );
+    }
+
+    /// C-026 (E-35, inode clause): `<name>.exe` is a **hardlink** of the
+    /// store's published blob, not a copy — one inode per store, which is the
+    /// property #301 exists for and what keeps an `ocx` upgrade or a re-sign
+    /// reaching every generated `.exe`.
+    ///
+    /// Byte-equality alone cannot tell a hardlink from a copy, so the store's
+    /// blob is mutated after the link and read back through the link. That is
+    /// the discriminator; nothing weaker is one.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_windows_shim_slot_hardlinks_the_exe_rather_than_copying_it() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let bin_dir = tempdir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let package = pinned("ns/cmake", "a");
+        let shim_bin = shim_bin_store(tempdir.path());
+
+        write_windows_shim_slot(&bin_dir, &BinaryName::try_from("cmake").unwrap(), &package, &shim_bin)
+            .await
+            .expect("the slot is written");
+
+        let blob = shim_bin.ensure().await.expect("the blob is published");
+        let linked = bin_dir.join("cmake.exe");
+        assert_eq!(
+            std::fs::read(&blob).unwrap(),
+            std::fs::read(&linked).unwrap(),
+            "the link starts byte-identical to the blob"
+        );
+        std::fs::write(&blob, b"mutated through the store").expect("the store blob is writable");
+        assert_eq!(
+            std::fs::read(&linked).unwrap(),
+            b"mutated through the store",
+            "a write through the store must be visible through the slot — a copy would not see it"
+        );
+    }
+
+    /// C-026 (E-40): the extensionless body stays, on Windows too. It is not
+    /// redundant — `materialize_lazy::is_generated_sibling` *requires* the
+    /// extensionless file to be present before `.exe`/`.shimref` read as
+    /// siblings, so dropping it would break the claim-set reader. Assert the
+    /// whole trio, and (E-42) that an interior dot does not turn a claimed
+    /// name into a sibling of something else.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_shim_launchers_writes_the_generated_sibling_trio_on_windows() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let staged = shim_dir_at(tempdir.path().join("staged"));
+        let package = pinned("ns/cpython", "a");
+        let set: BTreeSet<BinaryName> = ["cmake", "python3.13"]
+            .into_iter()
+            .map(|n| BinaryName::try_from(n).unwrap())
+            .collect();
+        let shim_bin = shim_bin_store(tempdir.path());
+
+        write_shim_launchers(&staged.bin(), &package, &set, &shim_bin)
+            .await
+            .expect("launchers are written");
+
+        for name in ["cmake", "python3.13"] {
+            for path in [name.to_string(), format!("{name}.exe"), format!("{name}.shimref")] {
+                assert!(
+                    staged.bin().join(&path).is_file(),
+                    "bin/{path} is part of the trio C-026 writes"
+                );
+            }
+        }
+    }
+
+    /// C-026 (E-41): a publisher may claim `mytool.exe` outright — `BinaryName`
+    /// imposes no suffix rule and `materialize_lazy.rs` records the defect that
+    /// assuming otherwise once caused. The slot is therefore `mytool.exe.exe`
+    /// and `mytool.exe.shimref`, and the extensionless `mytool.exe` stays the
+    /// claim itself.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_shim_launchers_pairs_a_claimed_name_that_already_ends_in_exe() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let staged = shim_dir_at(tempdir.path().join("staged"));
+        let package = pinned("ns/tool", "a");
+        let set: BTreeSet<BinaryName> = std::iter::once(BinaryName::try_from("mytool.exe").unwrap()).collect();
+        let shim_bin = shim_bin_store(tempdir.path());
+
+        write_shim_launchers(&staged.bin(), &package, &set, &shim_bin)
+            .await
+            .expect("launchers are written");
+
+        for path in ["mytool.exe", "mytool.exe.exe", "mytool.exe.shimref"] {
+            assert!(
+                staged.bin().join(path).is_file(),
+                "bin/{path} must exist: the claimed name keeps its own suffix and still gets its siblings"
+            );
+        }
+    }
+
+    /// C-022 / C-026 (E-38): the slot is staged into a fresh `TempDir` and
+    /// published by one rename, so it can **never** land on an occupied path.
+    /// An occupied slot is therefore a bug, and the writer must surface it
+    /// rather than paper over it — `hardlink::create` (`EEXIST`), no overwrite
+    /// branch.
+    ///
+    /// If the Implement stage adds an overwrite branch anyway it must use
+    /// `hardlink::update`, and this row flips with a recorded divergence. It
+    /// is deliberately not written as "errs or is idempotent": a disjunction
+    /// over outcomes is the cheapest form of unchecked green.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_windows_shim_slot_refuses_an_occupied_slot() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let bin_dir = tempdir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join("cmake.exe"), b"someone else's file").unwrap();
+        let package = pinned("ns/cmake", "a");
+        let shim_bin = shim_bin_store(tempdir.path());
+
+        let error = write_windows_shim_slot(&bin_dir, &BinaryName::try_from("cmake").unwrap(), &package, &shim_bin)
+            .await
+            .expect_err("an occupied slot is a bug in the caller, not a state to converge on");
+
+        // Discriminates the actual hardlink `EEXIST`, not merely "some
+        // Internal error" — a wildcard on the outer variant would also pass
+        // for, say, a failed `ShimBinStore::ensure` or a permissions error,
+        // neither of which is what this row exists to pin.
+        match error {
+            PackageErrorKind::Internal(crate::Error::InternalFile(path, io_error)) => {
+                assert_eq!(
+                    io_error.kind(),
+                    std::io::ErrorKind::AlreadyExists,
+                    "expected hardlink::create's EEXIST, got {io_error:?}"
+                );
+                assert_eq!(
+                    path,
+                    bin_dir.join("cmake.exe"),
+                    "the error must name the occupied slot, not some other path"
+                );
+            }
+            other => panic!("expected Internal(InternalFile(_, AlreadyExists)), got {other:?}"),
+        }
+    }
+
+    /// C-022 / C-026 (E-39): the shim blob cannot be published — here because
+    /// the store root is occupied by a file, so `ShimBinStore::ensure`'s
+    /// `create_dir_all` fails. The refusal is `PackageErrorKind::Internal` and,
+    /// crucially, **no sidecar is left behind**: `.shimref` without its `.exe`
+    /// is the worse of the two partial states (ADR Contract 2's write-ordering
+    /// postcondition), and the staged tree's `bin/` must never read as
+    /// complete.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_windows_shim_slot_fails_internally_when_the_blob_cannot_be_published() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let bin_dir = tempdir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        // A regular file where the store's root directory must go.
+        std::fs::write(tempdir.path().join("shim_bin"), b"not a directory").unwrap();
+        let package = pinned("ns/cmake", "a");
+        let shim_bin = shim_bin_store(tempdir.path());
+
+        let error = write_windows_shim_slot(&bin_dir, &BinaryName::try_from("cmake").unwrap(), &package, &shim_bin)
+            .await
+            .expect_err("an unpublishable shim blob refuses the slot");
+
+        assert!(
+            matches!(error, PackageErrorKind::Internal(_)),
+            "expected Internal, got {error:?}"
+        );
+        assert!(
+            !bin_dir.join("cmake.shimref").exists(),
+            "a .shimref without its .exe is the partial state the write order exists to exclude"
+        );
     }
 
     // ── C-008 / C-014 / C-020: the config-blob forward-refs ─────────────────

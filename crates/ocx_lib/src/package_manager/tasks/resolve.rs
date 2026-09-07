@@ -230,6 +230,24 @@ pub enum EnvScope {
         /// entries and the patch overlay, so constants replace and path
         /// entries land ahead of package paths.
         env: Vec<Entry>,
+        /// The toolchain tree this invocation may compose through (C-065,
+        /// C-070), or `None` when there is none to follow.
+        ///
+        /// `Some` carries the resolved `pinned` value, the home, and **the
+        /// groups this invocation selected** — the set
+        /// [`ComposePaths::resolve`](super::super::composer::ComposePaths::resolve)
+        /// heals before any link path is emitted. A caller narrowing it to the
+        /// default group is C-070's exact defect, which is why the field is the
+        /// selected set rather than something re-derived downstream.
+        ///
+        /// `None` is the digest lane and never an error: `ocx launcher exec`
+        /// passes it because its baked `pkg_root` is pinned by construction,
+        /// and so does any project composition with no rendered tree.
+        ///
+        /// Boxed because it carries a whole [`ProjectLock`](crate::project::ProjectLock):
+        /// inline it makes `Project` an order of magnitude larger than `Package`
+        /// and every `EnvScope` move pays for the lock (`clippy::large_enum_variant`).
+        toolchain: Option<Box<crate::package_manager::composer::ToolchainLinks>>,
     },
     /// No project toolchain is in scope — OCI-tier commands, isolated scratch
     /// managers, the self-update version probe. Empty opt-out: every admitted
@@ -280,6 +298,18 @@ impl EnvScope {
     fn contributed_env(&self) -> &[Entry] {
         match self {
             EnvScope::Project { env, .. } | EnvScope::Package { env } => env,
+        }
+    }
+
+    /// The toolchain tree this scope may compose through, if any.
+    ///
+    /// `Package` yields `None` structurally: the OCI tier reads no `ocx.toml`,
+    /// has no lock and no rendered tree, so "which groups did this invocation
+    /// select" has no answer there rather than an empty one.
+    fn toolchain_links(&self) -> Option<&crate::package_manager::composer::ToolchainLinks> {
+        match self {
+            EnvScope::Project { toolchain, .. } => toolchain.as_deref(),
+            EnvScope::Package { .. } => None,
         }
     }
 }
@@ -506,6 +536,16 @@ pub struct AdmittedClaims {
 /// Returns the registry the index points at (`index.ocx.sh`'s `repository`
 /// pointer, with the leaf digest carried over) when a source rewrites it, else
 /// `pinned` unchanged (registry-backed packages). Transport-only (C2).
+///
+/// This is the one resolve that exists in order to *materialize*, so it is
+/// also where the routing pointer gets recorded locally (#424): a
+/// digest-addressed resolve grows no root, so without the record a machine
+/// running only `pull`/`exec` against a committed lock re-asks the index site
+/// for the same pointer on every invocation, forever. Deliberately not done
+/// inside [`Index::physical_reference`] — the readers that call it (`cascade
+/// check`, `verify`, `sign`, `attest`) must leave no trace, and gating the
+/// write by where it is called from is stronger than gating it by a policy
+/// each caller has to set.
 async fn resolve_transport_pinned(
     index: &oci::index::Index,
     pinned: &oci::PinnedIdentifier,
@@ -515,7 +555,10 @@ async fn resolve_transport_pinned(
         .await
         .map_err(PackageErrorKind::Internal)?
     {
-        Some(physical) => oci::PinnedIdentifier::try_from(physical).map_err(|_| PackageErrorKind::DigestMissing),
+        Some(physical) => {
+            index.record_routing_pointer(pinned.as_identifier()).await;
+            oci::PinnedIdentifier::try_from(physical).map_err(|_| PackageErrorKind::DigestMissing)
+        }
         None => Ok(pinned.clone()),
     }
 }
@@ -853,7 +896,17 @@ impl PackageManager {
         // Convert the scope to its opt-out set exactly once; the overlay logic
         // below (and `build_site_patch_set`) keeps consuming a plain reference.
         let no_patches = scope.opt_out();
-        let out = composer::compose(packages, &self.file_structure().packages, self_view).await?;
+        // C-065's one code path, built once per composition: `ocx env`,
+        // `ocx exec`, `ocx direnv export` and the `env`-mode hook all reach the
+        // composer through this call, so none of them can disagree about
+        // whether a `<group>/<entry>` link is followed, nor about which groups
+        // were healed first (C-070). `None` — the OCI tier, and the launcher's
+        // baked `pkg_root` — is the digest lane (C-066).
+        let paths = match scope.toolchain_links() {
+            Some(links) => composer::ComposePaths::resolve(links, self.file_structure(), platform).await?,
+            None => composer::ComposePaths::digest_only(),
+        };
+        let out = composer::compose(packages, &self.file_structure().packages, self_view, &paths).await?;
         let mut attribution = AdmittedClaims {
             binaries: out.admitted_binaries,
             entrypoints: out.admitted_entrypoints,
@@ -3054,7 +3107,9 @@ mod phase4_spec_tests {
         let root = Arc::new(make_install_info(dir.path(), "root", 'r', root_resolved));
         let root_key = root.identifier().strip_advisory();
 
-        let out = composer::compose(&[root], &store, false).await.unwrap();
+        let out = composer::compose(&[root], &store, false, &composer::ComposePaths::digest_only())
+            .await
+            .unwrap();
 
         // dep_key stripped
         let dep_key = dep_id.strip_advisory();
@@ -3092,7 +3147,9 @@ mod phase4_spec_tests {
         let root = Arc::new(make_install_info(dir.path(), "root", 'r', root_resolved));
         let root_key = root.identifier().strip_advisory();
 
-        let out = composer::compose(&[root], &store, false).await.unwrap();
+        let out = composer::compose(&[root], &store, false, &composer::ComposePaths::digest_only())
+            .await
+            .unwrap();
 
         // Private dep excluded from admitted set on interface surface.
         let priv_key = priv_dep_id.strip_advisory();
@@ -3125,7 +3182,9 @@ mod phase4_spec_tests {
         };
         let root = Arc::new(make_install_info(dir.path(), "root", 'r', root_resolved));
 
-        let out = composer::compose(&[root], &store, true).await.unwrap();
+        let out = composer::compose(&[root], &store, true, &composer::ComposePaths::digest_only())
+            .await
+            .unwrap();
 
         let priv_key = priv_dep_id.strip_advisory();
         assert!(
@@ -3161,7 +3220,9 @@ mod phase4_spec_tests {
         let a = Arc::new(make_install_info(dir.path(), "roota", 'a', a_resolved));
         let b = Arc::new(make_install_info(dir.path(), "rootb", 'b', b_resolved));
 
-        let out = composer::compose(&[a, b], &store, false).await.unwrap();
+        let out = composer::compose(&[a, b], &store, false, &composer::ComposePaths::digest_only())
+            .await
+            .unwrap();
 
         let shared_key = shared_id.strip_advisory();
         let count = out.admitted.iter().filter(|id| **id == shared_key).count();
@@ -3208,9 +3269,14 @@ mod phase4_spec_tests {
         ));
 
         // Baseline: plain compose.
-        let compose_out = composer::compose(std::slice::from_ref(&root), &store, false)
-            .await
-            .unwrap();
+        let compose_out = composer::compose(
+            std::slice::from_ref(&root),
+            &store,
+            false,
+            &composer::ComposePaths::digest_only(),
+        )
+        .await
+        .unwrap();
         let compose_entries = compose_out.entries;
 
         // Manager with patches=None.
@@ -3921,7 +3987,9 @@ mod phase4_spec_tests {
             },
         ));
 
-        let out = composer::compose(&[root], &store, false).await.unwrap();
+        let out = composer::compose(&[root], &store, false, &composer::ComposePaths::digest_only())
+            .await
+            .unwrap();
 
         let priv_key = priv_dep_id.strip_advisory();
         assert!(
@@ -3956,7 +4024,9 @@ mod phase4_spec_tests {
             },
         ));
 
-        let out = composer::compose(&[root], &store, true).await.unwrap();
+        let out = composer::compose(&[root], &store, true, &composer::ComposePaths::digest_only())
+            .await
+            .unwrap();
 
         let priv_key = priv_dep_id.strip_advisory();
         assert!(
@@ -5624,7 +5694,9 @@ mod phase4_spec_tests {
         ));
 
         // Plain compose — no patch overlay (compose is patch-agnostic).
-        let out = composer::compose(&[companion], &store, false).await.unwrap();
+        let out = composer::compose(&[companion], &store, false, &composer::ComposePaths::digest_only())
+            .await
+            .unwrap();
 
         // The companion's interface var must be projected.
         assert!(
@@ -7638,6 +7710,7 @@ mod phase5d_spec_tests {
                 super::EnvScope::Project {
                     no_patches,
                     env: Vec::new(),
+                    toolchain: None,
                 },
                 &super::host_platform(),
             )
@@ -7675,6 +7748,7 @@ mod phase5d_spec_tests {
                 super::EnvScope::Project {
                     no_patches,
                     env: Vec::new(),
+                    toolchain: None,
                 },
                 &super::host_platform(),
             )
@@ -7713,6 +7787,7 @@ mod phase5d_spec_tests {
                 super::EnvScope::Project {
                     no_patches,
                     env: Vec::new(),
+                    toolchain: None,
                 },
                 &super::host_platform(),
             )
@@ -7752,6 +7827,7 @@ mod phase5d_spec_tests {
                 super::EnvScope::Project {
                     no_patches: BTreeSet::new(),
                     env: Vec::new(),
+                    toolchain: None,
                 },
                 &super::host_platform(),
             )
