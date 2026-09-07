@@ -116,7 +116,7 @@ ocx packages declare their environment variables in `metadata.json`. [`ocx packa
 <Terminal src="/casts/getting-started/env.cast" title="Package environment" collapsed />
 
 ::: tip Persistent shell environment
-OCX activation is handled by `$OCX_HOME/env.sh`, which is written by the installer and sourced from your login profile. At shell startup it invokes `ocx self activate --shell=sh` via the installer-written absolute path, so activation works even before `ocx` is on `PATH`. The command emits three blocks: a PATH prepend to the OCX binary directory, shell completions, and an `eval "$(ocx --global env --shell=sh)"` call that exports your global toolchain's environment. Because the PATH entry points at the `current` symlink, your profile stays valid across upgrades — no manual edit required.
+OCX activation is handled by `$OCX_HOME/env.sh`, which is written by the installer and sourced from your login profile. At shell startup it invokes `ocx self activate --shell=sh` via the installer-written absolute path, so activation works even before `ocx` is on `PATH`. The command emits three blocks: PATH prepends for the global toolchain's launcher directory and the OCX binary directory in front of it, shell completions, and — in the default `env` mode — an `eval "$(ocx --global env --shell=sh)"` call that exports your global toolchain's environment. Because the PATH entry points at the `current` symlink, your profile stays valid across upgrades — no manual edit required.
 
 Populate that global toolchain with [`ocx --global add`][user-guide-global-add] — `ocx --global add uv:0.10` installs a tool and puts it on `PATH` in every new shell. See [global toolchain][project-global] for the tier model.
 :::

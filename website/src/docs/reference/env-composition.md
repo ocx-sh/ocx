@@ -136,13 +136,13 @@ Recomposing a whole toolchain on every prompt costs a little work per prompt and
 | `none` | `false` | nothing | through the `<group>/<entry>` links | `bin/` and the links |
 | `none` | `true` | nothing | digest paths from `ocx.lock`, consulting no link | `bin/` only |
 
-The session's own directories — OCX's install directory and `$OCX_HOME/toolchain/bin` — are on `PATH` in every row, including `none`. They are minted per prompt, not by the project's mode.
+The session's own directories — OCX's install directory and `$OCX_HOME/toolchain/bin` — are on `PATH` in every row, including `none`. They are minted at shell start and again per prompt, by neither toolchain's mode.
 
 Two things the matrix's shape is saying:
 
 **The prompt's own `PATH` takes the lane too.** In `env` mode the per-prompt reconciler is itself a composing emitter: it composes the project's default group and, with `pinned` false, follows that group's `<group>/<entry>` links — so the project entries on your `PATH` are link paths. It carries no flag of its own, so [`ocx.toml`][config-pinned] and [`OCX_TOOLCHAIN_PINNED`][env-ocx-toolchain-pinned] are the only tiers that answer for it.
 
-**Five emitters compose, two carry the flag.** [`ocx env`][cmd-env-root], [`ocx exec`][cmd-run], [`ocx direnv export`][cmd-direnv-export], the `env`-mode reconciler and the global login exporter all take a lane; only `ocx env` and `ocx exec` declare [`--pinned` / `--no-pinned`][arg-pinned]. `pinned` selects the lane for all five, and separately decides whether a render writes links at all.
+**Five emitters compose, two carry the flag.** [`ocx env`][cmd-env-root], [`ocx exec`][cmd-run], [`ocx direnv export`][cmd-direnv-export], the `env`-mode reconciler and the `env`-mode login exporter all take a lane; only `ocx env` and `ocx exec` declare [`--pinned` / `--no-pinned`][arg-pinned]. The last two read the *global* tier's `activate`, so under `bin` or `none` neither composes at all and the lane question does not arise for them. `pinned` selects the lane for all five, and separately decides whether a render writes links at all.
 
 **A row promises a lane, not every path in it.** Two qualifications on the link cells, both by design and neither reported: a lock entry whose link is absent, stale, or not a link composes on its digest path while its siblings still compose through theirs — and the digest path is the correct path, the same directory under its other spelling. And only *roots* have links at all: a dependency's `PATH` contributions and every `${deps.<name>.installPath}` are digest paths in both lanes, so an [`ocx update`][cmd-update] moves a composed environment's roots and leaves its dependency paths where the previous lock put them. See [`--pinned`][arg-pinned-degrade] for both.
 

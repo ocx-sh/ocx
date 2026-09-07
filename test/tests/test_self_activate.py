@@ -962,3 +962,115 @@ def test_real_env_sh_loads_zsh_completions_when_interactive(ocx_binary: Path, oc
         f"sourcing env.sh in zsh must not error (compdef must be loaded); stderr:\n{result.stderr}"
     )
     assert result.returncode == 0, f"zsh sourcing env.sh must exit 0; stderr:\n{result.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# TEST-A12 — the login stream honours the global `activate` mode
+# ---------------------------------------------------------------------------
+
+
+def _run_activate_with_activate_mode(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    mode: str | None,
+) -> subprocess.CompletedProcess[str]:
+    """Run `ocx self activate --shell=bash` over an isolated OCX_HOME.
+
+    The home is per-test rather than the session one on purpose: the mode is
+    read from `$OCX_HOME/ocx.toml`, and writing that file into the shared home
+    would decide the answer for every sibling test running beside this one under
+    xdist. `mode=None` writes no manifest at all, which is the ladder's floor.
+    """
+    home = tmp_path / "activate home"
+    home.mkdir(parents=True, exist_ok=True)
+    if mode is not None:
+        (home / "ocx.toml").write_text(f'activate = "{mode}"\n', encoding="utf-8")
+    env = dict(ocx.env)
+    env["OCX_HOME"] = str(home)
+    # The environment tier is the weakest rung of the same ladder, so an
+    # inherited value would decide the `mode=None` row and nothing else would
+    # say so.
+    env.pop("OCX_TOOLCHAIN_ACTIVATE", None)
+    cmd = [str(ocx.binary), "self", "activate", "--shell=bash"]
+    result = subprocess.run(
+        cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, check=False
+    )
+    return result
+
+
+@pytest.mark.parametrize("mode", ["bin", "none"])
+def test_activate_omits_global_env_eval_when_mode_is_not_env(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    """A global `activate = "bin"` / `"none"` suppresses the login-time eval.
+
+    The per-prompt arm has honoured this mode since A-12; the login stream did
+    not, so a shell start composed the whole global environment whatever the
+    manifest said. An interactive shell repaired itself at the first prompt —
+    a script, an `ssh host cmd`, a git hook or a plain `sh` (which registers no
+    hook at all) never did.
+
+    Paired with `..._still_emits_global_env_eval_in_env_mode` below: neither row
+    means anything alone, because a stream that emitted the eval in no mode at
+    all would satisfy this one.
+    """
+    result = _run_activate_with_activate_mode(ocx, tmp_path, mode)
+
+    assert result.returncode == 0, (
+        f"activation must succeed with activate = {mode!r}; "
+        f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert "--global env" not in result.stdout, (
+        f"activate = {mode!r} must not compose the global environment at login - "
+        f"the tools come from the trampolines in toolchain/bin; got:\n{result.stdout}"
+    )
+
+
+@pytest.mark.parametrize("mode", ["env", None])
+def test_activate_still_emits_global_env_eval_in_env_mode(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    mode: str | None,
+) -> None:
+    """The positive control for the pair above, on both `env` rows.
+
+    `mode="env"` states the value; `mode=None` writes no manifest, so the file
+    tier is absent and the ladder falls to its floor. Both must still compose.
+    """
+    result = _run_activate_with_activate_mode(ocx, tmp_path, mode)
+
+    assert result.returncode == 0, (
+        f"activation must succeed with activate = {mode!r}; "
+        f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert _POSIX_GLOBAL_ENV_EVAL.search(result.stdout) is not None, (
+        f"activate = {mode!r} must still compose the global environment at login; "
+        f"got:\n{result.stdout}"
+    )
+
+
+@pytest.mark.parametrize("mode", ["env", "bin", "none", None])
+def test_activate_prepends_the_global_toolchain_bin_in_every_mode(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    mode: str | None,
+) -> None:
+    """`$OCX_HOME/toolchain/bin` reaches a login shell whatever the mode says.
+
+    It is a session-level directory, not a composition (C-059): the reconciler
+    holds it desired in every mode, and the login stream emits it too, so `bin`
+    mode still resolves its tools where the OS session-registration channel
+    `ocx self setup` writes is absent or ignored.
+    """
+    result = _run_activate_with_activate_mode(ocx, tmp_path, mode)
+    expected = str(tmp_path / "activate home" / "toolchain" / "bin")
+
+    assert result.returncode == 0, (
+        f"activation must succeed with activate = {mode!r}; "
+        f"rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert expected in result.stdout, (
+        f"activate = {mode!r} must prepend {expected!r} to PATH; got:\n{result.stdout}"
+    )

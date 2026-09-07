@@ -1757,7 +1757,11 @@ ocx self setup --toolchain-activate bin
 That targets the ocx home's own `ocx.toml`, never the project in effect — `--project` and [`OCX_PROJECT`][env-ocx-project] name a different toolchain and this flag does not redirect onto it. A project's own `ocx.toml` still decides for that project.
 
 ::: tip `bin` and `none` are the same `PATH` for the global toolchain
-`$OCX_HOME/toolchain/bin` is a session-level directory: [`ocx self setup`][cmd-self-setup] registers it on `PATH` once, and a prompt never withdraws it. So a global `activate = "bin"` and a global `activate = "none"` both leave the global toolchain reachable through its trampolines and compose nothing else — the same `PATH`, by the same route. The two values part company only for a project's toolchain, whose `bin/` directory a prompt does add and remove.
+`$OCX_HOME/toolchain/bin` is a session-level directory: [`ocx self setup`][cmd-self-setup] registers it on `PATH` once, a shell start prepends it again, and a prompt never withdraws it. So a global `activate = "bin"` and a global `activate = "none"` both leave the global toolchain reachable through its trampolines and compose nothing else — the same `PATH`, by the same route. The two values part company only for a project's toolchain, whose `bin/` directory a prompt does add and remove.
+:::
+
+::: tip Both halves of a shell honour the mode
+Two moments put a global environment into a shell, and both read this key: the login stream [`ocx self activate`][cmd-self-activate] emits at shell start, and the per-prompt reconciler runs at every prompt after that. In `env` mode the login stream carries an `ocx --global env` eval; under `bin` and `none` it does not, and the trampoline directory it always prepends is what resolves the tools instead. That matters most where no prompt ever runs — a script, an `ssh host cmd`, a git hook, a `sh` that registers no hook at all.
 :::
 
 `activate` governs how a toolchain reaches a shell **on its own**, never what a command you typed prints. [`ocx --global env`][cmd-env-root] and [`ocx --global exec`][cmd-run] are explicit requests and compose the global tier in full, whatever the key says.
@@ -1779,7 +1783,7 @@ pinned = true
 
 The key names a lane, and two things qualify what lands in it. **A link that is absent, stale, or not a link degrades that one entry to its digest path**, silently, while its siblings still compose through their links — and the digest path is the correct path, the same package directory under its other spelling. **Only roots have links**: a dependency's `PATH` contributions and every `${deps.<name>.installPath}` are digest paths under `false` as well as `true`. Both are covered in full under [`--pinned`][arg-pinned-degrade].
 
-`pinned` reaches five emitters, not the two that carry the flag: [`ocx env`][cmd-env-root], [`ocx exec`][cmd-run], [`ocx direnv export`][cmd-direnv-export], the `env`-mode shell hook, and the global login exporter. For the three that declare no flag, this key and [`OCX_TOOLCHAIN_PINNED`][env-ocx-toolchain-pinned] are the only tiers that answer.
+`pinned` reaches five emitters, not the two that carry the flag: [`ocx env`][cmd-env-root], [`ocx exec`][cmd-run], [`ocx direnv export`][cmd-direnv-export], the `env`-mode shell hook, and the `env`-mode login exporter. For the three that declare no flag, this key and [`OCX_TOOLCHAIN_PINNED`][env-ocx-toolchain-pinned] are the only tiers that answer. The last two compose only when the global tier's [`activate`](#project-config-activate) is `env`; under `bin` or `none` neither runs, so no lane is chosen for them at all.
 
 #### Resolution order {#project-config-pinned-ladder}
 

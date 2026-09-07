@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
+use ocx_lib::activate::ActivateMode;
 use ocx_lib::activation::{self, Outcome, ProjectIdentity, SessionError, SessionInput};
 use ocx_lib::cli::{ColorModeConfig, Theme};
 use ocx_lib::env::Env;
@@ -155,6 +156,25 @@ impl SelfActivate {
         // overhead (OCI client, OciIndex, PackageManager) on every shell startup.
         let file_structure = FileStructure::new();
         let bin_path = ocx_install_bin_path(&file_structure);
+        // C-001 — the store owns the spelling; never a literal `toolchain/bin`
+        // join here.
+        let toolchain_bin = file_structure.toolchain.bin();
+
+        // A-12's other half. The per-prompt hook has resolved this ladder since
+        // 2026-09-06 (`global_prompt_entries`); the login stream did not, so a
+        // global `activate = "bin"` still composed a full env envelope on every
+        // shell start — the very symptom A-12 records as closed. The gate sits
+        // here, at the emitter, for A-12's own reason: the resolver's other
+        // caller is `ocx --global env` / `ocx --global exec`, an explicit user
+        // request that composes under any mode.
+        //
+        // One small TOML parse on the startup path, next to the `ConfigLoader`
+        // pass `load_shell_config` already makes. It cannot fail: a missing,
+        // unreadable or unparseable `$OCX_HOME/ocx.toml` leaves the file tier
+        // absent and falls through to `OCX_TOOLCHAIN_ACTIVATE` and then the
+        // `env` floor, so a corrupt file still composes and no login ever
+        // breaks over it.
+        let activate = global_activate_mode(file_structure.root()).await;
 
         // C-042 Option C — `[shell]` is read **once**, here, through one
         // `ConfigLoader` pass. Not baked into the shim (byte-identical across
@@ -197,14 +217,16 @@ impl SelfActivate {
             Vec::new()
         };
 
-        emit_activation(
+        emit_activation(&LoginStream {
             shell,
-            &bin_path,
-            completion.as_deref(),
-            hook_enabled.then(|| ocx_binary_path(&bin_path)).as_deref(),
-            &watch,
-            hook_enabled.then(|| seed_carrier(&tiers, &watch)).flatten().as_deref(),
-        );
+            bin_path: &bin_path,
+            toolchain_bin: &toolchain_bin,
+            activate,
+            completion: completion.as_deref(),
+            hook_binary: hook_enabled.then(|| ocx_binary_path(&bin_path)).as_deref(),
+            watch: &watch,
+            seed: hook_enabled.then(|| seed_carrier(&tiers, &watch)).flatten().as_deref(),
+        });
         Ok(ExitCode::SUCCESS)
     }
 }
@@ -892,20 +914,50 @@ fn ocx_binary_path(bin_path: &Path) -> PathBuf {
     bin_path.join(if cfg!(windows) { "ocx.exe" } else { "ocx" })
 }
 
-/// Emit all activation lines to stdout for the given shell.
+/// Everything one login stream is built from.
 ///
-/// `completion` is the generated completion script to emit inline, or `None`
-/// when completions are disabled, the session is non-interactive, or the shell
-/// has no completion backend (see [`generate_completion_inline`]).
-fn emit_activation(
+/// A borrowed request struct rather than eight positional parameters, the same
+/// shape and for the same reason as
+/// [`RenderRequest`](ocx_lib::package_manager::tasks::render_toolchain::RenderRequest):
+/// a positional list of two paths, two `Option<&str>`s, an `Option<&Path>`, a
+/// slice and a mode reads as nothing at the call site, and `clippy::too_many_arguments`
+/// says so at seven.
+struct LoginStream<'a> {
+    /// The shell whose idiom every emitted line is written in.
     shell: Shell,
-    bin_path: &std::path::Path,
-    completion: Option<&str>,
-    hook_binary: Option<&Path>,
-    watch: &[PathBuf],
-    seed: Option<&str>,
-) {
-    for line in activation_lines(shell, bin_path, completion, hook_binary, watch, seed) {
+
+    /// The installed `ocx`'s own `bin` directory — [`ocx_install_bin_path`]'s
+    /// answer, prepended last so it lands frontmost on `PATH`.
+    bin_path: &'a Path,
+
+    /// The global rendered toolchain's trampolines, `$OCX_HOME/toolchain/bin`
+    /// — [`ToolchainStore::bin`](ocx_lib::file_structure::ToolchainStore::bin)'s
+    /// answer, never a literal join (C-001).
+    toolchain_bin: &'a Path,
+
+    /// The **global** tier's resolved mode. Gates exactly one line, the global
+    /// env eval; neither `PATH` prepend consults it.
+    activate: ActivateMode,
+
+    /// The generated completion script to emit inline, or `None` when
+    /// completions are disabled, the session is non-interactive, or the shell
+    /// has no completion backend (see [`generate_completion_inline`]).
+    completion: Option<&'a str>,
+
+    /// The absolute binary the per-prompt hook body invokes, or `None` when the
+    /// hook is disabled for this session.
+    hook_binary: Option<&'a Path>,
+
+    /// The watch set the emitted hook body stats on each prompt.
+    watch: &'a [PathBuf],
+
+    /// The encoded tier-list carrier the first prompt reads, when there is one.
+    seed: Option<&'a str>,
+}
+
+/// Emit all activation lines to stdout.
+fn emit_activation(request: &LoginStream<'_>) {
+    for line in activation_lines(request) {
         println!("{line}");
     }
 }
@@ -914,14 +966,22 @@ fn emit_activation(
 ///
 /// Built as a `Vec` rather than printed inline: the order **is** the contract
 /// here, and a test that reads it needs the stream as a value.
-fn activation_lines(
-    shell: Shell,
-    bin_path: &std::path::Path,
-    completion: Option<&str>,
-    hook_binary: Option<&Path>,
-    watch: &[PathBuf],
-    seed: Option<&str>,
-) -> Vec<String> {
+///
+/// `activate` is the **global** tier's resolved mode, and it gates exactly one
+/// line: the global-env eval. `toolchain_bin` is emitted in every mode — see
+/// the two blocks below for why the asymmetry is the contract rather than an
+/// oversight.
+fn activation_lines(request: &LoginStream<'_>) -> Vec<String> {
+    let &LoginStream {
+        shell,
+        bin_path,
+        toolchain_bin,
+        activate,
+        completion,
+        hook_binary,
+        watch,
+        seed,
+    } = request;
     let mut lines = Vec::new();
     // ── Shell completions (emitted FIRST) ────────────────────────────────────
     // The completion block must lead the stream: clap_complete's PowerShell
@@ -938,18 +998,39 @@ fn activation_lines(
     // Use the absolute resolved path — no $VAR references, so Shell::export_path
     // is safe here: each arm's own value escaper leaves a path carrying no shell
     // metacharacters byte-identical.
+    //
+    // Two session directories, in the order C-059 gives them: `toolchain/bin`
+    // first so the later `install_bin` prepend lands in front of it, exactly as
+    // the reconciler's desired fold leaves them (`SessionPath::global_bin` is
+    // "backmost of the three on PATH, so it is emitted first"). Both are
+    // **unconditional in every mode** — dropping either in `bin`/`none` would
+    // leave a login shell with no global tools at all wherever the OS
+    // session-registration channel `ocx self setup` writes is absent or ignored
+    // (a container, a host without systemd user env, `--no-modify-path`, a
+    // non-interactive `sh` that never renders a prompt to be repaired at).
+    lines.extend(path_prepend_line(shell, toolchain_bin));
     lines.extend(path_prepend_line(shell, bin_path));
 
     // ── Global toolchain env ─────────────────────────────────────────────────
-    // Evaluate the global toolchain env. The emitted env lines never duplicate on
-    // every shell — PATH uses idempotent move-to-front (cmd included, via
-    // substring-delete; see `Shell::export_path`), constants are absolute sets —
-    // so the eval runs unconditionally with NO `OCX_ACTIVATED` state guard. An
-    // exported guard leaks into child processes (e.g. a VS Code Remote server
-    // whose terminals inherit it) and wrongly suppresses activation in a shell
-    // that needs it. Running unconditionally also lets a re-source pick up a
-    // changed global toolchain.
-    lines.push(format_global_env_eval(shell, &ocx_binary_path(bin_path)));
+    // Evaluate the global toolchain env — in `env` mode only. `bin` and `none`
+    // compose nothing here and reach their tools through the trampolines in the
+    // `toolchain/bin` prepended above, which is the whole point of the mode; the
+    // per-prompt arm has drawn this same line since A-12 (`global_prompt_entries`),
+    // and a login stream that composed anyway is what made a global
+    // `activate = "bin"` look inert for a whole session.
+    //
+    // In `env` mode the eval carries NO `OCX_ACTIVATED` state guard, and the
+    // gate above is not one: it is a property of the toolchain's own manifest,
+    // not of shell state, so it is identical for every shell of a session. The
+    // emitted env lines never duplicate on a re-source — PATH uses idempotent
+    // move-to-front (cmd included, via substring-delete; see
+    // `Shell::export_path`), constants are absolute sets — and an *exported*
+    // guard would leak into child processes (e.g. a VS Code Remote server whose
+    // terminals inherit it) and wrongly suppress activation in a shell that
+    // needs it. Re-sourcing still picks up a changed global toolchain.
+    if activate == ActivateMode::Env {
+        lines.push(format_global_env_eval(shell, &ocx_binary_path(bin_path)));
+    }
 
     // ── Per-prompt hook + wrapper (emitted LAST) ─────────────────────────────
     // Last on purpose, and the ordering is load-bearing in both directions: the
@@ -1496,7 +1577,7 @@ mod reconcile_tests {
         Outcome, ProjectIdentity, SessionError, SessionPath, is_stat_only, next_ledger, plan_for, yield_messages,
     };
 
-    use super::{SelfActivate, activation_lines, ocx_binary_path, reconcile_lines};
+    use super::{ActivateMode, SelfActivate, activation_lines, ocx_binary_path, reconcile_lines};
 
     /// The uncoloured theme. These assertions are about the shell statements
     /// the stream emits, and an escape sequence inside an expected string would
@@ -1560,6 +1641,12 @@ mod reconcile_tests {
         PathBuf::from("/tmp/ocx_home/symlinks/ocx_sh/ocx/cli/current/content/bin")
     }
 
+    /// The other of C-059's two session directories — `$OCX_HOME/toolchain/bin`,
+    /// the global rendered toolchain's trampolines.
+    fn toolchain_bin_dir() -> PathBuf {
+        PathBuf::from("/tmp/ocx_home/toolchain/bin")
+    }
+
     /// The `PATH` a shell holds once C-059's two session directories are
     /// already applied — i.e. every prompt after a session's first, and what
     /// `ocx self setup` leaves behind at session level.
@@ -1573,26 +1660,31 @@ mod reconcile_tests {
         let mut env = Env::clean();
         env.set(
             "PATH",
-            std::env::join_paths([
-                bin_dir().as_os_str(),
-                std::ffi::OsStr::new("/tmp/ocx_home/toolchain/bin"),
-            ])
-            .expect("the seed joins"),
+            std::env::join_paths([bin_dir().as_os_str(), toolchain_bin_dir().as_os_str()]).expect("the seed joins"),
         );
         env
     }
 
+    /// The login stream in the ladder's floor mode, which is what every
+    /// assertion written before the `activate` gate existed assumed.
     fn startup_stream(shell: Shell, hook: bool) -> Vec<String> {
+        startup_stream_in(shell, hook, ActivateMode::Env)
+    }
+
+    /// The login stream under a stated global `activate` mode.
+    fn startup_stream_in(shell: Shell, hook: bool, activate: ActivateMode) -> Vec<String> {
         let bin = bin_dir();
         let binary = hook.then(|| ocx_binary_path(&bin));
-        activation_lines(
+        activation_lines(&super::LoginStream {
             shell,
-            &bin,
-            super::generate_completion_inline(shell).as_deref(),
-            binary.as_deref(),
-            &[PathBuf::from("/work/acme/ocx.lock")],
-            None,
-        )
+            bin_path: &bin,
+            toolchain_bin: &toolchain_bin_dir(),
+            activate,
+            completion: super::generate_completion_inline(shell).as_deref(),
+            hook_binary: binary.as_deref(),
+            watch: &[PathBuf::from("/work/acme/ocx.lock")],
+            seed: None,
+        })
     }
 
     // ── C-041: grammar ──────────────────────────────────────────────────────
@@ -2932,7 +3024,7 @@ mod bare_ocx_tests {
     use clap::ValueEnum as _;
     use ocx_lib::shell::{Shell, escape};
 
-    use super::{activation_lines, format_global_env_eval, generate_completion_inline, ocx_binary_path};
+    use super::{ActivateMode, activation_lines, format_global_env_eval, generate_completion_inline, ocx_binary_path};
 
     /// The arms whose activation stream defines a wrapper named `ocx`, and
     /// which therefore cannot contain a bare invocation.
@@ -2961,6 +3053,11 @@ mod bare_ocx_tests {
 
     fn bin_dir() -> PathBuf {
         PathBuf::from("/tmp/ocx_home/symlinks/ocx_sh/ocx/cli/current/content/bin")
+    }
+
+    /// C-059's other session directory — the global toolchain's trampolines.
+    fn toolchain_bin_dir() -> PathBuf {
+        PathBuf::from("/tmp/ocx_home/toolchain/bin")
     }
 
     /// The binary path as `shell` spells it inside its own quoting.
@@ -2996,14 +3093,16 @@ mod bare_ocx_tests {
 
         for shell in wrapper_arms() {
             let path = quoted_binary(shell, &binary);
-            let stream = activation_lines(
+            let stream = activation_lines(&super::LoginStream {
                 shell,
-                &bin_dir(),
-                generate_completion_inline(shell).as_deref(),
-                Some(&binary),
-                &[PathBuf::from("/work/acme/ocx.lock")],
-                None,
-            )
+                bin_path: &bin_dir(),
+                toolchain_bin: &toolchain_bin_dir(),
+                activate: ActivateMode::Env,
+                completion: generate_completion_inline(shell).as_deref(),
+                hook_binary: Some(&binary),
+                watch: &[PathBuf::from("/work/acme/ocx.lock")],
+                seed: None,
+            })
             .join("\n");
 
             // The reconcile needle carries `--offline` because the emitted call
@@ -3399,7 +3498,16 @@ mod ordering_tests {
         let overlay = PathBuf::from("/etc/fleet/consent.toml");
         let seed = super::seed_carrier(std::slice::from_ref(&overlay), &[]).expect("a non-empty tier list seeds");
 
-        let stream = super::activation_lines(ocx_lib::shell::Shell::Bash, &bin, None, Some(&binary), &[], Some(&seed));
+        let stream = super::activation_lines(&super::LoginStream {
+            shell: ocx_lib::shell::Shell::Bash,
+            bin_path: &bin,
+            toolchain_bin: &PathBuf::from("/tmp/ocx_home/toolchain/bin"),
+            activate: super::ActivateMode::Env,
+            completion: None,
+            hook_binary: Some(&binary),
+            watch: &[],
+            seed: Some(&seed),
+        });
 
         let carrier = stream
             .iter()
@@ -3950,5 +4058,168 @@ mod global_activate_tests {
 
         // SAFETY: see above.
         unsafe { std::env::remove_var("OCX_HOME") };
+    }
+
+    // ── A-12's other half: the LOGIN stream ─────────────────────────────────
+
+    /// The install-bin directory a login stream is built over.
+    fn bin_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from("/tmp/ocx_home/symlinks/ocx_sh/ocx/cli/current/content/bin")
+    }
+
+    /// C-059's other session directory — the global toolchain's trampolines.
+    fn toolchain_bin_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from("/tmp/ocx_home/toolchain/bin")
+    }
+
+    /// The login stream under a stated global `activate` mode.
+    ///
+    /// Five shells, not all ten: the gate sits *outside* per-shell formatting,
+    /// so exhaustiveness buys nothing here and the per-shell spelling of both
+    /// emitted lines is covered by `format_global_env_eval`'s and
+    /// `path_prepend_line`'s own tests. What this list does carry is every
+    /// shape the two needles take — the POSIX `eval`, fish's `| source`, pwsh's
+    /// `Invoke-Expression`, elvish's capture-then-`eval`, and nushell, the one
+    /// arm that consumes `--format json --global env` as data.
+    const GATE_SHELLS: [ocx_lib::shell::Shell; 5] = [
+        ocx_lib::shell::Shell::Bash,
+        ocx_lib::shell::Shell::Fish,
+        ocx_lib::shell::Shell::PowerShell,
+        ocx_lib::shell::Shell::Elvish,
+        ocx_lib::shell::Shell::Nushell,
+    ];
+
+    fn login_stream(shell: ocx_lib::shell::Shell, activate: ActivateMode) -> Vec<String> {
+        super::activation_lines(&super::LoginStream {
+            shell,
+            bin_path: &bin_dir(),
+            toolchain_bin: &toolchain_bin_dir(),
+            activate,
+            completion: None,
+            hook_binary: Some(&super::ocx_binary_path(&bin_dir())),
+            watch: &[],
+            seed: None,
+        })
+    }
+
+    /// Does this stream ask `ocx` for the global environment?
+    ///
+    /// Nushell is the one arm off the `--shell=NAME` channel: it has no string
+    /// `eval`, so it consumes the structured `--format json --global env`
+    /// output. Same question, different spelling — the needle follows the arm
+    /// exactly as `global_env_eval_invokes_global_env_for_any_shell` spells it.
+    fn composes_global_env(stream: &[String], shell: ocx_lib::shell::Shell) -> bool {
+        let needle = if shell == ocx_lib::shell::Shell::Nushell {
+            "--format json --global env"
+        } else {
+            "--global env"
+        };
+        stream.iter().any(|line| line.contains(needle))
+    }
+
+    /// A-12's other half — the **login** stream composes the global env in
+    /// `env` mode only.
+    ///
+    /// A-12 (2026-09-06) gated the per-prompt arm and recorded the gap as
+    /// closed, but two emitters put a global environment into a shell and only
+    /// one was gated: `$OCX_HOME/env.sh` runs `ocx self activate`, whose stream
+    /// pushed the eval in every mode. A global `activate = "bin"` therefore
+    /// looked inert — repaired at the first prompt in an interactive shell, and
+    /// never in a script, an `ssh host cmd`, a git hook or a plain `sh`, which
+    /// register no hook at all.
+    ///
+    /// The `env` arm is the positive control: without it, a stream that emitted
+    /// the eval in no mode at all would pass the `bin`/`none` assertions.
+    ///
+    /// Red state: drop the `activate == ActivateMode::Env` guard around
+    /// `format_global_env_eval` in `activation_lines`.
+    #[test]
+    fn a12_the_login_stream_composes_the_global_env_in_env_mode_only() {
+        for shell in GATE_SHELLS {
+            for mode in [ActivateMode::Bin, ActivateMode::None] {
+                let stream = login_stream(shell, mode);
+                assert!(
+                    !composes_global_env(&stream, shell),
+                    "{shell:?} in {mode} mode must not ask ocx for the global env - the tools come \
+                     from the trampolines in toolchain/bin; got: {stream:#?}"
+                );
+            }
+
+            let stream = login_stream(shell, ActivateMode::Env);
+            assert!(
+                composes_global_env(&stream, shell),
+                "{shell:?} in env mode must still compose the global env; got: {stream:#?}"
+            );
+        }
+    }
+
+    /// C-059 — both session directories reach a login shell in **every** mode.
+    ///
+    /// `$OCX_HOME/toolchain/bin` is a session-level fact, not a composition:
+    /// the reconciler holds it desired unconditionally
+    /// (`SessionPath::global_bin`), and the login stream now emits it too, so
+    /// `bin` mode still resolves its tools where the OS session-registration
+    /// channel `ocx self setup` writes is absent or ignored — a container, a
+    /// host without systemd user env, `--no-modify-path`, or a non-interactive
+    /// shell that never renders a prompt to be repaired at.
+    ///
+    /// Asserted against `path_prepend_line`'s own answer rather than a
+    /// substring: the directory's path also appears inside the hook body, so a
+    /// `contains` would stay green with no prepend at all.
+    ///
+    /// Red state: delete the `path_prepend_line(shell, toolchain_bin)` line, or
+    /// make it conditional on the mode.
+    #[test]
+    fn c059_the_login_stream_prepends_the_global_toolchain_bin_in_every_mode() {
+        let mut asserted = 0;
+        for shell in GATE_SHELLS {
+            let Some(expected) = super::path_prepend_line(shell, &toolchain_bin_dir()) else {
+                continue;
+            };
+            for mode in [ActivateMode::Env, ActivateMode::Bin, ActivateMode::None] {
+                let stream = login_stream(shell, mode);
+                assert!(
+                    stream.contains(&expected),
+                    "{shell:?} in {mode} mode must prepend the global toolchain bin dir; \
+                     expected {expected:?} in: {stream:#?}"
+                );
+                asserted += 1;
+            }
+        }
+        assert!(
+            asserted >= 12,
+            "the loop must have asserted something for nearly every shell and mode - a shell set \
+             whose arms all decline to express a prepend would make this test vacuous; got \
+             {asserted} assertions"
+        );
+    }
+
+    /// The two session directories arrive in C-060's order: the installed `ocx`
+    /// in front of the global trampolines, so a trampoline can never shadow the
+    /// binary it re-enters.
+    ///
+    /// Red state: swap the two `path_prepend_line` calls in `activation_lines`.
+    #[test]
+    fn c060_the_login_stream_puts_the_install_bin_in_front_of_the_toolchain_bin() {
+        for shell in GATE_SHELLS {
+            let (Some(install), Some(toolchain)) = (
+                super::path_prepend_line(shell, &bin_dir()),
+                super::path_prepend_line(shell, &toolchain_bin_dir()),
+            ) else {
+                continue;
+            };
+            let stream = login_stream(shell, ActivateMode::Bin);
+            let at = |needle: &String| {
+                stream
+                    .iter()
+                    .position(|line| line == needle)
+                    .unwrap_or_else(|| panic!("{shell:?}: the stream must carry {needle:?}; got {stream:#?}"))
+            };
+            assert!(
+                at(&toolchain) < at(&install),
+                "{shell:?}: the toolchain bin is emitted FIRST so the install bin lands in front of \
+                 it on PATH (C-060); got {stream:#?}"
+            );
+        }
     }
 }
