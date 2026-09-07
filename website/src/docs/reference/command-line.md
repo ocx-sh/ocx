@@ -1605,11 +1605,19 @@ The generated file contains a [`#:schema` directive][config-schemas] and an empt
 
 The command is an idempotent failure: if `ocx.toml` already exists (or a symlink at that path exists), it exits with code 64 without overwriting the existing file.
 
+It also records a [consent stamp][shell-consent] for the project it creates, so the next shell prompt in that directory applies it — creating an `ocx.toml` is at least as deliberate a gesture as the `ocx add` that already writes one. The stamp records an empty source set, because the project has no lock yet; the first `ocx add` re-records it. Pass `--no-consent` to skip it and consent later with [`ocx shell allow`](#shell-allow).
+
 **Usage**
 
 ```shell
-ocx init
+ocx init [OPTIONS]
 ```
+
+**Options**
+
+- `--consent`: Record a consent stamp for the new project. This is the default.
+- `--no-consent`: Create the project without consenting to its shell activation.
+- `-h`, `--help`: Print help information.
 
 **Exit codes**
 
@@ -2182,7 +2190,7 @@ Output is coloured when stdout is a terminal and colour is enabled (see [`--colo
 
 | `grant` | Text form | Where it comes from |
 |---|---|---|
-| `stamp` | `a consent stamp, present (written …)` | A consent stamp under `$OCX_HOME/state/projects/<key>/`, written by [`ocx shell allow`](#shell-allow) or as a side effect of one of the six [consent-writing commands][in-depth-shell-integration-consent]. `stamp_written_at` carries the instant the stamp itself records. Remove it with [`ocx shell revoke`](#shell-revoke). |
+| `stamp` | `a consent stamp, present (written …)` | A consent stamp under `$OCX_HOME/state/projects/<key>/`, written by [`ocx shell allow`](#shell-allow) or as a side effect of one of the other [consent-writing commands][in-depth-shell-integration-consent]. `stamp_written_at` carries the instant the stamp itself records. Remove it with [`ocx shell revoke`](#shell-revoke). |
 | `path` | `[shell.consent] paths` | A `[shell.consent] paths` entry in `config.toml` naming this directory. Revoked by editing that file. |
 | `namespace` | `[shell.consent] namespaces` | A `[shell.consent] namespaces` grant covering every source the store corroborates for this lock. Authorizes the project's **packages** only, never its own `[env]`. Revoked by editing `config.toml`. |
 
@@ -2208,7 +2216,7 @@ An inert shell is a finding, not a failure: the reason is the payload. The only 
 | `ocx.lock` unavailable | `ocx.lock` is absent, unreadable, or unparseable, so the source-set predicate driving the consent stamp check has nothing to quantify over |
 | Uncorroborated namespace | The project's sources match a `[shell.consent] namespaces` grant by the lock's claim, but the package store's own record of where those digests came from does not corroborate it; the report names both the claimed and the verified source sets |
 | Source-set drift | The lock's source set is no longer a subset of what the stamp last saw; the report names the new sources |
-| No consent stamp, no matching grant | The project has neither a stamp — from [`ocx shell allow`](#shell-allow) or one of the six [consent-writing commands][in-depth-shell-integration-consent] — nor a path grant covering it |
+| No consent stamp, no matching grant | The project has neither a stamp — from [`ocx shell allow`](#shell-allow), [`ocx init`](#init), or one of the [consent-writing commands][in-depth-shell-integration-consent] — nor a path grant covering it |
 | Ledger over cap | A scope's applied-variable count exceeds the carrier's size budget |
 | Ledger absent or corrupt | A carrier present but undecodable is the corrupt case. An **unset** carrier splits on whether `ocx self setup` has ever wired this shell (probed as `$OCX_HOME/env.sh`): wired reports "nothing has been applied in this shell yet" (fix: none needed, the next prompt applies it); never-wired reports "the shell integration has never been installed here" (fix: run `ocx self setup`, then start a new shell) |
 

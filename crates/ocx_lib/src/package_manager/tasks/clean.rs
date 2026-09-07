@@ -561,7 +561,7 @@ enum SweepReason {
     /// Liveness is irrelevant here and a re-probe would be actively wrong: the
     /// ocx root exists by definition, so re-probing would retain every one of
     /// these forever. Pre-guard binaries wrote them on any `--global` run of
-    /// the six writers; nothing reads them, because consent never evaluates the
+    /// the stamp writers; nothing reads them, because consent never evaluates the
     /// global tier.
     OcxHome,
 }
@@ -1238,7 +1238,7 @@ repository = "localhost:5000/shfmt"
     /// root is live, and a real project's stamp in the same run is not.
     ///
     /// Pre-guard binaries wrote this stamp on any `--global` invocation of the
-    /// six consent writers (`ocx --global lock` first; `run` rewrote the same
+    /// consent writers (`ocx --global lock` first; `run` rewrote the same
     /// key), so it exists on installations that ran before
     /// `consent::record_in` learned to refuse it. Liveness cannot collect it:
     /// the ocx root exists by definition, so the ordinary `DirProbe::Absent`

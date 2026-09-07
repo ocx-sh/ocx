@@ -74,7 +74,7 @@ impl Pull {
         // Errors propagate to the `main.rs` boundary: logged once via
         // `log::error!` and classified by `app::classify_error` from
         // `ProjectContextError`'s `ClassifyExitCode` impl.
-        // Consent write seam (C-024, A-29): `pull` is one of the six commands
+        // Consent write seam (C-024, A-29): `pull` is one of the commands
         // that opt in. `load_project_with_lock`, which four read-only callers
         // share, stamps nothing.
         let ctx = load_project_with_lock_consenting(&context).await?;

@@ -181,7 +181,7 @@ impl ToolchainExec {
         // Errors propagate to the `main.rs` boundary: logged once and
         // classified by `app::classify_error` from `ProjectContextError`'s
         // `ClassifyExitCode` impl (NoProject→64, LockMissing→78, StaleLock→65).
-        // Consent write seam (C-024, A-29): `run` is one of the six commands
+        // Consent write seam (C-024, A-29): `run` is one of the commands
         // that opt in. `load_project_with_lock`, which four read-only callers
         // share, stamps nothing.
         // C-068 — a rendered trampoline re-enters as

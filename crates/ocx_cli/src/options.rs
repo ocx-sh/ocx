@@ -4,6 +4,7 @@
 mod bin_scan;
 mod completion;
 mod compression_level;
+mod consent;
 mod content_path;
 mod env_override;
 mod forge_write;
@@ -44,6 +45,7 @@ mod verify;
 pub use bin_scan::{BinScan, BinScanMode};
 pub use completion::Completion;
 pub use compression_level::CompressionLevel;
+pub use consent::Consent;
 pub use content_path::ContentPath;
 pub use env_override::EnvOverride;
 pub use forge_write::ForgeWriteOptions;

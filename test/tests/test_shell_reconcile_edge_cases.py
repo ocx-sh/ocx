@@ -3649,7 +3649,7 @@ def test_ec_cfg_012_a_new_grant_is_observed_at_the_very_next_prompt(arena: Arena
 
 
 def test_ec_ident_012_every_offline_reachable_writer_stamps_consent(arena: Arena) -> None:
-    """EC-IDENT-012 — every one of the six consent-stamping commands writes ``state/projects/<key>/consent.json`` on an unstamped, granted project.
+    """EC-IDENT-012 — every one of the six mutating consent-stamping commands writes ``state/projects/<key>/consent.json`` on an unstamped, granted project.
 
     Of the six (``add``, ``remove``, ``lock``, ``update``, ``pull``, ``run``),
     only ``lock`` and ``run -- true`` are reachable offline without a
@@ -3677,7 +3677,7 @@ def test_ec_ident_012_every_offline_reachable_writer_stamps_consent(arena: Arena
 
 
 def test_ec_ident_013_read_only_commands_never_create_a_project_state_dir(arena: Arena) -> None:
-    """EC-IDENT-013 — A-29: the six writers are an explicit allowlist; every OTHER command, including ``ocx shell state`` itself, must never consent to the project it is diagnosing."""
+    """EC-IDENT-013 — A-29: the writers are an explicit allowlist; every OTHER command, including ``ocx shell state`` itself, must never consent to the project it is diagnosing."""
     project = arena.projects / "diagnose_only"
     matrix.write_project(project, 'WP15_CONST = "v1"\n')
     # Deliberately no `ocx lock` — this project must stay genuinely unstamped.

@@ -127,7 +127,7 @@ def arena(tmp_path: Path) -> Arena:
 def _locked_project(arena: Arena, name: str, env_block: str) -> Path:
     """A project with a real ``ocx.lock`` — and therefore a real consent stamp.
 
-    ``ocx lock`` is one of the six commands on A-29's closed stamp-writer
+    ``ocx lock`` is one of the commands on A-29's closed stamp-writer
     allowlist, so this is the acceptance-level spelling of "the user ran an ocx
     command here". It also produces the only lock whose ``declaration_hash``
     satisfies the composer's staleness gate.
@@ -1756,7 +1756,7 @@ def test_shell_allow_consents_a_clone_and_revoke_takes_it_back(arena: Arena) -> 
     allowed = _consent(arena, "allow", clone)
     assert allowed.returncode == 0, f"`ocx shell allow` must succeed:\n{allowed.stderr}"
     assert (matrix.stamp_dir(arena.ocx_home, key) / "consent.json").is_file(), (
-        "`ocx shell allow` must write the stamp the six mutating commands write"
+        "`ocx shell allow` must write the stamp the mutating commands write"
     )
 
     # Outside a live shell there is no carrier, so the reason ladder still has

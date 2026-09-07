@@ -16,11 +16,11 @@ pub enum Shell {
     /// Consent to a project's shell activation.
     ///
     /// Records a consent stamp for the project governing PATH (default: the
-    /// current directory), so a new shell prompt applies that project's tools
-    /// and environment. This is the same stamp `ocx add`, `ocx lock`,
-    /// `ocx pull` and `ocx exec` write as a side effect - running a mutating
-    /// command in a directory is itself consent; this is the way to record one
-    /// on purpose.
+    /// current directory), so the next shell prompt applies that project's tools
+    /// and environment. This is the same stamp `ocx init` writes for the project
+    /// it creates, and `ocx add`, `ocx lock`, `ocx pull` and `ocx exec` write as
+    /// a side effect - running a mutating command in a directory is itself
+    /// consent; this is the way to record one on purpose.
     ///
     /// The stamp records the source set the project's `ocx.lock` resolves from
     /// at the time it is written. A tool added from a new registry or

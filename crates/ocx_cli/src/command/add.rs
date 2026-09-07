@@ -209,7 +209,7 @@ impl Add {
             .await?
             .commit;
 
-        // Consent write seam (C-024, A-29) — one of the six commands allowed to
+        // Consent write seam (C-024, A-29) — one of the commands allowed to
         // stamp, opting in explicitly. AFTER the commit, so the stamp records
         // the source set the user just asked for rather than the one it
         // replaced. Best-effort; never fails the mutation.

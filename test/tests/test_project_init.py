@@ -10,6 +10,7 @@ Spec source: plan ``auto-findings-md-eventual-fox.md`` Unit 7 §1.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -157,3 +158,58 @@ def test_init_minimal_content_matches_research(ocx: OcxRunner, tmp_path: Path) -
         assert questionnaire_token not in lower, (
             f"ocx init must be non-interactive; found {questionnaire_token!r} in output:\n{content}"
         )
+
+
+def _consent_stamps(ocx_home: Path) -> list[Path]:
+    """Every consent stamp under this run's isolated ``$OCX_HOME``.
+
+    Globbed rather than keyed: the home is per-test, so the set is the answer to
+    "did init stamp anything", and the stamp's own ``project_dir`` field carries
+    the identity assertion without re-deriving ``ReferenceManager::name_for_path``
+    here (which would make the test agree with itself instead of the binary).
+    """
+    return sorted((ocx_home / "state" / "projects").glob("*/consent.json"))
+
+
+def test_init_records_a_consent_stamp(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx init`` consents to the project it creates (ocx-sh/ocx#397).
+
+    Creating an ``ocx.toml`` in a directory is at least as deliberate a gesture
+    as the ``ocx add`` that already stamps one, and without the stamp the very
+    next prompt reports the project just created as inert. The source set is
+    empty because there is no lock yet — the first ``ocx add`` re-records it.
+    """
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+
+    assert _consent_stamps(ocx.ocx_home) == [], "no stamp may exist before ocx init"
+
+    result = _run_init(ocx, project_dir)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx init failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+
+    stamps = _consent_stamps(ocx.ocx_home)
+    assert len(stamps) == 1, f"ocx init must write exactly one consent stamp; got {stamps}"
+    stamp = json.loads(stamps[0].read_text())
+    assert Path(stamp["project_dir"]) == project_dir.resolve(), (
+        f"the stamp must name the initialised project; got {stamp['project_dir']!r}"
+    )
+    assert stamp["sources"] == [], (
+        f"a project with no lock resolves from no source; got {stamp['sources']!r}"
+    )
+
+
+def test_init_no_consent_writes_no_stamp(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx init --no-consent`` creates the project without consenting to it."""
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+
+    result = _run_init(ocx, project_dir, "--no-consent")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx init --no-consent failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert (project_dir / "ocx.toml").exists(), "--no-consent must still create ocx.toml"
+    assert _consent_stamps(ocx.ocx_home) == [], (
+        "--no-consent must write no consent stamp"
+    )
