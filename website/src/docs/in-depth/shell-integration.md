@@ -46,9 +46,11 @@ The four shells in the last row still activate correctly the moment the shell st
 
 ### A project created where you already are {#activation-project-created-in-place}
 
-The guard the hooked shells run on every prompt compares a freshness stamp against a set of file paths **baked in when the hook was last emitted** — the project's `ocx.toml` and `ocx.lock`, the global tier's pair, the config files that were read, and the project's consent stamp. That set carries the project entries only when a project was actually in effect, so a directory that had no `ocx.toml` gave the guard nothing to watch for one appearing: the carrier was set, the stamp was fresh and the directory had not changed, so [`ocx init`][cmd-init] (or a `git checkout` that brings a project in, or an editor writing the file) left the shell inert until the next `cd` or a new terminal.
+The guard the hooked shells run on every prompt compares a freshness stamp against a set of file paths **baked in when the hook was last emitted** — the project file OCX resolved and the `ocx.lock` beside it, the global tier's pair, the config files that were read, and the project's consent stamp. That set carries the project entries only when a project was actually in effect, so a directory that had no `ocx.toml` gave the guard nothing to watch for one appearing: the carrier was set, the stamp was fresh and the directory had not changed, so [`ocx init`][cmd-init] (or a `git checkout` that brings a project in, or an editor writing the file) left the shell inert until the next `cd` or a new terminal.
 
 So the guard carries one term evaluated against the shell's **live** working directory: an `ocx.toml` there that is newer than the stamp. Creating a project where you already stand now reaches the very next prompt, and so does the [`ocx shell allow`][cmd-shell-allow] that consents to it. The cost is one `stat` by a shell builtin on the quiet path, and nothing else changes — what counts as *stale* is still the fingerprint over the watch set, and a term that fires for a directory OCX ends up not activating costs one reconcile that changes nothing.
+
+The watched project entry is the file OCX actually resolved, whatever it is called. That matters when you point OCX at a project by path rather than by walking to it: [`OCX_PROJECT`][env-ocx-project] names a file outright, and it may be named anything — set it to `/work/build.ocx.toml` and that is the file whose edits reconcile, not an `ocx.toml` beside it that does not exist. While `OCX_PROJECT` names a file that is not there yet, the reconcile has nothing to resolve and leaves the guard retrying, so the file appearing is picked up at the next prompt too. What no file term can see is the variable itself changing: exporting or re-pointing `OCX_PROJECT` in a shell that is already running moves nothing on disk, and takes effect at your next `cd`.
 
 One case still waits for a `cd`: an `ocx.toml` appearing in a **parent** of where you are, rather than in the directory itself. Walking the whole ancestor chain would put one `stat` per level on every prompt to catch a case the directory change already catches a moment later. elvish has no term of this kind at all — see below — but its `ocx` wrapper covers the half that matters, since it clears the recorded directory after every ocx command.
 
@@ -309,6 +311,7 @@ With no `[[trust.policy]]` configured, automatic verification is a no-op — som
 [env-ocx-env-state]: ../reference/environment.md#ocx-env-state
 [env-ocx-no-hook]: ../reference/environment.md#ocx-no-hook
 [env-ocx-config]: ../reference/environment.md#ocx-config
+[env-ocx-project]: ../reference/environment.md#ocx-project
 [cmd-shell-allow]: ../reference/command-line.md#shell-allow
 [cmd-shell-revoke]: ../reference/command-line.md#shell-revoke
 [env-ocx-consent-paths]: ../reference/environment.md#ocx-consent-paths

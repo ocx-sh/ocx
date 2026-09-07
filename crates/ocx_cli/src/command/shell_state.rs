@@ -146,7 +146,7 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
 
     let paths = reconcile::watch_paths(
         context.file_structure(),
-        project.map(|project| project.identity.dir.as_path()),
+        project.map(|project| project.identity.config_path.as_path()),
         project.map(|project| project.identity.key.as_str()),
         // The carrier's recorded list when the shell has one, so the report
         // shows the tiers the running shell actually watches — including a

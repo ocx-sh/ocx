@@ -209,7 +209,7 @@ impl SelfActivate {
             };
             reconcile::watch_paths(
                 &file_structure,
-                project.as_ref().map(|project| project.dir.as_path()),
+                project.as_ref().map(|project| project.config_path.as_path()),
                 project.as_ref().map(|project| project.key.as_str()),
                 Some(&tiers),
             )
@@ -289,7 +289,7 @@ impl SelfActivate {
         };
         let watch = reconcile::watch_paths(
             file_structure,
-            project.as_ref().map(|project| project.dir.as_path()),
+            project.as_ref().map(|project| project.config_path.as_path()),
             project.as_ref().map(|project| project.key.as_str()),
             // A-13 — the recorded list, seeded by the shell-start pass that saw
             // `--config`. Empty means no record yet; `watch_paths` re-derives.
@@ -3350,7 +3350,7 @@ mod ordering_tests {
         // is the production one and not a stub.
         let canonical = consent::canonical_project_dir(&project_file).expect("canonicalize");
         let key = ocx_lib::reference_manager::ReferenceManager::name_for_path(&canonical);
-        let watch = reconcile::watch_paths(&file_structure, Some(&canonical), Some(&key), None);
+        let watch = reconcile::watch_paths(&file_structure, Some(&project_file), Some(&key), None);
         let mut ledger = Ledger::empty();
         ledger.fp = reconcile::current_fingerprint(&watch, Some(&canonical));
         ledger.verdict = Some(Verdict::Inert);

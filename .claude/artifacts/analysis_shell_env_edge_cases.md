@@ -6,7 +6,7 @@ runtime environment can put the design in, written so that a test author needs n
 further design work: the trigger is a reproduction, the expectation cites the
 decision it follows from, and the tier says where the check belongs.
 
-**235 rows.** Produced by four parallel adversarial passes over the ADR and the
+**236 rows.** Produced by four parallel adversarial passes over the ADR and the
 shipped code — reconciler semantics, per-shell mechanics across ten `Shell` arms,
 consent/trust/config, and operational/environmental. `review_adr_env_sota.md`'s
 G-1..G-6 are folded in as `known` rows rather than rediscovered. Twelve
@@ -36,9 +36,9 @@ wildcard.
 | `ADR ref` | Decision number and/or ADR line range. |
 | `Coverage` | A test that proves the row, as `<file>::<test>`. Filled from the test tree, never by hand. **A sample, not an index**: the cell names *a* covering test, never every one — `reconcile/fingerprint.rs` holds 13 tests and is cited by 2 rows. Read it as "this row is proven here", never as "this is all the coverage there is", and check the tree before deleting a test because no row names it. |
 
-**Coverage: 235 / 235 rows cited, 232 by a test that asserts** — 134 by a pytest
-test in `test/tests/test_shell_reconcile*.py`, 106 by a Rust `#[test]` under
-`crates/`, 5 rows by both (134 + 106 − 5 = 235). Five rows are tiered `manual-only`
+**Coverage: 236 / 236 rows cited, 233 by a test that asserts** — 135 by a pytest
+test in `test/tests/test_shell_reconcile*.py`, 107 by a Rust `#[test]` under
+`crates/`, 6 rows by both (135 + 107 − 6 = 236). Five rows are tiered `manual-only`
 and two more carry a `manual-only` half; each cites a documented
 `manual_procedure_*` function instead of an executable check, and each states the
 obstacle that earns the tier rather than merely asserting one.
@@ -63,7 +63,7 @@ sibling checks close the loop the other way — every `pytest`-tier row must nam
 test in the edge-case module, and every test in that module must trace to a row
 that exists.
 
-**Tier distribution** — `rust-unit` 123 · `pytest-hostshell` 75 ·
+**Tier distribution** — `rust-unit` 124 · `pytest-hostshell` 75 ·
 `pytest-shellzoo` 32 · `manual-only` 5, each row counted once by its
 first-listed ("primary") tier. "Needs a Windows runner leg" is *not*
 `manual-only`: the ADR's Validation §Windows already commits to that leg, so
@@ -159,6 +159,7 @@ chasing one is chasing nothing; no rows are added for them and nothing is renumb
 | EC-SCOPE-007 | Scope | A symlinked `ocx.toml` promotes an ancestor project — and warns every prompt | edge | `/work/ocx.toml` (real file); `/work/proj/ocx.toml` as a symlink; `cd /work/proj`; watch stderr across several prompts | UNSPECIFIED-BY-ADR — closed by [A-12](./adr_shell_env_addenda.md) — the walk skips a symlinked candidate and **continues upward** (`loader.rs:652-657`), so `/work` activates instead of `/work/proj`, and it does so through `log::warn!` on a path D3 requires to be quiet and never to break. **Recommendation**: run the per-prompt walk with the loader's warnings demoted to debug, and surface the skipped candidate in `ocx shell state`'s reason list — silence at the prompt, visibility on demand **Register error, corrected by A-12:** claims the symlink warn reaches the prompt; the hook discards stderr unconditionally, so it never does. | pytest-hostshell | D3 L31/L166 | `test/tests/test_shell_reconcile_edge_cases.py::test_ec_scope_007_a_symlinked_candidate_is_skipped_and_the_ancestor_activates` |
 | EC-SCOPE-008 | Scope | `OCX_PROJECT` / `--project` pins the scope against `cd` | edge | `export OCX_PROJECT=/p1/ocx.toml`; `cd /p2` (a different consented project); next prompt | The explicit tier resolves one file and returns, replacing rather than layering, and never consults the CWD — so a PWD event changes nothing and `/p1` stays applied inside `/p2`. Follows from D3 L164 fact (3); assert it so a PWD-driven implementation cannot quietly override the explicit selector | pytest-hostshell | D3 L164 | `test/tests/test_shell_reconcile_edge_cases.py::test_ec_scope_008_an_explicit_ocx_project_selector_never_consults_the_cwd` |
 | EC-SCOPE-009 | Scope | Entering an **unconsented** project must still revert the previous one | edge | `cd /p1` (consented, `JAVA_HOME=/a`, PATH element X); `cd /fresh-clone` (no stamp, no grant) | Not stated directly, but forced by the retirement rule's scope-exit trigger: `/fresh-clone` yields an empty project D, and "D for that scope becomes empty" is exactly that trigger. `/p1`'s constant is reverted and X retired; an implementation reading "inert" as "do nothing" leaks `/p1` into the clone. One hint line, zero env change beyond the revert | pytest-hostshell | D3 L154, D4 L180 | `test/tests/test_shell_reconcile_edge_cases.py::test_ec_scope_009_entering_an_unconsented_fresh_clone_reverts_the_prior_project` |
+| EC-SCOPE-010 | Scope | The watch set names the **resolved** project file, so a project `OCX_PROJECT` names by a different filename reconciles when it is edited | known | `export OCX_PROJECT=/w/custom.toml` naming a real, consented project; take a prompt (it activates); edit its `[env]` block; take another prompt without changing directory | `watch_paths` contributed `<dir>/ocx.toml` and `<dir>/ocx.lock` from the project's *directory*, while `ProjectIdentity` already carried the resolved `config_path`. Under an `OCX_PROJECT` (or `--project`) that names anything but `ocx.toml`, the shell therefore watched a path the project does not have and never the file that decides: the guard's baked `-nt` term was false forever, the fingerprint folded the same absent member every prompt, and an `[env]`-only edit was invisible until a `cd`. Member 1 is now the resolved file itself, and the lock is derived as `config_path.parent()` — `lock_path_for`'s own spelling, the file the loader reads — rather than from the canonical directory, which diverges from it for a project reached through a symlink. Two derivations of one location, because `shell/` may not import `crate::project` (A-45); they are held together by a test in `activation.rs`, the layer that sees both. Not covered by this row and deliberately not fixed: `OCX_PROJECT` **exported or changed mid-session** moves no file, so no mtime term can see it — and while it names a file that does not exist yet the reconcile degrades, emits no checkpoint, and the guard retries on every prompt, which is how creation is picked up | rust-unit + pytest-shellzoo | [ocx-sh/ocx#397](https://github.com/ocx-sh/ocx/issues/397) — no ADR Decision contemplates a project file not named `ocx.toml`; C-019's member list is what the fix restates | `crates/ocx_lib/src/shell/reconcile/fingerprint.rs::watch_paths_name_the_resolved_project_file_not_a_hardcoded_ocx_toml` · `crates/ocx_lib/src/activation.rs::the_watch_set_lock_member_is_the_lock_the_loader_reads` · `test/tests/test_shell_reconcile_edge_cases.py::test_ec_scope_010_an_ocx_project_named_file_reconciles_when_it_is_edited` |
 
 ### Fingerprint and trigger
 
