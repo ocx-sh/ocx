@@ -116,6 +116,46 @@ pub trait IndexImpl: Send + Sync {
         Ok(None)
     }
 
+    /// The physical transport identifier for `identifier` derived from **local
+    /// state alone** — no source is ever contacted.
+    ///
+    /// The transport address exists to route a *download*. A caller that has
+    /// already established it is downloading nothing (the package is
+    /// materialized in the store) must not spend a network round trip on it:
+    /// that dial was issue #424, one `GET /p/<ns>/<pkg>.json` per locked tool
+    /// on every trampoline invocation, for a pointer nothing consumed.
+    ///
+    /// `Ok(None)` = nothing local rewrites this reference, which a caller reads
+    /// exactly as [`Self::physical_reference`]'s `Ok(None)`: no rewrite known.
+    /// The default returns `None`; only `ChainedIndex` overrides it, because it
+    /// is the only implementor that holds a local copy to answer from.
+    async fn physical_reference_local(&self, identifier: &oci::Identifier) -> Result<Option<oci::Identifier>> {
+        let _ = identifier;
+        Ok(None)
+    }
+
+    /// Record the routing pointer for `identifier` in local state, so the next
+    /// invocation answers [`Self::physical_reference_local`] from disk instead
+    /// of dialling a source for it again (#424).
+    ///
+    /// **Called from the resolve path only, and that placement is the gate.**
+    /// A physical address is asked for by readers too — `ocx package cascade
+    /// check`, `package verify`, `package sign`, `package attest` — and a read
+    /// must not snapshot one: writing `p/<ns>/<pkg>.json` *is* a snapshot of
+    /// the physical address even with no tag inside it, because the next
+    /// invocation routes by it having never re-asked. Recording where the
+    /// materialization happens keeps that unreachable from a read by
+    /// construction rather than by a policy each caller must remember.
+    ///
+    /// Best-effort and infallible by signature: this repairs a cache after the
+    /// caller's real work has already succeeded, so a lost race or a read-only
+    /// index home is logged, not surfaced. The default does nothing; only
+    /// `ChainedIndex` overrides it, being the only implementor with a local
+    /// copy to record into.
+    async fn record_routing_pointer(&self, identifier: &oci::Identifier) {
+        let _ = identifier;
+    }
+
     /// Whether this source will answer for `identifier`, and what its silence
     /// means — asked **before** the source is fetched from.
     ///

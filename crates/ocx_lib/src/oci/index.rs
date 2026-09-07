@@ -408,6 +408,24 @@ impl Index {
         self.inner.physical_reference(identifier).await
     }
 
+    /// The physical transport identifier known **locally**, never dialling a
+    /// source — see [`index_impl::IndexImpl::physical_reference_local`]. Used by
+    /// the store-hit path of [`PackageManager::find`](crate::package_manager::PackageManager::find),
+    /// which is downloading nothing and so must not pay for a pointer it will
+    /// not use.
+    pub async fn physical_reference_local(&self, identifier: &oci::Identifier) -> Result<Option<oci::Identifier>> {
+        self.inner.physical_reference_local(identifier).await
+    }
+
+    /// Record the routing pointer for `identifier` locally — see
+    /// [`index_impl::IndexImpl::record_routing_pointer`]. Called by
+    /// [`resolve_transport_pinned`](crate::package_manager::PackageManager),
+    /// the one path that resolves in order to materialize; readers ask for a
+    /// physical address without calling this, and so leave no snapshot behind.
+    pub async fn record_routing_pointer(&self, identifier: &oci::Identifier) {
+        self.inner.record_routing_pointer(identifier).await;
+    }
+
     /// The `trusted_hosts` escape hatch configured for `registry`.
     ///
     /// Exposed so the Sigstore trust-service dial guard
