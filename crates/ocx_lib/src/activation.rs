@@ -1794,6 +1794,35 @@ mod identity_tests {
         );
     }
 
+    /// EC-SCOPE-010 — the lock the watch set stats is the lock the loader
+    /// reads.
+    ///
+    /// `shell/` may not import `crate::project` (A-45), so
+    /// `reconcile::watch_paths` derives the project's `ocx.lock` from
+    /// `config_path.parent()` itself rather than calling
+    /// [`crate::project::lock::lock_path_for`]. That is a second derivation of
+    /// one location, and two derivations drift. This module is the layer that
+    /// can see both, so it holds them together.
+    ///
+    /// Asserted through a project file that is *not* named `ocx.toml`, because
+    /// a fixture named `ocx.toml` agrees with a hardcoded join by accident.
+    ///
+    /// Red state: derive the member from the canonical directory instead, and
+    /// the two spellings part company for any project reached through a
+    /// symlink.
+    #[test]
+    fn the_watch_set_lock_member_is_the_lock_the_loader_reads() {
+        let file_structure = crate::file_structure::FileStructure::with_root(std::path::PathBuf::from("/tmp/ocx_home"));
+        let config = std::path::Path::new("/work/proj/custom.toml");
+
+        let paths = crate::shell::reconcile::watch_paths(&file_structure, Some(config), None, None);
+
+        assert!(
+            paths.contains(&crate::project::lock::lock_path_for(config)),
+            "the watched lock must be the one `lock_path_for` names; got: {paths:?}"
+        );
+    }
+
     /// A path that will not canonicalize is *indeterminate*, not *absent* —
     /// both callers degrade rather than concluding "no project here".
     ///

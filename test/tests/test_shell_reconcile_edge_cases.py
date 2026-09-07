@@ -1772,6 +1772,102 @@ def test_ec_hook_018_a_project_created_in_place_activates_at_the_next_prompt(are
     )
 
 
+def _custom_named_project(arena: Arena, name: str, value: str) -> Path:
+    """A project whose file is ``custom.toml``, locked through ``OCX_PROJECT``.
+
+    The lock has to come from a real ``ocx lock`` run rather than
+    :func:`shell_matrix.write_lock`: the composer refuses a lock whose
+    ``declaration_hash`` does not match the declaration beside it, and the
+    refusal is silent, so a hand-written hash would make every probe below read
+    absent for a reason that has nothing to do with the row.
+    """
+    project = arena.projects / name
+    project.mkdir(parents=True, exist_ok=True)
+    (project / "custom.toml").write_text(f'[env]\nWP15_CONST = "{value}"\n', encoding="utf-8")
+    result = matrix.run_lock(arena.ocx, project, arena.env(OCX_PROJECT=str(project / "custom.toml")))
+    assert result.returncode == 0, f"ocx lock must succeed for the fixture; stderr:\n{result.stderr}"
+    assert (project / "ocx.lock").is_file(), "ocx lock must write ocx.lock beside the named project file"
+    return project
+
+
+def test_ec_scope_010_an_ocx_project_named_file_reconciles_when_it_is_edited(arena: Arena) -> None:
+    """EC-SCOPE-010 — ``OCX_PROJECT`` names the project file outright, so the watch set must fold *that* file, not ``<dir>/ocx.toml``.
+
+    ``OCX_PROJECT`` is the explicit tier of ``ConfigLoader::project_path``, and
+    the per-prompt process is spawned with no argv of its own, so it is the only
+    project override that reaches a prompt at all. ``reconcile::watch_paths``
+    baked ``<dir>/ocx.toml`` rather than the resolved ``config_path``: under
+    ``OCX_PROJECT=<dir>/custom.toml`` the shell watched a path the project does
+    not have and never the file that decides, so an ``[env]`` edit moved no
+    watched member, the fingerprint stayed equal and the prompt composed
+    nothing.
+
+    ``edited`` is the assertion under test. ``before`` and ``created`` are
+    preconditions, and ``created`` is deliberately **not** evidence for a guard
+    term: while ``OCX_PROJECT`` names a file that does not exist,
+    ``project_path`` returns ``FileNotFound``, the reconcile degrades and emits
+    *nothing* -- no checkpoint -- so the guard's ``$PWD``-vs-recorded term fires
+    on every prompt and the file appearing is picked up by that retry. Once it
+    resolves, the checkpoint lands, the guard settles, and only then does the
+    watch set decide anything. That is why the edit is the discriminating step
+    and the creation is not.
+
+    The lock is copied once and never again: ``declaration_hash`` is unchanged
+    by ``[env]`` (``project/config.rs::declaration_hash_unchanged_by_env``), so
+    the second transition moves the project file **alone**. Copying the lock
+    again would score ``edited`` green off the lock's own mtime, which is a
+    watched member with or without the fix.
+
+    The shell never changes directory and never runs an ``ocx`` command, so
+    ``$PWD``, the yield sentinels and the ``ocx`` wrapper are all ruled out as
+    the thing that fired the settled guard.
+
+    Red state: put ``dir.join("ocx.toml")`` back into ``watch_paths`` and
+    ``edited`` reads ``alpha``.
+    """
+    shell_abs = _require("bash")
+    alpha = _custom_named_project(arena, "src_alpha", "alpha")
+    beta = _custom_named_project(arena, "src_beta", "beta")
+    target = arena.projects / "target"
+    target.mkdir()
+
+    env = arena.env(shell_abs)
+    env["TERM"] = "dumb"
+    env["PS1"] = ""
+    # Exported before the shell starts, naming a file that does not exist yet --
+    # the state `project_path` degrades to "project-free" for.
+    env["OCX_PROJECT"] = str(target / "custom.toml")
+    # A paths grant rather than a stamp: consent is not what this row is about.
+    env["OCX_CONSENT_PATHS"] = str(target.resolve())
+
+    output = matrix.pty_session(
+        [shell_abs, "--norc", "-i"],
+        [
+            f'eval "$("{arena.ocx}" --offline self activate --shell=bash --hook --no-completion)"',
+            'printf "%s\n" "@@before@@${WP15_CONST-__OCX_ABSENT__}"',
+            f"cp '{alpha}/custom.toml' '{alpha}/ocx.lock' .",
+            'printf "%s\n" "@@created@@${WP15_CONST-__OCX_ABSENT__}"',
+            f"cp '{beta}/custom.toml' custom.toml",
+            'printf "%s\n" "@@edited@@${WP15_CONST-__OCX_ABSENT__}"',
+        ],
+        cwd=target,
+        env=env,
+    )
+    found = matrix.probes(output)
+    assert found.get("before") == matrix.ABSENT, (
+        "the shell must start with the named project absent, or nothing below proves anything\n"
+        f"pty transcript:\n{output}"
+    )
+    assert found.get("created") == "alpha", (
+        "the named file appearing must apply at the next prompt (the degraded reconcile leaves the "
+        f"guard retrying), or the edit below is not measuring the watch set\npty transcript:\n{output}"
+    )
+    assert found.get("edited") == "beta", (
+        "editing the file OCX_PROJECT names must reconcile -- the watch set has to fold the resolved "
+        f"config_path, not a hardcoded <dir>/ocx.toml\npty transcript:\n{output}"
+    )
+
+
 def test_ec_hook_002_bash_5_1_array_prompt_command_is_appended_as_element(arena: Arena) -> None:
     """EC-HOOK-002 — the Bash 5.1+ array ``PROMPT_COMMAND`` gets ``+=(__ocx_prompt_hook)``, never a string append."""
     shell_abs = _require("bash")
@@ -4426,7 +4522,7 @@ def test_traceability_every_pytest_and_manual_row_names_a_real_covering_test() -
     # + EC-GRANT-025 and EC-GRANT-026 (round 3: the per-platform ASCII-case
     # fold, and the single-wildcard rule)
     # + EC-HOOK-018 (ocx#397: a project created under an unchanged `$PWD`).
-    assert len(register) == 235, f"the register must still parse to exactly 235 rows; got {len(register)}"
+    assert len(register) == 236, f"the register must still parse to exactly 236 rows; got {len(register)}"
     test_to_ids = _this_modules_test_to_ids()
     known_test_names = set(test_to_ids.keys()) | _shell_module_test_names()
     known_manual_procedures = {

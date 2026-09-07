@@ -17,14 +17,15 @@ use std::path::{Path, PathBuf};
 /// path stat-only (C-042).
 ///
 /// `watch_paths` is the recorded member list, in order, exactly as the emitted
-/// hook body carries it (C-044): the project's `ocx.toml` and `ocx.lock`, the
-/// global tier's pair, the managed-config snapshot, the config-tier paths the
-/// last `ConfigLoader` pass discovered, and the project's consent stamp. Each is
-/// folded with its **presence**, its size and its mtime, so a tier file that did
-/// not exist becomes a change the moment it is created. `project_dir` is member
-/// 7 — which project the CWD walk resolved — folded as identity, so moving
-/// between two projects is a change even when no watched file was touched. The
-/// binary version is folded from `CARGO_PKG_VERSION`, so `self update` moves it.
+/// hook body carries it (C-044): the project file the loader resolved and the
+/// `ocx.lock` beside it, the global tier's pair, the managed-config snapshot,
+/// the config-tier paths the last `ConfigLoader` pass discovered, and the
+/// project's consent stamp. Each is folded with its **presence**, its size and
+/// its mtime, so a tier file that did not exist becomes a change the moment it
+/// is created. `project_dir` is member 7 — which project the CWD walk resolved
+/// — folded as identity, so moving between two projects is a change even when
+/// no watched file was touched. The binary version is folded from
+/// `CARGO_PKG_VERSION`, so `self update` moves it.
 ///
 /// A-13 — `consent_paths` and `consent_namespaces` are the **raw**
 /// `OCX_CONSENT_PATHS` / `OCX_CONSENT_NAMESPACES` values, passed in rather than
@@ -147,7 +148,7 @@ pub fn watch_set_fingerprint(watch_paths: &[PathBuf]) -> String {
 /// *"what makes the environment stale"* drift.
 pub fn watch_paths(
     file_structure: &crate::file_structure::FileStructure,
-    project_dir: Option<&Path>,
+    project_config: Option<&Path>,
     project_key: Option<&str>,
     recorded_tiers: Option<&[PathBuf]>,
 ) -> Vec<PathBuf> {
@@ -156,9 +157,24 @@ pub fn watch_paths(
     // Members 1-2 — the project tier. `[env]` applies on its own authority
     // independently of the lock, so watching locks alone would miss an
     // `[env]`-only edit.
-    if let Some(dir) = project_dir {
-        paths.push(dir.join("ocx.toml"));
-        paths.push(dir.join("ocx.lock"));
+    //
+    // The **resolved** file, never `<dir>/ocx.toml`: `--project` and
+    // `OCX_PROJECT` name the project file outright, and `OCX_PROJECT` is the
+    // only one of the two that reaches a per-prompt process (it is spawned with
+    // no argv of its own). A hardcoded `ocx.toml` there watches a path the
+    // project does not have and never the file that decides, so an `[env]` edit
+    // is invisible at every prompt.
+    //
+    // The lock is `config.parent()` and not the project's canonical directory,
+    // because that is the spelling `crate::project::lock::lock_path_for` uses —
+    // the file the loader actually reads. `shell/` may not import
+    // `crate::project` (A-45), so the two derivations are held together by
+    // `activation::identity_tests::the_watch_set_lock_member_is_the_lock_the_loader_reads`.
+    if let Some(config) = project_config {
+        paths.push(config.to_path_buf());
+        if let Some(dir) = config.parent() {
+            paths.push(dir.join("ocx.lock"));
+        }
     }
 
     // Members 3-5 — the global tier and the managed-config snapshot.
@@ -545,15 +561,15 @@ mod watch_path_tests {
     use super::*;
     use crate::file_structure::FileStructure;
 
-    /// C-019 — the project tier contributes **both** `ocx.toml` and `ocx.lock`:
-    /// `[env]` applies on its own authority independently of the lock, so
-    /// watching locks alone would miss an `[env]`-only edit.
+    /// C-019 — the project tier contributes **both** the project file and
+    /// `ocx.lock`: `[env]` applies on its own authority independently of the
+    /// lock, so watching locks alone would miss an `[env]`-only edit.
     #[test]
     fn watch_paths_carry_both_project_files_c019() {
         let file_structure = FileStructure::with_root(PathBuf::from("/tmp/ocx_home"));
         let project = Path::new("/work/proj");
 
-        let paths = watch_paths(&file_structure, Some(project), None, None);
+        let paths = watch_paths(&file_structure, Some(&project.join("ocx.toml")), None, None);
 
         assert!(
             paths.contains(&project.join("ocx.toml")),
@@ -640,6 +656,42 @@ mod watch_path_tests {
         }
     }
 
+    /// EC-SCOPE-010 — members 1-2 are the **resolved** project file and the
+    /// lock beside it, never a hardcoded `<dir>/ocx.toml`.
+    ///
+    /// `OCX_PROJECT=/work/proj/custom.toml` is the explicit tier of
+    /// `ConfigLoader::project_path`, and it is the only project override that
+    /// reaches a per-prompt process — which is spawned with no `--project`. A
+    /// set that names `ocx.toml` there watches a file that usually does not
+    /// exist and never the one that decides, so an `[env]` edit to the real
+    /// project file moves nothing the fingerprint folds.
+    ///
+    /// Both directions, so the negative is not vacuous: the resolved file must
+    /// be present *and* the hardcoded spelling absent.
+    ///
+    /// Red state: put `dir.join("ocx.toml")` back and the first assertion
+    /// fails.
+    #[test]
+    fn watch_paths_name_the_resolved_project_file_not_a_hardcoded_ocx_toml() {
+        let file_structure = FileStructure::with_root(PathBuf::from("/tmp/ocx_home"));
+        let config = Path::new("/work/proj/custom.toml");
+
+        let paths = watch_paths(&file_structure, Some(config), None, None);
+
+        assert!(
+            paths.contains(&config.to_path_buf()),
+            "the file the loader resolved is member 1, whatever it is named; got: {paths:?}"
+        );
+        assert!(
+            !paths.contains(&PathBuf::from("/work/proj/ocx.toml")),
+            "a hardcoded ocx.toml watches a file this project does not have; got: {paths:?}"
+        );
+        assert!(
+            paths.contains(&PathBuf::from("/work/proj/ocx.lock")),
+            "the lock keeps its own name beside the project file; got: {paths:?}"
+        );
+    }
+
     /// A-13 member 9 — the consent stamp joins the watch set, which is what
     /// makes the cached `inert` verdict expirable by a grant written from
     /// another terminal.
@@ -650,7 +702,7 @@ mod watch_path_tests {
         let without = watch_paths(&file_structure, None, None, None);
         let with = watch_paths(
             &file_structure,
-            Some(Path::new("/work/proj")),
+            Some(Path::new("/work/proj/ocx.toml")),
             Some("a1b2c3d4e5f60718"),
             None,
         );
