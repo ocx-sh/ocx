@@ -57,9 +57,62 @@ _MARK = "@@"
 # binary's own `ocx shell state` output, so a rename cannot go unnoticed.
 CARRIER = "__OCX_ENV_STATE"
 
-# A clean, minimal base PATH. The ocx bin dir and every project bin dir are
-# deliberately absent, so "the reconciler put it there" is never vacuous.
+# A clean, minimal base PATH. Every *project* bin dir is deliberately absent, so
+# "the reconciler put it there" is never vacuous. The two session directories
+# are not in here — they depend on `$OCX_HOME`, which this constant cannot see;
+# `clean_env` folds them in (see `SESSION_BIN_DIRS`).
 BASE_PATH = os.pathsep.join(["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"])
+
+# The two session-level PATH directories, relative to `$OCX_HOME`, front to
+# back (C-059/C-060). `ocx self setup` registers exactly these at session level;
+# from then on every shell in the field is born holding them, and the per-prompt
+# reconciler contributes them on *every* prompt so its own `owned_prefixes`
+# repair cannot strip the registration.
+#
+# The fixtures therefore have to carry them too: a child env without them makes
+# every prompt a PATH-changing prompt, so "this reconcile settled" and "this
+# prompt narrated nothing" become unprovable — not because the behaviour broke,
+# but because the fixture models a shell that cannot exist once `ocx self setup`
+# has run. Mirrored here rather than asked of the binary so the module stays
+# stdlib-only; `crates/ocx_lib/src/setup.rs::session_path_directories` is the
+# producer.
+#
+# Only the FIRST string is pinned against the binary: `test_self_activate.py`
+# asserts it appears in the emitted startup stream. `"toolchain/bin"` is
+# asserted nowhere else in this tree, so a rename of it would not be caught
+# here — it is caught one layer out, by `test_ec_path_005` and
+# `test_ec_rec_001`, which compare a live shell's PATH against
+# `session_path_dirs()` element for element and fail the moment the string
+# below stops naming what the reconciler contributes.
+SESSION_BIN_DIRS = ("symlinks/ocx.sh/ocx/cli/current/content/bin", "toolchain/bin")
+
+
+def session_path_dirs(ocx_home: Path) -> list[str]:
+    """The two session PATH directories under ``ocx_home``, front to back."""
+    return [str(ocx_home / relative) for relative in SESSION_BIN_DIRS]
+
+
+def with_session_path(path: str, ocx_home: Path) -> str:
+    """Splice :func:`session_path_dirs` into ``path`` where they settle.
+
+    The reconciler's fold leaves ``PATH`` reading, front to back: the project's
+    composed entries, the two session directories, the global tier's composed
+    entries, then whatever the shell already had. So the session pair goes
+    **between** whatever the caller put in front and the ambient base — at the
+    front for the default ``PATH``, and after a caller-supplied project ``bin``
+    dir for a fixture that models an already-applied project scope.
+
+    ``BASE_PATH``'s first surviving segment is the boundary, which is what makes
+    the rule mechanical rather than a guess: every fixture in this suite builds
+    its ``PATH`` as ``<what it is testing> + BASE_PATH``. A ``path`` carrying no
+    ``BASE_PATH`` segment at all gets the pair appended, which is the same rule
+    with an empty tail.
+    """
+    session = session_path_dirs(ocx_home)
+    segments = [segment for segment in path.split(os.pathsep) if segment not in session]
+    ambient = set(BASE_PATH.split(os.pathsep))
+    boundary = next((index for index, segment in enumerate(segments) if segment in ambient), len(segments))
+    return os.pathsep.join(segments[:boundary] + session + segments[boundary:])
 
 
 @dataclass(frozen=True)
@@ -134,6 +187,14 @@ def clean_env(home: Path, shell_abs: str, *, ocx_home: Path, **extra: str) -> di
 
     No ambient ``OCX_*`` leaks in, and the shell's own directory is appended so
     an arm that re-execs a helper still resolves it.
+
+    The two :data:`SESSION_BIN_DIRS` are spliced in by :func:`with_session_path`
+    **after** every override in ``extra`` has been merged, so a caller that
+    supplies its own ``PATH`` also gets a shell that looks like one
+    ``ocx self setup`` has touched. Without them the reconciler contributes two
+    directories on every prompt (C-059) and no fixture can ever assert a settled
+    ``PATH`` — not because the behaviour broke, but because the fixture models a
+    shell that cannot exist once the installer has run.
     """
     path = BASE_PATH
     shell_dir = str(Path(shell_abs).parent)
@@ -141,6 +202,7 @@ def clean_env(home: Path, shell_abs: str, *, ocx_home: Path, **extra: str) -> di
         path = path + os.pathsep + shell_dir
     env = {"HOME": str(home), "OCX_HOME": str(ocx_home), "PATH": path}
     env.update({key: value for key, value in extra.items() if value is not None})
+    env["PATH"] = with_session_path(env["PATH"], ocx_home)
     return env
 
 
@@ -284,10 +346,19 @@ def record_origin(ocx_home: Path, *, registry: str, digest: str, origin: str) ->
     return marker
 
 
-def write_project(project_dir: Path, env_block: str, *, tools_block: str = "") -> Path:
-    """Write an ``ocx.toml`` carrying ``env_block`` under ``[env]``."""
+def write_project(project_dir: Path, env_block: str, *, tools_block: str = "", preamble: str = "") -> Path:
+    """Write an ``ocx.toml`` carrying ``env_block`` under ``[env]``.
+
+    ``preamble`` is emitted **above every table**, which is the only place a
+    root-level key can go in TOML: a line after `[tools]` or `[env]` belongs to
+    that table. It exists for the toolchain-tier keys the fixtures now have to
+    set — ``activate = "bin"`` (C-012) is the first — so a caller does not have
+    to smuggle a root key into ``tools_block`` and leave the next reader to work
+    out why a table block starts with a bare assignment.
+    """
     project_dir.mkdir(parents=True, exist_ok=True)
-    body = f"{tools_block}\n[env]\n{env_block}\n" if tools_block else f"[env]\n{env_block}\n"
+    head = f"{preamble}\n\n" if preamble else ""
+    body = f"{head}{tools_block}\n[env]\n{env_block}\n" if tools_block else f"{head}[env]\n{env_block}\n"
     config = project_dir / "ocx.toml"
     config.write_text(body, encoding="utf-8")
     return config
