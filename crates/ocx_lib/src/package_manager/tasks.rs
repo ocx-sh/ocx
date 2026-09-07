@@ -33,10 +33,15 @@ pub(crate) mod prepare_lazy;
 pub(crate) mod pull;
 pub(crate) mod pull_local;
 pub(crate) mod purge;
+// `pub`, not `pub(crate)`: `ocx_cli` constructs a `RenderRequest` to call
+// `PackageManager::render_toolchain`, so the request and report types must be
+// nameable from outside the crate (same reason `patch_discovery` is public).
+pub mod render_toolchain;
 pub(crate) mod resolve;
 pub(crate) mod sbom;
 pub(crate) mod select;
 pub(crate) mod sign;
+pub(crate) mod toolchain_names;
 pub(crate) mod uninstall;
 pub(crate) mod update_check;
 pub(crate) mod verify;

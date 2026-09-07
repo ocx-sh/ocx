@@ -148,6 +148,14 @@ impl LauncherExec {
                 ocx_lib::package_manager::EnvScope::Project {
                     no_patches,
                     env: project_env.clone(),
+                    // No link lane here, and not for want of an input: this
+                    // frame composes the package its baked `pkg_root` names,
+                    // which is a digest path chosen when the launcher was
+                    // generated. It is pinned by construction, so following a
+                    // `<group>/<entry>` link would compose a *different*
+                    // package than the one this trampoline was written for
+                    // (RUL-82).
+                    toolchain: None,
                 },
                 // The launcher runs on the host, for the package materialized
                 // there — there is no target-platform question to carry.

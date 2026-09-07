@@ -82,6 +82,14 @@ pub struct ToolchainExec {
     #[clap(flatten)]
     pub lazy_mode: options::LazyMode,
 
+    /// Top tier of the `pinned` ladder for the environment this command
+    /// composes for the child (C-055, C-066).
+    ///
+    /// Declared before `names` and `argv`, per the project's
+    /// flags-before-positional-arguments convention.
+    #[clap(flatten)]
+    pub pinned: options::Pinned,
+
     #[clap(flatten)]
     pub records: options::Records,
 
@@ -176,7 +184,13 @@ impl ToolchainExec {
         // Consent write seam (C-024, A-29): `run` is one of the six commands
         // that opt in. `load_project_with_lock`, which four read-only callers
         // share, stamps nothing.
-        let ctx = load_project_with_lock_consenting(&context).await?;
+        // C-068 — a rendered trampoline re-enters as
+        // `ocx --project '<baked home>' exec` from whatever directory the user
+        // was in, so a failure to resolve must name the **selection**, not the
+        // working directory the walk happened to start at.
+        let ctx = load_project_with_lock_consenting(&context)
+            .await
+            .map_err(|error| attribute_to_selected_project(context.project_path(), error))?;
 
         // Phase B.3: validate `-g` groups against the loaded config.
         // `default` and `all` are always valid (all is expanded later).
@@ -261,9 +275,26 @@ impl ToolchainExec {
         // re-applies it after the package entries instead of reverting to them.
         let mut project_env = ocx_lib::project::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
         project_env.extend(env_overrides);
+        // C-065/C-070: the groups this invocation selected, healed and probed
+        // once inside `resolve_env_with_attribution` before any link path is
+        // emitted. Derived here rather than below because the same scope and
+        // home answer the trampoline-exclusion question further down — one
+        // derivation, so the composition and the `PATH` exclusion cannot
+        // disagree about which tree this project has.
+        let toolchain = crate::app::project_context::toolchain_links(
+            &context,
+            &ctx.config_path,
+            &ctx.config,
+            &ctx.lock,
+            &expanded,
+            self.pinned.pinned(),
+        )
+        .await?;
+        let toolchain_home = toolchain.home.clone();
         let scope = ocx_lib::package_manager::EnvScope::Project {
             no_patches: no_patches.clone(),
             env: project_env.clone(),
+            toolchain: Some(Box::new(toolchain)),
         };
         // Always the consumer surface. `--self` is package vocabulary: it
         // selects a package's own private surface, which by construction
@@ -365,7 +396,19 @@ impl ToolchainExec {
         // Resolved once, then handed to both the record and the launch: a second
         // resolution could disagree with the first and make the audit trail name
         // a binary other than the one that ran.
-        let executable = process_env.resolve_command(command);
+        // C-057/S-010: a name the composition does not provide is now an error
+        // propagated here rather than a bare name handed to `execvp`, which
+        // would have repeated the lookup against the ambient `PATH`.
+        // `CommandResolutionError` already classifies to `DataError`, so this
+        // `?` is the whole of exit 65 — and nothing is spawned on the way out.
+        // C-058/C-010 — the lookup copy of `PATH` excludes both trampoline
+        // directories, derived from the resolvers that produced the trees. The
+        // child's own `PATH` is untouched: a tool that spawns a sibling tool
+        // still resolves it through a trampoline, which is the re-entry the
+        // trampolines exist to provide. C-069's `is_ocx_trampoline` re-check
+        // over the resolved answer is the second, independent guard.
+        let excluded = trampoline_lookup_exclusions(context.file_structure(), &toolchain_home);
+        let executable = process_env.resolve_command_excluding(command, &excluded)?;
         let launch = Launch::recording(
             process_env,
             RecordInputs {
@@ -457,6 +500,94 @@ fn project_bindings(
 /// value.
 fn reconcile_run_entries(entries: &mut [Entry], project_env: &mut [Entry]) -> Result<(), env::ListSeparatorError> {
     env::reconcile_list_separators(entries.iter_mut().chain(project_env.iter_mut()))
+}
+
+/// The trampoline directories this invocation's **lookup** `PATH` excludes
+/// (C-058, C-010) — the project's `<home>/toolchain/bin` and the global
+/// `$OCX_HOME/toolchain/bin`.
+///
+/// # Derived, never joined
+///
+/// Both entries come from the resolver that produced the home —
+/// [`ToolchainStore::bin`](ocx_lib::file_structure::ToolchainStore::bin) for the
+/// global tree, [`ToolchainHome::bin`](ocx_lib::file_structure::ToolchainHome::bin)
+/// for the project's, the latter through
+/// [`PackageManager::toolchain_home`](ocx_lib::package_manager::PackageManager::toolchain_home)
+/// so `toolchain-dir` is honoured. A literal `join("toolchain").join("bin")`
+/// would compile, pass every fixture, and drift silently the day the tree shape
+/// moves — which is the whole of what C-010 forbids.
+///
+/// # Why both, and why only the lookup copy
+///
+/// The child's `PATH` is untouched: a tool that spawns a sibling tool still
+/// resolves it through a trampoline, which is the re-entry the trampolines exist
+/// to provide. Excluding the directories here only stops **this** lookup from
+/// answering with one. The exclusion is segment-exact and therefore not a
+/// containment check; C-069's `is_ocx_trampoline` re-check over the resolved
+/// answer — already shipped inside `Env::resolve_command_in` — is the second,
+/// independent guard that closes the alias gap.
+///
+/// # Why the two homes arrive as values (RUL-69)
+///
+/// Neither is looked up here. `Context` is only constructible through the async
+/// `Context::try_init`, which installs the global tracing subscriber, so a
+/// signature taking one puts this derivation out of reach of every unit test —
+/// and a derivation no test can reach is indistinguishable from the literal
+/// join it exists to forbid. The caller resolves the project home (through
+/// `PackageManager::toolchain_home`, the one derivation `ocx pull` also uses)
+/// and hands both trees in.
+fn trampoline_lookup_exclusions(
+    file_structure: &ocx_lib::file_structure::FileStructure,
+    project_home: &ocx_lib::file_structure::ToolchainHome,
+) -> Vec<std::path::PathBuf> {
+    vec![file_structure.toolchain.bin(), project_home.bin()]
+}
+
+/// Re-attribute a project-resolution failure to the project the invocation
+/// **selected**, rather than to the directory it happened to run from (C-068).
+///
+/// A toolchain trampoline re-enters as `ocx --project '<baked home>' exec`, from
+/// whatever working directory the user was in. When the baked home no longer
+/// holds an `ocx.toml`, the shipped path answers about the wrong tier: an
+/// explicit `--project` that is missing is a `config::Error::FileNotFound`
+/// (exit 79) and one naming a directory is a `config::Error::Io` (exit 74),
+/// while C-068 requires the three-way contract `ocx exec` already states —
+/// [`ProjectContextError::NoProject`] → **64**,
+/// [`LockCurrency::Missing`](ocx_lib::project::LockCurrency::Missing) → **78**,
+/// [`LockCurrency::Stale`](ocx_lib::project::LockCurrency::Stale) → **65** —
+/// with the baked path named in each.
+///
+/// The two lock arms already classify correctly and already carry a path, so
+/// this maps only the first: an explicit selection that did not resolve becomes
+/// `NoProject` naming the selection. Everything else passes through unchanged —
+/// a parse error in a project file that *does* exist is not a missing project.
+fn attribute_to_selected_project(
+    selected: Option<&std::path::Path>,
+    error: crate::app::project_context::ProjectContextError,
+) -> crate::app::project_context::ProjectContextError {
+    use crate::app::project_context::ProjectContextError;
+
+    let Some(selected) = selected else { return error };
+    let no_project = || ProjectContextError::NoProject {
+        cwd: selected.to_path_buf(),
+    };
+    match error {
+        // The loader answers `NoProject` with the **working directory** it
+        // walked, which for a trampoline is wherever the user happened to be.
+        // The selection is what the invocation actually named.
+        ProjectContextError::NoProject { .. } => no_project(),
+        // An explicit selection naming a path that is not there: `FileNotFound`,
+        // exit 79. For `ocx exec` the baked home *is* the project, so its
+        // absence is `no project` (64) — the same answer the directory branch
+        // gives for a home whose `ocx.toml` was deleted. The variant is not
+        // discriminated by tier because only one tier can produce it here:
+        // `load_project_with_lock`'s single `ConfigError` source is
+        // `ProjectConfig::resolve`, which resolves the project tier and nothing
+        // else — the `--config` tier was resolved in `Context::try_init`, long
+        // before this call.
+        ProjectContextError::Config(ocx_lib::ConfigError::FileNotFound { .. }) => no_project(),
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -617,5 +748,224 @@ mod tests {
             result.is_err(),
             "`--self` was removed from `ocx exec`; clap must reject it"
         );
+    }
+
+    // ── C-058 / RUL-69 — the exclusion set is derived, never joined ──────────
+
+    /// **C-058 / C-010** — both entries come from the resolvers that produced
+    /// the trees, so the exclusion cannot drift from the tree shape.
+    ///
+    /// The discriminating input is a project home whose root does **not** end
+    /// in `toolchain` — which is exactly what a `toolchain-dir` relocation
+    /// produces at `<root>/<project-key>/toolchain`, and what a
+    /// `join("toolchain").join("bin")` at the call site would answer wrongly
+    /// for. Reachable only because RUL-69 took `&Context` out of the signature:
+    /// a `Context` is constructible solely through the async `try_init`, which
+    /// installs the global tracing subscriber.
+    #[test]
+    fn the_exclusion_set_is_both_trees_own_bin_directories() {
+        let home = std::path::PathBuf::from("/w/.ocx-home");
+        let file_structure = ocx_lib::file_structure::FileStructure::with_root(home);
+        // A relocated project home: the segment before `bin` is a project key,
+        // not the literal `toolchain`.
+        let project_home = ocx_lib::file_structure::ToolchainHome::new("/w/toolchains/0123456789abcdef/toolchain");
+
+        let excluded = trampoline_lookup_exclusions(&file_structure, &project_home);
+
+        assert_eq!(
+            excluded,
+            vec![file_structure.toolchain.bin(), project_home.bin()],
+            "both entries must be the store's and the home's own `bin()`"
+        );
+        assert_eq!(
+            excluded[1],
+            std::path::PathBuf::from("/w/toolchains/0123456789abcdef/toolchain/bin"),
+            "C-010 — the project entry is `<home root>/bin`, never `<something>/toolchain/bin` re-joined"
+        );
+        assert_ne!(
+            excluded[0], excluded[1],
+            "the two tiers are two directories; collapsing them would leave one unexcluded"
+        );
+    }
+
+    // ── C-068 — a trampoline's baked home, re-attributed ─────────────────────
+
+    use crate::app::project_context::ProjectContextError;
+    use ocx_lib::cli::ExitCode;
+
+    /// The shipped exit-code authority — `main.rs`'s own classifier, walking
+    /// the source chain for CLI-local types before delegating to the library.
+    ///
+    /// Every code assertion below goes through it rather than restating an
+    /// integer, so a mapping that is correct in the enum and lost on the way to
+    /// the process's status still reds.
+    fn code_of(error: &ProjectContextError) -> ExitCode {
+        crate::app::classify_error(error)
+    }
+
+    /// The `config::Error` a *missing* explicit `--project` selection really
+    /// produces, from the shipped loader rather than a hand-built variant.
+    async fn selection_error(selected: &std::path::Path) -> ocx_lib::ConfigError {
+        ocx_lib::ConfigLoader::project_path(None, Some(selected))
+            .await
+            .expect_err("an explicit --project naming an absent path is an error")
+    }
+
+    /// The defect C-068 names, pinned as a **control** so the mapping below is
+    /// not asserted against a state that was already correct: a trampoline
+    /// re-entering with a baked home that no longer exists classifies as
+    /// `NotFound` (79) today, not as the 64 `ocx exec`'s own contract states.
+    #[tokio::test]
+    async fn an_unresolved_explicit_selection_classifies_as_not_found_before_re_attribution() {
+        let tmp = tempfile::tempdir().expect("a tempdir is creatable");
+        let baked = tmp.path().join("moved-away").join("ocx.toml");
+        let error = ProjectContextError::from(selection_error(&baked).await);
+        assert_eq!(
+            code_of(&error),
+            ExitCode::NotFound,
+            "the control: without re-attribution the baked home's absence is a 79"
+        );
+    }
+
+    /// **C-068** — an explicit selection that did not resolve becomes
+    /// `NoProject`, **naming the selection**, and classifies as **64**.
+    ///
+    /// This is the trampoline's own path: a rendered body re-enters as
+    /// `ocx --project '<baked home>' exec`, from whatever directory the user
+    /// happened to be in, so the attribution must follow the selection and not
+    /// the working directory.
+    ///
+    /// Mutation that reds it: returning the error unchanged (the shipped
+    /// behaviour, pinned by the control above) — 79 instead of 64.
+    #[tokio::test]
+    async fn a_missing_baked_project_is_re_attributed_to_no_project_and_exits_64() {
+        let tmp = tempfile::tempdir().expect("a tempdir is creatable");
+        let baked = tmp.path().join("moved-away");
+        let error = ProjectContextError::from(selection_error(&baked.join("ocx.toml")).await);
+
+        let mapped = attribute_to_selected_project(Some(&baked), error);
+        assert!(
+            matches!(&mapped, ProjectContextError::NoProject { cwd } if cwd == &baked),
+            "C-068 — the re-attributed error must name the *selected* home, got: {mapped:?}"
+        );
+        assert_eq!(
+            code_of(&mapped),
+            ExitCode::UsageError,
+            "C-068 — `NoProject` is exit 64, and the trampoline path inherits it"
+        );
+    }
+
+    /// C-068's boundary: with **no** explicit selection there is nothing to
+    /// re-attribute to, so the error passes through unchanged.
+    ///
+    /// Mutation that reds it: re-attributing unconditionally, which would turn
+    /// every unrelated config failure into "no project here".
+    #[tokio::test]
+    async fn without_a_selection_the_error_is_left_alone() {
+        let tmp = tempfile::tempdir().expect("a tempdir is creatable");
+        let absent = tmp.path().join("moved-away").join("ocx.toml");
+        let error = ProjectContextError::from(selection_error(&absent).await);
+
+        let passed_through = attribute_to_selected_project(None, error);
+        assert!(
+            !matches!(passed_through, ProjectContextError::NoProject { .. }),
+            "with no explicit selection there is no home to attribute the failure to"
+        );
+        assert_eq!(
+            code_of(&passed_through),
+            ExitCode::NotFound,
+            "an untouched error keeps its own classification"
+        );
+    }
+
+    /// C-068 — a project file that **does exist** but does not parse is not a
+    /// missing project, even under an explicit selection.
+    ///
+    /// Mutation that reds it: a blanket `_ => NoProject { cwd: selection }`,
+    /// which would answer 64 for a broken `ocx.toml` and send the user looking
+    /// for a file that is right there.
+    #[tokio::test]
+    async fn a_parse_failure_in_an_existing_project_file_is_not_re_attributed() {
+        let tmp = tempfile::tempdir().expect("a tempdir is creatable");
+        let project = tmp.path().to_path_buf();
+        std::fs::write(project.join("ocx.toml"), "this is not = = toml").expect("the manifest is writable");
+        let resolved = ocx_lib::ConfigLoader::project_path(None, Some(&project))
+            .await
+            .expect("a directory holding an ocx.toml resolves (RUL-55)")
+            .expect("the file is present");
+        let bytes = tokio::fs::read(&resolved).await.expect("the manifest is readable");
+        let parse_failure = ocx_lib::project::ProjectConfig::from_toml_bytes_with_path(&bytes, resolved)
+            .expect_err("an unparsable manifest is an error");
+        let error = ProjectContextError::from(parse_failure);
+        let before = code_of(&error);
+
+        let mapped = attribute_to_selected_project(Some(&project), error);
+        assert!(
+            !matches!(mapped, ProjectContextError::NoProject { .. }),
+            "a manifest that exists and does not parse is not `NoProject`"
+        );
+        assert_eq!(
+            code_of(&mapped),
+            before,
+            "a parse failure keeps the classification it already had"
+        );
+        assert_ne!(
+            before,
+            ExitCode::UsageError,
+            "the control: the parse failure's own code differs from 64, so the assertion above discriminates"
+        );
+    }
+
+    /// C-068's two lock arms, both under an explicit selection: they already
+    /// classify correctly and already carry a path, so re-attribution must
+    /// leave them alone.
+    ///
+    /// `Missing` → **78**, `Stale` → **65** — the other two thirds of the
+    /// three-way mapping, each keeping the baked path in its message.
+    #[test]
+    fn the_two_lock_arms_keep_their_own_codes_and_paths() {
+        let baked = std::path::PathBuf::from("/w/proj");
+        let lock_path = baked.join("ocx.lock");
+
+        let missing = ProjectContextError::from(ocx_lib::project::LockCurrency::Missing {
+            path: lock_path.clone(),
+        });
+        assert_eq!(code_of(&missing), ExitCode::ConfigError, "C-068 — an absent lock is 78");
+        let missing = attribute_to_selected_project(Some(&baked), missing);
+        assert_eq!(
+            code_of(&missing),
+            ExitCode::ConfigError,
+            "C-068 — re-attribution must not move the absent-lock arm off 78"
+        );
+        assert!(
+            missing.to_string().contains(&lock_path.display().to_string()),
+            "C-068 — each arm names its path: {missing}"
+        );
+
+        let stale = ProjectContextError::from(ocx_lib::project::LockCurrency::Stale {
+            lock_path: lock_path.clone(),
+        });
+        assert_eq!(code_of(&stale), ExitCode::DataError, "C-068 — a stale lock is 65");
+        let stale = attribute_to_selected_project(Some(&baked), stale);
+        assert_eq!(
+            code_of(&stale),
+            ExitCode::DataError,
+            "C-068 — re-attribution must not move the stale-lock arm off 65"
+        );
+    }
+
+    /// The three codes are three, and distinct. A mapping that collapsed any
+    /// two of them would satisfy every individual assertion above that names
+    /// only one arm.
+    #[test]
+    fn the_three_way_mapping_is_three_distinct_codes() {
+        let codes = [ExitCode::UsageError, ExitCode::ConfigError, ExitCode::DataError];
+        let unique: std::collections::BTreeSet<u8> = codes.iter().map(|code| *code as u8).collect();
+        assert_eq!(
+            unique.len(),
+            3,
+            "C-068 is a three-way mapping, not one code with three names"
+        );
+        assert_eq!(unique, [64u8, 65, 78].into_iter().collect());
     }
 }

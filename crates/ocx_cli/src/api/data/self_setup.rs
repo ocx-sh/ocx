@@ -2,7 +2,9 @@
 // Copyright 2026 The OCX Authors
 
 use ocx_lib::cli::Cell;
-use ocx_lib::setup::{BootstrapOutcome, BootstrapStatus, ManagedConfigSetupOutcome, ProfileOutcome, SetupOutcome};
+use ocx_lib::setup::{
+    BootstrapOutcome, BootstrapStatus, ManagedConfigSetupOutcome, ProfileOutcome, SessionPathOutcome, SetupOutcome,
+};
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -75,6 +77,58 @@ impl std::fmt::Display for ProfileOutcomeKind {
             Self::NoOp => f.write_str("no_op"),
             Self::Migrated => f.write_str("migrated"),
             Self::SkippedDirty => f.write_str("skipped_dirty"),
+        }
+    }
+}
+
+// ── per-store session-PATH outcome ────────────────────────────────────────────
+
+/// JSON-serialized per-store session-PATH outcome
+/// (`{"location":"…","outcome":"written"}`).
+///
+/// `location` rather than `path`: on Windows the store is
+/// `HKCU\Environment\Path`, a registry location, and on a host with no
+/// facility it is a deliberately unspellable placeholder.
+#[derive(Serialize, schemars::JsonSchema)]
+struct SessionPathEntry {
+    location: String,
+    outcome: SessionPathOutcomeKind,
+}
+
+/// Serde-facing mirror of [`SessionPathOutcome`] (`snake_case` discriminant).
+#[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum SessionPathOutcomeKind {
+    Written,
+    Unchanged,
+    Removed,
+    SkippedOptOut,
+    SkippedUnsupported,
+    Failed,
+}
+
+impl From<SessionPathOutcome> for SessionPathOutcomeKind {
+    fn from(outcome: SessionPathOutcome) -> Self {
+        match outcome {
+            SessionPathOutcome::Written => Self::Written,
+            SessionPathOutcome::Unchanged => Self::Unchanged,
+            SessionPathOutcome::Removed => Self::Removed,
+            SessionPathOutcome::SkippedOptOut => Self::SkippedOptOut,
+            SessionPathOutcome::SkippedUnsupported => Self::SkippedUnsupported,
+            SessionPathOutcome::Failed => Self::Failed,
+        }
+    }
+}
+
+impl std::fmt::Display for SessionPathOutcomeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Written => f.write_str("written"),
+            Self::Unchanged => f.write_str("unchanged"),
+            Self::Removed => f.write_str("removed"),
+            Self::SkippedOptOut => f.write_str("skipped_opt_out"),
+            Self::SkippedUnsupported => f.write_str("skipped_unsupported"),
+            Self::Failed => f.write_str("failed"),
         }
     }
 }
@@ -272,6 +326,9 @@ impl ManagedConfigEntry {
 ///   the adopt/refresh paths (`adopted` / `already_adopted` / `refreshed` /
 ///   `refresh_unavailable` / `would_refresh`), `"previous_digest"` on
 ///   `refreshed`, and `"reason"` on `refresh_unavailable`.
+/// - `session_path` is always present, one entry per store this host owns:
+///   `[{"location":"…","outcome":"written"}]`. Empty only where the platform
+///   has no session-PATH facility at all.
 /// - `exec_policy_warning`, `conflicting_ocx`, and `reload_hint` appear only
 ///   when present.
 #[derive(Serialize, schemars::JsonSchema)]
@@ -280,6 +337,13 @@ pub struct SelfSetupData {
     bootstrap: BootstrapEntry,
     shims: Vec<String>,
     profiles: Vec<ProfileEntry>,
+    /// Per-store session-PATH outcomes (C-036).
+    ///
+    /// Always serialized, in every state — including `skipped_opt_out` and
+    /// `skipped_unsupported` — because a `failed` store that reached no payload
+    /// would be an outcome computed and discarded, and absence-as-signal is not
+    /// this report's convention (`managed_config` is always present too).
+    session_path: Vec<SessionPathEntry>,
     /// Profiles skipped because the user edited the managed block; present iff
     /// status = `skipped`. Carried separately for a script to `case` on without
     /// scanning the `profiles` list.
@@ -294,7 +358,9 @@ pub struct SelfSetupData {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     conflicting_ocx: Option<String>,
-    /// Whether the user should re-source their profile to activate ocx now.
+    /// Whether this run changed a PATH surface that the user must act on: a shim or
+    /// managed profile block (re-source the shell), or a session-PATH store (log out
+    /// and back in, so programs started outside a shell see it too).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     reload_hint: bool,
@@ -329,6 +395,14 @@ impl SelfSetupData {
                 .map(|path| path.display().to_string())
                 .collect(),
             profiles,
+            session_path: outcome
+                .session_path
+                .iter()
+                .map(|(location, session_outcome)| SessionPathEntry {
+                    location: location.display().to_string(),
+                    outcome: (*session_outcome).into(),
+                })
+                .collect(),
             dirty_profiles,
             exec_policy_warning: outcome.exec_policy_warning.clone(),
             conflicting_ocx: outcome.conflicting_ocx.as_ref().map(|path| path.display().to_string()),
@@ -392,6 +466,16 @@ impl Printable for SelfSetupData {
             values.push(Cell::from(format!("{} ({})", profile.path, profile.outcome)));
         }
 
+        for (index, entry) in self.session_path.iter().enumerate() {
+            let label = if index == 0 {
+                "Session PATH".to_string()
+            } else {
+                String::new()
+            };
+            fields.push(Cell::from(label));
+            values.push(Cell::from(format!("{} ({})", entry.location, entry.outcome)));
+        }
+
         if !matches!(self.managed_config.status, ManagedConfigStatusKind::NotConfigured) {
             fields.push("Managed config".into());
             values.push(Cell::from(self.managed_config.summary()));
@@ -405,7 +489,9 @@ impl Printable for SelfSetupData {
 mod tests {
     use std::path::PathBuf;
 
-    use ocx_lib::setup::{BootstrapOutcome, BootstrapStatus, ManagedConfigSetupOutcome, ProfileOutcome, SetupOutcome};
+    use ocx_lib::setup::{
+        BootstrapOutcome, BootstrapStatus, ManagedConfigSetupOutcome, ProfileOutcome, SessionPathOutcome, SetupOutcome,
+    };
     use serde_json::json;
 
     use super::SelfSetupData;
@@ -423,7 +509,66 @@ mod tests {
             conflicting_ocx: None,
             reload_hint: false,
             managed_config: ManagedConfigSetupOutcome::NotConfigured,
+            session_path: Vec::new(),
         }
+    }
+
+    /// C-036 / E-X14: `session_path` is present in **every** state, including
+    /// the two skip outcomes — a `failed` store that reached no payload would
+    /// be an outcome computed and discarded, and absence-as-signal is not this
+    /// report's convention.
+    #[test]
+    fn every_session_path_outcome_reaches_the_json_payload() {
+        for (session_outcome, expected) in [
+            (SessionPathOutcome::Written, "written"),
+            (SessionPathOutcome::Unchanged, "unchanged"),
+            (SessionPathOutcome::Removed, "removed"),
+            (SessionPathOutcome::SkippedOptOut, "skipped_opt_out"),
+            (SessionPathOutcome::SkippedUnsupported, "skipped_unsupported"),
+            (SessionPathOutcome::Failed, "failed"),
+        ] {
+            let mut base = outcome();
+            base.session_path = vec![(
+                PathBuf::from("/home/dev/.config/environment.d/ocx.conf"),
+                session_outcome,
+            )];
+
+            let value = serde_json::to_value(SelfSetupData::from_outcome(&base)).unwrap();
+            assert_eq!(
+                value["session_path"],
+                json!([{"location": "/home/dev/.config/environment.d/ocx.conf", "outcome": expected}]),
+                "for {session_outcome:?}"
+            );
+        }
+    }
+
+    /// C-036 / E-X12: the per-store vector carries one outcome per store, so a
+    /// run that wrote one and failed the other reports both rather than
+    /// collapsing to a single verdict.
+    #[test]
+    fn a_failed_store_travels_beside_a_written_one() {
+        let mut base = outcome();
+        base.session_path = vec![
+            (
+                PathBuf::from("/home/dev/.config/environment.d/ocx.conf"),
+                SessionPathOutcome::Failed,
+            ),
+            (PathBuf::from("HKCU\\Environment\\Path"), SessionPathOutcome::Written),
+        ];
+
+        let value = serde_json::to_value(SelfSetupData::from_outcome(&base)).unwrap();
+        assert_eq!(
+            value["session_path"],
+            json!([
+                {"location": "/home/dev/.config/environment.d/ocx.conf", "outcome": "failed"},
+                {"location": "HKCU\\Environment\\Path", "outcome": "written"}
+            ])
+        );
+        assert_eq!(
+            value["status"],
+            json!("no_op"),
+            "a failed session-PATH store is warned about, not promoted to the top-level status"
+        );
     }
 
     /// A run that wrote a shim and one completed profile serializes to
@@ -465,6 +610,11 @@ mod tests {
         assert_eq!(value["bootstrap"], json!({"status": "already_present"}));
         assert_eq!(value["shims"], json!([]));
         assert_eq!(value["profiles"], json!([]));
+        assert_eq!(
+            value["session_path"],
+            json!([]),
+            "the key is always present; only a host with no facility makes it empty"
+        );
         assert!(value.get("reload_hint").is_none(), "false reload_hint is omitted");
         assert!(value.get("exec_policy_warning").is_none());
         assert!(value.get("conflicting_ocx").is_none());

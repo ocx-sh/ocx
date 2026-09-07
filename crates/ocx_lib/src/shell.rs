@@ -157,6 +157,17 @@ impl Shell {
     /// PATH element segment-exact after stripping one surrounding pair of `"`,
     /// ordinally on Unix and case-insensitively on Windows.
     ///
+    /// **One known divergence, reachable only through the ambient value.** On
+    /// Windows a *quoted* ambient segment whose interior holds an empty field —
+    /// `"C:\a;;b"` — survives
+    /// [`move_to_front`](crate::utility::path::move_to_front) whole, because
+    /// `std::env::split_paths` unquotes it into a single non-empty segment that
+    /// the re-join then re-quotes; every arm here splits on the raw separator
+    /// with no quote awareness, so it reads that interior field as an ambient
+    /// empty segment and drops it, re-joining as `"C:\a;b"`. The precondition
+    /// above forbids that shape in `value`, so the prepended value is never
+    /// affected — only a segment the variable already carried.
+    ///
     /// An **empty `value` is a no-op**, emitted as a shell comment. Prepending
     /// it would put an empty segment at the front of the variable, which POSIX
     /// resolves as the current working directory — a privilege-escalation

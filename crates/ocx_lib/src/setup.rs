@@ -23,11 +23,16 @@ pub mod bootstrap;
 pub mod error;
 pub mod profiles;
 pub mod rc_block;
+pub mod session_path;
 pub mod shell_config;
 pub mod shims;
 pub mod version_spec;
 
 pub use bootstrap::{BootstrapOutcome, BootstrapStatus};
+pub use session_path::{
+    SessionPathError, SessionPathFormat, SessionPathOutcome, deregister_session_path, register_session_path,
+    session_path_stores,
+};
 pub use version_spec::VersionSpec;
 
 /// POSIX fence payload — sources the POSIX env shim.
@@ -124,6 +129,23 @@ pub fn profiles_changed(profiles: &[(PathBuf, ProfileOutcome)]) -> bool {
         .any(|(_, outcome)| matches!(outcome, ProfileOutcome::Completed | ProfileOutcome::Migrated))
 }
 
+/// True when at least one session-PATH store gained the ocx directories on
+/// this run ([`SessionPathOutcome::Written`]).
+///
+/// The third input to the reload hint, beside [`profiles_changed`] and a
+/// non-empty shim set. A session PATH is read once, when the session starts —
+/// by the systemd user manager for an `environment.d` drop-in, by `launchd` at
+/// login for the macOS agent, by the desktop shell for the Windows registry
+/// value — so a store this run wrote reaches nothing already running, and the
+/// user has to be told. Without it the common re-run (shims current, every
+/// profile already `Current`, session PATH newly written) printed a `written`
+/// row and no guidance at all.
+pub fn session_path_written(session_path: &[(PathBuf, SessionPathOutcome)]) -> bool {
+    session_path
+        .iter()
+        .any(|(_, outcome)| *outcome == SessionPathOutcome::Written)
+}
+
 /// True when at least one profile carried user edits inside the managed fence
 /// and was left untouched ([`ProfileOutcome::SkippedDirty`]).
 ///
@@ -148,10 +170,27 @@ pub struct SetupOutcome {
     pub exec_policy_warning: Option<String>,
     /// An `ocx` on `PATH` ahead of the directory the shim prepends.
     pub conflicting_ocx: Option<PathBuf>,
-    /// Whether the CLI should print the "source your profile" hint once.
+    /// Whether this run changed a PATH surface, so the CLI should tell the
+    /// user what to reload.
+    ///
+    /// True when a shim was written, a managed profile block changed, or a
+    /// session-PATH store was written ([`session_path_written`]). Which
+    /// sentence to print is the CLI's decision, not this flag's: a profile is
+    /// re-sourced, a session PATH is only re-read at the next login.
     pub reload_hint: bool,
     /// Result of adopting/clearing the `--managed-config` tier (phase 1.5).
     pub managed_config: ManagedConfigSetupOutcome,
+    /// Per-store session-PATH outcomes (C-036), keyed by the location each
+    /// platform owns.
+    ///
+    /// **Always populated on a supported host**, in every state — including a
+    /// `--no-modify-path` run, which reports
+    /// [`SessionPathOutcome::SkippedOptOut`] for each store it did not touch.
+    /// A [`SessionPathOutcome::Failed`] here is warned about and exits 0; the
+    /// only session-PATH condition that changes the exit code is the C-037
+    /// encoding refusal, and that never reaches this field because it is an
+    /// `Err` from [`run`].
+    pub session_path: Vec<(PathBuf, SessionPathOutcome)>,
 }
 
 /// Result of the managed-config adoption phase (1.5) inside `ocx self setup`.
@@ -219,7 +258,15 @@ pub enum ManagedConfigSetupOutcome {
 ///
 /// # Hard ordering invariant (contract 1, item 2 — Block-tier)
 ///
-/// Bootstrap runs **first**. If it fails, `run` returns the error immediately,
+/// The session-PATH encoding refusal runs **before** bootstrap, as phase 0:
+/// an `$OCX_HOME` this host's PATH format cannot spell is refused with the
+/// machine byte-identical — no snapshot fetched, no shim written, no profile
+/// touched. It sits there rather than beside the registration it guards
+/// because it is the only refusal that would otherwise fire after four
+/// writing phases. `--no-modify-path` suppresses it along with the whole
+/// session-PATH arm.
+///
+/// Bootstrap runs first among the **writing** phases. If it fails, `run` returns the error immediately,
 /// having written **zero shims and touched zero profiles** — there is no partial
 /// state. The shims point at the `current` symlink the bootstrap wires, so
 /// writing them before the CAS exists would produce dangling integration.
@@ -238,6 +285,17 @@ pub async fn run(
     manager: &PackageManager,
     file_structure: &FileStructure,
 ) -> Result<SetupOutcome, error::Error> {
+    // ── Phase 0: session-PATH encoding preflight (C-037) ──────────────────────
+    // Ahead of every writing phase, because the refusal's whole promise is that
+    // a refused run leaves the machine byte-identical. The two directories are
+    // pure path joins off `file_structure` (no bootstrap, no config), so there
+    // is nothing this check needs that a later phase produces. Suppressed under
+    // `--no-modify-path` for the same reason phase 3.5 is (C-043): the arm never
+    // runs, so an `$OCX_HOME` it could not spell is not this run's problem.
+    if !options.no_modify_path {
+        session_path::refuse_unencodable(&session_path_directories(file_structure))?;
+    }
+
     // ── Phase 1: bootstrap (hard gate, runs first) ────────────────────────────
     // On `Err`, propagate now — zero shims written, zero profiles touched.
     let bootstrap =
@@ -282,6 +340,37 @@ pub async fn run(
         profiles.push((target.path, outcome));
     }
 
+    // ── Phase 3.5: session PATH (unless --no-modify-path) ─────────────────────
+    // Co-primary with the profile blocks rather than a fallback for them: a
+    // profile reaches login shells, a session PATH reaches everything else.
+    // The `?` below is C-037's encoding refusal (exit 78) and nothing else —
+    // a *write* failure comes back inside the `Ok` as
+    // `SessionPathOutcome::Failed`, which `emit_advisories` warns about and
+    // which never changes the exit code (C-036). Phase 0 already applied that
+    // same refusal to the same directories, so reaching it here means a caller
+    // bypassed `run`; the check stays because the writers own it, not because
+    // this path is expected to fire.
+    let session_path = if options.no_modify_path {
+        // C-043 suppresses the whole arm, so the writers are never called and
+        // cannot name their own stores; the caller enumerates them instead.
+        session_path::session_path_stores(ocx_home)
+            .into_iter()
+            .map(|store| (store, SessionPathOutcome::SkippedOptOut))
+            .collect()
+    } else {
+        let directories = session_path_directories(file_structure);
+        tokio::task::spawn_blocking({
+            let ocx_home = ocx_home.to_path_buf();
+            let dry_run = options.dry_run;
+            move || session_path::register_session_path(&ocx_home, &directories, dry_run)
+        })
+        .await
+        .map_err(|join| error::Error::Io {
+            path: ocx_home.to_path_buf(),
+            source: std::io::Error::other(join.to_string()),
+        })??
+    };
+
     // ── Phase 4: exec-policy probe (non-fatal advisory) ───────────────────────
     let exec_policy_warning = if profiles::execution_policy_is_restricted().await {
         Some(EXEC_POLICY_ADVISORY.to_string())
@@ -292,12 +381,15 @@ pub async fn run(
     // ── Phase 5: best-effort conflicting-ocx scan (never fails setup) ─────────
     let conflicting_ocx = conflicting_ocx_on_path(file_structure).await;
 
-    // The "re-source your profile" hint only makes sense when this run actually
-    // changed something: a shim was (re)written, or a profile gained/upgraded a
-    // managed block. A pure no-op re-run (all shims current, every profile
-    // already Current) suppresses it so the user is not told to reload an
-    // unchanged machine.
-    let reload_hint = !shims_written.is_empty() || profiles_changed(&profiles);
+    // The reload hint only makes sense when this run actually changed a PATH
+    // surface: a shim was (re)written, a profile gained/upgraded a managed
+    // block, or a session-PATH store was written. A pure no-op re-run (all
+    // shims current, every profile already Current, every store Unchanged)
+    // suppresses it so the user is not told to reload an unchanged machine.
+    // The three inputs stay separate rather than collapsing into one boolean
+    // here, because the *remedy* differs per surface and the CLI renders one
+    // line per surface from these same three predicates.
+    let reload_hint = !shims_written.is_empty() || profiles_changed(&profiles) || session_path_written(&session_path);
 
     Ok(SetupOutcome {
         bootstrap,
@@ -307,7 +399,45 @@ pub async fn run(
         conflicting_ocx,
         reload_hint,
         managed_config,
+        session_path,
     })
+}
+
+/// `$OCX_HOME/symlinks/<ocx cli id>/current/content/bin` — the directory the
+/// installed `ocx` itself resolves from.
+///
+/// Derived from the symlink store and [`crate::oci::ocx_cli_identifier`], never
+/// joined from a literal: the identifier honours the `__OCX_SELF_IMAGE` seam,
+/// so a hand-spelled `ocx.sh/ocx/cli` would be right on a developer machine and
+/// wrong under every test that moves it.
+pub fn ocx_install_bin_path(file_structure: &FileStructure) -> PathBuf {
+    file_structure
+        .symlinks
+        .current(&crate::oci::ocx_cli_identifier())
+        .join("content")
+        .join("bin")
+}
+
+/// The two directories `ocx self setup` registers at session level, **in the
+/// order they must appear on PATH** (C-060).
+///
+/// [`ocx_install_bin_path`] leads and `$OCX_HOME/toolchain/bin` follows, so the
+/// `ocx` a session resolves is the installed binary rather than whatever a
+/// composed toolchain happens to render under the same name. Every session-PATH
+/// writer takes this slice verbatim and prepends it in the order given, so the
+/// order decided here is the order that reaches the registry value, the
+/// `environment.d` line and the LaunchAgent script alike.
+///
+/// A named function rather than a `vec![]` inline in [`run`] because the order
+/// is a decision with a contract number attached, and an ordering nobody can
+/// call is an ordering no test can pin.
+/// The toolchain half is [`crate::file_structure::ToolchainStore::bin`], never
+/// a literal `toolchain/bin` join: C-001 builds that store once from the
+/// composite root precisely so no caller re-derives the tree location, and a
+/// second spelling here is what would keep pointing at the old place the day
+/// the layout moves.
+pub fn session_path_directories(file_structure: &FileStructure) -> Vec<PathBuf> {
+    vec![ocx_install_bin_path(file_structure), file_structure.toolchain.bin()]
 }
 
 /// Adopt (or clear) the managed-config tier from an already-resolved
@@ -859,11 +989,7 @@ fn home_env_from_environment(ocx_home: &Path) -> HomeEnv {
 /// Returns the shadowing path if found, or `None` on any read failure — a `$PATH`
 /// read error never fails setup (contract 1, item 14).
 async fn conflicting_ocx_on_path(file_structure: &FileStructure) -> Option<PathBuf> {
-    let shim_bin_dir = file_structure
-        .symlinks
-        .current(&crate::oci::ocx_cli_identifier())
-        .join("content")
-        .join("bin");
+    let shim_bin_dir = ocx_install_bin_path(file_structure);
 
     let path_var = std::env::var_os("PATH")?;
     let executable = if cfg!(windows) { "ocx.exe" } else { "ocx" };
@@ -888,6 +1014,51 @@ mod tests {
     /// Read a profile file back, for write-side assertions.
     fn read(path: &Path) -> String {
         std::fs::read_to_string(path).expect("profile file present after write")
+    }
+
+    // ── C-060: the session-PATH directory order ──────────────────────────────
+
+    /// C-060: the install bin directory leads, `$OCX_HOME/toolchain/bin`
+    /// follows, and there are exactly those two.
+    ///
+    /// This is the **one** site that decides the order — the writers prepend
+    /// the slice verbatim, so a swap here silently reorders the registry value,
+    /// the `environment.d` line and the LaunchAgent script together. The
+    /// per-writer tests assert their own file carries the slice in the order it
+    /// was handed; none of them can see that the order handed over is wrong,
+    /// which is why this assertion lives beside the decision rather than
+    /// inside a writer.
+    ///
+    /// Asserted by index and by identity against
+    /// [`ocx_install_bin_path`] — not by a spelled-out literal, which on
+    /// Windows would drive-join and stop matching (`quality-rust.md`,
+    /// "Cross-Platform Path Handling").
+    #[test]
+    fn the_session_path_directories_put_the_install_bin_dir_ahead_of_the_toolchain_one() {
+        let home = tempfile::TempDir::new().unwrap();
+        let file_structure = FileStructure::with_root(home.path().to_path_buf());
+
+        let directories = session_path_directories(&file_structure);
+
+        assert_eq!(
+            directories.len(),
+            2,
+            "exactly two directories are registered: {directories:?}"
+        );
+        assert_eq!(
+            directories[0],
+            ocx_install_bin_path(&file_structure),
+            "the installed ocx's own bin directory must lead, so a composed toolchain cannot shadow it"
+        );
+        assert_eq!(
+            directories[1],
+            home.path().join("toolchain").join("bin"),
+            "the rendered toolchain bin directory must follow it"
+        );
+        assert_ne!(
+            directories[0], directories[1],
+            "the two entries must be distinct, or the ordering assertion above is vacuous"
+        );
     }
 
     // ── W3: `--managed-config <ref>` Current-fence snapshot gate ─────────────

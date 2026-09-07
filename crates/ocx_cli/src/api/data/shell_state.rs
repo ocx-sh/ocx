@@ -44,6 +44,7 @@
 
 use std::path::{Path, PathBuf};
 
+use ocx_lib::activate::ActivateMode;
 use ocx_lib::cli::{DataInterface, Theme, human_bytes, human_instant, human_time};
 use ocx_lib::project::consent::{Grant, Reason};
 use ocx_lib::shell::coexistence::{Observation, Tool};
@@ -236,6 +237,23 @@ pub enum Note {
         /// [`ocx_lib::EntryDefect`]'s own rendering of what is wrong with it.
         defect: String,
     },
+    /// The `ocx.toml` that answers for the reported scope exists but will not
+    /// parse, so its `activate` / `pinned` are absent and the ladder answered
+    /// from `OCX_TOOLCHAIN_*` and then the floors.
+    ///
+    /// The per-prompt path is deliberately lenient over these bytes — a
+    /// malformed `$OCX_HOME/ocx.toml` must not break every prompt on the
+    /// machine — and the hook discards the binary's stderr unconditionally
+    /// (A-21). Without this row a typo'd `activate = "nnone"` therefore fails
+    /// **open**, to `env`, the most-composing mode, and nothing anywhere tells
+    /// the user their restriction was ignored.
+    ToolchainManifestUnparsed {
+        /// The `ocx.toml` that would not parse — `$OCX_HOME/ocx.toml` for the
+        /// global tier, the project's own otherwise.
+        manifest: PathBuf,
+        /// The parse failure, rendered for a human.
+        detail: String,
+    },
 }
 
 /// How much of the report the human rendering carries.
@@ -285,6 +303,45 @@ pub struct ShellStateReport {
     /// Deliberately **not** a [`Reason`] arm: "setup has not run" is not a
     /// consent state, and `consent::Reason` enumerates consent states.
     pub shell_integration_installed: bool,
+
+    /// The **resolved toolchain home** — a machine-readable contract field
+    /// (C-056, S-004).
+    ///
+    /// The supported way for an IDE, a devcontainer feature or a CI step to
+    /// discover where a project's tree lives when `config.toml` relocates it
+    /// with `toolchain-dir`; without it the only route is re-deriving a 16-hex
+    /// project key from a path the discoverer would also have to canonicalize
+    /// the same way ocx does.
+    ///
+    /// `<project>/.ocx/toolchain` or `<toolchain-dir>/<project-key>/toolchain`
+    /// for the project in effect, and `$OCX_HOME/toolchain` when no project
+    /// resolves — the tier that is always in effect, so the field never has to
+    /// say "none".
+    ///
+    /// **Always present, never `null`** (RUL-51): a `toolchain-dir` that fails
+    /// C-017–C-019 is refused at *config load*, so every command — this one
+    /// included — has already exited 78 before the report is built, and
+    /// `ToolchainRoot::resolve` performs no filesystem write and accepts a root
+    /// that does not exist yet (RUL-5). Once the configuration parses, the home
+    /// is always spellable, whether or not it has ever been rendered.
+    pub toolchain_home: PathBuf,
+
+    /// The **effective** `activate` mode, past the whole ladder — the flag tier
+    /// (absent here), then `ocx.toml`, then `OCX_TOOLCHAIN_ACTIVATE`, then the
+    /// floor (C-005, C-056).
+    ///
+    /// The resolved answer, never a tier: reporting `ocx.toml`'s raw value would
+    /// answer a different question from the one a user asking "why is my shell
+    /// not doing anything" is asking.
+    pub activate: ocx_lib::activate::ActivateMode,
+
+    /// The **effective** `pinned` value, resolved through the same ladder
+    /// (C-056, C-066).
+    ///
+    /// `true` means a composing emitter yields digest paths and consults no
+    /// `<group>/<entry>` link; `false` means it follows the rendered links, so
+    /// an `ocx update` takes effect with no re-render.
+    pub pinned: bool,
 
     /// Why the project's `ocx.lock` refuses composition, when it does — the
     /// `Display` of [`ocx_lib::project::LockCurrency`], rendered as text the
@@ -481,6 +538,23 @@ impl ShellStateReport {
                 theme.label("project:")
             )),
         }
+
+        // C-056 — the resolved home and the two **effective** settings, at both
+        // detail tiers. A user who has to pass `--verbose` to learn where their
+        // toolchain lives has been told the answer is a diagnostic; and the
+        // relocated case (`toolchain-dir`) is precisely the one where nothing
+        // else in this report names the directory.
+        //
+        // `quoted_path`, like every other path here: a `toolchain-dir` is a
+        // user-supplied path and on POSIX may carry a newline (CWE-117).
+        out.push(format!(
+            "{} {}",
+            theme.label("toolchain:"),
+            quoted_path(&self.toolchain_home)
+        ));
+        out.push(theme.field("  ", "activate", self.activate.to_string()));
+        out.push(theme.field("  ", "pinned", if self.pinned { "yes" } else { "no" }));
+
         out.push(String::new());
     }
 
@@ -682,6 +756,29 @@ impl ShellStateReport {
             None if self.project_unresolved() => {
                 out.push(format!("{} {}", theme.label("active:"), theme.alert("no")));
             }
+            // C-059 — `activate = none` contributes nothing: no composed
+            // environment, no directory on PATH, on this prompt and every one
+            // after it. Every other signal in this report reads exactly like a
+            // healthy `env` project, because the project scope *is* recorded
+            // (empty) on the first prompt after consent, so
+            // `project_scope_pending` is false and the arm below would answer
+            // `yes` with nothing behind it. The resolved mode is the only thing
+            // that separates the two states, and this is the command whose
+            // whole product is the explanation.
+            //
+            // Ordered after the enumerated reasons on purpose: consent refusing
+            // is the more specific answer, and a project that never got past
+            // the predicate never reached its own `activate` key.
+            None if self.project_dir.is_some() && self.activate == ActivateMode::None => {
+                out.push(format!("{} {}", theme.label("active:"), theme.alert("no")));
+                out.push(format!("{} {}", theme.alert("reason:"), "activate = none"));
+                out.push("  this project composes no environment and puts nothing on PATH".to_owned());
+                push_fix(
+                    theme,
+                    out,
+                    "set `activate` to `env` or `bin` in this project's ocx.toml",
+                );
+            }
             // A project resolved, consent did not refuse, and the ledger
             // decoded but holds no project-scope record: the scope simply has
             // not been applied in this shell yet. Saying `yes` here would be as
@@ -774,6 +871,25 @@ impl ShellStateReport {
                     // `EntryDefect::Display` already states the actionable
                     // rewrite, so the guidance is not lost.
                     out.push(theme.field("  ", "problem", defect));
+                }
+                Note::ToolchainManifestUnparsed { manifest, detail } => {
+                    out.push(format!(
+                        "{} the toolchain manifest does not parse, so its activate and pinned are ignored",
+                        theme.label("note:")
+                    ));
+                    out.push(theme.field("  ", "manifest", quoted_path(manifest)));
+                    // The loader's message embeds the offending path: untrusted
+                    // bytes, and therefore quoted, like `ProjectUnresolved`.
+                    out.push(theme.field("  ", "detail", quoted(detail)));
+                    // No `fix:` line: this note is not gated to an inert
+                    // project — a broken manifest is a config bug whether or
+                    // not the shell activated — and
+                    // `every_inert_arm_names_a_fix_and_no_other_arm_does` holds
+                    // `fix:` to exactly the arms that block activation. The
+                    // line below still says what to do.
+                    out.push(
+                        "  repair the manifest - until it parses, activate and pinned fall to their floors".to_owned(),
+                    );
                 }
             }
         }
@@ -1351,6 +1467,12 @@ mod tests {
             ocx_home: PathBuf::from("/home/u/.ocx"),
             ocx_home_present: true,
             shell_integration_installed: true,
+            // A relocated home, not the in-project default: the never-eval-able
+            // corpus only covers a rendering of this field if the fixture makes
+            // it differ from a path already in the report.
+            toolchain_home: PathBuf::from("/home/u/toolchains/0123456789abcdef/toolchain"),
+            activate: ocx_lib::activate::ActivateMode::Bin,
+            pinned: false,
             lock_refusal: None,
             carrier_present: true,
             carrier_bytes: 412,
@@ -1554,6 +1676,15 @@ mod tests {
         }];
         arms.push(("note_paths_defect", paths_defect));
 
+        let mut manifest_unparsed = base(None);
+        manifest_unparsed.notes = vec![Note::ToolchainManifestUnparsed {
+            manifest: PathBuf::from("/home/u/.ocx/ocx.toml"),
+            // The loader's own message, which embeds a project path: untrusted
+            // bytes, and therefore quoted by the renderer.
+            detail: "/home/u/.ocx/ocx.toml: invalid TOML".to_owned(),
+        }];
+        arms.push(("note_toolchain_manifest_unparsed", manifest_unparsed));
+
         let mut unresolved = base(None);
         unresolved.project_dir = None;
         unresolved.project_key = None;
@@ -1606,6 +1737,7 @@ mod tests {
             Note::ProjectUnresolved { .. } => "project_unresolved",
             Note::PathsNearMiss { .. } => "paths_near_miss",
             Note::PathsDefect { .. } => "paths_defect",
+            Note::ToolchainManifestUnparsed { .. } => "toolchain_manifest_unparsed",
         }
     }
 
@@ -1652,6 +1784,7 @@ mod tests {
                 "project_unresolved",
                 "paths_near_miss",
                 "paths_defect",
+                "toolchain_manifest_unparsed",
             ]),
             "every Note variant must be exercised by an arm in `every_arm()`"
         );
@@ -2174,6 +2307,44 @@ mod tests {
         assert!(!absent.project_scope_pending());
     }
 
+    /// C-059 — `activate = none` is reported as inert, and the *same* fixture
+    /// with a composing mode is not.
+    ///
+    /// Both halves are the test. `base(None)` is a consented project with a
+    /// decoded ledger carrying an applied project scope: under `bin` it is
+    /// genuinely active, and under `none` every field in the report is
+    /// byte-identical except the mode. So an implementation that ignored
+    /// `activate` — the one this replaces — answers `yes` to both, and one that
+    /// hard-codes `no` fails the control. Only reading the mode passes.
+    #[test]
+    fn c059_activate_none_is_not_reported_as_active() {
+        let mut composing = base(None);
+        composing.activate = ActivateMode::Bin;
+        let control = answer(&composing);
+        assert!(
+            control.contains("active: yes"),
+            "the control arm must stay active, or the assertion below proves nothing: {control}"
+        );
+
+        let mut inert = base(None);
+        inert.activate = ActivateMode::None;
+        let text = answer(&inert);
+        assert!(
+            text.contains("active: no"),
+            "`activate = none` composes nothing and puts nothing on PATH: {text}"
+        );
+        assert!(!text.contains("active: yes"), "{text}");
+        assert!(
+            !text.contains("the next prompt applies it"),
+            "no prompt ever applies anything in `none` mode: {text}"
+        );
+        assert!(text.contains("reason: activate = none"), "{text}");
+        assert!(
+            text.lines().any(|line| line.starts_with("fix: ")),
+            "the only user-facing refusal with no fix line is a dead end: {text}"
+        );
+    }
+
     /// QUAL-3 — a project that is reachable but unresolvable gets its own row
     /// rather than being reported as "no project reachable", the verdict above
     /// it says `no`, and the row carries a fix like every other refusal.
@@ -2259,8 +2430,13 @@ mod tests {
                 "the default rendering must carry {lead:?}: {default:#?}"
             );
         }
+        // Twelve before C-056, fifteen after: the resolved toolchain home and
+        // the two effective settings are three lines the *answer* owes a user
+        // (a home a `toolchain-dir` relocated is named nowhere else in the
+        // report), so the budget moves by exactly what the contract added and
+        // by nothing else.
         assert!(
-            default.len() <= 12,
+            default.len() <= 15,
             "the default rendering is the answer, not the state dump; got {} lines: {default:#?}",
             default.len()
         );
@@ -2467,7 +2643,12 @@ mod tests {
         // The other half, so the assertion pair discriminates: those same facts
         // are genuinely gone from the human default.
         let default = answer(&base(Some(Reason::LockUnavailable)));
-        for needle in ["watch set", "carrier:", "bytes:", "0123456789abcdef", "mtime"] {
+        // `key: <hex>`, not the bare hex: C-056 puts the resolved toolchain
+        // home in the default rendering, and a `toolchain-dir`-relocated home
+        // is keyed by that same 16 hex characters (`<root>/<key>/toolchain`).
+        // The row this assertion is about is the verbose `key:` field, and
+        // anchoring on the label is what keeps it about that row.
+        for needle in ["watch set", "carrier:", "bytes:", "key: 0123456789abcdef", "mtime"] {
             assert!(
                 !default.contains(needle),
                 "the default rendering must not carry {needle:?}: {default}"
@@ -2591,5 +2772,170 @@ mod tests {
         let mut lines = base(None).lines(&plain_theme(), Detail::Answer);
         lines.push("  OCX_INJECTED=1".to_owned());
         assert_lines_never_eval_able("injected", &lines);
+    }
+
+    // ── C-056 / RUL-51 — the resolved toolchain home and the two effective
+    //    settings ──────────────────────────────────────────────────────────
+
+    /// The fixture's relocated home, spelled once. Deliberately a
+    /// `toolchain-dir`-style path rather than `<project>/.ocx/toolchain`, so a
+    /// renderer that printed `project_dir` and called it a home would not
+    /// accidentally satisfy the assertions below.
+    fn fixture_toolchain_home() -> String {
+        base(None).toolchain_home.display().to_string()
+    }
+
+    /// The report with its toolchain home replaced.
+    fn with_home(home: &str) -> ShellStateReport {
+        let mut report = base(None);
+        report.toolchain_home = PathBuf::from(home);
+        report
+    }
+
+    /// **C-056 / RUL-51** — under `--format json` the resolved home is a
+    /// contract field: **present in every reportable state, and never `null`**.
+    ///
+    /// Asserted over the whole arm corpus, because "always present" is a claim
+    /// about every state the command can report, not about the happy one. A
+    /// refused `toolchain-dir` cannot appear here at all — it exits 78 at config
+    /// load — which is exactly why the field can be unconditional.
+    ///
+    /// Mutation that reds it: making the field `Option<PathBuf>`, the shape a
+    /// reader who has not seen RUL-51 reaches for.
+    #[test]
+    fn the_json_report_always_carries_a_non_null_toolchain_home() {
+        for (arm, report) in every_arm() {
+            let value = serde_json::to_value(&report).expect("the report serializes");
+            let home = value
+                .get("toolchain_home")
+                .unwrap_or_else(|| panic!("arm `{arm}`: `toolchain_home` must be a field of the JSON report"));
+            assert!(!home.is_null(), "arm `{arm}`: RUL-51 — the resolved home is never null");
+            let home = home
+                .as_str()
+                .unwrap_or_else(|| panic!("arm `{arm}`: `toolchain_home` must serialize as a path string, got {home}"));
+            assert!(!home.is_empty(), "arm `{arm}`: an empty home names nothing");
+        }
+    }
+
+    /// C-056 — the two **effective** settings travel with it, also on every arm.
+    #[test]
+    fn the_json_report_always_carries_the_effective_activate_and_pinned() {
+        for (arm, report) in every_arm() {
+            let value = serde_json::to_value(&report).expect("the report serializes");
+            let activate = value
+                .get("activate")
+                .unwrap_or_else(|| panic!("arm `{arm}`: `activate` must be a field of the JSON report"));
+            assert!(
+                ["env", "bin", "none"].contains(&activate.as_str().unwrap_or_default()),
+                "arm `{arm}`: `activate` must be one of the three wire values, got {activate}"
+            );
+            let pinned = value
+                .get("pinned")
+                .unwrap_or_else(|| panic!("arm `{arm}`: `pinned` must be a field of the JSON report"));
+            assert!(
+                pinned.is_boolean(),
+                "arm `{arm}`: `pinned` is the resolved boolean, not a tier, got {pinned}"
+            );
+        }
+    }
+
+    /// **C-056** — the human rendering names the resolved home at **both**
+    /// verbosity tiers.
+    ///
+    /// Both, because `--verbose` is a rendering tier and not a payload: a user
+    /// who has to pass a flag to learn where their toolchain lives has been told
+    /// the answer is a diagnostic.
+    ///
+    /// Mutation that reds it: adding the field to the struct and not to
+    /// `summary_lines` — the exact half-landed state this case exists to
+    /// forbid, and the one the wire-only assertions above cannot see.
+    #[test]
+    fn both_verbosity_tiers_name_the_resolved_toolchain_home() {
+        let report = base(None);
+        let home = fixture_toolchain_home();
+        assert!(
+            answer(&report).contains(&home),
+            "C-056 — the default rendering must name the resolved home ({home}):\n{}",
+            answer(&report)
+        );
+        assert!(
+            diagnostics(&report).contains(&home),
+            "C-056 — the --verbose rendering must name it too ({home}):\n{}",
+            diagnostics(&report)
+        );
+    }
+
+    /// C-056 — the human rendering reports the **effective** `activate` and
+    /// `pinned`, not a tier's raw value.
+    ///
+    /// Asserted by discrimination rather than by a format guess: three reports
+    /// differing only in `activate` must render three different texts, and two
+    /// differing only in `pinned` must differ too. A renderer that omitted
+    /// either would produce identical output for inputs the user needs told
+    /// apart — which is the whole complaint the command answers.
+    #[test]
+    fn both_effective_settings_are_visible_in_the_default_rendering() {
+        let mut renderings = std::collections::BTreeSet::new();
+        for mode in [
+            ocx_lib::activate::ActivateMode::Env,
+            ocx_lib::activate::ActivateMode::Bin,
+            ocx_lib::activate::ActivateMode::None,
+        ] {
+            let mut report = base(None);
+            report.activate = mode;
+            let rendered = answer(&report);
+            assert!(
+                rendered.contains(&mode.to_string()),
+                "C-056 — the rendering must carry the effective mode's wire spelling `{mode}`:\n{rendered}"
+            );
+            renderings.insert(rendered);
+        }
+        assert_eq!(
+            renderings.len(),
+            3,
+            "C-056 — three different effective modes must render three different reports"
+        );
+
+        let mut following = base(None);
+        following.pinned = false;
+        let mut pinned = base(None);
+        pinned.pinned = true;
+        assert_ne!(
+            answer(&following),
+            answer(&pinned),
+            "C-056 — the effective `pinned` must be visible; two reports differing only in it must differ"
+        );
+    }
+
+    /// C-056 — the resolved home never turns the report into shell source.
+    ///
+    /// A `toolchain-dir` is a user-supplied path, and on POSIX a path may carry
+    /// a newline. Interpolated bare, `<root>` = `"/h/t\nexport OCX_HOME=/tmp/x"`
+    /// would put a line into `ocx shell state`'s output that a careless
+    /// `eval "$(ocx shell state)"` executes — the injection the whole
+    /// never-eval-able corpus exists for.
+    ///
+    /// Two halves, and the second is what makes the first non-vacuous: the
+    /// rendering must *carry* the home (so the corpus is judging a real
+    /// rendering of it), and it must not gain a line from it.
+    #[test]
+    fn a_hostile_toolchain_home_cannot_forge_a_line() {
+        let hostile = "/h/toolchains/x\nexport OCX_HOME=/tmp/evil\nalias ls='rm -rf /'";
+        let report = with_home(hostile);
+
+        // Non-vacuity: the home is rendered at all. Without this, a renderer
+        // that simply ignores the field passes every assertion below.
+        assert!(
+            answer(&report).contains("toolchains"),
+            "the hostile home must actually be rendered, or this case measures nothing:\n{}",
+            answer(&report)
+        );
+        assert_eq!(
+            answer(&report).lines().count(),
+            answer(&with_home("/h/toolchains/x")).lines().count(),
+            "CWE-117 — a home carrying newlines must not add lines to the report"
+        );
+        assert_never_eval_able("hostile toolchain home", &report);
+        assert_not_interchangeable_with_activate("hostile toolchain home", &report);
     }
 }

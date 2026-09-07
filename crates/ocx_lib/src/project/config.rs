@@ -5,15 +5,18 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::env::ProjectEnv;
 use super::error::{ProjectError, ProjectErrorKind};
+use crate::activate::ActivateMode;
 use crate::lazy::{LazyMode, LazyModeLadder, LazyReport};
 use crate::oci::Identifier;
 use crate::oci::identifier::error::{IdentifierError, IdentifierErrorKind};
+use crate::package::metadata::slug::SLUG_MAX_LEN;
 
 /// A named group's body: `[group.<name>.tools]` and `[group.<name>.env]`.
 ///
@@ -172,6 +175,38 @@ pub struct ProjectConfig {
     /// built-in default. Excluded from [`super::declaration_hash`].
     #[serde(default, rename = "lazy-report", skip_serializing_if = "Option::is_none")]
     pub lazy_report: Option<LazyReport>,
+
+    /// Toolchain-tier `activate` mode (`plan_toolchain_activation.md`
+    /// C-006 / C-012) — whether a project's rendered toolchain reaches a
+    /// shell via per-prompt environment composition (`env`, the ladder's
+    /// floor), a `PATH` entry for `<home>/toolchain/bin` (`bin`), or
+    /// neither (`none`). `None` means fall through to
+    /// `OCX_TOOLCHAIN_ACTIVATE`, never [`crate::activate::ACTIVATE_FLOOR`]
+    /// directly — only the ladder's own floor applies that default.
+    /// [`ActivateMode`]'s own `Deserialize` already rejects an unrecognized
+    /// wire value (exit 78, C-012) — the same "no second validation pass"
+    /// shape [`Self::lazy_mode`] uses.
+    ///
+    /// RESOLVE-TIME POLICY, not a tool-binding declaration: excluded from
+    /// [`super::declaration_hash`] by omission (same rationale as
+    /// `lazy-mode`).
+    #[serde(default, rename = "activate", skip_serializing_if = "Option::is_none")]
+    pub activate: Option<ActivateMode>,
+
+    /// Toolchain-tier `pinned` setting (`plan_toolchain_activation.md`
+    /// C-007 / C-012) — whether composed paths follow the rendered
+    /// `<group>/<entry>` links (`false`, the ladder's floor) or pin to
+    /// digest roots (`true`). `None` means fall through to
+    /// `OCX_TOOLCHAIN_PINNED`; "unset" and "explicitly false" stay
+    /// distinguishable all the way down the ladder, which is why this is
+    /// `Option<bool>` rather than a bare `bool`.
+    ///
+    /// RESOLVE-TIME POLICY, not a tool-binding declaration: excluded from
+    /// [`super::declaration_hash`] by omission (same rationale as
+    /// `lazy-mode`).
+    #[serde(default, rename = "pinned", skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+
     /// Identity-pinned verification policies; `[[trust.policy]]` in TOML.
     ///
     /// Like [`Self::packages`], this is resolve-time policy — NOT a tool
@@ -221,6 +256,8 @@ impl Clone for ProjectConfig {
             packages: self.packages.clone(),
             lazy_mode: self.lazy_mode,
             lazy_report: self.lazy_report,
+            activate: self.activate,
+            pinned: self.pinned,
             trust: self.trust.clone(),
             declaration_hash_cache: OnceLock::new(),
         }
@@ -238,6 +275,8 @@ impl PartialEq for ProjectConfig {
             && self.packages == other.packages
             && self.lazy_mode == other.lazy_mode
             && self.lazy_report == other.lazy_report
+            && self.activate == other.activate
+            && self.pinned == other.pinned
             && self.trust == other.trust
     }
 }
@@ -296,6 +335,18 @@ struct RawProjectConfig {
     /// [`Self::lazy_mode`].
     #[serde(default, rename = "lazy-report")]
     lazy_report: Option<LazyReport>,
+
+    /// Toolchain-tier `activate` mode. [`ActivateMode`]'s own `Deserialize`
+    /// already rejects an unrecognized wire value — same direct-deserialize
+    /// rationale as [`Self::lazy_mode`], no second validation pass needed.
+    #[serde(default, rename = "activate")]
+    activate: Option<ActivateMode>,
+
+    /// Toolchain-tier `pinned` setting. A bare `bool`, so TOML's own type
+    /// check rejects a non-boolean value at the same first pass.
+    #[serde(default, rename = "pinned")]
+    pinned: Option<bool>,
+
     /// Trust policies (`[[trust.policy]]`). Parsed directly (no per-entry
     /// identifier validation — the scope is a prefix pattern, not an
     /// [`Identifier`]).
@@ -352,6 +403,10 @@ impl ProjectConfig {
             // the programmatic constructor starts with nothing declared.
             lazy_mode: None,
             lazy_report: None,
+            // Toolchain activation settings are resolve-time policy too;
+            // the programmatic constructor starts with nothing declared.
+            activate: None,
+            pinned: None,
             trust: None,
             declaration_hash_cache: OnceLock::new(),
         }
@@ -434,6 +489,23 @@ impl ProjectConfig {
             .map(|(_, settings)| settings)
     }
 
+    /// Path to the global tier's manifest: `<ocx_home>/ocx.toml`.
+    ///
+    /// One spelling for the sites that need the global `ocx.toml` path —
+    /// this `resolve`'s `global` branch, `ocx --global env`'s pinned-env
+    /// lookup, `ocx self activate`'s per-prompt read, and `ocx shell
+    /// state`'s global-scope path. Distinct from the CWD-walk's project-file
+    /// name (`config::loader::PROJECT_FILE_NAME`): this fixes the tier
+    /// (`ocx_home`), that fixes the filename.
+    ///
+    /// Not used by the per-prompt watch-set fingerprint
+    /// ([`crate::shell::reconcile::fingerprint::watch_paths`]): `shell/` must
+    /// never import `crate::project` (addendum A-45, guarded by
+    /// `shell_does_not_import_project`), so that site keeps its own literal.
+    pub fn global_manifest_path(ocx_home: &Path) -> PathBuf {
+        ocx_home.join("ocx.toml")
+    }
+
     /// Resolve the project-tier `ocx.toml` and adjacent lock paths.
     ///
     /// Precedence: `--global`/`OCX_GLOBAL` (exclusive with `--project`) >
@@ -478,7 +550,7 @@ impl ProjectConfig {
                 path: PathBuf::from("ocx.toml"),
                 tier: crate::config::error::ConfigSource::Project,
             })?;
-            let config_path = home.join("ocx.toml");
+            let config_path = Self::global_manifest_path(home);
             let lock = super::lock::lock_path_for(&config_path);
             return Ok(Some((config_path, lock)));
         }
@@ -606,29 +678,41 @@ impl ProjectConfig {
             return Err(ProjectError::new(path, ProjectErrorKind::ShellSectionInProject).into());
         }
 
-        // Schema-level: `[group.default]` is reserved for the implicit
-        // top-level `[tools]` table. Reject before identifier validation
-        // so the user sees the actionable schema error first.
-        if raw.groups.contains_key(super::internal::DEFAULT_GROUP) {
+        // Schema-level: `[group.default]` (any ASCII case — C-015/RUL-1: a
+        // `[group.Default]` silently coexisting with the `default` group is
+        // exactly the collision this reservation exists to stop) is reserved
+        // for the implicit top-level `[tools]` table. A folded scan over the
+        // keys, not `contains_key`, so the fold applies; `found` preserves
+        // the as-written casing for the message. Reject before identifier
+        // validation so the user sees the actionable schema error first.
+        if let Some(found) = raw
+            .groups
+            .keys()
+            .find(|key| is_reserved_toolchain_name(key.as_str(), super::internal::DEFAULT_GROUP))
+        {
             return Err(ProjectError::new(
                 path,
                 ProjectErrorKind::ReservedGroupName {
-                    name: super::internal::DEFAULT_GROUP.to_owned(),
+                    name: found.clone(),
                     hint: "put tools in the top-level [tools] table",
                 },
             )
             .into());
         }
 
-        // Schema-level: `[group.all]` is reserved as the CLI expansion
-        // keyword that selects every declared group. Rejected here before
-        // identifier validation so the user sees the actionable schema error
-        // first.
-        if raw.groups.contains_key(super::internal::ALL_GROUP) {
+        // Schema-level: `[group.all]` (any ASCII case, same C-015/RUL-1 rule
+        // as `default` above) is reserved as the CLI expansion keyword that
+        // selects every declared group. Rejected here before identifier
+        // validation so the user sees the actionable schema error first.
+        if let Some(found) = raw
+            .groups
+            .keys()
+            .find(|key| is_reserved_toolchain_name(key.as_str(), super::internal::ALL_GROUP))
+        {
             return Err(ProjectError::new(
                 path,
                 ProjectErrorKind::ReservedGroupName {
-                    name: super::internal::ALL_GROUP.to_owned(),
+                    name: found.clone(),
                     hint: "rename this group; `all` is a reserved keyword that selects every declared group",
                 },
             )
@@ -637,10 +721,15 @@ impl ProjectConfig {
 
         // Per-entry identifier validation across `[tools]` and every
         // `[group.*]` table, plus the env key/value grammar per scope.
-        let tools = parse_tool_map(&raw.tools, &path)?;
+        let tools = parse_tool_map("tools", &raw.tools, &path)?;
         let env = parse_project_env(super::env::DEFAULT_ENV_SCOPE, &raw.env, &path)?;
         let mut groups: BTreeMap<String, Group> = BTreeMap::new();
         for (group_name, group_body) in raw.groups {
+            // C-013/C-014/C-015: every `[group.<g>]` name goes through the
+            // same charset + `bin`-reservation validator the `[tools]` /
+            // `[group.<g>].tools` keys use, beside the `default`/`all`
+            // reserved-keyword checks above.
+            validate_toolchain_name("group", &group_name, &path)?;
             let parsed = parse_group(&group_name, &group_body, &path)?;
             groups.insert(group_name, parsed);
         }
@@ -662,6 +751,8 @@ impl ProjectConfig {
             // validated these — no second pass needed, unlike `tools`.
             lazy_mode: raw.lazy_mode,
             lazy_report: raw.lazy_report,
+            activate: raw.activate,
+            pinned: raw.pinned,
             trust: raw.trust,
             declaration_hash_cache: OnceLock::new(),
         })
@@ -728,7 +819,7 @@ fn parse_group(name: &str, raw: &toml::Table, path: &Path) -> Result<Group, supe
                     .clone()
                     .try_into()
                     .map_err(|e| ProjectError::new(path.to_path_buf(), ProjectErrorKind::TomlParse(e)))?;
-                group.tools = parse_tool_map(&raw_tools, path)?;
+                group.tools = parse_tool_map(&format!("group.{name}.tools"), &raw_tools, path)?;
             }
             "env" => {
                 let raw_env: toml::Table = value
@@ -815,9 +906,25 @@ pub(super) fn parse_tool_value(value: &str) -> Result<Identifier, IdentifierErro
 /// failures so the project-tier diagnostic can name the offending
 /// binding without losing the underlying [`IdentifierError`]
 /// for non-registry failures.
-fn parse_tool_map(raw: &BTreeMap<String, String>, path: &Path) -> Result<BTreeMap<String, Identifier>, super::Error> {
+///
+/// Also validates every KEY against [`validate_toolchain_name`] (C-013 /
+/// C-014) — the "key side is new" half the value-only validation here used
+/// to lack. `scope` names the enclosing table for the diagnostic
+/// (`"tools"` for the top-level table, `"group.<g>.tools"` for a named
+/// group's sub-table) and is threaded straight through, the same
+/// convention [`parse_project_env`] already uses for its own `scope`
+/// parameter.
+fn parse_tool_map(
+    scope: &str,
+    raw: &BTreeMap<String, String>,
+    path: &Path,
+) -> Result<BTreeMap<String, Identifier>, super::Error> {
     let mut out: BTreeMap<String, Identifier> = BTreeMap::new();
     for (name, value) in raw {
+        // Reject before identifier validation so the user sees the
+        // actionable schema error first — same ordering rule the
+        // `default`/`all` reserved-group checks already follow.
+        validate_toolchain_name(scope, name, path)?;
         match parse_tool_value(value) {
             Ok(id) => {
                 out.insert(name.clone(), id);
@@ -846,6 +953,128 @@ fn parse_tool_map(raw: &BTreeMap<String, String>, path: &Path) -> Result<BTreeMa
         }
     }
     Ok(out)
+}
+
+/// Charset for a `[tools]` key, a `[group.<g>].tools` key, or a
+/// `[group.<g>]` name — plan contract C-014 (`plan_toolchain_activation.md`).
+///
+/// Deliberately **wider** than
+/// [`crate::package::metadata::slug::SLUG_PATTERN_STR`] by uppercase and
+/// `.`, because these keys name existing user-authored bindings
+/// (`MSBuild`, `python3.13`) rather than an OCX-generated slug.
+/// [`SLUG_MAX_LEN`] (64 bytes) is reused verbatim for the length cap —
+/// see [`validate_toolchain_name`].
+const TOOLCHAIN_NAME_PATTERN_STR: &str = r"^[A-Za-z0-9][A-Za-z0-9._-]*$";
+
+/// Compiled sibling of [`TOOLCHAIN_NAME_PATTERN_STR`] (RUL-21 — a hand-rolled
+/// `chars().all(…)` loop would leave the constant unread anywhere, making it
+/// dead code under `-D dead-code` and free to drift from the enforced rule).
+/// Mirrors the shipped [`crate::package::metadata::slug::SLUG_PATTERN`]
+/// shape. Neither `^` nor `$` is given the multi-line flag, so `$` anchors to
+/// the end of the haystack rather than to the position before a trailing
+/// `\n` as PCRE does — the property `c014_charset_refuses_a_separator_space_control_byte_or_nul`
+/// pins for `"abc\n"`.
+static TOOLCHAIN_NAME_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(TOOLCHAIN_NAME_PATTERN_STR).expect("valid toolchain name regex"));
+
+/// The one ASCII-case-folding rule this file applies to every reserved-name
+/// comparison (C-015 / RUL-1): `name` is reserved when it case-folds to
+/// `reserved`, so `Default`, `DEFAULT` and `default` are the same
+/// reservation. Shared by the shipped `default`/`all` group-name checks
+/// above and by [`validate_toolchain_name`]'s `bin` comparison — one
+/// case-folding rule in this file, not two.
+fn is_reserved_toolchain_name(name: &str, reserved: &str) -> bool {
+    name.eq_ignore_ascii_case(reserved)
+}
+
+/// The keyword [`validate_toolchain_name`] refuses at every one of its call
+/// sites (plan contract C-013) — reserved as both a group name and a
+/// tool name so a future per-group `<group>/bin/` render layout stays
+/// possible without a layout break. Compared ASCII-case-folded (C-015), so
+/// `Bin` and `BIN` are refused too.
+const BIN_RESERVED_NAME: &str = "bin";
+
+/// Charset (C-014) plus `bin`-reservation (C-013) validator for a `[tools]`
+/// key, a `[group.<g>].tools` key, or a `[group.<g>]` name — the one
+/// validator `plan_toolchain_activation.md`'s C-014 documents as serving
+/// both reasons, called identically at every site so none of them can diverge
+/// from the others.
+///
+/// `pub(super)` for the **writer** side (R-W21): the three call sites below
+/// are this file's reader, and [`crate::project::mutate`] validates the names
+/// `ocx add` is about to write against the very same function. A second
+/// implementation of this grammar one module over is the drift the
+/// single-validator argument exists to refuse — and it had already drifted,
+/// in both directions, before the writer was routed here.
+///
+/// `scope` names the call site for the diagnostic (`"tools"`,
+/// `"group.<g>.tools"`, or `"group"` — see [`ProjectErrorKind::ReservedToolchainName`]
+/// / [`ProjectErrorKind::InvalidToolchainNameCharset`]). `name` is the
+/// as-written string, checked against [`TOOLCHAIN_NAME_PATTERN_STR`] /
+/// [`SLUG_MAX_LEN`] and, case-folded, against [`BIN_RESERVED_NAME`] (C-015).
+///
+/// The `bin` reservation is checked before the charset: every reserved word
+/// is charset-valid (`no_name_is_both_reserved_and_off_charset_so_the_two_refusals_cannot_race`),
+/// so the two branches never compete on one input and the order carries no
+/// observable meaning of its own — it is written this way only because the
+/// reservation is the more specific rule.
+///
+/// # Errors
+///
+/// [`ProjectErrorKind::ReservedToolchainName`] when `name` case-folds to
+/// [`BIN_RESERVED_NAME`]; [`ProjectErrorKind::InvalidToolchainNameCharset`]
+/// when `name` fails the charset or the [`SLUG_MAX_LEN`] cap. The two causes
+/// share one variant — a charset failure and an over-length name are both
+/// "this string cannot become a path component", and no caller has ever
+/// needed to tell them apart.
+pub(super) fn validate_toolchain_name(scope: &str, name: &str, path: &Path) -> Result<(), super::Error> {
+    if is_reserved_toolchain_name(name, BIN_RESERVED_NAME) {
+        return Err(ProjectError::new(
+            path.to_path_buf(),
+            ProjectErrorKind::ReservedToolchainName {
+                scope: scope.to_string(),
+                name: name.to_string(),
+            },
+        )
+        .into());
+    }
+    if name.len() > SLUG_MAX_LEN || !TOOLCHAIN_NAME_PATTERN.is_match(name) {
+        return Err(ProjectError::new(
+            path.to_path_buf(),
+            ProjectErrorKind::InvalidToolchainNameCharset {
+                scope: scope.to_string(),
+                name: name.to_string(),
+            },
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Names which half of [`ProjectErrorKind::InvalidToolchainNameCharset`]'s
+/// merged rule `name` actually broke — the charset, the length cap, or both
+/// (review W-2: the variant stays merged, per the two-open-items decision
+/// in the WP-3 brief, but the message must still say which check failed).
+///
+/// `pub(super)` so [`super::error`]'s `#[error(...)]` template can call it
+/// directly; lives beside [`TOOLCHAIN_NAME_PATTERN`] and [`SLUG_MAX_LEN`] so
+/// the diagnosis can never drift from what [`validate_toolchain_name`]
+/// itself enforces — a second, hand-copied charset check here would be
+/// exactly the drift RUL-21/RUL-23 exist to close, one function over.
+///
+/// [`validate_toolchain_name`] is the only real-world constructor and never
+/// builds this variant for a `name` that passes both checks, but this stays
+/// total (no panic) rather than assume that: several tests build the variant
+/// directly with an arbitrary `name` to exercise the message shape alone.
+pub(super) fn describe_toolchain_name_charset_violation(name: &str) -> &'static str {
+    let bad_charset = !TOOLCHAIN_NAME_PATTERN.is_match(name);
+    let too_long = name.len() > SLUG_MAX_LEN;
+    match (bad_charset, too_long) {
+        (true, true) => "the character set is wrong and the name is too long",
+        (true, false) => "the character set is wrong",
+        (false, true) => "the name is too long",
+        (false, false) => "the name satisfies both rules",
+    }
 }
 
 /// Validate every `[package."<key>"]` key as a strict, fully-qualified
@@ -914,11 +1143,14 @@ fn repository_key(identifier: &Identifier) -> String {
 /// permits, since a config author cannot know the digest a lock pins.
 ///
 /// Split from [`lazy_mode_for_tool`] so which-config-tier-feeds-which-slot is
-/// assertable independently of the host's shim-support floor: on Windows the
-/// resolved answer is `Never` for every input, so a test driving the resolving
-/// form there proves nothing about this wiring — the same reason
-/// [`LazyModeLadder::resolve`] is split from
-/// [`LazyModeLadder::resolve_for_host`] one layer down.
+/// assertable independently of any host-specific floor: `resolve_for_host` is
+/// the one host-aware entry point in the ladder, and it applies **no** floor
+/// today — plan contract C-027 removed the Windows one in the same change that
+/// gave Windows a deferred-shim producer (C-026), and the method stays in case
+/// a future platform needs a floor of its own. A test asserting tier wiring
+/// through the pure `resolve()` form here cannot be perturbed by whatever a
+/// host floor does or doesn't do — the same reason [`LazyModeLadder::resolve`]
+/// is split from [`LazyModeLadder::resolve_for_host`] one layer down.
 pub fn lazy_mode_ladder_for_tool(
     config: &ProjectConfig,
     identifier: &Identifier,
@@ -938,8 +1170,11 @@ pub fn lazy_mode_ladder_for_tool(
 /// every production caller uses.
 ///
 /// [`lazy_mode_ladder_for_tool`] fills the tiers; resolution goes through
-/// [`LazyModeLadder::resolve_for_host`], so on Windows the answer is
-/// [`LazyMode::Never`] whatever the tiers say — scenario S-010.
+/// [`LazyModeLadder::resolve_for_host`], which is a plain passthrough to
+/// [`LazyModeLadder::resolve`] — the five tiers' answer is never overridden by
+/// the host. It once floored `Always` to `LazyMode::Never` on Windows, because
+/// nothing wrote the Windows half of a deferred tool's shim slot; C-026's
+/// producer landed and plan contract C-027 removed the floor with it.
 ///
 /// Lives here, with the config it reads, because this contract makes
 /// `ProjectConfig` the owner of tiers 2-4. The OCI-tier sibling —
@@ -2358,5 +2593,875 @@ bogus = 1
         };
         assert_eq!(group, "ci");
         assert_eq!(key, "bogus");
+    }
+
+    // ── C-012–C-015 / S-012: the toolchain name grammar and the two
+    //    activation keys (plan_toolchain_activation.md, ADR item 17) ────────
+    //
+    // Written from the plan's contracts and the ADR, never from the
+    // validator's body. While `validate_toolchain_name` is `unimplemented!()`,
+    // every case below that reaches it reports a PANIC rather than a variant
+    // mismatch — that panic is the Specify-stage red. The cases that do not
+    // reach it (an earlier gate returns first) say so at their own site, so
+    // nobody reads their green as evidence the validator works.
+
+    /// Refuse `toml`, returning the structured error together with the exit
+    /// code the CLI derives from it.
+    ///
+    /// Variant and exit code travel together at every call site below: a
+    /// mis-classified `ClassifyExitCode` arm hands the user exit 70 with a
+    /// perfectly correct message, and a test asserting only the variant stays
+    /// green straight through it.
+    fn refuse_ocx_toml(toml: &str) -> (crate::project::error::ProjectError, Option<crate::cli::ExitCode>) {
+        let err = ProjectConfig::from_toml_str(toml).expect_err("this ocx.toml must be refused");
+        let code = crate::cli::ClassifyExitCode::classify(&err);
+        #[allow(irrefutable_let_patterns)]
+        let crate::project::Error::Project(pe) = err else {
+            panic!("expected Error::Project");
+        };
+        (pe, code)
+    }
+
+    /// The error [`validate_toolchain_name`] produces for `name` at `scope`,
+    /// or `None` when the name is admitted.
+    ///
+    /// The charset table calls the validator directly rather than routing
+    /// through TOML, because several of its rows are names TOML itself
+    /// re-interprets before the validator could ever see them — see
+    /// [`c014_a_bare_dotted_tools_key_is_toml_nesting_and_never_reaches_the_validator`].
+    /// The three call sites are proved separately, by
+    /// [`c014_the_charset_fires_at_all_three_declaration_sites`].
+    fn validate_name(scope: &str, name: &str) -> Option<ProjectErrorKind> {
+        match validate_toolchain_name(scope, name, std::path::Path::new("ocx.toml")) {
+            Ok(()) => None,
+            Err(err) => {
+                #[allow(irrefutable_let_patterns)]
+                let crate::project::Error::Project(pe) = err else {
+                    panic!("expected Error::Project");
+                };
+                Some(pe.kind)
+            }
+        }
+    }
+
+    // ── C-014: the charset ──────────────────────────────────────────────────
+
+    /// C-014 (E2, E3, E8, E9, E12, E14, E15): the grammar admits every name
+    /// shape projects already write — one character, all digits, an interior
+    /// dot, a TRAILING dot, an interior `..`, uppercase, and exactly the
+    /// 64-byte cap.
+    ///
+    /// `MSBuild` and `python3.13` are the ADR's own reason `SLUG_PATTERN_STR`
+    /// is deliberately not reused (it is lowercase-only and forbids `.`).
+    /// `foo.` and `a..b` are admitted on purpose: the tail class admits `.`,
+    /// and a `..` *substring* is not a path component. `..` alone is the
+    /// component the ADR names and is refused by the head class, below.
+    #[test]
+    fn c014_charset_admits_the_names_projects_already_write() {
+        let at_cap = "a".repeat(SLUG_MAX_LEN);
+        for name in [
+            "a",
+            "13",
+            "python3.13",
+            "MSBuild",
+            "go-task",
+            "rust-essentials",
+            "foo.",
+            "a..b",
+            at_cap.as_str(),
+        ] {
+            assert!(
+                validate_name("tools", name).is_none(),
+                "C-014 must admit {name:?}: narrowing the charset breaks existing projects for a \
+                 reason unrelated to the injection the validator exists to close"
+            );
+        }
+    }
+
+    /// C-014 / item 17 (E1): the empty name is refused.
+    ///
+    /// `"" = "ocx.sh/x:1"` is a legal TOML key (verified), so this is a file a
+    /// user can actually write. Unrefused it renders as the group directory
+    /// itself rather than as an entry inside it. Asserted at the validator and
+    /// again through the parser, because the head class is the only thing that
+    /// makes the empty string illegal — there is no separate length floor.
+    #[test]
+    fn c014_charset_refuses_an_empty_name() {
+        let Some(kind) = validate_name("tools", "") else {
+            panic!("C-014 must refuse the empty name");
+        };
+        assert!(
+            matches!(&kind, ProjectErrorKind::InvalidToolchainNameCharset { scope, name }
+                if scope == "tools" && name.is_empty()),
+            "expected InvalidToolchainNameCharset {{ scope: \"tools\", name: \"\" }}; got {kind:?}"
+        );
+
+        let (pe, code) = refuse_ocx_toml("[tools]\n\"\" = \"ocx.sh/x:1\"\n");
+        assert!(
+            matches!(&pe.kind, ProjectErrorKind::InvalidToolchainNameCharset { .. }),
+            "an empty [tools] key must reach the charset refusal; got {:?}",
+            pe.kind
+        );
+        assert_eq!(
+            code,
+            Some(crate::cli::ExitCode::ConfigError),
+            "C-014 refuses at exit 78"
+        );
+    }
+
+    /// C-014 (E3, E4): `SLUG_MAX_LEN` is an INCLUSIVE cap — 64 bytes is
+    /// admitted, 65 is refused.
+    ///
+    /// One test for both sides so the off-by-one is visible at the assertion
+    /// site: a `>=` where `>` belongs refuses `at_cap` and passes any test that
+    /// only checked the over-long case.
+    #[test]
+    fn c014_charset_admits_exactly_64_bytes_and_refuses_65() {
+        let at_cap = "a".repeat(SLUG_MAX_LEN);
+        let over_cap = "a".repeat(SLUG_MAX_LEN + 1);
+        assert_eq!(at_cap.len(), 64, "fixture must sit exactly on the cap");
+        assert_eq!(over_cap.len(), 65, "fixture must sit exactly one byte past the cap");
+
+        assert!(
+            validate_name("tools", &at_cap).is_none(),
+            "the cap is inclusive: {SLUG_MAX_LEN} bytes is admitted"
+        );
+        let Some(kind) = validate_name("tools", &over_cap) else {
+            panic!("a {}-byte name must be refused", over_cap.len());
+        };
+        assert!(
+            matches!(&kind, ProjectErrorKind::InvalidToolchainNameCharset { name, .. } if name == &over_cap),
+            "expected InvalidToolchainNameCharset echoing the over-long name; got {kind:?}"
+        );
+    }
+
+    /// C-014 (E5, E6, E7, E10, E11): the head class is `[A-Za-z0-9]`, so a
+    /// leading `-`, `.` or `_` is refused — and with it `.` and `..`, the two
+    /// traversal spellings the ADR names as the reason the head class is
+    /// narrower than the tail class.
+    #[test]
+    fn c014_charset_refuses_a_leading_dash_dot_or_underscore() {
+        for name in ["-foo", ".foo", "_foo", "..", ".", "-", "_"] {
+            let Some(kind) = validate_name("tools", name) else {
+                panic!("C-014 must refuse {name:?}: the head class admits only [A-Za-z0-9]");
+            };
+            assert!(
+                matches!(&kind, ProjectErrorKind::InvalidToolchainNameCharset { name: got, .. } if got == name),
+                "expected InvalidToolchainNameCharset echoing {name:?}; got {kind:?}"
+            );
+        }
+    }
+
+    /// C-014 (E16): 64 `é` is 64 *characters* and 128 *bytes*, and is refused.
+    ///
+    /// The grammar is an ASCII charset and the cap is a BYTE cap. A validator
+    /// counting `chars()` against `SLUG_MAX_LEN` admits this name and then
+    /// renders a 128-byte path component; a validator that folded to Unicode
+    /// alphanumerics — the mistake `mutate.rs::validate_group_name` already
+    /// makes — admits it too.
+    #[test]
+    fn c014_charset_refuses_non_ascii_even_inside_the_64_character_count() {
+        let accented = "é".repeat(64);
+        assert_eq!(accented.chars().count(), 64, "fixture is 64 characters");
+        assert_eq!(accented.len(), 128, "fixture is 128 bytes");
+        let Some(kind) = validate_name("tools", &accented) else {
+            panic!("C-014 must refuse a non-ASCII name");
+        };
+        let ProjectErrorKind::InvalidToolchainNameCharset { name, .. } = &kind else {
+            panic!("expected InvalidToolchainNameCharset; got {kind:?}");
+        };
+        assert_eq!(name, &accented, "the diagnostic must quote the offending name");
+    }
+
+    /// C-014 (E17–E20) — the security half of the contract. Both a `[tools]`
+    /// key and a `[group.<g>]` name become path components of the rendered
+    /// tree, and in following mode `ocx env` emits those paths as environment
+    /// values.
+    ///
+    /// The two newline rows are the discriminating ones. Rust's `regex`
+    /// anchors `$` to the end of the haystack rather than to the position
+    /// before a trailing `\n` as PCRE does — an implementation that ports a
+    /// PCRE habit, or that checks only the first line, admits `abc\n`. Both
+    /// the interior and the TRAILING spelling are asserted so that mistake has
+    /// a reachable red whichever implementation shape is chosen.
+    #[test]
+    fn c014_charset_refuses_a_separator_space_control_byte_or_nul() {
+        for name in [
+            "a b", "a/b", "a\\b", "a:b", "a\nb", "abc\n", "a\tb", "a\u{0}b", "a\u{7f}b",
+        ] {
+            let Some(kind) = validate_name("tools", name) else {
+                panic!("C-014 must refuse {name:?}: it escapes the home the containment policy defends");
+            };
+            assert!(
+                matches!(&kind, ProjectErrorKind::InvalidToolchainNameCharset { .. }),
+                "expected InvalidToolchainNameCharset for {name:?}; got {kind:?}"
+            );
+        }
+    }
+
+    /// C-014 (E13) — the trap. A BARE `python3.13 = "ocx.sh/py:1"` never
+    /// reaches the validator: TOML reads a bare dotted key as nesting, so the
+    /// value deserialises as `{tools: {python3: {13: …}}}` and
+    /// `RawProjectConfig.tools: BTreeMap<String, String>` refuses a table
+    /// value on the FIRST pass.
+    ///
+    /// Its quoted twin `"python3.13"` is the only spelling that reaches C-014,
+    /// and it is admitted (E14) — the ADR's own motivating example. Both halves
+    /// are asserted here so a reader does not conclude from the refusal that
+    /// dots are illegal.
+    #[test]
+    fn c014_a_bare_dotted_tools_key_is_toml_nesting_and_never_reaches_the_validator() {
+        let (pe, code) = refuse_ocx_toml("[tools]\npython3.13 = \"ocx.sh/py:1\"\n");
+        assert!(
+            matches!(&pe.kind, ProjectErrorKind::TomlParse(_)),
+            "a bare dotted key is a TOML shape fault, not a charset fault; got {:?}",
+            pe.kind
+        );
+        assert_eq!(code, Some(crate::cli::ExitCode::ConfigError), "still exit 78");
+
+        let config = ProjectConfig::from_toml_str("[tools]\n\"python3.13\" = \"ocx.sh/py:1\"\n")
+            .expect("the quoted spelling is the ADR's own motivating example and must parse");
+        assert!(
+            config.tools.contains_key("python3.13"),
+            "the quoted key must land verbatim; got {:?}",
+            config.tools.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// C-014 / item 17: the validator fires at ALL THREE declaration sites,
+    /// and each refusal names its own scope.
+    ///
+    /// One validator, three call sites, is the contract — so a wiring that
+    /// covered only `[tools]` would leave a group name unchecked, and a group
+    /// name is a path component exactly as a tool name is.
+    #[test]
+    fn c014_the_charset_fires_at_all_three_declaration_sites() {
+        let cases = [
+            ("tools", "[tools]\n\"a b\" = \"ocx.sh/x:1\"\n"),
+            ("group", "[group.\"a b\"]\n"),
+            ("group.ci.tools", "[group.ci.tools]\n\"a b\" = \"ocx.sh/x:1\"\n"),
+        ];
+        for (expected_scope, toml) in cases {
+            let (pe, code) = refuse_ocx_toml(toml);
+            let ProjectErrorKind::InvalidToolchainNameCharset { scope, name } = &pe.kind else {
+                panic!(
+                    "expected InvalidToolchainNameCharset at {expected_scope}; got {:?}",
+                    pe.kind
+                );
+            };
+            assert_eq!(scope, expected_scope, "the refusal must name the site it fired at");
+            assert_eq!(name, "a b", "the refusal must echo the offending name");
+            assert_eq!(code, Some(crate::cli::ExitCode::ConfigError), "C-014 is exit 78");
+        }
+    }
+
+    /// C-014 — the drift detector the architecture pass asked for.
+    ///
+    /// The user-facing message spells the grammar and the cap as LITERALS in
+    /// `error.rs`, while the enforced rule lives in
+    /// [`TOOLCHAIN_NAME_PATTERN_STR`] and [`SLUG_MAX_LEN`] here. Widening the
+    /// grammar or bumping the cap without editing the message makes the
+    /// message lie to the user, silently; nothing else notices.
+    #[test]
+    fn c014_the_refusal_message_quotes_the_enforced_pattern_and_cap() {
+        let rendered = ProjectErrorKind::InvalidToolchainNameCharset {
+            scope: "tools".to_string(),
+            name: "a b".to_string(),
+        }
+        .to_string();
+        // RUL-23: `contains` alone stayed green under a mutated pattern that
+        // was a substring of the message (e.g. a widened tail class), because
+        // the mutated text still contained the shorter, unmutated needle. The
+        // quoted pattern is extracted from between the message's own fixed
+        // wording and compared for EQUALITY, so any drift between the
+        // enforced regex and the literal in `error.rs` reds here.
+        let after_must_match = rendered
+            .split_once("must match ")
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| panic!("message must contain 'must match '; got {rendered:?}"));
+        let quoted_pattern = after_must_match
+            .split_once(" and be at most")
+            .map(|(pattern, _)| pattern)
+            .unwrap_or_else(|| panic!("message must contain ' and be at most'; got {rendered:?}"));
+        assert_eq!(
+            quoted_pattern, TOOLCHAIN_NAME_PATTERN_STR,
+            "the message must quote the enforced pattern EXACTLY, not merely a superstring of it; got {rendered:?}"
+        );
+        // W-1 (round-1 review): the cap half stayed on `contains`, so a
+        // mutated cap of `6` or `4` — both substrings of `64` — would have
+        // stayed green. Extract the same way as the pattern and assert
+        // EQUALITY against `SLUG_MAX_LEN`.
+        let after_at_most = after_must_match
+            .split_once(" and be at most ")
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| panic!("message must contain ' and be at most '; got {rendered:?}"));
+        let quoted_cap = after_at_most
+            .split_once(" bytes")
+            .map(|(cap, _)| cap)
+            .unwrap_or_else(|| panic!("message must contain ' bytes' after the cap; got {rendered:?}"));
+        assert_eq!(
+            quoted_cap,
+            SLUG_MAX_LEN.to_string(),
+            "the message must quote the enforced cap EXACTLY, not merely a superstring of it; got {rendered:?}"
+        );
+    }
+
+    /// W-2 (round-1 review): the merged `InvalidToolchainNameCharset`
+    /// variant stays merged, but the message must still say which of its two
+    /// causes the input actually broke — a bad character and an over-long
+    /// name are different fixes, and a reader should not have to guess.
+    #[test]
+    fn c014_the_refusal_message_names_which_rule_the_name_broke() {
+        let charset_only = ProjectErrorKind::InvalidToolchainNameCharset {
+            scope: "tools".to_string(),
+            name: "a b".to_string(),
+        }
+        .to_string();
+        assert!(
+            charset_only.contains("the character set is wrong") && !charset_only.contains("too long"),
+            "a space breaks only the charset rule; got {charset_only:?}"
+        );
+
+        let over_cap = "a".repeat(SLUG_MAX_LEN + 1);
+        let length_only = ProjectErrorKind::InvalidToolchainNameCharset {
+            scope: "tools".to_string(),
+            name: over_cap,
+        }
+        .to_string();
+        assert!(
+            length_only.contains("the name is too long") && !length_only.contains("character set is wrong"),
+            "a 65-byte all-ASCII-alnum name breaks only the length rule; got {length_only:?}"
+        );
+    }
+
+    // ── C-013 + C-015: `bin`, at every site, in every ASCII case ────────────
+
+    /// C-013 / C-015 / item 17 (E21–E23, E26): `bin` is refused as a tool name
+    /// at BOTH tool sites, in every ASCII case, and the refusal names its
+    /// scope and echoes the spelling as written.
+    ///
+    /// The tool half is what is new — `default` and `all` were already refused
+    /// as group names. `Bin` and `BIN` are refused by C-015's fold, not by a
+    /// second reserved word.
+    #[test]
+    fn c013_bin_is_refused_as_a_tool_name_at_both_tool_sites_in_every_ascii_case() {
+        let cases = [
+            ("tools", "bin"),
+            ("tools", "Bin"),
+            ("tools", "BIN"),
+            ("group.ci.tools", "bin"),
+            ("group.ci.tools", "Bin"),
+            ("group.ci.tools", "BIN"),
+        ];
+        for (scope, spelling) in cases {
+            let toml = if scope == "tools" {
+                format!("[tools]\n{spelling} = \"ocx.sh/x:1\"\n")
+            } else {
+                format!("[group.ci.tools]\n{spelling} = \"ocx.sh/x:1\"\n")
+            };
+            let (pe, code) = refuse_ocx_toml(&toml);
+            let ProjectErrorKind::ReservedToolchainName { scope: got_scope, name } = &pe.kind else {
+                panic!(
+                    "expected ReservedToolchainName for [{scope}] {spelling}; got {:?}",
+                    pe.kind
+                );
+            };
+            assert_eq!(got_scope, scope, "the refusal must name the site it fired at");
+            assert_eq!(name, spelling, "the refusal must echo the spelling as written");
+            assert_eq!(code, Some(crate::cli::ExitCode::ConfigError), "C-013 is exit 78");
+        }
+    }
+
+    /// C-013 / C-015 / item 17 (E24, E25): `bin` is refused as a GROUP name in
+    /// every ASCII case, beside the shipped `default` / `all` reservations.
+    ///
+    /// Reserved as a group name as well as a tool name so a future per-group
+    /// `<group>/bin/` render layout stays possible without a layout break.
+    #[test]
+    fn c013_bin_is_refused_as_a_group_name_in_every_ascii_case() {
+        for spelling in ["bin", "Bin", "BIN", "bIn"] {
+            let toml = format!("[group.{spelling}.tools]\ncmake = \"ocx.sh/cmake:3.28\"\n");
+            let (pe, code) = refuse_ocx_toml(&toml);
+            let ProjectErrorKind::ReservedToolchainName { scope, name } = &pe.kind else {
+                panic!(
+                    "expected ReservedToolchainName for [group.{spelling}]; got {:?}",
+                    pe.kind
+                );
+            };
+            assert_eq!(scope, "group", "the group-NAME site reports scope `group`");
+            assert_eq!(name, spelling, "the refusal must echo the spelling as written");
+            assert_eq!(code, Some(crate::cli::ExitCode::ConfigError), "C-013 is exit 78");
+        }
+    }
+
+    /// C-013, ordering (E27): a tool named `bin` inside a group named `bin`
+    /// produces EXACTLY ONE refusal, and it names the GROUP site.
+    ///
+    /// Two true refusals are available here; which one a user sees is decided
+    /// by the parse order — the group loop validates the group name before
+    /// `parse_group` descends into `[group.<g>.tools]`. Pinning it means a
+    /// later refactor that reorders the two cannot silently change the
+    /// diagnostic while both tests stay green.
+    #[test]
+    fn c013_a_bin_tool_inside_a_bin_group_is_refused_once_at_the_group_site() {
+        let (pe, code) = refuse_ocx_toml("[group.bin.tools]\nbin = \"ocx.sh/x:1\"\n");
+        let ProjectErrorKind::ReservedToolchainName { scope, name } = &pe.kind else {
+            panic!("expected ReservedToolchainName; got {:?}", pe.kind);
+        };
+        assert_eq!(
+            scope, "group",
+            "the group NAME is validated before parse_group descends, so the group site wins"
+        );
+        assert_eq!(name, "bin");
+        assert_eq!(code, Some(crate::cli::ExitCode::ConfigError));
+    }
+
+    /// C-013 scope (E31, E32): `default` and `all` stay legal as TOOL names.
+    ///
+    /// They are reserved as GROUP names only (ADR § *Reserved and validated
+    /// names*). This reds the moment a folded reserved set forgets the site
+    /// distinction and over-refuses a `[tools] default` that is legal today —
+    /// the failure mode a single shared reserved list invites.
+    #[test]
+    fn c013_default_and_all_stay_legal_as_tool_names() {
+        for spelling in ["default", "all", "Default", "ALL"] {
+            let toml =
+                format!("[tools]\n{spelling} = \"ocx.sh/x:1\"\n\n[group.ci.tools]\n{spelling} = \"ocx.sh/y:1\"\n");
+            let config = ProjectConfig::from_toml_str(&toml)
+                .unwrap_or_else(|e| panic!("`{spelling}` is reserved as a GROUP name only; got {e:?}"));
+            assert!(
+                config.tools.contains_key(spelling),
+                "[tools] {spelling} must be admitted; got {:?}",
+                config.tools.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                config
+                    .groups
+                    .get("ci")
+                    .is_some_and(|group| group.tools.contains_key(spelling)),
+                "[group.ci.tools] {spelling} must be admitted"
+            );
+        }
+    }
+
+    // ── C-015 / RUL-1: the fold reaches the shipped group reservations ──────
+
+    /// C-015 / RUL-1 (E28–E30): `[group.default]` and `[group.all]` are
+    /// refused in EVERY ASCII case, not only lowercase.
+    ///
+    /// `[group.Default]` silently coexisting with the `default` group derived
+    /// from `[tools]` is the collision the reservation exists to stop — and a
+    /// byte-exact `contains_key` lets it through. Lowercase rows are the
+    /// regression control on the shipped behaviour.
+    ///
+    /// NOTE for the reader of a red: this case returns from the `default` /
+    /// `all` guards, which sit BEFORE `validate_toolchain_name`. It therefore
+    /// passes against the stub, and its red is the fold mutation, not an
+    /// `unimplemented!()` panic.
+    #[test]
+    fn c015_the_reserved_group_keywords_are_refused_in_every_ascii_case() {
+        for spelling in ["default", "Default", "DEFAULT", "dEfAuLt", "all", "All", "ALL", "aLl"] {
+            let toml = format!("[group.{spelling}.tools]\ncmake = \"ocx.sh/cmake:3.28\"\n");
+            let (pe, code) = refuse_ocx_toml(&toml);
+            let ProjectErrorKind::ReservedGroupName { name, hint } = &pe.kind else {
+                panic!("expected ReservedGroupName for [group.{spelling}]; got {:?}", pe.kind);
+            };
+            assert_eq!(
+                name, spelling,
+                "the message must echo the user's own spelling so they can find the line"
+            );
+            assert!(!hint.is_empty(), "the shipped per-keyword hint must survive the fold");
+            assert_eq!(code, Some(crate::cli::ExitCode::ConfigError), "still exit 78");
+        }
+    }
+
+    /// C-015 / RUL-1, regression control: the two lowercase spellings keep
+    /// their SHIPPED hint text, byte-unchanged.
+    ///
+    /// The fold widens which names are refused; it must not rewrite what the
+    /// user is told. Each keyword keeps its own hint — `default` points at
+    /// `[tools]`, `all` explains the expansion keyword — so a fold implemented
+    /// with one shared message would red here.
+    #[test]
+    fn c015_the_folded_refusal_keeps_each_keywords_own_shipped_hint() {
+        let (default_err, _) = refuse_ocx_toml("[group.Default]\n");
+        let rendered = format!("{:#}", default_err.kind);
+        assert!(
+            rendered.contains("[group.Default] is reserved"),
+            "the message must name the group as written; got {rendered:?}"
+        );
+        assert!(
+            rendered.contains("put tools in the top-level [tools] table"),
+            "`default` keeps its own shipped hint; got {rendered:?}"
+        );
+
+        let (all_err, _) = refuse_ocx_toml("[group.ALL]\n");
+        let rendered = format!("{:#}", all_err.kind);
+        assert!(
+            rendered.contains("[group.ALL] is reserved"),
+            "the message must name the group as written; got {rendered:?}"
+        );
+        assert!(
+            rendered.contains("reserved keyword"),
+            "`all` keeps its own shipped hint; got {rendered:?}"
+        );
+    }
+
+    /// C-013 / C-014 (E33) — the ordering question, answered once so it is not
+    /// re-asked.
+    ///
+    /// No input is both reserved and off-charset: every reserved word
+    /// (`bin`, `default`, `all`) is charset-valid in every ASCII case, so the
+    /// two checks cannot both fire on one name and "which refusal wins" is not
+    /// a question BETWEEN CHECKS. It is only a question between SITES, which
+    /// [`c013_a_bin_tool_inside_a_bin_group_is_refused_once_at_the_group_site`]
+    /// and the two ordering tests below answer.
+    ///
+    /// `[group."Default "]` is the near-miss that proves it: the trailing space
+    /// takes it out of the reserved set (the fold compares whole strings) and
+    /// into the charset refusal.
+    #[test]
+    fn no_name_is_both_reserved_and_off_charset_so_the_two_refusals_cannot_race() {
+        for reserved in ["bin", "Bin", "BIN", "default", "Default", "all", "ALL"] {
+            assert!(
+                !matches!(
+                    validate_name("tools", reserved),
+                    Some(ProjectErrorKind::InvalidToolchainNameCharset { .. })
+                ),
+                "{reserved:?} is charset-valid, so a charset refusal here would mean the two \
+                 checks can race on one input"
+            );
+        }
+
+        let (pe, code) = refuse_ocx_toml("[group.\"Default \"]\n");
+        assert!(
+            matches!(&pe.kind, ProjectErrorKind::InvalidToolchainNameCharset { name, .. } if name == "Default "),
+            "a trailing space leaves the reserved set and lands in the charset refusal; got {:?}",
+            pe.kind
+        );
+        assert_eq!(code, Some(crate::cli::ExitCode::ConfigError));
+    }
+
+    /// Ordering (E37): with `[group.bin]` and `[group.default]` in one file,
+    /// the shipped `default` guard reports first — it runs before the group
+    /// loop that validates names.
+    #[test]
+    fn ordering_the_reserved_default_guard_precedes_the_group_name_validator() {
+        let (pe, _) = refuse_ocx_toml("[group.bin]\n\n[group.default]\n");
+        assert!(
+            matches!(&pe.kind, ProjectErrorKind::ReservedGroupName { name, .. } if name == "default"),
+            "the `default` guard runs before the group-name validator; got {:?}",
+            pe.kind
+        );
+    }
+
+    /// Ordering (E38): with an off-charset `[tools]` key and `[group.bin]` in
+    /// one file, the `[tools]` refusal reports first — `parse_tool_map` runs
+    /// before the group loop.
+    #[test]
+    fn ordering_the_tools_table_is_validated_before_any_group() {
+        let (pe, _) = refuse_ocx_toml("[tools]\n\"a b\" = \"ocx.sh/x:1\"\n\n[group.bin]\n");
+        let ProjectErrorKind::InvalidToolchainNameCharset { scope, name } = &pe.kind else {
+            panic!("[tools] is walked before the groups; got {:?}", pe.kind);
+        };
+        assert_eq!(scope, "tools");
+        assert_eq!(name, "a b");
+    }
+
+    // ── S-012: `ocx` and the privilege names are never refused ──────────────
+
+    /// S-012 (E34, E35): a tool named `ocx` is ADMITTED — in every ASCII case.
+    ///
+    /// Asserts the admission (the binding is present in the parsed config),
+    /// not merely the absence of an error: a parser that dropped the key on
+    /// the floor would satisfy an `is_ok()` assertion.
+    ///
+    /// C-015 folds *reserved-name* comparisons, and `ocx` is not in the
+    /// reserved set — so the fold must not smuggle it in. This reds the moment
+    /// someone helpfully reserves `ocx`.
+    #[test]
+    fn s012_a_tool_named_ocx_is_admitted_in_every_ascii_case() {
+        for spelling in ["ocx", "Ocx", "OCX", "oCx"] {
+            let toml = format!("[tools]\n{spelling} = \"ocx.sh/ocx/cli:1\"\n");
+            let config = ProjectConfig::from_toml_str(&toml)
+                .unwrap_or_else(|e| panic!("S-012: `{spelling}` must never be refused; got {e:?}"));
+            assert!(
+                config.tools.contains_key(spelling),
+                "the binding must be present as written; got {:?}",
+                config.tools.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// S-012 (E36): the privilege names and a group named `ocx` are admitted
+    /// too — a name collision is resolved at render, never by a parse refusal.
+    #[test]
+    fn s012_the_privilege_names_and_a_group_named_ocx_are_admitted() {
+        for spelling in ["sudo", "pkexec", "doas", "Sudo"] {
+            let toml = format!("[tools]\n{spelling} = \"ocx.sh/x:1\"\n");
+            let config = ProjectConfig::from_toml_str(&toml)
+                .unwrap_or_else(|e| panic!("S-012: `{spelling}` must never be refused; got {e:?}"));
+            assert!(config.tools.contains_key(spelling), "the binding must be present");
+        }
+
+        let config = ProjectConfig::from_toml_str("[group.ocx.tools]\ncmake = \"ocx.sh/cmake:3.28\"\n")
+            .expect("S-012: a group named `ocx` must never be refused");
+        assert!(
+            config.groups.contains_key("ocx"),
+            "the group must be present; got {:?}",
+            config.groups.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // ── C-012: `activate` and `pinned` ──────────────────────────────────────
+
+    /// C-012 (E40): both keys absent leave both tiers `None` — "inherit",
+    /// never the floor.
+    ///
+    /// A `#[serde(default)]` resolving to a floor value at parse time would
+    /// make every existing `ocx.toml` an explicit declaration and strand the
+    /// `OCX_TOOLCHAIN_*` tier below it. Same shape as
+    /// [`absent_lazy_settings_leave_every_tier_none`], because it is the same
+    /// rule.
+    #[test]
+    fn c012_absent_activate_and_pinned_leave_both_tiers_none() {
+        let config = ProjectConfig::from_toml_str("[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n").expect("parse");
+        assert_eq!(config.activate, None, "an undeclared `activate` is an absent tier");
+        assert_eq!(config.pinned, None, "an undeclared `pinned` is an absent tier");
+    }
+
+    /// C-012 (E41): `activate` parses each of its three wire values, and each
+    /// lands as its own mode.
+    #[test]
+    fn c012_activate_parses_each_of_its_three_wire_values() {
+        for (wire, expected) in [
+            ("env", ActivateMode::Env),
+            ("bin", ActivateMode::Bin),
+            ("none", ActivateMode::None),
+        ] {
+            let toml = format!("activate = \"{wire}\"\n\n[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n");
+            let config = ProjectConfig::from_toml_str(&toml).unwrap_or_else(|e| panic!("`{wire}` must parse: {e:?}"));
+            assert_eq!(config.activate, Some(expected), "`activate = \"{wire}\"`");
+        }
+    }
+
+    /// C-012 / C-007 (E42): `pinned = false` stays distinguishable from an
+    /// absent `pinned`.
+    ///
+    /// `Option<bool>`, not `bool`: a project that explicitly opts out must
+    /// outrank `OCX_TOOLCHAIN_PINNED=true`, and a bare `bool` makes that
+    /// declaration indistinguishable from silence.
+    #[test]
+    fn c012_pinned_keeps_an_explicit_false_distinct_from_absence() {
+        let declared_false =
+            ProjectConfig::from_toml_str("pinned = false\n\n[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n").expect("parse");
+        let declared_true =
+            ProjectConfig::from_toml_str("pinned = true\n\n[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n").expect("parse");
+        let absent = ProjectConfig::from_toml_str("[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n").expect("parse");
+
+        assert_eq!(declared_false.pinned, Some(false), "an explicit false is a declaration");
+        assert_eq!(declared_true.pinned, Some(true));
+        assert_eq!(absent.pinned, None, "silence is not a declaration");
+    }
+
+    /// C-012 (E43, E44, E48): a wrong-typed `activate` or `pinned` is refused
+    /// on the FIRST pass, as a TOML shape fault, at exit 78.
+    #[test]
+    fn c012_a_wrong_typed_activate_or_pinned_is_refused_at_exit_78() {
+        for toml in [
+            "activate = 1\n",
+            "activate = true\n",
+            "pinned = \"true\"\n",
+            "pinned = 1\n",
+        ] {
+            let (pe, code) = refuse_ocx_toml(toml);
+            assert!(
+                matches!(&pe.kind, ProjectErrorKind::TomlParse(_)),
+                "{toml:?} is a TOML type fault; got {:?}",
+                pe.kind
+            );
+            assert_eq!(code, Some(crate::cli::ExitCode::ConfigError), "{toml:?} must exit 78");
+        }
+    }
+
+    /// C-012 (E45–E47) versus C-006/C-007 — **the deliberate tier split, and
+    /// the reason a test must not conflate the two.**
+    ///
+    /// An unknown `activate` value in `ocx.toml` REFUSES AT PARSE, exit 78: a
+    /// file value is a config fault its author can fix. The same value in
+    /// `OCX_TOOLCHAIN_ACTIVATE` WARNS ONCE and yields `None`, exit 0, and the
+    /// ladder continues to the next tier — because C-007 makes the environment
+    /// the WEAKEST tier, and a bad env value must never be able to fail a
+    /// command.
+    ///
+    /// Three spellings, both tiers, one test, so the asymmetry is pinned in
+    /// one place and cannot be "harmonised" later by someone who saw only one
+    /// half. `""` is included because it is the one spelling whose env
+    /// behaviour is *also* silent — unset, not invalid.
+    #[test]
+    fn c012_an_unknown_activate_value_refuses_in_the_file_while_the_env_tier_falls_through() {
+        for value in ["always", "BIN", "Env", " bin", "bogus"] {
+            let toml = format!("activate = \"{value}\"\n");
+            let (pe, code) = refuse_ocx_toml(&toml);
+            assert!(
+                matches!(&pe.kind, ProjectErrorKind::TomlParse(_)),
+                "C-012: `activate = \"{value}\"` in ocx.toml is a parse refusal; got {:?}",
+                pe.kind
+            );
+            assert_eq!(
+                code,
+                Some(crate::cli::ExitCode::ConfigError),
+                "C-012: the FILE tier refuses at exit 78"
+            );
+        }
+
+        let (pe, code) = refuse_ocx_toml("activate = \"\"\n");
+        assert!(
+            matches!(&pe.kind, ProjectErrorKind::TomlParse(_)),
+            "C-012: an empty `activate` in ocx.toml is still an unknown value; got {:?}",
+            pe.kind
+        );
+        assert_eq!(code, Some(crate::cli::ExitCode::ConfigError));
+
+        // The other tier, same vocabulary, opposite outcome by design (C-006 /
+        // C-007). Goes through the crate's `#[cfg(test)]` env seam, never
+        // `std::env::set_var`, which is process-global and racy.
+        let env = crate::test::env::lock();
+        for value in ["always", "bogus", " bin"] {
+            env.set(crate::env::keys::OCX_TOOLCHAIN_ACTIVATE, value);
+            assert_eq!(
+                ActivateMode::from_env(),
+                None,
+                "C-006: `OCX_TOOLCHAIN_ACTIVATE={value}` yields an ABSENT tier at exit 0, never a refusal"
+            );
+        }
+        env.set(crate::env::keys::OCX_TOOLCHAIN_ACTIVATE, "BIN");
+        assert_eq!(
+            ActivateMode::from_env(),
+            Some(ActivateMode::Bin),
+            "C-006/C-015: the env reader folds ASCII case, while the file tier refuses `BIN` — \
+             `from_env` is the only folding reader and that asymmetry is deliberate"
+        );
+        env.set(crate::env::keys::OCX_TOOLCHAIN_ACTIVATE, "");
+        assert_eq!(
+            ActivateMode::from_env(),
+            None,
+            "C-006: an empty env value is UNSET, silently — the same spelling the file tier refuses"
+        );
+    }
+
+    /// C-012 (E49): the global `$OCX_HOME/ocx.toml` is read by the same
+    /// loader, so it gets the same rules and the same exit 78.
+    ///
+    /// `ProjectConfig::from_path` is the entry point both tiers use
+    /// (`command/toolchain_env.rs` reads the global file through it), and the
+    /// parser is path-blind by construction — this asserts the loader itself
+    /// applies C-012 rather than only the string constructor the tests above
+    /// use.
+    #[tokio::test]
+    async fn c012_the_global_ocx_toml_is_parsed_by_the_same_loader_with_the_same_refusal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("ocx.toml");
+
+        tokio::fs::write(&path, "activate = \"always\"\n")
+            .await
+            .expect("write global ocx.toml");
+        let err = ProjectConfig::from_path(&path)
+            .await
+            .expect_err("an unknown `activate` must be refused wherever the file lives");
+        assert_eq!(
+            crate::cli::ClassifyExitCode::classify(&err),
+            Some(crate::cli::ExitCode::ConfigError),
+            "the global tier refuses at the same exit 78"
+        );
+
+        tokio::fs::write(&path, "activate = \"bin\"\npinned = true\n")
+            .await
+            .expect("write global ocx.toml");
+        let config = ProjectConfig::from_path(&path).await.expect("valid keys parse");
+        assert_eq!(config.activate, Some(ActivateMode::Bin));
+        assert_eq!(config.pinned, Some(true));
+    }
+
+    /// C-012 (E50): an absent `activate` / `pinned` is not serialized; a set
+    /// one round-trips.
+    ///
+    /// Serialized to a `toml::Value` rather than to text: `ProjectConfig`
+    /// declares its tables before its scalars, and TOML forbids a bare value
+    /// after a table — the tree is what the assertion is actually about.
+    /// This is what keeps the format-preserving `ocx add` writer from
+    /// materialising two keys the author never wrote.
+    #[test]
+    fn c012_absent_activate_and_pinned_are_not_serialized_and_set_values_round_trip() {
+        let absent = ProjectConfig::from_toml_str("[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n").expect("parse");
+        let value = toml::Value::try_from(&absent).expect("serialize");
+        let table = value.as_table().expect("a config serializes as a table");
+        assert!(
+            !table.contains_key("activate"),
+            "an unset `activate` must not be emitted"
+        );
+        assert!(!table.contains_key("pinned"), "an unset `pinned` must not be emitted");
+
+        let declared = ProjectConfig::from_toml_str(
+            "activate = \"bin\"\npinned = true\n\n[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n",
+        )
+        .expect("parse");
+        let value = toml::Value::try_from(&declared).expect("serialize");
+        let table = value.as_table().expect("a config serializes as a table");
+        assert_eq!(table.get("activate").and_then(toml::Value::as_str), Some("bin"));
+        assert_eq!(table.get("pinned").and_then(toml::Value::as_bool), Some(true));
+    }
+
+    /// C-012 (E51): flipping `activate`, and separately `pinned`, must NOT
+    /// change the declaration hash.
+    ///
+    /// Both are resolve-time policy, not tool bindings — the exclusion is by
+    /// omission in `hash.rs`, so nothing annotates these fields as skipped and
+    /// this test is the only thing between a future edit of `hash.rs` and a
+    /// re-lock storm on every project that sets either key. Same shape as
+    /// [`declaration_hash_unchanged_by_lazy_mode`], because it is the same
+    /// rule.
+    #[test]
+    fn c012_declaration_hash_is_unchanged_by_an_activate_or_a_pinned_flip() {
+        let base = "[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n";
+        let with_activate = "activate = \"bin\"\n\n[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n";
+        let with_pinned = "pinned = true\n\n[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n";
+
+        let base_config = ProjectConfig::from_toml_str(base).expect("parse");
+        let activate_config = ProjectConfig::from_toml_str(with_activate).expect("parse");
+        let pinned_config = ProjectConfig::from_toml_str(with_pinned).expect("parse");
+
+        // The parse assertions keep the green honest: without them a
+        // regression that dropped both keys on the floor satisfies the hash
+        // assertions trivially.
+        assert_eq!(activate_config.activate, Some(ActivateMode::Bin));
+        assert_eq!(pinned_config.pinned, Some(true));
+
+        let expected = crate::project::declaration_hash(&base_config);
+        assert_eq!(
+            crate::project::declaration_hash(&activate_config),
+            expected,
+            "an `activate` flip must not invalidate ocx.lock"
+        );
+        assert_eq!(
+            crate::project::declaration_hash(&pinned_config),
+            expected,
+            "a `pinned` flip must not invalidate ocx.lock"
+        );
+    }
+
+    /// C-012 + C-013 (E52): the two new keys do not short-circuit the name
+    /// validator — a file that declares both AND a `bin` tool is still
+    /// refused, with the reserved variant.
+    #[test]
+    fn c012_activate_and_pinned_do_not_short_circuit_the_name_validator() {
+        let (pe, code) = refuse_ocx_toml("activate = \"bin\"\npinned = true\n\n[tools]\nbin = \"ocx.sh/x:1\"\n");
+        assert!(
+            matches!(&pe.kind, ProjectErrorKind::ReservedToolchainName { scope, name }
+                if scope == "tools" && name == "bin"),
+            "the name validator still runs beside the two new keys; got {:?}",
+            pe.kind
+        );
+        assert_eq!(code, Some(crate::cli::ExitCode::ConfigError));
     }
 }

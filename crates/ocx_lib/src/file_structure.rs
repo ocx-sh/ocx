@@ -12,6 +12,7 @@ mod shim_store;
 mod state_store;
 mod symlink_store;
 mod temp_store;
+mod toolchain_store;
 
 pub use blob_store::{BlobDir, BlobStore};
 pub use cas_path::{CasTier, DIGEST_FILENAME, cas_ref_name, cas_shard_path, read_digest_file, write_digest_file};
@@ -20,14 +21,15 @@ pub use layer_store::{LayerDir, LayerStore};
 pub use package_store::{PackageDir, PackageStore, record_origin};
 pub use shim_bin_store::ShimBinStore;
 pub use shim_store::{ShimDir, ShimStore};
-pub use state_store::StateStore;
+pub use state_store::{BinEntryStamp, RenderStamp, RenderStampScope, RenderStampTarget, StateStore};
 pub use symlink_store::{SymlinkKind, SymlinkStore};
 pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStore};
+pub use toolchain_store::{ToolchainHome, ToolchainPathComponent, ToolchainPathError, ToolchainStore};
 
 /// Root layout of the local OCX data directory.
 ///
 /// `FileStructure` is a thin composite that provides typed, well-named access
-/// to nine top-level stores:
+/// to ten top-level stores:
 ///
 /// - **`blobs`**    — content-addressed raw blob store
 /// - **`layers`**   — content-addressed extracted layer store
@@ -51,6 +53,11 @@ pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStor
 ///   with `digest` and `refs/` as siblings. Unlike the three CAS tiers the
 ///   repository IS part of its path, and its GC liveness is rooted directly in
 ///   the lock pins (see the `shim_store` module docs)
+/// - **`toolchain`** — the global rendered toolchain home (`toolchain/`):
+///   launcher trampolines under `bin/` and one `<group>/<entry>` directory
+///   link per locked tool. Outside the GC graph, never walked by `ocx clean`,
+///   and a wrapper over one `ToolchainHome` so the global tier and a project
+///   tier share one grammar (see the `toolchain_store` module docs)
 ///
 /// plus one non-store path:
 ///
@@ -81,6 +88,16 @@ pub struct FileStructure {
     /// but rooted directly in the lock pins rather than reachable from a
     /// package. See the `shim_store` module docs.
     pub shims: ShimStore,
+    /// The **global** rendered toolchain home (`$OCX_HOME/toolchain/`) —
+    /// launcher trampolines under `bin/`, `<group>/<entry>` directory links to
+    /// package roots, and the `.gitignore` that hides the tree (C-001).
+    /// Outside the three GC tiers, never walked by `ocx clean`, exactly as
+    /// [`ShimBinStore`] is. A project's home is the same grammar at a
+    /// different root and is deliberately NOT a field here: it depends on
+    /// which project is in scope, so it is resolved per call by
+    /// [`resolve_toolchain_home`](crate::project::resolve_toolchain_home)
+    /// (C-002). See the `toolchain_store` module docs.
+    pub toolchain: ToolchainStore,
     /// Machine-global cross-process lock directory (`$OCX_HOME/locks`). Not a
     /// CAS store and never in the GC graph — sharded, content-keyed advisory
     /// lock files written by [`crate::utility::fs::lock_scoped`]. Kept out of
@@ -126,6 +143,10 @@ impl FileStructure {
             // the deferred form of a tool. Present exactly when the matching
             // `packages/` entry is absent.
             shims: ShimStore::new(root.join("shims")),
+            // `toolchain/` — the global rendered home. A sibling namespace to
+            // the three CAS tiers, built once here so no caller re-derives the
+            // tree location by a literal join (C-001).
+            toolchain: ToolchainStore::new(root.join("toolchain")),
             locks,
             root,
         }
@@ -300,5 +321,62 @@ mod tests {
     fn repository_path_three_segments() {
         let expected = Path::new("a").join("b").join("c");
         assert_eq!(repository_path("a/b/c"), expected);
+    }
+
+    // ── C-001: the global toolchain store ────────────────────────────────────
+
+    /// C-001 — the global store is built once from the composite root, so no
+    /// caller ever re-derives the tree location by a literal join.
+    #[test]
+    fn the_global_toolchain_store_is_rooted_at_toolchain_under_the_composite_root() {
+        let root = std::path::PathBuf::from("/ocx");
+        let structure = FileStructure::with_root(root.clone());
+        assert_eq!(
+            structure.toolchain.root(),
+            root.join("toolchain"),
+            "the store must be built from the composite root, never re-derived"
+        );
+    }
+
+    /// C-001 — the store `FileStructure` owns and the home it wraps are one
+    /// grammar: every accessor reachable through the field answers exactly what
+    /// the wrapped home answers.
+    #[test]
+    fn the_composite_roots_toolchain_field_answers_through_its_one_home() {
+        let structure = FileStructure::with_root(std::path::PathBuf::from("/ocx"));
+        assert_eq!(structure.toolchain.bin(), structure.toolchain.home().bin());
+        assert_eq!(structure.toolchain.gitignore(), structure.toolchain.home().gitignore());
+        assert_eq!(
+            structure.toolchain.bin(),
+            structure.root().join("toolchain").join("bin"),
+            "the trampoline directory is `<root>/toolchain/bin`"
+        );
+    }
+
+    /// C-001, validation item 25 — the rendered tree is a **sibling** of the
+    /// GC-walked stores: never inside one, and never containing one. That
+    /// disjointness is what keeps `ocx clean`'s walk from ever reaching it, so
+    /// a stale tree is litter re-rendered by the next `ocx pull` rather than
+    /// collected content.
+    #[test]
+    fn the_toolchain_tree_sits_outside_every_gc_walked_store() {
+        let structure = FileStructure::with_root(std::path::PathBuf::from("/ocx"));
+        let toolchain = structure.toolchain.root().to_path_buf();
+
+        for walked in [
+            structure.packages.root(),
+            structure.layers.root(),
+            structure.blobs.root(),
+            structure.shims.root(),
+        ] {
+            assert!(
+                !toolchain.starts_with(walked),
+                "the toolchain tree must not live inside the GC-walked {walked:?}"
+            );
+            assert!(
+                !walked.starts_with(&toolchain),
+                "a GC-walked store must not live inside the toolchain tree ({walked:?})"
+            );
+        }
     }
 }

@@ -161,6 +161,38 @@ pub enum Error {
     #[error("launcher-unsafe character {character:?} in {value:?}; {}", launcher_unsafe_hint(*character))]
     LauncherUnsafeCharacter { value: String, character: char },
 
+    /// A toolchain **home** baked into a rendered trampoline or its `.exec`
+    /// sidecar is not an absolute path.
+    ///
+    /// Refused at render, never written: a relative value resolves against the
+    /// *invoking process's* working directory, so the same trampoline would
+    /// select two different homes from two directories. A relative
+    /// `.exec` sidecar is additionally refused by the shim at runtime as E2
+    /// (exit 78) — refusing here turns that confusing runtime failure into one
+    /// that names the path and the writer.
+    ///
+    /// The literal `global` is the one non-path value a `.exec` sidecar may
+    /// carry, and it is produced from [`crate::package_manager`]'s own global
+    /// target rather than from a project root — so a project root spelled
+    /// `global` is refused here and can never be read back as the global home.
+    #[error("toolchain home is not an absolute path: {value:?}")]
+    ToolchainHomeNotAbsolute { value: String },
+
+    /// A path baked verbatim into a generated launcher body or a one-line
+    /// sidecar is not valid UTF-8.
+    ///
+    /// Refused at render rather than converted: a lossy conversion substitutes
+    /// U+FFFD for every invalid byte, which passes the launcher-unsafe
+    /// character set and bakes a path that **does not exist**. The failure then
+    /// surfaces as a bare `ENOENT` from `/bin/sh`, naming a path the operator
+    /// never wrote and with nothing pointing at the encoding as the cause.
+    ///
+    /// `path` is the lossy rendering — the only printable form of a value that
+    /// is by definition not a `str`. The message says the path is not UTF-8, so
+    /// it never claims the bytes it shows are the bytes on disk.
+    #[error("path baked into a generated launcher is not valid UTF-8: {path:?}")]
+    LauncherPathNotUtf8 { path: String },
+
     /// An OCI signing operation failed.
     ///
     /// Boxed because [`crate::oci::sign::SignError`] carries a full
@@ -360,6 +392,13 @@ impl ClassifyExitCode for Error {
             Self::PinnedIdentifier(e) => e.classify(),
             Self::Singleflight(e) => e.classify(),
             Self::LauncherUnsafeCharacter { .. } => Some(ExitCode::DataError),
+            // A malformed baked value, exactly like its sibling above: the
+            // input is well-formed config that names an unusable home, not an
+            // I/O or policy failure.
+            Self::ToolchainHomeNotAbsolute { .. } => Some(ExitCode::DataError),
+            // Same family: a value that cannot be rendered into the artifact is
+            // malformed input, not an I/O failure of the write that never ran.
+            Self::LauncherPathNotUtf8 { .. } => Some(ExitCode::DataError),
             Self::Sign(e) => e.as_ref().classify(),
             Self::Verify(e) => e.as_ref().classify(),
         }

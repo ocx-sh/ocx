@@ -155,6 +155,53 @@ pub mod keys {
     /// **Not** resolution-affecting and **not** forwarded, same rationale as
     /// [`OCX_LAZY_MODE`].
     pub const OCX_LAZY_REPORT: &str = "OCX_LAZY_REPORT";
+    /// [`crate::activate::ActivateMode`] wire value (`env` / `bin` / `none`) —
+    /// how a rendered toolchain home reaches a shell
+    /// (`plan_toolchain_activation.md` C-006).
+    ///
+    /// **The weakest tier of the `activate` ladder, not an override.** It sits
+    /// *below* `ocx.toml`'s `activate` key, so a project that states a value
+    /// wins over an exported value here; this variable only decides the outcome
+    /// for a project that states none. Read through
+    /// [`crate::activate::ActivateMode::from_env`], which folds ASCII case and
+    /// warns-and-falls-through on an unrecognised value rather than erroring.
+    ///
+    /// **Not** resolution-affecting in the [`OcxConfigView`] sense: it changes
+    /// how the toolchain reaches `PATH`, never *which* digest resolves, so it
+    /// is deliberately absent from [`OcxConfigView`] and
+    /// [`Env::apply_ocx_config`] never forwards it — same rationale as
+    /// [`OCX_LAZY_MODE`].
+    pub const OCX_TOOLCHAIN_ACTIVATE: &str = "OCX_TOOLCHAIN_ACTIVATE";
+    /// Boolean — whether composed paths pin to digest roots instead of
+    /// following the rendered `<group>/<entry>` links
+    /// (`plan_toolchain_activation.md` C-007).
+    ///
+    /// **The weakest tier of the `pinned` ladder, not an override.** Below
+    /// both `--pinned` and `ocx.toml`'s `pinned` key, so it decides only for an
+    /// invocation where neither speaks. Read through
+    /// [`crate::activate::pinned_from_env`], which yields `Option<bool>` —
+    /// **not** through [`crate::env::flag`], which collapses "unset" and "false" and would
+    /// make an explicit `OCX_TOOLCHAIN_PINNED=false` indistinguishable from
+    /// absence.
+    pub const OCX_TOOLCHAIN_PINNED: &str = "OCX_TOOLCHAIN_PINNED";
+    /// Path to the root under which project toolchain homes are rendered —
+    /// the environment tier of `config.toml`'s `toolchain-dir`
+    /// (`plan_toolchain_activation.md` C-008 / C-016).
+    ///
+    /// **Resolution-affecting**: it moves where `<group>/<entry>` links and
+    /// `bin/` trampolines live, so every composed path a child ocx emits
+    /// changes with it. Carried on [`OcxConfigView`] and forwarded by
+    /// [`Env::apply_ocx_config`], which **removes** any inherited value when
+    /// the parent resolved none — otherwise a stale parent-shell export beats
+    /// the outer ocx's parsed state in every child.
+    ///
+    /// The containment refusals (C-017 root must be under `$HOME` /
+    /// `$OCX_HOME`, C-018 never a system prefix, C-019 owner-owned and not
+    /// group- or world-writable) apply to the **resolved** root whatever tier
+    /// produced it — this variable included. A value refused when written in
+    /// `config.toml` is refused identically when exported here (finding R-W2;
+    /// WP-4 owns the refusals themselves).
+    pub const OCX_TOOLCHAIN_DIR: &str = "OCX_TOOLCHAIN_DIR";
     /// Boolean — when truthy, skip the policy-gated auto-verify on
     /// `ocx package install` / `ocx package pull`. Env mirror of the
     /// per-command `--no-verify` flag (the flag wins). Forwarded to child ocx
@@ -366,6 +413,23 @@ pub struct OcxConfigView {
     /// contract is fully pinned at the unit layer.
     pub global: bool,
     pub index: Option<PathBuf>,
+    /// Root under which project toolchain homes are rendered — the resolved
+    /// `toolchain-dir` (C-008). `None` when no tier set one, which is the
+    /// in-project `<project>/.ocx/toolchain` default.
+    ///
+    /// Resolution-affecting, and that is the whole reason it travels: it moves
+    /// `<home>/toolchain/<group>/<entry>`, so a child ocx that resolved a
+    /// different root would emit composed paths pointing at another tree.
+    /// Forwarded as [`keys::OCX_TOOLCHAIN_DIR`], set-or-**remove** like
+    /// [`keys::OCX_CONFIG`] and [`keys::OCX_INDEX`].
+    ///
+    /// Every producer in the tree writes `None` until WP-4 resolves
+    /// `toolchain-dir` (plan finding R-W7) — which is the shape D-V10 invoked
+    /// *Unchecked Green* to reject for C-002, and is justified differently
+    /// here: the field is compile-forced (a struct literal cannot omit it),
+    /// and its `None` arm in [`Env::apply_ocx_config`] does real work today by
+    /// stripping a stale inherited export. Only the `Some` arm waits.
+    pub toolchain_dir: Option<PathBuf>,
     /// Per-traffic-host mirrors, as `(host, MirrorConfig)` pairs — the
     /// merged-but-not-yet-role-parsed union entries from
     /// [`crate::config::mirror::ResolvedMirrors::merged`]. Resolution-
@@ -431,6 +495,7 @@ impl OcxConfigView {
             project: None,
             global: false,
             index: None,
+            toolchain_dir: None,
             mirrors: Vec::new(),
             patches: None,
             patch_snapshot: None,
@@ -708,7 +773,8 @@ impl Env {
     /// [`keys::OCX_NO_VERIFY`] / [`keys::OCX_NO_CONFIG`] only
     /// when the corresponding flag is true so the child env stays minimal. Sets
     /// [`keys::OCX_CONFIG`] /
-    /// [`keys::OCX_INDEX`] / [`keys::OCX_RECORDS_DIR`] /
+    /// [`keys::OCX_INDEX`] / [`keys::OCX_TOOLCHAIN_DIR`] /
+    /// [`keys::OCX_RECORDS_DIR`] /
     /// [`keys::OCX_RECORDS_NAME`] only when the parent had an explicit value;
     /// otherwise removes any inherited setting so a stale parent-shell export
     /// cannot beat the outer ocx's parsed state.
@@ -754,6 +820,15 @@ impl Env {
         match &cfg.index {
             Some(path) => self.set(keys::OCX_INDEX, path.as_os_str()),
             None => self.remove(keys::OCX_INDEX),
+        }
+        // C-008. The `None` arm is load-bearing, not symmetry for its own sake:
+        // without the remove, a stale `OCX_TOOLCHAIN_DIR` exported into the
+        // parent shell survives into every child and beats the outer ocx's
+        // parsed state, so the two frames of one launch render and read two
+        // different toolchain trees.
+        match &cfg.toolchain_dir {
+            Some(path) => self.set(keys::OCX_TOOLCHAIN_DIR, path.as_os_str()),
+            None => self.remove(keys::OCX_TOOLCHAIN_DIR),
         }
         match encode_mirrors(&cfg.mirrors) {
             Some(json) => self.set(keys::OCX_MIRRORS, json),
@@ -932,10 +1007,76 @@ impl Env {
     /// `<name>.exe` launcher shim correctly before the child is spawned (the
     /// fallback default `.COM;.EXE;.BAT;.CMD` always advertises `.EXE`).
     ///
-    /// Falls back to the bare command name if resolution fails, letting
-    /// the OS handle it — `CreateProcessW` can still find `.exe` files.
-    pub fn resolve_command(&self, command: impl AsRef<OsStr>) -> PathBuf {
-        let command = command.as_ref();
+    /// # C-009 — the two arms differ, deliberately
+    ///
+    /// - A **path-bearing** `command` (`./hello`, `/abs/tool`, the Windows
+    ///   drive-relative `C:tool`) names a file directly, so this method keeps
+    ///   today's behaviour exactly, **including** falling back to the bare
+    ///   value when the lookup misses: the value already *is* a path, and
+    ///   handing it to the OS is a meaningful answer that four shipped tests
+    ///   depend on.
+    /// - A **bare** name that `PATH` cannot resolve is now
+    ///   [`CommandResolutionError::NotFound`]. The old
+    ///   `PathBuf::from(command)` fallback is deleted from this arm: it handed
+    ///   an unresolved name to `execvp`, which then performs its **own**
+    ///   ambient-`PATH` lookup — the exact escape from the composed
+    ///   environment ocx exists to prevent. The `log::warn!` that stood beside
+    ///   it is deleted with it; a function returning `Result` must not also log
+    ///   its own failure, or every caller that handles the error prints twice.
+    ///   [`Self::resolve_test_command`] deliberately keeps that warning,
+    ///   because its own contract is to fall through.
+    ///
+    /// The whole discrimination is `command_is_path`, the shipped helper
+    /// whose "exactly one `Component::Normal`" rule already handles the
+    /// `C:tool` trap a separator test misses. There is no second separator
+    /// test here.
+    ///
+    /// Empty `PATH` segments are dropped from the **lookup copy** before the
+    /// search — see `Self::lookup_path`. This env's own `PATH` is untouched.
+    ///
+    /// # C-069 — the answer is refused if it is a trampoline
+    ///
+    /// A successful lookup is gated once more before it is returned: an answer
+    /// that is itself an ocx launcher trampoline is
+    /// [`CommandResolutionError::TrampolineRefused`], never `Ok`. The gate
+    /// lives in `Self::resolve_command_in`, which both public resolvers route
+    /// through, so `Self::resolve_command_excluding` cannot acquire a different
+    /// posture by accident. WP-2 owns the refusal **and its call site**; the
+    /// only part of the loop guard left to WP-8 is C-058 — deriving the
+    /// exclusion set from `ToolchainStore::bin()` / `ToolchainHome::bin()` and
+    /// handing it to `Self::resolve_command_excluding`.
+    ///
+    /// # Errors
+    ///
+    /// [`CommandResolutionError::NotFound`] when `command` is a bare name that
+    /// no directory on this env's `PATH` provides, and
+    /// [`CommandResolutionError::TrampolineRefused`] when the answer is an
+    /// ocx-generated launcher trampoline (C-069).
+    pub fn resolve_command(&self, command: impl AsRef<OsStr>) -> Result<PathBuf, CommandResolutionError> {
+        self.resolve_command_in(command.as_ref(), self.lookup_path())
+    }
+
+    /// The one lookup both public resolvers route through, over an
+    /// already-prepared `PATH` copy.
+    ///
+    /// # Why the search space is a parameter — the C-010/C-069 ordering
+    ///
+    /// C-010's exclusion **shapes the input** to this lookup and C-069's
+    /// refusal **filters its output**, so the exclusion necessarily runs first
+    /// and no edit inside this function can reorder the two: by the time the
+    /// refusal has an answer to judge, the caller's `PATH` copy has already
+    /// decided which directories could produce one. That is what lets item 22
+    /// assert *which* guard caught a given input — the exclusion answers
+    /// "never looked there", the refusal answers "looked, found a trampoline".
+    ///
+    /// `NotFound`'s `searched` is re-split from **`path` itself**, on the miss
+    /// arm only: it must name the directories that were *actually* walked, and
+    /// a second derivation from the stored `PATH` would disagree with the copy
+    /// handed to `which_in` (finding S-1). Splitting the one value here also
+    /// keeps the vector off the success path, where a composed `PATH` of 15–60
+    /// segments would otherwise be allocated on every resolution for an error
+    /// that usually does not happen.
+    fn resolve_command_in(&self, command: &OsStr, path: Option<OsString>) -> Result<PathBuf, CommandResolutionError> {
         // cwd is only used by `which` when the command contains a path
         // separator (e.g. `./hello`).  For bare names it is ignored.
         let cwd = std::env::current_dir().unwrap_or_else(|e| {
@@ -943,42 +1084,233 @@ impl Env {
             PathBuf::new()
         });
 
+        // On Windows, `which_in` internally reads PATHEXT from the real
+        // process environment via `RealSys::env_windows_path_ext()`, not from
+        // our child `Env`. We therefore probe the child's PATHEXT ourselves so
+        // the native `<name>.exe` launcher shim is found even when the running
+        // process has a different PATHEXT.
+        //
+        // Bound to one variable rather than returned from two `#[cfg]` arms so
+        // there is a **single** success point for the C-069 gate below to sit
+        // on: a per-platform `return Ok(found)` would let an edit ship an
+        // ungated answer on the platform the other build never compiles.
         #[cfg(windows)]
-        {
-            // On Windows, `which_in` internally reads PATHEXT from the real
-            // process environment via `RealSys::env_windows_path_ext()`, not
-            // from our child `Env`. We therefore probe the child's PATHEXT
-            // ourselves so the native `<name>.exe` launcher shim is found
-            // even when the running process has a different PATHEXT.
-            if let Some(found) = self.resolve_command_windows(command, &cwd) {
-                return found;
-            }
-        }
+        let found = self.resolve_command_windows(command, path.as_deref(), &cwd);
         #[cfg(not(windows))]
-        if let Ok(path) = which::which_in(command, self.get("PATH"), cwd) {
-            return path;
+        let found = which::which_in(command, path.as_deref(), &cwd).ok();
+
+        if let Some(found) = found {
+            // C-069, the only site that fires it. After the lookup, before the
+            // `Ok` — a trampoline answer re-enters `ocx exec` against its own
+            // home, and with two homes on one `PATH` that is an unbounded
+            // A → B → A loop with no error and no depth counter.
+            if is_ocx_trampoline(&found) {
+                return Err(CommandResolutionError::TrampolineRefused {
+                    command: command.to_string_lossy().into_owned(),
+                    path: found,
+                });
+            }
+            return Ok(found);
         }
 
-        log::warn!(
-            "Could not resolve '{}' via PATH, falling back to OS lookup.",
-            command.to_string_lossy()
-        );
-        PathBuf::from(command)
+        if command_is_path(command) {
+            // Today's behaviour, unchanged: the value names a file, so hand it
+            // to the OS. `execvp` performs no `PATH` search for a value
+            // carrying a separator, so there is no ambient escape to close.
+            //
+            // Deliberately outside the C-069 gate: this arm is reached only
+            // when the lookup *failed*, so the named file does not exist or
+            // cannot be executed, and a file in that state cannot be the
+            // working trampoline the refusal exists to stop. A path-bearing
+            // command that does name a real trampoline resolves above and is
+            // refused there.
+            //
+            // `{:?}` on the command: it arrives from package metadata, from
+            // `ocx.lock` and from argv, and a raw newline in a log line forges
+            // a second one (CWE-117).
+            log::warn!(
+                "Could not resolve {:?} via PATH, falling back to OS lookup.",
+                command.to_string_lossy()
+            );
+            return Ok(PathBuf::from(command));
+        }
+
+        Err(CommandResolutionError::NotFound {
+            command: command.to_string_lossy().into_owned(),
+            // Re-split the very value `which_in` was handed, so the reported
+            // search space cannot disagree with the searched one. No `PATH`
+            // key, or a `PATH` of nothing but empty segments, is `None` here
+            // and therefore an empty space — never an invented one.
+            searched: path
+                .as_deref()
+                .map(|value| std::env::split_paths(value).collect())
+                .unwrap_or_default(),
+        })
     }
 
-    /// Windows-only: resolve `command` by probing this env's PATH with each
-    /// extension from this env's PATHEXT, in order.
+    /// The `PATH` value handed to `which_in`, with empty segments dropped.
     ///
-    /// Returns `None` when the command cannot be found (caller logs + falls
-    /// back to the bare name). Reads PATH and PATHEXT exclusively from this
-    /// `Env`, not the running process — that is the entire point of this
-    /// method vs. delegating to `which_in` which reads `std::env::var_os`.
+    /// A copy: this env's own `PATH` is never rewritten, so the child process
+    /// still inherits every segment its composition established.
+    ///
+    /// An empty `PATH` segment (`/a::/b`, a leading or trailing `:`) means
+    /// *the current directory* on Unix — CWE-426, untrusted search path. It is
+    /// not exotic: [`Self::inherited`] carries whatever the invoking shell
+    /// exported, and an ocx invocation whose composed entries touch no `PATH`
+    /// key passes it through verbatim. Dropping the segments here makes a
+    /// resolution answer independent of where the user happened to `cd`.
+    ///
+    /// # `None` is the only spelling of "nothing to search"
+    ///
+    /// Returned both when the env carries no `PATH` key at all and when every
+    /// segment it carries is empty (`""`, `":"`, `"::"` — the shape
+    /// `PATH="$A:$B"` produces when both are unset). The empty *string* is not
+    /// an empty search space: `split_paths("")` yields one empty segment, and
+    /// `which` filters those on Windows only, so on Unix `which_in` would stat
+    /// the bare candidate against the **process working directory** — exactly
+    /// the CWE-426 probe this filter exists to remove. `None` is refused
+    /// outright (`CannotGetCurrentDirAndPathListEmpty`) and has no ambient
+    /// fallback, which is why the caller must never substitute `Some("")`.
+    ///
+    /// Re-joined with [`std::env::join_paths`], the exact inverse of the
+    /// [`split_paths`](std::env::split_paths) that produced the segments. On
+    /// Windows `split_paths` reads `"` as a quote, so a segment it yields
+    /// *can* contain the separator — std's own example is
+    /// `c:\foo;c:\som"e;di"r;c:\bar`, whose middle segment is `c:\some;dir`.
+    /// `join_paths` re-quotes such a segment; a manual
+    /// `push(PATH_SEPARATOR)` join would tear it into `c:\some` and `dir` and
+    /// hand `which_in` a directory nobody put on `PATH` — a widening in the
+    /// one function whose whole subject is narrowing the search space.
+    ///
+    /// Its rejection arm degrades to `None`, never to the value *unfiltered*:
+    /// an unfiltered value is precisely the empty-segment search this function
+    /// exists to prevent, whereas no search space at all is refused outright
+    /// by `which_in`. The arm is unreachable in practice — `join_paths`
+    /// rejects only what its own `split_paths` cannot emit (a `"` on Windows,
+    /// a `:` on Unix) — so failing closed there costs nothing.
+    fn lookup_path(&self) -> Option<OsString> {
+        let path = self.get("PATH")?;
+        let joined =
+            std::env::join_paths(std::env::split_paths(path).filter(|segment| !segment.as_os_str().is_empty())).ok()?;
+        if joined.is_empty() {
+            return None;
+        }
+        Some(joined)
+    }
+
+    /// [`Self::resolve_command`] over a `PATH` from which `excluded` has been
+    /// removed (`plan_toolchain_activation.md` C-010).
+    ///
+    /// # The invariant
+    ///
+    /// **`excluded` is removed from the lookup copy of `PATH` only. This env's
+    /// own `PATH` must be byte-identical after the call.** The child process
+    /// still receives every segment its composition established, so a tool that
+    /// spawns a sibling tool still resolves that sibling through a trampoline.
+    /// Rewriting the stored value instead would silently convert "do not let
+    /// *this* lookup answer with a trampoline directory" into "no descendant
+    /// process may ever use one" — a different, much larger decision, and one
+    /// that would break the very re-entry the trampolines exist to provide.
+    ///
+    /// This is the opposite of what `ocx launcher shim` does with its own shim
+    /// directory: that site prunes the **child's** `PATH`
+    /// (`process_env.set("PATH", pruned)`) because a shim tree must not follow
+    /// the process it materialised. Do not unify the two.
+    ///
+    /// # Not a containment check
+    ///
+    /// Segments are dropped with
+    /// [`utility::path::remove_segment`](crate::utility::path::remove_segment),
+    /// whose own doc comment is explicit that a segment naming the same
+    /// directory by a different string — a trailing slash, a symlink alias,
+    /// `$OCX_HOME` spelled one way by the composing process and another by this
+    /// one — survives untouched, and that it "is therefore not a containment
+    /// check and must not be read as one". C-069's
+    /// [`is_ocx_trampoline`] re-check over the *resolved answer* is what closes
+    /// that gap, and it is a second, independent guard: deleting either one
+    /// alone must leave the other observably firing.
+    ///
+    /// C-058's caller derives `excluded` from the same resolver that produced
+    /// the homes (`ToolchainStore::bin()` / `ToolchainHome::bin()`), never from
+    /// a literal path join, so the set cannot drift from the tree shape. That
+    /// derivation — passing the set in — is the **whole** of what C-069 leaves
+    /// to WP-8; the refusal itself and its call site ship here, in the shared
+    /// `Self::resolve_command_in` this method routes through.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::resolve_command`]: [`CommandResolutionError::NotFound`] when
+    /// a bare name resolves in no remaining directory, and
+    /// [`CommandResolutionError::TrampolineRefused`] when a directory that
+    /// survived the segment-exact exclusion answers with a trampoline anyway.
+    pub fn resolve_command_excluding(
+        &self,
+        command: impl AsRef<OsStr>,
+        excluded: &[PathBuf],
+    ) -> Result<PathBuf, CommandResolutionError> {
+        self.resolve_command_in(command.as_ref(), self.lookup_path_excluding(excluded))
+    }
+
+    /// [`Self::lookup_path`] with every directory in `excluded` removed
+    /// (C-010).
+    ///
+    /// `None` means the same thing it means there, for the same reason: an
+    /// exhausted search space is nothing to search, never `Some("")`.
+    ///
+    /// Split out from [`Self::resolve_command_excluding`] so the exclusion is
+    /// an *input* to the shared lookup rather than a step inside it — see the
+    /// ordering argument on `Self::resolve_command_in`.
+    fn lookup_path_excluding(&self, excluded: &[PathBuf]) -> Option<OsString> {
+        // Start from the copy `Self::lookup_path` already makes. Nothing below
+        // writes back through `self`, so this env's own `PATH` stays
+        // byte-identical — the invariant on `Self::resolve_command_excluding`.
+        //
+        // `None` propagates: no `PATH` key, or one carrying nothing but empty
+        // segments, leaves nothing to prune, and inventing a search space the
+        // env does not have is exactly what `lookup_path` refuses to do.
+        let path = self.lookup_path()?;
+        if excluded.is_empty() {
+            // An empty exclusion set is `Self::resolve_command`, byte for byte,
+            // because it *is* `lookup_path`'s value.
+            return Some(path);
+        }
+
+        // Segment-exact removal, one excluded directory at a time. A directory
+        // that is not on `PATH` simply matches nothing, which is why "exclude
+        // something absent" is a no-op rather than an error.
+        //
+        // `remove_segment` splits, drops empty segments and re-joins on every
+        // call, so it subsumes `lookup_path`'s CWE-426 empty-segment filter —
+        // re-filtering here would be a second copy of the same rule, free to
+        // drift from it.
+        let pruned = excluded.iter().fold(path, |value, dir| {
+            utility::path::remove_segment(&value, dir.as_os_str())
+        });
+
+        if pruned.is_empty() {
+            // Every segment was excluded — the `None` case of `lookup_path`,
+            // reached by a different route and for the same CWE-426 reason.
+            return None;
+        }
+
+        Some(pruned)
+    }
+
+    /// Windows-only: resolve `command` by probing `path` with each extension
+    /// from this env's PATHEXT, in order.
+    ///
+    /// Returns `None` when the command cannot be found. `path` is the caller's
+    /// **lookup copy** (`Self::lookup_path`), not this env's stored `PATH`:
+    /// the empty-segment drop and C-010's exclusion both apply to the copy
+    /// only, and reading the field here would silently bypass both. PATHEXT is
+    /// still read from this `Env`, not the running process — that is the entire
+    /// point of this method vs. delegating to `which_in` which reads
+    /// `std::env::var_os`.
     #[cfg(windows)]
-    fn resolve_command_windows(&self, command: &OsStr, cwd: &std::path::Path) -> Option<PathBuf> {
+    fn resolve_command_windows(&self, command: &OsStr, path: Option<&OsStr>, cwd: &std::path::Path) -> Option<PathBuf> {
         // For each extension, ask `which_in` if `command + ext` is found.
         // `which_in` on a name-with-extension will not try to append further
         // extensions — it just probes the PATH directories for that exact name.
-        let path = self.get("PATH");
         for ext in self.pathext() {
             let mut candidate = command.to_os_string();
             candidate.push(&ext);
@@ -1043,8 +1375,13 @@ impl Env {
     ///    fall-through to a host copy.
     /// 3. A name the package does not ship resolves through
     ///    [`Self::resolve_command`], with a warning naming the directories that
-    ///    were searched — unless the host lookup came up empty too, where
-    ///    [`Self::resolve_command`] has already warned about the same name.
+    ///    were searched — and a name the host does not provide either falls
+    ///    through to the bare name with its own warning, never an error. That
+    ///    fall-through is **deliberately retained** across C-009 (which deleted
+    ///    the equivalent one from [`Self::resolve_command`]): four production
+    ///    callers, the Starlark host among them, treat a total miss as "let the
+    ///    OS answer", and this method owns the warning that used to live one
+    ///    level down.
     ///
     /// A path-bearing `command` (`./tool`, an absolute path, a Windows
     /// drive-relative `C:tool`) names a file directly, so there is no
@@ -1062,11 +1399,20 @@ impl Env {
     /// # Errors
     ///
     /// [`CommandResolutionError::NotExecutable`] when the package under test
-    /// ships the name but the file cannot be executed.
+    /// ships the name but the file cannot be executed, and
+    /// [`CommandResolutionError::TrampolineRefused`] when the host lookup
+    /// answers with an ocx launcher trampoline (C-069). The fall-through in
+    /// step 3 is scoped to `NotFound` — the **total miss** C-011 describes —
+    /// and to nothing else: a refusal is not a miss, and mapping it back to
+    /// the bare name would hand that name to `execvp`, whose own ambient-`PATH`
+    /// lookup finds the same trampoline again. That is the unbounded
+    /// A → B → A re-entry C-069 exists to stop, restored one level up.
     pub fn resolve_test_command(&self, command: impl AsRef<OsStr>) -> Result<PathBuf, CommandResolutionError> {
         let command = command.as_ref();
         if command_is_path(command) {
-            return Ok(self.resolve_command(command));
+            // C-009's path-bearing arm never errors, so this delegation carries
+            // the same answer it always did.
+            return self.resolve_command(command);
         }
 
         // The bare name comes last, and only for a command that already
@@ -1135,26 +1481,54 @@ impl Env {
 
         // ponytail: warn, not error — strict upgrade = swap this arm for
         // Err(OutsidePackage) when the owner flips decision #1 on #268.
-        let found = self.resolve_command(command);
-        // Only when the host lookup actually found something. `resolve_command`
-        // already warned on its way to returning the bare name unchanged, and a
-        // second line there would claim a resolution that did not happen.
-        // Directories go through `{:?}`, which quotes and escapes them: a value
-        // reaching here can carry a newline, and a raw one forges log lines
-        // (CWE-117).
-        if found.as_path() != std::path::Path::new(command) {
-            // `split_paths("")` yields one empty PathBuf; the scan skips those,
-            // so the message must too or a PATH-less package prints `[""]`.
-            let searched: Vec<PathBuf> = std::env::split_paths(&self.package_path)
-                .filter(|dir| !dir.as_os_str().is_empty())
-                .collect();
-            log::warn!(
-                "'{}' is not shipped by the composed packages; resolved to '{}' on the host PATH — expected it under one of: {:?}",
-                command.to_string_lossy(),
-                found.display(),
-                searched
-            );
-        }
+        //
+        // C-011: the total-miss fall-through is kept **intact** and is now
+        // detected by matching `resolve_command`'s `Result` directly, instead
+        // of by comparing its answer against the bare input string. Four
+        // production callers depend on the fall-through — including the
+        // Starlark host in `script/ocx_module.rs`, whose
+        // `bare_name_does_not_anchor_on_cwd` test panics if a total miss turns
+        // into an `Err`.
+        let found = match self.resolve_command(command) {
+            Ok(found) => found,
+            // The **total miss**, and only it. C-009 deleted the warning from
+            // `resolve_command`'s bare arm along with the fallback it
+            // described; this function still performs that fallback, so it
+            // owns the line or it disappears from the product silently.
+            Err(CommandResolutionError::NotFound { .. }) => {
+                log::warn!(
+                    "Could not resolve {:?} via PATH, falling back to OS lookup.",
+                    command.to_string_lossy()
+                );
+                return Ok(PathBuf::from(command));
+            }
+            // C-069's `TrampolineRefused` above all. A blanket arm here hands
+            // the bare name to `execvp`, which repeats the lookup against the
+            // ambient `PATH` and finds the same trampoline — the guard fully
+            // defeated, and reachable from every installed launcher's re-entry
+            // (`launcher/exec.rs`), which prunes nothing and inherits the
+            // ambient `PATH` a `bin`-mode toolchain puts its trampolines on.
+            // Same rule, same spelling, as `update_check.rs`'s
+            // `query_installed_version` and `launcher/shim.rs`'s `execute`.
+            Err(error) => return Err(error),
+        };
+        // The host answered, so the composed packages did not ship the name —
+        // structurally, because a total miss returned above.
+        //
+        // `split_paths("")` yields one empty PathBuf; the scan skips those, so
+        // the message must too or a PATH-less package prints `[""]`. Every
+        // interpolation goes through `{:?}`, which quotes and escapes: these
+        // values arrive from `PATH`, from package metadata and from
+        // `ocx.lock`, and a raw newline forges a log line (CWE-117).
+        let searched: Vec<PathBuf> = std::env::split_paths(&self.package_path)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .collect();
+        log::warn!(
+            "{:?} is not shipped by the composed packages; resolved to {:?} on the host PATH — expected it under one of: {:?}",
+            command.to_string_lossy(),
+            found,
+            searched
+        );
         Ok(found)
     }
 }
@@ -1470,19 +1844,74 @@ pub fn is_reserved_ocx_key(key: &str) -> bool {
     upper.starts_with("OCX_") || upper.starts_with("__OCX_")
 }
 
-/// Failure modes of [`Env::resolve_test_command`].
+/// Failure modes of [`Env::resolve_command`],
+/// [`Env::resolve_command_excluding`] and [`Env::resolve_test_command`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CommandResolutionError {
+    /// A bare command name resolves in no directory of the composed `PATH`
+    /// (`plan_toolchain_activation.md` C-009).
+    ///
+    /// Terminal rather than a fall-through to the bare name: handing an
+    /// unresolved name to `execvp` makes the kernel repeat the search against
+    /// the **ambient** `PATH`, which is precisely the escape from the composed
+    /// environment ocx exists to prevent. A path-bearing command never reaches
+    /// this variant — it names a file, so there is no search to fail.
+    ///
+    /// `{command:?}` rather than `{command}`: a resolved value can carry a
+    /// newline, and a raw one forges log lines (CWE-117). `searched` goes
+    /// through `{:?}` for the same reason.
+    #[error("{command:?} does not resolve in the composed environment; searched: {searched:?}")]
+    NotFound {
+        /// The bare command name as invoked.
+        command: String,
+        /// The non-empty `PATH` directories that were searched, in order.
+        searched: Vec<PathBuf>,
+    },
+
+    /// The resolution answer is itself an ocx-generated launcher trampoline
+    /// (`plan_toolchain_activation.md` C-069, divergence D-V1).
+    ///
+    /// A trampoline re-enters `ocx exec` against its own home. Executing one as
+    /// the *answer* to a resolution performed by `ocx exec` is a self-reference:
+    /// with two project homes on one `PATH`, each carrying a stale trampoline
+    /// for the same name, the invocation loops A → B → A forever, one full
+    /// compose per hop, with no error and no depth counter.
+    ///
+    /// A **distinct** kind from [`Self::NotFound`], and distinct from C-010's
+    /// `PATH` exclusion, so a test can assert *which* guard caught a given
+    /// input and each guard keeps its own reachable red state. C-010 removes
+    /// the known trampoline directories from the lookup copy of `PATH`; this
+    /// variant is what remains when a directory named by a different string
+    /// survived that segment-exact comparison. Deleting either guard alone must
+    /// leave the other observably firing.
+    ///
+    /// `{command:?}` **and `{path:?}`** for the CWE-117 reason above: the path
+    /// is a `PATH` segment plus a resolved file name, neither of which this
+    /// process chose, so `Path::display` would render an embedded newline raw.
+    #[error(
+        "{command:?} resolves to an ocx launcher trampoline at {path:?}; running it would re-enter ocx against itself"
+    )]
+    TrampolineRefused {
+        /// The command name as invoked.
+        command: String,
+        /// The resolved path that was identified as a trampoline.
+        path: PathBuf,
+    },
+
     /// The package under test ships this name, but the file cannot be exec'd.
     ///
     /// Deliberately terminal: falling through to a same-named host binary
     /// would run the test against something the package does not contain and
     /// report a pass.
+    ///
+    /// `{command:?}` and `{path:?}`, the one spelling this enum uses (D-V15(e)
+    /// named this variant): the command arrives from package metadata and the
+    /// path from a composed `PATH` segment, so a raw render forges log lines
+    /// (CWE-117).
     #[error(
-        "'{command}' is present in the package under test at '{}' but is not executable (mode {mode:04o}); \
-         re-create the package with the executable bit set - ocx does not fall through to a host copy on PATH",
-        path.display()
+        "{command:?} is present in the package under test at {path:?} but is not executable (mode {mode:04o}); \
+         re-create the package with the executable bit set - ocx does not fall through to a host copy on PATH"
     )]
     NotExecutable {
         /// The bare command name as invoked.
@@ -1495,12 +1924,260 @@ pub enum CommandResolutionError {
 }
 
 impl crate::cli::ClassifyExitCode for CommandResolutionError {
+    /// An **exhaustive match with no wildcard arm** (D-V15), copying the shape
+    /// of `crate::Error::classify`.
+    ///
+    /// It was a blanket `Some(DataError)`. Under a blanket, a variant added
+    /// later is silently 65 and **no test can catch it** — the wrong answer and
+    /// the right one are the same bytes. Under an exhaustive match, adding a
+    /// variant is a compile error until somebody classifies it. Every arm
+    /// happening to yield the same code today is not a reason to collapse them:
+    /// the match is a gate on the *decision*, not a dispatch table.
+    ///
+    /// This type is already registered in `crate::cli::classify`; the arms
+    /// below are the whole classification and nothing needs re-registering.
     fn classify(&self) -> Option<crate::cli::ExitCode> {
-        // Parity with `BinScanError::DeclaredNotExecutable`: the package's own
-        // content contradicts what it claims to ship — malformed input data,
-        // not a usage error and not a config fault.
-        Some(crate::cli::ExitCode::DataError)
+        match self {
+            // Parity with `BinScanError::DeclaredNotExecutable`: the package's
+            // own content contradicts what it claims to ship — malformed input
+            // data, not a usage error and not a config fault.
+            Self::NotExecutable { .. } => Some(crate::cli::ExitCode::DataError),
+            // C-057/S-010: a name the composition does not provide is bad input
+            // data, the same class as a package claiming a binary it omits.
+            // Not `Failure` (1) — the caller can tell a missing tool from a
+            // crashed one — and not `Usage` (64), because the argv was
+            // well-formed; it is the *environment* that lacks the name.
+            Self::NotFound { .. } => Some(crate::cli::ExitCode::DataError),
+            // C-069. Same code as its siblings on purpose: the exit code
+            // classifies the *class* of failure, and the guard identity lives
+            // in the message and the variant, which is where the item-22 test
+            // asserts which guard fired.
+            Self::TrampolineRefused { .. } => Some(crate::cli::ExitCode::DataError),
+        }
     }
+}
+
+/// The marker every ocx-generated POSIX launcher **trampoline** carries, and
+/// the sole POSIX signal of [`is_ocx_trampoline`]
+/// (`plan_toolchain_activation.md` C-069, divergence D-V12).
+///
+/// Defined here, beside the predicate that consumes it, and **imported** by
+/// the one emitter: `package_manager::launcher::body::unix_trampoline_body`
+/// writes this constant rather than re-spelling it — one canonical spelling
+/// with a producer and a consumer, the same split C-034's paired golden uses.
+///
+/// # The constraint on that emitter
+///
+/// The marker must be **exactly the second line** of the body — after the
+/// shebang, ahead of every interpolated value — because that is the whole of
+/// what [`is_ocx_trampoline`] matches. Not "somewhere in the head": line two,
+/// compared whole.
+///
+/// Two failures that position rules out, one on each side:
+///
+/// - A root deep enough to push the marker past
+///   [`TRAMPOLINE_PROBE_BYTES`] would disarm C-069 for any checkout roughly
+///   146 characters deep while every shallow-`tmp_path` test stayed green.
+///   `a_marker_beyond_the_probe_window_is_not_refused` pins that half.
+/// - A `$OCX_HOME` whose **own path text** spells this marker would otherwise
+///   land it inside the probed head of an ordinary package launcher — whose
+///   body interpolates that path — and get a file refused that must keep
+///   resolving (E-21). Line one and line two are the only bytes no baked value
+///   can reach. `a_launcher_whose_baked_path_spells_the_marker_is_not_refused`
+///   pins that half.
+///
+/// # Why not the shipped header
+///
+/// `# Generated by ocx at install time. Do not edit.` is emitted
+/// **byte-identically** by `unix_launcher_body` and `unix_shim_body` as well,
+/// both golden-pinned. A predicate keyed on it would refuse every ocx-generated
+/// package launcher and every lazy shim — files that are not trampolines,
+/// cannot start the two-home A → B → A loop, and must keep resolving. That
+/// refusal would break `ocx launcher exec` and `ocx package exec` outright.
+/// This marker is discriminating by construction.
+pub const TRAMPOLINE_MARKER: &str = "# ocx-toolchain-trampoline";
+
+/// How many bytes of a candidate file [`is_ocx_trampoline`] reads.
+///
+/// Enough to hold a shebang line plus [`TRAMPOLINE_MARKER`] with room to spare,
+/// and small enough that the read costs one `read(2)` on any filesystem. The
+/// bound is the point: see [`is_ocx_trampoline`].
+///
+/// It is deliberately **smaller than a whole trampoline body**. A C-028 body
+/// carries an absolute project root, so it passes 256 bytes as soon as the
+/// checkout is roughly 146 characters deep — which is why the probe reads a
+/// *prefix* and the marker is emitted on the second line.
+pub const TRAMPOLINE_PROBE_BYTES: usize = 256;
+
+/// Whether `path` — an already-**resolved** command answer — is an
+/// ocx-generated launcher trampoline (C-069).
+///
+/// Fires **after** C-010's `PATH` exclusion, never instead of it, so a test can
+/// assert which of the two guards caught a given input and each keeps its own
+/// reachable red state. It identifies the *file*, not a directory list, which
+/// is what makes it independent of how many toolchain trees exist — the defect
+/// D-V1 records is two project homes on one `PATH`, where any exclusion set can
+/// only ever name this invocation's own two.
+///
+/// # POSIX signal
+///
+/// [`TRAMPOLINE_MARKER`] as **exactly the second line**, read out of a
+/// **bounded prefix** of [`TRAMPOLINE_PROBE_BYTES`] — never `contains()`, and
+/// never "anywhere in the prefix". Two mechanisms doing two different jobs:
+///
+/// - The **line-2 anchor** is the discriminator. It is what refuses a file, and
+///   equally what stops any *non*-line-2 occurrence from counting — an ordinary
+///   tool that merely embeds the string somewhere in its data
+///   (`a_file_that_merely_contains_the_marker_later_in_its_body_is_not_refused`),
+///   and a *baked* occurrence (E-21). The second case is the reachable one: WP-6
+///   interpolates an operator-controlled absolute path into every generated
+///   body, so a `$OCX_HOME` spelling the marker would otherwise put it inside
+///   the probed head of an ordinary package launcher and refuse it — breaking
+///   `ocx launcher exec` for that install, which is the exact class D-V12
+///   excluded when it rejected keying on the shared header
+///   (`a_launcher_whose_baked_path_spells_the_marker_is_not_refused`).
+/// - The **bound** is a read cap, not a discriminator, and owns exactly two
+///   effects the anchor does not. It makes the probe one `read(2)` rather than
+///   an allocation of whatever binary `PATH` resolved — this runs before every
+///   `exec`, including `/bin/sh`. And it decides that a marker which *is* the
+///   whole of line two but **begins past** [`TRAMPOLINE_PROBE_BYTES`] does not
+///   count, which is the one property that stops the bound being widened away:
+///   `a_marker_beyond_the_probe_window_is_not_refused` pins it, and reds when it
+///   is.
+///
+/// Nothing interpolated can reach line one (the shebang) or line two, so the
+/// anchor is discriminating by position as well as by spelling.
+///
+/// # Not `utility::fs::read_bounded`
+///
+/// The catalog advertises that helper as "read a whole file under a byte
+/// ceiling, refusing anything that is not a regular file", which reads like an
+/// exact match for the paragraph above and is the first thing a
+/// search-before-writing reflex finds. It is the **wrong** helper here: it
+/// *errors* when the file exceeds the cap, and a C-028 trampoline body passes
+/// 256 bytes as soon as the project root is roughly 146 characters deep.
+/// Folded into the fail-open arm below, that error becomes "not a trampoline"
+/// — C-069 silently disarmed for exactly the deep-checkout case, with every
+/// test rooted at a shallow `tmp_path` still green. This is a prefix read
+/// (`File::open` + [`std::io::Read::take`]), where passing the cap is the
+/// normal case and carries no verdict.
+///
+/// # Windows signal
+///
+/// A sibling `.exec` sidecar beside the resolved `<stem>.exe`, plus a refusal
+/// of a resolved path whose *own* extension is `.exec`. C-069's original
+/// blob-content clause is **struck** (D-V15): every trampoline `.exe` and every
+/// lazy-shim-slot `.exe` is a hardlink of the one committed blob, so content
+/// cannot discriminate them and a content match would refuse shim slots —
+/// exactly the class D-V12 excluded on POSIX. The second half is not
+/// belt-and-braces: `which` treats any file carrying an extension as executable
+/// on Windows, so a `PATHEXT` containing `.EXEC` makes the sidecar *text file*
+/// itself a resolution answer.
+///
+/// # Regular files only, and the order is load-bearing
+///
+/// `std::fs::metadata` decides `is_file()` **before** anything is opened.
+/// Opening a FIFO for reading blocks until a writer appears — forever, on a
+/// resolution path that runs before every `exec`. A non-regular file is
+/// therefore "not a trampoline" without ever being opened.
+///
+/// # Fails open
+///
+/// Any I/O error answers *not a trampoline*. This is deliberately the opposite
+/// posture from `ocx launcher shim`'s `resolves_inside`, and correctly so:
+/// that predicate runs once, over one directory ocx itself created, where the
+/// unresolvable case is genuinely suspicious. This one runs on **every**
+/// resolution, including `/bin/sh`, so a fail-closed I/O arm would turn a
+/// transient `EACCES` on an unrelated binary into a refusal to run an ordinary
+/// command. The guard it backstops (C-010's exclusion) is still in force, and
+/// an attacker who can make the file unreadable can equally make it absent.
+///
+/// # Why this has a body while its sibling C-010 exclusion does not
+///
+/// It sits on `Env::resolve_command`'s success arm, which every bare-name
+/// resolution in the workspace reaches — including `/bin/sh`. A stub here is
+/// not a deferral, it is a panic on the hot path.
+///
+/// # Which validation row measures this
+///
+/// Item **37** (trampoline re-entry) is the only gate that ever observes this
+/// predicate's cost, because it is the only one that resolves a command.
+/// WP-12e's `bin`-mode reconcile row does **not**: the reconciler puts a
+/// directory on `PATH` and resolves nothing, so it measures the cheap half.
+/// Reporting the reconcile number as "the cost of C-069" answers a question
+/// nobody asked.
+pub fn is_ocx_trampoline(path: &std::path::Path) -> bool {
+    trampoline_signal(path)
+}
+
+/// POSIX half of [`is_ocx_trampoline`]: [`TRAMPOLINE_MARKER`] in the first
+/// [`TRAMPOLINE_PROBE_BYTES`] bytes of a regular file.
+///
+/// Split per platform as two whole functions rather than two `#[cfg]` blocks
+/// inside one: the signals share no code, and a `cfg`-gated block in tail
+/// position is the shape that silently becomes `()` when someone edits it.
+#[cfg(not(windows))]
+fn trampoline_signal(path: &std::path::Path) -> bool {
+    use std::io::Read as _;
+
+    // Ordered before the open, and load-bearing: opening a FIFO for reading
+    // blocks until a writer appears — forever, on the path that runs before
+    // every `exec`.
+    if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut prefix = Vec::with_capacity(TRAMPOLINE_PROBE_BYTES);
+    if file
+        .take(TRAMPOLINE_PROBE_BYTES as u64)
+        .read_to_end(&mut prefix)
+        .is_err()
+    {
+        return false;
+    }
+    // Bytes, not `str`: an arbitrary file on `PATH` need not be UTF-8, and a
+    // lossy conversion would both allocate and let a replacement character
+    // land inside the needle. Same idiom as `shim::contains_version_resource`.
+    //
+    // The SECOND line, matched whole — not "somewhere in the prefix" (E-21).
+    // WP-6 bakes an operator-controlled absolute path into every generated
+    // body, so a `$OCX_HOME` whose own path text spells the marker would land
+    // it inside the probed head of an ordinary *package launcher* and refuse a
+    // file that must keep resolving. A position no baked value can occupy is
+    // the discriminating one: line 1 is the shebang and line 2 is the marker,
+    // both emitted before anything interpolated.
+    //
+    // `split` yields one element for a `\n`-free prefix, so `nth(1)` is `None`
+    // there and the answer is false without a special case. A truncated line 2
+    // cannot arise: the marker sits at bytes 10..36 of a 256-byte window.
+    prefix
+        .split(|byte| *byte == b'\n')
+        .nth(1)
+        .is_some_and(|line| line == TRAMPOLINE_MARKER.as_bytes())
+}
+
+/// Windows half of [`is_ocx_trampoline`]: the sibling `.exec` sidecar, and a
+/// resolved path whose own extension is `.exec`.
+///
+/// No content check (D-V15): every trampoline `.exe` and every lazy-shim-slot
+/// `.exe` is a hardlink of the one committed blob, so content cannot tell them
+/// apart and a content match would refuse shim slots.
+#[cfg(windows)]
+fn trampoline_signal(path: &std::path::Path) -> bool {
+    // The resolved path's *own* extension first: `which` treats any file
+    // carrying an extension as executable on Windows, so a `PATHEXT`
+    // containing `.EXEC` makes the sidecar text file itself an answer.
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exec"))
+    {
+        return true;
+    }
+    // `with_extension` replaces `<stem>.exe` with `<stem>.exec` — the sidecar
+    // the trampoline generator writes beside the shim hardlink.
+    std::fs::metadata(path.with_extension("exec")).is_ok_and(|sidecar| sidecar.is_file())
 }
 
 /// Failure modes of decoding the forwarded [`keys::OCX_ENV`] payload.
@@ -3987,7 +4664,7 @@ mod tests {
         // Anchor: the old resolver silently picked the host copy. If this ever
         // stops holding, the test below no longer discriminates.
         assert!(
-            same_file(&env.resolve_command("tool"), &decoy),
+            same_file(&env.resolve_command("tool").unwrap(), &decoy),
             "precondition: resolve_command must still return the host decoy"
         );
 
@@ -4026,7 +4703,7 @@ mod tests {
             "package copy must win; got {}",
             resolved.display()
         );
-        assert!(same_file(&resolved, &env.resolve_command("tool")));
+        assert!(same_file(&resolved, &env.resolve_command("tool").unwrap()));
     }
 
     /// A name the package does not ship still resolves on the host PATH — the
@@ -4130,7 +4807,7 @@ mod tests {
             resolved.display()
         );
         assert!(
-            same_file(&resolved, &env.resolve_command("tool")),
+            same_file(&resolved, &env.resolve_command("tool").unwrap()),
             "package-scan order must agree with what the OS would run"
         );
     }
@@ -4170,7 +4847,7 @@ mod tests {
         for name in [shipped.to_str().unwrap(), "./tool", "..", "a/b"] {
             assert_eq!(
                 env.resolve_test_command(name).unwrap(),
-                env.resolve_command(name),
+                env.resolve_command(name).unwrap(),
                 "path-bearing '{name}' must delegate unchanged"
             );
         }
@@ -4415,7 +5092,7 @@ mod tests {
     #[test]
     fn resolve_command_finds_sh_on_unix() {
         let env = Env::new();
-        let resolved = env.resolve_command("sh");
+        let resolved = env.resolve_command("sh").unwrap();
         // On any Unix system `sh` must exist somewhere on PATH.
         assert!(
             resolved.exists(),
@@ -4424,20 +5101,26 @@ mod tests {
         );
     }
 
-    /// When the command is not on PATH, `resolve_command` returns the bare
-    /// name unchanged (OS fallback path).
+    /// A bare name the composed PATH cannot resolve is an error, not the bare
+    /// name handed back for `execvp` to look up against the **ambient** PATH.
+    ///
+    /// Inverted from the pre-C-009 assertion this replaces, following
+    /// `interface_shim_names_refuses_the_literal_ocx_name`: the old test
+    /// asserted exactly the fallback C-009 deletes, so keeping it would have
+    /// pinned the escape the contract exists to close.
     #[test]
-    fn resolve_command_falls_back_to_bare_name_when_not_found() {
+    fn resolve_command_errors_when_a_bare_name_does_not_resolve() {
         let mut env = Env::clean();
         // Empty PATH — nothing can be found.
         env.set("PATH", "");
         #[cfg(windows)]
         env.set("PATHEXT", ".EXE;.CMD");
-        let resolved = env.resolve_command("__ocx_definitely_missing_binary__");
-        assert_eq!(
-            resolved,
-            std::path::PathBuf::from("__ocx_definitely_missing_binary__"),
-            "missing binary must fall back to bare name"
+        assert!(
+            matches!(
+                env.resolve_command("__ocx_definitely_missing_binary__"),
+                Err(CommandResolutionError::NotFound { .. })
+            ),
+            "an unresolvable bare name must be NotFound, never the bare name back"
         );
     }
 
@@ -4460,7 +5143,9 @@ mod tests {
         // PATHEXT lists .EXE — must resolve `my_tool` → `my_tool.exe`.
         env.set("PATHEXT", ".EXE;.CMD");
 
-        let resolved = env.resolve_command("my_tool");
+        let resolved = env
+            .resolve_command("my_tool")
+            .expect("the shim resolves through the child env PATHEXT");
         assert_eq!(
             resolved.file_name().unwrap().to_str().unwrap().to_ascii_lowercase(),
             "my_tool.exe",
@@ -4489,11 +5174,1242 @@ mod tests {
         // `my_tool.exe` via the always-probed `.exe` fallback.
         env.set("PATHEXT", ".BAT;.CMD");
 
-        let resolved = env.resolve_command("my_tool");
+        let resolved = env
+            .resolve_command("my_tool")
+            .expect("the shim resolves through the child env PATHEXT");
         assert_eq!(
             resolved.file_name().unwrap().to_str().unwrap().to_ascii_lowercase(),
             "my_tool.exe",
             "resolve_command must probe .exe even when child PATHEXT omits it"
+        );
+    }
+
+    // ── C-008: `OCX_TOOLCHAIN_DIR` on the child env ────────────────────────
+
+    /// C-008: a resolved `toolchain-dir` travels to a child ocx, because it
+    /// moves `<home>/toolchain/<group>/<entry>` and is therefore
+    /// resolution-affecting.
+    #[test]
+    fn apply_ocx_config_sets_ocx_toolchain_dir_when_some() {
+        let mut cfg = view("/abs/ocx");
+        cfg.toolchain_dir = Some(std::path::PathBuf::from("/home/u/toolchains"));
+
+        let mut env = Env::clean();
+        env.apply_ocx_config(&cfg);
+
+        assert_eq!(
+            env.get(keys::OCX_TOOLCHAIN_DIR)
+                .expect("OCX_TOOLCHAIN_DIR must be set when toolchain_dir is Some"),
+            "/home/u/toolchains",
+            "the child must resolve the same toolchain root as the parent"
+        );
+    }
+
+    /// C-008: the `None` arm is **load-bearing**, not symmetry for its own
+    /// sake — without the remove, a stale `OCX_TOOLCHAIN_DIR` exported into the
+    /// parent shell survives into every child and beats the outer ocx's parsed
+    /// state, so the two frames of one launch read two different trees.
+    ///
+    /// Modelled on `apply_ocx_config_removes_ocx_patch_snapshot_when_none`.
+    #[test]
+    fn apply_ocx_config_removes_ocx_toolchain_dir_when_none() {
+        let cfg = view("/abs/ocx");
+        assert!(cfg.toolchain_dir.is_none(), "the default view carries no root");
+
+        let mut env = Env::clean();
+        env.set(keys::OCX_TOOLCHAIN_DIR, "/stale/toolchains");
+        env.apply_ocx_config(&cfg);
+
+        assert!(
+            env.get(keys::OCX_TOOLCHAIN_DIR).is_none(),
+            "toolchain_dir=None must strip a stale inherited OCX_TOOLCHAIN_DIR"
+        );
+    }
+
+    // ── C-009 / C-069 fixtures ─────────────────────────────────────────────
+
+    /// An executable POSIX body carrying [`TRAMPOLINE_MARKER`] on its second
+    /// line, exactly where C-028's generated trampoline puts it.
+    #[cfg(unix)]
+    fn write_trampoline(dir: &std::path::Path, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            // The five-line C-028 shape WP-6 actually emits, including RUL-13's
+            // single-quoted `__ocx_binary` assignment. A four-line fixture
+            // spelling `${OCX_BINARY_PIN:-ocx}` would be a body this codebase
+            // no longer produces, and every C-069 row here would then be
+            // measured against a shape that cannot occur on disk.
+            format!(
+                "#!/bin/sh\n{TRAMPOLINE_MARKER}\nunset OCX_GLOBAL OCX_PROJECT\n\
+                 __ocx_binary='/home/ocx/bin/ocx'\n\
+                 exec \"${{OCX_BINARY_PIN:-$__ocx_binary}}\" --project '/p' exec -- \"${{0##*/}}\" \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// `mkfifo(2)`, the one filesystem object `std::fs` cannot create.
+    ///
+    /// Copied from `oci/index/file_transport.rs`'s helper rather than shared:
+    /// two `#[cfg(test)]` modules in different subsystems, and the crate has no
+    /// test-support home for a three-line libc call.
+    #[cfg(unix)]
+    #[track_caller]
+    fn mkfifo(path: &std::path::Path) {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let c_path = CString::new(path.as_os_str().as_bytes()).expect("a tempdir path holds no NUL");
+        // SAFETY: `c_path` is a NUL-terminated C string alive for the whole
+        // call, and `mkfifo` only reads it.
+        let created = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
+        assert_eq!(created, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+    }
+
+    // ── C-009: the fallible `resolve_command` ──────────────────────────────
+
+    /// C-009: a bare name a composed `PATH` directory provides resolves to that
+    /// file's absolute path — the happy path the fallible signature keeps.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_resolves_a_bare_name_to_an_absolute_path_on_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = write_binary(dir.path(), "tool", 0o755);
+
+        let mut env = Env::clean();
+        env.set("PATH", dir.path());
+
+        let resolved = env.resolve_command("tool").expect("a name on PATH resolves");
+        assert!(
+            same_file(&resolved, &tool),
+            "resolve_command must answer with the file on PATH; got {}",
+            resolved.display()
+        );
+        assert!(resolved.is_absolute(), "the answer is a path, never the bare name back");
+    }
+
+    /// C-009: the `NotFound` error **names the search space it walked**, so a
+    /// user can see which directories were actually consulted.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_not_found_names_the_directories_it_searched() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+
+        let mut env = Env::clean();
+        env.set(
+            "PATH",
+            std::env::join_paths([first.path(), second.path()]).expect("tempdir paths carry no separator"),
+        );
+
+        let error = env
+            .resolve_command("__ocx_wp2_absent_tool__")
+            .expect_err("a bare name no directory provides is an error, never the bare name back");
+        let CommandResolutionError::NotFound { command, searched } = &error else {
+            panic!("expected NotFound, got {error:?}");
+        };
+        assert_eq!(command, "__ocx_wp2_absent_tool__");
+        assert_eq!(
+            searched,
+            &vec![first.path().to_path_buf(), second.path().to_path_buf()],
+            "the reported search space must be the one that was searched, in PATH order"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&first.path().display().to_string()),
+            "the message must name the searched directories, got: {message}"
+        );
+    }
+
+    /// C-009: a **path-bearing** command keeps today's behaviour — including
+    /// the fall-through when the lookup misses. Only the bare-name arm changed.
+    ///
+    /// Every fixture is absolute or a name that cannot exist, so the answer
+    /// does not depend on the process working directory.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_keeps_todays_behaviour_for_a_path_bearing_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = write_binary(dir.path(), "tool", 0o755);
+
+        let mut env = Env::clean();
+        env.set("PATH", "");
+
+        let resolved = env
+            .resolve_command(tool.as_os_str())
+            .expect("an absolute path names a file directly");
+        assert!(same_file(&resolved, &tool), "an absolute path resolves to itself");
+
+        // The lookup misses, and a path-bearing value is still handed to the OS
+        // rather than refused: `execvp` performs no PATH search for it, so
+        // there is no ambient escape to close.
+        for bearing in ["./__ocx_wp2_missing__", "..", "/nonexistent/__ocx_wp2_missing__"] {
+            let resolved = env
+                .resolve_command(bearing)
+                .unwrap_or_else(|error| panic!("'{bearing}' must fall through, got {error:?}"));
+            assert_eq!(
+                resolved,
+                PathBuf::from(bearing),
+                "a path-bearing miss is handed to the OS unchanged"
+            );
+        }
+    }
+
+    /// C-009: no `PATH` key at all is an empty search space, never an ambient
+    /// fallback and never a panic.
+    ///
+    /// The probe is **`sh`**, not a name that exists nowhere: this test's whole
+    /// subject is whether `which_in(cmd, None, …)` really means "no search
+    /// space", and an impossible name is `NotFound` either way — green whether
+    /// `None` is refused or silently falls back to the ambient `PATH`.
+    /// `resolve_command_finds_sh_on_unix` is the sibling that proves `sh` is on
+    /// that ambient `PATH`, so a fallback would answer `Ok` here.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_errors_when_the_env_carries_no_path_at_all() {
+        let env = Env::clean();
+        assert!(env.get("PATH").is_none(), "precondition: this env has no PATH");
+
+        let error = env
+            .resolve_command("sh")
+            .expect_err("a PATH-less env resolves no bare name, not even one the host provides");
+        let CommandResolutionError::NotFound { searched, .. } = &error else {
+            panic!("expected NotFound, got {error:?}");
+        };
+        assert!(
+            searched.is_empty(),
+            "a PATH-less env must not invent a search space, got {searched:?}"
+        );
+    }
+
+    /// D-V15 (CWE-426), Block B: a `PATH` of nothing but empty segments is
+    /// **`None`**, never `Some("")`.
+    ///
+    /// Asserted on `Env::lookup_path` directly — the test module is this
+    /// module, so the private helper is callable and the property needs no
+    /// `set_current_dir`, which is process-global and racy under nextest.
+    ///
+    /// `Some("")` is not a harmless spelling of the same thing: `which` filters
+    /// empty segments on Windows only, so on Unix `which_in` stats the bare
+    /// candidate against the **process working directory** — `PATH=":"` (what
+    /// `PATH="$A:$B"` renders to when both are unset) plus a hostile clone
+    /// containing `./cmake` is a resolution answer out of the CWD. `None` is
+    /// refused outright by `which_in` and has no ambient fallback.
+    #[test]
+    fn an_all_empty_path_is_no_search_space_at_all() {
+        let separator = PATH_SEPARATOR;
+        for hostile in ["".to_string(), separator.to_string(), format!("{separator}{separator}")] {
+            let mut env = Env::clean();
+            env.set("PATH", &hostile);
+            assert_eq!(
+                env.lookup_path(),
+                None,
+                "PATH={hostile:?} names no directory; Some(\"\") would probe the working directory"
+            );
+        }
+
+        // Discriminating control: one real segment beside two empties still
+        // yields a search space, so the guard above drops empties rather than
+        // refusing every `PATH` that has one.
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = Env::clean();
+        env.set("PATH", format!("{separator}{}{separator}", dir.path().display()));
+        assert_eq!(
+            env.lookup_path().as_deref(),
+            Some(dir.path().as_os_str()),
+            "a real segment survives the filter that drops its empty neighbours"
+        );
+    }
+
+    /// The lookup copy is re-joined with [`std::env::join_paths`], so a
+    /// segment that legally contains the separator survives as **one**
+    /// segment.
+    ///
+    /// On Windows `split_paths` reads `"` as a quote and can therefore emit a
+    /// segment containing `;` — std's own example is
+    /// `c:\foo;c:\som"e;di"r;c:\bar`, whose middle segment is `c:\some;dir`.
+    /// The manual `push(PATH_SEPARATOR)` join this replaced tore that back
+    /// into two directories, handing `which_in` a `c:\some` nobody put on
+    /// `PATH`: a search-path widening in the function whose subject is
+    /// narrowing the search space.
+    ///
+    /// **On Unix this assertion proves nothing about quoting, and is not
+    /// claimed to.** `split_paths` splits on every `:` there, so no Unix
+    /// segment can contain the separator and the manual join was
+    /// byte-identical to `join_paths` for every input — there is no
+    /// Linux-observable red for the tearing. What runs here is the count
+    /// round-trip: it reds on the manual join only where quoting exists, and
+    /// on this platform guards only that the filter drops the empties and
+    /// nothing else. It is unconditional rather than `#[cfg(windows)]`
+    /// because `task rust:check:windows-cfg` is scoped to `ocx_shim`, so a
+    /// Windows-gated test here would not even be compiled by the gate.
+    #[test]
+    fn the_lookup_copy_round_trips_its_segments_one_for_one() {
+        let separator = PATH_SEPARATOR;
+        let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+        let expected: Vec<PathBuf> = dirs.iter().map(|dir| dir.path().to_path_buf()).collect();
+
+        // Leading, interior and trailing empties, so the round trip is
+        // asserted against the *filtered* set rather than against a value the
+        // filter never had to touch.
+        let hostile = format!(
+            "{separator}{}{separator}{separator}{}{separator}{}{separator}",
+            expected[0].display(),
+            expected[1].display(),
+            expected[2].display()
+        );
+
+        let mut env = Env::clean();
+        env.set("PATH", &hostile);
+
+        let looked_up = env.lookup_path().expect("three real segments are a search space");
+        assert_eq!(
+            std::env::split_paths(&looked_up).collect::<Vec<PathBuf>>(),
+            expected,
+            "PATH={hostile:?} names three directories; a join that tears or drops one \
+             changes the search space"
+        );
+    }
+
+    /// D-V15 (CWE-426): an **empty `PATH` segment** means the current directory
+    /// on Unix, and it is dropped from the lookup copy before the search.
+    ///
+    /// Asserted through `NotFound`'s `searched`, which the resolver derives
+    /// from the very value it hands to `which_in` — so an unfiltered `PATH`
+    /// shows up here as an empty segment in the reported search space. The
+    /// behavioural half (planting a decoy in the process working directory)
+    /// is **not** written: it needs `std::env::set_current_dir`, which is
+    /// process-global and racy across `cargo test`'s threads.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_drops_empty_path_segments_from_the_lookup_copy() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+
+        let mut env = Env::clean();
+        // Leading, interior and trailing empties — the three spellings a shell
+        // produces from `PATH="$PATH:"`, `PATH=":$PATH"` and an unset variable
+        // interpolated between two colons.
+        let hostile = format!(":{}::{}:", first.path().display(), second.path().display());
+        env.set("PATH", &hostile);
+
+        let error = env
+            .resolve_command("__ocx_wp2_absent_tool__")
+            .expect_err("the name exists in neither directory");
+        let CommandResolutionError::NotFound { searched, .. } = &error else {
+            panic!("expected NotFound, got {error:?}");
+        };
+        assert_eq!(
+            searched,
+            &vec![first.path().to_path_buf(), second.path().to_path_buf()],
+            "every empty segment must be dropped from the lookup copy"
+        );
+        assert_eq!(
+            env.get("PATH").unwrap(),
+            OsStr::new(hostile.as_str()),
+            "this env's own PATH is a copy's source, never rewritten by a lookup"
+        );
+
+        // A PATH that is nothing but empty segments searches nothing at all.
+        let mut only_empties = Env::clean();
+        only_empties.set("PATH", ":");
+        let error = only_empties
+            .resolve_command("__ocx_wp2_absent_tool__")
+            .expect_err("a PATH of empty segments resolves nothing");
+        let CommandResolutionError::NotFound { searched, .. } = &error else {
+            panic!("expected NotFound, got {error:?}");
+        };
+        assert!(
+            searched.is_empty(),
+            "an all-empty PATH searches nothing, got {searched:?}"
+        );
+    }
+
+    /// C-009: three things on `PATH` that carry the right *name* but cannot be
+    /// executed — a directory, a non-executable file, and a broken symlink —
+    /// are each `NotFound`, never an answer.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_refuses_a_directory_a_non_executable_and_a_broken_symlink() {
+        let as_directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(as_directory.path().join("tool")).unwrap();
+
+        let as_plain_file = tempfile::tempdir().unwrap();
+        write_binary(as_plain_file.path(), "tool", 0o644);
+
+        let as_broken_link = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(
+            as_broken_link.path().join("__ocx_wp2_no_such_target__"),
+            as_broken_link.path().join("tool"),
+        )
+        .unwrap();
+
+        for (what, dir) in [
+            ("a directory", as_directory.path()),
+            ("a non-executable file", as_plain_file.path()),
+            ("a broken symlink", as_broken_link.path()),
+        ] {
+            let mut env = Env::clean();
+            env.set("PATH", dir);
+            let resolved = env.resolve_command("tool");
+            assert!(
+                matches!(resolved, Err(CommandResolutionError::NotFound { .. })),
+                "{what} named `tool` must not resolve, got {resolved:?}"
+            );
+        }
+    }
+
+    // ── C-010: `resolve_command_excluding` ─────────────────────────────────
+    //
+    // Every test below was written from C-010 against the stub, not from the
+    // implementation: while `Env::lookup_path_excluding` was WP-2's one
+    // `unimplemented!()` each of them was an honest panic-red, so none of them
+    // can have been shaped to fit whatever the body turned out to do.
+
+    /// C-010: the excluded directory is not consulted, and the answer comes
+    /// from elsewhere on `PATH`.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_excluding_does_not_consult_the_excluded_directory() {
+        let excluded_dir = tempfile::tempdir().unwrap();
+        let real_dir = tempfile::tempdir().unwrap();
+        write_trampoline(excluded_dir.path(), "cmake");
+        let real = write_binary(real_dir.path(), "cmake", 0o755);
+
+        let mut env = Env::clean();
+        env.set(
+            "PATH",
+            std::env::join_paths([excluded_dir.path(), real_dir.path()]).unwrap(),
+        );
+
+        let resolved = env
+            .resolve_command_excluding("cmake", &[excluded_dir.path().to_path_buf()])
+            .expect("the name resolves in the surviving directory");
+        assert!(
+            same_file(&resolved, &real),
+            "the excluded directory must not answer; got {}",
+            resolved.display()
+        );
+    }
+
+    /// C-010, **the load-bearing invariant**: `excluded` is removed from the
+    /// *lookup copy* of `PATH` only. This env's own `PATH` must be
+    /// byte-identical after the call, because a tool that spawns a sibling tool
+    /// still resolves it through a trampoline.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_excluding_leaves_this_env_s_own_path_byte_identical() {
+        let excluded_dir = tempfile::tempdir().unwrap();
+        let real_dir = tempfile::tempdir().unwrap();
+        write_binary(real_dir.path(), "cmake", 0o755);
+
+        let mut env = Env::clean();
+        let original = std::env::join_paths([excluded_dir.path(), real_dir.path()]).unwrap();
+        env.set("PATH", &original);
+
+        let _ = env.resolve_command_excluding("cmake", &[excluded_dir.path().to_path_buf()]);
+
+        assert_eq!(
+            env.get("PATH").expect("PATH survives the call"),
+            original.as_os_str(),
+            "the child's PATH keeps every segment its composition established"
+        );
+    }
+
+    /// C-010: an empty exclusion set behaves exactly as
+    /// [`Env::resolve_command`].
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_excluding_with_an_empty_exclusion_behaves_as_resolve_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = write_binary(dir.path(), "tool", 0o755);
+
+        let mut env = Env::clean();
+        env.set("PATH", dir.path());
+
+        let resolved = env
+            .resolve_command_excluding("tool", &[])
+            .expect("an empty exclusion excludes nothing");
+        assert!(same_file(&resolved, &tool), "got {}", resolved.display());
+    }
+
+    /// C-010: excluding a directory that is not on `PATH` is a no-op, never an
+    /// error.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_excluding_a_directory_that_is_not_on_path_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let unrelated = tempfile::tempdir().unwrap();
+        let tool = write_binary(dir.path(), "tool", 0o755);
+
+        let mut env = Env::clean();
+        env.set("PATH", dir.path());
+
+        let resolved = env
+            .resolve_command_excluding("tool", &[unrelated.path().to_path_buf()])
+            .expect("excluding an absent directory changes nothing");
+        assert!(same_file(&resolved, &tool), "got {}", resolved.display());
+    }
+
+    /// C-010: excluding **every** segment is `NotFound` — never a panic and
+    /// never an ambient fallback to the bare name.
+    ///
+    /// The probe is **`sh`** for the reason
+    /// `resolve_command_errors_when_the_env_carries_no_path_at_all` states: an
+    /// exhausted space reaches `which_in` as `None`, and only a name the
+    /// ambient `PATH` really does provide can tell "`None` means no search
+    /// space" from "`None` silently falls back".
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_excluding_every_segment_is_not_found() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        write_binary(first.path(), "sh", 0o755);
+        write_binary(second.path(), "sh", 0o755);
+
+        let mut env = Env::clean();
+        env.set("PATH", std::env::join_paths([first.path(), second.path()]).unwrap());
+        assert!(
+            env.resolve_command("sh").is_ok(),
+            "precondition: `sh` resolves before the exclusion empties the space"
+        );
+
+        let resolved = env.resolve_command_excluding("sh", &[first.path().to_path_buf(), second.path().to_path_buf()]);
+        let Err(CommandResolutionError::NotFound { searched, .. }) = &resolved else {
+            panic!("an exhausted search space is NotFound, got {resolved:?}");
+        };
+        assert!(
+            searched.is_empty(),
+            "an exhausted space names nothing, and the host's own `sh` is not an answer; got {searched:?}"
+        );
+    }
+
+    /// C-010 ∧ C-069, the belt the two-guard design rests on: a directory that
+    /// **survives** the segment-exact exclusion answers with a trampoline, and
+    /// the refusal catches it.
+    ///
+    /// `remove_segment`'s own doc is explicit that a segment naming the same
+    /// directory by a different string survives untouched, and a trailing slash
+    /// is the cheapest such spelling. Both arms are asserted so the fixture
+    /// cannot pass for the wrong reason: the exact spelling empties the space
+    /// (`NotFound`, guard one), the slashed spelling does not (
+    /// `TrampolineRefused`, guard two).
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_excluding_refuses_a_trampoline_a_trailing_slash_left_on_path() {
+        let bin = tempfile::tempdir().unwrap();
+        let trampoline = write_trampoline(bin.path(), "cmake");
+
+        let mut env = Env::clean();
+        env.set("PATH", bin.path());
+
+        let exact = env.resolve_command_excluding("cmake", &[bin.path().to_path_buf()]);
+        assert!(
+            matches!(exact, Err(CommandResolutionError::NotFound { .. })),
+            "control: the exact spelling really is excluded, got {exact:?}"
+        );
+
+        let slashed = PathBuf::from(format!("{}/", bin.path().display()));
+        let error = env
+            .resolve_command_excluding("cmake", &[slashed])
+            .expect_err("a surviving trampoline directory must not answer");
+        let CommandResolutionError::TrampolineRefused { path, .. } = &error else {
+            panic!("the second guard must be the one that fired, got {error:?}");
+        };
+        assert!(
+            same_file(path, &trampoline),
+            "the refusal names the trampoline the exclusion could not strip; got {}",
+            path.display()
+        );
+    }
+
+    // ── C-069: the trampoline-identity refusal ─────────────────────────────
+
+    /// C-069 / D-V1, **the input where only this guard defends**: a *foreign*
+    /// home's trampoline on the lookup `PATH`.
+    ///
+    /// C-010's exclusion set can only ever name *this* invocation's own homes,
+    /// so a second project's `<home>/toolchain/bin` on the same `PATH` is a
+    /// directory the exclusion structurally cannot name. Under C-010 alone the
+    /// invocation loops A → B → A forever, one full compose per hop, with no
+    /// error and no depth counter.
+    ///
+    /// Kept a **unit** case on purpose: the acceptance form of this is an
+    /// unbounded re-exec loop that hangs rather than fails, because
+    /// `test/src/runner.py` passes no `timeout=`.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_command_refuses_a_foreign_home_trampoline_the_exclusion_cannot_name() {
+        let foreign = tempfile::tempdir().unwrap();
+        let bin = foreign.path().join("project-b/.ocx/toolchain/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let trampoline = write_trampoline(&bin, "cmake");
+
+        let mut env = Env::clean();
+        env.set("PATH", &bin);
+
+        let error = env
+            .resolve_command("cmake")
+            .expect_err("a trampoline answer must be refused, never returned as Ok");
+        let CommandResolutionError::TrampolineRefused { command, path } = &error else {
+            panic!("expected TrampolineRefused — the guard identity is the whole point, got {error:?}");
+        };
+        assert_eq!(command, "cmake");
+        assert!(
+            same_file(path, &trampoline),
+            "the refusal must name the trampoline it found; got {}",
+            path.display()
+        );
+    }
+
+    /// C-069 / finding S-1: a **symlink** on `PATH` pointing at a trampoline is
+    /// refused, and the refusal judges the *link* path.
+    ///
+    /// `which` answers with the uncanonicalized path it walked, so the
+    /// predicate is handed a symlink; `std::fs::metadata` and `File::open` both
+    /// follow it, which is why it fires today. Swapping either for
+    /// `symlink_metadata` — the natural "harden this against link tricks" edit
+    /// — makes the answer "not a regular file" and silently disarms C-069 for
+    /// exactly the aliased-directory class `remove_segment` cannot strip. That
+    /// is the defect [pyenv#2696](https://github.com/pyenv/pyenv/issues/2696)
+    /// shipped, and nothing else in this file pins it.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_on_path_pointing_at_a_trampoline_is_refused() {
+        let real = tempfile::tempdir().unwrap();
+        let alias = tempfile::tempdir().unwrap();
+        let trampoline = write_trampoline(real.path(), "cmake");
+        let link = alias.path().join("cmake");
+        std::os::unix::fs::symlink(&trampoline, &link).unwrap();
+
+        let mut env = Env::clean();
+        env.set("PATH", alias.path());
+
+        let error = env
+            .resolve_command("cmake")
+            .expect_err("a symlinked trampoline is still a trampoline");
+        let CommandResolutionError::TrampolineRefused { path, .. } = &error else {
+            panic!("expected TrampolineRefused, got {error:?}");
+        };
+        assert_eq!(
+            path, &link,
+            "which answers with the link path it walked, uncanonicalized"
+        );
+        assert!(
+            std::fs::symlink_metadata(path)
+                .expect("the refused answer exists")
+                .file_type()
+                .is_symlink(),
+            "the refusal must have judged a symlink — otherwise this fixture proves nothing"
+        );
+    }
+
+    /// C-069 / D-V12: the marker is **discriminating by construction**.
+    ///
+    /// Three arms in one test so it cannot pass vacuously: the real
+    /// `unix_launcher_body` output is not refused, the real `unix_shim_body`
+    /// output is not refused, and only a body carrying [`TRAMPOLINE_MARKER`]
+    /// is. Both non-trampoline bodies come from the **shipped generators**, not
+    /// from an approximation written here — a predicate keyed on the shared
+    /// `# Generated by ocx at install time. Do not edit.` header would refuse
+    /// both and break `ocx launcher exec` and `ocx package exec` outright.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_marker_admits_the_shipped_launcher_and_shim_bodies_and_refuses_only_a_trampoline() {
+        use std::collections::BTreeMap;
+
+        use crate::package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypoints};
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        // 1. The real package launcher, written by the shipped generator.
+        let pkg_root = tmp.path().join("pkg");
+        let dest = pkg_root.join("entrypoints");
+        let entries = Entrypoints::new(BTreeMap::from([(
+            EntrypointName::try_from("cmake").unwrap(),
+            Entrypoint::default(),
+        )]));
+        let shim_bin = crate::file_structure::ShimBinStore::new(tmp.path().join("shim_bin"));
+        crate::package_manager::launcher::generate(&pkg_root, &entries, &dest, &shim_bin)
+            .await
+            .expect("the shipped generator writes a launcher");
+        let launcher = dest.join("cmake");
+        assert!(
+            std::fs::read_to_string(&launcher)
+                .unwrap()
+                .contains("# Generated by ocx at install time. Do not edit."),
+            "precondition: the shipped launcher really does carry the shared header"
+        );
+        assert!(
+            !is_ocx_trampoline(&launcher),
+            "a package launcher is not a trampoline and must keep resolving"
+        );
+
+        // 2. The real deferred-tool shim, from the shipped generator.
+        let identifier = crate::oci::PinnedIdentifier::try_from(
+            crate::oci::Identifier::new_registry("cmake", "example.com")
+                .clone_with_digest(crate::oci::Digest::Sha256("a".repeat(64))),
+        )
+        .expect("a digest-bearing identifier is pinned");
+        let shim_path = tmp.path().join("shim-cmake");
+        std::fs::write(
+            &shim_path,
+            crate::package_manager::launcher::shim_body(&identifier).expect("the shim body renders"),
+        )
+        .unwrap();
+        assert!(
+            !is_ocx_trampoline(&shim_path),
+            "a lazy shim is not a trampoline and must keep resolving"
+        );
+
+        // 3. The trampoline itself.
+        let trampoline = write_trampoline(tmp.path(), "trampoline-cmake");
+        assert!(
+            is_ocx_trampoline(&trampoline),
+            "a body carrying TRAMPOLINE_MARKER is the one file that is refused"
+        );
+    }
+
+    /// C-069 / finding W-1: a body **longer than [`TRAMPOLINE_PROBE_BYTES`]**
+    /// is still refused when the marker sits inside the probed head — the deep
+    /// checkout case, where C-028's baked absolute project root pushes the body
+    /// past 256 bytes.
+    ///
+    /// `#[cfg(unix)]` like every other body-content row here: the probe window
+    /// is the POSIX `trampoline_signal` only. The Windows half is the `.exec`
+    /// sidecar and has no content check at all (D-V15), so a shell body there
+    /// is not a trampoline no matter where its marker sits — the row would
+    /// assert something the platform does not claim.
+    #[cfg(unix)]
+    #[test]
+    fn a_marker_inside_the_probe_window_of_an_over_long_body_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cmake");
+        let body = format!("#!/bin/sh\n{TRAMPOLINE_MARKER}\n{}\n", "x".repeat(4 * 1024));
+        assert!(
+            body.len() > TRAMPOLINE_PROBE_BYTES,
+            "precondition: the body must exceed the probe window"
+        );
+        std::fs::write(&path, body).unwrap();
+
+        assert!(
+            is_ocx_trampoline(&path),
+            "a bounded prefix read must not turn an over-long body into 'not a trampoline'"
+        );
+    }
+
+    /// C-069 / finding W-1, the other half: a marker sitting **beyond** the
+    /// probe window is **not** refused.
+    ///
+    /// This is the row that pins the **bound**, so the fixture has to be one
+    /// only the bound can answer: line *one* outruns
+    /// [`TRAMPOLINE_PROBE_BYTES`], and the marker sits on line two — the exact
+    /// position C-028 emits it at and the anchor accepts. The probed prefix
+    /// therefore holds no `\n` at all, `nth(1)` is `None`, and the file is not
+    /// a trampoline. Widen the constant and this test goes red, which is the
+    /// whole point of it.
+    ///
+    /// A fixture that pushed the marker onto line *three* instead would be
+    /// refused by the **anchor** at every bound — green with the window
+    /// widened to a gigabyte, green with the bounded read deleted outright —
+    /// and would pin nothing here.
+    ///
+    /// Recorded as the constraint WP-6 must honour when it emits the
+    /// trampoline body: the marker has to land within the first
+    /// [`TRAMPOLINE_PROBE_BYTES`] bytes, which is why C-028 puts it on line
+    /// two, ahead of the line carrying the absolute project root. Together with
+    /// the test above, this is what stops a future swap to a whole-file read
+    /// silently disarming the guard for deep project roots, and a future
+    /// re-ordering of the body silently disarming it for everyone.
+    #[test]
+    fn a_marker_beyond_the_probe_window_is_not_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cmake");
+        let first_line = format!("#!/bin/sh {}", "#".repeat(300));
+        assert!(
+            first_line.len() > TRAMPOLINE_PROBE_BYTES,
+            "precondition: line one must outrun the probe window, or this test measures the anchor, not the bound"
+        );
+        std::fs::write(&path, format!("{first_line}\n{TRAMPOLINE_MARKER}\n")).unwrap();
+
+        assert!(
+            !is_ocx_trampoline(&path),
+            "the probe reads a bounded prefix; WP-6 must emit the marker inside it"
+        );
+    }
+
+    /// E-21 / T-11: an ordinary **package launcher** whose baked package root
+    /// spells the marker in its own path text must keep resolving.
+    ///
+    /// This is the case the bounded-prefix rule alone cannot answer, and it is
+    /// reachable: WP-6 interpolates an operator-controlled absolute path into
+    /// every generated body, so a `$OCX_HOME` containing the marker string puts
+    /// it inside the probed head — line 3, at roughly byte 90, well inside 256.
+    /// Under a "marker anywhere in the prefix" rule C-069 refuses this file and
+    /// `ocx launcher exec` breaks for that install: exactly the class D-V12
+    /// excluded when it rejected keying on the shared header. The line-2 anchor
+    /// is what closes it.
+    ///
+    /// The body comes from the **shipped generator**, not an approximation, so
+    /// the test cannot pass by mis-modelling the layout it is asserting about.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_launcher_whose_baked_path_spells_the_marker_is_not_refused() {
+        use std::collections::BTreeMap;
+
+        use crate::package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypoints};
+
+        let tmp = tempfile::tempdir().unwrap();
+        // A package root whose own directory name is the marker — the shape a
+        // hostile-or-just-unlucky `$OCX_HOME` produces.
+        let pkg_root = tmp.path().join(TRAMPOLINE_MARKER).join("pkg");
+        let dest = pkg_root.join("entrypoints");
+        let entries = Entrypoints::new(BTreeMap::from([(
+            EntrypointName::try_from("cmake").unwrap(),
+            Entrypoint::default(),
+        )]));
+        let shim_bin = crate::file_structure::ShimBinStore::new(tmp.path().join("shim_bin"));
+        crate::package_manager::launcher::generate(&pkg_root, &entries, &dest, &shim_bin)
+            .await
+            .expect("the shipped generator writes a launcher");
+        let launcher = dest.join("cmake");
+
+        let body = std::fs::read(&launcher).unwrap();
+        let head = &body[..TRAMPOLINE_PROBE_BYTES.min(body.len())];
+        let needle = TRAMPOLINE_MARKER.as_bytes();
+        assert!(
+            head.windows(needle.len()).any(|window| window == needle),
+            "precondition: the marker must really be inside the probed head, or this \
+             fixture proves nothing about the anchor"
+        );
+        assert_ne!(
+            body.split(|byte| *byte == b'\n').nth(1),
+            Some(needle),
+            "precondition: and it must NOT be on line two — that is the difference \
+             the anchor reads"
+        );
+
+        assert!(
+            !is_ocx_trampoline(&launcher),
+            "a package launcher that merely bakes the marker in its path is not a \
+             trampoline; refusing it would break `ocx launcher exec` for that install"
+        );
+    }
+
+    /// E-21 / T-12, the positive control for the row above: the same anchor
+    /// still refuses a real trampoline whose baked root is **deep**.
+    ///
+    /// Without this, `a_launcher_whose_baked_path_spells_the_marker_is_not_refused`
+    /// would also pass against a predicate that answered `false` for everything.
+    /// The root exceeds 200 characters so the body runs past the probe window,
+    /// which is the case the head bound has to keep answering.
+    #[cfg(unix)]
+    #[test]
+    fn a_trampoline_with_a_root_past_the_probe_window_is_still_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cmake");
+        let deep_root = format!("/w/{}", "d".repeat(240));
+        assert!(deep_root.len() > 200, "precondition: the root must be deep");
+        let body = format!(
+            "#!/bin/sh\n{TRAMPOLINE_MARKER}\nunset OCX_GLOBAL OCX_PROJECT\n\
+             __ocx_binary='ocx'\n\
+             exec \"${{OCX_BINARY_PIN:-$__ocx_binary}}\" --project '{deep_root}' exec -- \"${{0##*/}}\" \"$@\"\n"
+        );
+        assert!(
+            body.len() > TRAMPOLINE_PROBE_BYTES,
+            "precondition: the body must exceed the probe window"
+        );
+        std::fs::write(&path, body).unwrap();
+
+        assert!(
+            is_ocx_trampoline(&path),
+            "the marker is line two regardless of how deep the baked root is — the \
+             anchor sits ahead of every interpolated value"
+        );
+    }
+
+    /// The anchor is the SECOND line specifically, not "an early line". A
+    /// marker on line one or line three is not a trampoline signal, so a
+    /// future re-ordering of the C-028 body disarms the guard loudly.
+    ///
+    /// `#[cfg(unix)]`: the line-two anchor is the POSIX signal. On Windows the
+    /// signal is the `.exec` sidecar and no body is read (D-V15), so the three
+    /// negatives would pass vacuously and the control — which is what makes
+    /// them mean anything — cannot.
+    #[cfg(unix)]
+    #[test]
+    fn only_the_second_line_carries_the_marker_signal() {
+        let dir = tempfile::tempdir().unwrap();
+        for (label, body) in [
+            ("line one", format!("{TRAMPOLINE_MARKER}\n#!/bin/sh\nexec ocx\n")),
+            (
+                "line three",
+                format!("#!/bin/sh\nunset OCX_GLOBAL\n{TRAMPOLINE_MARKER}\n"),
+            ),
+            (
+                "line two, but only as a prefix of it",
+                format!("#!/bin/sh\n{TRAMPOLINE_MARKER} and more\nexec ocx\n"),
+            ),
+        ] {
+            let path = dir.path().join(label.replace(' ', "_"));
+            std::fs::write(&path, &body).unwrap();
+            assert!(
+                !is_ocx_trampoline(&path),
+                "{label}: the signal is line two matched WHOLE, nothing looser"
+            );
+        }
+
+        // The control: the exact shape IS refused, so the rows above are not
+        // passing because the predicate answers false unconditionally.
+        let path = dir.path().join("real");
+        std::fs::write(&path, format!("#!/bin/sh\n{TRAMPOLINE_MARKER}\nexec ocx\n")).unwrap();
+        assert!(
+            is_ocx_trampoline(&path),
+            "control: the marker as the whole of line two is the signal"
+        );
+    }
+
+    /// C-069: a file that merely *contains* the marker somewhere in its body is
+    /// not refused. An unbounded `contains()` would refuse any ordinary tool
+    /// that happens to embed the string in its data — and would allocate a
+    /// 200 MB binary on every resolution.
+    #[test]
+    fn a_file_that_merely_contains_the_marker_later_in_its_body_is_not_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grep");
+        let mut body: Vec<u8> = b"\x7fELF".to_vec();
+        body.resize(8 * 1024, 0);
+        body.extend_from_slice(TRAMPOLINE_MARKER.as_bytes());
+        std::fs::write(&path, body).unwrap();
+
+        assert!(
+            !is_ocx_trampoline(&path),
+            "an ordinary binary embedding the string must keep resolving"
+        );
+    }
+
+    /// C-069: a 0-byte file is not a trampoline, and the probe does not panic
+    /// on it.
+    #[test]
+    fn a_zero_byte_file_is_not_a_trampoline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty");
+        std::fs::write(&path, b"").unwrap();
+
+        assert!(!is_ocx_trampoline(&path), "an empty file carries no marker");
+    }
+
+    /// C-069: an unreadable file is **not** refused — the predicate fails
+    /// *open*, the deliberate inverse of `ocx launcher shim`'s `resolves_inside`.
+    ///
+    /// This predicate runs on every resolution including `/bin/sh`, so a
+    /// fail-closed I/O arm would turn a transient `EACCES` on an unrelated
+    /// binary into a refusal to run an ordinary command.
+    ///
+    /// The fixture's content **is** a trampoline body, so the assertion can
+    /// only pass because the read failed. When the read does not fail — a
+    /// privileged uid bypasses the mode bits — the test's premise does not
+    /// hold, and it says so having *observed* the successful open rather than
+    /// having assumed a uid.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_is_not_a_trampoline() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_trampoline(dir.path(), "cmake");
+        assert!(
+            is_ocx_trampoline(&path),
+            "precondition: while readable, this body is refused"
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        if std::fs::File::open(&path).is_ok() {
+            // Observed, not assumed: this uid bypasses the mode bits
+            // (root / CAP_DAC_OVERRIDE), so "unreadable" is not reproducible
+            // here and there is nothing for the fail-open arm to answer.
+            return;
+        }
+
+        assert!(
+            !is_ocx_trampoline(&path),
+            "an unreadable file must fail open, never refuse an ordinary command"
+        );
+    }
+
+    /// C-069 / D-V15(b): a **FIFO** on the resolution path must not block.
+    ///
+    /// `std::fs::metadata` decides `is_file()` before anything is opened, and
+    /// that ordering is the whole guard: opening a FIFO for reading blocks
+    /// until a writer appears — forever, on the path that runs before every
+    /// `exec`. No writer is ever opened here, so a regression that opens first
+    /// hangs; the test is deterministic without a timeout because the two
+    /// outcomes are "returns false" and "never returns", and only the first can
+    /// report green.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_not_a_trampoline_and_is_never_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cmake");
+        mkfifo(&path);
+        assert!(
+            std::fs::metadata(&path).is_ok_and(|m| !m.is_file()),
+            "precondition: the fixture really is a FIFO, not a regular file"
+        );
+
+        assert!(
+            !is_ocx_trampoline(&path),
+            "a non-regular file is 'not a trampoline' without ever being opened"
+        );
+    }
+
+    /// C-069 / D-V15(a), Windows: the sibling `.shim` sidecar of a lazy shim
+    /// slot is **not** a trampoline signal.
+    ///
+    /// Every trampoline `.exe` *and* every shim-slot `.exe` is a hardlink of
+    /// the one committed blob, so content cannot discriminate them; `.exec` is
+    /// the only signal, and `.shim` must keep resolving.
+    #[cfg(windows)]
+    #[test]
+    fn a_sibling_shim_sidecar_is_not_a_trampoline() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("cmake.exe");
+        std::fs::write(&exe, b"MZ").unwrap();
+        std::fs::write(dir.path().join("cmake.shim"), b"C:\\pkg\n").unwrap();
+
+        assert!(
+            !is_ocx_trampoline(&exe),
+            "a lazy shim slot must keep resolving; only `.exec` marks a trampoline"
+        );
+    }
+
+    /// C-069, Windows: a sibling `.exec` sidecar **is** the trampoline signal.
+    #[cfg(windows)]
+    #[test]
+    fn a_sibling_exec_sidecar_is_a_trampoline() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("cmake.exe");
+        std::fs::write(&exe, b"MZ").unwrap();
+        std::fs::write(dir.path().join("cmake.exec"), b"C:\\project\n").unwrap();
+
+        assert!(
+            is_ocx_trampoline(&exe),
+            "the `.exec` sidecar is the Windows trampoline signal"
+        );
+    }
+
+    /// C-069 / D-V15(a), Windows: a resolved path whose **own** extension is
+    /// `.exec` is refused.
+    ///
+    /// `which` treats any file carrying an extension as executable on Windows,
+    /// so a `PATHEXT` containing `.EXEC` makes the sidecar *text file* itself a
+    /// resolution answer.
+    #[cfg(windows)]
+    #[test]
+    fn a_resolved_path_whose_own_extension_is_exec_is_a_trampoline() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("cmake.exec");
+        std::fs::write(&sidecar, b"C:\\project\n").unwrap();
+
+        assert!(
+            is_ocx_trampoline(&sidecar),
+            "a `.exec` file is never a command answer, whatever PATHEXT says"
+        );
+        assert!(
+            is_ocx_trampoline(&dir.path().join("CMAKE.EXEC")),
+            "the extension comparison folds case, like every other reserved-name check"
+        );
+    }
+
+    // ── C-011: `resolve_test_command`, one case per named caller ───────────
+    //
+    // Four production callers depend on this method's error semantics, and
+    // C-009 must not change any of them. Each test below is named for the
+    // caller whose dependency it pins.
+
+    /// C-011, `crates/ocx_cli/src/command/launcher/exec.rs` — every installed
+    /// launcher's re-entry. The package's own executable copy wins, and the
+    /// signature still returns that path.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_test_command_answers_the_launcher_re_entry_with_the_package_copy() {
+        let package_dir = tempfile::tempdir().unwrap();
+        let ambient_dir = tempfile::tempdir().unwrap();
+        let shipped = write_binary(package_dir.path(), "tool", 0o755);
+        write_binary(ambient_dir.path(), "tool", 0o755);
+
+        let mut env = Env::clean();
+        env.set("PATH", ambient_dir.path());
+        env.apply_entries(&[path_entry("PATH", package_dir.path())]);
+
+        let resolved = env.resolve_test_command("tool").expect("the package ships the name");
+        assert!(same_file(&resolved, &shipped), "got {}", resolved.display());
+    }
+
+    /// C-011, `crates/ocx_cli/src/command/package_test.rs` — a package that
+    /// ships the name without the executable bit is still a hard
+    /// `NotExecutable`, never a silent fall-through to a host copy.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_test_command_keeps_not_executable_terminal_for_package_test() {
+        let package_dir = tempfile::tempdir().unwrap();
+        let shipped = write_binary(package_dir.path(), "tool", 0o600);
+
+        let mut env = Env::clean();
+        env.set("PATH", "");
+        env.apply_entries(&[path_entry("PATH", package_dir.path())]);
+
+        let error = env
+            .resolve_test_command("tool")
+            .expect_err("a non-executable package copy is terminal");
+        let CommandResolutionError::NotExecutable { path, mode, .. } = &error else {
+            panic!("expected NotExecutable, got {error:?}");
+        };
+        assert_eq!(path, &shipped);
+        assert_eq!(*mode, 0o600, "the error names the permission bits it found");
+    }
+
+    /// C-011, `crates/ocx_cli/src/command/patch_test.rs` — a path-bearing
+    /// command still delegates to [`Env::resolve_command`] unchanged, so the
+    /// package-versus-host question is never asked of a value that names a file.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_test_command_delegates_a_path_bearing_name_for_patch_test() {
+        let package_dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        write_binary(package_dir.path(), "tool", 0o755);
+        let direct = write_binary(elsewhere.path(), "tool", 0o755);
+
+        let mut env = Env::clean();
+        env.set("PATH", "");
+        env.apply_entries(&[path_entry("PATH", package_dir.path())]);
+
+        let resolved = env
+            .resolve_test_command(direct.as_os_str())
+            .expect("an absolute path names a file directly");
+        assert!(
+            same_file(&resolved, &direct),
+            "a path-bearing value must not be redirected to the package copy; got {}",
+            resolved.display()
+        );
+    }
+
+    /// C-011, `crates/ocx_lib/src/script/ocx_module.rs` — the Starlark host
+    /// behind `ocx package test --script`, and the canary for this contract.
+    ///
+    /// A **total miss** — the package ships nothing and the host provides
+    /// nothing — falls through to the bare name, never an `Err`. That
+    /// fall-through is deliberately retained across C-009, and
+    /// `ocx_module.rs`'s shipped `bare_name_does_not_anchor_on_cwd` panics the
+    /// moment it becomes an error.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_test_command_falls_through_to_the_bare_name_for_the_starlark_host() {
+        let package_dir = tempfile::tempdir().unwrap();
+        write_binary(package_dir.path(), "other", 0o755);
+
+        let mut env = Env::clean();
+        env.set("PATH", "");
+        env.apply_entries(&[path_entry("PATH", package_dir.path())]);
+
+        let resolved = env
+            .resolve_test_command("__ocx_wp2_absent_tool__")
+            .expect("a total miss falls through to the bare name, never an error");
+        assert_eq!(
+            resolved,
+            PathBuf::from("__ocx_wp2_absent_tool__"),
+            "the bare name is handed back for the OS to answer"
+        );
+    }
+
+    /// C-011 ∧ C-069, Block A: the fall-through is scoped to the **total
+    /// miss**, so a trampoline refusal propagates as itself instead of becoming
+    /// a bare name.
+    ///
+    /// The bare name is the whole defect: `execvp` performs its own lookup
+    /// against the **ambient** `PATH` and finds the same trampoline, so the
+    /// A → B → A re-entry C-069 exists to stop is restored one level up, with
+    /// no error and no depth counter. Reachable from
+    /// `crates/ocx_cli/src/command/launcher/exec.rs`'s `run_with_env`, which
+    /// builds `Env::new()` — the ambient `PATH`, carrying a `bin`-mode
+    /// toolchain's trampolines — prunes nothing, and calls this method for
+    /// every installed launcher's re-entry.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_test_command_propagates_a_trampoline_refusal_instead_of_the_bare_name() {
+        let package_dir = tempfile::tempdir().unwrap();
+        let foreign_home = tempfile::tempdir().unwrap();
+        // The package ships something, just not the name under test — so the
+        // scan misses and the host lookup is reached.
+        write_binary(package_dir.path(), "other", 0o755);
+        let trampoline = write_trampoline(foreign_home.path(), "cmake");
+
+        let mut env = Env::clean();
+        env.set("PATH", foreign_home.path());
+        env.apply_entries(&[path_entry("PATH", package_dir.path())]);
+
+        let error = env
+            .resolve_test_command("cmake")
+            .expect_err("a refused trampoline is not a total miss and must not fall through");
+        let CommandResolutionError::TrampolineRefused { command, path } = &error else {
+            panic!("expected TrampolineRefused — a bare name here re-arms the loop, got {error:?}");
+        };
+        assert_eq!(command, "cmake");
+        assert!(
+            same_file(path, &trampoline),
+            "the refusal must name the trampoline it found; got {}",
+            path.display()
+        );
+    }
+
+    // ── C-057 / S-010: exit-code classification, per variant ───────────────
+
+    /// C-057 / S-010: a name the composition does not provide is exit **65**.
+    ///
+    /// Asserted per variant rather than on one sample: the classification is an
+    /// exhaustive match with no wildcard (D-V15(e)), and a blanket answer would
+    /// make a later variant silently 65 with no test able to catch it.
+    #[test]
+    fn command_resolution_not_found_classifies_as_data_error() {
+        let error = CommandResolutionError::NotFound {
+            command: "cmake".into(),
+            searched: vec![PathBuf::from("/p/.ocx/toolchain/bin")],
+        };
+        assert_eq!(
+            crate::cli::ClassifyExitCode::classify(&error),
+            Some(crate::cli::ExitCode::DataError),
+            "S-010: a trampoline invoked under a name the composition lacks exits 65"
+        );
+        assert_eq!(
+            crate::cli::classify_error(&error),
+            crate::cli::ExitCode::DataError,
+            "the CLI's own classifier must reach the same answer through the error chain"
+        );
+    }
+
+    /// C-057 / C-069: the trampoline refusal is exit **65** too.
+    ///
+    /// Same code as its siblings on purpose — the exit code classifies the
+    /// *class* of failure, and the guard identity lives in the variant and the
+    /// message, which is where item 22 asserts which guard fired.
+    #[test]
+    fn command_resolution_trampoline_refusal_classifies_as_data_error() {
+        let error = CommandResolutionError::TrampolineRefused {
+            command: "cmake".into(),
+            path: PathBuf::from("/p/.ocx/toolchain/bin/cmake"),
+        };
+        assert_eq!(
+            crate::cli::ClassifyExitCode::classify(&error),
+            Some(crate::cli::ExitCode::DataError)
+        );
+        assert_eq!(
+            crate::cli::classify_error(&error),
+            crate::cli::ExitCode::DataError,
+            "the refusal reaches the CLI as 65, not as the generic Failure"
         );
     }
 }

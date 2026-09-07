@@ -115,6 +115,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::config::mirror::MirrorConfigError;
     use crate::config::patch::PatchConfigError;
     use crate::env::{CommandResolutionError, ForwardedEnvError, ListSeparatorError};
+    use crate::file_structure::ToolchainPathError;
     use crate::file_structure::error::Error as FileStructureError;
     use crate::forge::ForgeError;
     use crate::launch::LaunchError;
@@ -194,6 +195,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(ManagedConfigPublishError);
     try_downcast!(AuthError);
     try_downcast!(FileStructureError);
+    try_downcast!(ToolchainPathError);
     try_downcast!(ArchiveError);
     try_downcast!(CompressionError);
     try_downcast!(CiError);
@@ -1337,6 +1339,32 @@ mod tests {
             source,
         });
         assert_eq!(classify(err), ExitCode::Unavailable);
+    }
+
+    // ── toolchain path grammar (WP-1, C-001/D-V14) ───────────────────────────
+
+    /// C-013/C-014's exit 78 must be reachable **through the real classifier**,
+    /// not only through the error type's own `classify()` impl.
+    ///
+    /// This test and `every_toolchain_path_error_variant_classifies_as_config_error`
+    /// in `file_structure/toolchain_store.rs` cover two different failures, which
+    /// is why both exist: removing the `try_downcast!(ToolchainPathError)` entry
+    /// from the ladder leaves that one green — the impl still returns
+    /// `Some(ConfigError)` — while this one reds, because an unregistered type
+    /// falls through the chain walk to `ExitCode::Failure`.
+    #[test]
+    fn toolchain_path_error_is_registered_in_the_classifier() {
+        use crate::file_structure::{ToolchainPathComponent, ToolchainPathError};
+
+        let err = ToolchainPathError::Reserved {
+            component: ToolchainPathComponent::Group,
+            value: "bin".to_string(),
+        };
+        assert_eq!(
+            classify(err),
+            ExitCode::ConfigError,
+            "an unregistered error type falls through to Failure — 78 must come from the ladder"
+        );
     }
 
     // ── claim error classification (C-052 / C-071) ──────────────────────────

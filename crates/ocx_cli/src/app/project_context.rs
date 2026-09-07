@@ -23,13 +23,20 @@
 //! on every `ocx exec` / `ocx pull`. Direnv-style use re-runs `ocx exec`
 //! at every shell prompt, which made the registry write the dominant
 //! cost of warm reads. Moving registration to the write side recovers
-//! that overhead at the cost of one documented behaviour change: a
-//! pure-`ocx pull` workflow (no preceding `ocx lock`) no longer auto-
-//! registers the project on first pull. The first explicit
-//! lock-mutating command is what installs the registry entry. See ADR
-//! `adr_clean_project_backlinks.md` for the original
-//! "register at every project-tier touch" intent that this perf fix
-//! narrows.
+//! that overhead. See ADR `adr_clean_project_backlinks.md` for the
+//! original "register at every project-tier touch" intent that this perf
+//! fix narrows.
+//!
+//! **`ocx pull` still registers, by a different route.** The behaviour
+//! change this comment used to record — "a pure-`ocx pull` workflow (no
+//! preceding `ocx lock`) no longer auto-registers the project on first
+//! pull" — no longer holds: C-052 makes rendering a **project** toolchain
+//! tree register that project in the `projects/` GC ledger, and `ocx pull`
+//! renders. So the registry entry appears on the first pull again, written
+//! by the render rather than by this prologue. What stays true is the rule
+//! this module enforces: *loading* a project registers nothing. Rendering
+//! the global tree registers nothing either, under the no-self-link
+//! invariant.
 
 use std::path::{Path, PathBuf};
 
@@ -328,6 +335,48 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
         lock_path,
         config,
         lock,
+    })
+}
+
+/// The toolchain tree a project-tier composing emitter may follow (C-065,
+/// C-070).
+///
+/// One derivation for all four of them — `ocx exec`, `ocx env`,
+/// `ocx direnv export` and the `env`-mode hook — because the input that must
+/// not drift between them is `groups`: passing the default group where the
+/// invocation selected `ci` is C-070's exact defect, and it is a non-empty
+/// wrong answer that no assertion downstream can catch. `groups` is therefore
+/// the caller's already-expanded `-g` set, threaded verbatim.
+///
+/// The home comes from
+/// [`PackageManager::toolchain_home`](ocx_lib::package_manager::PackageManager::toolchain_home)
+/// over the scope `Context::toolchain_render_scope` derived, never a joined
+/// path — the same two calls `ocx pull` makes, so the emitter and the renderer
+/// cannot disagree about where the tree lives.
+///
+/// `pinned_cli` is `--pinned` / `--no-pinned` where the command has them
+/// (`ocx env`, `ocx exec`) and `None` where it does not — `None` is "the flag
+/// was not given", which lets `ocx.toml` and `OCX_TOOLCHAIN_PINNED` speak.
+///
+/// # Errors
+///
+/// The scope derivation's own I/O failure, or the home canonicalisation's.
+pub async fn toolchain_links(
+    context: &crate::app::Context,
+    config_path: &Path,
+    config: &ProjectConfig,
+    lock: &ocx_lib::project::ProjectLock,
+    groups: &[String],
+    pinned_cli: Option<bool>,
+) -> anyhow::Result<ocx_lib::package_manager::ToolchainLinks> {
+    let scope = context.toolchain_render_scope(config_path).await?;
+    let home = context.manager().toolchain_home(&scope, context.toolchain_root())?;
+    Ok(ocx_lib::package_manager::ToolchainLinks {
+        pinned: ocx_lib::package_manager::pinned_for_project(pinned_cli, config),
+        home,
+        scope,
+        lock: lock.clone(),
+        groups: groups.to_vec(),
     })
 }
 

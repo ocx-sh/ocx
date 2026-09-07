@@ -194,7 +194,12 @@ impl Exec {
         // Resolved once, then handed to both the record and the launch: a second
         // resolution could disagree with the first and make the audit trail name
         // a binary other than the one that ran.
-        let resolved = process_env.resolve_command(command);
+        // C-057/S-010: a name the composition does not provide is now an error
+        // propagated here rather than a bare name handed to `execvp`, which
+        // would have repeated the lookup against the ambient `PATH`.
+        // `CommandResolutionError` already classifies to `DataError`, so this
+        // `?` is the whole of exit 65 — and nothing is spawned on the way out.
+        let resolved = process_env.resolve_command(command)?;
         let launch = Launch::recording(
             process_env,
             RecordInputs {

@@ -58,6 +58,29 @@ pub enum Shell {
     /// https://ocx.sh/docs/in-depth/shell-integration
     Revoke(super::shell_revoke::ShellRevoke),
     /// Report the shell integration's state, and why it is inert when it is.
+    ///
+    /// Prints the decoded `__OCX_ENV_STATE` ledger as fields: what each scope
+    /// applied, whether the watch-set fingerprint still matches, whether the
+    /// project scope's constant priors are intact, and - above all - the
+    /// enumerated reason the shell is not active. That reason is one of: no
+    /// consent stamp and no matching grant, source-set drift naming the new
+    /// source, the hook disabled naming the deciding rung and tier, yielded to
+    /// direnv or mise naming the live signal observed, the ledger over cap, or
+    /// the ledger absent versus corrupt.
+    ///
+    /// Read-only: it never writes a consent stamp, never repairs the ledger
+    /// and never emits a plan. The repair gesture is `unset __OCX_ENV_STATE`
+    /// (which destroys the priors, so a new shell is the cleaner floor); this
+    /// command is how you check it worked.
+    ///
+    /// The output is diagnostics for a human to read and is never valid shell
+    /// source - deliberately not interchangeable with `ocx self activate`.
+    ///
+    /// Exits 0 in every reportable state, including an inert shell: the reason
+    /// is the payload, not a failure. Exits 74 only when `$OCX_HOME` cannot be
+    /// read.
+    ///
+    /// https://ocx.sh/docs/in-depth/shell-integration
     State(super::shell_state::ShellState),
 }
 

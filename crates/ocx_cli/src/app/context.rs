@@ -38,11 +38,16 @@ pub struct Context {
     /// referrer from the registry even offline — verify's offline semantics
     /// scope to Sigstore trust services, not the artifact registry (see
     /// `verify_client`). `remote_client` stays offline-gated for every other
-    /// command. Deferred rather than built unconditionally in `try_init`
-    /// because most `--offline` invocations never call `verify_client` and the
-    /// TLS trust-store construction it costs (~7ms) is pure waste for them;
-    /// `try_init` still forces it eagerly whenever a network client is needed
-    /// anyway (online) or an operator trust policy demands auto-verify.
+    /// command.
+    ///
+    /// The cell predates `oci::Client`'s own laziness and is now **redundant
+    /// for cost, load-bearing for identity**. Constructing a `Client` no longer
+    /// builds a TLS trust store — that moved inside `oci::Client`, onto the
+    /// first request — so the cell no longer saves the ~28 ms it was introduced
+    /// for. What it still does is hand every caller the *same* client, and
+    /// therefore the same auth store, token cache and connection pool, rather
+    /// than a fresh one per `verify_client()` call. Kept for that; not to be
+    /// read as a cost optimisation any more.
     /// `Arc` makes the cell cloneable alongside the rest of `Context`.
     registry_client_cell: std::sync::Arc<std::sync::OnceLock<oci::Client>>,
     /// Registry mirror map threaded into [`Self::registry_client_cell`]'s
@@ -58,6 +63,11 @@ pub struct Context {
     default_registry: String,
     config_trust: ocx_lib::trust::TrustConfig,
     config_view: env::OcxConfigView,
+    /// The effective `toolchain-dir` root, past every C-017–C-019 refusal, or
+    /// `None` when no tier declared one (the in-project `.ocx/toolchain`
+    /// default). Resolved once in [`Self::try_init`]; see the comment there for
+    /// why the refusal belongs to config load rather than to rendering.
+    toolchain_root: Option<ocx_lib::ToolchainRoot>,
     concurrency: package_manager::Concurrency,
     progress: ocx_lib::cli::progress::ProgressManager,
     /// The fully merged config (every tier). Exposed so `ocx config update`
@@ -528,9 +538,12 @@ impl Context {
         // single value (the per-command `--verify`/`--no-verify` flag refines it
         // in `conventions::manager_with_verify_flag`).
         let no_verify_env = env::flag(env::keys::OCX_NO_VERIFY, false);
-        // Only force the lazy registry client when a policy actually needs it —
-        // an empty `operator_policies` must not pay the ~7ms TLS-store build cost
-        // `build_auto_verify` would otherwise trigger by taking `&oci::Client`.
+        // Only build the registry client when a policy actually needs it. The
+        // TLS-store cost this branch was written against now lives inside
+        // `oci::Client` (built on the first request, not on construction), so
+        // what the branch saves today is the client's own allocation and the
+        // `build_auto_verify` work behind it — kept because an empty policy set
+        // has nothing to verify, not because construction is expensive.
         let auto_verify = if operator_policies.is_empty() {
             None
         } else {
@@ -609,6 +622,15 @@ impl Context {
         config_view.records = forwarded_records;
         check_global_project_exclusivity(&config_view)?;
         check_frozen_remote_exclusivity(&config_view)?;
+        // The `toolchain-dir` funnel, run once per invocation at config-load
+        // time (C-017–C-019, RUL-51). Resolving here — rather than at the one
+        // site that builds a home — is what makes the refusal a property of the
+        // *configuration* instead of a property of rendering: every command
+        // exits 78 on a refused root, including the read-only ones, and
+        // `ocx shell state` therefore never has to report a home it could not
+        // spell. Mapped through `ConfigError` so `classify_error` reaches the
+        // refusal's own `ClassifyExitCode` down the `source()` chain.
+        let toolchain_root = ocx_lib::ToolchainRoot::resolve(&config).map_err(ocx_lib::ConfigError::from)?;
         let concurrency = resolve_concurrency(options.jobs);
 
         Ok(Context {
@@ -631,6 +653,7 @@ impl Context {
             // extracted into `default_registry` / mirrors / patches above.
             config_trust: config.trust.clone().unwrap_or_default(),
             config_view,
+            toolchain_root,
             concurrency,
             progress,
             config,
@@ -683,6 +706,57 @@ impl Context {
     /// the flag is not silently discarded.
     pub fn project_path(&self) -> Option<&Path> {
         self.project_path.as_deref()
+    }
+
+    /// The validated `toolchain-dir` root, or `None` for the in-project
+    /// `<project>/.ocx/toolchain` default (C-002, C-016, R-W20).
+    ///
+    /// The only way to reach a root from a command, and it is already past the
+    /// containment, system-prefix, directory-ness and ownership refusals — which
+    /// is what makes [`resolve_toolchain_home`](ocx_lib::project::resolve_toolchain_home)'s
+    /// `Option<&ToolchainRoot>` parameter a funnel rather than a suggestion.
+    /// Ignored by the global tier, whose home never relocates.
+    #[must_use]
+    pub fn toolchain_root(&self) -> Option<&ocx_lib::ToolchainRoot> {
+        self.toolchain_root.as_ref()
+    }
+
+    /// Which toolchain tree this invocation renders, and — for a project — the
+    /// **canonical** project directory (C-054, D-V13).
+    ///
+    /// One derivation for all five rendering commands (`pull` and the four
+    /// mutators), because the `Project` arm's path is also the render stamp's
+    /// key and the consent stamp's, and a second spelling of it would file one
+    /// project under two `state/projects/<key>/` directories.
+    ///
+    /// `--global` selects [`RenderStampScope::Global`] outright: the global home
+    /// is `$OCX_HOME/toolchain`, has no project key, and never relocates
+    /// (C-016).
+    ///
+    /// # Errors
+    ///
+    /// The canonicalisation's own I/O failure, with the offending path
+    /// attached. Callers derive the scope **before** committing anything, so a
+    /// failure here leaves nothing half-done.
+    pub async fn toolchain_render_scope(
+        &self,
+        config_path: &Path,
+    ) -> anyhow::Result<ocx_lib::file_structure::RenderStampScope> {
+        use ocx_lib::file_structure::RenderStampScope;
+
+        if self.global() {
+            return Ok(RenderStampScope::Global);
+        }
+        // Two `stat`-walking syscalls, so the same blocking hop
+        // `project_context::record_activation_consent` makes around the very
+        // same call.
+        let path = config_path.to_path_buf();
+        let directory = tokio::task::spawn_blocking(move || {
+            ocx_lib::project::consent::canonical_project_dir(&path)
+                .map_err(|error| ocx_lib::Error::InternalFile(path, error))
+        })
+        .await??;
+        Ok(RenderStampScope::Project(directory))
     }
 
     /// Whether the global toolchain (`$OCX_HOME/ocx.toml`) was selected

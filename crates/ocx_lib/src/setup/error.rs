@@ -96,6 +96,18 @@ pub enum Error {
     /// function cannot be bypassed by a direct caller.
     #[error(transparent)]
     ManagedConfigLocked(#[from] crate::config::managed::ManagedConfigError),
+    /// A directory cannot be encoded for this host's session-PATH format, so
+    /// the session-PATH registration was refused **before** anything was
+    /// written (C-037, exit 78).
+    ///
+    /// This is the only way a session-PATH failure reaches an `Err`. A write
+    /// that is attempted and fails is
+    /// [`crate::setup::SessionPathOutcome::Failed`] — an outcome carried in the
+    /// `Ok` arm, warned about, and exit 0 (C-036). The split is the contract:
+    /// a refused run left the machine byte-identical, whereas a failed write
+    /// left it as it was and is worth a warning, not an abort.
+    #[error(transparent)]
+    SessionPath(#[from] crate::setup::session_path::SessionPathError),
 }
 
 impl ClassifyExitCode for Error {
@@ -122,6 +134,11 @@ impl ClassifyExitCode for Error {
             Error::ManagedConfigUpdateFailed(_) => None,
             // A locked-tier override rejection is a configuration policy error.
             Error::ManagedConfigLocked(_) => Some(ExitCode::ConfigError),
+            // Delegate rather than restate: `SessionPathError` owns the mapping
+            // from its own variants to a code, and this arm existing is what
+            // makes exit 78 reachable from `argv` at all — `SetupError` is
+            // already registered in `cli::classify`, the inner type is not.
+            Error::SessionPath(inner) => inner.classify(),
         }
     }
 }

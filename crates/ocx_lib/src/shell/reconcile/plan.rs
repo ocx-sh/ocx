@@ -149,8 +149,12 @@ pub fn plan(desired: &[Entry], current: &Env, ledger: &Ledger, owned_prefixes: &
 ///
 /// There is no fourth mark for the lost-ledger repair (C-006): it retires
 /// ocx-owned segments from a variable D still declares, so it rides that key's
-/// own `+` rather than producing a token of its own. See the `(false, false)`
-/// arm below for why the alternative cannot arise.
+/// own `+` rather than producing a token of its own. A key **neither** ledger
+/// records reads `+` too — the session `PATH` directories are desired on every
+/// prompt that composes a desired set at all (C-042's stat-only fast path
+/// composes none) and recorded on none (C-059, RUL-92), and a prompt whose only
+/// `PATH` contribution is that block is starting to set the variable, not
+/// stopping.
 ///
 /// When this prompt **changed which project is in effect** — both ledgers name
 /// a project and they differ — the line ends with that project's directory
@@ -209,16 +213,21 @@ pub fn summary(plan: &Plan, previous: &Ledger, next: &Ledger, theme: &Theme) -> 
             (false, true) => '+',
             (true, true) => '~',
             (true, false) => '-',
-            // Unreachable through the shipped caller, and folded in with `-`
-            // only to keep the match total. `plan` and `next_ledger` run the
-            // same A-10 admission predicate over the same `Outcome`, so every
-            // key `sets` can name is in `after`, and every key `removes` or
-            // `restores` can name comes either from the previous ledger (so it
-            // is in `before`) or from `repair_owned_segments`' key set, which
-            // is drawn from exactly those two places. The lost-ledger repair
-            // (C-006) therefore rides the `+` of the key D still declares — it
-            // never produces a token of its own.
-            (false, false) => '-',
+            // Reachable, and `+` is the honest mark. The two session `PATH`
+            // directories (C-059) are in the desired set of every prompt that
+            // composes one — C-042's stat-only fast path composes none and
+            // never reaches here — but are deliberately **not** recorded in the
+            // ledger (RUL-92): they are
+            // unconditional, so there is nothing for a later prompt to retire
+            // or revert. A prompt whose only `PATH` contribution is the session
+            // block therefore names a key neither ledger records — and this
+            // prompt does start setting it, which is what `+` says. `-` said
+            // "ocx stops setting PATH" on the very prompt it started.
+            //
+            // The lost-ledger repair (C-006) never lands here: it retires a
+            // segment of a key D still declares, so that key is in `after` and
+            // the repair rides its `(false, true)` `+`.
+            (false, false) => '+',
         };
         marks.entry(norm).or_insert_with(|| ink(theme, mark, key));
     }
@@ -250,8 +259,9 @@ fn ink(theme: &Theme, mark: char, key: &str) -> String {
     match mark {
         '+' => theme.ok(token),
         '~' => theme.tag(token),
-        // Retirement, including the `(false, false)` tail the caller folds in
-        // with `-` to keep its match total.
+        // Retirement. `-` is the only mark that reaches here: the caller's
+        // four arms produce three marks, and both arms that yield `+` are
+        // matched above.
         _ => theme.alert(token),
     }
 }
@@ -2445,11 +2455,10 @@ mod summary_tests {
     /// retires an ocx-owned segment from a variable D still declares, so the
     /// key is in `after` and the line reads `+PATH`.
     ///
-    /// This is why the `(false, false)` arm has no distinct mark — the state a
-    /// distinct mark would describe (a plan touching a key neither ledger
-    /// names) cannot arise, because `plan` and `next_ledger` run the same A-10
-    /// admission predicate over the same `Outcome`, and
-    /// `repair_owned_segments`' key set is drawn only from D and L.
+    /// The key is in `after`, so this is the `(false, true)` arm. Its sibling
+    /// below reaches `+` from the other direction — a key neither ledger
+    /// records — and the two must not be read as one case: only this one has a
+    /// `removes` entry riding the token.
     ///
     /// Red state: give `plan` an owned prefix that does not cover the stale
     /// segment (`/elsewhere`) and the repair stops firing, so `removes` empties
@@ -2471,6 +2480,40 @@ mod summary_tests {
             summary(&planned, &Ledger::empty(), &recording(&desired), &plain()).as_deref(),
             Some("ocx: +PATH"),
             "the repair rides the key's own token; it never earns a separate one"
+        );
+    }
+
+    /// **C-059 x RUL-92 — the mark for a key neither ledger records.**
+    ///
+    /// The two session `PATH` directories are contributed on every prompt that
+    /// composes a desired set and recorded in no ledger, so a prompt whose only
+    /// `PATH` contribution is
+    /// that block plans a `set` for a key that is in neither `before` nor
+    /// `after`. That is the `(false, false)` arm, and the honest mark is `+`:
+    /// ocx starts setting `PATH` here.
+    ///
+    /// The arm reached production marked `-`, behind a comment calling it
+    /// unreachable, because nothing asserted it — so a shell whose only
+    /// contribution was the session block would have been told `ocx: -PATH`,
+    /// "ocx stops setting PATH", on the very prompt that set it.
+    ///
+    /// Red state: `(false, false) => '-'` and the line reads `ocx: -PATH`.
+    #[test]
+    fn a_key_neither_ledger_records_is_started_not_retired() {
+        // The session block as `desired_entries` splices it: contributed by the
+        // desired set, absent from both ledgers.
+        let session = vec![path_entry("PATH", "/home/u/.ocx/toolchain/bin")];
+        let current = env_with(&[("PATH", "/usr/bin")]);
+        let planned = plan(&session, &current, &Ledger::empty(), &owned());
+        assert!(
+            planned.sets.iter().any(|entry| entry.key == "PATH"),
+            "the fixture must plan a PATH set, or the mark proves nothing"
+        );
+
+        assert_eq!(
+            summary(&planned, &Ledger::empty(), &Ledger::empty(), &plain()).as_deref(),
+            Some("ocx: +PATH"),
+            "a variable this prompt starts setting is `+`, whatever the ledgers decline to record"
         );
     }
 

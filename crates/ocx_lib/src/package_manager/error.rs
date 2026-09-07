@@ -107,11 +107,10 @@ pub struct OfflineManifestMissing {
 }
 
 /// Payload for the shim refusals that name a package **and** one of its claimed
-/// interface names ([`PackageErrorKind::ShimNameShadowsOcx`],
-/// [`ShimNameNotClaimed`](PackageErrorKind::ShimNameNotClaimed),
+/// interface names ([`ShimNameNotClaimed`](PackageErrorKind::ShimNameNotClaimed),
 /// [`ShimClaimUnfulfilled`](PackageErrorKind::ShimClaimUnfulfilled)).
 ///
-/// A size device, not a semantic union: the three refusals are unrelated
+/// A size device, not a semantic union: the two refusals are unrelated
 /// situations that happen to carry the same pair, and inlining it makes the
 /// variant 128 bytes — over the `clippy::result_large_err` ceiling every
 /// `Result<_, PackageErrorKind>` in the crate would then trip. Boxed for the
@@ -249,23 +248,6 @@ pub enum PackageErrorKind {
     )]
     ShimNamesNotEnumerable { package: oci::PinnedIdentifier },
 
-    /// A claimed name equals the literal name `ocx`, which cannot be shimmed
-    /// (plan contract C-009).
-    ///
-    /// The literal, never `current_exe()`'s stem: the shadowing check is
-    /// against the string the generated body falls back to, which is `ocx` on
-    /// every build however this binary happens to be named.
-    ///
-    /// A shim body resolves `${OCX_BINARY_PIN:-ocx}`, so a shim named `ocx`
-    /// ahead on `PATH` re-resolves to itself whenever the pin is unset — the
-    /// case in any plain shell that merely sourced an exported env.
-    #[error(
-        "cannot defer '{}': the claimed name '{}' is ocx's own binary name, and a shim for it would re-invoke itself",
-        _0.package,
-        _0.name
-    )]
-    ShimNameShadowsOcx(Box<ShimClaim>),
-
     /// A shim name is not a valid [`BinaryName`] (plan contract C-009 / C-011).
     ///
     /// Raised from **both** ends of the shim path, which is why the message
@@ -301,6 +283,24 @@ pub enum PackageErrorKind {
         _0.name
     )]
     ShimClaimUnfulfilled(Box<ShimClaim>),
+
+    /// A group or entry name cannot become a path component of a rendered
+    /// toolchain tree (RUL-21, D-V14).
+    ///
+    /// Lives here rather than on [`crate::Error`] because its only producers
+    /// are `package_manager` tasks — `render_toolchain` and `heal_links`,
+    /// which `?`-propagate
+    /// [`ToolchainHome::entry`](crate::file_structure::ToolchainHome::entry)
+    /// and its store-side twin. A top-level variant would mint crate-wide
+    /// vocabulary for a leaf with a natural home one layer down, and this
+    /// enum is already an entry in `cli/classify.rs`'s downcast ladder, so
+    /// exit 78 is reachable from `argv` through it.
+    ///
+    /// `transparent` because the wrapped error already names the component
+    /// (`group` or `entry`), the refused value and the reason — there is no
+    /// prefix worth adding.
+    #[error(transparent)]
+    ToolchainPath(#[from] file_structure::ToolchainPathError),
 
     /// An underlying internal error (I/O, OCI, network, etc.).
     #[error(transparent)]
@@ -405,7 +405,6 @@ impl ClassifyExitCode for PackageErrorKind {
             // and cannot honour, or a wire value that does not satisfy the
             // name grammar — malformed input, never a missing package.
             | Self::ShimNamesNotEnumerable { .. }
-            | Self::ShimNameShadowsOcx(_)
             | Self::ShimNameInvalid(_)
             | Self::ShimNameNotClaimed(_)
             | Self::ShimClaimUnfulfilled(_) => ExitCode::DataError,
@@ -423,6 +422,12 @@ impl ClassifyExitCode for PackageErrorKind {
             Self::PatchDiscovery(inner) => {
                 return Some(crate::cli::classify_error(inner as &(dyn std::error::Error + 'static)));
             }
+            // Delegate rather than restate 78 here: `ToolchainPathError` owns
+            // its own wildcard-free `classify`, so a variant added there
+            // compile-errors at that match and inherits whatever code its
+            // author chose — one source of truth for the code, exactly as
+            // `RequiredCompanionFailed` above defers to its source.
+            Self::ToolchainPath(inner) => return inner.classify(),
             // Internal wraps a full `crate::Error` — walk through classify_error
             // so the inner chain is inspected via the generic entry point.
             Self::Internal(inner) => return Some(crate::cli::classify_error(inner)),

@@ -5,7 +5,7 @@
 //! under an exclusive advisory flock on the config file itself.
 //!
 //! Public mutation helpers ([`add_binding`], [`remove_binding`],
-//! [`init_project`]) take the **resolved config file path** — typically
+//! [`init_project`], [`set_activate`]) take the **resolved config file path** — typically
 //! `<project_root>/ocx.toml` but may be `<project_root>/<custom>.toml`
 //! when the caller passed `--project=<custom>.toml`. The flock target is
 //! always the config file itself, never a hard-coded `ocx.toml`.
@@ -77,37 +77,109 @@ pub fn binding_key(identifier: &Identifier) -> String {
         .to_owned()
 }
 
-/// Validate an explicit binding name supplied via the `NAME=IDENTIFIER` form
-/// of `ocx add`.
+/// Validate the `[tools]` key `ocx add` is about to write — the explicit name
+/// from the `NAME=IDENTIFIER` form, or the key [`binding_key`] derived from
+/// the identifier.
 ///
-/// Valid names: non-empty, consist solely of ASCII alphanumeric characters,
-/// `.`, `_`, and `-` — the same character set `StringExt::to_relaxed_slug`
-/// preserves. The name is a TOML map key (and the lock entry's `name`
-/// field), nothing more — it never becomes a filesystem path segment.
-fn validate_binding_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+/// Both go through [`super::config::validate_toolchain_name`], the one grammar
+/// the **reader** applies to every `[tools]` key, `[group.<g>].tools` key and
+/// `[group.<g>]` name. The derived key is not the safer input of the two —
+/// `ocx add ghcr.io/acme/bin` derives the reserved `bin` from an identifier
+/// nobody spelled a name for, and before this guard existed nothing looked at
+/// it at all.
+///
+/// **What this buys, stated exactly.** It does not stop an unloadable file:
+/// `super::document::render_preserving` re-parses the text it renders through
+/// the same reader, so a refused name was already refused — late, with
+/// [`ProjectErrorKind::ManifestEditDiverged`], which names neither the
+/// offending key nor the rule it broke, and only after the lock was taken and
+/// the lock file resolved. What this buys is the reader's own diagnosis, at
+/// the first door, before any of that. The `my.tools` direction is the one
+/// where behaviour genuinely changes: the old hand-rolled group charset
+/// refused names the reader accepts.
+///
+/// `scope` matches the reader's own vocabulary so one string appears in the
+/// diagnostic whichever door the name came through: `"tools"` for the default
+/// group, `"group.<g>.tools"` for a named one.
+///
+/// # Errors
+///
+/// [`ProjectErrorKind::ReservedToolchainName`] or
+/// [`ProjectErrorKind::InvalidToolchainNameCharset`] — the reader's own
+/// variants, so the message a user gets from `ocx add` is the message they
+/// would get from the file.
+fn validate_tool_key(key: &str, group: Option<&str>, path: &Path) -> Result<(), Error> {
+    let scope = match group {
+        None => "tools".to_owned(),
+        Some(group_name) => format!("group.{group_name}.tools"),
+    };
+    super::config::validate_toolchain_name(&scope, key, path)
 }
 
 /// Validate a group name supplied via `--group`.
 ///
-/// Valid names: non-empty, consist solely of ASCII alphanumeric characters,
-/// hyphens (`-`), and underscores (`_`). Rejects `/`, `\`, NUL bytes,
-/// `..` sequences, and any other character not in that set.
+/// Two rules, in the reader's own order:
 ///
-/// Also rejects the reserved keywords `default` and `all` — both are
-/// reserved group selectors that cannot be declared as literal `[group.*]`
-/// tables or used as group names in mutating commands (`ocx add`,
-/// `ocx remove`). The error variant is `InvalidGroupName` (same class as
-/// other unusable group names; no new variant needed per plan §Reserved Name
-/// Enforcement).
-fn validate_group_name(name: &str) -> bool {
-    if name == super::internal::DEFAULT_GROUP || name == super::internal::ALL_GROUP {
-        return false;
+/// 1. The reserved selectors `default` and `all`, compared **ASCII
+///    case-folded** — `[group.Default]` silently coexisting with the `default`
+///    group is exactly the collision the reservation exists to stop, and the
+///    reader folds case for the same comparison.
+/// 2. Everything else is [`super::config::validate_toolchain_name`]: the same
+///    charset, the same 64-byte cap, and the same `bin` reservation the reader
+///    applies to a `[group.<g>]` name.
+///
+/// Rule 2 replaces a hand-rolled `is_alphanumeric()` test that was wrong in
+/// both directions: `is_alphanumeric` is **Unicode**, so it admitted `café`,
+/// which the reader refuses; and it excluded `.`, so it refused `my.tools`,
+/// which the reader accepts.
+///
+/// # The charset refusal is a **usage** fault here, not a config one (RUL-73)
+///
+/// Rule 2 applies the *reader's* charset to a value nobody put in a file, and
+/// the reader's [`ProjectErrorKind::InvalidToolchainNameCharset`] classifies as
+/// `ConfigError` (78) — the right answer for what an `ocx.toml` contains and
+/// the wrong one for what a user typed. `ocx add --group '../../etc'` exited 64
+/// through [`ProjectErrorKind::InvalidGroupName`] until C-014's shared
+/// validator silently reclassified it, so the charset arm is re-attributed
+/// back here, at the one door a command-line group name comes through.
+/// `project/config.rs`'s parse-time validator is untouched and still answers 78
+/// for the identical name read out of a file.
+///
+/// The `bin` reservation is **not** re-attributed: it is a distinct refusal
+/// with its own message and its own contract (C-013/C-015), and RUL-73 scopes
+/// this change to the charset check.
+///
+/// # Errors
+///
+/// [`ProjectErrorKind::InvalidGroupName`] for a reserved selector or a name
+/// outside the toolchain charset — both usage faults in `--group`, exit 64.
+/// Otherwise the reader's own [`ProjectErrorKind::ReservedToolchainName`].
+fn validate_group_name(name: &str, path: &Path) -> Result<(), Error> {
+    if name.eq_ignore_ascii_case(super::internal::DEFAULT_GROUP)
+        || name.eq_ignore_ascii_case(super::internal::ALL_GROUP)
+    {
+        return Err(invalid_group_name(name, path));
     }
-    !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    super::config::validate_toolchain_name("group", name, path).map_err(|error| match &error {
+        // The reader's charset diagnosis is not carried through:
+        // `InvalidGroupName` holds only a name. That is the trade RUL-73 makes
+        // — a precise sentence at the wrong exit code is worse than a general
+        // one at the right code, because only the code is machine-readable.
+        Error::Project(project_error)
+            if matches!(project_error.kind, ProjectErrorKind::InvalidToolchainNameCharset { .. }) =>
+        {
+            invalid_group_name(name, path)
+        }
+        _ => error,
+    })
+}
+
+/// [`ProjectErrorKind::InvalidGroupName`] for `name`, attached to `path`.
+fn invalid_group_name(name: &str, path: &Path) -> Error {
+    Error::Project(ProjectError::new(
+        path.to_path_buf(),
+        ProjectErrorKind::InvalidGroupName { name: name.to_owned() },
+    ))
 }
 
 // ── public API ────────────────────────────────────────────────────────────
@@ -176,9 +248,12 @@ async fn read_config_via_guard(
 /// Same set as [`add_binding`] minus the I/O / parse variants
 /// (`Io`, `FileTooLarge`, `TomlParse`, `TomlSerialize`, `Locked`):
 ///
-/// - [`ProjectErrorKind::InvalidBindingName`] — `name` is empty or contains
-///   characters outside `[A-Za-z0-9._-]`.
-/// - [`ProjectErrorKind::InvalidGroupName`] — `group` contains invalid characters.
+/// - [`ProjectErrorKind::InvalidGroupName`] — `group` is a reserved selector
+///   (`default` or `all`, ASCII-case-folded).
+/// - [`ProjectErrorKind::ReservedToolchainName`] /
+///   [`ProjectErrorKind::InvalidToolchainNameCharset`] — `group`, or the key
+///   this mutation would write, is not a name the reader accepts. The key is
+///   checked whether it was typed or derived (R-W21).
 /// - [`ProjectErrorKind::BindingAlreadyExists`] — the key already exists in
 ///   the target group.
 pub fn add_binding_in_memory(
@@ -188,29 +263,16 @@ pub fn add_binding_in_memory(
     name: Option<&str>,
     group: Option<&str>,
 ) -> Result<String, Error> {
-    if let Some(binding_name) = name
-        && !validate_binding_name(binding_name)
-    {
-        return Err(Error::Project(ProjectError::new(
-            path.to_path_buf(),
-            ProjectErrorKind::InvalidBindingName {
-                name: binding_name.to_owned(),
-            },
-        )));
+    if let Some(group_name) = group {
+        validate_group_name(group_name, path)?;
     }
 
-    if let Some(group_name) = group
-        && !validate_group_name(group_name)
-    {
-        return Err(Error::Project(ProjectError::new(
-            path.to_path_buf(),
-            ProjectErrorKind::InvalidGroupName {
-                name: group_name.to_owned(),
-            },
-        )));
-    }
-
+    // One guard for both doors: the explicit `NAME=IDENTIFIER` key and the one
+    // `binding_key` derives. Validating only the typed name is what let
+    // `ocx add ghcr.io/acme/bin` carry the reserved `bin` all the way to the
+    // write and fail there with a diagnosis naming neither.
     let key = name.map_or_else(|| binding_key(identifier), str::to_owned);
+    validate_tool_key(&key, group, path)?;
 
     // Duplicate check: scoped to the target group only.
     match group {
@@ -267,8 +329,11 @@ pub fn add_binding_in_memory(
 ///
 /// # Errors
 ///
-/// - [`ProjectErrorKind::InvalidGroupName`] — `group` contains characters
-///   outside `[a-zA-Z0-9_-]`, is empty, or contains path traversal sequences.
+/// - [`ProjectErrorKind::InvalidGroupName`] — `group` is a reserved selector
+///   (`default` or `all`, ASCII-case-folded).
+/// - [`ProjectErrorKind::ReservedToolchainName`] /
+///   [`ProjectErrorKind::InvalidToolchainNameCharset`] — `group`, or the key
+///   this mutation would write, is not a name the reader accepts.
 /// - [`ProjectErrorKind::Io`] — the config file could not be read or written.
 /// - [`ProjectErrorKind::FileTooLarge`] — the config file exceeds the 64 KiB cap.
 /// - [`ProjectErrorKind::TomlParse`] — the config could not be parsed from TOML.
@@ -277,8 +342,6 @@ pub fn add_binding_in_memory(
 /// - [`ProjectErrorKind::ManifestEditDiverged`] — the format-preserving edit
 ///   produced a document that no longer describes the staged configuration;
 ///   the write is abandoned rather than falling back to a whole-file rewrite.
-/// - [`ProjectErrorKind::InvalidBindingName`] — `name` is empty or contains
-///   characters outside `[A-Za-z0-9._-]`.
 /// - [`ProjectErrorKind::BindingAlreadyExists`] — the binding key already
 ///   exists in the target group. The same name may exist in other groups
 ///   without error.
@@ -292,15 +355,8 @@ pub async fn add_binding(
 ) -> Result<(), Error> {
     // Validate the group name before acquiring the lock so invalid input is
     // rejected cheaply — no filesystem operations needed.
-    if let Some(group_name) = group
-        && !validate_group_name(group_name)
-    {
-        return Err(Error::Project(ProjectError::new(
-            config_path.to_path_buf(),
-            ProjectErrorKind::InvalidGroupName {
-                name: group_name.to_owned(),
-            },
-        )));
+    if let Some(group_name) = group {
+        validate_group_name(group_name, config_path)?;
     }
 
     let mut guard = acquire_project_lock_for_file(config_path).await?;
@@ -548,6 +604,67 @@ pub fn init_project_at_default(project_root: &Path) -> Result<PathBuf, Error> {
     init_project(&project_root.join("ocx.toml"))
 }
 
+/// Persist the toolchain `activate` mode as the top-level `activate` key of
+/// the config file at `config_path`.
+///
+/// The writer behind `ocx self setup --toolchain-activate`, whose target is
+/// always the **global** `$OCX_HOME/ocx.toml`. Omitting the flag calls nothing,
+/// so a run that does not ask for the key leaves the file byte-identical —
+/// the same contract the `[shell]` toggles keep for `config.toml`.
+///
+/// **Creates the file when absent, carrying only this key.** A machine that
+/// has never run `ocx --global add` has no `$OCX_HOME/ocx.toml`, and the
+/// alternative — refusing, or writing [`init_project`]'s `[tools]` template —
+/// would either make the flag conditional on unrelated state or invent
+/// declarations the user did not make.
+///
+/// Every write goes through [`acquire_project_lock_for_file`] and the shared
+/// format-preserving render, exactly as [`add_binding`] does. There is no
+/// second `toml_edit` site: a comment, a key order or a spacing convention
+/// that survives `ocx add` must survive this too, and two editors of one file
+/// format is how that stops being true.
+///
+/// **The create-when-absent case needs no branch.** `LockedFile::try_exclusive`
+/// creates the file it locks, so an absent `$OCX_HOME/ocx.toml` is read back as
+/// empty text, and the render inserts one scalar into an empty document — no
+/// `[tools]` table, no template, only the key. The same acquire also runs the
+/// shipped symlink refusal, so a symlink planted at the path is refused rather
+/// than followed.
+///
+/// **This does not stale `ocx.lock`.** [`super::declaration_hash`] covers
+/// `tools` and `group.*.tools` only, so writing `activate` cannot force a
+/// re-lock — and the cached hash on `config` stays valid, which is why this is
+/// the one mutator here that does not invalidate it.
+///
+/// # Errors
+///
+/// The [`add_binding`] set minus the binding-specific variants:
+/// [`ProjectErrorKind::Io`], [`ProjectErrorKind::FileTooLarge`],
+/// [`ProjectErrorKind::TomlParse`], [`ProjectErrorKind::ManifestEditParse`],
+/// [`ProjectErrorKind::ManifestEditDiverged`], [`ProjectErrorKind::Locked`].
+pub async fn set_activate(config_path: &Path, mode: crate::activate::ActivateMode) -> Result<(), Error> {
+    let mut guard = acquire_project_lock_for_file(config_path).await?;
+
+    let (original, mut config) = read_config_via_guard(&mut guard, config_path).await?;
+    if config.activate == Some(mode) {
+        // Already what was asked for: leave the bytes alone rather than
+        // re-render them, so a re-run cannot disturb decor or mtime.
+        return Ok(());
+    }
+    config.activate = Some(mode);
+
+    let serialized = super::document::render_preserving(&original, &config, config_path)?;
+    // Rewrite in place through the lock-owning handle (see `add_binding`).
+    guard.replace_bytes(serialized.as_bytes()).await.map_err(|e| {
+        Error::Project(ProjectError::new(
+            config_path.to_path_buf(),
+            ProjectErrorKind::Io(std::io::Error::other(e)),
+        ))
+    })?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -746,26 +863,282 @@ mod tests {
         );
     }
 
-    /// An explicit name outside `[A-Za-z0-9._-]`, or an empty one, is rejected
-    /// before anything is written.
+    /// An explicit name the reader's charset refuses is rejected before
+    /// anything is written — and with the reader's own error, so `ocx add`
+    /// and a hand-written `ocx.toml` give one answer for one string (R-W21).
+    ///
+    /// The candidates cover both halves of the merged charset variant: three
+    /// off-charset spellings, one leading-punctuation spelling the old
+    /// `[A-Za-z0-9._-]` test admitted, and one over the 64-byte cap.
     #[tokio::test(flavor = "multi_thread")]
     async fn add_binding_rejects_invalid_explicit_name() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
         let id = test_id("example.com", "gitlab/cli", "1.0");
+        let too_long = "a".repeat(65);
 
-        for candidate in ["gitlab/cli", "", "with space"] {
+        for candidate in [
+            "gitlab/cli",
+            "",
+            "with space",
+            "-leading",
+            ".leading",
+            "_leading",
+            too_long.as_str(),
+        ] {
             let err = add_binding(&toml(dir.path()), &id, Some(candidate), None)
                 .await
                 .expect_err("invalid explicit name must be rejected");
             assert!(
-                matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::InvalidBindingName { name } if name == candidate)),
-                "expected InvalidBindingName for {candidate:?}; got: {err}"
+                matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::InvalidToolchainNameCharset { scope, name } if scope == "tools" && name == candidate)),
+                "expected InvalidToolchainNameCharset {{ scope: \"tools\" }} for {candidate:?}; got: {err}"
             );
         }
 
         let cfg = reload_config(dir.path());
         assert!(cfg.tools.is_empty(), "a rejected name must leave [tools] untouched");
+    }
+
+    /// R-W21: the **derived** key is validated too. `ocx add ghcr.io/acme/bin`
+    /// names no key at all, and the basename it derives is the one word the
+    /// reader reserves — so validating only the typed name leaves the one
+    /// input nobody typed unguarded.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_binding_rejects_a_derived_key_the_reader_refuses() {
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let id = test_id("example.com", "acme/bin", "1.0");
+
+        let err = add_binding(&toml(dir.path()), &id, None, None)
+            .await
+            .expect_err("a derived `bin` key must be rejected");
+        assert!(
+            matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::ReservedToolchainName { scope, name } if scope == "tools" && name == "bin")),
+            "expected ReservedToolchainName for the derived key; got: {err}"
+        );
+
+        let cfg = reload_config(dir.path());
+        assert!(cfg.tools.is_empty(), "a rejected key must leave [tools] untouched");
+    }
+
+    /// C-013/C-015 from the writer side: `bin` is reserved as a tool name and
+    /// as a group name, ASCII-case-folded, whichever way it is spelled.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_binding_rejects_the_reserved_bin_name_case_folded() {
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let id = test_id("example.com", "acme/tool", "1.0");
+
+        for candidate in ["bin", "Bin", "BIN"] {
+            let err = add_binding(&toml(dir.path()), &id, Some(candidate), None)
+                .await
+                .expect_err("a reserved tool name must be rejected");
+            assert!(
+                matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::ReservedToolchainName { scope, name } if scope == "tools" && name == candidate)),
+                "expected ReservedToolchainName for tool {candidate:?}; got: {err}"
+            );
+
+            let err = add_binding(&toml(dir.path()), &id, None, Some(candidate))
+                .await
+                .expect_err("a reserved group name must be rejected");
+            assert!(
+                matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::ReservedToolchainName { scope, name } if scope == "group" && name == candidate)),
+                "expected ReservedToolchainName for group {candidate:?}; got: {err}"
+            );
+        }
+    }
+
+    /// R-W21: the group charset was `char::is_alphanumeric`, which is
+    /// **Unicode**, and excluded `.`. It was therefore wrong in both
+    /// directions at once — admitting a name the reader refuses and refusing
+    /// one the reader accepts. Both directions are asserted here, because
+    /// fixing only the first would still leave `ocx add -g my.tools` unusable.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_binding_group_charset_matches_the_reader_in_both_directions() {
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let id = test_id("example.com", "cmake", "3.28");
+
+        let err = add_binding(&toml(dir.path()), &id, None, Some("café"))
+            .await
+            .expect_err("a non-ASCII group name must be rejected");
+        // RUL-73 — refused by the reader's charset, reported as the *usage*
+        // fault a `--group` value is (`InvalidGroupName`, exit 64). Which names
+        // the charset admits is what R-W21 is about, and that is unchanged:
+        // `café` is still refused and `my.tools` still accepted below.
+        assert!(
+            matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::InvalidGroupName { name } if name == "café")),
+            "expected InvalidGroupName for a Unicode group name; got: {err}"
+        );
+
+        add_binding(&toml(dir.path()), &id, None, Some("my.tools"))
+            .await
+            .expect("a dotted group name is legal to the reader and must be legal to the writer");
+        let cfg = reload_config(dir.path());
+        assert!(
+            cfg.groups
+                .get("my.tools")
+                .is_some_and(|g| g.tools.contains_key("cmake")),
+            "the dotted group must round-trip through the reader"
+        );
+    }
+
+    /// D-V17 from the writer side: the reserved-selector comparison folds
+    /// ASCII case, so `[group.Default]` cannot be written to coexist with the
+    /// `default` group it would collide with.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_binding_rejects_a_reserved_selector_whatever_its_case() {
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let id = test_id("example.com", "cmake", "3.28");
+
+        for candidate in ["Default", "DEFAULT", "All", "ALL"] {
+            let err = add_binding(&toml(dir.path()), &id, None, Some(candidate))
+                .await
+                .expect_err("a case variant of a reserved selector must be rejected");
+            assert!(
+                matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::InvalidGroupName { name } if name == candidate)),
+                "expected InvalidGroupName for {candidate:?}; got: {err}"
+            );
+        }
+    }
+
+    // ── set_activate (C-042) ─────────────────────────────────────────────
+
+    /// C-042: an absent `$OCX_HOME/ocx.toml` is created carrying **only** the
+    /// key — no `[tools]` template, no invented declarations.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_activate_creates_the_file_with_only_that_key() {
+        use crate::activate::ActivateMode;
+
+        let dir = tempdir().unwrap();
+        let target = toml(dir.path());
+        assert!(!target.exists(), "the fixture starts with no ocx.toml");
+
+        set_activate(&target, ActivateMode::Bin).await.expect("write succeeds");
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "activate = \"bin\"\n");
+        assert_eq!(reload_config(dir.path()).activate, Some(ActivateMode::Bin));
+    }
+
+    /// C-042: an existing file keeps everything the typed model does not own —
+    /// the schema directive, the bindings, the comments — and gains one key.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_activate_leaves_the_rest_of_the_file_alone() {
+        use crate::activate::ActivateMode;
+
+        let dir = tempdir().unwrap();
+        let original = "#:schema https://ocx.sh/schemas/project/v1.json\n\
+                        # my toolchain\n\
+                        \n\
+                        [tools]\n\
+                        cmake    =    \"example.com/cmake:3.28\"  # pinned\n";
+        write_minimal_toml(dir.path(), original);
+
+        set_activate(&toml(dir.path()), ActivateMode::None)
+            .await
+            .expect("write succeeds");
+
+        let rendered = fs::read_to_string(toml(dir.path())).unwrap();
+        assert!(rendered.contains("#:schema"), "{rendered}");
+        assert!(rendered.contains("# my toolchain"), "{rendered}");
+        assert!(
+            rendered.contains("cmake    =    \"example.com/cmake:3.28\"  # pinned"),
+            "the untouched binding keeps its spacing and comment: {rendered}"
+        );
+        assert_eq!(reload_config(dir.path()).activate, Some(ActivateMode::None));
+    }
+
+    /// Re-running `ocx self setup --toolchain-activate <same>` must leave the
+    /// file **byte-identical**, not merely equivalent — the same contract the
+    /// `[shell]` toggles keep for `config.toml`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_activate_is_byte_identical_on_a_re_run() {
+        use crate::activate::ActivateMode;
+
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+
+        set_activate(&toml(dir.path()), ActivateMode::Env).await.unwrap();
+        let first = fs::read_to_string(toml(dir.path())).unwrap();
+        set_activate(&toml(dir.path()), ActivateMode::Env).await.unwrap();
+        assert_eq!(fs::read_to_string(toml(dir.path())).unwrap(), first);
+    }
+
+    /// Writing `activate` must not stale `ocx.lock`: the declaration hash
+    /// covers `tools` and `group.*.tools` only, so this key cannot force a
+    /// re-lock. Asserted rather than assumed, because the cheapest wrong
+    /// implementation — folding the key into the hash — would make every
+    /// `ocx self setup --toolchain-activate` demand an `ocx lock`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_activate_does_not_stale_the_lock() {
+        use crate::activate::ActivateMode;
+        use crate::project::declaration_hash;
+
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\ncmake = \"example.com/cmake:3.28\"\n");
+        let before = declaration_hash(&reload_config(dir.path()));
+
+        set_activate(&toml(dir.path()), ActivateMode::Bin).await.unwrap();
+
+        assert_eq!(declaration_hash(&reload_config(dir.path())), before);
+    }
+
+    /// R-W21's whole point, as one property: **the writer accepts a name if
+    /// and only if the reader does.** Each candidate is put through
+    /// `add_binding` and, independently, through a hand-written `ocx.toml`
+    /// carrying the same key — and the two verdicts must agree.
+    ///
+    /// **The direction this test uniquely guards is "the writer refuses a
+    /// name the reader accepts"** — the half R-W21's `my.tools` case names,
+    /// and the half no other test here covers as a property rather than as a
+    /// listed example. Measured, not assumed: deleting the key guard leaves
+    /// this test **green**, because `render_preserving` re-parses what it
+    /// renders and refuses the write a second time. Two independent guards
+    /// defend the other direction, so neither one alone reds it.
+    ///
+    /// That second guard is also why the shipped defect was not a corrupt
+    /// file: pre-fix, `ocx add ghcr.io/acme/bin` failed late with
+    /// `ManifestEditDiverged` — a diagnosis naming nothing the user could act
+    /// on — rather than writing an unloadable `ocx.toml`. Validating up front
+    /// is what turns that into a named refusal before the lock is taken.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_writer_accepts_exactly_the_names_the_reader_accepts() {
+        let too_long = "a".repeat(65);
+        let candidates = [
+            "cmake",
+            "python3.13",
+            "MSBuild",
+            "my-tool",
+            "my.tool",
+            "my_tool",
+            "bin",
+            "Bin",
+            "-leading",
+            ".leading",
+            "_leading",
+            "with space",
+            "gitlab/cli",
+            "café",
+            "",
+            too_long.as_str(),
+        ];
+
+        for candidate in candidates {
+            let dir = tempdir().unwrap();
+            write_minimal_toml(dir.path(), "[tools]\n");
+            let id = test_id("example.com", "acme/tool", "1.0");
+
+            let written = add_binding(&toml(dir.path()), &id, Some(candidate), None).await.is_ok();
+            let read =
+                ProjectConfig::from_toml_str(&format!("[tools]\n\"{candidate}\" = \"example.com/acme/tool:1.0\"\n"))
+                    .is_ok();
+
+            assert_eq!(
+                written, read,
+                "writer and reader disagree about {candidate:?}: writer accepted = {written}, reader accepted = {read}"
+            );
+        }
     }
 
     /// A binding added under an explicit name is removable by that name, and
@@ -1103,5 +1476,184 @@ mod tests {
                 .unwrap_or(false),
             "cmake must appear under [group.ci] after add with normal group name"
         );
+    }
+
+    /// R-W21 / E-R10 / D-V14: **no second name grammar lives in this module.**
+    ///
+    /// The finding is not "the writer refuses the wrong names" — it is that a
+    /// second copy of the grammar existed at all, and that it had drifted from
+    /// the reader's in both directions. A fix that leaves a hand-rolled charset
+    /// loop beside the shared validator re-creates the drift the moment either
+    /// side changes, so the deleted validators must stay deleted.
+    ///
+    /// `SLUG_MAX_LEN` is included because RUL-21 makes a hand-rolled length cap
+    /// the other half of the same copy.
+    ///
+    /// Comment lines and the test module are cut first: the doc comments in
+    /// this file quote `is_alphanumeric` when they explain what was removed,
+    /// and this test's own needle list is a literal in the file it scans.
+    #[test]
+    fn no_second_name_grammar_lives_in_this_module() {
+        let source = include_str!("mutate.rs");
+        let code: String = source
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or(source)
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            code.contains("validate_toolchain_name"),
+            "the writer must route through the reader's grammar, not re-implement it"
+        );
+        for forbidden in [
+            "is_alphanumeric",
+            "is_ascii_alphanumeric",
+            "SLUG_MAX_LEN",
+            "fn validate_binding_name",
+        ] {
+            assert!(
+                !code.contains(forbidden),
+                "{forbidden:?} is a second copy of the grammar `project::config` owns"
+            );
+        }
+    }
+
+    /// C-042 / E-C9: the write path is new, so the symlink refusal is asserted
+    /// rather than assumed. `$OCX_HOME/ocx.toml` is a path an attacker who can
+    /// write the store root could replace with a link to something else, and
+    /// the acquire is what refuses to follow it.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_activate_refuses_a_symlink_at_the_config_path() {
+        use crate::activate::ActivateMode;
+
+        let dir = tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere.toml");
+        fs::write(&elsewhere, "[tools]\n").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, toml(dir.path())).unwrap();
+
+        let err = set_activate(&toml(dir.path()), ActivateMode::Bin)
+            .await
+            .expect_err("a symlink at the config path must be refused, not followed");
+
+        assert!(
+            matches!(&err, Error::Project(pe) if !matches!(pe.kind, ProjectErrorKind::ManifestEditDiverged)),
+            "expected a refusal from the lock acquire; got: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(&elsewhere).unwrap(),
+            "[tools]\n",
+            "the link target must not be written through"
+        );
+    }
+
+    /// C-042 / E-C10: another process holding the flock yields
+    /// [`ProjectErrorKind::Locked`] after the contention budget — never a
+    /// half-written file. The sibling of
+    /// `add_binding_returns_locked_when_ocx_toml_already_locked`, asserted for
+    /// the new writer because it is a second entry into the same lock.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_activate_returns_locked_when_ocx_toml_already_locked() {
+        use crate::activate::ActivateMode;
+
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let guard = LockedFile::try_exclusive(&toml(dir.path()))
+            .await
+            .unwrap()
+            .expect("first exclusive lock on ocx.toml must succeed");
+
+        let err = set_activate(&toml(dir.path()), ActivateMode::Bin)
+            .await
+            .expect_err("set_activate must fail with Locked while ocx.toml is exclusively held");
+
+        assert!(
+            matches!(&err, Error::Project(pe) if matches!(pe.kind, ProjectErrorKind::Locked)),
+            "expected ProjectErrorKind::Locked; got: {err}"
+        );
+
+        // Released before the file is read back. `flock` is advisory, but
+        // Windows' `LockFileEx` is mandatory over the locked range and fails an
+        // unrelated handle's read with `ERROR_LOCK_VIOLATION` — so reading
+        // through the live guard measures the platform's lock semantics, not
+        // whether the contended write left a byte.
+        drop(guard);
+        assert_eq!(
+            fs::read_to_string(toml(dir.path())).unwrap(),
+            "[tools]\n",
+            "a contended write must leave the file byte-identical"
+        );
+    }
+
+    /// C-042 / E-C12: a file whose last line carries no trailing newline must
+    /// not have the `activate` key glued onto it.
+    ///
+    /// The table-less case is the one that reaches `document::take_header` —
+    /// `toml_edit` files every comment of a table-less document under trailing
+    /// trivia — and `$OCX_HOME/ocx.toml` is table-less exactly when a corporate
+    /// rollout creates it for this key alone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_activate_does_not_glue_the_key_onto_an_unterminated_last_line() {
+        use crate::activate::ActivateMode;
+
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "# how the toolchain reaches PATH");
+
+        set_activate(&toml(dir.path()), ActivateMode::Env)
+            .await
+            .expect("write succeeds");
+
+        let rendered = fs::read_to_string(toml(dir.path())).unwrap();
+        assert!(
+            rendered
+                .lines()
+                .any(|line| line.trim_start().starts_with("activate") && line.contains("\"env\"")),
+            "the key must occupy its own line: {rendered:?}"
+        );
+        assert!(rendered.contains("# how the toolchain reaches PATH"), "{rendered:?}");
+        assert_eq!(reload_config(dir.path()).activate, Some(ActivateMode::Env));
+    }
+
+    /// C-042 / E-C8: every legal value round-trips through the **parser**, not
+    /// through a text grep — a grep for `activate = "bin"` passes for a file
+    /// the reader would refuse.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_activate_mode_round_trips_through_the_reader() {
+        use crate::activate::ActivateMode;
+
+        for mode in [ActivateMode::Env, ActivateMode::Bin, ActivateMode::None] {
+            let dir = tempdir().unwrap();
+            write_minimal_toml(dir.path(), "[tools]\ncmake = \"example.com/cmake:3.28\"\n");
+
+            set_activate(&toml(dir.path()), mode).await.expect("write succeeds");
+
+            let cfg = reload_config(dir.path());
+            assert_eq!(cfg.activate, Some(mode), "for {mode}");
+            assert!(
+                cfg.tools.contains_key("cmake"),
+                "the binding must survive the activate write: {mode}"
+            );
+        }
+    }
+
+    /// C-042 / E-C4: an existing `activate` set to a **different** value is
+    /// replaced in place and the surrounding bytes survive.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_activate_replaces_a_different_value_in_place() {
+        use crate::activate::ActivateMode;
+
+        let dir = tempdir().unwrap();
+        let original = "#:schema https://ocx.sh/schemas/project/v1.json\nactivate = \"env\"\n\n[tools]\ncmake = \"example.com/cmake:3.28\"\n";
+        write_minimal_toml(dir.path(), original);
+
+        set_activate(&toml(dir.path()), ActivateMode::None)
+            .await
+            .expect("write succeeds");
+
+        let rendered = fs::read_to_string(toml(dir.path())).unwrap();
+        assert_eq!(rendered, original.replace("activate = \"env\"", "activate = \"none\""));
     }
 }

@@ -54,20 +54,6 @@ pub struct Remove {
 
 impl Remove {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        // Validate the group name early — before flock acquisition — so a
-        // typo doesn't lock out other writers waiting on `ocx.toml`.
-        if let Some(ref g) = self.group
-            && g != "default"
-        {
-            let valid = !g.is_empty() && g.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_');
-            if !valid {
-                return Err(anyhow::anyhow!(
-                    "invalid group name '{}': must be non-empty and contain only alphanumeric characters, '-', or '_'",
-                    g
-                ));
-            }
-        }
-
         // Acquire flock + load snapshot + predecessor. Errors propagate to
         // the `main.rs` boundary (logged + classified there).
         let guard = load_project_for_mutate(&context).await?;
@@ -161,7 +147,28 @@ impl Remove {
             }
         };
 
-        let commit = guard.commit(staged, new_lock.clone()).await?;
+        // C-054 / D-V8 / S-008 — commit, then re-render the toolchain home, so
+        // the removed tool's trampoline is pruned by the same invocation that
+        // dropped it from the lock. The scope is derived while the guard still
+        // exists; a render failure afterwards never rolls the commit back
+        // (RUL-53). `ocx remove` has no `--platform`, so the render resolves
+        // link leaves for the host.
+        let scope = context.toolchain_render_scope(guard.config_path()).await?;
+        let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
+        let commit = context
+            .manager()
+            .commit_and_render(
+                guard,
+                staged,
+                new_lock.clone(),
+                ocx_lib::package_manager::ToolchainRender {
+                    scope: &scope,
+                    toolchain_root: context.toolchain_root(),
+                    platform: &host,
+                },
+            )
+            .await?
+            .commit;
 
         // Consent write seam (C-024, A-29) — one of the six commands allowed to
         // stamp, opting in explicitly. AFTER the commit, so the stamp records
@@ -195,7 +202,6 @@ impl Remove {
             }
         }
 
-        let host = ocx_lib::oci::Platform::current().unwrap_or_else(ocx_lib::oci::Platform::any);
         let entries: Vec<LockEntry> = new_lock.tools.iter().map(|t| LockEntry::from_tool(t, &host)).collect();
         let report = LockReport::new(entries);
         context.api().report(&report)?;

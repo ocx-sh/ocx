@@ -196,6 +196,11 @@ pub struct ToolchainEnv {
     #[clap(flatten)]
     lazy_mode: options::LazyMode,
 
+    /// Top tier of the `pinned` ladder for the environment this command
+    /// composes (C-055, C-066).
+    #[clap(flatten)]
+    pinned: options::Pinned,
+
     /// Annotate each entry with its origin package or companion identifier.
     ///
     /// When `[patches]` is configured, companion overlay entries are appended
@@ -326,7 +331,15 @@ impl ToolchainEnv {
             // semantics. It stays offline, never installs, never hangs. The
             // PROJECT tier (the `else` arm) stays strict throughout: an explicit
             // project's missing/stale/corrupt `ocx.lock` IS an error.
-            match resolve_global_pinned_env(&context, &target, self.groups.names(), &env_overrides).await {
+            match resolve_global_pinned_env(
+                &context,
+                &target,
+                self.groups.names(),
+                &env_overrides,
+                self.pinned.pinned(),
+            )
+            .await
+            {
                 Ok(Some((entries, patch_start, provenance, claims))) => (entries, patch_start, provenance, claims),
                 Ok(None) => (Vec::new(), 0, Vec::new(), AdmittedClaims::default()),
                 Err(error) => return Err(error),
@@ -393,9 +406,23 @@ impl ToolchainEnv {
             // it would otherwise execute in.
             let mut project_env = ocx_lib::project::project_env_entries(&ctx.config, &ctx.config_path, &expanded);
             project_env.extend(env_overrides);
+            // C-065/C-070: the groups this invocation selected, healed and
+            // probed once inside `resolve_env_with_attribution`. `ocx env` and
+            // `ocx exec` build this identically — that is what makes item 11's
+            // parity oracle (`env` ≡ `exec`) hold in the link lane too.
+            let toolchain = crate::app::project_context::toolchain_links(
+                &context,
+                &ctx.config_path,
+                &ctx.config,
+                &ctx.lock,
+                &expanded,
+                self.pinned.pinned(),
+            )
+            .await?;
             let scope = ocx_lib::package_manager::EnvScope::Project {
                 no_patches: ctx.config.no_patches_repositories(),
                 env: project_env,
+                toolchain: Some(Box::new(toolchain)),
             };
             manager
                 .resolve_env_with_attribution(&infos, false, scope, &target)
@@ -460,8 +487,13 @@ impl ToolchainEnv {
         // `<name>.exe` shim, and `.EXE` is unconditionally in the default
         // Windows PATHEXT — nothing to inject for bare-name resolution.
 
-        if !context.api().is_json() {
-            ocx_lib::log::warn!("default output is not eval-safe; use --shell=bash to activate");
+        // Only where the footgun is: a non-terminal stdout is the
+        // `eval "$(ocx env)"` case. See `conventions::not_eval_safe_advisory`.
+        if let Some(advisory) = crate::conventions::not_eval_safe_advisory(
+            context.api().is_json(),
+            std::io::IsTerminal::is_terminal(&std::io::stdout()),
+        ) {
+            ocx_lib::log::warn!("{advisory}");
         }
 
         let binaries = api::data::env::BinaryAttribution::from_pairs(&attribution.binaries);
@@ -526,6 +558,26 @@ fn group_of(origin: &Origin) -> Option<&str> {
 /// caller PROPAGATES that error: the global tier fails closed on a mandated
 /// overlay exactly as the project tier does. Never exit 74.
 ///
+/// # `pinned_cli` — the CLI tier of the `pinned` ladder (C-007, C-055)
+///
+/// `options::Pinned::pinned()` from the invocation, or `None` for a caller that
+/// has no such flag. `None` means "neither flag was given", never `Some(false)`:
+/// it leaves the global `ocx.toml`'s `pinned` key and `OCX_TOOLCHAIN_PINNED`
+/// deciding the lane, which is what the per-prompt hook
+/// ([`global_prompt_entries`](crate::command::self_group::activate)) passes so
+/// that path resolves from the file and environment tiers exactly as before.
+///
+/// It reaches the ladder through the one resolver every tier uses,
+/// [`pinned_for_project`](ocx_lib::package_manager::pinned_for_project), in
+/// **both** arms of the config read — a global file that will not parse yields
+/// the same absent file tier a file stating nothing would, and a typed
+/// `--pinned` still outranks it. `ocx --global exec` already honoured the flag
+/// (it routes through the project loader, which is `--global`-aware); this is
+/// what stops its sibling from parsing the flag and discarding it.
+///
+/// This adds **no failure path**: `pinned_for_project` is total, so the
+/// never-fail contract above is unchanged.
+///
 /// # Offline guarantee
 ///
 /// Resolution goes through `manager().offline_view(...)` — it MUST NOT contact
@@ -550,9 +602,10 @@ pub(crate) async fn resolve_global_pinned_env(
     target: &Platform,
     groups: &[String],
     env_overrides: &[Entry],
+    pinned_cli: Option<bool>,
 ) -> anyhow::Result<Option<(Vec<Entry>, usize, Vec<PatchProvenance>, AdmittedClaims)>> {
     let home = context.file_structure().root();
-    let global_config = home.join("ocx.toml");
+    let global_config = ocx_lib::project::ProjectConfig::global_manifest_path(home);
     let global_lock_path = lock_path_for(&global_config);
 
     // Per-package opt-out AND the global file's own `[env]` / group `[env]`,
@@ -567,7 +620,11 @@ pub(crate) async fn resolve_global_pinned_env(
     // applies to `ocx --global env` / `ocx --global run` and never composes
     // into a project-tier resolution — the two tiers are resolved by disjoint
     // branches of `execute`, never unioned.
-    let (no_patches, mut project_env) = match ocx_lib::project::ProjectConfig::from_path(&global_config).await {
+    // The third element is the resolved `pinned` lane (C-007, RUL-104), taken
+    // in the same arm as the config it reads: an unparseable global file yields
+    // the floor, which is the following lane, exactly as a file stating nothing
+    // would.
+    let (no_patches, mut project_env, pinned) = match ocx_lib::project::ProjectConfig::from_path(&global_config).await {
         Ok(config) => {
             // Expand `all` against the CONFIG's groups, not the lock's: a group
             // that declares only `[group.<name>.env]` and no tools has no lock
@@ -577,9 +634,14 @@ pub(crate) async fn resolve_global_pinned_env(
                 env_groups = vec![DEFAULT_GROUP.to_owned()];
             }
             let env = ocx_lib::project::project_env_entries(&config, &global_config, &env_groups);
-            (config.no_patches_repositories(), env)
+            let pinned = ocx_lib::package_manager::pinned_for_project(pinned_cli, &config);
+            (config.no_patches_repositories(), env, pinned)
         }
-        Err(_) => (std::collections::BTreeSet::new(), Vec::new()),
+        Err(_) => (
+            std::collections::BTreeSet::new(),
+            Vec::new(),
+            ocx_lib::package_manager::pinned_for_project(pinned_cli, &ocx_lib::project::ProjectConfig::default()),
+        ),
     };
     // Stage 6 last, on this tier too. An unparseable global file yields an
     // empty stage 4-5 above, but the caller's own `--env` is not the global
@@ -605,8 +667,38 @@ pub(crate) async fn resolve_global_pinned_env(
     };
 
     let mut infos = Vec::new();
+    let mut toolchain = None;
     if let Some(lock) = &lock {
         let selected_groups = selected_groups_global(groups, lock);
+        // RUL-104 — `ocx --global pull` renders `$OCX_HOME/toolchain/<group>/
+        // <entry>`, so this emitter follows that tree like the other three
+        // (C-065). The group set is the **lock-derived** one computed here, not
+        // the config-expanded env-group set above: a group declaring only
+        // `[group.<g>.env]` and no tools has no links, and C-070 is precisely
+        // about not passing the wrong set.
+        //
+        // The login exporter is contracted never to fail on a corrupt global
+        // lock, and `ComposePaths::resolve` raises `ToolchainPath` (exit 78) for
+        // a name that cannot become a path component. Filtering those entries
+        // out here keeps both contracts: each composes on its digest path
+        // (C-067) and the shell still starts.
+        toolchain = context
+            .manager()
+            .toolchain_home(&ocx_lib::file_structure::RenderStampScope::Global, None)
+            .ok()
+            .map(|home| {
+                let mut followable = lock.clone();
+                followable
+                    .tools
+                    .retain(|tool| home.entry(&tool.group, &tool.name).is_ok());
+                Box::new(ocx_lib::package_manager::ToolchainLinks {
+                    pinned,
+                    home,
+                    scope: ocx_lib::file_structure::RenderStampScope::Global,
+                    lock: followable,
+                    groups: selected_groups.clone(),
+                })
+            });
         for tool in &lock.tools {
             // Global tier is lenient: a group named on the command line that no
             // lock entry carries simply matches nothing (no error, empty env).
@@ -647,6 +739,10 @@ pub(crate) async fn resolve_global_pinned_env(
     let scope = ocx_lib::package_manager::EnvScope::Project {
         no_patches,
         env: project_env,
+        // RUL-104 — the global tier follows the lane like the other three
+        // composing emitters; `None` here only when there is no global lock to
+        // derive links from, which is C-067's digest lane by construction.
+        toolchain,
     };
     Ok(Some(
         manager
@@ -811,5 +907,212 @@ mod tests {
             selected_groups_global(&["lint".to_owned(), "missing".to_owned()], &lock),
             vec!["lint".to_owned(), "missing".to_owned()]
         );
+    }
+
+    // ── The `pinned` ladder's CLI tier on the GLOBAL tier ─────────────────────
+    //
+    // `ocx --global env` resolves through `resolve_global_pinned_env`, which is
+    // a different code path from the project tier's `toolchain_links` — so the
+    // CLI tier reaching one proves nothing about the other. These read the lane
+    // at the COMMAND surface (`Cli::parse_from` → `execute`) rather than at a
+    // function signature, which is what lets them compile against a tree where
+    // the resolver takes no CLI tier at all and fail there.
+
+    /// A global file that declares only an `[env]` — every `pinned` tier absent.
+    const DECLARED_ENV: &str = "[env]\nWP18 = \"composed\"\n";
+
+    /// The same, with the FILE tier of the ladder asking to pin.
+    const PINNING_ENV: &str = "pinned = true\n[env]\nWP18 = \"composed\"\n";
+
+    /// A `$OCX_HOME` carrying the two things the global resolver reads: a
+    /// declared `[env]`, so it always has a contribution and never
+    /// short-circuits to `Ok(None)`, and a one-tool `ocx.lock`, so it has a
+    /// toolchain lane to choose between.
+    fn global_home(config_body: &str) -> tempfile::TempDir {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(home.path().join("ocx.toml"), config_body).expect("write ocx.toml");
+        std::fs::write(
+            home.path().join("ocx.lock"),
+            lock_with_groups(&["default"])
+                .to_toml_string()
+                .expect("the fixture lock serializes"),
+        )
+        .expect("write ocx.lock");
+        home
+    }
+
+    /// Runs the real `ocx --global env <flags>` over a fresh home and answers
+    /// whether the **link lane** ran.
+    ///
+    /// C-066: `pinned = true` is answered "before any I/O: no heal, no probe,
+    /// no link consulted" ([`ocx_lib::package_manager::ToolchainLinks::pinned`]),
+    /// while the following lane heals first — and `heal_links` creates the
+    /// toolchain home root before it repairs anything. So the root's existence
+    /// after the run IS the lane the resolver chose, and it needs no
+    /// materialised package to observe.
+    ///
+    /// The root's creation is conditional on the heal not being refused — a
+    /// refused tree creates nothing and answers `HealOutcome::Refused` (crate-
+    /// internal to `ocx_lib`, hence no intra-doc link). The premise holds for
+    /// this fixture because [`global_home`] is a fresh
+    /// tempdir with no symlink anywhere on the path, so the only reachable
+    /// answer is a heal that ran.
+    ///
+    /// The home path is asked of the manager (the same call
+    /// `resolve_global_pinned_env` makes), never joined by hand.
+    async fn link_lane_ran(config_body: &str, flags: &[&str]) -> bool {
+        use ocx_lib::cli::ColorModeConfig;
+        use ocx_lib::file_structure::RenderStampScope;
+
+        use crate::app::{Cli, Context, ManagedConfigGate};
+
+        let home = global_home(config_body);
+        // SAFETY: `OCX_HOME` is read through `ocx_lib::env::var`, whose
+        // `#[cfg(test)]` override seam is internal to `ocx_lib` and therefore
+        // unavailable from this crate; the process variable is the only seam.
+        // nextest runs one test per process, so this cannot race a sibling.
+        unsafe { std::env::set_var("OCX_HOME", home.path()) };
+
+        let mut argv = vec!["ocx", "--global", "env"];
+        argv.extend_from_slice(flags);
+        let cli = Cli::parse_from(argv);
+        let context = Context::try_init(
+            &cli.context,
+            ColorModeConfig {
+                stdout: false,
+                stderr: false,
+                relayed: false,
+            },
+            ManagedConfigGate {
+                enforce_required: false,
+                onboarding: false,
+            },
+        )
+        .await
+        .expect("a context over the fixture home");
+        assert_eq!(
+            context.file_structure().root(),
+            home.path(),
+            "the context must resolve the tempdir as its home, or this reads someone else's \
+             ocx.toml and proves nothing"
+        );
+
+        let root = context
+            .manager()
+            .toolchain_home(&RenderStampScope::Global, None)
+            .expect("the global toolchain home")
+            .root()
+            .to_path_buf();
+        assert!(
+            !root.exists(),
+            "precondition: nothing may have rendered '{}' before the command ran, or every \
+             answer below is `true` for free",
+            root.display()
+        );
+
+        let Some(crate::command::Command::Env(env)) = cli.command else {
+            panic!("`ocx --global env` must parse to the env command");
+        };
+        env.execute(context)
+            .await
+            .expect("the global tier never fails on a well-formed home");
+
+        let ran = root.exists();
+        // SAFETY: see above.
+        unsafe { std::env::remove_var("OCX_HOME") };
+        ran
+    }
+
+    /// C-055 / C-066 — `ocx --global env --pinned` composes the DIGEST lane.
+    ///
+    /// The defect this pins: `resolve_global_pinned_env` re-derived the lane
+    /// from the file and environment tiers alone, so the parsed flag was
+    /// accepted and silently discarded — exit 0, nothing on stderr, and the
+    /// opposite of what was asked.
+    ///
+    /// `global_env_with_no_flag_follows_the_links` is this test's positive
+    /// control and must be read with it: without that one, a fixture whose lock
+    /// failed to parse (no toolchain lane at all, hence no heal, hence no root)
+    /// would satisfy this assertion for entirely the wrong reason. They are two
+    /// tests rather than two assertions because `Context::try_init` installs the
+    /// global tracing dispatcher, which a process may do exactly once.
+    #[tokio::test]
+    async fn global_env_pinned_selects_the_digest_lane() {
+        assert!(
+            !link_lane_ran(DECLARED_ENV, &["--pinned"]).await,
+            "--pinned must reach the global resolver: C-066 short-circuits the lane before any \
+             I/O, so no heal runs and no root is rendered"
+        );
+    }
+
+    /// The control for [`global_env_pinned_selects_the_digest_lane`]: the same
+    /// fixture with no flag follows the links, so the heal runs and the root
+    /// appears. Proves the harness can answer `true` at all.
+    #[tokio::test]
+    async fn global_env_with_no_flag_follows_the_links() {
+        assert!(
+            link_lane_ran(DECLARED_ENV, &[]).await,
+            "with every tier absent the floor is the following lane, so the heal runs"
+        );
+    }
+
+    /// C-055 / RUL-60 — `ocx --global env --no-pinned` outranks a global
+    /// `ocx.toml` that asked to pin.
+    ///
+    /// The mirror direction, and the one that proves the CLI tier is a real
+    /// LADDER tier rather than an `Option`-collapsed default: the file states
+    /// `pinned = true` and the flag has to beat it. Control:
+    /// [`global_env_with_a_pinning_file_and_no_flag_pins`].
+    #[tokio::test]
+    async fn global_env_no_pinned_outranks_a_pinning_global_file() {
+        assert!(
+            link_lane_ran(PINNING_ENV, &["--no-pinned"]).await,
+            "--no-pinned must reach the global resolver and beat the file tier, or the flag \
+             cannot override an ocx.toml that asked to pin"
+        );
+    }
+
+    /// The control for [`global_env_no_pinned_outranks_a_pinning_global_file`]:
+    /// the file tier alone already pins, so no heal runs. Proves the fixture's
+    /// `pinned = true` is actually read.
+    #[tokio::test]
+    async fn global_env_with_a_pinning_file_and_no_flag_pins() {
+        assert!(
+            !link_lane_ran(PINNING_ENV, &[]).await,
+            "`pinned = true` in the global ocx.toml selects the digest lane on its own"
+        );
+    }
+
+    /// C-055 — `ocx env` and `ocx exec` read the SAME CLI tier.
+    ///
+    /// A control, not a discriminator: the parse layer already agrees on the
+    /// unfixed tree. It is here because the two commands' *wiring* is what
+    /// diverged, and this is the assertion a future divergence trips — both
+    /// feed this exact value into `pinned_for_project`.
+    #[test]
+    fn env_and_exec_read_the_same_pinned_cli_tier() {
+        use crate::command::toolchain_exec::ToolchainExec;
+
+        for (flags, expected) in [
+            (Vec::new(), None),
+            (vec!["--pinned"], Some(true)),
+            (vec!["--no-pinned"], Some(false)),
+        ] {
+            let mut env_argv = vec!["env"];
+            env_argv.extend_from_slice(&flags);
+            let env = ToolchainEnv::try_parse_from(env_argv).expect("env parses");
+
+            let mut exec_argv = vec!["exec"];
+            exec_argv.extend_from_slice(&flags);
+            exec_argv.extend_from_slice(&["--", "true"]);
+            let exec = ToolchainExec::try_parse_from(exec_argv).expect("exec parses");
+
+            assert_eq!(env.pinned.pinned(), expected, "env must read {flags:?} as {expected:?}");
+            assert_eq!(
+                exec.pinned.pinned(),
+                env.pinned.pinned(),
+                "the two siblings must never disagree about the CLI tier for {flags:?}"
+            );
+        }
     }
 }

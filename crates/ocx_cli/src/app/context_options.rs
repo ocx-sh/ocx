@@ -17,19 +17,23 @@ pub struct ContextOptions {
     #[arg(short, long, value_name = "FILE")]
     pub config: Option<std::path::PathBuf>,
 
-    /// Path to the project-level `ocx.toml` (project-tier toolchain config).
+    /// Project directory, or the project file itself (project-tier toolchain
+    /// config).
+    ///
+    /// A directory resolves to the `ocx.toml` inside it, so `--project .` and
+    /// `--project /path/to/repo` both work. Naming a file instead accepts any
+    /// filename (matches Cargo `--manifest-path`); the CWD walk still looks for
+    /// the literal name `ocx.toml`.
     ///
     /// Can also be set via the `OCX_PROJECT` environment variable.
     /// To disable project discovery entirely, set `OCX_NO_PROJECT=1`.
-    /// Any filename is accepted via this flag (matches Cargo `--manifest-path`);
-    /// the CWD walk still looks for the literal name `ocx.toml`.
     ///
     /// Symlink policy: paths given via this flag (and `OCX_PROJECT`) are
     /// trusted and followed through symlinks. Paths discovered by the CWD walk
     /// reject symlinks and continue upward to avoid a writer with control
     /// over an intermediate directory redirecting discovery to arbitrary
     /// files.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "PATH")]
     pub project: Option<std::path::PathBuf>,
 
     /// Select the global toolchain (`$OCX_HOME/ocx.toml`) as the project
@@ -169,6 +173,13 @@ impl ContextOptions {
             project: self.project.clone(),
             global: self.global,
             index: self.index.clone(),
+            // The resolved toolchain root is not derivable from
+            // `ContextOptions`: `toolchain-dir` is a `config.toml` key with no
+            // root flag, folded with `OCX_TOOLCHAIN_DIR` and subject to the
+            // containment refusals. `Context::try_init` resolves it and
+            // populates this field on the returned view; the parser tier starts
+            // empty (C-008).
+            toolchain_dir: None,
             // The resolved mirror map is not derivable from `ContextOptions`
             // alone — it merges `[mirrors]` config with the inherited
             // `OCX_MIRRORS` env. `Context::try_init` builds it and populates

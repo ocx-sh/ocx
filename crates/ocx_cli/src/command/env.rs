@@ -251,8 +251,14 @@ impl Env {
         // `<name>.exe` shim, and `.EXE` is unconditionally in the default
         // Windows PATHEXT — nothing to inject for bare-name resolution.
 
-        if !context.api().is_json() {
-            ocx_lib::log::warn!("default output is not eval-safe; use --shell=bash to activate");
+        // Only where the footgun is: a non-terminal stdout is the
+        // `eval "$(ocx package env)"` case. Same predicate as `ocx env` —
+        // see `conventions::not_eval_safe_advisory`.
+        if let Some(advisory) = not_eval_safe_advisory(
+            context.api().is_json(),
+            std::io::IsTerminal::is_terminal(&std::io::stdout()),
+        ) {
+            ocx_lib::log::warn!("{advisory}");
         }
 
         let binaries = api::data::env::BinaryAttribution::from_pairs(&attribution.binaries);

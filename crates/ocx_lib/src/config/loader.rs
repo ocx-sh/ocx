@@ -25,6 +25,17 @@ use crate::log;
 /// accidentally pointing `--config` at a multi-megabyte file.
 const MAX_CONFIG_SIZE: u64 = 64 * 1024;
 
+/// The project file's literal name, as the CWD walk looks for it and as an
+/// explicit `--project <directory>` resolves to (RUL-55).
+///
+/// One spelling for both: the directory branch of
+/// [`ConfigLoader::resolve_explicit_project_path`] and
+/// [`ConfigLoader::walk_for_project_file`] must agree on what a project file is
+/// called, or `--project .` and a bare CWD walk would answer differently for
+/// the same directory. `--project <file>` still accepts any name, which is the
+/// spelling that exists for the exception.
+const PROJECT_FILE_NAME: &str = "ocx.toml";
+
 /// Test-only seam redirecting [`ConfigLoader::system_path`] away from
 /// `/etc/ocx/config.toml`, so the SYSTEM-scope lock path is exercisable
 /// without root. Gated per the `__OCX_*` seam convention in
@@ -758,17 +769,54 @@ impl ConfigLoader {
     }
 
     /// Resolve an explicit project-tier path (from `--project` or
-    /// `OCX_PROJECT`). Explicit paths follow symlinks and must resolve
-    /// to a regular file.
+    /// `OCX_PROJECT`). Explicit paths follow symlinks.
+    ///
+    /// # A directory names the project it governs (RUL-55)
+    ///
+    /// `<dir>` resolves to `<dir>/ocx.toml`. Requiring a regular file made the
+    /// most common spelling — `--project .`, and every rendered toolchain
+    /// trampoline, which re-enters as `ocx --project '<project root>' exec` —
+    /// fail with `Error::Io` (exit 74) before anything ran. It also put C-068's
+    /// contract out of reach: a *directory that holds no `ocx.toml`* is **no
+    /// project** (`Ok(None)` → exit 64), which is a different answer from *this
+    /// file is missing* (exit 79), and only the directory branch can tell the
+    /// two apart.
+    ///
+    /// Everything else keeps the regular-file requirement: any filename is
+    /// still accepted (Cargo `--manifest-path` semantics), a device or FIFO is
+    /// still `Error::Io`, and a path that does not exist at all is still
+    /// `Error::FileNotFound`.
     async fn resolve_explicit_project_path(
         path: &Path,
     ) -> std::result::Result<Option<PathBuf>, crate::config::error::Error> {
         // `tokio::fs::metadata` follows symlinks (trusted caller intent, G5).
         match tokio::fs::metadata(path).await {
             Ok(meta) if meta.file_type().is_file() => Ok(Some(path.to_path_buf())),
+            Ok(meta) if meta.is_dir() => {
+                // The literal name `ocx.toml`, matching the CWD walk — the
+                // `--project <file>` spelling is what accepts any other name.
+                let candidate = path.join(PROJECT_FILE_NAME);
+                match tokio::fs::metadata(&candidate).await {
+                    Ok(meta) if meta.file_type().is_file() => Ok(Some(candidate)),
+                    // No `ocx.toml` under a directory the caller named: this is
+                    // "no project", not "file not found" — the caller turns it
+                    // into `NoProject` (exit 64).
+                    Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Ok(_) => Err(Error::Io {
+                        path: candidate,
+                        tier: ConfigSource::Project,
+                        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"),
+                    }),
+                    Err(source) => Err(Error::Io {
+                        path: candidate,
+                        tier: ConfigSource::Project,
+                        source,
+                    }),
+                }
+            }
             Ok(_) => {
-                // Path exists but is not a regular file (directory, device,
-                // FIFO). Phase 1 discards the resolved path, so if we
+                // Path exists but is neither a regular file nor a directory
+                // (device, FIFO). Phase 1 discards the resolved path, so if we
                 // returned `Ok(Some(path))` here the defect would silently
                 // slip through discovery and surface only at parse time.
                 // Surface now as `Error::Io` (exit 74, ADR G9).
@@ -814,7 +862,7 @@ impl ConfigLoader {
             // UP past the repo root, not accepting a project file AT the
             // repo root. The `.git/` gate therefore fires AFTER the
             // candidate-hit check but before ascending.
-            let candidate = current.join("ocx.toml");
+            let candidate = current.join(PROJECT_FILE_NAME);
             let (git_present, candidate_meta) =
                 tokio::join!(Self::has_git_dir(current), tokio::fs::symlink_metadata(&candidate),);
 
@@ -1501,6 +1549,7 @@ impl ConfigLoader {
             trust,
             shell,
             records,
+            toolchain_dir,
         } = config;
 
         *patches = patches.take().filter(|patches| patches.system_locked);
@@ -1512,6 +1561,14 @@ impl ConfigLoader {
         // activation consent whitelist are ambient host configuration, and the
         // flag prunes them with the user and `$OCX_HOME` tiers.
         *shell = None;
+        // `toolchain-dir` (C-016) is a bare root-level scalar with no lock of
+        // its own, so it is ambient configuration and prunes like `[shell]`.
+        // Continuity under the flag comes from the environment instead: a parent
+        // ocx forwards its resolved root as `OCX_TOOLCHAIN_DIR`, which
+        // `ToolchainRoot::resolve` reads as its weakest tier — so a hermetic
+        // child still lands its trees where its parent did, without reading an
+        // ambient file to find out.
+        *toolchain_dir = None;
         if let Some(entries) = registries.as_mut() {
             entries.retain(|_, entry| entry.system_locked);
         }
@@ -3052,21 +3109,73 @@ mod tests {
         );
     }
 
-    /// Explicit `--project <dir>` must not silently succeed — non-file
-    /// targets surface as `Error::Io` (exit 74, ADR G9) rather than being
-    /// accepted as a valid project-file path.
-    #[cfg(unix)]
+    /// Explicit `--project <dir>` resolves to the `ocx.toml` inside it, and a
+    /// directory that holds none is **no project** rather than an error
+    /// (RUL-55).
+    ///
+    /// This reverses `project_path_explicit_directory_rejected_as_io`, which
+    /// asserted `Error::Io` (exit 74) for the same input. That contract made
+    /// `--project .` — and every rendered toolchain trampoline, which re-enters
+    /// as `ocx --project '<project root>' exec` — fail before anything ran, and
+    /// put C-068's `NoProject` → exit 64 out of reach: only the directory branch
+    /// can tell *this directory governs no project* from *this file is missing*.
     #[tokio::test]
-    async fn project_path_explicit_directory_rejected_as_io() {
+    async fn project_path_explicit_directory_resolves_to_its_project_file() {
         let env = crate::test::env::lock();
         env.remove("OCX_PROJECT");
         env.remove("OCX_NO_PROJECT");
         env.remove("OCX_CEILING_PATH");
         let dir = TempDir::new().unwrap();
-        let target = dir.path().to_path_buf();
+        let project = dir.path().join("ocx.toml");
+        write_file(&project, "");
+
+        let resolved = ConfigLoader::project_path(None, Some(dir.path()))
+            .await
+            .expect("a directory holding an ocx.toml must resolve");
+        assert_eq!(
+            resolved,
+            Some(project),
+            "explicit --project <dir> must resolve to <dir>/ocx.toml"
+        );
+    }
+
+    /// The other half of RUL-55: a named directory with no `ocx.toml` is `None`
+    /// — "no project" (the caller's exit 64), never `FileNotFound` (79) or
+    /// `Error::Io` (74).
+    #[tokio::test]
+    async fn project_path_explicit_directory_without_a_project_file_is_none() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT");
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let dir = TempDir::new().unwrap();
+
+        let resolved = ConfigLoader::project_path(None, Some(dir.path()))
+            .await
+            .expect("a directory with no ocx.toml is not an error");
+        assert_eq!(
+            resolved, None,
+            "a directory holding no ocx.toml governs no project, so the answer is None"
+        );
+    }
+
+    /// A path that is neither a regular file nor a directory still surfaces as
+    /// `Error::Io` (exit 74, ADR G9).
+    ///
+    /// Kept as its own case because RUL-55 took the directory out of this arm,
+    /// and a character device is the remaining reachable input for it — without
+    /// this, the arm has no coverage at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_path_explicit_device_rejected_as_io() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT");
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+        let target = PathBuf::from("/dev/null");
         let err = ConfigLoader::project_path(None, Some(&target))
             .await
-            .expect_err("explicit --project pointing at a directory must error");
+            .expect_err("explicit --project pointing at a character device must error");
         assert!(
             matches!(
                 err,
@@ -3076,7 +3185,7 @@ mod tests {
                     ..
                 } if path == &target,
             ),
-            "expected Error::Io(Project) for directory on explicit --project path, got: {err:?}"
+            "expected Error::Io(Project) for a device on explicit --project path, got: {err:?}"
         );
     }
 
@@ -4129,6 +4238,22 @@ mod tests {
         }
     }
 
+    /// A TOML `<key> = <path>` line whose value is escaped **by the TOML
+    /// serializer**, never by hand.
+    ///
+    /// `format!("{key} = \"{}\"", path.display())` is a fixture hand-rolling a
+    /// serializer for a format a library already owns, and it is wrong on
+    /// Windows: a basic string reads backslash as an escape introducer, so a
+    /// real temporary directory — `C:\Users\RUNNER~1\AppData\Local\Temp\…` —
+    /// parses as `\U`, `\A` and `\T` and the loader refuses the file with
+    /// "too few unicode value digits, expected unicode hexadecimal value".
+    /// `toml::Value`'s own `Display` owns the quoting and escaping
+    /// (`quality-core.md` § *Don't Own Non-Domain Code*).
+    fn toml_path_line(key: &str, path: &Path) -> String {
+        let value = toml::Value::from(path.to_str().expect("fixture paths are utf-8"));
+        format!("{key} = {value}\n")
+    }
+
     /// The published guarantee (`reference/execution-records.md`): "no caller
     /// can opt out of a sink the operator has locked at system scope."
     /// `OCX_NO_CONFIG=1` is a caller, and used to be the one way out.
@@ -4145,8 +4270,8 @@ mod tests {
             &env,
             &dir,
             &format!(
-                "[records]\ndir = \"{}\"\nname = \"{{time}}.json\"\nrequired = true\n",
-                sink.display()
+                "[records]\n{}name = \"{{time}}.json\"\nrequired = true\n",
+                toml_path_line("dir", &sink)
             ),
         );
 
@@ -4181,7 +4306,7 @@ mod tests {
         with_system_config(
             &env,
             &dir,
-            &format!("[records]\ndir = \"{}\"\nrequired = true\n", sink.display()),
+            &format!("[records]\n{}required = true\n", toml_path_line("dir", &sink)),
         );
         let caller = write_config(
             &dir,
@@ -4326,6 +4451,9 @@ mod tests {
             "[shell]\nhook = true\n",
         ))
         .unwrap();
+        // A root-level scalar has to precede every table header, so it is
+        // spliced in rather than appended (C-016).
+        config.toolchain_dir = Some(PathBuf::from("/home/operator/tc"));
 
         ConfigLoader::apply_system_locks(&mut config);
         ConfigLoader::retain_system_locked_sections(&mut config);
@@ -4344,6 +4472,10 @@ mod tests {
             config.shell.is_none(),
             "[shell] locks nothing, so the flag prunes it like any ambient tier"
         );
+        assert!(
+            config.toolchain_dir.is_none(),
+            "`toolchain-dir` locks nothing either, so the flag prunes it like [shell] (C-016)"
+        );
     }
 
     /// The filter is lock-driven, not section-driven: the same sections parsed
@@ -4360,6 +4492,7 @@ mod tests {
             "signers = [{ kind = \"keyless\", identity = \"ci@acme.example\", oidc_issuer = \"https://iss.example\" }]\n",
         ))
         .unwrap();
+        config.toolchain_dir = Some(PathBuf::from("/home/operator/tc"));
 
         ConfigLoader::retain_system_locked_sections(&mut config);
 
@@ -4369,6 +4502,10 @@ mod tests {
         assert!(config.mirrors.is_none(), "an emptied table collapses to None");
         assert!(config.records.is_none());
         assert!(config.trust.is_none(), "an emptied policy list collapses to None");
+        assert!(
+            config.toolchain_dir.is_none(),
+            "an unlocked `toolchain-dir` is pruned too"
+        );
     }
 
     /// The other half of the `[records]` clamp: a SYSTEM file that declares no
@@ -4490,7 +4627,7 @@ mod tests {
         let absolute = write_config(
             &dir,
             "absolute.toml",
-            &format!("[records]\ndir = \"{}\"\n", spelled_out.display()),
+            &format!("[records]\n{}", toml_path_line("dir", &spelled_out)),
         );
         let config = ConfigLoader::load_and_merge(&[absolute]).await.expect("load");
         assert_eq!(
@@ -5841,6 +5978,337 @@ mod tests {
             folded_records.required,
             Some(true),
             "a field the payload leaves unset must not be clobbered"
+        );
+    }
+
+    // ── WP-4 · `toolchain-dir` across the tiers (C-016, S-004, R-W2, E-43/E-44)
+    //
+    // Written from `plan_toolchain_activation.md` (C-016, S-004, R-W2) and
+    // RUL-3, not from an implementation. Two kinds of row: those that ask only
+    // what the loader *merged* (they pin the prune this work package added),
+    // and those that hand the merged config to `ToolchainRoot::resolve` and
+    // assert the root it admits or the refusal it reports.
+
+    /// A `$OCX_HOME` anchor plus a hermetic tier set, for the rows that resolve
+    /// a root rather than only merging one — or `None` when this host's
+    /// temporary root cannot serve as a containment anchor.
+    ///
+    /// Through `crate::config::sandbox_or_skip`, never a bare `TempDir::new()`.
+    /// On macOS `$TMPDIR` is under `/var/folders/…`, which canonicalises through
+    /// the `/var` → `private/var` symlink to `/private/var/folders/…`, and
+    /// `/private` is a live C-018 prefix — so pass 2 refuses every root beneath
+    /// it with `SystemPrefix` and the `.expect("… is admitted")` calls below
+    /// panic on `verify-deep.yml`'s `macos-latest` leg. That helper is at
+    /// `crate::config` scope for exactly this reason: the reasoning was written
+    /// once in `config.rs` and this module could not see it.
+    fn toolchain_anchor(env: &crate::test::env::EnvLock) -> Option<TempDir> {
+        let anchor = crate::config::sandbox_or_skip()?;
+        env.set("OCX_HOME", anchor.path().to_str().expect("temp path is utf-8"));
+        env.remove(crate::env::keys::OCX_TOOLCHAIN_DIR);
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+        without_system_config(env);
+        Some(anchor)
+    }
+
+    /// S-004 — a fleet operator's `[managed]` payload carries `toolchain-dir`
+    /// into the merged config like any other tier. `fold_managed_tier` parses
+    /// the payload as a whole `Config`, so the key needs no separate
+    /// allow-listing; this pins that it stays that way.
+    #[tokio::test]
+    async fn managed_payload_carries_toolchain_dir_into_the_merged_config() {
+        let env = crate::test::env::lock();
+        let Some(anchor) = toolchain_anchor(&env) else { return };
+        let fleet_root = anchor.path().join("fleet");
+
+        std::fs::write(
+            anchor.path().join("config.toml"),
+            "[managed]\nsource = \"registry.test/managed-config:v1\"\nrequired = false\n",
+        )
+        .unwrap();
+        write_managed_snapshot(
+            anchor.path(),
+            "registry.test/managed-config:v1",
+            &toml_path_line("toolchain-dir", &fleet_root),
+        );
+
+        let config = ConfigLoader::load(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load should succeed");
+
+        assert_eq!(
+            config.toolchain_dir.as_deref(),
+            Some(fleet_root.as_path()),
+            "a [managed] payload's toolchain-dir must reach the merged config (S-004)"
+        );
+        let resolved = crate::config::ToolchainRoot::resolve(&config)
+            .expect("a fleet root inside $OCX_HOME is admitted")
+            .expect("the payload declared a root");
+        assert_eq!(
+            resolved.as_path(),
+            dunce::canonicalize(anchor.path())
+                .expect("canonicalise the anchor")
+                .join("fleet"),
+            "the fleet-pushed root resolves like any other tier's"
+        );
+    }
+
+    /// S-004 · R-W2 — the `[managed]` tier is not a bypass. A fleet-pushed
+    /// system location faces the identical refusal a hand-written
+    /// `config.toml` would, and reports as the `config.toml` tier because that
+    /// is what an operator edits to fix it.
+    #[tokio::test]
+    async fn managed_payload_toolchain_dir_faces_the_identical_refusal() {
+        let env = crate::test::env::lock();
+        let Some(anchor) = toolchain_anchor(&env) else { return };
+
+        std::fs::write(
+            anchor.path().join("config.toml"),
+            "[managed]\nsource = \"registry.test/managed-config:v1\"\nrequired = false\n",
+        )
+        .unwrap();
+        // This host's own system location, not a POSIX literal: `/usr` has no
+        // drive prefix on Windows, so `Path::is_absolute` is false there and
+        // the value would be refused as `Relative` — a real refusal, but not
+        // the C-018 one this row is about.
+        let system_location = if cfg!(windows) {
+            PathBuf::from(crate::env::var("SystemRoot").unwrap_or_else(|| r"C:\Windows".to_string()))
+        } else {
+            PathBuf::from("/usr")
+        };
+        write_managed_snapshot(
+            anchor.path(),
+            "registry.test/managed-config:v1",
+            &toml_path_line("toolchain-dir", &system_location),
+        );
+
+        let config = ConfigLoader::load(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load should succeed");
+
+        let error = crate::config::ToolchainRoot::resolve(&config)
+            .expect_err("a fleet-pushed system location is refused like any other tier's");
+        assert!(
+            matches!(
+                error,
+                crate::config::ToolchainRootError::SystemPrefix {
+                    tier: crate::config::ToolchainRootTier::ConfigFile,
+                    ..
+                }
+            ),
+            "the [managed] tier folds into the config.toml chain and is refused as one; got {error}"
+        );
+    }
+
+    /// `OCX_NO_CONFIG=1` prunes an ambient `toolchain-dir`, and the environment
+    /// tier then becomes the effective one.
+    ///
+    /// Both halves matter: the prune alone would leave a hermetic child with no
+    /// root at all, and the shipped continuity story is that a parent ocx
+    /// forwards its own resolved root as `OCX_TOOLCHAIN_DIR`.
+    #[tokio::test]
+    async fn hermetic_mode_prunes_an_ambient_toolchain_dir_and_the_environment_tier_takes_over() {
+        let env = crate::test::env::lock();
+        let Some(anchor) = toolchain_anchor(&env) else { return };
+        let dir = TempDir::new().unwrap();
+        with_system_config(
+            &env,
+            &dir,
+            &toml_path_line("toolchain-dir", &anchor.path().join("from-system")),
+        );
+        env.set("OCX_NO_CONFIG", "1");
+        env.set(
+            crate::env::keys::OCX_TOOLCHAIN_DIR,
+            anchor.path().join("from-env").to_str().expect("temp path is utf-8"),
+        );
+
+        let config = ConfigLoader::load(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load should succeed");
+
+        assert!(
+            config.toolchain_dir.is_none(),
+            "toolchain-dir is ambient host configuration and OCX_NO_CONFIG=1 prunes it"
+        );
+        let resolved = crate::config::ToolchainRoot::resolve(&config)
+            .expect("the environment root is inside $OCX_HOME")
+            .expect("the environment tier declared a root");
+        assert_eq!(
+            resolved.as_path(),
+            dunce::canonicalize(anchor.path())
+                .expect("canonicalise the anchor")
+                .join("from-env"),
+            "with the file tier pruned, OCX_TOOLCHAIN_DIR is the effective tier"
+        );
+    }
+
+    /// `OCX_NO_CONFIG=1` does **not** prune a `toolchain-dir` from an explicit
+    /// `--config` / `OCX_CONFIG` file: `retain_system_locked_sections` runs
+    /// over the discovered chain only, and the explicit overlay merges
+    /// afterwards. So the explicit file still beats the environment tier.
+    #[tokio::test]
+    async fn hermetic_mode_keeps_an_explicit_config_toolchain_dir() {
+        let env = crate::test::env::lock();
+        let Some(anchor) = toolchain_anchor(&env) else { return };
+        let dir = TempDir::new().unwrap();
+        let explicit = write_config(
+            &dir,
+            "explicit.toml",
+            &toml_path_line("toolchain-dir", &anchor.path().join("from-file")),
+        );
+        env.set("OCX_NO_CONFIG", "1");
+        env.set(
+            crate::env::keys::OCX_TOOLCHAIN_DIR,
+            anchor.path().join("from-env").to_str().expect("temp path is utf-8"),
+        );
+
+        let config = ConfigLoader::load(ConfigInputs {
+            explicit_path: Some(&explicit),
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load should succeed");
+
+        assert_eq!(
+            config.toolchain_dir.as_deref(),
+            Some(anchor.path().join("from-file").as_path()),
+            "an explicitly named file is not ambient configuration, so the flag does not prune it"
+        );
+        let resolved = crate::config::ToolchainRoot::resolve(&config)
+            .expect("the explicit root is inside $OCX_HOME")
+            .expect("the explicit file declared a root");
+        assert_eq!(
+            resolved.as_path(),
+            dunce::canonicalize(anchor.path())
+                .expect("canonicalise the anchor")
+                .join("from-file"),
+            "the explicit file still beats the environment tier under OCX_NO_CONFIG=1"
+        );
+    }
+
+    // ── RUL-55 — the selector a rendered trampoline bakes must reach the
+    //    project it names ─────────────────────────────────────────────────
+
+    /// The `--project` value out of a POSIX trampoline body, between the single
+    /// quotes `unix_trampoline_body` puts it in.
+    ///
+    /// Parsed out of the emitted text rather than re-derived, so this reads the
+    /// **shipped** selector and not a second spelling of it.
+    fn baked_project_selector(body: &str) -> String {
+        let after = body
+            .split_once("--project '")
+            .expect("a project trampoline bakes `--project '<root>'`")
+            .1;
+        after
+            .split_once('\'')
+            .expect("the baked selector is single-quoted")
+            .0
+            .to_owned()
+    }
+
+    /// **RUL-55, the load-bearing one.** A rendered toolchain trampoline
+    /// re-enters as `ocx --project '<abs project root>' exec`, and that root is
+    /// a **directory**. Before RUL-55 the explicit-project resolver refused
+    /// anything that was not a regular file, so *every rendered trampoline*
+    /// exited 74 before it ran anything.
+    ///
+    /// This is the join between the two halves — WP-6's baked selector and this
+    /// module's resolver — and it is deliberately end-to-end across them: each
+    /// half is self-consistently green on its own (the body has byte-exact
+    /// goldens, the resolver has the directory cases above), and the defect
+    /// lived only in the seam.
+    ///
+    /// Mutation that reds it: restoring the regular-file-only arm, or changing
+    /// `unix_trampoline_body` to bake `<root>/ocx.toml` — the workaround D-V33
+    /// rejects, because it would contradict C-028's home selector, C-030/C-031's
+    /// sidecar grammar, WP-6's goldens and the committed shim blobs.
+    #[tokio::test]
+    async fn the_selector_a_trampoline_bakes_resolves_to_the_project_it_names() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT");
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+
+        let dir = TempDir::new().unwrap();
+        // The canonical spelling: `tempfile` hands back a path under `/tmp`,
+        // itself a symlink on macOS, and the renderer bakes the canonical
+        // project directory.
+        let project_root = dunce::canonicalize(dir.path()).expect("the scratch project canonicalises");
+        write_file(&project_root.join("ocx.toml"), "");
+
+        let body = crate::package_manager::launcher::unix_trampoline_body(
+            &crate::package_manager::launcher::TrampolineTarget::Project(project_root.clone()),
+            Some(std::path::Path::new("/opt/ocx/bin/ocx")),
+        )
+        .expect("an ordinary absolute root carries no launcher-unsafe character");
+
+        let baked = baked_project_selector(&body);
+        assert_eq!(
+            std::path::Path::new(&baked),
+            project_root.as_path(),
+            "C-028 — the body bakes the project *root*, a directory, not the manifest inside it"
+        );
+
+        let resolved = ConfigLoader::project_path(None, Some(std::path::Path::new(&baked)))
+            .await
+            .expect("RUL-55 — the baked selector must reach the project, not exit 74");
+        assert_eq!(
+            resolved,
+            Some(project_root.join("ocx.toml")),
+            "RUL-55 — `--project '<abs project root>'` resolves to the `ocx.toml` inside it"
+        );
+    }
+
+    /// C-068's precondition, stated from the trampoline's side: a baked home
+    /// whose `ocx.toml` is gone — the project was deleted or moved — resolves to
+    /// **no project** rather than to an error.
+    ///
+    /// That is what lets the caller answer `NoProject` → exit 64 instead of
+    /// `FileNotFound` → 79. Only the directory branch can tell *this directory
+    /// governs no project* from *this file is missing*, which is why RUL-55 and
+    /// C-068 are one change.
+    #[tokio::test]
+    async fn a_baked_home_whose_project_moved_away_resolves_to_no_project() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_PROJECT");
+        env.remove("OCX_NO_PROJECT");
+        env.remove("OCX_CEILING_PATH");
+
+        let dir = TempDir::new().unwrap();
+        let project_root = dunce::canonicalize(dir.path()).expect("the scratch project canonicalises");
+        let manifest = project_root.join("ocx.toml");
+        write_file(&manifest, "");
+
+        let body = crate::package_manager::launcher::unix_trampoline_body(
+            &crate::package_manager::launcher::TrampolineTarget::Project(project_root.clone()),
+            Some(std::path::Path::new("/opt/ocx/bin/ocx")),
+        )
+        .expect("an ordinary absolute root carries no launcher-unsafe character");
+        let baked = baked_project_selector(&body);
+
+        // The project moves away; the trampoline keeps its baked selector.
+        std::fs::remove_file(&manifest).expect("the manifest is removable");
+
+        let resolved = ConfigLoader::project_path(None, Some(std::path::Path::new(&baked)))
+            .await
+            .expect("a directory holding no ocx.toml is not an error");
+        assert_eq!(
+            resolved, None,
+            "C-068 — a baked home with no manifest is `no project` (exit 64), never `file not found` (79)"
         );
     }
 }
