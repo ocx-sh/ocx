@@ -93,23 +93,99 @@ use std::path::{Path, PathBuf};
 use crate::cli::{ClassifyExitCode, ExitCode};
 use crate::utility::fs::BoundedReadError;
 
-/// Directory holding the launcher trampolines, and one of the two component
-/// names [`ToolchainHome::entry`] refuses for a group or an entry.
+/// Leaf name of the launcher-trampoline directory — the `bin` in both
+/// [`ToolchainHome::bin`] and [`ToolchainHome::shell_bin`].
 ///
-/// Reserved on both components rather than only on the group: C-013 reserves
-/// `bin` as a tool name as well as a group name, and one rule over one
-/// grammar is what keeps the store and the home from disagreeing.
+/// A leaf, never a depth-1 component: the physical directory is
+/// `shells/<shell>/bin` and the PATH-facing spelling is `active/bin`, so this
+/// name can no longer collide with a group or a tool name (C-071) and is not
+/// reserved against one.
 const TOOLCHAIN_BIN_DIR: &str = "bin";
 
-/// The VCS-ignore file C-004 keeps present in every rendered home, and the
-/// second name [`ToolchainHome::entry`] refuses.
+/// The VCS-ignore file C-004 keeps present in every rendered home.
 ///
-/// Reserved for the same reason as [`TOOLCHAIN_BIN_DIR`]: it is one of the
-/// tree's *own* names, so a locked tool named `.gitignore` would overwrite the
-/// file that hides the tree. The parse-time charset validator would refuse a
-/// leading `.`, but D-V14's premise is that it is not a guard — `ocx.lock`
-/// group keys are a second producer that never passes through it.
+/// One of the tree's own depth-1 names (C-071), beside [`ACTIVE_LINK`],
+/// [`LINKS_DIR`] and [`SHELLS_DIR`] — not a reserved group or tool name:
+/// `<root>/links/.gitignore` and `<root>/.gitignore` are different paths.
 const GITIGNORE_FILE: &str = ".gitignore";
+
+/// The depth-1 link every `PATH` route resolves through — `<root>/active`,
+/// pointing at `shells/<shell>` (C-078).
+///
+/// A symlink on POSIX, a junction on Windows. Its one legal target is derived,
+/// never remembered: see [`expected_active_target`].
+const ACTIVE_LINK: &str = "active";
+
+/// The depth-1 directory holding every group's entry links — `<root>/links`
+/// (C-071, C-072).
+///
+/// Every user-supplied name lives one level below this, which is what retires
+/// the old depth-1 name reservation by construction instead of by validation.
+const LINKS_DIR: &str = "links";
+
+/// The depth-1 directory holding the physical per-shell render targets —
+/// `<root>/shells` (C-078).
+const SHELLS_DIR: &str = "shells";
+
+/// The one shell a render writes today.
+///
+/// Not configuration: multi-shell selection is out of scope
+/// ([#363](https://github.com/ocx-sh/ocx/issues/363),
+/// [#189](https://github.com/ocx-sh/ocx/issues/189)), so `shells/` holds
+/// exactly one entry. It is `pub` only because the accessors that take a shell
+/// name need a caller-nameable value for it.
+pub const DEFAULT_SHELL: &str = "default";
+
+/// The closed set of depth-1 names a rendered home owns (C-071).
+///
+/// The renderer's depth-1 orphan scan compares against **this** set rather
+/// than deriving a name from an accessor: `Path::file_name` on either `bin()`
+/// or `shell_bin()` yields the string `"bin"`, so a keep-set derived that way
+/// would silently keep a legacy `bin/` at the root forever.
+pub const TREE_OWN_DEPTH1_NAMES: [&str; 4] = [GITIGNORE_FILE, ACTIVE_LINK, LINKS_DIR, SHELLS_DIR];
+
+/// `active`'s one legal target, derived from the home root and the shell name
+/// (C-079).
+///
+/// **Derived, never remembered.** A copied `$OCX_HOME` carries a stale
+/// absolute junction *and* any stamp that agreed with it, so a stamped
+/// comparison passes on precisely the state it exists to catch. POSIX renders
+/// the **relative** `shells/<shell>` — two normal components, no leading `/`,
+/// no `..` — so a moved or copied home still points inside itself by
+/// construction, and containment needs no separate check. Windows renders the
+/// **absolute** `<root>\shells\<shell>`, because a junction accepts only an
+/// absolute local-drive target.
+fn expected_active_target(root: &Path, shell: &str) -> PathBuf {
+    if cfg!(windows) {
+        root.join(SHELLS_DIR).join(shell)
+    } else {
+        Path::new(SHELLS_DIR).join(shell)
+    }
+}
+
+/// Compare a stored link target against a derived one (C-079).
+///
+/// **Byte equality on both arms, never `Path`'s own `PartialEq`**, which drops
+/// trailing separators — `shells/default/` and `shells/default` are one value
+/// to `PathBuf` and two distinct stored targets to `readlink(2)`. C-080 says
+/// raw, so the raw bytes are what is compared, and a differently-spelled
+/// target that happens to resolve to the right directory is repointed rather
+/// than accepted.
+///
+/// `case_insensitive` is a **parameter rather than a `cfg!`** so both arms are
+/// reachable from the one CI leg that runs: a fold that only exists under
+/// `#[cfg(windows)]` is the unreachable-red class RUL-10/C-025 refuses.
+/// `dunce::simplified` runs on both sides unconditionally — it strips a
+/// Windows `\\?\` prefix and is the identity on every other shape.
+fn targets_match(actual: &Path, expected: &Path, case_insensitive: bool) -> bool {
+    let actual = dunce::simplified(actual).as_os_str();
+    let expected = dunce::simplified(expected).as_os_str();
+    if case_insensitive {
+        actual.eq_ignore_ascii_case(expected)
+    } else {
+        actual == expected
+    }
+}
 
 /// The exact bytes C-004 keeps in every rendered home's ignore file: the `*`
 /// pattern, on one newline-terminated line.
@@ -234,14 +310,16 @@ pub enum ToolchainPathError {
     },
 
     /// The name ends with a `.` or a space, which Windows strips when it
-    /// resolves a path — so `bin.` and `bin ` would both land on the
-    /// trampoline directory the `bin` reservation exists to protect, and
-    /// `.gitignore.` on the file that hides the tree.
+    /// resolves a path — so `foo.` and `foo ` and `foo` are three lock keys
+    /// naming **one** rendered directory.
     ///
-    /// Refused outright rather than folded into [`Self::Reserved`]'s
-    /// comparison: the trailing form is meaningless on every platform, so
-    /// refusing it is both simpler and defensible everywhere, and the message
-    /// stays honest for a name like `tools.` that is not reserved at all.
+    /// A render-identity collision, not a reserved name: C-047 requires two
+    /// renders of the same input to leave a byte-identical tree, and two
+    /// distinct group keys collapsing onto one path make that unachievable
+    /// whatever the names are. Refused on every platform rather than under
+    /// `#[cfg(windows)]`, for the reason [`Self::PathPrefix`] gives — a
+    /// host-conditional refusal is one the CI leg that actually runs can never
+    /// observe.
     #[error("toolchain {component} name {value:?} ends with a dot or a space")]
     TrailingDotOrSpace {
         /// Which component was refused.
@@ -253,18 +331,6 @@ pub enum ToolchainPathError {
     /// The name is `.` or `..`, which navigates rather than names.
     #[error("toolchain {component} name {value:?} is a relative path component")]
     Relative {
-        /// Which component was refused.
-        component: ToolchainPathComponent,
-        /// The refused name.
-        value: String,
-    },
-
-    /// The name ASCII-case-folds to one of the tree's own names — `bin`, the
-    /// trampoline directory (C-013, C-015), or `.gitignore`, the file that
-    /// hides the tree (C-004). Admitting either would let a locked tool
-    /// overwrite it.
-    #[error("toolchain {component} name {value:?} is reserved")]
-    Reserved {
         /// Which component was refused.
         component: ToolchainPathComponent,
         /// The refused name.
@@ -287,8 +353,7 @@ impl ClassifyExitCode for ToolchainPathError {
             | Self::Separator { .. }
             | Self::PathPrefix { .. }
             | Self::TrailingDotOrSpace { .. }
-            | Self::Relative { .. }
-            | Self::Reserved { .. } => Some(ExitCode::ConfigError),
+            | Self::Relative { .. } => Some(ExitCode::ConfigError),
         }
     }
 }
@@ -321,21 +386,85 @@ impl ToolchainHome {
 
     /// The home's root directory.
     ///
-    /// **Never join a group or entry name onto this.** [`Self::entry`]
-    /// validates its components and is the only sanctioned route into the
-    /// tree; a literal join here is the one bypass this type cannot close, so
-    /// it is signposted instead.
+    /// **Never join a group or entry name onto this.** [`Self::entry`] and
+    /// [`Self::links_group`] validate their components and are the only
+    /// sanctioned routes to a user-supplied name; [`Self::active`],
+    /// [`Self::bin`], [`Self::shell_bin`] and [`Self::gitignore`] are the
+    /// sanctioned routes to the tree's own names. A literal join here is the
+    /// one bypass this type cannot close, so it is signposted instead.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// The trampoline directory, `<root>/bin`.
+    /// The `active` link, `<root>/active` (C-078).
+    ///
+    /// Deliberately **not** covered by the renderer's symlinked-leaf refusal:
+    /// it must *be* a link, so its rule is [`Self::active_is_valid`], not that
+    /// loop's negation.
+    pub fn active(&self) -> PathBuf {
+        self.root.join(ACTIVE_LINK)
+    }
+
+    /// The **PATH-facing** trampoline directory, `<root>/active/bin` (C-078).
     ///
     /// This is the directory the three PATH routes point at, and the one
     /// C-010's lookup-PATH exclusion is derived from — never a literal join at
     /// the call site, so the exclusion cannot drift from the tree shape.
+    ///
+    /// It resolves *through* the `active` link, so anything that stats, opens
+    /// or enumerates at or below it sees whatever `active` points at: `lstat`
+    /// does not follow a path's final component but does follow every
+    /// intermediate one. The renderer therefore writes, prunes, fingerprints
+    /// and guards through [`Self::shell_bin`] instead, and the two are equal
+    /// only *through* the link, never by string equality.
     pub fn bin(&self) -> PathBuf {
-        self.root.join(TOOLCHAIN_BIN_DIR)
+        self.active().join(TOOLCHAIN_BIN_DIR)
+    }
+
+    /// The **physical** trampoline directory for one shell,
+    /// `<root>/shells/<shell>/bin` (C-078).
+    ///
+    /// Where the renderer writes. Every write, prune, fingerprint and guard
+    /// pass uses this and not [`Self::bin`], so none of them can be redirected
+    /// by a repointed `active`.
+    ///
+    /// `shell` is a tree-owned constant ([`DEFAULT_SHELL`]), never a
+    /// user-supplied name, so it is not validated here — multi-shell selection
+    /// is out of scope, and the day a name arrives from configuration it must
+    /// route through `validate_component` like every other one.
+    pub fn shell_bin(&self, shell: &str) -> PathBuf {
+        self.root.join(SHELLS_DIR).join(shell).join(TOOLCHAIN_BIN_DIR)
+    }
+
+    /// Whether `<root>/active` is a link at exactly its derived target
+    /// (C-080).
+    ///
+    /// The **one** validity predicate, shared by the render path's heal and
+    /// the prompt path's gate so the two cannot answer differently. Read-only:
+    /// a prompt must never write, so a `false` here is a withhold at the
+    /// prompt and a heal at the render.
+    ///
+    /// [`crate::symlink::is_link`], never `Path::is_symlink`, because Windows
+    /// writes a junction and `is_symlink` reports `false` for one. Raw
+    /// `read_link`, never a canonicalising probe, because
+    /// `shells/../shells/default` is contained and resolves correctly and is
+    /// still not the value this tree writes. A `read_link` that errors is
+    /// **invalid**, never "unchanged": on Windows `is_link` is true for any
+    /// reparse point, including ones `read_link` cannot read.
+    ///
+    /// `active/bin` goes on `PATH`, so a link that escapes the home is an
+    /// arbitrary-directory-on-PATH primitive (CWE-426). That is closed here,
+    /// by equality with a derived value, rather than by a containment test
+    /// bolted on afterwards.
+    pub fn active_is_valid(&self, shell: &str) -> bool {
+        let active = self.active();
+        if !crate::symlink::is_link(&active) {
+            return false;
+        }
+        match std::fs::read_link(&active) {
+            Ok(target) => targets_match(&target, &expected_active_target(&self.root, shell), cfg!(windows)),
+            Err(_) => false,
+        }
     }
 
     /// The VCS-ignore file, `<root>/.gitignore` (C-004).
@@ -453,16 +582,23 @@ impl ToolchainHome {
         Ok(true)
     }
 
-    /// The directory link for `entry` in `group`, `<root>/<group>/<entry>`.
+    /// The directory link for `entry` in `group`,
+    /// `<root>/links/<group>/<entry>` (C-072).
+    ///
+    /// One tree-owned literal plus two validated components, three joins,
+    /// never one `join(format!(…))` — a single formatted join would embed a
+    /// literal separator and mix separators on Windows.
     ///
     /// Fallible because it validates its own inputs (D-V14): a component is
-    /// refused when it is empty, carries a path separator, carries a path
-    /// prefix (`:`), is `.` or `..`, ends with a `.` or a space, or
-    /// ASCII-case-folds to one of the tree's own names, `bin` (C-015) or
-    /// `.gitignore` (C-004). See [`ToolchainPathError`] for why the
-    /// parse-time validator is not sufficient on its own, and for why the
-    /// prefix and trailing-dot refusals are unconditional rather than
-    /// `#[cfg(windows)]`.
+    /// refused when it is empty, carries a control character, carries a path
+    /// separator, carries a path prefix (`:`), is `.` or `..`, or ends with a
+    /// `.` or a space. **No name is refused for colliding with the tree's
+    /// own** — every component here lands at depth 2 or below, one level under
+    /// the closed depth-1 set, so `[group.links]` renders at
+    /// `links/links/<entry>` and collides with nothing (C-071, C-073). See
+    /// [`ToolchainPathError`] for why the parse-time validator is not
+    /// sufficient on its own, and for why the prefix and trailing-dot refusals
+    /// are unconditional rather than `#[cfg(windows)]`.
     ///
     /// **Both `/` and `\` are refused on every platform**, regardless of the
     /// host's own separator. The check is on the *characters*, not on
@@ -484,13 +620,31 @@ impl ToolchainHome {
     ///
     /// [`ToolchainPathError`] naming the component and the refused value.
     pub fn entry(&self, group: &str, entry: &str) -> Result<PathBuf, ToolchainPathError> {
-        validate_component(ToolchainPathComponent::Group, group)?;
+        let group_dir = self.links_group(group)?;
         validate_component(ToolchainPathComponent::Entry, entry)?;
-        // Two separate joins of two validated single components: containment is
-        // a property of the construction, so there is no post-hoc check to
-        // forget. A single `join(format!("{group}/{entry}"))` would embed a
-        // literal separator and mix separators on Windows.
-        Ok(self.root.join(group).join(entry))
+        // Built on `links_group` rather than beside it: the two would agree
+        // until someone changed one literal, and nothing but this construction
+        // makes `entry(g, e).parent() == links_group(g)` true by definition.
+        Ok(group_dir.join(entry))
+    }
+
+    /// The directory holding one group's entry links, `<root>/links/<group>`
+    /// (C-072).
+    ///
+    /// The sanctioned route for every call site that needs the group
+    /// directory itself rather than an entry inside it — the renderer's
+    /// group-orphan scan and its default-group observation both joined the
+    /// group name onto the root before this existed, which is exactly the
+    /// bypass [`Self::root`] signposts.
+    ///
+    /// # Errors
+    ///
+    /// [`ToolchainPathError`] naming the refused group — the same refusals,
+    /// in the same order, that [`Self::entry`] applies to its group
+    /// component, because both call `validate_component`.
+    pub fn links_group(&self, group: &str) -> Result<PathBuf, ToolchainPathError> {
+        validate_component(ToolchainPathComponent::Group, group)?;
+        Ok(self.root.join(LINKS_DIR).join(group))
     }
 }
 
@@ -545,18 +699,15 @@ fn validate_component(component: ToolchainPathComponent, value: &str) -> Result<
         });
     }
     // Windows strips trailing dots and spaces when it resolves a path, so
-    // `bin.` and `bin ` reach the trampoline directory the reservation below
-    // exists to protect while sailing past `eq_ignore_ascii_case("bin")`.
-    // Refusing the trailing form outright is simpler than folding it into that
-    // comparison, and it is meaningless on every platform anyway.
+    // `foo.`, `foo ` and `foo` all resolve to ONE directory — three distinct
+    // lock keys rendering onto one path, which C-047's byte-identical-across-
+    // two-renders contract cannot survive. The refusal is about render
+    // identity, not about any reserved name: nothing at depth 1 is reachable
+    // from here any more (C-071), and this rule outlives the reservation that
+    // used to be its neighbour. Meaningless on every platform anyway, so it is
+    // refused everywhere rather than under a `cfg` the CI leg never compiles.
     if value.ends_with('.') || value.ends_with(' ') {
         return Err(ToolchainPathError::TrailingDotOrSpace {
-            component,
-            value: value.to_string(),
-        });
-    }
-    if value.eq_ignore_ascii_case(TOOLCHAIN_BIN_DIR) || value.eq_ignore_ascii_case(GITIGNORE_FILE) {
-        return Err(ToolchainPathError::Reserved {
             component,
             value: value.to_string(),
         });
@@ -595,9 +746,15 @@ impl ToolchainStore {
         self.home.root()
     }
 
-    /// The trampoline directory, `{root}/bin`.
+    /// The **PATH-facing** trampoline directory, `{root}/active/bin` (C-078).
     pub fn bin(&self) -> PathBuf {
         self.home.bin()
+    }
+
+    /// The **physical** trampoline directory the renderer writes,
+    /// `{root}/shells/<shell>/bin` (C-078).
+    pub fn shell_bin(&self, shell: &str) -> PathBuf {
+        self.home.shell_bin(shell)
     }
 
     /// The VCS-ignore file, `{root}/.gitignore` (C-004).
@@ -618,7 +775,8 @@ impl ToolchainStore {
         self.home.ensure_gitignore()
     }
 
-    /// The directory link for `entry` in `group`, `{root}/<group>/<entry>`.
+    /// The directory link for `entry` in `group`,
+    /// `{root}/links/<group>/<entry>` (C-072).
     ///
     /// # Errors
     ///
@@ -627,6 +785,17 @@ impl ToolchainStore {
     pub fn entry(&self, group: &str, entry: &str) -> Result<PathBuf, ToolchainPathError> {
         self.home.entry(group, entry)
     }
+
+    /// The directory holding one group's entry links, `{root}/links/<group>`
+    /// (C-072).
+    ///
+    /// # Errors
+    ///
+    /// [`ToolchainPathError`] — see [`ToolchainHome::links_group`], which owns
+    /// the validation.
+    pub fn links_group(&self, group: &str) -> Result<PathBuf, ToolchainPathError> {
+        self.home.links_group(group)
+    }
 }
 
 #[cfg(test)]
@@ -634,7 +803,10 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
-    use super::{ToolchainHome, ToolchainPathComponent, ToolchainPathError, ToolchainStore};
+    use super::{
+        DEFAULT_SHELL, ToolchainHome, ToolchainPathComponent, ToolchainPathError, ToolchainStore,
+        expected_active_target, targets_match,
+    };
     use crate::cli::{ClassifyExitCode, ExitCode};
 
     /// Component names D-V14 refuses, one per refusal reason, reused by the
@@ -647,16 +819,25 @@ mod tests {
         "a/b",
         "a\\b",
         "/etc",
-        "bin",
-        "Bin",
-        ".gitignore",
+        // Control characters, refused before every other rule so no later
+        // message interpolates a raw byte. `\u{85}` is the C1 row a C0-only
+        // rewrite would drop.
+        "a\0b",
+        "a\nb",
+        "a\rb",
+        "a\tb",
+        "a\u{7f}b",
+        "a\u{85}b",
         // Windows path prefixes: `PathBuf::push` replaces `self` entirely for
-        // a path with a prefix but no root, so these discard the home root.
+        // a path with a prefix but no root, so these discard the home root —
+        // and, after the move under `links/`, discard that component too.
         "C:",
         "C:x",
         "a:b",
         // Windows strips trailing dots and spaces when resolving a path, so
-        // these land on the reserved names without folding to them.
+        // two distinct lock keys would name one rendered directory. `bin` and
+        // `.gitignore` themselves are no longer refused (C-073); these
+        // trailing forms still are, and this is now their only fixture.
         "bin.",
         "bin ",
         ".gitignore.",
@@ -687,17 +868,17 @@ mod tests {
         assert_eq!(home.root(), Path::new("/w/proj/.ocx/toolchain"));
     }
 
-    /// C-001 — the trampoline directory is `bin`, exactly one component below
-    /// the home root. This is the directory the three PATH routes point at and
-    /// the one C-010's lookup-PATH exclusion is derived from.
+    /// C-078 — `bin()` keeps its name and its meaning (the directory the three
+    /// PATH routes point at, and the one C-010's lookup-PATH exclusion is
+    /// derived from) and now reaches it **through** the `active` link.
     #[test]
-    fn the_trampoline_directory_is_bin_directly_under_the_home_root() {
+    fn the_path_facing_trampoline_directory_resolves_through_active() {
         let home = ToolchainHome::new("/w/proj/.ocx/toolchain");
-        assert_eq!(home.bin(), PathBuf::from("/w/proj/.ocx/toolchain/bin"));
+        assert_eq!(home.bin(), PathBuf::from("/w/proj/.ocx/toolchain/active/bin"));
         assert_eq!(
             home.bin().parent(),
-            Some(home.root()),
-            "the trampoline directory must be a direct child of the home root"
+            Some(Path::new("/w/proj/.ocx/toolchain/active")),
+            "C-078 — the PATH-facing directory is `bin` under the `active` link, not under the root"
         );
     }
 
@@ -721,7 +902,17 @@ mod tests {
         let store = ToolchainStore::new("/ocx/toolchain");
         assert_eq!(store.root(), store.home().root(), "root() must forward");
         assert_eq!(store.bin(), store.home().bin(), "bin() must forward");
+        assert_eq!(
+            store.shell_bin("default"),
+            store.home().shell_bin("default"),
+            "shell_bin() must forward"
+        );
         assert_eq!(store.gitignore(), store.home().gitignore(), "gitignore() must forward");
+        assert_eq!(
+            store.links_group("ci"),
+            store.home().links_group("ci"),
+            "links_group() must forward"
+        );
     }
 
     /// C-001, D-V14 — `entry` forwards too, so the store cannot admit a
@@ -734,10 +925,17 @@ mod tests {
             store.home().entry("default", "cmake"),
             "an accepted pair must resolve identically through both spellings"
         );
+        // `"a/b"`, not `"bin"`: `bin` is an accepted name after C-073, so the
+        // old probe would have gone on comparing two `Ok`s and silently stopped
+        // testing refusal-forwarding at all.
         assert_eq!(
-            store.entry("bin", "cmake"),
-            store.home().entry("bin", "cmake"),
+            store.entry("a/b", "cmake"),
+            store.home().entry("a/b", "cmake"),
             "a refused component must be refused identically through both spellings"
+        );
+        assert!(
+            store.entry("a/b", "cmake").is_err(),
+            "the control: the probe pair must actually be refused, or this test compares two Ok values"
         );
     }
 
@@ -1195,62 +1393,89 @@ mod tests {
         ));
     }
 
-    /// C-015, C-013, C-004 — the tree's own names are reserved on **both**
-    /// components, and the comparison folds ASCII case, so `Bin` is `bin`.
+    /// C-071, C-073 — the tree's own names are **accepted** as group and entry
+    /// names, because no user-supplied name is a depth-1 component any more.
+    ///
+    /// `bin` and `.gitignore` were reserved for a collision that the move
+    /// under `links/` removes by construction; `links`, `shells` and `active`
+    /// are deliberately *not* reserved in their place — a group name sits one
+    /// level below every tree-own name, so `[group.links]` renders at
+    /// `links/links/<entry>` and collides with nothing. Three separate readings
+    /// of this record have proposed re-reserving them, so the acceptance is
+    /// asserted positively rather than left as an absence.
+    ///
+    /// RED: restore the `eq_ignore_ascii_case` arm in `validate_component`, or
+    /// add one for the depth-1 set, and every row here exits `Err`.
     #[test]
-    fn entry_refuses_the_trees_own_names_case_folded() {
+    fn the_trees_own_names_are_accepted_as_group_and_entry_names() {
         let home = ToolchainHome::new("/ocx/toolchain");
-        for name in ["bin", "Bin", "BIN", ".gitignore", ".GITIGNORE", ".GitIgnore"] {
-            assert!(
-                matches!(
-                    home.entry(name, "cmake"),
-                    Err(ToolchainPathError::Reserved {
-                        component: ToolchainPathComponent::Group,
-                        ..
-                    })
-                ),
-                "C-015 — group {name:?} folds to one of the tree's own names and must be refused"
+        for name in [
+            "bin",
+            "Bin",
+            "BIN",
+            ".gitignore",
+            ".GITIGNORE",
+            "links",
+            "shells",
+            "active",
+            "Links",
+            "Shells",
+            "Active",
+        ] {
+            assert_eq!(
+                home.entry(name, "cmake")
+                    .unwrap_or_else(|e| panic!("C-073 — group {name:?} must be accepted, got {e}")),
+                PathBuf::from("/ocx/toolchain/links").join(name).join("cmake"),
+                "C-071 — a tree-own name is an ordinary group one level below `links`"
             );
-            assert!(
-                matches!(
-                    home.entry("default", name),
-                    Err(ToolchainPathError::Reserved {
-                        component: ToolchainPathComponent::Entry,
-                        ..
-                    })
-                ),
-                "C-013 reserves `bin` as a tool name too, so entry {name:?} must be refused"
+            assert_eq!(
+                home.entry("default", name)
+                    .unwrap_or_else(|e| panic!("C-073 — entry {name:?} must be accepted, got {e}")),
+                PathBuf::from("/ocx/toolchain/links/default").join(name),
+                "C-071 — a tree-own name is an ordinary entry two levels below `links`"
+            );
+            assert_eq!(
+                home.links_group(name)
+                    .unwrap_or_else(|e| panic!("C-072 — links_group({name:?}) must be accepted, got {e}")),
+                PathBuf::from("/ocx/toolchain/links").join(name),
+                "C-072 — the group accessor admits exactly what `entry` admits"
             );
         }
     }
 
-    /// D-V14 — an ordinary pair resolves, and `default` specifically stays a
-    /// legal group directory: it is the group `bin/` exposes, so refusing it
-    /// would make the common tree unrenderable.
+    /// D-V14, C-072 — an ordinary pair resolves under `links/`, and `default`
+    /// specifically stays a legal group directory: it is the group the
+    /// trampolines expose, so refusing it would make the common tree
+    /// unrenderable.
     #[test]
     fn entry_accepts_an_ordinary_group_and_entry_pair() {
         let home = ToolchainHome::new("/ocx/toolchain");
         assert_eq!(
             home.entry("default", "cmake").expect("`default`/`cmake` must resolve"),
-            PathBuf::from("/ocx/toolchain/default/cmake")
+            PathBuf::from("/ocx/toolchain/links/default/cmake")
         );
         assert_eq!(
             home.entry("ci", "python3.13")
                 .expect("an ordinary group/entry pair must resolve"),
-            PathBuf::from("/ocx/toolchain/ci/python3.13")
+            PathBuf::from("/ocx/toolchain/links/ci/python3.13")
         );
     }
 
-    /// D-V14 — containment. Every accepted pair lands exactly two components
-    /// below the home root, and every hostile component is refused outright, so
-    /// no admitted name can widen into a third component or escape the tree.
+    /// C-071, D-V14 — containment. Every accepted pair lands exactly three
+    /// components below the home root with `links` first, and every hostile
+    /// component is refused outright through **both** accessors, so no admitted
+    /// name can widen into a fourth component or escape the tree.
+    ///
+    /// Component-wise on `strip_prefix`, never `starts_with`: `..` passes a
+    /// `starts_with` check, so a prefix test would admit exactly the escape
+    /// this guard exists to catch.
     ///
     /// Modelled on the shipped `cache_files_reject_hostile_slug` guard in
     /// `state_store.rs`, and run over the hostile list rather than only the
     /// accepted one — a refusal that leaked through would otherwise be presumed
     /// impossible instead of checked.
     #[test]
-    fn every_resolved_entry_stays_exactly_two_components_below_the_home_root() {
+    fn every_resolved_entry_stays_exactly_three_components_below_the_home_root() {
         let home = ToolchainHome::new("/ocx/toolchain");
 
         for (group, entry) in [("default", "cmake"), ("ci", "python3.13"), ("Release", "MSBuild")] {
@@ -1260,7 +1485,12 @@ mod tests {
                 .expect("a resolved entry must stay under the home root")
                 .components()
                 .collect();
-            assert_eq!(tail.len(), 2, "expected <group>/<entry>, got {path:?}");
+            assert_eq!(tail.len(), 3, "expected links/<group>/<entry>, got {path:?}");
+            assert_eq!(
+                tail[0].as_os_str(),
+                "links",
+                "C-071 — depth 1 is tree-owned, so a rendered entry starts at `links`, got {path:?}"
+            );
         }
 
         for name in HOSTILE_COMPONENTS {
@@ -1272,7 +1502,281 @@ mod tests {
                 home.entry("default", name).is_err(),
                 "D-V14 — entry {name:?} must be refused, never rendered"
             );
+            assert!(
+                home.links_group(name).is_err(),
+                "C-072 — links_group({name:?}) must be refused, never rendered"
+            );
         }
+    }
+
+    /// C-072 — the two accessors cannot drift: `links_group` refuses **exactly**
+    /// what `entry`'s group component refuses, with the same variant and the
+    /// same component, and an accepted `entry` is its `links_group` plus one
+    /// component.
+    ///
+    /// The equality is on the whole error, not on `is_err()`: the refusal order
+    /// in `validate_component` is load-bearing (a control byte outranks a
+    /// separator so no later message interpolates a raw control byte), and only
+    /// a variant-level comparison can see that order diverge.
+    ///
+    /// RED: give `links_group` its own inlined checks instead of routing them
+    /// both through `validate_component`, and reorder any two — `"a\nb/c"` then
+    /// reports `Separator` through one accessor and `ControlCharacter` through
+    /// the other.
+    #[test]
+    fn links_group_and_entry_refuse_the_same_component_identically() {
+        let home = ToolchainHome::new("/ocx/toolchain");
+
+        for name in HOSTILE_COMPONENTS.iter().chain(["a\nb/c", "a b."].iter()) {
+            assert_eq!(
+                home.links_group(name).unwrap_err(),
+                home.entry(name, "cmake").unwrap_err(),
+                "C-072 — {name:?} must be refused identically through both accessors"
+            );
+        }
+
+        for (group, entry) in [("default", "cmake"), ("bin", "ocx"), ("ci", "python3.13")] {
+            let resolved = home.entry(group, entry).expect("an accepted pair must resolve");
+            assert_eq!(
+                resolved.parent(),
+                Some(
+                    home.links_group(group)
+                        .expect("an accepted group must resolve")
+                        .as_path()
+                ),
+                "C-072 — entry() is links_group() plus exactly one component"
+            );
+        }
+    }
+
+    /// C-073 — `TrailingDotOrSpace` survives the reservation's deletion, and it
+    /// is now the *only* rule refusing `bin.` and `bin `.
+    ///
+    /// Kept as its own test because the reservation's removal takes `"bin"`,
+    /// `"Bin"` and `".gitignore"` out of the refused set: deleting the whole
+    /// `bin` family together would silently drop R6's only fixture with them.
+    /// The rule it now defends is a render-identity collision, not a reserved
+    /// name — Windows strips the trailing form, so `foo.` and `foo` would name
+    /// one `links/<group>` directory from two distinct lock keys.
+    #[test]
+    fn a_trailing_dot_or_space_is_still_refused_after_the_reservation_is_gone() {
+        let home = ToolchainHome::new("/ocx/toolchain");
+        for name in ["bin.", "bin ", ".gitignore.", "links.", "cmake "] {
+            assert!(
+                matches!(
+                    home.entry(name, "cmake"),
+                    Err(ToolchainPathError::TrailingDotOrSpace {
+                        component: ToolchainPathComponent::Group,
+                        ..
+                    })
+                ),
+                "group {name:?} must still be refused as a trailing dot or space"
+            );
+            assert!(
+                matches!(
+                    home.links_group(name),
+                    Err(ToolchainPathError::TrailingDotOrSpace { .. })
+                ),
+                "links_group({name:?}) must still be refused as a trailing dot or space"
+            );
+        }
+    }
+
+    /// D-V14 — the grammar has **no length cap and no confusable folding**, and
+    /// that is a decision rather than an omission.
+    ///
+    /// The length cap is `SLUG_MAX_LEN` at the `ocx.toml` parse seam, which
+    /// `ocx.lock` group keys bypass by D-V14's own premise; adding one here
+    /// would be a second, silently different rule. A Unicode look-alike is a
+    /// *distinct* directory, which is the correct outcome once no depth-1 name
+    /// can be shadowed. Asserted positively so either becoming a refusal is a
+    /// deliberate change and not a drift.
+    #[test]
+    fn the_grammar_caps_no_length_and_folds_no_confusable() {
+        let home = ToolchainHome::new("/ocx/toolchain");
+        let long = "a".repeat(300);
+        assert!(home.entry(&long, "cmake").is_ok(), "the grammar imposes no length cap");
+
+        // Cyrillic `с` (U+0441), not ASCII `c`.
+        let confusable = "сmake";
+        assert_ne!(confusable, "cmake", "the control: the two spellings differ in bytes");
+        assert_eq!(
+            home.entry("default", confusable)
+                .expect("a Unicode look-alike is an ordinary name"),
+            PathBuf::from("/ocx/toolchain/links/default").join(confusable)
+        );
+    }
+
+    // ── C-079/C-080: the `active` validity predicate ─────────────────────────
+
+    /// Plant `state` at `<root>/active` and answer the predicate.
+    ///
+    /// Takes the raw target rather than a typed state so every row of the
+    /// truth table below reads as the on-disk value it describes; `None` means
+    /// "not a link", handled by the caller.
+    fn active_link_to(root: &Path, target: &str) -> bool {
+        std::fs::create_dir_all(root).unwrap();
+        let link = root.join("active");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(target, &link).unwrap();
+        ToolchainHome::new(root).active_is_valid(DEFAULT_SHELL)
+    }
+
+    /// C-080 — the predicate is true for **exactly one** value, the derived
+    /// target, and false for every other on-disk state.
+    ///
+    /// One row per state class the corrupt-states hunt enumerated, driven over
+    /// a real `TempDir` because the question is about the filesystem, not about
+    /// string handling.
+    ///
+    /// RED, one mutation per class: replace the equality with
+    /// `target.starts_with("shells")` and the wrong-shell, dot-prefixed and
+    /// `..`-traversing rows all flip to `true` — the wrong-shell row is the
+    /// security-relevant one, since it names another shell's real `bin`.
+    #[test]
+    fn active_is_valid_admits_exactly_the_derived_target() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // The one legal value.
+        assert!(
+            active_link_to(&tmp.path().join("v0"), "shells/default"),
+            "C-079 — the derived relative target is the one valid value"
+        );
+
+        // Every other link target.
+        for target in [
+            "shells/ghost",             // a shell that does not exist
+            "shells/other",             // a real, wrong shell — the security row
+            "active",                   // self
+            "/tmp/evil",                // absolute, outside the home
+            "../../escape",             // relative, outside the home
+            "./shells/default",         // resolves correctly, spelled differently
+            "shells/../shells/default", // resolves correctly, contained, traversing
+            "shells/default/",          // resolves correctly, trailing separator
+            "shells",                   // one component short
+        ] {
+            assert!(
+                !active_link_to(
+                    &tmp.path().join(format!("v-{}", target.replace(['/', '.'], "_"))),
+                    target
+                ),
+                "C-080 — `active -> {target:?}` is not the derived target and must be invalid"
+            );
+        }
+    }
+
+    /// C-080 — a path that is not a link is invalid, whatever else it is.
+    ///
+    /// `read_link` on a real directory fails `EINVAL`, so a predicate written
+    /// as `is_link(p) && read_link(p).map_or(true, ..)` would report these
+    /// `true`; the `is_link` gate is what actually refuses them here, and the
+    /// `Err`-is-invalid rule is what refuses a Windows non-junction reparse
+    /// point, which no Linux leg can plant.
+    #[test]
+    fn active_is_valid_refuses_every_non_link_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let absent = tmp.path().join("absent");
+        std::fs::create_dir_all(&absent).unwrap();
+        assert!(
+            !ToolchainHome::new(&absent).active_is_valid(DEFAULT_SHELL),
+            "an absent `active` is invalid, and the render creates it"
+        );
+
+        let populated = tmp.path().join("populated");
+        std::fs::create_dir_all(populated.join("active").join("bin")).unwrap();
+        assert!(
+            !ToolchainHome::new(&populated).active_is_valid(DEFAULT_SHELL),
+            "the `cp -rL` outcome — a real directory where the link belongs — is invalid"
+        );
+
+        let file = tmp.path().join("file");
+        std::fs::create_dir_all(&file).unwrap();
+        std::fs::write(file.join("active"), b"not a link").unwrap();
+        assert!(
+            !ToolchainHome::new(&file).active_is_valid(DEFAULT_SHELL),
+            "a regular file where the link belongs is invalid"
+        );
+    }
+
+    /// C-079 — the expected target is a pure function of `(root, shell)` and
+    /// the comparison's case fold is a **parameter**, not a `cfg!`.
+    ///
+    /// The fold only fires on Windows, so a `cfg!` inside the comparison would
+    /// leave one of its two arms unreachable on the only CI leg that runs —
+    /// the RUL-10/C-025 unreachable-red class this record rejected option D
+    /// for. Driving `targets_match` with the flag as data exercises both arms
+    /// on Linux.
+    #[test]
+    fn targets_match_folds_case_only_when_told_to() {
+        assert!(targets_match(
+            Path::new("shells/Default"),
+            Path::new("shells/default"),
+            true
+        ));
+        assert!(!targets_match(
+            Path::new("shells/Default"),
+            Path::new("shells/default"),
+            false
+        ));
+        // Raw, never `PathBuf`-normalised: a trailing separator is a different
+        // stored target, and `PathBuf`'s own `PartialEq` would call these equal.
+        assert!(!targets_match(
+            Path::new("shells/default/"),
+            Path::new("shells/default"),
+            false
+        ));
+        assert_eq!(
+            expected_active_target(Path::new("/ocx/toolchain"), DEFAULT_SHELL),
+            if cfg!(windows) {
+                PathBuf::from("/ocx/toolchain").join("shells").join("default")
+            } else {
+                PathBuf::from("shells/default")
+            },
+            "C-079 — POSIX derives the relative target, Windows the absolute one"
+        );
+    }
+
+    /// C-080 — `crate::symlink::is_link`, never `Path::is_symlink`, and raw
+    /// `read_link`, never a canonicalising probe.
+    ///
+    /// A structural guard because no behavioural test on Linux can see the
+    /// first half: there `is_link` *is* `Path::is_symlink`, so swapping them
+    /// leaves every row of the truth table answering the same way. It is the
+    /// Windows junction rows the swap breaks, and this repository has no
+    /// Windows leg. Modelled on `the_forge_client_disables_redirects` in
+    /// `forge/http.rs`: comments stripped so the rationale above cannot satisfy
+    /// the needle, and the test module cut off so the assertion's own string
+    /// literals cannot either.
+    #[test]
+    fn the_active_predicate_probes_links_the_junction_aware_way() {
+        let source = include_str!("toolchain_store.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields a first part");
+        let code: String = production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            code.contains("crate::symlink::is_link("),
+            "C-080 — the predicate must probe through `crate::symlink::is_link`, which sees a Windows junction"
+        );
+        assert_eq!(
+            code.matches("is_symlink(").count(),
+            0,
+            "C-080 — `Path::is_symlink` reports false for a junction, so the predicate must never call it"
+        );
+        assert_eq!(
+            code.matches("canonicalize").count(),
+            0,
+            "C-080 — the comparison is on the raw stored target; a canonicalising probe admits `shells/../shells/default`"
+        );
     }
 
     // ── exit-code registration ───────────────────────────────────────────────
@@ -1284,8 +1788,8 @@ mod tests {
     /// [`ToolchainPathError::classify`] — and no further. Nothing forces it
     /// into `one_of_every_variant` or into the expected-name set below, so a
     /// variant added and listed only where the compiler demands leaves the
-    /// count comparison green at 6 == 6 with the new variant never classified
-    /// by any test.
+    /// count comparison green at 6 == 6 — the number of variants that survive
+    /// C-073 — with the new variant never classified by any test.
     ///
     /// The real tripwire is `classify`'s wildcard-free match, which stops
     /// compiling until someone chooses the new variant's exit code. This
@@ -1298,7 +1802,6 @@ mod tests {
             ToolchainPathError::PathPrefix { .. } => "PathPrefix",
             ToolchainPathError::TrailingDotOrSpace { .. } => "TrailingDotOrSpace",
             ToolchainPathError::Relative { .. } => "Relative",
-            ToolchainPathError::Reserved { .. } => "Reserved",
         }
     }
 
@@ -1327,10 +1830,6 @@ mod tests {
                 component: ToolchainPathComponent::Entry,
                 value: "..".to_string(),
             },
-            ToolchainPathError::Reserved {
-                component: ToolchainPathComponent::Entry,
-                value: "bin".to_string(),
-            },
         ]
     }
 
@@ -1348,7 +1847,6 @@ mod tests {
             "PathPrefix",
             "TrailingDotOrSpace",
             "Relative",
-            "Reserved",
         ]
         .into_iter()
         .collect();

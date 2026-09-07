@@ -83,10 +83,10 @@ pub fn binding_key(identifier: &Identifier) -> String {
 ///
 /// Both go through [`super::config::validate_toolchain_name`], the one grammar
 /// the **reader** applies to every `[tools]` key, `[group.<g>].tools` key and
-/// `[group.<g>]` name. The derived key is not the safer input of the two —
-/// `ocx add ghcr.io/acme/bin` derives the reserved `bin` from an identifier
-/// nobody spelled a name for, and before this guard existed nothing looked at
-/// it at all.
+/// `[group.<g>]` name. The derived key is not the safer input of the two — it
+/// comes from an identifier nobody spelled a name for, so an over-long or
+/// off-charset repository basename reaches the file unexamined, and before
+/// this guard existed nothing looked at it at all.
 ///
 /// **What this buys, stated exactly.** It does not stop an unloadable file:
 /// `super::document::render_preserving` re-parses the text it renders through
@@ -104,9 +104,8 @@ pub fn binding_key(identifier: &Identifier) -> String {
 ///
 /// # Errors
 ///
-/// [`ProjectErrorKind::ReservedToolchainName`] or
 /// [`ProjectErrorKind::InvalidToolchainNameCharset`] — the reader's own
-/// variants, so the message a user gets from `ocx add` is the message they
+/// variant, so the message a user gets from `ocx add` is the message they
 /// would get from the file.
 fn validate_tool_key(key: &str, group: Option<&str>, path: &Path) -> Result<(), Error> {
     let scope = match group {
@@ -125,8 +124,8 @@ fn validate_tool_key(key: &str, group: Option<&str>, path: &Path) -> Result<(), 
 ///    group is exactly the collision the reservation exists to stop, and the
 ///    reader folds case for the same comparison.
 /// 2. Everything else is [`super::config::validate_toolchain_name`]: the same
-///    charset, the same 64-byte cap, and the same `bin` reservation the reader
-///    applies to a `[group.<g>]` name.
+///    charset and the same 64-byte cap the reader applies to a `[group.<g>]`
+///    name.
 ///
 /// Rule 2 replaces a hand-rolled `is_alphanumeric()` test that was wrong in
 /// both directions: `is_alphanumeric` is **Unicode**, so it admitted `café`,
@@ -145,15 +144,13 @@ fn validate_tool_key(key: &str, group: Option<&str>, path: &Path) -> Result<(), 
 /// `project/config.rs`'s parse-time validator is untouched and still answers 78
 /// for the identical name read out of a file.
 ///
-/// The `bin` reservation is **not** re-attributed: it is a distinct refusal
-/// with its own message and its own contract (C-013/C-015), and RUL-73 scopes
-/// this change to the charset check.
-///
 /// # Errors
 ///
 /// [`ProjectErrorKind::InvalidGroupName`] for a reserved selector or a name
 /// outside the toolchain charset — both usage faults in `--group`, exit 64.
-/// Otherwise the reader's own [`ProjectErrorKind::ReservedToolchainName`].
+/// The `_ => error` arm below is defensive rather than reachable: since C-073
+/// deleted the `bin` reservation, the charset refusal is the only variant the
+/// reader's validator still produces.
 fn validate_group_name(name: &str, path: &Path) -> Result<(), Error> {
     if name.eq_ignore_ascii_case(super::internal::DEFAULT_GROUP)
         || name.eq_ignore_ascii_case(super::internal::ALL_GROUP)
@@ -250,8 +247,7 @@ async fn read_config_via_guard(
 ///
 /// - [`ProjectErrorKind::InvalidGroupName`] — `group` is a reserved selector
 ///   (`default` or `all`, ASCII-case-folded).
-/// - [`ProjectErrorKind::ReservedToolchainName`] /
-///   [`ProjectErrorKind::InvalidToolchainNameCharset`] — `group`, or the key
+/// - [`ProjectErrorKind::InvalidToolchainNameCharset`] — `group`, or the key
 ///   this mutation would write, is not a name the reader accepts. The key is
 ///   checked whether it was typed or derived (R-W21).
 /// - [`ProjectErrorKind::BindingAlreadyExists`] — the key already exists in
@@ -268,9 +264,9 @@ pub fn add_binding_in_memory(
     }
 
     // One guard for both doors: the explicit `NAME=IDENTIFIER` key and the one
-    // `binding_key` derives. Validating only the typed name is what let
-    // `ocx add ghcr.io/acme/bin` carry the reserved `bin` all the way to the
-    // write and fail there with a diagnosis naming neither.
+    // `binding_key` derives. Validating only the typed name is what let a
+    // derived key carry a name the reader refuses all the way to the write and
+    // fail there with a diagnosis naming neither the key nor the rule.
     let key = name.map_or_else(|| binding_key(identifier), str::to_owned);
     validate_tool_key(&key, group, path)?;
 
@@ -331,8 +327,7 @@ pub fn add_binding_in_memory(
 ///
 /// - [`ProjectErrorKind::InvalidGroupName`] — `group` is a reserved selector
 ///   (`default` or `all`, ASCII-case-folded).
-/// - [`ProjectErrorKind::ReservedToolchainName`] /
-///   [`ProjectErrorKind::InvalidToolchainNameCharset`] — `group`, or the key
+/// - [`ProjectErrorKind::InvalidToolchainNameCharset`] — `group`, or the key
 ///   this mutation would write, is not a name the reader accepts.
 /// - [`ProjectErrorKind::Io`] — the config file could not be read or written.
 /// - [`ProjectErrorKind::FileTooLarge`] — the config file exceeds the 64 KiB cap.
@@ -899,53 +894,77 @@ mod tests {
         assert!(cfg.tools.is_empty(), "a rejected name must leave [tools] untouched");
     }
 
-    /// R-W21: the **derived** key is validated too. `ocx add ghcr.io/acme/bin`
-    /// names no key at all, and the basename it derives is the one word the
-    /// reader reserves — so validating only the typed name leaves the one
-    /// input nobody typed unguarded.
+    /// R-W21: the **derived** key is validated too. `ocx add` names no key at
+    /// all, so validating only the typed name leaves the one input nobody
+    /// typed unguarded.
+    ///
+    /// The probe was `acme/bin` until C-073, whose derived key was the one
+    /// word the reader reserved. That reservation is gone, so the probe is now
+    /// an over-long basename — still derived, still refused, and still by the
+    /// reader's own validator rather than a second one here.
     #[tokio::test(flavor = "multi_thread")]
     async fn add_binding_rejects_a_derived_key_the_reader_refuses() {
         let dir = tempdir().unwrap();
         write_minimal_toml(dir.path(), "[tools]\n");
-        let id = test_id("example.com", "acme/bin", "1.0");
+        let over_long = "a".repeat(crate::package::metadata::slug::SLUG_MAX_LEN + 1);
+        let id = test_id("example.com", &format!("acme/{over_long}"), "1.0");
 
         let err = add_binding(&toml(dir.path()), &id, None, None)
             .await
-            .expect_err("a derived `bin` key must be rejected");
+            .expect_err("a derived key past the length cap must be rejected");
         assert!(
-            matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::ReservedToolchainName { scope, name } if scope == "tools" && name == "bin")),
-            "expected ReservedToolchainName for the derived key; got: {err}"
+            matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::InvalidToolchainNameCharset { scope, name } if scope == "tools" && name == &over_long)),
+            "expected InvalidToolchainNameCharset for the derived key; got: {err}"
         );
 
         let cfg = reload_config(dir.path());
         assert!(cfg.tools.is_empty(), "a rejected key must leave [tools] untouched");
     }
 
-    /// C-013/C-015 from the writer side: `bin` is reserved as a tool name and
-    /// as a group name, ASCII-case-folded, whichever way it is spelled.
+    /// C-073 / S-003 from the writer side: `bin` is an ordinary tool name and
+    /// an ordinary group name, in every ASCII case — including the key
+    /// `ocx add example.com/acme/bin` derives without anyone typing it.
+    ///
+    /// This is the user-visible half of the reservation's deletion: the same
+    /// command that exited 78 now writes `[tools] bin = …`, and the tree
+    /// renders it at `links/<group>/bin`.
     #[tokio::test(flavor = "multi_thread")]
-    async fn add_binding_rejects_the_reserved_bin_name_case_folded() {
-        let dir = tempdir().unwrap();
-        write_minimal_toml(dir.path(), "[tools]\n");
+    async fn add_binding_accepts_bin_as_a_tool_and_a_group_name_case_folded() {
         let id = test_id("example.com", "acme/tool", "1.0");
 
         for candidate in ["bin", "Bin", "BIN"] {
-            let err = add_binding(&toml(dir.path()), &id, Some(candidate), None)
+            let dir = tempdir().unwrap();
+            write_minimal_toml(dir.path(), "[tools]\n");
+            add_binding(&toml(dir.path()), &id, Some(candidate), None)
                 .await
-                .expect_err("a reserved tool name must be rejected");
+                .unwrap_or_else(|e| panic!("C-073 — tool {candidate:?} must be accepted; got {e}"));
             assert!(
-                matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::ReservedToolchainName { scope, name } if scope == "tools" && name == candidate)),
-                "expected ReservedToolchainName for tool {candidate:?}; got: {err}"
+                reload_config(dir.path()).tools.contains_key(candidate),
+                "the accepted tool must actually be written to [tools]"
             );
 
-            let err = add_binding(&toml(dir.path()), &id, None, Some(candidate))
+            let dir = tempdir().unwrap();
+            write_minimal_toml(dir.path(), "[tools]\n");
+            add_binding(&toml(dir.path()), &id, None, Some(candidate))
                 .await
-                .expect_err("a reserved group name must be rejected");
+                .unwrap_or_else(|e| panic!("C-073 — group {candidate:?} must be accepted; got {e}"));
             assert!(
-                matches!(&err, Error::Project(pe) if matches!(&pe.kind, ProjectErrorKind::ReservedToolchainName { scope, name } if scope == "group" && name == candidate)),
-                "expected ReservedToolchainName for group {candidate:?}; got: {err}"
+                reload_config(dir.path()).groups.contains_key(candidate),
+                "the accepted group must actually be written to [group.<g>]"
             );
         }
+
+        // The derived key, which nobody types: `acme/bin` -> `bin`.
+        let dir = tempdir().unwrap();
+        write_minimal_toml(dir.path(), "[tools]\n");
+        let derived = test_id("example.com", "acme/bin", "1.0");
+        add_binding(&toml(dir.path()), &derived, None, None)
+            .await
+            .expect("C-073 — a derived `bin` key must be accepted");
+        assert!(
+            reload_config(dir.path()).tools.contains_key("bin"),
+            "S-003 — `ocx add example.com/acme/bin` writes `[tools] bin`"
+        );
     }
 
     /// R-W21: the group charset was `char::is_alphanumeric`, which is

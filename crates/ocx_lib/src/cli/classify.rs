@@ -1356,9 +1356,13 @@ mod tests {
     fn toolchain_path_error_is_registered_in_the_classifier() {
         use crate::file_structure::{ToolchainPathComponent, ToolchainPathError};
 
-        let err = ToolchainPathError::Reserved {
+        // `Separator`, not the deleted `Reserved`: the sample only has to be a
+        // variant of this type, and re-basing it keeps the ladder check alive —
+        // deleting the test with the variant would delete the only assertion
+        // that catches un-registering `ToolchainPathError` from the ladder.
+        let err = ToolchainPathError::Separator {
             component: ToolchainPathComponent::Group,
-            value: "bin".to_string(),
+            value: "a/b".to_string(),
         };
         assert_eq!(
             classify(err),

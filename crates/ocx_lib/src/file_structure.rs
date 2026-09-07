@@ -24,7 +24,9 @@ pub use shim_store::{ShimDir, ShimStore};
 pub use state_store::{BinEntryStamp, RenderStamp, RenderStampScope, RenderStampTarget, StateStore};
 pub use symlink_store::{SymlinkKind, SymlinkStore};
 pub use temp_store::{StaleEntry, TempAcquireResult, TempDir, TempEntry, TempStore};
-pub use toolchain_store::{ToolchainHome, ToolchainPathComponent, ToolchainPathError, ToolchainStore};
+pub use toolchain_store::{
+    DEFAULT_SHELL, TREE_OWN_DEPTH1_NAMES, ToolchainHome, ToolchainPathComponent, ToolchainPathError, ToolchainStore,
+};
 
 /// Root layout of the local OCX data directory.
 ///
@@ -345,11 +347,25 @@ mod tests {
     fn the_composite_roots_toolchain_field_answers_through_its_one_home() {
         let structure = FileStructure::with_root(std::path::PathBuf::from("/ocx"));
         assert_eq!(structure.toolchain.bin(), structure.toolchain.home().bin());
+        assert_eq!(
+            structure.toolchain.shell_bin(DEFAULT_SHELL),
+            structure.toolchain.home().shell_bin(DEFAULT_SHELL)
+        );
         assert_eq!(structure.toolchain.gitignore(), structure.toolchain.home().gitignore());
         assert_eq!(
             structure.toolchain.bin(),
-            structure.root().join("toolchain").join("bin"),
-            "the trampoline directory is `<root>/toolchain/bin`"
+            structure.root().join("toolchain").join("active").join("bin"),
+            "C-078 — the PATH-facing trampoline directory is `<root>/toolchain/active/bin`"
+        );
+        assert_eq!(
+            structure.toolchain.shell_bin(DEFAULT_SHELL),
+            structure
+                .root()
+                .join("toolchain")
+                .join("shells")
+                .join("default")
+                .join("bin"),
+            "C-078 — the renderer writes the physical `<root>/toolchain/shells/default/bin`"
         );
     }
 
