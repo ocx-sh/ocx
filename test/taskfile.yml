@@ -235,9 +235,10 @@ tasks:
       no-op prompt path, shell startup within exec_floor + 2 ms and the
       per-prompt reconcile - in `env` mode AND in `bin` mode (D-V5) - within
       exec_floor + 10 ms, with the floor measured in the same run. It also
-      measures validation item 37, the trampoline re-entry overhead, against the
-      owner's 10 ms composed-env-cache trigger; that number is reported, not
-      asserted. Both
+      measures validation item 37, the trampoline re-entry overhead, asserted
+      against the owner's 10 ms composed-env-cache trigger ABOVE the same
+      bare-exec floor - the raw figure carries one whole ocx spawn, which a
+      macOS runner charges 11.2 ms for, and is reported beside it. Both
       measured commands are DERIVED at run time - startup from the shipped
       env.sh sourced by a real interactive bash, reconcile from the hook body
       the binary just emitted - so the gate drives the production interactivity
