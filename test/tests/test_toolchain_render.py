@@ -651,29 +651,67 @@ def test_an_entry_that_cannot_be_written_for_any_other_reason_names_its_cause(
 
 
 # ---------------------------------------------------------------------------
-# Item 17 — the `bin` reservation and the name charset (C-013, C-014)
+# Item 17 / S-003 — `bin` is an ordinary name, and the charset still refuses
+# (C-014, C-071, C-073)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("case", "body"),
+    [
+        ("group_bin", '[group.bin.tools]\n{key} = "{fq}"\n'),
+        ("tools_bin", '[tools]\nbin = "{fq}"\n'),
+        ("tools_BIN_case_folded", '[tools]\nBIN = "{fq}"\n'),
+        ("group_tools_bin", '[group.ci.tools]\nbin = "{fq}"\n'),
+    ],
+)
+def test_the_bin_name_is_accepted_at_every_declaration_site(
+    ocx: OcxRunner, tmp_path: Path, case: str, body: str
+) -> None:
+    """S-003 / C-073 — the acceptance half of the reservation's **deletion**.
+
+    These four rows asserted exit 78 and the message ``name 'bin' is reserved``
+    until the rendered tree moved every user-supplied name one level down, under
+    ``links/`` (C-071). ``bin`` was held for a per-group launcher directory that
+    would have sat beside each ``<group>/``; the launcher directory is now
+    ``shells/<shell>/bin`` and no user-supplied name reaches depth 1 at all, so
+    ``[group.bin]`` renders at ``links/bin/<entry>`` and collides with nothing.
+    The refusal is deleted with its error variant rather than reworded — no rule
+    is left for its message to describe.
+
+    ``BIN`` stays in the set because the old refusal was ASCII-case-folded: an
+    acceptance test that only covered the lower-case spelling could not tell a
+    deleted reservation from a reservation that merely stopped folding.
+
+    Asserted through ``ocx status``, the same invocation the refusal rows used —
+    it reads ``ocx.toml`` and reports, resolving nothing and rendering nothing,
+    so the exit code answers exactly one question: does the reader admit this
+    name?
+
+    RED: restore the ``is_reserved_toolchain_name(name, "bin")`` arm in
+    ``validate_toolchain_name`` and all four rows exit 78 again.
+    """
+    project = tmp_path / f"proj-{case}"
+    project.mkdir()
+    write_ocx_toml(
+        project,
+        body.format(key=f"rkey{uuid4().hex[:8]}", fq="ocx.sh/acme/tool:1.0"),
+    )
+
+    result = run_in(ocx, project, "status")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"S-003 — {case} must be accepted (exit {EXIT_SUCCESS}); "
+        f"got {result.returncode}\n{result.stderr}"
+    )
+    assert "is reserved" not in result.stderr, (
+        f"C-073 — the reservation's message must be gone, not demoted to a "
+        f"warning; stderr:\n{result.stderr}"
+    )
 
 
 @pytest.mark.parametrize(
     ("case", "body", "needle"),
     [
-        (
-            "group_bin",
-            '[group.bin.tools]\n{key} = "{fq}"\n',
-            "[group] name 'bin' is reserved",
-        ),
-        ("tools_bin", '[tools]\nbin = "{fq}"\n', "[tools] name 'bin' is reserved"),
-        (
-            "tools_BIN_case_folded",
-            '[tools]\nBIN = "{fq}"\n',
-            "[tools] name 'BIN' is reserved",
-        ),
-        (
-            "group_tools_bin",
-            '[group.ci.tools]\nbin = "{fq}"\n',
-            "[group.ci.tools] name 'bin' is reserved",
-        ),
         (
             "group_name_with_a_space",
             '[group."a b".tools]\n{key} = "{fq}"\n',
@@ -686,17 +724,17 @@ def test_an_entry_that_cannot_be_written_for_any_other_reason_names_its_cause(
         ),
     ],
 )
-def test_the_bin_reservation_and_the_name_charset_are_refused_at_every_site(
+def test_the_name_charset_is_still_refused_at_every_site(
     ocx: OcxRunner, tmp_path: Path, case: str, body: str, needle: str
 ) -> None:
-    """Item 17 / C-013 / C-014 — the acceptance half of the reservation.
+    """Item 17 / C-014 — the charset refusal is untouched by C-073.
 
-    All four declaration sites plus both charset sites, each exiting **78** with
-    a message naming the site and the offending name. ``BIN`` is the C-015 case
-    fold: a reservation that only matched the lower-case spelling would be no
-    reservation at all.
+    Both sites still exit **78** with a message naming the site and the
+    offending name. Kept as its own case rather than merged into the acceptance
+    rows above: deleting the whole `bin` family together would have taken the
+    charset's own acceptance-level coverage with it.
 
-    RED: remove the validator and watch ``[tools] bin`` parse cleanly.
+    RED: remove the validator and watch ``[tools] "a b"`` parse cleanly.
     """
     label = uuid4().hex[:8]
     package = make_package(

@@ -725,10 +725,9 @@ impl ProjectConfig {
         let env = parse_project_env(super::env::DEFAULT_ENV_SCOPE, &raw.env, &path)?;
         let mut groups: BTreeMap<String, Group> = BTreeMap::new();
         for (group_name, group_body) in raw.groups {
-            // C-013/C-014/C-015: every `[group.<g>]` name goes through the
-            // same charset + `bin`-reservation validator the `[tools]` /
-            // `[group.<g>].tools` keys use, beside the `default`/`all`
-            // reserved-keyword checks above.
+            // C-014: every `[group.<g>]` name goes through the same charset
+            // validator the `[tools]` / `[group.<g>].tools` keys use, beside
+            // the `default`/`all` reserved-keyword checks above.
             validate_toolchain_name("group", &group_name, &path)?;
             let parsed = parse_group(&group_name, &group_body, &path)?;
             groups.insert(group_name, parsed);
@@ -980,25 +979,23 @@ static TOOLCHAIN_NAME_PATTERN: LazyLock<Regex> =
 /// The one ASCII-case-folding rule this file applies to every reserved-name
 /// comparison (C-015 / RUL-1): `name` is reserved when it case-folds to
 /// `reserved`, so `Default`, `DEFAULT` and `default` are the same
-/// reservation. Shared by the shipped `default`/`all` group-name checks
-/// above and by [`validate_toolchain_name`]'s `bin` comparison — one
-/// case-folding rule in this file, not two.
+/// reservation. Its two callers are the `default` and `all` group-keyword
+/// checks above — the only reservations left, both of them CLI selectors
+/// rather than tree names.
 fn is_reserved_toolchain_name(name: &str, reserved: &str) -> bool {
     name.eq_ignore_ascii_case(reserved)
 }
 
-/// The keyword [`validate_toolchain_name`] refuses at every one of its call
-/// sites (plan contract C-013) — reserved as both a group name and a
-/// tool name so a future per-group `<group>/bin/` render layout stays
-/// possible without a layout break. Compared ASCII-case-folded (C-015), so
-/// `Bin` and `BIN` are refused too.
-const BIN_RESERVED_NAME: &str = "bin";
-
-/// Charset (C-014) plus `bin`-reservation (C-013) validator for a `[tools]`
-/// key, a `[group.<g>].tools` key, or a `[group.<g>]` name — the one
-/// validator `plan_toolchain_activation.md`'s C-014 documents as serving
-/// both reasons, called identically at every site so none of them can diverge
-/// from the others.
+/// Charset validator (C-014) for a `[tools]` key, a `[group.<g>].tools` key,
+/// or a `[group.<g>]` name — called identically at every site so none of them
+/// can diverge from the others.
+///
+/// It carried a second rule until C-073: `bin` was refused here as both a
+/// group and a tool name, to hold the name for a per-group launcher
+/// directory. The rendered tree no longer puts any user-supplied name at
+/// depth 1 (C-071), so `bin` collides with nothing and the reservation is
+/// deleted rather than reworded — there is no remaining refusal for its
+/// message to describe.
 ///
 /// `pub(super)` for the **writer** side (R-W21): the three call sites below
 /// are this file's reader, and [`crate::project::mutate`] validates the names
@@ -1010,34 +1007,17 @@ const BIN_RESERVED_NAME: &str = "bin";
 /// `scope` names the call site for the diagnostic (`"tools"`,
 /// `"group.<g>.tools"`, or `"group"` — see [`ProjectErrorKind::ReservedToolchainName`]
 /// / [`ProjectErrorKind::InvalidToolchainNameCharset`]). `name` is the
-/// as-written string, checked against [`TOOLCHAIN_NAME_PATTERN_STR`] /
-/// [`SLUG_MAX_LEN`] and, case-folded, against [`BIN_RESERVED_NAME`] (C-015).
-///
-/// The `bin` reservation is checked before the charset: every reserved word
-/// is charset-valid (`no_name_is_both_reserved_and_off_charset_so_the_two_refusals_cannot_race`),
-/// so the two branches never compete on one input and the order carries no
-/// observable meaning of its own — it is written this way only because the
-/// reservation is the more specific rule.
+/// as-written string, checked against [`TOOLCHAIN_NAME_PATTERN_STR`] and
+/// [`SLUG_MAX_LEN`].
 ///
 /// # Errors
 ///
-/// [`ProjectErrorKind::ReservedToolchainName`] when `name` case-folds to
-/// [`BIN_RESERVED_NAME`]; [`ProjectErrorKind::InvalidToolchainNameCharset`]
-/// when `name` fails the charset or the [`SLUG_MAX_LEN`] cap. The two causes
-/// share one variant — a charset failure and an over-length name are both
-/// "this string cannot become a path component", and no caller has ever
-/// needed to tell them apart.
+/// [`ProjectErrorKind::InvalidToolchainNameCharset`] when `name` fails the
+/// charset or the [`SLUG_MAX_LEN`] cap. The two causes share one variant — a
+/// charset failure and an over-length name are both "this string cannot
+/// become a path component", and no caller has ever needed to tell them
+/// apart.
 pub(super) fn validate_toolchain_name(scope: &str, name: &str, path: &Path) -> Result<(), super::Error> {
-    if is_reserved_toolchain_name(name, BIN_RESERVED_NAME) {
-        return Err(ProjectError::new(
-            path.to_path_buf(),
-            ProjectErrorKind::ReservedToolchainName {
-                scope: scope.to_string(),
-                name: name.to_string(),
-            },
-        )
-        .into());
-    }
     if name.len() > SLUG_MAX_LEN || !TOOLCHAIN_NAME_PATTERN.is_match(name) {
         return Err(ProjectError::new(
             path.to_path_buf(),
@@ -2937,83 +2917,59 @@ bogus = 1
     // ── C-013 + C-015: `bin`, at every site, in every ASCII case ────────────
 
     /// C-013 / C-015 / item 17 (E21–E23, E26): `bin` is refused as a tool name
-    /// at BOTH tool sites, in every ASCII case, and the refusal names its
-    /// scope and echoes the spelling as written.
+    /// at BOTH tool sites, in every ASCII case, and the binding it declares is
+    /// present in the parsed config.
     ///
-    /// The tool half is what is new — `default` and `all` were already refused
-    /// as group names. `Bin` and `BIN` are refused by C-015's fold, not by a
-    /// second reserved word.
+    /// The reservation held `bin` for a per-group launcher directory. The
+    /// rendered tree puts every user-supplied name under `links/` (C-071), so
+    /// a tool named `bin` renders at `links/<group>/bin` and collides with
+    /// nothing — the refusal is deleted rather than reworded, because no rule
+    /// is left for its message to describe.
+    ///
+    /// RED: restore the `is_reserved_toolchain_name(name, "bin")` arm in
+    /// `validate_toolchain_name` and every row here exits 78.
     #[test]
-    fn c013_bin_is_refused_as_a_tool_name_at_both_tool_sites_in_every_ascii_case() {
-        let cases = [
-            ("tools", "bin"),
-            ("tools", "Bin"),
-            ("tools", "BIN"),
-            ("group.ci.tools", "bin"),
-            ("group.ci.tools", "Bin"),
-            ("group.ci.tools", "BIN"),
-        ];
-        for (scope, spelling) in cases {
-            let toml = if scope == "tools" {
-                format!("[tools]\n{spelling} = \"ocx.sh/x:1\"\n")
-            } else {
-                format!("[group.ci.tools]\n{spelling} = \"ocx.sh/x:1\"\n")
-            };
-            let (pe, code) = refuse_ocx_toml(&toml);
-            let ProjectErrorKind::ReservedToolchainName { scope: got_scope, name } = &pe.kind else {
-                panic!(
-                    "expected ReservedToolchainName for [{scope}] {spelling}; got {:?}",
-                    pe.kind
-                );
-            };
-            assert_eq!(got_scope, scope, "the refusal must name the site it fired at");
-            assert_eq!(name, spelling, "the refusal must echo the spelling as written");
-            assert_eq!(code, Some(crate::cli::ExitCode::ConfigError), "C-013 is exit 78");
+    fn c073_bin_is_accepted_as_a_tool_name_at_both_tool_sites_in_every_ascii_case() {
+        for spelling in ["bin", "Bin", "BIN"] {
+            let config = ProjectConfig::from_toml_str(&format!("[tools]\n{spelling} = \"ocx.sh/x:1\"\n"))
+                .unwrap_or_else(|e| panic!("C-073 — [tools] {spelling} must parse; got {e}"));
+            assert!(
+                config.tools.contains_key(spelling),
+                "the binding must survive into the parsed config, not merely fail to be refused"
+            );
+
+            let config = ProjectConfig::from_toml_str(&format!("[group.ci.tools]\n{spelling} = \"ocx.sh/x:1\"\n"))
+                .unwrap_or_else(|e| panic!("C-073 — [group.ci.tools] {spelling} must parse; got {e}"));
+            assert!(
+                config.groups["ci"].tools.contains_key(spelling),
+                "the group binding must survive into the parsed config too"
+            );
         }
     }
 
-    /// C-013 / C-015 / item 17 (E24, E25): `bin` is refused as a GROUP name in
-    /// every ASCII case, beside the shipped `default` / `all` reservations.
+    /// C-073 / item 17 (E24, E25): `bin` is ACCEPTED as a GROUP name in every
+    /// ASCII case; only `default` and `all` remain reserved, and both are CLI
+    /// selectors rather than tree names.
     ///
-    /// Reserved as a group name as well as a tool name so a future per-group
-    /// `<group>/bin/` render layout stays possible without a layout break.
+    /// The last row is the pair the reservation used to refuse twice — a tool
+    /// named `bin` inside a group named `bin`. It now parses, and both names
+    /// survive into the config, which is what makes `links/bin/bin` a
+    /// renderable path.
     #[test]
-    fn c013_bin_is_refused_as_a_group_name_in_every_ascii_case() {
+    fn c073_bin_is_accepted_as_a_group_name_in_every_ascii_case() {
         for spelling in ["bin", "Bin", "BIN", "bIn"] {
             let toml = format!("[group.{spelling}.tools]\ncmake = \"ocx.sh/cmake:3.28\"\n");
-            let (pe, code) = refuse_ocx_toml(&toml);
-            let ProjectErrorKind::ReservedToolchainName { scope, name } = &pe.kind else {
-                panic!(
-                    "expected ReservedToolchainName for [group.{spelling}]; got {:?}",
-                    pe.kind
-                );
-            };
-            assert_eq!(scope, "group", "the group-NAME site reports scope `group`");
-            assert_eq!(name, spelling, "the refusal must echo the spelling as written");
-            assert_eq!(code, Some(crate::cli::ExitCode::ConfigError), "C-013 is exit 78");
+            let config = ProjectConfig::from_toml_str(&toml)
+                .unwrap_or_else(|e| panic!("[group.{spelling}] must parse; got {e}"));
+            assert!(
+                config.groups[spelling].tools.contains_key("cmake"),
+                "the group must survive into the parsed config under its as-written spelling"
+            );
         }
-    }
 
-    /// C-013, ordering (E27): a tool named `bin` inside a group named `bin`
-    /// produces EXACTLY ONE refusal, and it names the GROUP site.
-    ///
-    /// Two true refusals are available here; which one a user sees is decided
-    /// by the parse order — the group loop validates the group name before
-    /// `parse_group` descends into `[group.<g>.tools]`. Pinning it means a
-    /// later refactor that reorders the two cannot silently change the
-    /// diagnostic while both tests stay green.
-    #[test]
-    fn c013_a_bin_tool_inside_a_bin_group_is_refused_once_at_the_group_site() {
-        let (pe, code) = refuse_ocx_toml("[group.bin.tools]\nbin = \"ocx.sh/x:1\"\n");
-        let ProjectErrorKind::ReservedToolchainName { scope, name } = &pe.kind else {
-            panic!("expected ReservedToolchainName; got {:?}", pe.kind);
-        };
-        assert_eq!(
-            scope, "group",
-            "the group NAME is validated before parse_group descends, so the group site wins"
-        );
-        assert_eq!(name, "bin");
-        assert_eq!(code, Some(crate::cli::ExitCode::ConfigError));
+        let config = ProjectConfig::from_toml_str("[group.bin.tools]\nbin = \"ocx.sh/x:1\"\n")
+            .expect("C-073 — a `bin` tool inside a `bin` group must parse");
+        assert!(config.groups["bin"].tools.contains_key("bin"));
     }
 
     /// C-013 scope (E31, E32): `default` and `all` stay legal as TOOL names.
@@ -3110,19 +3066,18 @@ bogus = 1
     /// C-013 / C-014 (E33) — the ordering question, answered once so it is not
     /// re-asked.
     ///
-    /// No input is both reserved and off-charset: every reserved word
-    /// (`bin`, `default`, `all`) is charset-valid in every ASCII case, so the
+    /// No input is both reserved and off-charset: both surviving reserved
+    /// words (`default`, `all`) are charset-valid in every ASCII case, so the
     /// two checks cannot both fire on one name and "which refusal wins" is not
     /// a question BETWEEN CHECKS. It is only a question between SITES, which
-    /// [`c013_a_bin_tool_inside_a_bin_group_is_refused_once_at_the_group_site`]
-    /// and the two ordering tests below answer.
+    /// the two ordering tests below answer.
     ///
     /// `[group."Default "]` is the near-miss that proves it: the trailing space
     /// takes it out of the reserved set (the fold compares whole strings) and
     /// into the charset refusal.
     #[test]
     fn no_name_is_both_reserved_and_off_charset_so_the_two_refusals_cannot_race() {
-        for reserved in ["bin", "Bin", "BIN", "default", "Default", "all", "ALL"] {
+        for reserved in ["default", "Default", "all", "ALL"] {
             assert!(
                 !matches!(
                     validate_name("tools", reserved),
@@ -3142,12 +3097,16 @@ bogus = 1
         assert_eq!(code, Some(crate::cli::ExitCode::ConfigError));
     }
 
-    /// Ordering (E37): with `[group.bin]` and `[group.default]` in one file,
-    /// the shipped `default` guard reports first — it runs before the group
-    /// loop that validates names.
+    /// Ordering (E37): with an off-charset group and `[group.default]` in one
+    /// file, the shipped `default` guard reports first — it runs before the
+    /// group loop that validates names.
+    ///
+    /// The competing name is `"a b"`, not the former `bin`: C-073 makes
+    /// `[group.bin]` legal, so a `bin` probe would leave one refusal in the
+    /// file and stop testing the ordering it names.
     #[test]
     fn ordering_the_reserved_default_guard_precedes_the_group_name_validator() {
-        let (pe, _) = refuse_ocx_toml("[group.bin]\n\n[group.default]\n");
+        let (pe, _) = refuse_ocx_toml("[group.\"a b\"]\n\n[group.default]\n");
         assert!(
             matches!(&pe.kind, ProjectErrorKind::ReservedGroupName { name, .. } if name == "default"),
             "the `default` guard runs before the group-name validator; got {:?}",
@@ -3160,7 +3119,7 @@ bogus = 1
     /// before the group loop.
     #[test]
     fn ordering_the_tools_table_is_validated_before_any_group() {
-        let (pe, _) = refuse_ocx_toml("[tools]\n\"a b\" = \"ocx.sh/x:1\"\n\n[group.bin]\n");
+        let (pe, _) = refuse_ocx_toml("[tools]\n\"a b\" = \"ocx.sh/x:1\"\n\n[group.\"c d\"]\n");
         let ProjectErrorKind::InvalidToolchainNameCharset { scope, name } = &pe.kind else {
             panic!("[tools] is walked before the groups; got {:?}", pe.kind);
         };
@@ -3450,15 +3409,19 @@ bogus = 1
         );
     }
 
-    /// C-012 + C-013 (E52): the two new keys do not short-circuit the name
-    /// validator — a file that declares both AND a `bin` tool is still
-    /// refused, with the reserved variant.
+    /// C-012 + C-014 (E52): the two new keys do not short-circuit the name
+    /// validator — a file that declares both AND an off-charset tool key is
+    /// still refused.
+    ///
+    /// The probe key is `"a b"`, not the former `bin`: C-073 deleted that
+    /// refusal, so a `bin` probe would assert nothing about the validator
+    /// running at all.
     #[test]
     fn c012_activate_and_pinned_do_not_short_circuit_the_name_validator() {
-        let (pe, code) = refuse_ocx_toml("activate = \"bin\"\npinned = true\n\n[tools]\nbin = \"ocx.sh/x:1\"\n");
+        let (pe, code) = refuse_ocx_toml("activate = \"bin\"\npinned = true\n\n[tools]\n\"a b\" = \"ocx.sh/x:1\"\n");
         assert!(
-            matches!(&pe.kind, ProjectErrorKind::ReservedToolchainName { scope, name }
-                if scope == "tools" && name == "bin"),
+            matches!(&pe.kind, ProjectErrorKind::InvalidToolchainNameCharset { scope, name }
+                if scope == "tools" && name == "a b"),
             "the name validator still runs beside the two new keys; got {:?}",
             pe.kind
         );
