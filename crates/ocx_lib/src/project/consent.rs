@@ -130,7 +130,7 @@ pub enum Decision {
 #[serde(rename_all = "snake_case")]
 pub enum Grant {
     /// Clause 1 — a valid stamp for this directory whose source set covers the
-    /// lock's. A human ran one of the six stamp-writing commands here.
+    /// lock's. A human ran one of the stamp-writing commands here.
     Stamp,
     /// Clause 2 — every repository the store recorded for the lock's tools
     /// resolves to a source matching `[shell.consent] namespaces`. A fleet-wide
@@ -353,7 +353,7 @@ pub fn lock_sources(lock: &ProjectLock) -> BTreeSet<String> {
 ///
 /// A store populated before origins were recorded therefore has none, and
 /// clause 2 is inert for it until the next `ocx pull`. That is intentional and
-/// costs nothing: `ocx pull` is one of the six stamp-writing commands, so the
+/// costs nothing: `ocx pull` is one of the stamp-writing commands, so the
 /// project gains a clause-1 stamp at the same moment it gains its origin
 /// records.
 ///
@@ -510,13 +510,14 @@ pub enum Revoked {
 ///
 /// # The write seam is a closed allowlist, stated as a negative contract
 ///
-/// A-29 — the **only** writers are the six explicit project-scoped commands:
-/// `add`, `remove`, `lock`, `update`, `pull`, `run`. Every other command —
+/// A-29 — the **only** writers are the seven explicit project-scoped
+/// commands: `add`, `remove`, `lock`, `update`, `pull`, `run`, and `init`,
+/// which consents to the project it creates. Every other command —
 /// explicitly including `ocx env`, `ocx inspect`, `ocx shell state`,
 /// `ocx self activate` (with and without `--reconcile`), `ocx list`,
 /// `ocx direnv export` and `ocx completions` — MUST NOT create or modify
 /// `state/projects/<key>/`. Enforcement is the acceptance test, not
-/// visibility: the six callers live in `ocx_cli`, so this cannot be
+/// visibility: the seven callers live in `ocx_cli`, so this cannot be
 /// `pub(crate)` as A-29 words it and still compile.
 ///
 /// The seam is **per-caller opt-in**, never a hook in the shared loader:

@@ -402,8 +402,9 @@ pub async fn load_project_with_lock_consenting(
 /// Record shell-activation consent for the project at `config_path` over the
 /// source set `lock` resolves from (C-024, C-026, A-29).
 ///
-/// **The write seam is a closed allowlist of six commands** — `add`, `remove`,
-/// `lock`, `update`, `pull`, `run` — and it is **per-caller opt-in, never a
+/// **The write seam is a closed allowlist of seven commands** — `add`, `remove`,
+/// `lock`, `update`, `pull`, `run`, and `init` through
+/// [`record_activation_consent_over`] — and it is **per-caller opt-in, never a
 /// hook in a shared loader**. `load_project_with_lock` has six call sites and
 /// only two are members: `inspect`, `patch freeze`, `ocx env` and
 /// `ocx lock --check` reach it too, so stamping inside it would auto-grant
@@ -421,8 +422,22 @@ pub async fn load_project_with_lock_consenting(
 /// worst it costs is one inert prompt until the next explicit command — the
 /// fail-safe direction — while aborting `ocx add` over it is not.
 pub async fn record_activation_consent(config_path: &Path, lock: &ocx_lib::project::ProjectLock) {
+    record_activation_consent_over(config_path, ocx_lib::project::consent::lock_sources(lock)).await;
+}
+
+/// [`record_activation_consent`] over a source set the caller already holds.
+///
+/// `ocx init` is the one caller that has no lock to derive one from — it
+/// creates `ocx.toml` and nothing else — so it stamps the **empty** set. That
+/// is the honest record: a project with no lock resolves from no source, and
+/// the first `ocx add` re-records the set it grew (C-026's drift check is what
+/// makes that safe rather than merely conventional).
+///
+/// Every property of [`record_activation_consent`] holds here — same allowlist
+/// discipline, same best-effort failure posture — because that function is a
+/// thin wrapper over this one.
+pub async fn record_activation_consent_over(config_path: &Path, sources: std::collections::BTreeSet<String>) {
     let config_path = config_path.to_path_buf();
-    let sources = ocx_lib::project::consent::lock_sources(lock);
 
     // Two filesystem resolutions plus an atomic write — all blocking, so the
     // whole seam runs on a blocking thread rather than stalling the runtime.
@@ -808,11 +823,15 @@ mod tests {
         );
     }
 
-    // ── A-29 — the write seam is a closed allowlist of six commands ─────────
+    // ── A-29 — the write seam is a closed allowlist of seven commands ───────
 
     /// The seam call every consent writer routes through. A caller that stamps
     /// names one of these two; a caller that does not, names neither.
-    const SEAM_CALLS: [&str; 2] = ["record_activation_consent(", "load_project_with_lock_consenting("];
+    const SEAM_CALLS: [&str; 3] = [
+        "record_activation_consent(",
+        "record_activation_consent_over(",
+        "load_project_with_lock_consenting(",
+    ];
 
     /// Strip `//`-prefixed lines so a guard never matches the comments that
     /// document the very shape it polices.
@@ -844,8 +863,8 @@ mod tests {
         rest[..end].to_string()
     }
 
-    /// A-29/C-024: exactly the six explicit project-scoped commands stamp, and
-    /// no other command file does.
+    /// A-29/C-024: exactly the seven explicit project-scoped commands stamp,
+    /// and no other command file does.
     ///
     /// Both halves are asserted. The positive half is what keeps this from
     /// passing vacuously if the seam is ever renamed out from under
@@ -853,8 +872,12 @@ mod tests {
     /// written from `ocx inspect` or `ocx env` would consent to a project the
     /// user only asked to look at.
     #[test]
-    fn a029_exactly_six_commands_write_a_consent_stamp() {
-        let members: [(&str, &str); 6] = [
+    fn a029_exactly_seven_commands_write_a_consent_stamp() {
+        let members: [(&str, &str); 7] = [
+            // `init` is the one member that creates the project it consents to,
+            // through the sources-taking half of the seam: it has no lock to
+            // derive a source set from (ocx-sh/ocx#397).
+            ("init", include_str!("../command/init.rs")),
             ("add", include_str!("../command/add.rs")),
             ("remove", include_str!("../command/remove.rs")),
             ("lock", include_str!("../command/lock.rs")),

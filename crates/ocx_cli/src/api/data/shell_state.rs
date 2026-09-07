@@ -276,7 +276,7 @@ pub enum Detail {
 /// What `ocx shell state` reports — all derived, none of it mutating.
 ///
 /// Read-only, absolutely: it never writes a stamp, never repairs a ledger,
-/// never emits a plan (A-29 names it a non-member of the six-writer stamp
+/// never emits a plan (A-29 names it a non-member of the stamp-writer
 /// allowlist — a stamp written from here would consent to the very project it
 /// is diagnosing). Repair is the `unset __OCX_ENV_STATE` gesture or a new
 /// shell (C-012); this command is how a user checks the gesture worked.
