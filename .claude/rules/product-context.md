@@ -5,14 +5,14 @@ paths:
   - .claude/agents/worker-researcher.md
   - .claude/agents/worker-architect.md
   - .claude/agents/worker-doc-writer.md
-  - .claude/skills/architect/**
+  - .claude/skills/hex-architect/**
   - .claude/skills/builder/**
   - .claude/skills/code-check/**
   - .claude/skills/qa-engineer/**
   - .claude/skills/security-auditor/**
-  - .claude/skills/swarm-execute/**
-  - .claude/skills/swarm-plan/**
-  - .claude/skills/swarm-review/**
+  - .claude/skills/hex-execute/**
+  - .claude/skills/hex-plan/**
+  - .claude/skills/hex-review/**
   - .claude/skills/docs/**
   - .claude/skills/deps/**
 ---

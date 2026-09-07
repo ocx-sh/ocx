@@ -1,7 +1,7 @@
 ---
 paths:
   - ".claude/agents/**"
-  - ".claude/skills/swarm-*/**"
+  - ".claude/skills/hex-*/**"
   - ".claude/artifacts/**"
 ---
 
