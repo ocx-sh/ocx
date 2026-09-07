@@ -206,6 +206,7 @@ pub fn run_script(
 ) -> Result<ScriptOutcome, ScriptError> {
     let state = host::HostState {
         package_root: package_root.to_path_buf(),
+        content_root: package_root.join("content"),
         scratch_root: scratch_root.to_path_buf(),
         platform: platform.clone(),
         env,

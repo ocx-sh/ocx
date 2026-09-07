@@ -529,28 +529,33 @@ def test_u13_sandbox_escape_symlink_on_read(
 ) -> None:
     """U13: package binary creates scratch/esc -> /, then read through it → exit 1.
 
-    Also covers the ocx.exists variant (read side is NOT exempt from the C1
-    symlink re-check).
+    Covers the ocx.exists variant too (read side is NOT exempt from the C1
+    symlink re-check). The two host fns need two SCRIPTS, not two lines in one:
+    the first guard rejection terminates the script, so a trailing ocx.exists
+    after an ocx.read_file that already raised is dead code and asserts nothing.
     """
     bundle, meta, pkg = script_test_package
-    smoke = _write_script(
-        tmp_path,
-        "symread.star",
-        'ocx.run("shtool", "mklink", ocx.scratch_root + "/esc")\n'
-        'c = ocx.read_file("esc/etc/passwd")\n'
-        "print(c)\n"
-        'b = ocx.exists("esc/etc/passwd")\n'
-        "print(b)\n",
+    # (host fn, script body after the mklink line, string that must not reach stdout)
+    cases = (
+        ("read_file", 'c = ocx.read_file("esc/etc/passwd")\nprint(c)\n', "root:"),
+        ("exists", 'b = ocx.exists("esc/etc/passwd")\nprint(b)\n', "True"),
     )
+    for host_fn, body, forbidden in cases:
+        smoke = _write_script(
+            tmp_path,
+            f"symread-{host_fn}.star",
+            'ocx.run("shtool", "mklink", ocx.scratch_root + "/esc")\n' + body,
+        )
 
-    result = _run_script(ocx, bundle, meta, pkg, script=smoke)
+        result = _run_script(ocx, bundle, meta, pkg, script=smoke)
 
-    assert result.returncode == 1, (
-        f"U13: symlink-escape on read must exit 1 (Failed), got {result.returncode}"
-    )
-    assert "root:" not in result.stdout, (
-        "U13: no host content may be emitted through a scratch symlink"
-    )
+        assert result.returncode == 1, (
+            f"U13: symlink-escape through ocx.{host_fn} must exit 1 (Failed), "
+            f"got {result.returncode}\nstderr: {result.stderr}"
+        )
+        assert forbidden not in result.stdout, (
+            f"U13: ocx.{host_fn} must not surface {forbidden!r} through a scratch symlink"
+        )
 
 
 def test_u14_sandbox_escape_symlink_as_cwd(
@@ -985,22 +990,29 @@ def test_target_platform_is_typed_value_with_attrs(
     )
 
 
-def test_package_and_scratch_roots_are_path_attributes(
+def test_package_content_and_scratch_roots_are_path_attributes(
     script_test_package: tuple[Path, Path, PackageInfo],
     ocx: OcxRunner,
     tmp_path: Path,
 ) -> None:
-    """ocx.package_root / ocx.scratch_root are per-run path ATTRIBUTES (no
-    parens) — non-empty strings, and the two roots differ."""
+    """ocx.package_root / ocx.content_root / ocx.scratch_root are per-run path
+    ATTRIBUTES (no parens) — non-empty strings, and the three roots differ."""
     bundle, meta, pkg = script_test_package
     body = (
         "pr = ocx.package_root\n"
+        "cr = ocx.content_root\n"
         "sr = ocx.scratch_root\n"
         'expect.eq(type(pr), "string")\n'
+        'expect.eq(type(cr), "string")\n'
         'expect.eq(type(sr), "string")\n'
         "expect.true(len(pr) > 0)\n"
+        "expect.true(len(cr) > 0)\n"
         "expect.true(len(sr) > 0)\n"
         "expect.ne(pr, sr)\n"
+        "expect.ne(pr, cr)\n"
+        "expect.ne(cr, sr)\n"
+        # content_root is the bundle's own tree, inside the package store dir.
+        "expect.true(cr.startswith(pr))\n"
     )
 
     result = _run_script(ocx, bundle, meta, pkg, script="-", stdin=body)
@@ -1008,6 +1020,44 @@ def test_package_and_scratch_roots_are_path_attributes(
     assert result.returncode == 0, (
         f"root attributes: expected exit 0, got {result.returncode}\n"
         f"stderr: {result.stderr}"
+    )
+
+
+def test_read_fallback_resolves_against_the_bundle_content(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    tmp_path: Path,
+) -> None:
+    """#398: ocx.exists / ocx.read_file read the BUNDLE, not the package store dir.
+
+    Every other read-side test in this module is an escape rejection, so the
+    happy path — a real file that exists only under the read-only root — had no
+    end-to-end coverage, and the fallback shipped anchored one level too high
+    (on the package store dir, whose `content/` holds the bundle). A smoke test
+    then saw `ocx.exists("bin/<tool>") == False` for a bundle that ships it —
+    silently, since a miss is `False` and not an error.
+
+    Both spellings are asserted, because each one alone is discriminating in
+    only one direction:
+      - `bin/shtool` is True only when the fallback anchors on the content root;
+      - `content/bin/shtool` is True only when it anchors on the store dir.
+    """
+    bundle, meta, pkg = script_test_package
+    body = (
+        # The reported symptom: the bundle's own layout, spelled as the bundle
+        # ships it.
+        'expect.true(ocx.exists("bin/shtool"))\n'
+        f'expect.contains(ocx.read_file("bin/shtool"), "{_TOOL_VERSION}")\n'
+        # The store layout is NOT the script contract: the old spelling that
+        # worked by accident must not resolve any more.
+        'expect.false(ocx.exists("content/bin/shtool"))\n'
+    )
+
+    result = _run_script(ocx, bundle, meta, pkg, script="-", stdin=body)
+
+    assert result.returncode == 0, (
+        f"#398: reads must resolve against the bundle content, got exit "
+        f"{result.returncode}\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
 
