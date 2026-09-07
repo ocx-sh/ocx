@@ -344,7 +344,14 @@ tasks:
       #    to name. On a genuinely contended runner this step abstains too and
       #    exits 0 with a `::warning`, which is the same honest answer step 2
       #    gives: neither an assertion nor its demonstration can be made on a
-      #    measurement of the runner.
+      #    measurement of the runner. That amnesty is PER NEEDLE since
+      #    2026-09-07: the macOS leg failed with two of the three needles
+      #    demonstrated and `per-prompt reconcile` abstaining on 23.188 ms of
+      #    floor scatter, which the step reported as a failed injection when one
+      #    third of it had simply not been measurable. A needle whose gate
+      #    abstained is warned about and excused; a needle whose gate
+      #    conclusively PASSED under the injection is still an error, because an
+      #    assert whose red state is unreachable never abstains - it passes.
       - >-
         OCX_COMMAND={{.LATENCY_OCX_BINARY}}
         __OCX_TESTING_LATENCY_INJECT_MS=11.0

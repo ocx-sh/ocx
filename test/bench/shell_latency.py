@@ -939,10 +939,49 @@ def unmatched_gate_needles(needles: Sequence[str], gates: Sequence[Gate]) -> lis
     An **inconclusive** gate is not a red one and never satisfies a needle: an
     abstention is the absence of a verdict, and reading it as the demonstrated
     red state would let a contended runner certify a fault injection it never
-    observed. :func:`main` tells the two apart before it gets here.
+    observed. :func:`needles_without_verdict` is how :func:`main` tells the two
+    apart afterwards — an unmatched needle is not automatically a detection
+    failure.
     """
     red = [gate.name for gate in gates if not gate.passed]
     return [needle for needle in needles if not any(needle in name for name in red)]
+
+
+def needles_without_verdict(needles: Sequence[str], gates: Sequence[Gate]) -> list[str]:
+    """The unmatched needles whose gate **abstained** rather than passed.
+
+    PURE. The partition :func:`unmatched_gate_needles`' docstring promises, and
+    the reason it exists: an unmatched needle has two entirely different causes,
+    and only one of them is a defect.
+
+    * The named gate **passed** under the injected delay → the injection did not
+      red it. That is the detection failure ``--expect-fail-gate`` exists to
+      catch, and it is an error.
+    * The named gate **abstained** → the runner's own bare-exec floor scattered
+      wider than the miss, so nothing was decided about that gate in either
+      direction. Not a demonstration, and not a denial either.
+
+    Lumping the second into the first is what redded the macOS leg of
+    `shell-activation-deep.yml` on 2026-09-07
+    ([run 34126190760](https://github.com/ocx-sh/ocx/actions/runs/34126190760)):
+    two of three needles went red under an 11 ms injection while
+    ``per-prompt reconcile`` abstained on 23.188 ms of floor scatter, and the
+    step reported a fault injection that had failed when what had actually
+    happened is that one third of it could not be measured. :func:`main` already
+    granted exactly this amnesty when **every** wall-clock gate abstained (the
+    run then carries ``passed=True`` and exits 0 with a warning); all this does
+    is make the partial case agree with the total one.
+
+    What it does **not** relax: a gate that conclusively passed under injection
+    is still an error, so an assert whose red state is unreachable cannot hide
+    behind a noisy runner — it never abstains, it passes.
+    """
+    abstained = [gate.name for gate in gates if gate.inconclusive]
+    return [
+        needle
+        for needle in unmatched_gate_needles(needles, gates)
+        if any(needle in name for name in abstained)
+    ]
 
 
 def floor_spread_ms(floor_samples: Sequence[float]) -> float:
@@ -4056,6 +4095,39 @@ def self_check() -> None:
         "a gate that reached no verdict must not satisfy the needle that demands its red state"
     )
     needles.append(False)
+    # ... and the partition that decides what `main` does about it. An unmatched
+    # needle whose gate abstained is a no-verdict, not a detection failure; one
+    # whose gate conclusively PASSED under the injection still is. Both colours,
+    # because a version of this that returned every unmatched needle would turn
+    # `--expect-fail-gate` into a warning nobody can fail.
+    assert needles_without_verdict([RECONCILE_GATE_NEEDLE], abstained.gates) == [RECONCILE_GATE_NEEDLE], (
+        "an unmatched needle whose gate abstained reached no verdict — the runner could not decide it, "
+        "which is not the same as the injection failing to red it"
+    )
+    assert needles_without_verdict([RECONCILE_GATE_NEEDLE], over_budget.gates) == [], (
+        "a needle whose gate conclusively PASSED under injection is a detection failure and must not be "
+        "excused as contention — a gate whose red state is unreachable never abstains, it passes"
+    )
+    # The shape the macOS leg actually produced: three needles, one red, one
+    # abstained, one red. The abstained one is excused, the reds satisfy
+    # themselves, and nothing is left for `main` to error on.
+    macos_shape = case(
+        expect_pass=False,
+        why="a partial abstention under injection leaves the redded needles demonstrated",
+        red_gate="bin-mode prompt reconcile <= exec_floor + delta",
+        abstains="per-prompt reconcile <= exec_floor + delta",
+        floor_samples=_CONTENDED_FLOOR,
+        startup_samples=_CONTENDED_STARTUP,
+        reconcile_samples=breaching_reconcile,
+        reconcile_bin_samples=[value + 6.0 for value in breaching_reconcile],
+    )
+    demanded = [RECONCILE_GATE_NEEDLE, RECONCILE_BIN_GATE_NEEDLE]
+    excused = needles_without_verdict(demanded, macos_shape.gates)
+    assert excused == [RECONCILE_GATE_NEEDLE], excused
+    assert [n for n in unmatched_gate_needles(demanded, macos_shape.gates) if n not in excused] == [], (
+        "with the abstained needle excused, the demanded set is satisfied by the gates that did decide"
+    )
+    needles += [False, True]
 
     # All three needles at once is what the taskfile passes: one injected run has
     # to red all three budgets, and a single red must not stand in for the set.
@@ -4207,6 +4279,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 return 1
             unmatched = unmatched_gate_needles(args.expect_fail_gate, report.gates)
+            # An unmatched needle whose gate ABSTAINED is not a detection
+            # failure: the runner could not resolve that miss, so nothing was
+            # decided about it either way. The same amnesty the all-abstain
+            # branch above already grants, applied to the partial case — see
+            # `needles_without_verdict` for why the two must agree.
+            no_verdict = needles_without_verdict(args.expect_fail_gate, report.gates)
+            if no_verdict:
+                print(
+                    f"\n::warning::--expect-fail-gate: no verdict on {no_verdict} — the injected delay "
+                    "landed, but this runner's bare-exec floor scattered wider than the miss, so those "
+                    "gates abstained instead of going red. The remaining named gates still demonstrated "
+                    "theirs. Re-run on a quiet machine for a full demonstration",
+                    file=sys.stderr,
+                )
+            unmatched = [needle for needle in unmatched if needle not in no_verdict]
             if unmatched:
                 reds = [gate.name for gate in report.gates if not gate.passed]
                 print(
