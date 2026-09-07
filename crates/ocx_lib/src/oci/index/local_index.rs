@@ -1153,6 +1153,22 @@ pub(super) enum RootScope<'a> {
     /// `ocx index update pkg` — the sanctioned point to take a routing
     /// migration, because the user named the package and nothing narrower.
     Package,
+    /// The package-level fields — `repository` above all — and no tags at all,
+    /// written only when this machine holds no committed root for the package.
+    ///
+    /// A digest-addressed resolve has no tag to pin, so [`Self::Tags`] declines
+    /// to write anything and the local copy never learns where the content
+    /// lives; every later invocation re-asks the source for a pointer it
+    /// already paid for once (issue #424). This scope records that answer, and
+    /// only that answer.
+    ///
+    /// **Never a routing migration.** A package with a committed root is left
+    /// exactly as committed: replacing a `repository` this machine already
+    /// snapshotted is `ocx index update <pkg>` ([`Self::Package`]) and nobody
+    /// else's, because that moves where every future pull of an already-known
+    /// package fetches from. First sight is adoption, not migration — there is
+    /// no pointer to move.
+    Routing,
 }
 
 /// Whether `error` is a lock acquisition that ran out of patience rather than a
@@ -1261,6 +1277,11 @@ fn merge_root(committed: Option<&[u8]>, fetched: &[u8], scope: RootScope<'_>) ->
             .flatten()
             .map(|(tag, entry)| (tag.clone(), entry.clone()))
             .collect(),
+        // First sight only — see the variant's own doc. A committed root
+        // already answers the routing question locally, so there is nothing to
+        // repair and every write here would be a migration.
+        RootScope::Routing if committed.is_some() => return None,
+        RootScope::Routing => Vec::new(),
     };
 
     // The TYPED parse, not merely "is it JSON": a document missing `repository`
@@ -2500,6 +2521,45 @@ mod tests {
             1,
             "the resolve path's fetch is NOT gated: gating it would have to return None or \
              re-read and re-parse the object, on the hottest path in the binary"
+        );
+    }
+
+    /// `RootScope::Routing` adopts the package-level fields on first sight and
+    /// refuses to touch a package this machine has already committed.
+    ///
+    /// Asserted on `merge_root` directly, because the refusal arm is defence in
+    /// depth for the scope's contract rather than a state the one production
+    /// caller can reach: `ChainedIndex::physical_reference` answers from the
+    /// committed root before it ever asks a source, so it calls this only when
+    /// there is nothing committed. The contract is what a future caller would
+    /// rely on, so it is the contract that is pinned here.
+    #[test]
+    fn routing_scope_adopts_on_first_sight_and_never_migrates() {
+        let fetched = format!(
+            r#"{{"repository":"oci://{REGISTRY}/{REPO}","tags":{{"1.0":{{"content":"{}"}}}}}}"#,
+            content_for('1')
+        );
+
+        let first_sight = merge_root(None, fetched.as_bytes(), RootScope::Routing)
+            .expect("first sight must write: there is no committed pointer to preserve");
+        let written: serde_json::Value = serde_json::from_slice(&first_sight).unwrap();
+        assert_eq!(
+            written["repository"].as_str(),
+            Some(format!("oci://{REGISTRY}/{REPO}").as_str()),
+            "the routing pointer is the whole point of the scope"
+        );
+        assert_eq!(
+            written["tags"].as_object().map(serde_json::Map::len),
+            Some(0),
+            "a digest resolve names no tag, so it may adopt none — writing one \
+             would move a pin the user never asked for"
+        );
+
+        let committed = format!(r#"{{"repository":"oci://elsewhere.example/{REPO}","tags":{{}}}}"#);
+        assert!(
+            merge_root(Some(committed.as_bytes()), fetched.as_bytes(), RootScope::Routing).is_none(),
+            "a committed root is left exactly as committed: replacing its \
+             repository is a routing migration, which is `ocx index update`'s"
         );
     }
 

@@ -215,7 +215,19 @@ pub(crate) enum ReadAddressing {
 }
 
 pub struct Client {
-    transport: Box<dyn OciTransport>,
+    /// The transport, built on first use from [`Self::recipe`].
+    ///
+    /// Shared by every clone rather than rebuilt per clone: the fork's
+    /// `native::Client` holds all of its mutable state (`auth_store`, `tokens`,
+    /// `challenges`, `token_flights`, the `reqwest::Client` pools) behind
+    /// `Arc`s, and so does [`auth::Auth`] — so the `box_clone` this replaced was
+    /// already handing every clone the same state. What changes is only *when*
+    /// the trust store is parsed, and how many times: once per process, on the
+    /// first request, instead of once per `Client` construction whether or not a
+    /// request follows. See [`builder::TransportRecipe`] for the cost.
+    transport_cell: std::sync::Arc<std::sync::OnceLock<Box<dyn OciTransport>>>,
+    /// How to build [`Self::transport`]. Cheap to hold and to clone.
+    recipe: builder::TransportRecipe,
     pub(super) lock_timeout: std::time::Duration,
     pub(super) tag_chunk_size: usize,
     pub(super) repository_chunk_size: usize,
@@ -231,7 +243,8 @@ pub struct Client {
 impl Clone for Client {
     fn clone(&self) -> Self {
         Self {
-            transport: self.transport.box_clone(),
+            transport_cell: std::sync::Arc::clone(&self.transport_cell),
+            recipe: self.recipe.clone(),
             lock_timeout: self.lock_timeout,
             tag_chunk_size: self.tag_chunk_size,
             repository_chunk_size: self.repository_chunk_size,
@@ -258,14 +271,38 @@ impl Client {
     /// [`native_transport`](fn@native_transport) is the one public constructor of a
     /// `Box<dyn OciTransport>` (OCX-C-1), and it deliberately bypasses this
     /// type entirely rather than widening it.
+    ///
+    /// **This is where the transport is built.** Every path that reaches the
+    /// network goes through here, so deferring construction to this call is what
+    /// keeps a `Client` free to construct — see [`Self::transport_cell`]'s field
+    /// doc.
+    ///
+    /// Two consequences, both worth stating rather than discovering:
+    ///
+    /// - **Where a misconfiguration surfaces moved** from `Client` construction
+    ///   to the first request. Nothing actually moved *today*:
+    ///   `oci::native::Client::new` is infallible (the fork falls back to a
+    ///   seeded default client rather than erroring), and every refusal that
+    ///   could reject a config — the plain-HTTP gate, the index base-URL parse,
+    ///   the SSRF `GuardedResolver` construction — still runs eagerly where it
+    ///   did. A future config that *can* fail would move with it.
+    /// - **`get_or_init` blocks the caller** while another thread is building,
+    ///   and this is called from `async` code. It is not new blocking work: the
+    ///   same ~28 ms of trust-store parsing ran inline on a runtime thread in
+    ///   `Context::try_init` before, unconditionally. Now it runs once per
+    ///   process, only when a request is actually made, and only for whoever
+    ///   makes the first one.
     pub(crate) fn transport(&self) -> &dyn OciTransport {
-        &*self.transport
+        &**self.transport_cell.get_or_init(|| self.recipe.build())
     }
 
     #[cfg(test)]
     pub(crate) fn with_transport(transport: Box<dyn OciTransport>) -> Self {
         Client {
-            transport,
+            // Pre-filled, so `recipe` is never consulted — a test double is
+            // exactly the case that has no recipe.
+            transport_cell: std::sync::Arc::new(std::sync::OnceLock::from(transport)),
+            recipe: builder::TransportRecipe::default(),
             lock_timeout: std::time::Duration::from_secs(5),
             tag_chunk_size: 100,
             repository_chunk_size: 100,
@@ -472,7 +509,7 @@ impl Client {
             oci::RegistryOperation::Push => identifier.canonical_reference(),
             oci::RegistryOperation::Pull => self.transport_reference(identifier),
         };
-        self.transport.ensure_auth(&image, operation).await?;
+        self.transport().ensure_auth(&image, operation).await?;
         Ok(())
     }
 
@@ -497,9 +534,11 @@ impl Client {
         addressing: ReadAddressing,
     ) -> Result<Vec<String>> {
         let image = self.read_reference(&identifier, addressing);
-        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+        self.transport()
+            .ensure_auth(&image, oci::RegistryOperation::Pull)
+            .await?;
         let chunk_size = self.tag_chunk_size;
-        let tags = paginate(chunk_size, |cs, last| self.transport.list_tags(&image, cs, last)).await?;
+        let tags = paginate(chunk_size, |cs, last| self.transport().list_tags(&image, cs, last)).await?;
         log::trace!("Listed tags for {}: {:?}", identifier, tags);
         Ok(tags)
     }
@@ -526,9 +565,11 @@ impl Client {
     pub async fn list_repositories(&self, registry: impl Into<String>) -> Result<Vec<String>> {
         let registry = registry.into();
         let image = self.transport_registry(&registry);
-        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+        self.transport()
+            .ensure_auth(&image, oci::RegistryOperation::Pull)
+            .await?;
         let chunk_size = self.repository_chunk_size;
-        let repositories = paginate(chunk_size, |cs, last| self.transport.catalog(&image, cs, last)).await?;
+        let repositories = paginate(chunk_size, |cs, last| self.transport().catalog(&image, cs, last)).await?;
         log::trace!("Listed repositories for {}: {:?}", registry, repositories);
         Ok(repositories)
     }
@@ -549,12 +590,12 @@ impl Client {
         addressing: ReadAddressing,
     ) -> Result<oci::Digest> {
         let ref_ = self.read_reference(identifier, addressing);
-        self.transport
+        self.transport()
             .ensure_auth(&ref_, oci::RegistryOperation::Pull)
             .await
             .map_err(|e| self.via_mirror(identifier, &ref_, e))?;
         let digest = self
-            .transport
+            .transport()
             .fetch_manifest_digest(&ref_)
             .await
             .map_err(|e| self.via_mirror(identifier, &ref_, e))?;
@@ -583,7 +624,7 @@ impl Client {
         addressing: ReadAddressing,
     ) -> Result<(Digest, oci::Manifest)> {
         let ref_ = self.read_reference(identifier, addressing);
-        self.transport
+        self.transport()
             .ensure_auth(&ref_, oci::RegistryOperation::Pull)
             .await
             .map_err(|e| self.via_mirror(identifier, &ref_, e))?;
@@ -624,12 +665,14 @@ impl Client {
         let target_identifier = source_identifier.clone_with_tag(target_tag);
         // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
         let ref_ = target_identifier.canonical_reference();
-        self.transport.ensure_auth(&ref_, oci::RegistryOperation::Push).await?;
+        self.transport()
+            .ensure_auth(&ref_, oci::RegistryOperation::Push)
+            .await?;
         let platform = Some(platform.clone().into());
 
         log::debug!("Merging platform entry into index for {}", ref_);
         let mut index = match self
-            .transport
+            .transport()
             .pull_manifest_raw(&ref_, &[MEDIA_TYPE_OCI_IMAGE_MANIFEST, MEDIA_TYPE_OCI_IMAGE_INDEX])
             .await
         {
@@ -705,7 +748,7 @@ impl Client {
 
         let index_data = serde_json::to_vec(&index).map_err(ClientError::Serialization)?;
         let index_digest = Algorithm::Sha256.hash(&index_data);
-        self.transport
+        self.transport()
             .push_manifest_raw(&ref_, index_data, MEDIA_TYPE_OCI_IMAGE_INDEX)
             .await?;
         log::debug!("Successfully merged platform entry into index for {}", ref_);
@@ -731,11 +774,13 @@ impl Client {
     pub(crate) async fn push_index(&self, identifier: &Identifier, index: &oci::ImageIndex) -> Result<Digest> {
         // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
         let ref_ = identifier.canonical_reference();
-        self.transport.ensure_auth(&ref_, oci::RegistryOperation::Push).await?;
+        self.transport()
+            .ensure_auth(&ref_, oci::RegistryOperation::Push)
+            .await?;
 
         let index_data = serde_json::to_vec(index).map_err(ClientError::Serialization)?;
         let index_digest = Algorithm::Sha256.hash(&index_data);
-        self.transport
+        self.transport()
             .push_manifest_raw(&ref_, index_data, MEDIA_TYPE_OCI_IMAGE_INDEX)
             .await?;
         log::debug!("Pushed index for {} as {}", ref_, index_digest);
@@ -798,7 +843,7 @@ impl Client {
 
         // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
         let repo_ref = source_identifier.canonical_reference();
-        self.transport
+        self.transport()
             .ensure_auth(&repo_ref, oci::RegistryOperation::Push)
             .await?;
 
@@ -814,12 +859,12 @@ impl Client {
             .clone_with_digest(manifest_digest.clone())
             .canonical_reference();
         let (manifest_bytes, _digest_str) = self
-            .transport
+            .transport()
             .pull_manifest_raw(&digest_ref, &[MEDIA_TYPE_OCI_IMAGE_MANIFEST])
             .await?;
 
         let tag_ref = source_identifier.clone_with_tag(tag.clone()).canonical_reference();
-        self.transport
+        self.transport()
             .push_manifest_raw(&tag_ref, manifest_bytes, MEDIA_TYPE_OCI_IMAGE_MANIFEST)
             .await?;
 
@@ -839,8 +884,10 @@ impl Client {
     /// `package push`.
     pub async fn head_blob(&self, identifier: &Identifier, digest: &Digest) -> Result<u64> {
         let image = self.transport_reference(identifier);
-        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
-        let size = self.transport.head_blob(&image, digest).await?;
+        self.transport()
+            .ensure_auth(&image, oci::RegistryOperation::Pull)
+            .await?;
+        let size = self.transport().head_blob(&image, digest).await?;
         Ok(size)
     }
 
@@ -866,7 +913,7 @@ impl Client {
         let expected_digest = identifier.digest().to_string();
         let image = self.transport_reference(identifier);
 
-        self.transport
+        self.transport()
             .ensure_auth(&image, oci::RegistryOperation::Pull)
             .await
             .map_err(|e| self.via_mirror(identifier, &image, e))?;
@@ -901,11 +948,11 @@ impl Client {
     /// content interpretation.
     pub async fn pull_blob(&self, blob_ref: &oci::PinnedIdentifier) -> std::result::Result<Vec<u8>, ClientError> {
         let image = self.transport_reference(blob_ref);
-        self.transport
+        self.transport()
             .ensure_auth(&image, oci::RegistryOperation::Pull)
             .await
             .map_err(|e| self.via_mirror(blob_ref, &image, e))?;
-        self.transport
+        self.transport()
             .pull_blob(&image, &blob_ref.digest())
             .await
             .map_err(|e| self.via_mirror(blob_ref, &image, e))
@@ -1007,7 +1054,9 @@ impl Client {
         let content_path = output_dir.join("content");
 
         let image = self.transport_reference(identifier);
-        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+        self.transport()
+            .ensure_auth(&image, oci::RegistryOperation::Pull)
+            .await?;
 
         let layer_digest = Digest::try_from(layer.digest.as_str())
             .map_err(|e| ClientError::InvalidManifest(format!("layer digest '{}' is malformed: {e}", layer.digest)))?;
@@ -1028,7 +1077,7 @@ impl Client {
         // Obtain the raw compressed byte stream from the transport.
         // NativeTransport: wraps fork's pull_blob_stream (VerifyingStream
         // included — secondary verifier). Default impl: temp file fallback.
-        let raw_stream = self.transport.pull_blob_streaming(&image, &layer_digest).await?;
+        let raw_stream = self.transport().pull_blob_streaming(&image, &layer_digest).await?;
 
         // ── Pipeline assembly ─────────────────────────────────────────
         //
@@ -1375,7 +1424,9 @@ impl Client {
 
         // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
         let image = package_info.identifier.canonical_reference();
-        self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
+        self.transport()
+            .ensure_auth(&image, oci::RegistryOperation::Push)
+            .await?;
 
         let (_manifest, manifest_data, manifest_sha256, layer_counts) =
             self.push_multi_layer_manifest(package_info, layers).await?;
@@ -1441,7 +1492,9 @@ impl Client {
 
         // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
         let image = package_info.identifier.canonical_reference();
-        self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
+        self.transport()
+            .ensure_auth(&image, oci::RegistryOperation::Push)
+            .await?;
 
         let total_layers = layers.len();
         // Upload file layers and verify digest layers concurrently, preserving
@@ -1505,7 +1558,7 @@ impl Client {
                                     package_data_len as u64,
                                 );
                                 let on_progress = bar.callback();
-                                self.transport
+                                self.transport()
                                     .push_blob(&image, package_data, &digest, on_progress)
                                     .await?;
                                 drop(bar);
@@ -1550,7 +1603,7 @@ impl Client {
                             // mount, the (adapted) mount path doesn't return the
                             // blob's size, and it doubles as existence
                             // verification for the non-mounted path.
-                            let size = self.transport.head_blob(&image, digest).await?;
+                            let size = self.transport().head_blob(&image, digest).await?;
 
                             log::trace!(
                                 "Layer {progress_label} {digest}: verified, media_type={media_type}, size={size}"
@@ -1598,7 +1651,7 @@ impl Client {
         log::trace!("Config digest: {}", parts.config_digest);
 
         // Push config blob — tiny, no progress needed.
-        self.transport
+        self.transport()
             .push_blob(
                 &image,
                 parts.config_bytes,
@@ -1611,7 +1664,7 @@ impl Client {
         let canonical_image = image.clone_with_digest(manifest_sha256.clone());
 
         let pushed_digest = self
-            .transport
+            .transport()
             .push_manifest_raw(
                 &canonical_image,
                 parts.manifest_bytes.clone(),
@@ -1654,7 +1707,7 @@ impl Client {
         let Some(source_repository) = mount_from else {
             return false;
         };
-        match self.transport.mount_blob(image, source_repository, digest).await {
+        match self.transport().mount_blob(image, source_repository, digest).await {
             Ok(MountOutcome::Mounted) => true,
             Ok(MountOutcome::UploadRequired) => {
                 // Debug, not warn: a decline is the spec-legal common case on
@@ -1693,18 +1746,20 @@ impl Client {
         let desc_identifier = identifier.clone_with_tag(InternalTag::DESCRIPTION_TAG);
         // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
         let image = desc_identifier.canonical_reference();
-        self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
+        self.transport()
+            .ensure_auth(&image, oci::RegistryOperation::Push)
+            .await?;
 
         let config_data = b"{}".to_vec();
         let config_digest = Algorithm::Sha256.hash(&config_data);
-        self.transport
+        self.transport()
             .push_blob(&image, config_data, &config_digest, transport::no_progress())
             .await?;
 
         let readme_bytes = description.readme.as_bytes();
         let readme_len = readme_bytes.len();
         let readme_digest = Algorithm::Sha256.hash(readme_bytes);
-        self.transport
+        self.transport()
             .push_blob(&image, readme_bytes.to_vec(), &readme_digest, transport::no_progress())
             .await?;
 
@@ -1722,7 +1777,7 @@ impl Client {
         if let Some(logo) = &description.logo {
             let logo_len = logo.data.len();
             let logo_digest = Algorithm::Sha256.hash(&logo.data);
-            self.transport
+            self.transport()
                 .push_blob(&image, logo.data.clone(), &logo_digest, transport::no_progress())
                 .await?;
 
@@ -1757,7 +1812,7 @@ impl Client {
         let manifest_data = parts.manifest_bytes;
 
         // Push to the tag reference directly (not by digest) so the tag is created.
-        self.transport
+        self.transport()
             .push_manifest_raw(&image, manifest_data, MEDIA_TYPE_OCI_IMAGE_MANIFEST)
             .await?;
 
@@ -1799,17 +1854,19 @@ impl Client {
         let patch_identifier = patch_repo_id.clone_with_tag(InternalTag::PATCH_TAG);
         // Push stays canonical (mirror-free): remote/proxy mirrors are read-only.
         let image = patch_identifier.canonical_reference();
-        self.transport.ensure_auth(&image, oci::RegistryOperation::Push).await?;
+        self.transport()
+            .ensure_auth(&image, oci::RegistryOperation::Push)
+            .await?;
 
         let config_data = b"{}".to_vec();
         let config_digest = Algorithm::Sha256.hash(&config_data);
-        self.transport
+        self.transport()
             .push_blob(&image, config_data, &config_digest, transport::no_progress())
             .await?;
 
         let layer_len = descriptor_bytes.len();
         let layer_digest = Algorithm::Sha256.hash(descriptor_bytes);
-        self.transport
+        self.transport()
             .push_blob(
                 &image,
                 descriptor_bytes.to_vec(),
@@ -1840,7 +1897,7 @@ impl Client {
         let manifest_digest = parts.manifest_digest.clone();
 
         // Push to the tag reference directly (not by digest) so the tag is created.
-        self.transport
+        self.transport()
             .push_manifest_raw(&image, parts.manifest_bytes, MEDIA_TYPE_OCI_IMAGE_MANIFEST)
             .await?;
 
@@ -1887,7 +1944,9 @@ impl Client {
     ) -> std::result::Result<Option<package::description::Description>, ClientError> {
         let desc_identifier = identifier.clone_with_tag(InternalTag::DESCRIPTION_TAG);
         let image = self.read_reference(&desc_identifier, addressing);
-        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+        self.transport()
+            .ensure_auth(&image, oci::RegistryOperation::Pull)
+            .await?;
 
         let (manifest, _digest) = match self.fetch_manifest_raw(&image).await {
             Ok(result) => result,
@@ -1923,7 +1982,7 @@ impl Client {
             let layer_digest = Digest::try_from(layer.digest.as_str()).map_err(|e| {
                 ClientError::InvalidManifest(format!("description layer digest '{}' is malformed: {e}", layer.digest))
             })?;
-            self.transport
+            self.transport()
                 .pull_blob_to_file(&image, &layer_digest, &blob_path)
                 .await?;
 
@@ -2125,11 +2184,11 @@ impl Client {
         addressing: ReadAddressing,
     ) -> std::result::Result<Option<Digest>, ClientError> {
         let image = self.read_reference(identifier, addressing);
-        self.transport
+        self.transport()
             .ensure_auth(&image, oci::RegistryOperation::Pull)
             .await
             .map_err(|e| self.via_mirror(identifier, &image, e))?;
-        match self.transport.fetch_manifest_digest(&image).await {
+        match self.transport().fetch_manifest_digest(&image).await {
             Ok(digest_str) => Ok(Some(Digest::try_from(digest_str.as_str()).map_err(|e| {
                 ClientError::InvalidManifest(format!("digest '{digest_str}' from registry HEAD is malformed: {e}"))
             })?)),
@@ -2203,13 +2262,13 @@ impl Client {
         addressing: ReadAddressing,
     ) -> std::result::Result<Option<(Vec<u8>, Digest, oci::Manifest)>, ClientError> {
         let image = self.read_reference(identifier, addressing);
-        self.transport
+        self.transport()
             .ensure_auth(&image, oci::RegistryOperation::Pull)
             .await
             .map_err(|e| self.via_mirror(identifier, &image, e))?;
 
         let (raw_bytes, digest_str) = match self
-            .transport
+            .transport()
             .pull_manifest_raw(&image, ACCEPTED_MANIFEST_MEDIA_TYPES)
             .await
         {
@@ -2282,14 +2341,16 @@ impl Client {
         let image = self.transport_reference(identifier_for_auth);
         // Auth was already established by the caller in fetch_manifest_raw_bytes,
         // but call ensure_auth again for robustness (it is a no-op on cache hit).
-        self.transport.ensure_auth(&image, oci::RegistryOperation::Pull).await?;
+        self.transport()
+            .ensure_auth(&image, oci::RegistryOperation::Pull)
+            .await?;
 
         // Stream the blob with a hard byte cap so a malicious registry that
         // sends more bytes than its declared layer size cannot OOM the process.
         // We read up to (max_bytes + 1) to detect overflow: if we fill the
         // buffer to that length, the registry sent too many bytes.
         use tokio::io::AsyncReadExt as _;
-        let stream = self.transport.pull_blob_streaming(&image, layer_digest).await?;
+        let stream = self.transport().pull_blob_streaming(&image, layer_digest).await?;
         // Cap sentinel: read one byte beyond the allowed ceiling to detect overflow.
         let cap_sentinel = max_bytes.saturating_add(1);
         let mut buf = Vec::with_capacity(max_bytes as usize);
@@ -2317,7 +2378,7 @@ impl Client {
     ) -> std::result::Result<(oci::Manifest, String), ClientError> {
         log::debug!("Pulling manifest for image {}", image);
         let (data, digest) = self
-            .transport
+            .transport()
             .pull_manifest_raw(image, ACCEPTED_MANIFEST_MEDIA_TYPES)
             .await?;
         let manifest = parse_registry_manifest(&data)?;

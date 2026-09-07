@@ -202,7 +202,19 @@ impl Clone for Box<dyn IndexTransport> {
 /// replaces (D-010 rule 2).
 #[derive(Clone)]
 pub struct ReqwestIndexTransport {
-    client: reqwest::Client,
+    /// Built on first request, from [`Self::hardening`], and shared by every
+    /// clone — `reqwest::Client` is itself an `Arc` handle, so sharing one is
+    /// what cloning the built client already did.
+    ///
+    /// Deferred because [`build_index_http_client`] parses the ~150 bundled
+    /// Mozilla roots into a rustls trust store — ~38 ms of pure CPU on this
+    /// box — and an invocation that resolves every locked tool out of the local
+    /// store never sends a request. `Context::try_init` builds one
+    /// [`super::OcxIndex`] per index-bearing namespace whenever it is not
+    /// `--offline`, so before this the cost was unconditional on every online
+    /// invocation, including every rendered-trampoline `exec`.
+    client: std::sync::Arc<std::sync::OnceLock<reqwest::Client>>,
+    hardening: TransportHardening,
     policy: RetryPolicy,
     budget: RetryBudget,
 }
@@ -274,10 +286,16 @@ impl ReqwestIndexTransport {
     /// waiting out the shipped minutes against a real socket.
     fn with_hardening(hardening: &TransportHardening, policy: RetryPolicy) -> Self {
         Self {
-            client: build_index_http_client(hardening),
+            client: std::sync::Arc::new(std::sync::OnceLock::new()),
+            hardening: *hardening,
             policy,
             budget: RetryBudget::new(),
         }
+    }
+
+    /// The HTTP client, built on first use. Every request goes through here.
+    fn client(&self) -> &reqwest::Client {
+        self.client.get_or_init(|| build_index_http_client(&self.hardening))
     }
 
     /// One attempt at `url`: everything from dispatching the request to the
@@ -424,7 +442,7 @@ impl IndexTransport for ReqwestIndexTransport {
     /// retry *volume* is what the budget bounds, and per-attempt duration is
     /// what `TransportHardening::outer_cap` bounds.
     async fn get(&self, url: &str) -> Result<IndexFetch> {
-        let client = &self.client;
+        let client = self.client();
         let policy = &self.policy;
         transport_policy::run(policy, &self.budget, move |attempt| async move {
             if attempt > 0 {
@@ -643,7 +661,7 @@ struct SourceCacheInner {
     /// entry is what keeps a name the index does not hold from re-asking the
     /// wire once per chain consult: it costs exactly one 404 per process, not
     /// one per source loop.
-    roots: BTreeMap<String, Option<Arc<IndexRoot>>>,
+    roots: BTreeMap<String, Option<CachedRoot>>,
     /// Set once `config.json` has been fetched and its `format_version`
     /// confirmed supported this invocation, so a repeat call skips the fetch
     /// (F1 "read once"). Never set on a served-but-unsupported version (a
@@ -653,6 +671,28 @@ struct SourceCacheInner {
     /// construction means there is no probe outcome to soften a transport
     /// failure into — that always propagates.
     config: Option<Arc<IndexFormatConfig>>,
+}
+
+/// One memoized root: the **verbatim** `p/<repo>.json` bytes and the parse of
+/// them, together.
+///
+/// Together because the two consumers want different halves of the same
+/// request. [`OcxIndex::resolve_root`] wants the parse; `fetch_root_document`
+/// wants the bytes, and wants them verbatim rather than re-serialised — they
+/// hash to the catalog entry (F1) and carry keys this client does not model
+/// (A2). Memoizing only the parse is what made a **first-sight**
+/// digest-addressed resolve pay two `GET /p/<ns>/<pkg>.json` for one root
+/// (ocx#424): `physical_reference` resolves the root, then
+/// `ChainedIndex::record_routing_pointer` asks for its bytes and the memo had
+/// nothing to give.
+///
+/// Cost is one extra `Arc<Vec<u8>>` per repository this process touches — the
+/// map beside it already holds the strictly larger parse of the same bytes.
+#[derive(Clone)]
+struct CachedRoot {
+    /// The bytes exactly as served, never a re-serialisation of `parsed`.
+    bytes: Arc<Vec<u8>>,
+    parsed: Arc<IndexRoot>,
 }
 
 /// Max keys a source's singleflight group admits.
@@ -1076,8 +1116,8 @@ impl OcxIndex {
         // The version gate runs before any root is consumed (F1). Absence is
         // v1, not a refusal (C-005) — an unsupported served version still is.
         self.check_format_version().await?;
-        if let Some(root) = self.cache.read().await.roots.get(repository) {
-            return Ok(root.clone());
+        if let Some(cached) = self.cache.read().await.roots.get(repository) {
+            return Ok(cached.as_ref().map(|cached| cached.parsed.clone()));
         }
         // Coalesce the cold misses: the per-tag fan-out asks for one
         // repository's root once per tag, and all of them read-check together.
@@ -1093,10 +1133,14 @@ impl OcxIndex {
             Acquisition::Resolved(root) => return Ok(root),
         };
         match self.fetch_root(repository).await {
-            Ok(root) => {
-                self.memoize_root(repository, root.clone()).await;
-                handle.complete(root.clone());
-                Ok(root)
+            Ok(cached) => {
+                self.memoize_root(repository, cached.clone()).await;
+                // The singleflight broadcasts the parse alone: a waiter is a
+                // `resolve_root` caller, and the bytes reach `fetch_root_document`
+                // through the memo the line above just filled.
+                let parsed = cached.map(|cached| cached.parsed);
+                handle.complete(parsed.clone());
+                Ok(parsed)
             }
             Err(error) => Err(error::broadcast_failure(handle, error)),
         }
@@ -1104,12 +1148,16 @@ impl OcxIndex {
 
     /// One `GET p/<repo>.json`. `Ok(None)` on a confirmed 404, which is a
     /// result and not a failure — nothing else may fold into it.
-    async fn fetch_root(&self, repository: &str) -> Result<Option<Arc<IndexRoot>>> {
+    async fn fetch_root(&self, repository: &str) -> Result<Option<CachedRoot>> {
         let url = format!("{}/p/{}.json", self.base_url, repository);
         match self.transport.get(&url).await? {
             IndexFetch::Found { bytes } => {
                 let parsed: IndexRoot = parse_document(&bytes, &url)?;
-                Ok(Some(Arc::new(parsed)))
+                // The bytes are kept, not dropped: see [`CachedRoot`].
+                Ok(Some(CachedRoot {
+                    bytes: Arc::new(bytes),
+                    parsed: Arc::new(parsed),
+                }))
             }
             IndexFetch::NotFound => Ok(None),
         }
@@ -1124,7 +1172,7 @@ impl OcxIndex {
     /// [`Self::jurisdiction`] as `Outside` for the served registry's
     /// identically-named repository, and that package would silently stop
     /// resolving through the index for the rest of the process.
-    async fn memoize_root(&self, repository: &str, root: Option<Arc<IndexRoot>>) {
+    async fn memoize_root(&self, repository: &str, root: Option<CachedRoot>) {
         self.cache.write().await.roots.insert(repository.to_string(), root);
     }
 
@@ -1502,12 +1550,17 @@ impl index_impl::IndexImpl for OcxIndex {
         }
         // The version gate runs before any root is consumed (F1).
         self.check_format_version().await?;
-        // A memoized **miss** is the whole answer, so it short-circuits: a flat
-        // name costs one 404 per process however many times it is asked for. A
-        // memoized hit cannot, because the caller needs the verbatim bytes and
-        // the memo holds only the parse.
-        if let Some(None) = self.cache.read().await.roots.get(identifier.repository()) {
-            return Ok(None);
+        // A memoized root is the whole answer, hit and miss alike: a flat name
+        // costs one 404 per process however many times it is asked for, and a
+        // hit costs one GET, because [`CachedRoot`] carries the verbatim bytes
+        // beside the parse. Without the bytes a first-sight digest-addressed
+        // resolve paid two GETs for one root — `physical_reference` fetched it
+        // through `resolve_root`, then `record_routing_pointer` asked here for
+        // the bytes of the very same document (ocx#424).
+        if let Some(cached) = self.cache.read().await.roots.get(identifier.repository()) {
+            return Ok(cached
+                .as_ref()
+                .map(|cached| ((*cached.bytes).clone(), (*cached.parsed).clone())));
         }
         let url = format!("{}/p/{}.json", self.base_url, identifier.repository());
         // Both arms below issued the request, so both memoize — the miss on
@@ -1519,8 +1572,14 @@ impl index_impl::IndexImpl for OcxIndex {
         match self.transport.get(&url).await? {
             IndexFetch::Found { bytes } => {
                 let root: IndexRoot = parse_document(&bytes, &url)?;
-                self.memoize_root(identifier.repository(), Some(Arc::new(root.clone())))
-                    .await;
+                self.memoize_root(
+                    identifier.repository(),
+                    Some(CachedRoot {
+                        bytes: Arc::new(bytes.clone()),
+                        parsed: Arc::new(root.clone()),
+                    }),
+                )
+                .await;
                 Ok(Some((bytes, root)))
             }
             // A 404 is a clean miss, never an error.
@@ -3222,6 +3281,51 @@ mod tests {
         assert!(
             transport.request_urls().contains(&root_url()),
             "fetch_root_document must GET p/<ns>/<pkg>.json"
+        );
+    }
+
+    /// ocx#424 / V-11 — a root already resolved is **not** re-fetched when its
+    /// verbatim bytes are asked for.
+    ///
+    /// This pair is the shipped sequence of a first-sight, digest-addressed
+    /// resolve: `ChainedIndex::physical_reference` dereferences the root
+    /// through `resolve_root`, and `record_routing_pointer` then asks
+    /// `fetch_root_document` for the same document's bytes so it can commit a
+    /// local routing pointer. Two calls, one document, one GET.
+    ///
+    /// *Red-reachability:* memoize the parse alone — `roots` as
+    /// `Option<Arc<IndexRoot>>`, which is what shipped — and the count is 2,
+    /// because a memoized hit cannot answer for bytes it does not hold. The
+    /// assertion is on the REQUEST COUNT and on the bytes: an answer that
+    /// re-serialised the parse would keep the count at 1 and break F1.
+    #[tokio::test]
+    async fn a_resolved_root_is_not_re_fetched_for_its_verbatim_bytes() {
+        let transport = StubIndexTransport::new();
+        transport.insert(&config_url(), br#"{"format_version":1}"#);
+        // Non-canonical whitespace, for the reason the sibling above states.
+        let root_bytes = br#"{  "repository" : "oci://ghcr.io/ocx-contrib/cmake" ,  "tags" : { }  }"#.to_vec();
+        transport.insert(&root_url(), &root_bytes);
+        let source = make_source(transport.clone(), false);
+
+        source
+            .resolve_root(REPO)
+            .await
+            .unwrap()
+            .expect("the published root is served");
+        let (bytes, _) = source
+            .fetch_root_document(&tagged_id())
+            .await
+            .unwrap()
+            .expect("the root already in the memo still answers for its bytes");
+
+        assert_eq!(
+            transport.request_count(&root_url()),
+            1,
+            "ocx#424 — the routing-pointer write must reuse the root the resolve just fetched"
+        );
+        assert_eq!(
+            bytes, root_bytes,
+            "and the memo must hand back the verbatim bytes, never a re-serialisation (F1)"
         );
     }
 

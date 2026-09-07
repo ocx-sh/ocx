@@ -85,9 +85,65 @@ pub(crate) const REGISTRY_READ_TIMEOUT: std::time::Duration = std::time::Duratio
 /// than two.
 pub(crate) const REGISTRY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-pub struct ClientBuilder {
+/// Everything [`TransportRecipe::build`] needs, and nothing that costs anything
+/// to hold — the deferred half of [`ClientBuilder`].
+///
+/// The recipe exists because building the transport is **not** cheap and the
+/// warm path never uses it. `oci::native::ClientConfig::default()` copies the
+/// ~150 bundled Mozilla roots, and `oci::native::Client::new` then hands them to
+/// **two** `reqwest::Client` builds (the redirect-following one and its
+/// no-redirect twin), each of which parses the whole set into a rustls trust
+/// store: ~28 ms of pure CPU on every invocation that constructs a [`Client`],
+/// paid whether or not a request is ever made. A rendered trampoline
+/// (`<home>/toolchain/bin/<name>`) constructs one on every `cmake`, and resolves
+/// every locked tool out of the local store without dialling anything.
+///
+/// So the recipe is what a [`Client`] carries around, and the transport is built
+/// on the first call to [`Client::transport`]. Every field here is `Clone` and
+/// holds no trust store, no socket and no thread — which is the property that
+/// lets [`Client`] stay `Clone` without either re-running the build per clone or
+/// keeping a `ClientConfig` (which is not `Clone`) alive.
+#[derive(Clone, Default)]
+pub(super) struct TransportRecipe {
     auth: auth::Auth,
-    config: oci::native::ClientConfig,
+    /// Hosts to contact over plain HTTP; `None` is HTTPS everywhere.
+    plain_http_registries: Option<Vec<String>>,
+    dns_resolver: Option<std::sync::Arc<dyn reqwest::dns::Resolve>>,
+}
+
+impl TransportRecipe {
+    /// The config the transport is built from — the whole of what deferring
+    /// costs, materialised. `ClientConfig::default()` is where the ~150 bundled
+    /// roots get copied, so calling this is already most of the price.
+    pub(super) fn config(&self) -> oci::native::ClientConfig {
+        let mut config = oci::native::ClientConfig {
+            push_chunk_size: PUSH_CHUNK_SIZE,
+            read_timeout: Some(REGISTRY_READ_TIMEOUT),
+            connect_timeout: Some(REGISTRY_CONNECT_TIMEOUT),
+            // CA roots are seeded by the fork's `ClientConfig::default()`
+            // (self-contained on hosts with no system trust store), inherited
+            // here via `..Default::default()`. Single source of truth: the fork.
+            ..Default::default()
+        };
+        if let Some(registries) = &self.plain_http_registries {
+            config.protocol = oci::native::ClientProtocol::HttpsExcept(registries.clone());
+        }
+        config.dns_resolver = self.dns_resolver.clone();
+        config
+    }
+
+    /// Constructs the transport. Called at most once per [`Client`] cell, from
+    /// [`Client::transport`].
+    pub(super) fn build(&self) -> Box<dyn super::transport::OciTransport> {
+        Box::new(NativeTransport::new(
+            oci::native::Client::new(self.config()),
+            self.auth.clone(),
+        ))
+    }
+}
+
+pub struct ClientBuilder {
+    recipe: TransportRecipe,
     lock_timeout: Option<std::time::Duration>,
     progress: crate::cli::progress::ProgressManager,
     mirrors: MirrorMap,
@@ -96,16 +152,7 @@ pub struct ClientBuilder {
 impl ClientBuilder {
     pub fn new() -> Self {
         ClientBuilder {
-            auth: auth::Auth::default(),
-            config: oci::native::ClientConfig {
-                push_chunk_size: PUSH_CHUNK_SIZE,
-                read_timeout: Some(REGISTRY_READ_TIMEOUT),
-                connect_timeout: Some(REGISTRY_CONNECT_TIMEOUT),
-                // CA roots are seeded by the fork's `ClientConfig::default()`
-                // (self-contained on hosts with no system trust store), inherited
-                // here via `..Default::default()`. Single source of truth: the fork.
-                ..Default::default()
-            },
+            recipe: TransportRecipe::default(),
             lock_timeout: None,
             progress: crate::cli::progress::ProgressManager::disabled(),
             mirrors: MirrorMap::default(),
@@ -121,7 +168,7 @@ impl ClientBuilder {
     /// Registries that should be contacted over plain HTTP instead of HTTPS.
     pub fn plain_http_registries(mut self, registries: Vec<String>) -> Self {
         if !registries.is_empty() {
-            self.config.protocol = oci::native::ClientProtocol::HttpsExcept(registries);
+            self.recipe.plain_http_registries = Some(registries);
         }
         self
     }
@@ -156,14 +203,16 @@ impl ClientBuilder {
         let resolver: std::sync::Arc<dyn reqwest::dns::Resolve> = std::sync::Arc::new(
             crate::oci::ssrf::GuardedResolver::new(std::sync::Arc::new(trusted_hosts), crate::oci::ssrf::proxy_rules()),
         );
-        self.config.dns_resolver = Some(resolver);
+        self.recipe.dns_resolver = Some(resolver);
         self
     }
 
+    /// Returns a client whose transport is **not built yet** — see
+    /// [`TransportRecipe`] for why, and [`Client::transport`] for where it is.
     pub fn build(self) -> Client {
-        let transport = NativeTransport::new(oci::native::Client::new(self.config), self.auth);
         Client {
-            transport: Box::new(transport),
+            transport_cell: std::sync::Arc::new(std::sync::OnceLock::new()),
+            recipe: self.recipe,
             lock_timeout: self.lock_timeout.unwrap_or(std::time::Duration::from_secs(30)),
             tag_chunk_size: 100,
             repository_chunk_size: 100,
@@ -193,17 +242,22 @@ impl ClientBuilder {
     /// which exposes no public getter, so this is the only seam that can observe
     /// the resolved value before construction.
     pub(crate) fn plain_http_hosts(&self) -> Option<&[String]> {
-        match &self.config.protocol {
-            oci::native::ClientProtocol::HttpsExcept(hosts) => Some(hosts.as_slice()),
-            _ => None,
-        }
+        self.recipe.plain_http_registries.as_deref()
     }
 
     /// Test-only inspector: how many bundled CA roots were seeded into the
     /// client config. Non-zero proves the trust store is self-contained and the
     /// empty-system-store panic path cannot be reached.
     pub(crate) fn root_certificate_count(&self) -> usize {
-        self.config.extra_root_certificates.len()
+        self.config().extra_root_certificates.len()
+    }
+
+    /// Test-only: the `ClientConfig` [`build`](Self::build) would hand the
+    /// transport. The production path no longer holds one — the recipe composes
+    /// it on demand — so this is how a test drives the real, shipped config
+    /// (and overrides one field of it) without a second construction path.
+    pub(crate) fn config(&self) -> oci::native::ClientConfig {
+        self.recipe.config()
     }
 }
 
@@ -566,7 +620,7 @@ mod push_wire_tests {
     ) -> super::super::transport::Result<String> {
         let config = ClientBuilder::new()
             .plain_http_registries(vec![stub.address.clone()])
-            .config;
+            .config();
         let transport = NativeTransport::new(oci::native::Client::new(config), auth::Auth::default());
         let image = stub_image(stub);
         let digest = sha256_digest(&data);
@@ -578,7 +632,7 @@ mod push_wire_tests {
     /// GHCR's cap re-breaks every layer over 4 MiB — this is the tripwire.
     #[test]
     fn shipped_chunk_size_stays_within_the_registry_request_cap() {
-        let configured = ClientBuilder::new().config.push_chunk_size;
+        let configured = ClientBuilder::new().config().push_chunk_size;
         assert!(
             configured > 0,
             "a zero chunk size would never terminate the upload loop"
@@ -908,12 +962,12 @@ mod read_timeout_tests {
 
     /// Reads a blob body from `address` through the real `NativeTransport`,
     /// with `read_timeout` overridden so the test does not wait out the shipped
-    /// 30 s. The override rides the same `.config` field access
+    /// 30 s. The override rides the same `.config()` accessor
     /// `push_through_production_client` already uses — no new knob.
     async fn read_stalled_blob_with_timeout(address: &str, read_timeout: Duration) -> std::io::Result<u64> {
         let mut config = ClientBuilder::new()
             .plain_http_registries(vec![address.to_string()])
-            .config;
+            .config();
         config.read_timeout = Some(read_timeout);
 
         let transport = NativeTransport::new(oci::native::Client::new(config), auth::Auth::default());
@@ -932,7 +986,7 @@ mod read_timeout_tests {
     #[test]
     fn production_client_config_carries_the_registry_read_timeout() {
         assert_eq!(
-            ClientBuilder::new().config.read_timeout,
+            ClientBuilder::new().config().read_timeout,
             Some(REGISTRY_READ_TIMEOUT),
             "ClientBuilder::new() must set read_timeout — inheriting the fork's None means a stalled registry hangs the pull forever"
         );
@@ -944,7 +998,7 @@ mod read_timeout_tests {
     #[test]
     fn production_client_config_carries_the_registry_connect_timeout() {
         assert_eq!(
-            ClientBuilder::new().config.connect_timeout,
+            ClientBuilder::new().config().connect_timeout,
             Some(REGISTRY_CONNECT_TIMEOUT),
             "ClientBuilder::new() must set connect_timeout — inheriting the fork's None means a black-holed connect hangs until the OS gives up"
         );
@@ -999,7 +1053,9 @@ mod read_timeout_tests {
     async fn stalled_registry_read_timeout_classifies_as_transient() {
         let address = start_stalling_registry().await;
 
-        let mut config = ClientBuilder::new().plain_http_registries(vec![address.clone()]).config;
+        let mut config = ClientBuilder::new()
+            .plain_http_registries(vec![address.clone()])
+            .config();
         config.read_timeout = Some(Duration::from_secs(2));
         let transport = NativeTransport::new(oci::native::Client::new(config), auth::Auth::default());
         let image: oci::native::Reference = format!("{address}/test/blob:latest").parse().unwrap();

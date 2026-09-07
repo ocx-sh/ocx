@@ -1488,6 +1488,91 @@ impl index_impl::IndexImpl for ChainedIndex {
         last_error.map_or(Ok(None), Err)
     }
 
+    /// The committed local root's answer, and only that — the source walk of
+    /// [`Self::physical_reference`] is skipped entirely, in every mode.
+    ///
+    /// Same guard, same refusal semantics as the local half of that method:
+    /// an unreadable local index is a miss, an SSRF refusal propagates.
+    async fn physical_reference_local(&self, identifier: &oci::Identifier) -> Result<Option<oci::Identifier>> {
+        self.local_physical_answer(identifier).await
+    }
+
+    /// Record the routing pointer for `identifier`, so the next invocation
+    /// reads it off disk instead of paying a source for it again (#424).
+    ///
+    /// A digest-addressed resolve grows no root — [`Self::fetch_and_persist_chain`]'s
+    /// grow branch needs a tag to pin — so without this a machine that only ever
+    /// pulls and execs against a committed lock re-asks the source where the
+    /// content lives on every single invocation, forever.
+    ///
+    /// **Only the resolve path calls this, and that is the gate.** The write
+    /// used to live inside [`Self::physical_reference`], which was wrong in a
+    /// way one test caught and four callers would have suffered: `ocx package
+    /// cascade check`, `package verify`, `package sign` and `package attest`
+    /// all ask for a physical address without materializing anything, and a
+    /// pure read must not snapshot one. Creating `p/<ns>/<pkg>.json` **is** a
+    /// snapshot of the physical address even with no tag in it, because a later
+    /// invocation routes by it having never re-asked. Keeping the call in
+    /// `resolve_transport_pinned` makes that unreachable from a read by
+    /// construction, for the four callers today and any added later.
+    ///
+    /// **Best-effort.** A cache write on a path whose real work has already
+    /// succeeded: a lost catalog-lock race or a read-only index home is logged
+    /// and swallowed, the same tolerance the leaf-manifest blob cache gets in
+    /// `fetch_and_persist_chain`. Failing a resolve because a cache write lost
+    /// a race would be a worse defect than the dial it removes.
+    ///
+    /// Four gates, each load-bearing:
+    ///
+    /// - [`LocalWritePolicy::Full`] — a `NoTag` view (`ocx update`, resolving on
+    ///   behalf of a lock) and a `ReadOnly` view (`ocx package inspect`) write
+    ///   nothing into the local index, and a routing pointer is no exception.
+    /// - **not [`ChainMode::Frozen`]** — `--frozen` promises the invocation
+    ///   changes nothing. The consequence is deliberate: a frozen invocation
+    ///   against a cold index may still dial, and the non-frozen pull that
+    ///   populated the store is where the pointer gets recorded.
+    /// - **the local copy already answers** — nothing to repair, and every
+    ///   write here would be a routing migration. Checked *before* the source
+    ///   is asked, so a warm machine spends no request.
+    /// - [`SourceKind::Published`] — [`LocalIndex::commit_published_root`] is
+    ///   the published writer; a derived source's root is OCX-authored and has
+    ///   its own path.
+    ///
+    /// [`RootScope::Routing`] carries the rest: package-level fields only, no
+    /// tags, and nothing at all when a root is already committed.
+    async fn record_routing_pointer(&self, identifier: &oci::Identifier) {
+        if self.write_policy != LocalWritePolicy::Full || self.mode == ChainMode::Frozen {
+            return;
+        }
+        // A committed root already answers locally — no repair to make, and no
+        // request to spend finding that out.
+        if matches!(self.local_physical_answer(identifier).await, Ok(Some(_))) {
+            return;
+        }
+        for (source, _) in self.candidate_sources(identifier).await {
+            if !matches!(source.source_kind(), SourceKind::Published) {
+                continue;
+            }
+            match source.fetch_root_document(identifier).await {
+                Ok(Some((bytes, _))) => {
+                    if let Err(error) = self
+                        .local_index
+                        .commit_published_root(identifier, &bytes, RootScope::Routing)
+                        .await
+                    {
+                        log::debug!("could not record the routing pointer for '{identifier}': {error}");
+                    }
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    log::debug!("could not read the root document for '{identifier}': {error}");
+                    return;
+                }
+            }
+        }
+    }
+
     fn jurisdiction(&self, identifier: &oci::Identifier) -> Jurisdiction {
         // Fold the chain: one authoritative source makes the whole chain
         // authoritative; otherwise any source that would still be asked makes it
