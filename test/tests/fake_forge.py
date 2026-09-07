@@ -535,23 +535,20 @@ class FakeForge(GitHttpRoutes, GitLabRoutes, http.server.ThreadingHTTPServer):
         self.gitlab_job_token_push_allowed: dict[str, bool] = {}
         # Target project path -> the source project paths its job-token
         # allowlist contains. An absent key is an EMPTY allowlist (a miss), not
-        # an unreadable one; unreadable is the separate knob below, because
-        # C-029 gives the two different exit codes.
+        # an unreadable one: C-029 gives the two different exit codes, and
+        # unreadable is what `gl_job_token_refuses` answers instead.
         self.gitlab_job_token_allowlist: dict[str, list[str]] = {}
-        # Target project paths whose allowlist read answers 403 — the field the
-        # credential may not read, which is `unknown`-and-proceed.
-        self.gitlab_job_token_allowlist_unreadable: set[str] = set()
-        # Whether the GitLab surface holds a `JOB-TOKEN` request to the scope a
-        # real CI job token has. ON by default, because the permissive answer is
-        # what let #429 ship: this fake served `GET /projects/:id` and the
-        # single-branch endpoint to every credential, so the job-token posture
-        # passed here and died against a real instance at the first read. A knob
-        # rather than a constant only so a row can *demonstrate* the difference —
-        # turning it off is how the pre-fix failure is reproduced, never how a
-        # row is made to pass.
-        #
-        # https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access
-        self.gitlab_job_token_endpoint_scope: bool = True
+        # Target project path -> the GROUP paths its job-token allowlist
+        # contains. GitLab keeps two independent lists and a group entry admits
+        # every project under it at any depth (#430); this is the second one.
+        # Absent key is an EMPTY list, so an existing row that seeds only
+        # `gitlab_job_token_allowlist` keeps meaning exactly what it means
+        # today — neither list admits, which is still a miss.
+        self.gitlab_job_token_groups_allowlist: dict[str, list[str]] = {}
+        # No `..._unreadable` knob for either list: the 403 one would arm is
+        # already what `gl_job_token_refuses` answers a bare job token, which is
+        # the posture that meets it in production. A knob no row arms is a
+        # branch no row covers.
 
         self.git_http_init()
 
