@@ -24,13 +24,19 @@
 //!   (the platform the package was built/tested for), not the host.
 //!   `p.is_any`, `p.os`, `p.arch`. The OS / arch namespaces (`ocx.os.Linux`,
 //!   `ocx.arch.Amd64`, …) carry the matching constants.
-//! - `ocx.package_root` — read-only package root path ATTRIBUTE (no parens,
-//!   `/`-normalized). Per-run constant materialized at globals-build time.
+//! - `ocx.package_root` — read-only package STORE root path ATTRIBUTE (no
+//!   parens, `/`-normalized). Holds `content/`, `refs/`, `metadata.json`, …
+//!   Per-run constant materialized at globals-build time.
+//! - `ocx.content_root` — read-only path ATTRIBUTE for the bundle's own files
+//!   (`<package_root>/content`). This — not `package_root` — is the base
+//!   `read_file` / `exists` fall back to, so a script spells `bin/javac`.
 //! - `ocx.scratch_root` — read-write sandbox root path ATTRIBUTE (no parens,
 //!   `/`-normalized). Per-run constant materialized at globals-build time.
-//! - `ocx.read_file(path, *, max_bytes=1048576) -> str` — guarded read.
+//! - `ocx.read_file(path, *, max_bytes=1048576) -> str` — guarded read over
+//!   `{scratch_root, content_root}`.
 //! - `ocx.write_file(path, content)` — scratch-only guarded write.
-//! - `ocx.exists(path) -> bool` — guarded existence check.
+//! - `ocx.exists(path) -> bool` — guarded existence check over the same two
+//!   roots as `read_file`.
 //! - `ocx.mkdir(path)` — scratch-only recursive idempotent `mkdir -p`.
 //!
 //! Every `path` arg AND `ocx.run(cwd=…)` goes through `guard::resolve_scratch`
@@ -501,15 +507,18 @@ fn ocx_members(globals: &mut GlobalsBuilder) {
     ) -> starlark::Result<String> {
         let cap = usize::try_from(max_bytes.max(0)).unwrap_or(0);
         let resolved = host::with(|s| {
-            guard::resolve_read(path, &s.scratch_root, &s.package_root)
+            guard::resolve_read(path, &s.scratch_root, &s.content_root)
                 .map_err(|e| e.to_string())
                 .and_then(|p| {
                     // Symlink re-check against the root that actually contains
-                    // the resolved path (read side is NOT exempt — C1).
+                    // the resolved path (read side is NOT exempt — C1). The
+                    // read-only side contains against the CONTENT root, not the
+                    // package root: a bundle symlink reaching up into the store's
+                    // `refs/` or `metadata.json` is an escape.
                     let root = if p.starts_with(&s.scratch_root) {
                         &s.scratch_root
                     } else {
-                        &s.package_root
+                        &s.content_root
                     };
                     guard::verify_symlink_containment(root, &p)
                         .map_err(|e| e.to_string())
@@ -550,13 +559,13 @@ fn ocx_members(globals: &mut GlobalsBuilder) {
     /// `ocx.exists(path) -> bool`
     fn exists(#[starlark(require = pos)] path: &str) -> starlark::Result<bool> {
         let resolved = host::with(|s| {
-            guard::resolve_read(path, &s.scratch_root, &s.package_root)
+            guard::resolve_read(path, &s.scratch_root, &s.content_root)
                 .map_err(|e| e.to_string())
                 .and_then(|p| {
                     let root = if p.starts_with(&s.scratch_root) {
                         &s.scratch_root
                     } else {
-                        &s.package_root
+                        &s.content_root
                     };
                     guard::verify_symlink_containment(root, &p)
                         .map_err(|e| e.to_string())
@@ -612,20 +621,23 @@ fn arch_members(globals: &mut GlobalsBuilder) {
 /// These per-run constants are materialized as **attributes** (not methods) by
 /// reading the host scope at globals-build time and freezing the values into
 /// the namespace: `target_platform` from the host
-/// [`Platform`][crate::oci::Platform], and the two roots from the host's
-/// package / scratch directories. This requires `host::scoped` to be installed
+/// [`Platform`][crate::oci::Platform], and the three roots from the host's
+/// package / content / scratch directories. This requires `host::scoped` to be installed
 /// BEFORE `build_globals` runs (see [`super::engine::evaluate`]).
 pub(super) fn ocx_module(globals: &mut GlobalsBuilder) {
     // Falls back to `Platform::Any` when no host scope is installed (LSP
     // build, structural-parity test). The runtime path always has a scope.
     let platform = host::try_with(|s| PlatformValue::from_platform(&s.platform))
         .unwrap_or_else(|| PlatformValue::from_platform(&crate::oci::Platform::Any));
-    // `package_root` / `scratch_root` are per-run path constants (the
-    // materialized package dir and the writable scratch dir). Like
+    // `package_root` / `content_root` / `scratch_root` are per-run path
+    // constants (the package store dir, the bundle's own files inside it, and
+    // the writable scratch dir). `content_root` is the one reads resolve
+    // against — see `guard::resolve_read`. Like
     // `target_platform`, they take no arguments and never change during a run,
     // so they are attributes, not methods. Empty string when no host scope is
     // installed (LSP / parity build); the runtime path always has a scope.
     let package_root = host::try_with(|s| slash_path(&s.package_root)).unwrap_or_default();
+    let content_root = host::try_with(|s| slash_path(&s.content_root)).unwrap_or_default();
     let scratch_root = host::try_with(|s| slash_path(&s.scratch_root)).unwrap_or_default();
     globals.namespace("ocx", |b| {
         ocx_members(b);
@@ -633,6 +645,7 @@ pub(super) fn ocx_module(globals: &mut GlobalsBuilder) {
         b.namespace("arch", arch_members);
         b.set("target_platform", platform);
         b.set("package_root", package_root);
+        b.set("content_root", content_root);
         b.set("scratch_root", scratch_root);
     });
 }

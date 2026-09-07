@@ -38,7 +38,7 @@ pub(super) enum GuardError {
 /// Resolves a script-supplied path, anchoring it on the scratch root.
 ///
 /// This is the WRITE/`cwd` side: the result is always inside the read-write
-/// scratch root. (Read-side fallback to the package root is `resolve_read`.)
+/// scratch root. (Read-side fallback to the bundle content is `resolve_read`.)
 /// Applies the lexical layer only; the caller must additionally apply the
 /// symlink re-check (Codex C1) before opening/spawning. Returns the resolved
 /// absolute path on success.
@@ -63,8 +63,8 @@ pub(super) fn resolve_scratch(user_path: &str, scratch_root: &Path) -> Result<Pa
     }
     let normalized = lexical_normalize(raw);
 
-    // The scratch root is the read-write sandbox. Package-root reads are
-    // handled separately by `resolve_read` (which probes the package root as
+    // The scratch root is the read-write sandbox. Bundle-content reads are
+    // handled separately by `resolve_read` (which probes the content root as
     // an explicit fallback base); this fn always anchors on scratch so a write
     // can never land in the read-only package tree.
     let resolved = scratch_root.join(&normalized);
@@ -82,22 +82,26 @@ pub(super) fn resolve_scratch(user_path: &str, scratch_root: &Path) -> Result<Pa
     Ok(resolved)
 }
 
-/// Resolves a read-side path, allowing the package root as a fallback base.
+/// Resolves a read-side path, allowing the bundle's content root as a fallback base.
 ///
-/// `read_file` / `exists` accept `{scratch (rw), package (ro)}`. This anchors
+/// `read_file` / `exists` accept `{scratch (rw), content (ro)}`. This anchors
 /// the lexically-validated relative path on the scratch root first; if it does
-/// not exist there it retries against the read-only package root. Both
+/// not exist there it retries against the read-only content root. Both
 /// candidates are inside their respective roots (the lexical layer already
 /// rejected `..`/absolute escapes).
-pub(super) fn resolve_read(user_path: &str, scratch_root: &Path, package_root: &Path) -> Result<PathBuf, GuardError> {
+///
+/// `content_root` is the bundle's own file tree (`<package_root>/content`), NOT
+/// the package store directory: a script asks for `bin/javac`, the layout of the
+/// store around it is not part of the script contract.
+pub(super) fn resolve_read(user_path: &str, scratch_root: &Path, content_root: &Path) -> Result<PathBuf, GuardError> {
     let scratch_candidate = resolve_scratch(user_path, scratch_root)?;
     if scratch_candidate.exists() {
         return Ok(scratch_candidate);
     }
     let normalized = lexical_normalize(Path::new(user_path));
-    let package_candidate = package_root.join(&normalized);
-    if package_candidate.exists() {
-        return Ok(package_candidate);
+    let content_candidate = content_root.join(&normalized);
+    if content_candidate.exists() {
+        return Ok(content_candidate);
     }
     // Neither exists yet — default to the scratch candidate (the host fn maps
     // a missing file to its own error / `false`).
@@ -159,17 +163,18 @@ mod tests {
     // encode the lexical layer ONLY (no symlink — that is the C1 re-check,
     // exercised at acceptance level U7/U8/U13/U14).
 
+    /// `(scratch root, content root)` — the two bases `resolve_read` probes.
     fn roots() -> (tempfile::TempDir, tempfile::TempDir) {
         let scratch = tempfile::tempdir().unwrap();
-        let package = tempfile::tempdir().unwrap();
-        (scratch, package)
+        let content = tempfile::tempdir().unwrap();
+        (scratch, content)
     }
 
     #[test]
     fn accepts_relative_path_inside_scratch() {
         // C7: a plain relative path resolves under the scratch root and the
         // returned path is contained in it.
-        let (scratch, _package) = roots();
+        let (scratch, _content) = roots();
         let resolved =
             resolve_scratch("out/result.txt", scratch.path()).expect("a relative in-scratch path must be accepted");
         assert!(
@@ -181,7 +186,7 @@ mod tests {
     #[test]
     fn rejects_parent_dir_escape() {
         // Error Taxonomy: `..` escape → guard rejection.
-        let (scratch, _package) = roots();
+        let (scratch, _content) = roots();
         let err = resolve_scratch("../escape", scratch.path()).expect_err("a `..` escape must be rejected");
         assert!(matches!(err, GuardError::LexicalEscape(_)));
     }
@@ -189,7 +194,7 @@ mod tests {
     #[test]
     fn rejects_absolute_path() {
         // C4 Path rule: absolute paths rejected before normalization.
-        let (scratch, _package) = roots();
+        let (scratch, _content) = roots();
         let abs = if cfg!(windows) {
             "C:\\etc\\passwd"
         } else {
@@ -202,7 +207,7 @@ mod tests {
     #[test]
     fn rejects_deep_parent_dir_escape() {
         // Error Taxonomy: multi-level `..` traversal out of scratch.
-        let (scratch, _package) = roots();
+        let (scratch, _content) = roots();
         let err = resolve_scratch("a/../../../outside", scratch.path())
             .expect_err("a multi-level `..` escape must be rejected");
         assert!(matches!(err, GuardError::LexicalEscape(_)));
@@ -211,51 +216,51 @@ mod tests {
     #[test]
     fn resolve_scratch_is_strictly_scratch_anchored() {
         // W2: the previous test asserted `starts_with(scratch) || starts_with
-        // (package)`, which is vacuously true because resolve_scratch ALWAYS
+        // (content)`, which is vacuously true because resolve_scratch ALWAYS
         // anchors on scratch. Assert the honest invariant: a relative path
-        // resolves strictly inside the scratch root and NEVER under the package
-        // root (write/cwd side has no package fallback).
-        let (scratch, package) = roots();
+        // resolves strictly inside the scratch root and NEVER under the content
+        // root (write/cwd side has no read-only fallback).
+        let (scratch, content) = roots();
         let resolved = resolve_scratch("bin/tool", scratch.path()).expect("an in-scope relative path must resolve");
         assert!(
             resolved.starts_with(scratch.path()),
             "resolve_scratch must anchor on the scratch root, got {resolved:?}"
         );
         assert!(
-            !resolved.starts_with(package.path()),
-            "resolve_scratch must never resolve into the package root, got {resolved:?}"
+            !resolved.starts_with(content.path()),
+            "resolve_scratch must never resolve into the content root, got {resolved:?}"
         );
     }
 
     #[test]
-    fn resolve_read_falls_back_to_package_root_when_only_there() {
+    fn resolve_read_falls_back_to_content_root_when_only_there() {
         // W2: a real read-fallback test. A file that exists ONLY under the
-        // read-only package root (not in scratch) must resolve to the package
+        // read-only content root (not in scratch) must resolve to the content
         // candidate — exercising the `resolve_read` fallback branch that the
         // old `read_only_access_*` test never actually covered.
-        let (scratch, package) = roots();
-        let nested = package.path().join("share");
+        let (scratch, content) = roots();
+        let nested = content.path().join("share");
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("data.txt"), b"pkg").unwrap();
 
-        let resolved = resolve_read("share/data.txt", scratch.path(), package.path())
-            .expect("a package-root-only file must resolve via the read fallback");
+        let resolved = resolve_read("share/data.txt", scratch.path(), content.path())
+            .expect("a content-root-only file must resolve via the read fallback");
         assert!(
-            resolved.starts_with(package.path()) && !resolved.starts_with(scratch.path()),
-            "resolve_read must land on the package candidate, got {resolved:?}"
+            resolved.starts_with(content.path()) && !resolved.starts_with(scratch.path()),
+            "resolve_read must land on the content candidate, got {resolved:?}"
         );
-        assert!(resolved.exists(), "the resolved package candidate must exist");
+        assert!(resolved.exists(), "the resolved content candidate must exist");
     }
 
     #[test]
     fn resolve_read_prefers_scratch_when_present_in_both() {
         // resolve_read probes scratch first: a file present in scratch wins
-        // over a same-named package-root file (scratch is the rw working area).
-        let (scratch, package) = roots();
+        // over a same-named content-root file (scratch is the rw working area).
+        let (scratch, content) = roots();
         std::fs::write(scratch.path().join("dup.txt"), b"scratch").unwrap();
-        std::fs::write(package.path().join("dup.txt"), b"package").unwrap();
+        std::fs::write(content.path().join("dup.txt"), b"content").unwrap();
 
-        let resolved = resolve_read("dup.txt", scratch.path(), package.path()).expect("present in scratch");
+        let resolved = resolve_read("dup.txt", scratch.path(), content.path()).expect("present in scratch");
         assert!(
             resolved.starts_with(scratch.path()),
             "resolve_read must prefer the scratch candidate, got {resolved:?}"

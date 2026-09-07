@@ -21,8 +21,13 @@ use crate::oci::Platform;
 
 /// Host state available to the `ocx.*` host functions during one script run.
 pub(super) struct HostState {
-    /// Read-only materialized package root.
+    /// Read-only materialized package root — the package *store* directory
+    /// (`content/`, `refs/`, `metadata.json`, ...), not the bundle's files.
     pub package_root: PathBuf,
+    /// Read-only root the bundle's own files live under (`<package_root>/content`).
+    /// This — not [`Self::package_root`] — is the read-side fallback base, so a
+    /// script spells `bin/javac`, never `content/bin/javac`.
+    pub content_root: PathBuf,
     /// Read-write sandbox root (sibling of the package root).
     pub scratch_root: PathBuf,
     /// Target platform reflecting the `-p` flag (NOT the host).

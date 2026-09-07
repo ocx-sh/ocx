@@ -177,14 +177,15 @@ The `ocx.*` module gives the script access to the materialized package environme
 | `ocx.run(prog, *args, *, env=None, cwd=None, stdin=None)` | `RunResult` | Spawn a binary from the composed package env. `env` is a dict overlaid on top of the composed env for this call only. `cwd` defaults to the scratch root. `stdin` is a string written to the child's stdin. |
 | `ocx.env(name)` | `str \| None` | Read one variable from the composed package env. Returns `None` if the variable is not set. |
 | `ocx.target_platform` | `Platform` | Attribute (no parens) — per-run constant. Typed value with attributes `is_any: bool`, `os: os \| None`, `arch: arch \| None`. Reflects the `-p` flag passed to the command (the platform the package was built for), not the host. |
-| `ocx.package_root` | `str` | Attribute (no parens) — per-run constant. Path to the materialized package (read-only). |
+| `ocx.content_root` | `str` | Attribute (no parens) — per-run constant. Path to the bundle's own files, i.e. what the package ships (read-only). |
+| `ocx.package_root` | `str` | Attribute (no parens) — per-run constant. Path to the materialized package directory holding it (read-only). |
 | `ocx.scratch_root` | `str` | Attribute (no parens) — per-run constant. Path to the writable scratch directory. |
-| `ocx.read_file(path, *, max_bytes=1048576)` | `str` | Read a file within `{scratch_root, package_root}`. |
+| `ocx.read_file(path, *, max_bytes=1048576)` | `str` | Read a file within `{scratch_root, content_root}`. |
 | `ocx.write_file(path, content)` | — | Write a file within `scratch_root` only. Parent directories must exist. |
-| `ocx.exists(path)` | `bool` | Check whether a path exists within `{scratch_root, package_root}`. |
+| `ocx.exists(path)` | `bool` | Check whether a path exists within `{scratch_root, content_root}`. |
 | `ocx.mkdir(path)` | — | Create a directory and its parents within `scratch_root` (idempotent). |
 
-`ocx.run` returns a typed `RunResult` value with attributes `exit_code: int`, `stdout: str`, `stderr: str`, `duration_ms: int`, `truncated: bool`. A non-zero exit code does not raise — the script decides whether to fail.
+`ocx.run` returns a typed `RunResult` value with attributes `exit_code: int`, `stdout: str`, `stderr: str`, `duration_ms: int`, `truncated: bool`. A non-zero exit code does not raise — the script decides whether to fail. A program that cannot be spawned at all is different: nothing ran, there is no exit code, and the script fails outright. Ask what a bundle contains with `ocx.exists`, not by spawning and inspecting the failure.
 
 `ocx.target_platform` is a typed `Platform` attribute (no parens). The OS / architecture constants live in companion namespaces (`ocx.os.{Linux,Darwin,Windows}`, `ocx.arch.{Amd64,Arm64}`). Compare typed values directly:
 
@@ -198,7 +199,14 @@ Full reference for every typed value and every host function is in the [Script H
 
 `ocx.env(name)` reads only the composed package env. Host credentials such as `OCX_AUTH_*` are not readable from scripts.
 
-Path arguments use `/` as separator on all platforms. Absolute paths and `..` escapes are rejected.
+Read paths are relative and are resolved against the scratch root first, then the bundle's `content_root` — so a file the package ships at `bin/javac` is read as `bin/javac`:
+
+```python
+if ocx.exists("bin/javac"):
+    expect.ok(ocx.run("javac", "-version"))
+```
+
+Path arguments use `/` as separator on all platforms. Absolute paths and `..` escapes are rejected — including an absolute path built from `ocx.content_root`, which names a location inside the sandbox. Use the relative spelling.
 
 ### Assertion API — `expect.*` {#scripted-tests-expect-api}
 
@@ -231,7 +239,7 @@ expect.true(ocx.env("SHFMT_ROOT") != None, "SHFMT_ROOT should be set")
 The script runs inside a bounded environment:
 
 - **Writable area**: a scratch directory created as a sibling of the package root. The `ocx.scratch_root` attribute holds its path. Files written here survive `--keep`.
-- **Read area**: the package root is readable but not writable.
+- **Read area**: the bundle's own files (`ocx.content_root`) are readable but not writable. The package directory around them is storage structure, not a script contract — a script never has to name it.
 - **Symlink containment**: every path is validated for symlink escape after lexical normalization. A symlink inside `scratch_root` that points outside is refused on access, not just at creation.
 - **Path portability**: use `/` as the separator in all paths — it works on all platforms.
 

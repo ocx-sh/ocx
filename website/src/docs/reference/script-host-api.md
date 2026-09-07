@@ -52,6 +52,13 @@ The keyword-only parameters:
 
 A non-zero exit code does **not** raise. The script decides whether to fail.
 
+A program that cannot be spawned **at all** is a different case: a name that
+resolves nowhere, or a file that is not executable, fails the script outright and
+is never observable as a `RunResult` — there is no exit code to inspect, because
+nothing ran. Starlark has no way to catch it. To ask whether a bundle ships
+something before running it, probe the filesystem with
+[`ocx.exists`](#ocx-exists) rather than spawning and inspecting the failure.
+
 :::warning Spawned binaries are not sandboxed
 The sandbox applies to the `ocx.*` host API only — file reads, writes, and path resolution. Binaries launched via `ocx.run` run with normal host OS privileges, exactly as `-- CMD` does.
 :::
@@ -77,13 +84,29 @@ Named `target_platform` (not `host_platform`) because Bazel-style terminology di
 
 Exposed as an attribute rather than a method because the value never changes during a single script run — calling it would be ceremony for a constant.
 
-### `ocx.package_root` / `ocx.scratch_root` {#ocx-roots}
+### `ocx.content_root` / `ocx.package_root` / `ocx.scratch_root` {#ocx-roots}
 
 | | |
 |---|---|
 | **Kind** | Attributes (no parens) — per-run path constants materialized at script-engine init. |
 | **Type** | `str` |
-| **Purpose** | `package_root` is the materialized package directory (read-only). `scratch_root` is the writable scratch directory. Both `/`-normalized on every platform. |
+| **Purpose** | `content_root` is the bundle's own file tree — what the package ships, read-only. `package_root` is the package directory holding it, read-only. `scratch_root` is the writable scratch directory. All three `/`-normalized on every platform. |
+
+`content_root` is the one that matters for reads: [`ocx.read_file`](#ocx-read-file)
+and [`ocx.exists`](#ocx-exists) fall back to it, so a relative path is spelled the
+way the bundle ships it. A package built from an archive whose root holds `bin/`
+and `release` is read as `bin/javac` and `release` — never with a prefix naming
+the directory the package sits in.
+
+`package_root` is the enclosing package directory. Its layout is storage
+structure, not a script contract, and a script that walks it is coupled to
+internals that are free to change. Reach for it only to build an absolute path
+for [`ocx.run`](#ocx-run), where `content_root` is almost always the one you
+want:
+
+```python
+ocx.run(ocx.content_root + "/bin/java", "-version")
+```
 
 Exposed as attributes rather than methods for the same reason as [`ocx.target_platform`](#ocx-target-platform): a path that never changes during a single run is a constant, so parens would be ceremony.
 
@@ -92,7 +115,17 @@ Exposed as attributes rather than methods for the same reason as [`ocx.target_pl
 | | |
 |---|---|
 | **Returns** | `str` |
-| **Purpose** | Read a UTF-8 file within `{scratch_root, package_root}`. Truncated at `max_bytes` (default 1 MiB). Symlink-escape attempts and non-UTF-8 content are rejected. |
+| **Purpose** | Read a UTF-8 file within `{scratch_root, content_root}`. Truncated at `max_bytes` (default 1 MiB). Symlink-escape attempts and non-UTF-8 content are rejected. |
+
+`path` is relative, and is resolved against the scratch root first, then the
+bundle's [`content_root`](#ocx-roots). An **absolute** path is rejected before
+anything else — including one built from `ocx.content_root`, which names a
+location inside the sandbox. The relative spelling is the supported one:
+
+```python
+ocx.read_file("release")            # the bundle's own `release` file
+ocx.read_file(ocx.content_root + "/release")   # rejected: path escapes the sandbox
+```
 
 ### `ocx.write_file(path, content)` {#ocx-write-file}
 
@@ -103,7 +136,20 @@ Write a file within `scratch_root` only. Parent directories must exist. Symlink-
 | | |
 |---|---|
 | **Returns** | `bool` |
-| **Purpose** | Existence check within `{scratch_root, package_root}`. Same guard as `read_file`. |
+| **Purpose** | Existence check within `{scratch_root, content_root}`. Same guard and same relative-path rule as [`read_file`](#ocx-read-file). |
+
+This is the supported way to ask what a bundle contains — useful when one
+repository publishes several flavours under `variants:` and a smoke test has to
+assert the bytes really are the flavour the tag claims:
+
+```python
+if ocx.exists("bin/javac"):
+    # a JDK, not a JRE
+    expect.ok(ocx.run("javac", "-version"))
+```
+
+A path that is simply absent returns `False` rather than raising; a path that
+escapes the sandbox fails the script.
 
 ### `ocx.mkdir(path)` {#ocx-mkdir}
 
