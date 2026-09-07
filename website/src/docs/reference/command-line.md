@@ -233,15 +233,15 @@ color-related environment variables ([`NO_COLOR`][env-no-color],
 
 ### `--project` {#arg-project}
 
-Path to the project-level `ocx.toml` (project-tier toolchain config).
+Path to the project-level `ocx.toml` (project-tier toolchain config) — or to the directory that holds it.
 
-When set, OCX reads this file as the project tier and skips the CWD walk entirely. Any filename is accepted (not just `ocx.toml`), which is useful for fixtures and integration tests.
+When set, OCX reads this as the project tier and skips the CWD walk entirely. A file is read directly, and any filename is accepted (not just `ocx.toml`), which is useful for fixtures and integration tests. A directory resolves to `<dir>/ocx.toml` — the spelling `--project .` uses, and the one every rendered toolchain trampoline bakes in when it re-enters as `ocx --project '<project root>' exec`.
 
 The same override can be set persistently via the [`OCX_PROJECT`][env-project] environment variable. To disable project-file discovery entirely — including the `OCX_PROJECT` variable but not an explicit `--project` flag — set [`OCX_NO_PROJECT`][env-no-project]`=1`.
 
 **Symlink policy:** Paths supplied via `--project` or `OCX_PROJECT` are trusted and followed through symlinks. Paths discovered by the CWD walk reject symlinks to prevent directory-traversal redirection.
 
-**Error cases:** A missing explicit path exits with code 79 ([`NotFound`][exit-codes]). A path that exists but cannot be read (permission denied, not a regular file) exits with code 74 ([`IoError`][exit-codes]).
+**Error cases:** A path that does not exist at all exits with code 79 ([`NotFound`][exit-codes]). A directory that exists but holds no `ocx.toml` is not a missing file — it is no project — and exits with code 64 (`UsageError`), the same code [`ocx exec`](#exec) and its siblings use whenever they have no project to act on. A path that exists but cannot be read as configured — permission denied, or a candidate that is not a regular file (a device, a FIFO) — exits with code 74 ([`IoError`][exit-codes]).
 
 ### `--global`, `-g` {#global-flag}
 
@@ -404,8 +404,8 @@ Controls when a declared tool's content downloads: now, or on first use.
 
 An omitted flag leaves the CLI tier absent, letting the more general tiers speak — it never means `never`. See [Deferred Tools][in-depth-lazy-loading] for the full lifecycle, and [`ocx package which`](#which) below for how a deferred tool reports its on-disk `kind`.
 
-::: tip Windows composes eagerly regardless of this flag
-`lazy-mode` has no effect on Windows in this release — a tool resolved to `always` composes eagerly instead, with a debug-level log noting why. See [Deferred Tools][in-depth-lazy-loading] for the current state of Windows shim support.
+::: info Windows defers like every other platform
+`lazy-mode` carries no platform floor. A tool the ladder resolves to `always` is deferred on Windows exactly as it is on Linux and macOS. The only difference is the shape of the slot: a deferred name occupies two files there — `<name>.exe`, a hardlink to the shared launcher shim, plus a `<name>.shimref` sidecar carrying the pinned identifier the shim reads back. See [Deferred Tools][in-depth-lazy-loading].
 :::
 
 ### `--lazy-report` {#arg-lazy-report}
@@ -428,6 +428,77 @@ It cannot be a flag on any of the seven composing commands above: the process th
 | — | Floor: `silent` |
 
 See [Deferred Tools][in-depth-lazy-loading] for why `lazy-report` has no `[group.<name>]` tier.
+
+### `--pinned`, `--no-pinned` {#arg-pinned}
+
+Declared on [`ocx env`](#env-root) and [`ocx exec`](#exec), and on no other command. The pair picks which of two lanes the composed paths take: the digest roots [`ocx.lock`](#lock) pins, or the rendered `<group>/<entry>` links that point at them.
+
+Declaring the flag and composing a toolchain are two different lists. **Five** emitters compose a toolchain, and each one takes a lane: `ocx env`, `ocx exec`, [`ocx direnv export`](#direnv-export), the `env`-mode shell hook, and the global login exporter [`ocx self setup`](#self-setup) writes into your shell profile. The three that declare no flag resolve the lane from the lower tiers of the [ladder](#arg-pinned-ladder) alone.
+
+The two lanes agree until the lock moves. An environment composed from links keeps a **root's** paths working across the next [`ocx update`](#update): the same path resolves to the new package root, with nothing to re-compose. One composed from digest paths names the exact packages the lock pinned at compose time, so an update does not reach it. Following the links is the default.
+
+| Flag | Composed paths |
+|------|----------------|
+| `--pinned` | The digest roots `ocx.lock` pins right now. No `<group>/<entry>` link is consulted, and the rendered tree is never read — the lane is decided before any filesystem call. |
+| `--no-pinned` | The rendered `<group>/<entry>` links, so a later [`ocx update`](#update) reaches a [root](#arg-pinned-roots-only) with no re-render. This is the default. |
+
+The difference is visible in the composed values themselves — the same toolchain, once through its rendered links and once through the digest roots the lock pins:
+
+<Terminal src="/casts/reference/command-line/pinned.cast" title="Toolchain links versus digest paths" collapsed />
+
+```sh
+# Follow the links (the default) — a later `ocx update` is picked up.
+ocx exec -- cmake --version
+
+# Name the locked digests instead, for a build that must not move underneath it.
+ocx exec --pinned -- cmake --version
+```
+
+Neither flag takes a value: `--pinned=true` is a usage error (exit [`64`](#exit-codes)), not a parsed `true`. Passing both is **not** an error — the pair is last-wins, the [git][git-no-verify] `--[no-]verify` idiom — so `ocx exec --pinned --no-pinned` follows the links and `ocx exec --no-pinned --pinned` pins.
+
+#### A link that is not there degrades that one entry {#arg-pinned-degrade}
+
+The link lane is decided per entry, and it never fails. An entry composes on its digest path instead whenever its `<group>/<entry>` link is absent, is not a link at all, or points somewhere other than the digest root `ocx.lock` derives for this host — and the other entries in the same composition still compose through their links. Two conditions degrade the whole composition the same way: a toolchain home the symlink guards refuse, and a link probe that cannot complete. Nothing is printed, and no exit code changes.
+
+**A digest path is correct when it appears.** It names the same package directory the link would have named — the two spellings are one directory, not a good result and a degraded one. The single property it does not carry is the one the link lane exists for: it does not follow a later [`ocx update`](#update).
+
+One consequence is worth naming, because it is the one that surprises: two machines on the same `ocx.lock` can emit **different spellings for the same entry** — one the link, one the digest root — and that is expected. Compare what the paths resolve to, never the strings.
+
+#### Only roots take the link lane {#arg-pinned-roots-only}
+
+A `<group>/<entry>` link points at a lock entry — a tool named in `[tools]` or a `[group.<name>]` table — and at nothing else. So a lock entry is the only thing the link lane can move. Everything a **dependency** contributes is a digest path in *both* lanes: the `PATH` directories a dependency adds to the composition, and every `${deps.<name>.installPath}` a package's `[env]` dereferences.
+
+The "no re-render" property is therefore a property of roots. After an [`ocx update`](#update), an already-composed environment picks the new root up through the root's link, while its dependency-contributed paths still name the packages the previous lock pinned, until something composes the environment again.
+
+#### Resolution order {#arg-pinned-ladder}
+
+The flag is the top tier of a three-level ladder, most specific first:
+
+| Tier | Source |
+|------|--------|
+| 1 | `--pinned` / `--no-pinned` on the invoked command |
+| 2 | The toolchain-level `pinned` key in [`ocx.toml`][config-project-pinned] |
+| 3 | [`OCX_TOOLCHAIN_PINNED`][env-ocx-toolchain-pinned] |
+| — | Floor: follow the links |
+
+**`OCX_TOOLCHAIN_PINNED` is the weakest tier, not an override.** It sits *below* `ocx.toml`, so an exported value loses to a project that states the key; the variable decides only for a project that states none. Omitting both flags leaves the CLI tier absent so the lower tiers can speak — it never means `--no-pinned`, and an explicit `--no-pinned` is how you override an `ocx.toml` that asked for digest paths.
+
+```toml
+# ocx.toml — this project composes digest paths whatever the shell exports.
+pinned = true
+
+[tools]
+cmake = "ocx.sh/kitware/cmake:3.28"
+```
+
+#### Not on the package tier {#arg-pinned-package-tier}
+
+[`ocx package env`](#env) and [`ocx package exec`](#package-exec) reject both flags as an unknown argument (exit [`64`](#exit-codes)). A package composition has no toolchain tree, so it has no link lane to choose between; accepting the flag as a silent no-op there would read as though it had chosen one.
+
+#### Not on `ocx pull` {#arg-pinned-pull}
+
+[`ocx pull`](#pull) declares neither flag, deliberately. `pull` *renders* the `<group>/<entry>` links rather than composing from them, and this setting selects the lane a composition takes — a flag on `pull` would be inert on the tree the command writes. The lower tiers still resolve: `pull` reads the `ocx.toml` key, then `OCX_TOOLCHAIN_PINNED`, and hands the result to the render.
+
 
 ## Commands
 
@@ -456,7 +527,7 @@ ocx add [OPTIONS] <[NAME=]IDENTIFIER>...
 
 **Arguments**
 
-- `<[NAME=]IDENTIFIER>...`: One or more fully-qualified tool identifiers to add (e.g. `ocx.sh/kitware/cmake:3.28` or `ghcr.io/acme/mytool:1.0`). Bare identifiers without a tag (e.g. `ocx.sh/kitware/cmake`) default to `:latest` — the written `ocx.toml` entry is always explicit (`cmake = "ocx.sh/kitware/cmake:latest"`), following the same convention as `docker pull`. See [Unit 3 bare-identifier default][user-guide-toml] for the design rationale. Prefix an identifier with `NAME=` to bind it under an explicit key instead of the derived repository basename — see [Binding names](#add-binding-names) below.
+- `<[NAME=]IDENTIFIER>...`: One or more fully-qualified tool identifiers to add (e.g. `ocx.sh/kitware/cmake:3.28` or `ghcr.io/acme/mytool:1.0`). Bare identifiers without a tag (e.g. `ocx.sh/kitware/cmake`) default to `:latest` — the written `ocx.toml` entry is always explicit (`cmake = "ocx.sh/kitware/cmake:latest"`), following the same convention as `docker pull`. See [the bare-identifier default][user-guide-toml] for the design rationale. Prefix an identifier with `NAME=` to bind it under an explicit key instead of the derived repository basename — see [Binding names](#add-binding-names) below.
 
 **Options**
 
@@ -511,6 +582,8 @@ An object is unreferenced when nothing points to it — no candidate or current 
 Do not run `clean` concurrently with other OCX commands. A concurrent install may reference an object that `clean` is about to remove, causing the install to fail.
 :::
 
+The rendered toolchain tree is outside this graph entirely. `<home>/toolchain/` holds `bin/` trampolines and `<group>/<entry>` links — pure derived state that [`ocx pull`](#pull) rewrites from `ocx.lock` — so `clean` never walks it and never collects from it. The packages those links *point at* are ordinary object-store entries, held live by the project's own `ocx.lock` through the `$OCX_HOME/projects/` ledger like every other pinned tool.
+
 **Usage**
 
 ```shell
@@ -527,7 +600,7 @@ ocx clean [OPTIONS]
 
 **JSON output schema** (`--format json`)
 
-`ocx clean --format json` emits an array of objects, one per candidate entry:
+`ocx --format json clean` emits an array of objects, one per candidate entry:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -688,6 +761,7 @@ ocx env [OPTIONS]
 | `--export-file=PATH` | — | Write GitLab CI/CD JSON-lines output to `PATH` instead of stdout. Requires `--ci=gitlab`. Rejected with exit 64 when combined with `--ci=github` (GitHub infers its sink from [`GITHUB_ENV`][env-github-env] and [`GITHUB_PATH`][env-github-path]) or when given without `--ci`. | *(unset — stdout for gitlab)* |
 | `--platform <PLATFORM>` | `-p` | Compose the environment for a single target platform instead of the host (cross-build export). Single-valued: passing more than one exits 64. A tool that ships no leaf for the target exits 78 (project tier) or is skipped (global tier, lenient). Defaults to the current host. | *(current host)* |
 | [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim for every tool the ladder resolves to `always`, instead of downloading its content up front. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
+| [`--pinned`](#arg-pinned), [`--no-pinned`](#arg-pinned) | — | Top tier of the [`pinned` resolution ladder](#arg-pinned-ladder). `--pinned` composes the digest roots `ocx.lock` names; `--no-pinned` composes the rendered `<group>/<entry>` links. Neither takes a value, and passing both is last-wins. | *(inherit from `ocx.toml` / `OCX_TOOLCHAIN_PINNED`)* |
 | `--pull` | — | Materialise missing tools into the object store before composing (single batched install, like `ocx exec`). A tool already present resolves locally with no network — only a genuine miss pulls. Last-wins with `--no-pull`. Ignored under `--global` — the global tier never installs. | **default** |
 | `--no-pull` | — | Skip the install fallback: resolve against local state only. A lock-pinned tool that is not materialised is reported on stderr with an `ocx pull` hint and omitted from the composed env; the command never contacts the registry and the exit code stays 0. | — |
 | `--show-patches` | — | Annotate each entry with its origin. When [`[patches]`][config-patches] is configured, companion overlay entries are appended after the toolchain's own entries; this flag adds a `Source` column to the plain table (a `"source"` object in JSON) naming the descriptor rule and companion that produced each overlay entry. No effect when `[patches]` is not configured. Mutually exclusive with `--shell` and `--ci`. | false |
@@ -821,6 +895,7 @@ ocx exec [OPTIONS] [NAME...] -- ARGV...
 | `--group <NAME>` | `-g` | Scope env composition to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). `default` selects `[tools]`; `all` expands to `default` + every declared `[group.*]`. | `[tools]` only |
 | `--clean` | — | Start with a clean environment containing only the composed package variables, instead of inheriting the current shell environment. | off |
 | [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim for every tool the ladder resolves to `always`; its content downloads the first time the child process invokes it. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
+| [`--pinned`](#arg-pinned), [`--no-pinned`](#arg-pinned) | — | Top tier of the [`pinned` resolution ladder](#arg-pinned-ladder). `--pinned` composes the digest roots `ocx.lock` names; `--no-pinned` composes the rendered `<group>/<entry>` links. Neither takes a value, and passing both is last-wins. | *(inherit from `ocx.toml` / `OCX_TOOLCHAIN_PINNED`)* |
 | `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Only the segment before that first `=` is checked for a `:TYPE[:SEP]` qualifier — an environment variable name can never contain `:`, so a Windows-style value with its own colon (`--env PATH:path=C:\tools\bin`) is read correctly, and `--env FOO:constant=a=b` sets `FOO` to `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends) — the same three kinds [`[env]`][config-project-env] uses. `SEP` qualifies `list` only: the string a `list` contribution is joined to the existing value with (`--env GODEBUG:list:,=gctrace=1`); omitted, the key inherits whatever separator another contributor already declared, or a single space if none did — see [Env Composition][env-composition-list]. A relative `path` value resolves against the **current directory** the flag was invoked from, not the project root [`[env]`][config-project-env] resolves against: a checked-in file must mean the same thing from any subdirectory, while a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
 | `--records-dir <DIR>` | — | Sink directory for the [exec-time resolution record][execution-records-ref] — one JSON file written immediately before the child starts, naming every package digest that composed the environment plus the resolved executable. Overrides the [`[records]` `dir`][config-records-dir] config key and [`OCX_RECORDS_DIR`][env-ocx-records-dir]. Unset at every tier means no record is written. | *(unset — recording off)* |
 | `--records-name <TEMPLATE>` | — | Filename template for the sink, over the closed placeholder set in [Filename grammar][execution-records-filename]. Has no effect unless a sink directory is also active. Overrides the [`[records]` `name`][config-records-name] config key and [`OCX_RECORDS_NAME`][env-ocx-records-name]. | `{time}-{pid}-{rand}.json` |
@@ -845,14 +920,16 @@ The composer prepends env entries in iteration order, so the **last group listed
 - `default` — always valid; selects the top-level `[tools]` table.
 - `all` — always valid as a `-g` argument; expands to `[default, *named_groups_alphabetical]` before composition. Not declarable: `[group.all]` in `ocx.toml` exits 78 at parse time; `ocx add --group all` exits 64 at mutate time.
 
+The first token after `--` is resolved once, before the child starts: `exec` searches only the composed environment's `PATH` contributions (the resolved packages' own directories), never the ambient `PATH` and never a working-directory fallback, and refuses a match that is itself an ocx-generated launcher trampoline rather than let the child re-enter `ocx exec` through it.
+
 **Exit codes**
 
 | Code | Meaning |
 |------|---------|
 | *(child)* | Child ran; its exit code is forwarded byte-for-byte. |
-| 1 | Child spawn failed (binary not found, exec errno). |
+| 1 | Child spawn failed after resolution succeeded — a TOCTOU race (the resolved binary vanished or lost its executable bit before `execvp`) or another spawn `errno` not covered by a more specific code below. An unresolvable command is never this code; see 65. |
 | 64 | `--` missing; empty argv; empty `-g` segment; no `ocx.toml` found; unknown `-g` group; unknown binding NAME; ambiguous NAME across groups with conflicting identifiers; `--global` combined with `--project`; a bare `--env FOO` with no `=`; an `--env` `TYPE` that names no modifier or is empty (`--env X:bogus=v`, `--env X:=v`); or `--env` sets an `OCX_*`/`__OCX_*` key. (OCX remaps clap's default exit 2 to 64.) |
-| 65 | `ocx.lock` is stale — run `ocx lock`; or two contributors to one env key declared conflicting list separators (see [Separator agreement][env-composition-list-separator]); or a policy-covered binding's Sigstore bundle is tampered (auto-verify). |
+| 65 | `ocx.lock` is stale — run `ocx lock`; or two contributors to one env key declared conflicting list separators (see [Separator agreement][env-composition-list-separator]); or a policy-covered binding's Sigstore bundle is tampered (auto-verify); or the command does not resolve within the composed environment (no ambient-`PATH` or working-directory fallback); or the command resolves to an ocx-generated launcher trampoline, refused to prevent an unbounded self-invocation loop. |
 | 69 | Registry unreachable during auto-install of a missing package. |
 | 74 | The [exec-time resolution record][execution-records-ref] could not be written and [`[records] required`][config-records] is `true` — the child never starts. |
 | 75 | Transient registry failure during auto-install (connect failure, timeout, 429/502/503/504) — rerunning may succeed. |
@@ -928,7 +1005,7 @@ ocx package which [OPTIONS] <PACKAGE>...
 Use `--format json` with `jq` to embed the path in a script:
 
 ```shell
-cmake_root=$(ocx package which --candidate --format json kitware/cmake:3.28 | jq -r '.["kitware/cmake:3.28"].path')
+cmake_root=$(ocx --format json package which --candidate kitware/cmake:3.28 | jq -r '.["kitware/cmake:3.28"].path')
 ```
 :::
 
@@ -1752,7 +1829,7 @@ Pass `--global` **before** the subcommand: `ocx --global lock`. See [`--global`]
 
 **JSON output** (`--format json`)
 
-`ocx lock --format json` emits an array of objects, one per resolved tool:
+`ocx --format json lock` emits an array of objects, one per resolved tool:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -1878,6 +1955,30 @@ Outside `--dry-run`, plain output is a three-column `Package` / `Kind` / `Path` 
 
 One reserved key sits beside the identifier keys: `advisories`, the same array [`ocx env`](#env-root) and [`ocx package env`](#package-env) publish — `{"kind": "...", "package": "...", "key": "...", "message": "..."}` objects, one per deferred tool whose declared metadata could not be fully validated. Always present, empty unless a tool composed with `--lazy-mode always` raised one; warning-only, and written to stderr as well so the plain channel carries it too. No pinned identifier can collide with the key, since every other key is a `registry/repository@sha256:...` string.
 
+#### Toolchain render {#pull-render}
+
+A warm object store is not yet a usable toolchain: something has to point at those packages under names a shell can resolve. `ocx pull` does both in one run. After the roots this invocation selected have resolved, it renders the toolchain home, so the tree the [shell integration][in-depth-shell-integration] and [`ocx exec`](#exec) read is current when the command returns — no second step.
+
+Three things are written under `<home>/toolchain/`:
+
+| Written | What it is |
+|---------|-----------|
+| `bin/<name>` | One launcher trampoline per exposed name. On Windows this is two entries per name — `<name>.exe` plus its `<name>.exec` sidecar. |
+| `<group>/<entry>/` | A directory link to a package root, one per selected group. |
+| `.gitignore` | A single `*` line, written on every render so the tree lands in a directory git already ignores — see [Storage][in-depth-storage-toolchain]. |
+
+The render stamp that records this run's entry set — written last, after the final entry and the final prune — is **not** part of this tree: it lives under `$OCX_HOME/state/` — per-project at `state/projects/<key>/render_stamp.json`, or directly at `state/render_stamp.json` for the global toolchain — precisely so it survives a `toolchain-dir` relocation and a checkout wipe of `<home>/toolchain/` alike.
+
+The render is a **reconcile**, not an append: the computed name set is written and every name no longer in it is pruned.
+
+`-g` narrows it. A bare `ocx pull` covers every group the lock declares plus the default group unconditionally; a `-g ci,lint` run covers exactly those. `bin/` belongs to the default group and to nothing else, so a run that narrows the default group away leaves `bin/` **entirely untouched** rather than emptied — reconciling it would force the default group's metadata to resolve, growing a network dependency you did not ask for.
+
+**The heal is not this command's alone.** Every composing emitter repairs the groups it is about to emit *before* it probes a single link: it creates an absent link and repoints a stale one, then reads. That is a write on [`ocx env`](#env-root)'s per-prompt path, and it is what delivers the link lane's "no re-render" behaviour after an [`ocx update`](#update) without a `pull` in between. It is best-effort and silent — a read-only tree, a home the symlink guards refuse, or a link lock it cannot acquire leaves the entry unrepaired, and the composition emits that entry's [digest path](#arg-pinned-degrade) instead.
+
+[`--dry-run`](#pull-dry-run) reports the delta and writes nothing. It also **performs no heal**: a poisoned or stale link is still there afterwards, because every write step the heal needs is a step a dry run does not take.
+
+**A render failure never fails the pull.** The command's product is a warmed object store, and that work is finished before the render starts; a read-only checkout, a foreign-owned `.ocx/`, a lock timeout, or a metadata closure an offline invocation cannot walk are all states where the warming still succeeded. Whatever the render could not do is reported as a warning on stderr and `ocx pull` still exits 0. The render outcome is never the exit code — script against the warmed store, not against the tree.
+
 #### Dry-run preview {#pull-dry-run}
 
 `ocx pull --dry-run` resolves each locked tool through the local index
@@ -1894,7 +1995,7 @@ localhost:5000/ripgrep@sha256:8d2b60fa1c95  would-fetch
 
 Plain output shortens each locked leaf to a 12-hex digest; the full pin rides
 out under [`--format json`](#arg-format), which also carries a `path` field. That
-`path` matches the contract of [`ocx package which`](#package-which): it is the
+`path` matches the contract of [`ocx package which`](#which): it is the
 **package root** (parent of `content/` and `entrypoints/`), not the `content/`
 subdirectory, and it is populated only for `cached` rows. Consumers traverse into
 `<path>/content/` for files or prefer [`ocx env`](#env) to compose `PATH` and
@@ -2071,7 +2172,7 @@ ocx --format json shell state   # the complete structured report
 
 The default text output is the answer and nothing else — where `$OCX_HOME` is, which project is in effect, whether the integration is active, and, when it is not, the enumerated reason and the one line that says what to do about it. Everything `--verbose` adds is diagnostic detail for a support conversation, not an answer to *"is it working"*.
 
-`--verbose` is a **rendering tier, not a payload**. The root [`--format`][arg-format] flag set to `json` emits the complete structured report — `ocx_home`, `ocx_home_present`, `shell_integration_installed`, `lock_refusal`, `carrier_present`, `carrier_bytes`, `ledger`, `fingerprint_current`, `watch_set`, `project_dir`, `project_key`, `project_stamped`, `grant`, `stamp_written_at`, `priors`, `hook`, `yielded_to`, `inert_reason`, `notes` — and that document is identical with and without `--verbose`. A machine consumer never sees less because a human flag was absent.
+`--verbose` is a **rendering tier, not a payload**. The root [`--format`][arg-format] flag set to `json` emits the complete structured report — `ocx_home`, `ocx_home_present`, `shell_integration_installed`, `toolchain_home`, `activate`, `pinned`, `lock_refusal`, `carrier_present`, `carrier_bytes`, `ledger`, `fingerprint_current`, `watch_set`, `project_dir`, `project_key`, `project_stamped`, `grant`, `stamp_written_at`, `priors`, `hook`, `yielded_to`, `inert_reason`, `notes` — and that document is identical with and without `--verbose`. A machine consumer never sees less because a human flag was absent.
 
 Output is coloured when stdout is a terminal and colour is enabled (see [`--color`][arg-color]): the verdict, the reason, and the fix are highlighted so they can be found at a glance. Redirected to a file or a pipe, the text is byte-identical minus the escapes.
 
@@ -2197,7 +2298,7 @@ Re-running is safe. The shims and the managed block are diff-gated: an unchanged
 **Usage**
 
 ```shell
-ocx self setup [VERSION] [--no-modify-path] [--profile PATH]... [--dry-run] [--force] [--managed-config REF]
+ocx self setup [VERSION] [--toolchain-activate MODE] [--no-modify-path] [--profile PATH]... [--dry-run] [--force] [--managed-config REF]
 ```
 
 **Arguments**
@@ -2214,7 +2315,8 @@ ocx self setup [VERSION] [--no-modify-path] [--profile PATH]... [--dry-run] [--f
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--no-modify-path` | — | Write the env shims only; skip every shell profile. Equivalent env var: [`OCX_NO_MODIFY_PATH`][env-ocx-no-modify-path] (truthy). The opt-out is not remembered between runs. | off |
+| `--no-modify-path` | — | Write the env shims but touch neither a shell profile nor the [session PATH](#self-setup-session-path). Suppresses **both** surfaces; the run reports each location it did not touch, as `skipped_opt_out`. Equivalent env var: [`OCX_NO_MODIFY_PATH`][env-ocx-no-modify-path] (truthy). The opt-out is not remembered between runs. | off |
+| `--toolchain-activate MODE` | — | Write `activate = "MODE"` into `$OCX_HOME/ocx.toml`, the tier that decides how the **global** toolchain reaches a shell. `MODE` is `env`, `bin` or `none`; the three meanings are in the [`activate` reference][config-project-activate], where `bin` and `none` compose the same `PATH` for this tier. A project's own `ocx.toml` decides for that project, and [`OCX_TOOLCHAIN_ACTIVATE`][env-ocx-toolchain-activate] is the weakest tier of both. Omit to leave `ocx.toml` untouched; the file is created carrying only this key if absent. An unknown mode exits 64. | *(untouched)* |
 | `--profile PATH` | — | Override the auto-detected profiles; repeatable. Explicit targets use POSIX-fence semantics regardless of file name. | *(autodetect)* |
 | `--dry-run` | — | Report what would change and write nothing. Resolves the version and reports `WouldPull` with the resolved digest, but writes nothing. Never returns exit 82. | off |
 | `--force` | — | Overwrite a managed block that carries user edits (the dirty state). | off |
@@ -2226,6 +2328,94 @@ ocx self setup [VERSION] [--no-modify-path] [--profile PATH]... [--dry-run] [--f
 | `-h`, `--help` | | Print help information. | — |
 
 Omitting a flag from either pair leaves the corresponding `config.toml` key untouched — `self setup` only ever writes the keys you name. This is the persistent counterpart to [`self activate --hook`/`--no-hook`][in-depth-shell-integration-commands], which decides the same ladder rung for one session only and never touches disk.
+
+##### Session PATH {#self-setup-session-path}
+
+A shell profile reaches login shells. It does not reach an IDE, a desktop launcher, or a background service started outside any shell — those inherit their environment from the session, and a `PATH` written into `~/.zshrc` never gets there. So `ocx self setup` writes a **session-level** registration too, co-primary with the profile block rather than a fallback for it.
+
+Two directories are registered, in this order, so the `ocx` a session resolves is the installed binary rather than whatever a composed toolchain renders under the same name:
+
+1. `$OCX_HOME/symlinks/<ocx cli id>/current/content/bin` — the directory the installed `ocx` itself resolves from.
+2. `$OCX_HOME/toolchain/bin` — the global toolchain's trampolines.
+
+Each platform has exactly one store:
+
+| Platform | Store | Mechanism |
+|----------|-------|-----------|
+| Windows | `HKCU\Environment`, value `Path` | Written as `REG_EXPAND_SZ`, then a [`WM_SETTINGCHANGE`][wm-settingchange] broadcast so running applications pick the change up. |
+| Linux | `$XDG_CONFIG_HOME/environment.d/ocx.conf` (`~/.config/environment.d/ocx.conf` when `XDG_CONFIG_HOME` is unset) | One [`environment.d`][systemd-environment-d] line, `PATH=…:$PATH` — a prepend, so nothing another tool put on `PATH` is displaced. |
+| macOS | `~/Library/LaunchAgents/sh.ocx.path.plist` | A `RunAtLoad` [LaunchAgent][launchd-agents] labelled `sh.ocx.path`, published at mode `0644` (launchd refuses an agent with "dubious permissions") and bootstrapped into the current GUI domain. |
+
+The registration is idempotent by presence test, never by append: a second `ocx self setup` reports `unchanged` and the stored value does not grow.
+
+**A write failure is a warning, not an exit code.** A store that cannot be written is reported and warned about, and setup still exits 0; re-running retries it. The one refusal that *is* fatal is an `$OCX_HOME` this platform's format cannot spell — a `%` or `;` on Windows, a character `environment.d` cannot carry, a `"` the plist quoting cannot carry. That is checked **before** anything is written, so a refused run leaves the machine byte-identical, and it exits [`78`](#exit-codes).
+
+Each store's reach has limits worth knowing. `environment.d` is read only by processes started under `systemd --user` — confirmed for GNOME and KDE Plasma Wayland, and read by neither LightDM (by default), SDDM, nor a non-systemd desktop; a Flatpak- or Snap-sandboxed application takes its `PATH` from the sandbox instead. `~/.pam_environment` is deliberately not written — it has been deprecated since pam_env 1.5.0. On every platform, terminals and applications already open see nothing until they are restarted.
+
+::: tip Opting out
+[`--no-modify-path`](#self-setup) (or a truthy [`OCX_NO_MODIFY_PATH`][env-ocx-no-modify-path]) suppresses this arm along with the profile blocks — the writers are never called. Each store still appears in the run summary, as `skipped_opt_out`, so you can see what was not touched.
+:::
+
+##### Removing the session PATH by hand {#self-setup-session-path-removal}
+
+There is no `ocx self uninstall` yet ([#413][issue-413]), so a session-PATH registration is reversed by hand. One location per platform:
+
+::: warning Edit, never delete
+On Windows the registry value is shared: `HKCU\Environment\Path` holds every other user `PATH` entry too. **Remove ocx's two segments from the value; do not delete the value.** The same rule is why `launchctl unsetenv PATH` must never be used on macOS — it deletes the whole session-wide value rather than ocx's contribution to it, stripping every other tool's segment from every GUI application launched afterwards. ocx has no wrapper for it, deliberately.
+:::
+
+::: code-group
+
+```powershell [Windows]
+# Open the built-in editor, remove the two ocx segments from the user Path, and
+# save — saving preserves the value's type and broadcasts the settings change
+# for you, which is why this is the recommended route.
+rundll32 sysdm.cpl,EditEnvironmentVariables
+
+# Or from PowerShell, through the registry API rather than [Environment]:
+# [Environment]::SetEnvironmentVariable(..., 'User') always writes REG_SZ,
+# no matter what type the value had before. That is a permanent downgrade —
+# even if today's Path holds no %VAR% reference, no %VAR% any tool adds to
+# Path later will ever expand again. The registry API below reads the value
+# unexpanded and writes back the same type it read, matching what ocx's own
+# removal does; only ocx's own *registration* writes REG_EXPAND_SZ
+# unconditionally (see the table above). Unlike the built-in editor and
+# [Environment], it does not broadcast WM_SETTINGCHANGE — already-open
+# terminals need a restart, or send the broadcast yourself.
+# Read $root from a guarded expression, never bare $env:OCX_HOME: an empty
+# prefix would match every segment and strip the whole PATH.
+$root = if ($env:OCX_HOME) { $env:OCX_HOME } else { Join-Path $HOME '.ocx' }
+$key  = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+$path = $key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+$kept = ($path -split ';' |
+  Where-Object { $_ -and -not $_.StartsWith($root, 'OrdinalIgnoreCase') }) -join ';'
+$key.SetValue('Path', $kept, 'ExpandString')
+$key.Close()
+```
+
+```sh [Linux]
+rm ~/.config/environment.d/ocx.conf
+# Or $XDG_CONFIG_HOME/environment.d/ocx.conf when that variable is set.
+# Takes effect at the next login; the current session keeps its PATH.
+```
+
+```sh [macOS]
+# Boot out the *service*, then delete its plist.
+launchctl bootout "gui/$(id -u)/sh.ocx.path"
+rm ~/Library/LaunchAgents/sh.ocx.path.plist
+```
+
+:::
+
+::: danger `gui/<uid>` is not `gui/<uid>/sh.ocx.path`
+`launchctl bootout gui/$(id -u)` names the **domain**, not the service: it tears down your entire GUI login session. The service target — the one above, with `/sh.ocx.path` on the end — is what removes this one agent. Booting out an agent that is not loaded is not an error, so the command is safe to run twice.
+:::
+
+ocx's own writer does not treat the two directions the same way, and the difference matters for anyone editing this by hand. **Registering** ocx's entries (`ocx self setup`) always writes `REG_EXPAND_SZ`, even over an existing `REG_SZ` value — deliberately, because [rustup once shipped `REG_SZ` here and broke `%VAR%` expansion for every other entry already on `Path`][rustup-261]. **Deregistering** them (the reversal above) preserves whatever type it read instead: removal never promises to upgrade or downgrade a value it is not otherwise touching. Both directions read the value unexpanded, so a foreign `%…%` reference already on `Path` is never flattened into whatever it resolves to at that moment. Prefer the built-in editor above when hand-editing: it is the one form here that both preserves the type and broadcasts the change for you.
+
+::: warning This section only covers the session PATH
+Reversing the session-PATH registration above does not remove ocx. Also still in place: the managed shell-profile block (the `# >>> ocx v1 … >>>` fence, or the dedicated fish/Nushell file), the `$OCX_HOME/env.*` shims, and `$OCX_HOME` itself — see [Uninstalling][uninstalling] for that recipe. Neither recipe touches a project's own rendered toolchain, either: delete `.ocx/toolchain/` (or the [`toolchain-dir`][config-toolchain-dir] root, if configured) in every project you have run [`ocx pull`](#pull) or another render-performing command in. There is no `ocx self uninstall` to do any of this in one step yet ([#413][issue-413]).
+:::
 
 **Version grammar**
 
@@ -2269,6 +2459,9 @@ A typical pinned run that pulled a new version:
     {"path": "/home/alice/.bashrc", "outcome": "completed"},
     {"path": "/home/alice/.zshrc", "outcome": "no_op"}
   ],
+  "session_path": [
+    {"location": "/home/alice/.config/environment.d/ocx.conf", "outcome": "written"}
+  ],
   "reload_hint": true,
   "managed_config": {"status": "not_configured"}
 }
@@ -2282,10 +2475,11 @@ The root object is discriminated by `status`:
 | `bootstrap` | object | Nested sub-object describing the ocx binary install step (see below). |
 | `shims` | array of strings | Absolute paths to the env shim files written during this run. Empty when no shims changed. |
 | `profiles` | array of objects | Per-profile outcome: `{"path": "…", "outcome": "completed"|"no_op"|"migrated"|"skipped_dirty"}`. |
+| `session_path` | array of objects | Per-store [session-PATH](#self-setup-session-path) outcome: `{"location": "…", "outcome": "written"\|"unchanged"\|"removed"\|"skipped_opt_out"\|"skipped_unsupported"\|"failed"}`. Always present, one entry per store this host owns — including the skipped states. Empty only on a platform with no session-PATH facility at all. |
 | `dirty_profiles` | array of strings | Paths of profiles that carried user edits and were skipped. Present only when `status` is `skipped`. |
 | `exec_policy_warning` | string | Windows-only advisory when the execution policy is `Restricted`. Omitted when absent. |
 | `conflicting_ocx` | string | Absolute path to a shadowing `ocx` binary found ahead of the shim directory on `PATH`. Omitted when absent. |
-| `reload_hint` | boolean | `true` when at least one shim or profile was written and the shell must be re-sourced to activate the changes. Omitted when `false`. |
+| `reload_hint` | boolean | `true` when this run changed a PATH surface — a shim, a managed profile block, or a session-PATH store. A shim or profile change is applied by re-sourcing the shell; a session-PATH store reaches programs started outside a shell only after the next login. Omitted when `false`. |
 | `managed_config` | object | Result of adopting or clearing the `--managed-config` tier (see below). Always present, even when the flag was not passed. |
 
 Root-level `status` values:
@@ -2351,7 +2545,7 @@ digest=$(echo "$result" | jq -r '.bootstrap.digest // empty')  # sha256:<hex>, o
 | 65 | `tag@digest` immutability assertion failed — the tag resolved to a different digest than the one specified. Also returned when a `--managed-config` sync fetch succeeds but the package is malformed (no `any/any` entry, no `config.toml`, digest mismatch, over the 64 KiB cap, or not valid TOML). |
 | 69 | Registry unreachable while bootstrapping, or while syncing a `--managed-config` snapshot. |
 | 74 | I/O error writing a shim, shell profile, or `--managed-config` snapshot. |
-| 78 | The `--managed-config` value is not a valid OCI identifier. |
+| 78 | The `--managed-config` value is not a valid OCI identifier. Also: `$OCX_HOME` cannot be spelled in this platform's [session-PATH](#self-setup-session-path) format (a `%` or `;` on Windows, a character `environment.d` cannot carry, a `"` the plist quoting cannot carry). Checked before anything is written, so a refused run leaves the machine byte-identical. A session-PATH *write* failure is **not** here — it warns and exits 0. |
 | 79 | The pinned tag or digest was not found in the registry. |
 | 80 | Authentication failed while syncing a `--managed-config` snapshot. |
 | 81 | A policy (`--offline` or `--frozen`) blocked resolution and the version was not cached locally. |
@@ -2494,7 +2688,7 @@ Queries the registry for the latest `major.minor.patch` release tag (rolling tag
 - **Installed** — a newer version was downloaded and selected.
 - **Skipped** — a soft failure (lookup unreachable, version unparseable) prevented the check; the running binary is unchanged.
 
-After a successful install, `ocx self update` also refreshes the shell integration that `ocx self setup` owns: it regenerates the `$OCX_HOME/env.*` shims and re-applies the managed activation block in your shell profiles when its body has drifted from the current form. This refresh only *heals* an existing block — it never adds one where you have none (so a `--no-modify-path` install stays untouched) and never overwrites a block you have edited (it advises `ocx self setup --force` instead). When a block or shim is updated, it prints a one-line hint to re-source your profile.
+After a successful install, `ocx self update` also refreshes the shell integration that `ocx self setup` owns: it regenerates the `$OCX_HOME/env.*` shims and re-applies the managed activation block in your shell profiles when its body has drifted from the current form. This refresh only *heals* an existing block — it never adds one where you have none (so a `--no-modify-path` install stays untouched) and never overwrites a block you have edited (it advises `ocx self setup --force` instead). When a block or shim is updated, it prints a one-line hint to re-source your profile. The [session-PATH registration](#self-setup-session-path) is outside this refresh: `self update` never writes it, so a store that failed or was opted out of stays that way until you run `ocx self setup` again.
 
 **Behavior with `--check`**
 
@@ -5112,11 +5306,14 @@ ocx package exec [OPTIONS] <PACKAGES>... -- <COMMAND> [ARGS...]
 On Unix, `ocx package exec` hands the current process image off to the target via `execvp(2)`, so the child inherits ocx's PID. Signals reach the target without an ocx forwarder, `pgrep <name>` shows the wrapped binary, and the process tree drops the ocx layer entirely — matching the same semantics shells use when chaining `exec "$@"` in entry-point scripts. On Windows, `ocx package exec` spawns the target and waits for it, since `CreateProcess` has no exec equivalent; the propagated exit code is forwarded as ocx's own exit code.
 :::
 
+`<COMMAND>` is resolved once, before the child starts, by searching only the composed packages' own `PATH` contributions — never the ambient `PATH` and never a working-directory fallback — and a match that is itself an ocx-generated launcher trampoline is refused rather than handed to the child.
+
 **Exit codes**
 
 | Code | Meaning |
 |------|---------|
 | 0 | Command exited successfully (`exec` propagates the wrapped command's exit code). |
+| 65 | `<COMMAND>` does not resolve within the composed environment (no ambient-`PATH` or working-directory fallback); or `<COMMAND>` resolves to an ocx-generated launcher trampoline, refused to prevent an unbounded self-invocation loop. |
 | 74 | The [exec-time resolution record][execution-records-ref] could not be written and [`[records] required`][config-records] is `true` — the command never runs. |
 | 78 | The `--records-name`/`OCX_RECORDS_NAME`/[`[records] name`][config-records-name] template names an unrecognized placeholder, carries no varying component (`{time}`, `{pid}`, or `{rand}`), or renders to something other than a single plain filename; or the `--records-dir`/`OCX_RECORDS_DIR`/[`[records] dir`][config-records-dir] sink resolves through a symlink to a different directory. |
 | _N_ | Wrapped command exited with code _N_ — `exec` forwards the child status verbatim. |
@@ -5773,6 +5970,12 @@ or a registry error) — the report then degrades to a local-state-only summary
 | 80 | Authentication failed against the registry (full-update path only). |
 
 <!-- external -->
+[git-no-verify]: https://git-scm.com/docs/git-commit
+[wm-settingchange]: https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-settingchange
+[rustup-261]: https://github.com/rust-lang/rustup/issues/261
+[systemd-environment-d]: https://www.freedesktop.org/software/systemd/man/latest/environment.d.html
+[launchd-agents]: https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html
+[issue-413]: https://github.com/ocx-sh/ocx/issues/413
 [releases]: https://github.com/ocx-sh/ocx/releases/latest
 [cargo]: https://doc.rust-lang.org/cargo/
 [direnv]: https://direnv.net
@@ -5852,6 +6055,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 [env-docker-config]: ./environment.md#external-docker-config
 [env-ocx-home]: ./environment.md#ocx-home
 [env-ocx-no-modify-path]: ./environment.md#ocx-no-modify-path
+[env-ocx-toolchain-activate]: ./environment.md#ocx-toolchain-activate
+[env-ocx-toolchain-pinned]: ./environment.md#ocx-toolchain-pinned
 [env-ocx-no-completions]: ./environment.md#ocx-no-completions
 [env-ocx-update-check-interval]: ./environment.md#ocx-update-check-interval
 [env-github-actions]: ./environment.md#external-github-actions
@@ -5869,6 +6074,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 
 <!-- reference -->
 [config-ref]: ./configuration.md
+[config-toolchain-dir]: ./configuration.md#keys-toolchain-dir
 [config-mirrors]: ./configuration.md#keys-mirrors
 [config-patches]: ./configuration.md#keys-patches
 [config-managed]: ./configuration.md#keys-managed
@@ -5876,6 +6082,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 [config-project-env]: ./configuration.md#project-config-env
 [config-project-package]: ./configuration.md#project-config-package
 [config-project-groups]: ./configuration.md#project-config-groups
+[config-project-activate]: ./configuration.md#project-config-activate
+[config-project-pinned]: ./configuration.md#project-config-pinned
 [config-records]: ./configuration.md#keys-records
 [config-records-dir]: ./configuration.md#keys-records-dir
 [config-records-name]: ./configuration.md#keys-records-name
@@ -5886,6 +6094,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [env-ocx-records-dir]: ./environment.md#ocx-records-dir
 [env-ocx-records-name]: ./environment.md#ocx-records-name
 [user-guide-managed-config]: ../user-guide.md#managed-config
+[user-guide-toml]: ../user-guide.md#project
 [user-guide-claiming]: ../user-guide/claiming-a-namespace.md
 [env-composition-project-env]: ./env-composition.md#project-env
 [env-composition-list]: ./env-composition.md#composition-order-list
@@ -5908,9 +6117,11 @@ or a registry error) — the report then degrades to a local-state-only summary
 [entry-points]: ./metadata.md#entry-points
 [metadata-strip-components]: ./metadata.md#extraction-strip-components
 [guide-entry-points]: ../in-depth/entry-points.md
+[uninstalling]: ../installation.md#uninstalling
 [exit-codes]: #exit-codes
 [fs-objects]: ../in-depth/storage.md#packages
 [fs-symlinks]: ../in-depth/storage.md#symlinks
+[in-depth-storage-toolchain]: ../in-depth/storage.md#toolchain-location
 [fs-index]: ../in-depth/indices.md#local
 [ug-dependencies]: ../user-guide.md#dependencies
 [ug-deps-env]: ../user-guide.md#dependencies-environment
@@ -5930,6 +6141,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [arg-offline]: #arg-offline
 [arg-remote]: #arg-remote
 [arg-format]: #arg-format
+[arg-project]: #arg-project
 [arg-color]: #arg-color
 
 <!-- commands (package group) -->

@@ -38,7 +38,7 @@ Prefer not to pipe a script into your shell? Jump to [Manual Installation][manua
 
 ## With Script {#with-script}
 
-The one-liners above are thin per-shell bootstraps served by [setup.ocx.sh][setup-home]. Each detects your platform, resolves the latest release from the [`dist.json`][setup-dist] manifest (no GitHub API call in the install path), downloads the archive and verifies its SHA-256 against the manifest, then hands off to [`ocx self setup`][cmd-self-setup] — which performs the [content-addressed][fs-objects] self-install, writes the per-shell `$OCX_HOME/env.*` shims, and adds a managed activation block to your shell profile.
+The one-liners above are thin per-shell bootstraps served by [setup.ocx.sh][setup-home]. Each detects your platform, resolves the latest release from the [`dist.json`][setup-dist] manifest (no GitHub API call in the install path), downloads the archive and verifies its SHA-256 against the manifest, then hands off to [`ocx self setup`][cmd-self-setup] — which performs the [content-addressed][fs-objects] self-install, writes the per-shell `$OCX_HOME/env.*` shims, adds a managed activation block to your shell profile, and registers a [session `PATH`][cmd-self-setup-session-path] for the processes no profile reaches.
 
 There is one installer per shell because a bash-only one-liner either fails to parse in [fish][fish], [Nushell][nushell], [Elvish][elvish], or [PowerShell][powershell], or leaves the profile unwired. Each script is written in its own shell's dialect, so the one-liner parses natively and the managed block lands in the right profile file.
 
@@ -50,13 +50,13 @@ The [`setup.ocx.sh/sh`][setup-sh] installer fails closed when only an older `wge
 
 The installer takes a few knobs, passed as flags after `-s --` (POSIX `sh`) or as environment variables that work across every shell's argument-passing quirks.
 
-**Skip shell profile modification.** If you manage your `PATH` yourself — in a CI environment or a dotfile framework — pass `--no-modify-path` so the installer never touches your shell profile:
+**Skip every PATH modification.** If you manage your `PATH` yourself — in a CI environment or a dotfile framework — pass `--no-modify-path` so the installer touches neither your shell profile nor the [session `PATH`][cmd-self-setup-session-path]:
 
 ```sh
 curl -fsSL https://setup.ocx.sh/sh | sh -s -- --no-modify-path
 ```
 
-You can also set [`OCX_NO_MODIFY_PATH=1`][env-no-modify-path]. Either way, add `~/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin` to your `PATH` yourself.
+You can also set [`OCX_NO_MODIFY_PATH=1`][env-no-modify-path]. Either way, add both directories the installer would have registered to your `PATH` yourself, install bin first: `~/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin`, then `~/.ocx/toolchain/bin`.
 
 **Pin a version.** The `OCX_INSTALL_VERSION` env knob is the portable way to install an exact release — `<VERSION>` is the semver string with no leading `v`:
 
@@ -92,7 +92,7 @@ PowerShell needs the script compiled to a scriptblock so `-Version` binds to its
 
 ## Manual Installation {#manual}
 
-Security-conscious environments often forbid piping a network script into an interpreter. The downloaded binary is the answer: pre-built binaries for every supported platform are published to [GitHub Releases][releases]. Download the archive for your platform, extract it, and run [`ocx self setup`][cmd-self-setup] — you reach exactly the same managed state the install script produces (the content-addressed self-install, the `$OCX_HOME/env.*` shims, and the managed shell-profile block), with no shell script piped from the network.
+Security-conscious environments often forbid piping a network script into an interpreter. The downloaded binary is the answer: pre-built binaries for every supported platform are published to [GitHub Releases][releases]. Download the archive for your platform, extract it, and run [`ocx self setup`][cmd-self-setup] — you reach exactly the same managed state the install script produces (the content-addressed self-install, the `$OCX_HOME/env.*` shims, the managed shell-profile block, and the [session `PATH`][cmd-self-setup-session-path]), with no shell script piped from the network.
 
 | Platform | Architecture | Archive |
 |---|---|---|
@@ -217,6 +217,7 @@ Then remove the managed activation that [`ocx self setup`][cmd-self-setup] added
 - **Nushell**: delete `~/.local/share/nushell/vendor/autoload/ocx.nu`
 - **Elvish**: delete the `# >>> ocx v1 … >>>` … `# <<< ocx <<<` block from `~/.config/elvish/rc.elv`
 - **PowerShell**: delete the `# >>> ocx v1 … >>>` … `# <<< ocx <<<` block from your `$PROFILE`
+- **every platform**: also remove the session-level `PATH` registration — one location each, with the exact commands, in [Removing the session PATH by hand][cmd-self-setup-session-path-removal]
 
 ::: warning This deletes everything
 This removes all installed packages, the local index cache, and ocx itself. If you only want to remove specific packages, use [`ocx package uninstall --purge`][cmd-uninstall] and [`ocx clean`][cmd-clean] instead.
@@ -288,6 +289,8 @@ This returns `"dev"` for dev builds and `null` (field absent) for stable release
 [cmd-about]: ./reference/command-line.md#about
 [cmd-env]: ./reference/command-line.md#env-root
 [cmd-self-setup]: ./reference/command-line.md#self-setup
+[cmd-self-setup-session-path]: ./reference/command-line.md#self-setup-session-path
+[cmd-self-setup-session-path-removal]: ./reference/command-line.md#self-setup-session-path-removal
 [cmd-self-update]: ./reference/command-line.md#self-update
 [cmd-update]: ./reference/command-line.md#update
 [cmd-uninstall]: ./reference/command-line.md#package-uninstall

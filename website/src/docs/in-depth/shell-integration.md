@@ -48,6 +48,48 @@ The four shells in the last row still activate correctly the moment the shell st
 
 Elvish registers its reconcile the same append-safe way the other hooked shells do, just on a different seam: `set edit:before-readline = [$@edit:before-readline { … }]`, elvish's documented idiom for adding a hook without discarding one another module already installed. Where bash, zsh, fish, and PowerShell compare a stamp against a watch set of file mtimes — `ocx.toml`, `ocx.lock`, the selected binary — elvish's guard has only two terms: the private carrier [`__OCX_ENV_STATE`][env-ocx-env-state] being empty, and the current directory differing from the one the last successful reconcile ran for. Elvish 0.21 has nothing to build a third term from: `os:stat` documents `name`, `size`, `type`, `perm`, `special-modes`, and `sys` as its fields and states timestamps are not exposed, and elvish ships no clock module, so there is no stamp and nothing to compare one against. Elvish's `ocx` wrapper compensates for the missing term: on the way out of every `ocx` invocation run **in that same shell**, it clears the recorded directory, so the next prompt reconciles regardless of what the command changed. That is a narrower net than it sounds, because only two things clear it — an `ocx` command typed in this shell, and a `cd`. The residual is anything OCX watches that changes by neither route: `ocx.toml` or `ocx.lock` edited by hand in an editor is one example, and so is an `ocx add --global` run in a **different** terminal, a `git checkout` that swaps `ocx.lock` on disk, a config file edited by hand, or `ocx self update` run from elsewhere. None of these reconcile in this elvish shell until its next `cd` or its next `ocx` command. Every other hooked shell (bash, zsh, fish, PowerShell) notices all of these immediately, at the very next prompt, because their guard compares file mtimes directly instead of relying on a wrapper. Reaching for an external `test -nt` on every prompt would add one process spawn to the quiet path — exactly the per-prompt cost this design exists to avoid.
 
+## The session PATH beside the hook {#session-path}
+
+The per-prompt hook can only run where there is a prompt. An IDE, a desktop launcher and a background service each start without one, so nothing in the mechanism above ever reaches them — which is why a `PATH` that is right in the terminal can be wrong everywhere else on the same machine.
+
+[`ocx self setup`][cmd-self-setup] answers that separately. It writes two directories — the ocx installation's `bin` directory and `$OCX_HOME/toolchain/bin` — into the one store per platform that a whole login session reads, once, at install time. That registration is **not** the hook and does not depend on it: every process started afterwards inherits those directories whether or not it ever runs a shell. The stores, the per-platform mechanisms and the six limits the registration does not promise are in the [user guide][user-guide-session-path] and the [command-line reference][cmd-self-setup-session-path].
+
+The two mechanisms then share one `PATH`. Three things decide how they fit.
+
+### The reconciler cannot drop them {#session-path-unconditional}
+
+Both session directories are in the reconciler's desired set on **every** prompt, in every `activate` mode — `none` included. That is not a courtesy to the installer; it is what stops the two mechanisms from fighting.
+
+`$OCX_HOME` is an owned prefix, and the repair pass removes every segment under an owned prefix that the desired set does not contribute. Both directories sit under `$OCX_HOME`. So an arm that composed nothing and returned early without them would not leave them alone — it would **delete the registration `ocx self setup` had just written**, at the first prompt of the first shell. They are session-level facts rather than activation decisions, and the reconciler treats them as such even when it has been told to activate nothing at all.
+
+### Where they sit on PATH {#session-path-order}
+
+Front to back, a converged `PATH` reads:
+
+1. the project scope's composed entries (`env` mode only)
+2. the ocx installation's `bin` directory
+3. the project's `<home>/toolchain/bin` (`bin` mode only)
+4. `$OCX_HOME/toolchain/bin`
+5. the global toolchain's composed entries
+
+The session block sits **between** the two tiers, and that position is the contract rather than an arrangement. Putting it after both would place the global tier's composed entries ahead of a project's own trampoline directory, so a globally installed `cmake` would shadow the project's — the tier inversion [strict isolation][user-guide-isolation] exists to forbid. Putting it before both would put both tiers ahead of the installed `ocx`.
+
+Within the session block the install directory leads, and the honest reason is not that it closes a `PATH` hijack of `ocx`: a rendered trampoline bakes an **absolute** `ocx` path and never resolves that name through `PATH` at all. It leads because it costs nothing and because it settles the one remaining bare-name case — a trampoline rendered when both rungs of that ladder declined — in favour of the installed binary rather than whatever a project puts in front of it.
+
+### What `bin` mode costs a prompt {#session-path-bin-gate}
+
+In [`bin` mode][config-project-activate] the reconciler emits a project's `<home>/toolchain/bin` only when a render stamp exists for that home *and* the directory still holds exactly what the stamp recorded. The check is one directory read plus one `stat` per entry, and a content hash only for the entries the cheap comparison already found suspect. **No compose, no metadata read, no network** — that budget is most of why `bin` mode exists.
+
+It is set equality in both directions: every name the stamp records must be present, and every name present must be recorded. A one-way lookup over the stamp's own keys would pass the moment each recorded entry matched — which is precisely the case the gate is built for, a hostile clone force-committing one extra `bin/cmake` beside an otherwise legitimate tree. Every filesystem condition on that walk is a **mismatch** rather than an error: an unreadable `bin/`, an entry that vanished mid-walk, a `bin/` replaced by a symlink after a good render, a name that is not UTF-8. The entry is withheld and `PATH` does not change.
+
+A mismatch and a missing stamp have one behaviour, so they get one sentence. The prompt emits nothing for that project and prints the line that names the fix:
+
+```
+ocx: /work/acme/api: its toolchain has not been rendered for this lock; run `ocx pull` here
+```
+
+The stale window between a lock change and the next [`ocx pull`][cmd-pull] is **designed**, not something that line apologises for. The prompt path never prunes, and none may be added: pruning here would be a whole-directory delete inside a repository-writable tree, running before every command you type, with no `--dry-run` in front of it. The stale trampolines stay exactly where they are, and the render that replaces them is a command you ran on purpose.
+
 ## Consent grants {#consent}
 
 A project activating on `cd` — pulling whatever `ocx.toml` names onto `PATH` with no confirmation — is the same shape of risk [mise][mise-security]'s [GHSA-436v-8fw5-4mj8][mise-ghsa] exploited, just aimed the other direction: instead of a project declaring itself trusted, a project here would simply *be* trusted by default. OCX refuses that default. Activation requires one of three independent grants; without any of them, a project is inert regardless of what it declares.
@@ -99,30 +141,35 @@ ocx self setup --no-hook                 # write [shell] hook = false
 
 Disabling the hook entirely, for a single shell or every shell, is [`OCX_NO_HOOK`][env-ocx-no-hook] — see its reference entry for the exact rules, including why it only takes effect at the next shell start.
 
+[`ocx shell state`][cmd-shell-state] is the read-only counterpart to every switch above: it changes nothing and reports what all of them decided, plus the resolved toolchain home and the two effective toolchain settings a tool integrating with OCX needs. See [Diagnosing a shell](#diagnostics).
+
 ## Diagnosing a shell {#diagnostics}
 
 Everything documented so far is deliberately quiet: the hook logs at debug, an absent ledger is the ordinary first-prompt case, an inert project prints one hint line at most, and a yielded scope prints one info line. That is right for a path that runs on every keystroke's worth of prompts and wrong the moment you are staring at a missing tool wondering why.
 
 [`ocx shell state`][cmd-shell-state] is the read-only answer. It never mutates anything — no stamp, no ledger repair, no plan — and it exits `0` in every state it reports, including every flavor of "not active."
 
-By default it answers the question you actually asked, in a handful of lines: where `$OCX_HOME` is, which project is in effect, whether the integration is active, and — when it is not — *why*, plus the one line that says what to do about it. The reason is one of an enumerated set: a consent stamp missing, a stamp present but the lock outgrowing it, the hook disabled and which config tier decided that, a [yield to direnv or mise](#coexistence) naming the live signal it saw, a ledger reduced to a marker because it went over the size cap, or a `ocx.lock` that will not parse.
+By default it answers the question you actually asked, in a handful of lines: where `$OCX_HOME` is, which project is in effect, which toolchain home that resolves to and how it activates, whether the integration is active, and — when it is not — *why*, plus the one line that says what to do about it. The reason is one of an enumerated set: a consent stamp missing, a stamp present but the lock outgrowing it, the hook disabled and which config tier decided that, a [yield to direnv or mise](#coexistence) naming the live signal it saw, a ledger reduced to a marker because it went over the size cap, or a `ocx.lock` that will not parse.
 
 ```sh
 ocx shell state
 ```
 
 ```
-ocx home: "/home/you/.ocx"
-project: "/work/acme/api"
+ocx home: /home/you/.ocx
+project: /work/acme/api
+toolchain: /work/acme/api/.ocx/toolchain
+  activate: env
+  pinned: no
 
 active: no
 reason: no consent stamp, and no matching grant
   derived sources:
-    - "ocx.sh/acme"
+    - ocx.sh/acme
   paths tested:
-    - "/work/other"
+    - /work/other
   namespaces tested:
-    - "ocx.sh/other"
+    - ocx.sh/other
 fix: run `ocx shell allow` here, or add this directory to [shell.consent] paths
 ```
 
@@ -157,6 +204,18 @@ ocx shell state --verbose
 ```sh
 ocx --format json shell state   # complete, with or without --verbose
 ```
+
+Three of its fields are a contract other tools read rather than a diagnostic a person reads — the supported way for an editor, a [devcontainer feature][devcontainer-features] or a CI step to discover a toolchain from outside ocx:
+
+| Field | What it carries |
+|---|---|
+| `toolchain_home` | The resolved toolchain home: `<project>/.ocx/toolchain`, or `<toolchain-dir>/<project-key>/toolchain` when [`toolchain-dir`][config-toolchain-dir] relocates it, or `$OCX_HOME/toolchain` when no project resolves. Always present, never `null` — a `toolchain-dir` the containment rules refuse is rejected at config load, so a report that exists at all has a spellable home. |
+| `activate` | The mode the project in effect resolves to — `env`, `bin` or `none` — through that project's own [`activate` key][config-project-activate] and then the environment, never one tier's raw value. With no project in effect the file tier is absent and the environment answers. |
+| `pinned` | The boolean, resolved through the same two tiers. `true` means a composing emitter yields digest paths and consults no `<group>/<entry>` link; `false` means it follows the rendered links, so an [`ocx update`][cmd-update] takes effect with no re-render. |
+
+Without `toolchain_home` the only route to that directory is re-deriving a 16-hex project key from a path the caller would also have to canonicalize exactly the way ocx does. All three appear in the human rendering too, at both verbosity tiers: where a toolchain lives is an answer, not a diagnostic.
+
+<Terminal src="/casts/in-depth/shell-integration/toolchain-state.cast" title="Reading the toolchain state" collapsed />
 
 Its output is never `eval`-able — no line is valid shell-assignment syntax in any supported shell, at either detail tier, coloured or not — on purpose. `ocx self activate` emits text meant to be evaluated; `ocx shell state` emits text meant to be read, and a surface where those two are interchangeable is one copy-paste away from evaluating a diagnostic dump into your live shell.
 
@@ -224,12 +283,15 @@ With no `[[trust.policy]]` configured, automatic verification is a no-op — som
 [cmd-package-verify]: ../reference/command-line.md#package-verify
 [cmd-shell-state]: ../reference/command-line.md#shell-state
 [cmd-clean]: ../reference/command-line.md#clean
+[cmd-self-setup-session-path]: ../reference/command-line.md#self-setup-session-path
 
 <!-- reference -->
 [config-ref]: ../reference/configuration.md
 [config-managed]: ../reference/configuration.md#keys-managed
 [config-trust-policy]: ../reference/configuration.md#keys-trust
 [config-mirrors]: ../reference/configuration.md#keys-mirrors
+[config-toolchain-dir]: ../reference/configuration.md#keys-toolchain-dir
+[config-project-activate]: ../reference/configuration.md#project-config-activate
 [arg-config]: ../reference/command-line.md#arg-config
 [env-ocx-env-state]: ../reference/environment.md#ocx-env-state
 [env-ocx-no-hook]: ../reference/environment.md#ocx-no-hook
@@ -244,3 +306,5 @@ With no `[[trust.policy]]` configured, automatic verification is a no-op — som
 
 <!-- cross-page -->
 [user-guide-cleanup]: ../user-guide.md#cleanup
+[user-guide-session-path]: ../user-guide.md#global-toolchain-session-path
+[user-guide-isolation]: ../user-guide.md#global-toolchain-isolation

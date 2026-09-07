@@ -25,8 +25,14 @@ Content-addressed storage, a local index, persistent state, stable symlinks, and
     <Node name="index/" icon="🏷️">
       <Description>local index collection — one subtree per source (see Index below)</Description>
     </Node>
+    <Node name="toolchain/" icon="🧰">
+      <Description>the global tier's rendered toolchain tree (see Toolchain below)</Description>
+    </Node>
     <Node name="state/" icon="🗄️">
       <Description>persistent runtime state — one subdirectory per concern</Description>
+      <Node name="projects/" icon="📁">
+        <Description>one subdirectory per project key — shell-activation consent and the render stamp</Description>
+      </Node>
       <Node name="update-check/" icon="⏱️">
         <Description>throttle markers for the background update-check probe</Description>
       </Node>
@@ -238,9 +244,76 @@ This slot is **host-only**: installing a foreign platform (`-p windows/amd64` on
 [SDKMAN][sdkman] (the Java SDK manager) uses the same two-level pattern: `~/.sdkman/candidates/{tool}/{version}/` for pinned installs and a `current` symlink updated by `sdk default {version}`. [Homebrew][homebrew] does the same with its `Cellar/{formula}/{version}/` store and a stable `opt/{formula}` symlink pointing at the active version. Linux's `update-alternatives` is the system-level equivalent, managing tools like `java` and `python3` via a layer of stable symlinks in `/etc/alternatives/`.
 :::
 
+## Toolchain {#toolchain}
+
+The stores above are keyed by digest, registry, or tag — none of them by the name you actually type. A toolchain is the other direction: a set of bindings a project declares, each a plain name that has to resolve to one package on this host, right now.
+
+[`ocx pull`][cmd-pull] renders that set into a directory. Every path in it is a name you chose, and every leaf points back into the [package store][fs-packages] — nothing is copied.
+
+<Tree>
+  <Node name="{home}/" icon="🧰" open>
+    <Description><code>$OCX_HOME/toolchain/</code> for the global tier, <code>{project}/.ocx/toolchain/</code> for a project</Description>
+    <Node name=".gitignore" icon="📄">
+      <Description>a single <code>*</code> line, kept present by the renderer</Description>
+    </Node>
+    <Node name="bin/" icon="⚙️" open>
+      <Description>one launcher trampoline per exposed tool name — default group only</Description>
+      <Node name="cmake" icon="🚀">
+        <Description>POSIX: a five-line <code>/bin/sh</code> trampoline that re-enters ocx</Description>
+      </Node>
+      <Node name="cmake.exe" icon="🚀">
+        <Description>Windows: a native shim, paired with the sidecar below</Description>
+      </Node>
+      <Node name="cmake.exec" icon="📄">
+        <Description>Windows: one line carrying the home selector — the project root, or the literal <code>global</code></Description>
+      </Node>
+    </Node>
+    <Node name="{group}/" icon="📁" open-icon="📂" open>
+      <Description>one directory per selected group; the default group is <code>default/</code></Description>
+      <Node name="{entry}" icon="➡️">
+        <Description>directory link to a package root — an NTFS junction on Windows</Description>
+      </Node>
+    </Node>
+  </Node>
+</Tree>
+
+`bin/` holds the trampolines that make [`activate = "bin"`][config-activate] work: one `PATH` entry, and each name resolved by its own launcher at invocation time. It covers the default group only — that is the group `PATH` exposes. On Windows each name is **two** files, an `.exe` and its `.exec` sidecar, and both are tracked independently.
+
+`<group>/<entry>` is the link lane. Each entry is a directory link to a package root (the same target shape [`candidates/{tag}`](#symlinks) uses), so a composed environment can name `…/default/cmake/content/bin` instead of a digest path. Whether an environment *uses* those links is the [`pinned`][config-pinned] setting — see [Toolchain activation][env-composition-activation].
+
+The lane holds one entry at a time and only for lock entries. A link that is absent, stale, or not a link leaves **that** entry on its digest path while the rest of the composition still follows its links, with nothing printed — and the digest path is the correct path, the same package directory under its other spelling. A dependency has no link at all, so its `PATH` contributions and every `${deps.<name>.installPath}` name digest paths whatever `pinned` says. Both are set out under [`--pinned`][arg-pinned-degrade].
+
+Every composing emitter repairs this lane before it reads it: it creates an absent link and repoints a stale one for the groups it is about to emit, then probes. The repair is best-effort — a read-only tree, a home the symlink guards refuse, or a link lock it cannot take leaves the entry as it found it, and that entry composes on its digest path.
+
+A toolchain link takes **no** `refs/symlinks/` back-reference. That is the deliberate difference from an install symlink: a back-reference is a [GC root](#gc), and a toolchain link that took one would pin its package forever, on every project that ever rendered a tree.
+
+### Where a project's tree lives {#toolchain-location}
+
+By default a project renders into its own checkout, at `<project>/.ocx/toolchain/`. The renderer keeps a `.gitignore` containing `*` in every home it writes, so the default lands in a directory git already ignores.
+
+[`toolchain-dir`][config-toolchain-dir] moves them all out. With it set, a project's tree lands at `<root>/<project-key>/toolchain/`, where `<project-key>` is the same 16-hex key the `projects/` GC ledger and `state/projects/<key>/` derive from the canonical project directory. The **global** home ignores the key entirely and stays at `$OCX_HOME/toolchain`.
+
+### The render stamp {#toolchain-stamp}
+
+A rendered tree is only usable if it matches the lock it was rendered from, and walking it on every shell prompt to find out is not an option. So each render writes a stamp describing the tree **as it stands on disk** — the `bin/` entry set with each file's identity, and the default group's links — and the prompt path compares against that instead.
+
+| Tier | Stamp |
+|---|---|
+| Global | `$OCX_HOME/state/render_stamp.json` |
+| Project | `$OCX_HOME/state/projects/<key>/render_stamp.json` |
+
+The global stamp sits directly under `state/`, not beside the project ones, because `state/projects/<key>/` is swept as a unit and a global stamp filed there would be deleted on every [`ocx clean`][cmd-clean]. An absent, unreadable, or unrecognized stamp reads as *absent*, never as an error — the answer to an absent stamp is "re-render", which is always safe.
+
+### Outside garbage collection {#toolchain-gc}
+
+The rendered tree is **pure derived state, outside the three GC tiers**. [`ocx clean`][cmd-clean] never walks it, it takes no reference-counting back-refs, and nothing in it is a GC root.
+
+Deleting it is safe. The next [`ocx pull`][cmd-pull] rebuilds it from `ocx.toml` and `ocx.lock`, and until then a `bin`-mode prompt withholds the `PATH` entry and prints one line telling you to run exactly that. A superseded tree is litter, accepted by design — the same posture the [index](#index) takes.
+
 ## See Also
 
 - [Storage section in the user guide][user-storage] — how-to: install, switch versions, embed stable paths
+- [Toolchain activation][env-composition-activation] — the `activate` × `pinned` matrix and what a trampoline composes
 - [Indices][in-depth-indices] — the local index collection, `index.ocx.sh`, locking, offline behavior
 - [Entry Points][in-depth-entry-points] — generated launchers, synth-PATH, clean-env execution
 - [Dependencies][in-depth-dependencies] — `refs/deps/` forward-refs and reachability across the GC walk
@@ -264,6 +337,7 @@ This slot is **host-only**: installing a foreign platform (`-p windows/amd64` on
 [cmd-launcher-exec]: ../reference/command-line.md#launcher-exec
 [cmd-exec]: ../reference/command-line.md#package-exec
 [cmd-package-env]: ../reference/command-line.md#package-env
+[cmd-pull]: ../reference/command-line.md#pull
 
 <!-- environment -->
 [env-ocx-home]: ../reference/environment.md#ocx-home
@@ -273,6 +347,11 @@ This slot is **host-only**: installing a foreign platform (`-p windows/amd64` on
 [metadata-ref]: ../reference/metadata.md
 [metadata-entry-points]: ../reference/metadata.md#entry-points
 [config-mirrors]: ../reference/configuration.md#keys-mirrors
+[config-toolchain-dir]: ../reference/configuration.md#keys-toolchain-dir
+[config-activate]: ../reference/configuration.md#project-config-activate
+[config-pinned]: ../reference/configuration.md#project-config-pinned
+[env-composition-activation]: ../reference/env-composition.md#toolchain-activation
+[arg-pinned-degrade]: ../reference/command-line.md#arg-pinned-degrade
 
 <!-- security -->
 [cwe-345]: https://cwe.mitre.org/data/definitions/345.html
