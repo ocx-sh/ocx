@@ -98,6 +98,28 @@ def test_preserves_multispan_and_zebra() -> None:
     assert f"{_SKY}sha256:bb.." in r1
 
 
+def test_spinner_residue_after_the_erase_does_not_inflate_column_zero() -> None:
+    """A cursor-movement escape between the last `\\x1b[2K` and the header
+    must not be measured as content.
+
+    Real shape, from an `ocx add` recording: the spinner tears down with
+    `…\\x1b[1A\\r\\x1b[2K\\x1b[1B\\r\\x1b[2K\\x1b[1A` and the header follows
+    immediately. `\\x1b[1A` is CSI-but-not-SGR, so `analyze` counted its four
+    bytes as visible text: column 0 measured 4 wider than it rendered and every
+    data row was padded to that phantom width. Both parts are asserted — the
+    residue survives in the event, and the rows line up.
+    """
+    residue = "\x1b[1A\r\x1b[2K\x1b[1B\r\x1b[2K\x1b[1A"
+    rec = CastRecording(events=[CastEvent(0.0, "o", residue + _table())])
+    rec.realign_tables()
+    data = rec.events[0].data
+
+    assert data.startswith(residue), "control residue must be re-emitted verbatim"
+    header, r0, r1 = data[len(residue) :].split("\r\n")
+    assert _strip(header) == f"{'Package':<17}  {'Visibility':<10}  {'Digest':<11}"
+    assert len({len(_strip(x)) for x in (header, r0, r1)}) == 1
+
+
 def test_non_table_lines_untouched() -> None:
     # Tree chrome (no underline SGR) and a lone underlined hint (no data
     # rows -> block < 2) are both left exactly as-is.

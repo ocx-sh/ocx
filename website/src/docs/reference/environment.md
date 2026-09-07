@@ -695,22 +695,33 @@ When you run [`ocx self setup`][cmd-self-setup], it uses `OCX_HOME` (default `~/
 
 ### `OCX_NO_MODIFY_PATH` {#ocx-no-modify-path}
 
-When set to a [truthy value](#truthy-values), [`ocx self setup`][cmd-self-setup] writes the env shim files to `$OCX_HOME` but skips modifying any shell profile. Use this in CI environments or when you manage your `PATH` manually.
+When set to a [truthy value](#truthy-values), [`ocx self setup`][cmd-self-setup] writes the env shim files to `$OCX_HOME` and touches neither a shell profile nor the session PATH. Use this in CI environments or when you manage your `PATH` manually.
 
-The equivalent CLI flag is `--no-modify-path` on `ocx self setup`.
+It suppresses **both** PATH surfaces, on all three platforms: the managed activation block in your shell profiles, and the [session-level registration][cmd-self-setup-session-path] — the Windows user environment, a systemd [`environment.d`][systemd-environment-d] drop-in on Linux, a login [LaunchAgent][launchd-agents] on macOS. The writers are never called. Each location still appears in the run summary, with outcome `skipped_opt_out`, so you can see what was not touched.
+
+The equivalent CLI flag is [`--no-modify-path`][cmd-self-setup] on `ocx self setup`; the flag and this variable mean the same thing, and either one alone is enough.
 
 ::: warning Truthy values only — not "any non-empty"
-`OCX_NO_MODIFY_PATH` follows the same truthy/falsy rules as [`OCX_OFFLINE`](#ocx-offline) and [`OCX_REMOTE`](#ocx-remote). Only the values in the [truthy list](#truthy-values) (`1`, `y`, `yes`, `on`, `true`, case-insensitive) enable the flag. An unrecognized non-empty value (e.g. `OCX_NO_MODIFY_PATH=skip`) logs a warning and is treated as the default (`false` — profiles are modified). An empty string is also treated as false.
+`OCX_NO_MODIFY_PATH` follows the same truthy/falsy rules as [`OCX_OFFLINE`](#ocx-offline) and [`OCX_REMOTE`](#ocx-remote). Only the values in the [truthy list](#truthy-values) (`1`, `y`, `yes`, `on`, `true`, case-insensitive) enable the flag. An unrecognized non-empty value (e.g. `OCX_NO_MODIFY_PATH=skip`) logs a warning and is treated as the default (`false` — both PATH surfaces are written, the profile blocks and the session-level registration). An empty string is also treated as false.
 :::
 
-**The opt-out is not remembered between runs.** A user who ran `ocx self setup --no-modify-path` once, then runs `ocx self setup` again without the flag, will have profiles modified. To make the opt-out persistent, either:
+**The opt-out is not remembered between runs.** A user who ran `ocx self setup --no-modify-path` once, then runs `ocx self setup` again without the flag, gets both the profile blocks and the session-PATH registration written. To make the opt-out persistent, either:
 
 - Export `OCX_NO_MODIFY_PATH=1` in your environment before every `ocx self setup` invocation, or
 - Pass `--no-modify-path` each time.
 
 A `$OCX_HOME/state/no-modify-path` sentinel file that persists the preference automatically is planned for a future release.
 
-**Profile-indirection limitation.** Shell activation through `$OCX_HOME/env.*` only takes effect inside interactive PowerShell and POSIX shell sessions that source the login profile. It does not register `OCX_HOME/bin` with Windows `HKCU\Environment` — `cmd.exe` sessions and GUI applications launched from the desktop do not inherit the PATH update until you open a new PowerShell or bash session and source the profile. If you need OCX tools visible to `cmd.exe` or GUI apps, set `PATH` via System Properties or a Group Policy, or use `ocx self setup` alongside a separate `HKCU\Environment` update.
+**What you give up.** Shell activation through `$OCX_HOME/env.*` takes effect only inside interactive PowerShell and POSIX shell sessions that source the login profile. `cmd.exe`, desktop launchers, IDEs and background services never source one, so with this opt-out set they never see the ocx directories.
+
+Reaching those is exactly what the [session-PATH registration][cmd-self-setup-session-path] is for, and it is the half this variable also suppresses. Without the opt-out, `ocx self setup` registers **two** directories, in this order:
+
+1. `$OCX_HOME/symlinks/<ocx cli id>/current/content/bin` — where the installed `ocx` binary itself resolves from. It leads, so a session resolves the installed `ocx` rather than whatever a composed toolchain renders under that name.
+2. `$OCX_HOME/toolchain/bin` — the global toolchain's launcher trampolines.
+
+There is no `$OCX_HOME/bin`; the install directory is the symlink path above, derived from the store rather than joined from a literal.
+
+If you keep the opt-out and still need ocx tools visible to `cmd.exe` or GUI applications, put those two directories on `PATH` yourself — via System Properties or Group Policy on Windows, an [`environment.d`][systemd-environment-d] drop-in on Linux, a [LaunchAgent][launchd-agents] on macOS.
 
 ### `OCX_NO_CODESIGN` {#ocx-no-codesign}
 
@@ -741,7 +752,7 @@ For [`ocx package verify`][cmd-package-verify], offline scopes to the **Sigstore
 
 ### `OCX_PROJECT` {#ocx-project}
 
-Path to a project-tier `ocx.toml` to load. Bypasses the CWD walk — the named file is used directly. Not part of the ambient configuration chain: the project tier is a separate API surface from the ambient config tier loaded via [`OCX_CONFIG`](#ocx-config-file).
+Path to a project-tier `ocx.toml` to load, or to the directory that holds it. Bypasses the CWD walk — a file is loaded directly, and a directory resolves to `<dir>/ocx.toml`. Not part of the ambient configuration chain: the project tier is a separate API surface from the ambient config tier loaded via [`OCX_CONFIG`](#ocx-config).
 
 Equivalent to the `--project` CLI flag, but injectable via environment — the intended use is CI and Docker setups where the env is controlled but the command line is not.
 
@@ -749,7 +760,7 @@ Equivalent to the `--project` CLI flag, but injectable via environment — the i
 export OCX_PROJECT=/workspace/ocx.toml
 ```
 
-Precedence: `--project` > `OCX_PROJECT` > CWD walk. [`OCX_NO_PROJECT=1`](#ocx-no-project) prunes both the CWD walk and this env var, but does not block an explicit `--project` flag. Missing files produce a clear error with the path.
+Precedence: `--project` > `OCX_PROJECT` > CWD walk. [`OCX_NO_PROJECT=1`](#ocx-no-project) prunes both the CWD walk and this env var, but does not block an explicit `--project` flag. A path that does not exist at all exits with code 79. A directory that exists but holds no `ocx.toml` is not a missing file — it is no project — and exits with code 64, the same code [`ocx exec`][cmd-run] and its siblings use whenever they have no project to act on. A path that exists but cannot be read as configured — permission denied, or a candidate that is not a regular file — exits with code 74.
 
 **Escape hatch**: setting this to the empty string (`OCX_PROJECT=`) is treated as unset, not as an error. Useful when the variable is exported from a shell profile and you want to disable it for a single invocation without unsetting it.
 
@@ -812,6 +823,82 @@ It scopes to the package tier, whose pin is the local index. A patch companion r
 Unlike [`OCX_OFFLINE`](#ocx-offline), this is **not** a network ban: known and digest-pinned content is still fetched. It only refuses to discover a new tag→digest mapping.
 
 Equivalent to passing the [`--frozen`][arg-frozen] flag on every invocation; the flag takes precedence. Mutually exclusive with [`OCX_REMOTE`](#ocx-remote) (combining the two is a usage error, exit `64`); combining with [`OCX_OFFLINE`](#ocx-offline) is accepted, with offline taking effect.
+
+### `OCX_TOOLCHAIN_ACTIVATE` {#ocx-toolchain-activate}
+
+How a rendered toolchain reaches your shell — by composing the environment at every prompt, by putting one directory on `PATH`, or not at all. Read by both tiers: a project's toolchain and the global one in `$OCX_HOME`.
+
+```sh
+export OCX_TOOLCHAIN_ACTIVATE=bin
+```
+
+| Value | Behaviour |
+|-------|-----------|
+| `env` | Compose the toolchain environment on every prompt. The default when no tier sets the key. |
+| `bin` | Put the toolchain home's `bin` directory on `PATH` and compose nothing else — each tool is resolved by its launcher trampoline at the moment it runs. |
+| `none` | Neither. The reconciler withdraws whatever it owns and adds nothing. |
+
+Parsed case-insensitively (`Bin`, `BIN` and `bin` are equivalent), unlike the `ocx.toml` key, which is case-sensitive lowercase. Whitespace is **not** trimmed: `OCX_TOOLCHAIN_ACTIVATE=" bin"` is an unrecognized value, not `bin`. An empty value reads as unset.
+
+**An unrecognized value warns and falls through** — the tier is simply absent, resolution continues to the next one, and the command exits 0. The `ocx.toml` key does not forgive: an unrecognized value there is a parse error, exit [`78`][exit-codes]. The asymmetry is deliberate. A typo in a file you committed should stop the build; a typo in a variable a CI image exported should not take every project on that runner down with it.
+
+**This variable is the weakest tier, not an override.** It sits *below* [`ocx.toml`'s `activate` key][config-project-activate], so a file that states a value — a project's own, or `$OCX_HOME/ocx.toml` for the global toolchain — wins over an exported one; the variable decides only where no file states the key.
+
+[`ocx self setup --toolchain-activate MODE`][cmd-self-setup] is not a fourth tier — it *writes* the key into `$OCX_HOME/ocx.toml` rather than overriding this variable for one invocation. That file is the global toolchain's own file tier and outranks this variable exactly as a project's does.
+
+::: warning Not forwarded to child processes
+Like [`OCX_LAZY_MODE`](#ocx-lazy-mode), this variable changes *how* a toolchain reaches `PATH`, never *which* digest resolves, so it sits outside the forwarded set entirely. A child `ocx` reads its own environment.
+:::
+
+### `OCX_TOOLCHAIN_DIR` {#ocx-toolchain-dir}
+
+The root directory under which each project's toolchain tree is rendered — the environment spelling of [`config.toml`'s `toolchain-dir` key][config-toolchain-dir]. A project's tree lands at `<root>/<project-key>/toolchain/`, so this names one directory holding many projects, not one project's toolchain home. The global toolchain home ignores it entirely: that one is always `$OCX_HOME/toolchain`, whatever this resolves to.
+
+```sh
+export OCX_TOOLCHAIN_DIR=~/.cache/ocx/toolchain
+```
+
+**This variable is the weakest tier, not an override.** `config.toml` beats it, so a host that states the key wins over an exported value; the variable supplies continuity only where a child process cannot read that configuration for itself (`OCX_NO_CONFIG=1`, or a different `--config`). An empty value reads as absent at both tiers, so `OCX_TOOLCHAIN_DIR=""` does not erase a configured root.
+
+Unlike the two toolchain settings on either side of it, this one **is** resolution-affecting — it moves where the `<group>/<entry>` links and `bin/` trampolines live, so every composed path changes with it — and it is forwarded to child `ocx` processes. When the parent resolved no root, the forward **removes** any inherited value, so a stale export in your shell cannot outrank the outer ocx's parsed state.
+
+#### Two expansion rules, and only two {#ocx-toolchain-dir-expansion}
+
+A **leading** `~` expands against the home directory. **Nothing else expands.**
+
+A `%VAR%` reference is taken literally on every platform, Windows included. So `OCX_TOOLCHAIN_DIR='%LOCALAPPDATA%\ocx\toolchain'` does not name a directory under `AppData` — it is a *relative* path whose first component is the literal text `%LOCALAPPDATA%`, and ocx refuses it at parse with exit [`78`][exit-codes] for being relative. Spell the directory out, or use `~`.
+
+#### Refusals {#ocx-toolchain-dir-refusals}
+
+The resolved root is refused with exit [`78`][exit-codes] — naming the tier that declared it, so the message points at the file or the variable you can actually edit — when it:
+
+- is relative, or carries a `..` component;
+- resolves outside both the home directory and `$OCX_HOME`;
+- **is** the home directory or `$OCX_HOME` itself rather than a directory beneath one;
+- is a filesystem root, or a system location such as `/usr`, `/etc`, `/var/lib`, `%SystemRoot%`, `C:\Program Files`, `C:\Program Files (x86)` or `C:\ProgramData`;
+- sits at or under `$OCX_HOME/toolchain` — a global [`ocx pull`][cmd-pull] reconciles that directory as a whole and would prune other projects' trees there as orphan groups;
+- exists and is not a directory;
+- **on Linux and macOS only** — is not owned by the invoking user, or grants write to group or world. The check runs against the root when it exists and against its nearest existing ancestor when it does not: that ancestor is the directory the renderer will create under, so it is the one whose permissions decide whether another account could plant a trampoline on your `PATH`.
+
+**Windows checks no ownership.** Reading a directory's owner there needs a Windows security API ocx does not yet call, so the last refusal simply does not fire on Windows. The directory-is-a-directory check does run everywhere.
+
+The root does not have to exist. Resolution creates nothing — no directory, no probe file — and the tree is created when a toolchain is first rendered.
+
+### `OCX_TOOLCHAIN_PINNED` {#ocx-toolchain-pinned}
+
+Whether a composed toolchain environment names the digest roots `ocx.lock` pins, or the rendered `<group>/<entry>` links that point at them.
+
+```sh
+export OCX_TOOLCHAIN_PINNED=true
+```
+
+A [truthy value](#truthy-values) selects the digest lane: composed paths name the exact packages the lock pinned at compose time, consulting no link and reading no rendered tree, so a later `ocx update` does not reach that environment. A falsy value selects the link lane, where an update moves a **root**'s paths with no re-render. Following the links is the default.
+
+Two qualifications ride the link lane either way. **An entry whose link is absent, stale, or not a link composes on its digest path** — that one entry, silently, while the rest of the composition still follows its links; the digest path is the correct path, the same package directory under its other spelling. **Only roots have links**: a dependency's `PATH` contributions and every `${deps.<name>.installPath}` are digest paths in both lanes. See [`--pinned`][arg-pinned-degrade]. An empty value reads as unset; an unparseable one warns and falls through, exit 0.
+
+"Unset" and "explicitly false" are different answers here, deliberately. `OCX_TOOLCHAIN_PINNED=false` *states* the link lane and beats the ladder's floor; an unset variable states nothing and lets a lower tier answer.
+
+**This variable is the weakest tier, not an override.** It sits *below* both [`--pinned` / `--no-pinned`][arg-pinned] and [`ocx.toml`'s `pinned` key][config-project-pinned], so it decides only for an invocation where neither of those speaks. Three of the five composing emitters — [`ocx direnv export`][cmd-direnv-export], the `env`-mode shell hook and the global login exporter — carry no flag, so for those this variable and the `ocx.toml` key are the whole ladder. See [`--pinned`, `--no-pinned`][arg-pinned] for the full ladder, for which commands carry the flag, and for why [`ocx pull`][cmd-pull] carries none.
 
 ### `OCX_UPDATE_CHECK_INTERVAL` {#ocx-update-check-interval}
 
@@ -991,6 +1078,8 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [curl-proxy-env]: https://curl.se/docs/manpage.html
 [reqwest-proxy]: https://docs.rs/reqwest/latest/reqwest/struct.Proxy.html
 [direnv]: https://direnv.net/
+[systemd-environment-d]: https://www.freedesktop.org/software/systemd/man/latest/environment.d.html
+[launchd-agents]: https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html
 
 <!-- commands -->
 [cmd-ref]: command-line.md
@@ -1031,6 +1120,10 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cmd-pinned-only-mode]: command-line.md#pinned-only-mode
 [cmd-self-activate]: command-line.md#self-activate
 [cmd-self-setup]: command-line.md#self-setup
+[cmd-self-setup-session-path]: command-line.md#self-setup-session-path
+[arg-pinned]: command-line.md#arg-pinned
+[arg-pinned-degrade]: command-line.md#arg-pinned-degrade
+[exit-codes]: command-line.md#exit-codes
 [cmd-self-update]: command-line.md#self-update
 [cmd-config-setup]: command-line.md#config-setup
 [cmd-config-update]: command-line.md#config-update
@@ -1069,6 +1162,9 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [config-records]: ./configuration.md#keys-records
 [config-records-dir]: ./configuration.md#keys-records-dir
 [config-records-name]: ./configuration.md#keys-records-name
+[config-toolchain-dir]: ./configuration.md#keys-toolchain-dir
+[config-project-activate]: ./configuration.md#project-config-activate
+[config-project-pinned]: ./configuration.md#project-config-pinned
 
 <!-- execution records -->
 [execution-records-ref]: ./execution-records.md

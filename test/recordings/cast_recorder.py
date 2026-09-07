@@ -35,6 +35,11 @@ _SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 # two-or-more spaces. Cell values never contain a double space (digests,
 # identifiers, tags, visibility), so this split is unambiguous.
 _GAP_RE = re.compile(r"\x20{2,}")
+# Control residue a progress spinner leaves *after* its final `\x1b[2K`:
+# cursor movement (CSI with any final byte except `m`, which is SGR and is
+# real styling) and bare carriage returns.  Anchored at the start of the
+# post-erase content only — an interior `\r\n` is a line break, not residue.
+_CTRL_RESIDUE_RE = re.compile(r"(?:\x1b\[[0-9;]*[@-ln-~]|\r)+")
 
 _GAP = "  "
 _UNDERLINE = "\x1b[4m"  # marks the (bold+underlined) header row
@@ -206,6 +211,18 @@ class CastRecording:
             else:
                 prefix = ""
                 content = event.data
+
+            # A spinner's teardown does not stop at its last erase: the real
+            # tail is `…\x1b[2K\x1b[1A` (or a bare `\r`), and whatever follows
+            # the erase leads the first header cell.  `analyze` only knows SGR
+            # (`…m`), so a cursor-movement escape counts as four *visible*
+            # characters — column 0 measures four wider than it renders, and
+            # every data row under the header is padded to that phantom width.
+            # Move the residue into the prefix, which is re-emitted verbatim.
+            residue = _CTRL_RESIDUE_RE.match(content)
+            if residue:
+                prefix += content[: residue.end()]
+                content = content[residue.end() :]
 
             lines = content.split("\r\n")
             new_lines = list(lines)

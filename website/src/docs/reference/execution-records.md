@@ -122,7 +122,7 @@ Had the identifier been digest-pinned instead, **both** would be absent and the 
 
 `packages[]` is field-for-field an [in-toto][in-toto-attestation] `ResourceDescriptor` (`name`/`uri`/`digest`/`annotations`), so it drops into an [SLSA][slsa] `resolvedDependencies` list without reshaping if an attestation flow is ever built on top. `digest` is always a bare lowercase-hex map keyed by algorithm — never a `sha256:`-prefixed string, never a transport prefix.
 
-`resolution.registries` lists the **content** registries the frame's resolved packages carry — not the index endpoint a version choice was looked up through. A package resolved via an index host is routinely fetched from a different registry that index points at; `registries` names the latter, since that is what an auditor needs to reach the same bytes again. `resolution.mirrors` is a per-host map, keyed by the upstream host a [`[mirrors]`][config-mirrors] entry rewrites, each value naming which traffic role that entry handles:
+`resolution.registries` lists the **content** registries the frame's resolved packages carry — not the index endpoint a version choice was looked up through. A package resolved via an index host is routinely fetched from a different registry that index points at; `registries` names the latter, since that is what an auditor needs to reach the same bytes again. A frame that fetched nothing names a host only when this machine's index copy holds its routing pointer; a store restored without that copy reports none. `resolution.mirrors` is a per-host map, keyed by the upstream host a [`[mirrors]`][config-mirrors] entry rewrites, each value naming which traffic role that entry handles:
 
 ```json
 "mirrors": {
