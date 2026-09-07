@@ -572,9 +572,22 @@ pub trait Forge: Send + Sync {
     /// - A capability field that could not be read at all — an older instance,
     ///   or a credential that may not see it — is *absence of evidence*. It
     ///   records [`CheckStatus::Unknown`] and the call proceeds.
+    /// - A credential that may not call the **visibility endpoint itself** is
+    ///   the same absence one level up: the read that would answer "may this
+    ///   credential push" is out of reach, so there is no verdict to report.
+    ///   It records [`CheckStatus::Unknown`] — but **only where a later write
+    ///   renders the verdict**. On a path that performs no such write there is
+    ///   nothing left to answer the question, and the unreadable read is a
+    ///   denial. On GitLab this is a CI job token, which cannot call
+    ///   `GET /projects/:id`: under the `git` transport the push decides and a
+    ///   real refusal is promoted from its stderr, while under `api` the
+    ///   refusal is raised here.
     ///
     /// Reading only "a check that cannot be read reports `Unknown`" as licence
-    /// to swallow the first case would turn a refused push into a silent one.
+    /// to swallow the first case would turn a refused push into a silent one;
+    /// applying the third without its write would turn it into a bare status
+    /// code from the commit that follows, which is what this preflight exists
+    /// to collapse.
     ///
     /// Under the `git` transport the same REST probe runs, plus the job-token
     /// capability checks, plus the `git-version` row rendered from the
@@ -584,8 +597,9 @@ pub trait Forge: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`ForgeError::PushAccessDenied`] when the repository is invisible
-    /// to the credential or reports no push permission;
+    /// Returns [`ForgeError::PushAccessDenied`] when the repository reports no
+    /// push permission, or is invisible to the credential on a path where no
+    /// later write can render the verdict;
     /// [`ForgeError::WriteCapabilityUnavailable`] when a capability the selected
     /// transport requires reads as *disabled* (as opposed to unreadable); or any
     /// other [`ForgeError`] on transport, status, or decode failure.

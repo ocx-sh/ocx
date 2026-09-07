@@ -2550,6 +2550,14 @@ class GitHttpRoutes:
                 "state": "opened",
                 "target_branch": options.get("merge_request.target", INITIAL_BRANCH),
                 "source_branch": branch,
+                # A push carries its own branch onto the project it pushed to, so
+                # source and target are the same project. The client reads these
+                # two ids instead of resolving a numeric project id of its own —
+                # `GET /projects/:id` is not job-token-readable (ocx#429) — and
+                # compares them to reject a stranger's request on the same
+                # deterministic branch name.
+                "source_project_id": self._gl_project_id_locked(push.project),
+                "target_project_id": self._gl_project_id_locked(push.project),
             }
 
 

@@ -45,6 +45,7 @@ import json
 import stat
 import subprocess
 import time
+import urllib.parse
 import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -92,6 +93,11 @@ GIT_TOKEN = "glpat_test_push_only_GIT_TOKEN_VALUE_0987654321"
 #: The `CI_JOB_TOKEN` value. Distinct again, so a run that picked the wrong rung
 #: is visible in the injected header rather than only in a report field.
 JOB_TOKEN = "job_test_ci_JOB_TOKEN_VALUE_5555555555"
+
+#: `INDEX_FULL` as ocx spells it in a REST path: one percent-encoded segment,
+#: never two. `gitlab.rs::encode_segment` keeps only `[A-Za-z0-9-_~]` literal,
+#: which for these fixtures is what `quote(safe="")` produces.
+ENCODED_INDEX = urllib.parse.quote(INDEX_FULL, safe="")
 
 #: The publishing project a job token claims to run in (`CI_PROJECT_PATH`).
 #: Never the index path, so the allowlist read is a genuine cross-project one.
@@ -398,6 +404,26 @@ def job_token_env(**extra: str) -> dict[str, str]:
     }
     env.update(extra)
     return env
+
+
+def split_pair_env(**extra: str) -> dict[str, str]:
+    """The split-credential pair: an ordinary token reads, the job token pushes.
+
+    **The only posture in which C-029's preflight can be performed at all.** The
+    field it reads lives on the project body, and `GET /projects/:id` is not on
+    [GitLab's job-token endpoint list][list] — a job token is answered 404 there,
+    so under `job_token_env()` the capability is permanently `unknown` and the
+    push is what decides (ocx#429). `job_token_push_applies()` gates on the
+    **push** half, which is still the job token here, so the capability matrix
+    applies exactly as it does in a job — only the reader differs.
+
+    `CI_JOB_TOKEN` still has to be set and still has to equal
+    `OCX_ANNOUNCE_GIT_TOKEN`: `is_job_token` is value equality against the
+    environment, not a tag carried from the rung that produced the credential.
+
+    [list]: https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access
+    """
+    return job_token_env(OCX_ANNOUNCE_GIT_TOKEN=JOB_TOKEN, **extra)
 
 
 def admit_publishing_project(fake_forge: FakeForge) -> None:
@@ -991,7 +1017,7 @@ def test_unchanged_path_with_open_request_performs_no_push(
     assert [r for r in fake_forge.git_http_requests[before:] if r.service == "git-receive-pack"] == [], (
         f"and reached no receive-pack route: {fake_forge.git_http_requests[before:]}"
     )
-    assert fake_forge.request_count("GET", f"/projects/{fake_forge.gl_project_id(INDEX_FULL)}/merge_requests") >= 1, (
+    assert fake_forge.request_count("GET", f"/projects/{ENCODED_INDEX}/merge_requests") >= 1, (
         "the REST merge-request read is what makes the three absences a check "
         f"rather than a description of a run that did nothing: {fake_forge.requests}"
     )
@@ -1281,7 +1307,7 @@ def test_merge_request_confirmed_within_bound(
     result = report(announce_over_git(ocx, fake_forge, package, shim, home))
 
     assert result["pull_request_url"], "the poll must confirm the request the push asked for"
-    reads = fake_forge.request_count("GET", f"/projects/{fake_forge.gl_project_id(INDEX_FULL)}/merge_requests")
+    reads = fake_forge.request_count("GET", f"/projects/{ENCODED_INDEX}/merge_requests")
     assert reads >= 2, (
         f"a single read is the pre-loop probe answering; the poll never polled: {reads}"
     )
@@ -1377,6 +1403,13 @@ def test_job_token_push_disabled_86_before_any_push(
     produces both — it is `::test_unknown_preflight_with_successful_push_exits_0`
     below, run against the same fixture.
 
+    The **split pair**, not a bare job token: the field this row arms lives on
+    the project body, which a job token may not read at all (ocx#429), so under
+    `job_token_env()` the capability is `unknown` and this refusal is unreachable
+    by construction. The push half is still the job token, which is what
+    `job_token_push_applies()` gates on, so the capability matrix is the same one
+    — see `split_pair_env`.
+
     Mutation: map `Some(false)` to a proceed — the run reaches the push and reds.
     """
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
@@ -1384,7 +1417,7 @@ def test_job_token_push_disabled_86_before_any_push(
     admit_publishing_project(fake_forge)
 
     result = announce_over_git(
-        ocx, fake_forge, package, shim, home, token=None, extra_env=job_token_env()
+        ocx, fake_forge, package, shim, home, extra_env=split_pair_env()
     )
 
     assert result.returncode == 86, f"a disabled capability is an administrator's to fix: {result.stderr}"
@@ -1486,6 +1519,10 @@ def test_same_line_with_passed_preflight_77(
     push makes the promotion unreachable and lands every capability refusal on
     77 silently, and this pair is what sees that.
 
+    The split pair for the same reason the row above uses it: a preflight cannot
+    report `passed` on a field the credential may not read, so a bare job token
+    would land this on 86 and measure the promotion instead of the refusal.
+
     Mutation: promote on `Passed` as well — this reds.
     """
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
@@ -1494,7 +1531,7 @@ def test_same_line_with_passed_preflight_77(
     fake_forge.git_http_pre_receive_refusal = REFUSAL_LINE
 
     result = announce_over_git(
-        ocx, fake_forge, package, shim, home, token=None, extra_env=job_token_env()
+        ocx, fake_forge, package, shim, home, extra_env=split_pair_env()
     )
 
     assert result.returncode == 77, (
@@ -1599,6 +1636,70 @@ def test_job_token_pickup_headers_and_push_user(
     assert identity == "ocx <noreply@ocx.sh>", (
         f"C-045 fixes the commit identity; the fixture HOME's would be "
         f"{home.user_name!r}: {identity!r}"
+    )
+
+
+def test_job_token_run_reads_only_endpoints_a_job_token_may_call(
+    ocx: OcxRunner, fake_forge: FakeForge, git_package: tuple[str, str, str], tmp_path: Path
+) -> None:
+    """#429: the job-token posture completes, reading only what a job token can.
+
+    A CI job token may call `GET /projects/:id/repository/branches` (the LIST)
+    but not `…/branches/<name>`, and may not call the Projects API at all. Both
+    answer **404** — the same status a project that is not there answers — so
+    reading either turned a working run into `no base ref found to commit onto`
+    (exit 1, from the branch read) or a push-access refusal (exit 80, from the
+    project read), against an instance whose push would have been accepted.
+
+    The contract asserted is **not** "no off-list endpoint is contacted", which
+    is neither true nor desirable: `job_token_scope/allowlist` is deliberately
+    probed and its refusal *is* the answer (`AllowlistAnswer::Unreadable`), and
+    the project read is worth attempting because an instance that does serve it
+    hands back a genuinely useful early refusal. The contract is that **no
+    off-list refusal can fail the run** — which the run's own exit code says —
+    plus the one endpoint that has no tolerant reading: a 404 from the SINGLE
+    branch is indistinguishable from an absent branch, so ocx must never ask.
+
+    The fake holds a `JOB-TOKEN` request to that scope
+    (`fake_gitlab.gl_job_token_refuses`), so a client that regressed here would
+    fail as it fails in production rather than be served. The positives are what
+    stop the negative from being a description of a run that did nothing.
+
+    Mutation: restore `branch_sha`'s single-branch URL — the run exits 1 with
+    `MissingBaseRef`, and the branch assertions red.
+    """
+    package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
+    admit_publishing_project(fake_forge)
+    assert fake_forge.gitlab_job_token_endpoint_scope, (
+        "the fake must be holding the job token to its real scope, or every "
+        "assertion below is about a fixture that answers anything"
+    )
+
+    result = report(
+        announce_over_git(ocx, fake_forge, package, shim, home, token=None, extra_env=job_token_env())
+    )
+    assert result["credential_kind"] == "job-token", f"the row must really be a job-token run: {result}"
+
+    project = f"/projects/{ENCODED_INDEX}"
+    reads = [path for method, path in fake_forge.requests if method == "GET"]
+
+    assert not [path for path in reads if path.startswith(f"{project}/repository/branches/")], (
+        f"only the branch LIST is job-token-readable, never a single branch: {reads}"
+    )
+    assert f"{project}/repository/branches" in reads, (
+        f"the base ref must still be resolved — through the list: {reads}"
+    )
+    assert [path for path in reads if path.startswith(f"{project}/repository/files/")], (
+        f"the root must still be read — the raw-file endpoint is on the list: {reads}"
+    )
+    assert project in reads, (
+        "the project read is still attempted — this row is about surviving its "
+        f"refusal, not about avoiding it: {reads}"
+    )
+    statuses = {check["name"]: check["status"] for check in result["capability_checks"]}
+    assert statuses["push-access"] == "unknown", (
+        "the refused project read leaves the access level unreadable rather than "
+        f"zero; zero is what exited 80 before the push: {result['capability_checks']}"
     )
 
 

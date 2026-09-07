@@ -90,6 +90,8 @@ const JOB_TOKEN_PUSH_FIELD: &str = "ci_push_repository_for_job_token_allowed";
 const PUBLISHING_PROJECT_VARIABLE: &str = "CI_PROJECT_PATH";
 /// The allowlist endpoint, named as a `detail` when it cannot be read.
 const ALLOWLIST_ENDPOINT: &str = "job_token_scope/allowlist";
+/// The Projects API, named as a `detail` when the credential cannot read it.
+const PROJECT_ENDPOINT: &str = "projects/:id";
 /// Backoff delays before each replay of a failed commit.
 const COMMIT_RETRY_DELAYS: [Duration; 3] = [Duration::from_secs(3), Duration::from_secs(9), Duration::from_secs(27)];
 
@@ -100,6 +102,27 @@ const COMMIT_RETRY_DELAYS: [Duration; 3] = [Duration::from_secs(3), Duration::fr
 /// encoded — `NON_ALPHANUMERIC` minus the RFC 3986 unreserved marks, which is
 /// stricter than necessary and therefore never wrong.
 const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'~');
+
+/// How many branches one `branch_sha` search may answer with.
+///
+/// ponytail: one page, not a walk. The search is a prefix of a *full* branch
+/// name — `main`, or `indexbot-announce-<ns>-<pkg>` — so more than this many
+/// collisions is not a state the index reaches. If it ever is, the upgrade is
+/// `regex=^…$` with re2 escaping: exact on the server, and no page at all.
+const BRANCH_SEARCH_PER_PAGE: u32 = 100;
+
+/// Whether a merge request was opened from the project it targets.
+///
+/// The id-free spelling of `source_project_id=<this project>`: every entry
+/// carries both ids, so the comparison needs no numeric id of ocx's own. A body
+/// missing either field is **not** a match — announce then proposes its own
+/// request rather than adopting one whose provenance it could not read, which is
+/// the safe direction: the push updates a branch it already owns.
+fn opened_onto_its_own_project(request: &Value) -> bool {
+    let source = request.get("source_project_id").and_then(Value::as_u64);
+    let target = request.get("target_project_id").and_then(Value::as_u64);
+    matches!((source, target), (Some(source), Some(target)) if source == target)
+}
 
 /// Percent-encode one path segment.
 fn encode_segment(value: &str) -> String {
@@ -478,12 +501,45 @@ impl GitLabForge {
     /// `git read-tree` and the right-hand side of a `--force-with-lease`. A
     /// response is forge-controlled input at a trust boundary, and this is the
     /// boundary.
+    ///
+    /// Reads the branch **list**, never `…/branches/<name>`. A CI job token may
+    /// call only the list form — the single-branch endpoint is not on GitLab's
+    /// [job-token endpoint list] and answers 404, which this method would read as
+    /// "no such branch" and the caller as `MissingBaseRef` ([#429]). One path for
+    /// every credential rather than a job-token arm: a posture-conditional read
+    /// is exercised in exactly the rare posture that already shipped broken.
+    ///
+    /// [job-token endpoint list]: https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access
+    /// [#429]: https://github.com/ocx-sh/ocx/issues/429
     async fn branch_sha(&self, repo: &RepoCoordinate, branch: &str) -> Result<Option<String>, ForgeError> {
-        let url = self.project_url(repo, &format!("/repository/branches/{}", encode_segment(branch)));
+        let url = self.project_url(
+            repo,
+            &format!(
+                "/repository/branches?search=%5E{}&per_page={BRANCH_SEARCH_PER_PAGE}",
+                encode_segment(branch)
+            ),
+        );
         let Some(body) = self.get_json_optional(&url).await? else {
             return Ok(None);
         };
-        body.get("commit")
+        // `search=^term` is a PREFIX filter, so the exact name is selected here
+        // rather than by taking `[0]`: `main` and `maintenance` both match `^main`
+        // and GitLab does not promise an order. A `regex=^…$` would be exact on
+        // the server, at the cost of re2-escaping a ref name — and ref names may
+        // carry `.`, `+`, `(`, `|` and `$`.
+        let Some(entry) = body
+            .as_array()
+            .ok_or_else(|| ForgeError::MissingField {
+                url: url.clone(),
+                field: "[]".to_string(),
+            })?
+            .iter()
+            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(branch))
+        else {
+            return Ok(None);
+        };
+        entry
+            .get("commit")
             .and_then(|commit| commit.get("id"))
             .and_then(Value::as_str)
             .filter(|id| is_object_name(id))
@@ -905,8 +961,23 @@ impl GitLabForge {
         // the credential cannot see answers 404 rather than 403 — both mean the
         // same thing to the caller, so both land on the same error.
         let project = self.project(repo).await?;
+        // Except under a CI job token, which cannot call this endpoint at all:
+        // the Projects API is not on GitLab's [job-token endpoint list] and
+        // answers 404, indistinguishable here from a project that is not there
+        // ([#429]). Refusing on it exits 80 before the push, on a run whose push
+        // GitLab would have accepted.
+        //
+        // Nor would the answer be about the right credential: the level read
+        // here belongs to the API half, while the identity that pushes is the
+        // push half, and the split-pair posture makes those genuinely different
+        // tokens. So the row is `unknown`, the push decides, and `git_stderr.rs`
+        // promotes a real refusal on exactly that status.
+        //
+        // [job-token endpoint list]: https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access
+        // [#429]: https://github.com/ocx-sh/ocx/issues/429
+        let unreadable_under_job_token = project.is_none() && self.credentials.api_is_job_token();
         let access = project.as_ref().map_or(0, project_access_level);
-        if access < ACCESS_LEVEL_DEVELOPER {
+        if access < ACCESS_LEVEL_DEVELOPER && !unreadable_under_job_token {
             return Err(ForgeError::PushAccessDenied { repo: repo.full_path() });
         }
         let mut checks = PushAccess::skipped_all();
@@ -917,11 +988,19 @@ impl GitLabForge {
                 Some(format!("git {}", git.version)),
             );
         }
-        checks.record(
-            CapabilityName::PushAccess,
-            CheckStatus::Passed,
-            Some(format!("access level {access}")),
-        );
+        if unreadable_under_job_token {
+            checks.record(
+                CapabilityName::PushAccess,
+                CheckStatus::Unknown,
+                Some(PROJECT_ENDPOINT.to_string()),
+            );
+        } else {
+            checks.record(
+                CapabilityName::PushAccess,
+                CheckStatus::Passed,
+                Some(format!("access level {access}")),
+            );
+        }
         if !self.job_token_push_applies() {
             return Ok(checks);
         }
@@ -1236,15 +1315,31 @@ impl Forge for GitLabForge {
         head: &RepoCoordinate,
         branch: &str,
     ) -> Result<Option<PullRequest>, ForgeError> {
-        let index_id = self.project_id(index).await?;
-        let head_id = self.project_id(head).await?;
-        // A merge request is listed on its TARGET project; `source_project_id`
-        // narrows it to the one opened from this fork, so an unrelated fork
-        // proposing the same deterministic branch name is never adopted.
-        let url = self.project_id_url(
-            index_id,
+        // A merge request is listed on its TARGET project; the source narrows it
+        // to the one opened from this head, so an unrelated fork proposing the
+        // same deterministic branch name is never adopted.
+        //
+        // Which side answers that question depends on whether there is a fork at
+        // all. Off one, `source_project_id` needs the fork's numeric id and the
+        // run is `--transport api` by construction — `--transport git` refuses
+        // `--fork` at parse time and every fork method before its first request.
+        // Onto the index itself the same question is `source == target`, which
+        // every entry answers about itself, so no numeric id is spent: resolving
+        // one costs a `GET /projects/:id`, which is not on GitLab's job-token
+        // endpoint list and answers 404 there ([#429]). The list endpoint is on
+        // that list, and takes a URL-encoded path for `:id`.
+        //
+        // [#429]: https://github.com/ocx-sh/ocx/issues/429
+        let same_project = head.full_path() == index.full_path();
+        let source_filter = if same_project {
+            String::new()
+        } else {
+            format!("&source_project_id={}", self.project_id(head).await?)
+        };
+        let url = self.project_url(
+            index,
             &format!(
-                "/merge_requests?state=opened&source_branch={}&source_project_id={head_id}",
+                "/merge_requests?state=opened&source_branch={}{source_filter}",
                 encode_segment(branch)
             ),
         );
@@ -1253,7 +1348,11 @@ impl Forge for GitLabForge {
             return Err(self.status_error(&url, status, &body));
         }
         let list = Self::parse_json(&url, &body)?;
-        let Some(existing) = list.as_array().and_then(|requests| requests.first()) else {
+        let Some(existing) = list.as_array().and_then(|requests| {
+            requests
+                .iter()
+                .find(|request| !same_project || opened_onto_its_own_project(request))
+        }) else {
             return Ok(None);
         };
         merge_request_from_body(&url, existing, true).map(Some)
@@ -1271,8 +1370,10 @@ impl Forge for GitLabForge {
     /// Returns a [`ForgeError`] on transport failure, a project that is not
     /// visible to the credential, or a non-success status other than 404.
     async fn pull_request_mergeability(&self, index: &RepoCoordinate, number: u64) -> Result<Mergeability, ForgeError> {
-        let index_id = self.project_id(index).await?;
-        let url = self.project_id_url(index_id, &format!("/merge_requests/{number}"));
+        // By encoded path, for the reason `find_open_pull_request` states: the
+        // single-merge-request endpoint is job-token-readable, the numeric id it
+        // used to be addressed by is not.
+        let url = self.project_url(index, &format!("/merge_requests/{number}"));
         let Some(body) = self.get_json_optional(&url).await? else {
             return Ok(Mergeability::Unknown);
         };
@@ -2321,7 +2422,7 @@ mod tests {
         let fake = FakeGitLab::start(|_, _| {
             (
                 200,
-                json!({ "name": "main", "commit": { "id": BRANCH_HEAD } }).to_string(),
+                json!([{ "name": "main", "commit": { "id": BRANCH_HEAD } }]).to_string(),
             )
         })
         .await;
@@ -2386,7 +2487,7 @@ mod tests {
             let fake = FakeGitLab::start(|_, _| {
                 (
                     200,
-                    json!({ "name": "main", "commit": { "id": BRANCH_HEAD } }).to_string(),
+                    json!([{ "name": "main", "commit": { "id": BRANCH_HEAD } }]).to_string(),
                 )
             })
             .await;
@@ -2426,7 +2527,7 @@ mod tests {
         let fake = FakeGitLab::start(|_, _| {
             (
                 200,
-                json!({ "name": "main", "commit": { "id": BRANCH_HEAD } }).to_string(),
+                json!([{ "name": "main", "commit": { "id": BRANCH_HEAD } }]).to_string(),
             )
         })
         .await;
@@ -3723,7 +3824,11 @@ mod tests {
         }
         assert_eq!(
             fake.routes(),
-            vec!["GET /projects/acme%2Findex/repository/branches/indexbot-claim-acme-widget".to_string(); 2],
+            vec![
+                "GET /projects/acme%2Findex/repository/branches?search=%5Eindexbot-claim-acme-widget&per_page=100"
+                    .to_string();
+                2
+            ],
             "the branch read is REST under both transports"
         );
     }
@@ -3742,13 +3847,13 @@ mod tests {
         let env = isolated_env();
         let credentials = job_token_credentials(&env);
         let fake = FakeGitLab::start(|_, target| {
-            if target.ends_with("/repository/branches/main") {
+            if target.contains("/repository/branches?search=%5Emain&") {
                 return (
                     200,
-                    json!({ "name": "main", "commit": { "id": BRANCH_HEAD } }).to_string(),
+                    json!([{ "name": "main", "commit": { "id": BRANCH_HEAD } }]).to_string(),
                 );
             }
-            (404, json!({ "message": "404 Branch Not Found" }).to_string())
+            (200, json!([]).to_string())
         })
         .await;
 
@@ -3823,7 +3928,7 @@ mod tests {
             "5f2c8b9d1e4a7063f8b2c5d9e1a4706358b2c5d",
         ];
         for id in hostile {
-            let body = json!({ "name": "main", "commit": { "id": id } }).to_string();
+            let body = json!([{ "name": "main", "commit": { "id": id } }]).to_string();
             let fake = FakeGitLab::start(move |_, _| (200, body.clone())).await;
             let error = fake
                 .forge(credentials.clone())
@@ -3862,7 +3967,7 @@ mod tests {
             "5f2c8b9d1e4a7063f8b2c5d9e1a4706358b2c5d95f2c8b9d1e4a7063f8b2c5d9",
         ];
         for id in accepted {
-            let body = json!({ "name": "main", "commit": { "id": id } }).to_string();
+            let body = json!([{ "name": "main", "commit": { "id": id } }]).to_string();
             let fake = FakeGitLab::start(move |_, _| (200, body.clone())).await;
             assert_eq!(
                 fake.forge(credentials.clone())
@@ -3873,6 +3978,199 @@ mod tests {
                 "{id} must survive the guard byte for byte"
             );
         }
+    }
+
+    /// The branch read picks the entry it asked for, not the first one back.
+    ///
+    /// `search=^main` is a PREFIX filter, so `maintenance` and `main-old` come
+    /// back with `main` and GitLab promises no order. Taking `[0]` would hand a
+    /// *different branch's* head to `git read-tree` and to the right-hand side
+    /// of a `--force-with-lease` — the two places this value is load-bearing.
+    ///
+    /// The list is deliberately ordered with the wanted entry last: a fixture
+    /// that answered it first would let `[0]` pass.
+    ///
+    /// Reds on: `.first()` instead of the name match; matching on a prefix
+    /// rather than equality.
+    #[tokio::test]
+    async fn a_prefix_search_selects_the_exact_branch_name() {
+        let env = isolated_env();
+        let credentials = job_token_credentials(&env);
+        let fake = FakeGitLab::start(|_, _| {
+            (
+                200,
+                json!([
+                    { "name": "maintenance", "commit": { "id": "1111111111111111111111111111111111111111" } },
+                    { "name": "main-old", "commit": { "id": "2222222222222222222222222222222222222222" } },
+                    { "name": "main", "commit": { "id": BRANCH_HEAD } },
+                ])
+                .to_string(),
+            )
+        })
+        .await;
+
+        assert_eq!(
+            fake.forge(credentials)
+                .get_ref_sha(&index_repo(), "heads/main")
+                .await
+                .expect("the branch read succeeds"),
+            Some(BRANCH_HEAD.to_string()),
+            "the entry whose name IS the branch is the one that answers"
+        );
+    }
+
+    /// A prefix search that matches only neighbours is an absent branch.
+    ///
+    /// The list endpoint answers 200 with entries, so "not found" here is a
+    /// non-empty body containing no exact match — a state the single-branch
+    /// endpoint's 404 could never produce, and the one an `[0]` implementation
+    /// would read as `Some`.
+    #[tokio::test]
+    async fn a_prefix_match_that_is_not_the_branch_is_absent() {
+        let env = isolated_env();
+        let credentials = job_token_credentials(&env);
+        let fake = FakeGitLab::start(|_, _| {
+            (
+                200,
+                json!([{ "name": "main-old", "commit": { "id": BRANCH_HEAD } }]).to_string(),
+            )
+        })
+        .await;
+
+        assert_eq!(
+            fake.forge(credentials)
+                .get_ref_sha(&index_repo(), "heads/main")
+                .await
+                .expect("a non-matching page is an answer, not a failure"),
+            None,
+            "only an exact name is this branch"
+        );
+    }
+
+    /// A job token cannot read `GET /projects/:id`, so the push-access row is
+    /// `unknown` and the run proceeds ([#429]).
+    ///
+    /// The endpoint is not on GitLab's job-token list and answers 404 — the same
+    /// status a project that is not there answers. Collapsing that to access
+    /// level 0 exits 80 before a push GitLab would have accepted, which is the
+    /// whole defect. And the level would be the wrong credential's anyway: it
+    /// describes the API half, while the identity that pushes is the push half.
+    ///
+    /// `JobTokenPush` folds to `unknown` off the same absent body, which is what
+    /// `git_stderr.rs` promotes on — so a push GitLab really does refuse still
+    /// lands as 86 naming the setting.
+    ///
+    /// Reds on: refusing on an unreadable project under a job token; recording
+    /// the row as `passed` (86 would then never be promoted).
+    ///
+    /// [#429]: https://github.com/ocx-sh/ocx/issues/429
+    #[tokio::test]
+    async fn an_unreadable_project_under_a_job_token_is_unknown_not_denied() {
+        let env = isolated_env();
+        env.set("CI_PROJECT_PATH", "acme/index");
+        let credentials = job_token_credentials(&env);
+        let fake = FakeGitLab::start(|_, _| (404, json!({ "message": "404 Project Not Found" }).to_string())).await;
+
+        let checks = fake
+            .git_forge(credentials)
+            .ensure_push_access(&index_repo())
+            .await
+            .expect("an unreadable project under a job token must not refuse the run");
+
+        assert_eq!(
+            checks.status(CapabilityName::PushAccess),
+            CheckStatus::Unknown,
+            "the access level is unreadable, not zero"
+        );
+        assert_eq!(
+            checks.status(CapabilityName::JobTokenPush),
+            CheckStatus::Unknown,
+            "the same absent body cannot answer the job-token-push question either — \
+             and this is the status the push-time promotion keys on"
+        );
+    }
+
+    /// The same 404, under a credential that is not a job token, still refuses.
+    ///
+    /// The regression guard on the row above: a personal access token *can* read
+    /// the Projects API, so a 404 there means the project is not visible to it,
+    /// which is the state exit 80 exists for. Without this the widening is
+    /// indistinguishable from dropping the refusal outright.
+    ///
+    /// Reds on: keying the arm on anything but `api_is_job_token`.
+    #[tokio::test]
+    async fn an_unreadable_project_under_a_personal_token_is_still_denied() {
+        let env = isolated_env();
+        env.remove("CI_JOB_TOKEN");
+        let credentials = ForgeCredentials::new(ForgeToken::new("glpat-notarealpat".to_string()));
+        assert!(!credentials.api_is_job_token(), "the fixture must not be a job token");
+        let fake = FakeGitLab::start(|_, _| (404, json!({ "message": "404 Project Not Found" }).to_string())).await;
+
+        let error = fake
+            .git_forge(credentials)
+            .ensure_push_access(&index_repo())
+            .await
+            .expect_err("a project a personal token cannot see is a refusal");
+        assert!(
+            matches!(error, ForgeError::PushAccessDenied { .. }),
+            "the refusal is the push-access one; got {error:?}"
+        );
+    }
+
+    /// Looking a merge request up spends no `GET /projects/:id`, and still
+    /// refuses one opened from somewhere else ([#429]).
+    ///
+    /// Both halves in one row because they are one decision. The numeric id used
+    /// to come from the Projects API, which a job token cannot call; the guard it
+    /// bought — "not a stranger's request on the same deterministic branch name"
+    /// — is answered by the entry itself, since every merge request carries both
+    /// its source and its target project id.
+    ///
+    /// The fixture answers a foreign request FIRST, so an implementation that
+    /// takes `[0]` adopts it.
+    ///
+    /// Reds on: resolving the project id (a `/projects/` route appears); reading
+    /// `[0]`; dropping the source/target comparison.
+    ///
+    /// [#429]: https://github.com/ocx-sh/ocx/issues/429
+    #[tokio::test]
+    async fn a_merge_request_lookup_spends_no_project_read_and_refuses_a_stranger() {
+        let env = isolated_env();
+        let credentials = job_token_credentials(&env);
+        let fake = FakeGitLab::start(|_, _| {
+            (
+                200,
+                json!([
+                    // A third party's fork, proposing the same branch name onto
+                    // the same index.
+                    { "iid": 3, "web_url": "https://gitlab.example/mr/3",
+                      "source_project_id": 7, "target_project_id": 42 },
+                    { "iid": 4, "web_url": "https://gitlab.example/mr/4",
+                      "source_project_id": 42, "target_project_id": 42 },
+                ])
+                .to_string(),
+            )
+        })
+        .await;
+
+        let found = fake
+            .git_forge(credentials)
+            .find_open_pull_request(&index_repo(), &index_repo(), "indexbot-claim-acme-widget")
+            .await
+            .expect("the list read succeeds")
+            .expect("the index's own request is open");
+        assert_eq!(found.number, 4, "a stranger's request must never be adopted");
+
+        let projects: Vec<String> = fake
+            .routes()
+            .into_iter()
+            .filter(|route| route.ends_with("/projects/acme%2Findex"))
+            .collect();
+        assert_eq!(
+            projects,
+            Vec::<String>::new(),
+            "the Projects API is not readable with a job token, so nothing may need it"
+        );
     }
 
     // ── The one clone, and a later caller that disagrees with it ─────────────
@@ -3965,7 +4263,9 @@ mod tests {
         assert_eq!(
             fake.routes(),
             vec![
-                "GET /projects/acme%2Findex/repository/branches/indexbot-claim-acme%2Fplatform-widget%2Eio".to_string()
+                "GET /projects/acme%2Findex/repository/branches\
+                 ?search=%5Eindexbot-claim-acme%2Fplatform-widget%2Eio&per_page=100"
+                    .to_string()
             ],
             "the branch name must not split into further URL segments"
         );
@@ -4112,8 +4412,11 @@ mod tests {
             if method == "POST" {
                 return (201, json!({ "id": "deadbeef" }).to_string());
             }
-            if target.contains("/repository/branches/") {
-                return (404, json!({ "message": "404 Branch Not Found" }).to_string());
+            if target.contains("/repository/branches?") {
+                // The LIST endpoint: an unmatched search is 200 with an empty
+                // array, never a 404. A 404 here would be the project answering,
+                // not the branch.
+                return (200, json!([]).to_string());
             }
             (200, pushable_project().to_string())
         })
@@ -4158,7 +4461,7 @@ mod tests {
         assert!(
             fake.routes()
                 .iter()
-                .any(|route| route.contains("/repository/branches/")),
+                .any(|route| route.contains("/repository/branches?")),
             "the branch-existence read is the call that decides the fetch refspecs (C-036, DV-6)"
         );
     }
@@ -4187,7 +4490,17 @@ mod tests {
             if target.contains("/merge_requests") {
                 return (
                     200,
-                    json!([{ "iid": 4, "web_url": "https://gitlab.example/mr/4" }]).to_string(),
+                    json!([{
+                        "iid": 4,
+                        "web_url": "https://gitlab.example/mr/4",
+                        // Opened from the index onto the index: the id-free
+                        // spelling of `source_project_id=<this project>`, which
+                        // is what keeps an unrelated fork's request on the same
+                        // branch name from being adopted.
+                        "source_project_id": 42,
+                        "target_project_id": 42,
+                    }])
+                    .to_string(),
                 );
             }
             (200, pushable_project().to_string())
@@ -4223,10 +4536,7 @@ mod tests {
             "C-042: no write of any kind on the unchanged path"
         );
         assert!(
-            !fake
-                .routes()
-                .iter()
-                .any(|route| route.contains("/repository/branches/")),
+            !fake.routes().iter().any(|route| route.contains("/repository/branches")),
             "no clone is opened, so the branch-existence read the clone needs is never issued"
         );
     }
@@ -4298,10 +4608,7 @@ mod tests {
             "a refused run posts no merge request"
         );
         assert!(
-            !fake
-                .routes()
-                .iter()
-                .any(|route| route.contains("/repository/branches/")),
+            !fake.routes().iter().any(|route| route.contains("/repository/branches")),
             "the refusal lands before the clone, so no branch-existence read is spent"
         );
     }
@@ -4309,16 +4616,22 @@ mod tests {
     /// Under `git`, the preflight already performed is the one the push is
     /// classified against — it is not run a second time (DX-35).
     ///
-    /// A request **count** cannot see this: `find_open_pull_request` resolves
-    /// the project id from the same endpoint, so a re-run preflight and an
-    /// ordinary id lookup are the same row in the log. So the fake answers
-    /// `ci_push_repository_for_job_token_allowed` **true on the first project
-    /// read and false afterwards** — a value ocx must never see, because the
-    /// preflight it acts on already happened. Reusing the record therefore ends
-    /// at the clone; re-running it ends at 86.
+    /// The fake answers `ci_push_repository_for_job_token_allowed` **true on the
+    /// first project read and false afterwards** — a value ocx must never see,
+    /// because the preflight it acts on already happened. Reusing the record
+    /// therefore ends at the clone; re-running it ends at 86.
+    ///
+    /// The count is a second, independent witness now that
+    /// `find_open_pull_request` addresses the project by path rather than
+    /// resolving its numeric id ([#429]): the only `GET /projects/:id` this run
+    /// can make is a preflight, so "exactly one" says the record was reused. The
+    /// control is a third `ensure_push_access` against the same fake, which must
+    /// refuse — that is what proves the knob was armed rather than inert.
     ///
     /// Reds on: dropping the `git_run.preflight` record, and on substituting a
     /// fresh `ensure_push_access` for the recorded one in `push_preflight`.
+    ///
+    /// [#429]: https://github.com/ocx-sh/ocx/issues/429
     #[tokio::test]
     async fn the_recorded_preflight_is_reused_by_the_publish_path() {
         let env = isolated_env();
@@ -4335,8 +4648,11 @@ mod tests {
             if target.contains("/merge_requests") {
                 return (200, json!([]).to_string());
             }
-            if target.contains("/repository/branches/") {
-                return (404, json!({ "message": "404 Branch Not Found" }).to_string());
+            if target.contains("/repository/branches?") {
+                // The LIST endpoint: an unmatched search is 200 with an empty
+                // array, never a 404. A 404 here would be the project answering,
+                // not the branch.
+                return (200, json!([]).to_string());
             }
             let first = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
             let mut project = pushable_project();
@@ -4376,9 +4692,21 @@ mod tests {
             ),
             "the recorded preflight must carry the push; a re-read would refuse at 86, got {error:?}"
         );
+        assert_eq!(
+            project_reads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the recorded preflight is reused, so the project is read exactly once"
+        );
+        // The control. Without it the row above is equally green against a fake
+        // whose knob never flips — "the run did not refuse" would then be a
+        // statement about the fixture, not about the record.
+        let refused = forge
+            .ensure_push_access(&index_repo())
+            .await
+            .expect_err("the second project read answers false");
         assert!(
-            project_reads.load(std::sync::atomic::Ordering::SeqCst) > 1,
-            "the control: the project WAS read again for the id lookup, so the knob was live"
+            matches!(refused, ForgeError::WriteCapabilityUnavailable { .. }),
+            "the knob must be live, or reusing the record proves nothing: {refused:?}"
         );
         assert_eq!(
             writes(&fake),
@@ -4400,10 +4728,10 @@ mod tests {
             if target.contains("/repository/compare") {
                 return (200, json!({ "commits": [] }).to_string());
             }
-            if target.contains("/repository/branches/") {
+            if target.contains("/repository/branches?") {
                 return (
                     200,
-                    json!({ "name": "indexbot-claim-acme-widget", "commit": { "id": BRANCH_HEAD } }).to_string(),
+                    json!([{ "name": "indexbot-claim-acme-widget", "commit": { "id": BRANCH_HEAD } }]).to_string(),
                 );
             }
             (200, pushable_project().to_string())
