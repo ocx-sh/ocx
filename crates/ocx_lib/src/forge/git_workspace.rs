@@ -31,7 +31,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 use super::error::is_server_fault;
-use super::git_command::{CredentialInjection, CredentialScope, redact, run_git};
+use super::git_command::{CredentialInjection, CredentialScope, LazyFetch, redact, run_git};
 use super::git_push_options::{escape_newlines, render_push_options};
 use super::git_stderr::{GitInvocation, classify_push_failure, classify_remote_failure};
 use super::poll::{PollSchedule, backoff_delays};
@@ -485,7 +485,14 @@ impl GitWorkspace {
             flags.extend(entries.iter().map(String::as_str));
             self.run_local("update-index", &flags, &[]).await?;
         }
-        let tree = self.run_local("write-tree", &[], &[]).await?;
+        // `--missing-ok` because the fetch is blobless (C-036): every entry here
+        // either came from the server's own base tree or was just written by
+        // `hash-object -w`, so an absent blob is the expected state of this
+        // checkout rather than an inconsistency, and the tree names only objects
+        // the remote already has or the push carries. Without it `write-tree`
+        // verifies each entry exists, and in a partial clone that check *fetches*
+        // — a network dial from a local command that holds no credential.
+        let tree = self.run_local("write-tree", &["--missing-ok"], &[]).await?;
         let new = self.commit_tree(&tree, &parent, message).await?;
         self.move_ref(branch, &new, expected.as_deref()).await?;
         Ok(new)
@@ -601,7 +608,7 @@ impl GitWorkspace {
 
         let argv = self.network_argv("push", &flags, &[self.remote.as_str(), refspec.as_str()]);
         let injection = self.injection();
-        let output = self.spawn(&argv, injection.as_ref()).await?;
+        let output = self.spawn(&argv, injection.as_ref(), LazyFetch::Allow).await?;
         if output.status.success() {
             return Ok(());
         }
@@ -873,7 +880,7 @@ impl GitWorkspace {
         let reference = format!("refs/heads/{branch}");
         let old = expected.unwrap_or(ZERO_OID);
         let argv = Self::local_argv("update-ref", &[], &[&reference, new, old]);
-        let output = self.spawn(&argv, None).await?;
+        let output = self.spawn(&argv, None, LazyFetch::Refuse).await?;
         if output.status.success() {
             return Ok(());
         }
@@ -890,7 +897,7 @@ impl GitWorkspace {
     /// then fails loudly against the object it was handed.
     async fn resolve(&self, revision: &str) -> Result<Option<String>, ForgeError> {
         let argv = Self::local_argv("rev-parse", &["--verify", "--quiet"], &[revision]);
-        let output = self.spawn(&argv, None).await?;
+        let output = self.spawn(&argv, None, LazyFetch::Refuse).await?;
         if !output.status.success() {
             return Ok(None);
         }
@@ -900,14 +907,14 @@ impl GitWorkspace {
     /// Run a local plumbing step, returning its trimmed stdout.
     async fn run_local(&self, command: &str, flags: &[&str], positionals: &[&str]) -> Result<String, ForgeError> {
         let argv = Self::local_argv(command, flags, positionals);
-        self.run(command, &argv, None).await
+        self.run(command, &argv, None, LazyFetch::Refuse).await
     }
 
     /// Run a step that talks to the remote, returning its trimmed stdout.
     async fn run_network(&self, command: &str, flags: &[&str], positionals: &[&str]) -> Result<String, ForgeError> {
         let argv = self.network_argv(command, flags, positionals);
         let injection = self.injection();
-        self.run(command, &argv, injection.as_ref()).await
+        self.run(command, &argv, injection.as_ref(), LazyFetch::Allow).await
     }
 
     async fn run(
@@ -915,8 +922,9 @@ impl GitWorkspace {
         command: &str,
         argv: &[OsString],
         injection: Option<&CredentialInjection<'_>>,
+        lazy_fetch: LazyFetch,
     ) -> Result<String, ForgeError> {
-        let output = self.spawn(argv, injection).await?;
+        let output = self.spawn(argv, injection, lazy_fetch).await?;
         if !output.status.success() {
             return Err(self.command_failed(command, &output));
         }
@@ -933,9 +941,10 @@ impl GitWorkspace {
         &self,
         argv: &[OsString],
         injection: Option<&CredentialInjection<'_>>,
+        lazy_fetch: LazyFetch,
     ) -> Result<std::process::Output, ForgeError> {
         let borrowed: Vec<&OsStr> = argv.iter().map(OsString::as_os_str).collect();
-        run_git(&self.git, self.repository(), injection, &borrowed).await
+        run_git(&self.git, self.repository(), injection, lazy_fetch, &borrowed).await
     }
 
     /// Name a failed non-push invocation.
@@ -1279,7 +1288,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         use super::*;
-        use crate::forge::git_command::{probe_git_binary_at, run_git};
+        use crate::forge::git_command::{LazyFetch, probe_git_binary_at, run_git};
 
         /// The field separator the shim writes between record fields.
         const SEPARATOR: char = '\u{1f}';
@@ -1341,6 +1350,7 @@ mod tests {
             "GIT_AUTHOR_EMAIL",
             "GIT_COMMITTER_NAME",
             "GIT_COMMITTER_EMAIL",
+            "GIT_NO_LAZY_FETCH",
         ];
 
         /// One recorded `git` invocation.
@@ -1445,7 +1455,7 @@ mod tests {
             /// log must hold the workspace's invocations and nothing else.
             pub async fn git(&self, workdir: &Path, args: &[&str]) -> String {
                 let argv: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
-                let output = run_git(&self.real, workdir, None, &argv)
+                let output = run_git(&self.real, workdir, None, LazyFetch::Allow, &argv)
                     .await
                     .unwrap_or_else(|error| panic!("git {args:?} could not run: {error}"));
                 assert!(
@@ -1458,9 +1468,14 @@ mod tests {
 
             /// Run the host's own `git`, reporting success rather than asserting
             /// it — for the one assertion that needs to see a `git` refusal.
+            ///
+            /// `LazyFetch::Refuse` because this is the *observer*: a probe that
+            /// resolves a missing object by fetching it reports every object as
+            /// present, which is the one answer that would make an absence
+            /// assertion green in every state.
             pub async fn try_git(&self, workdir: &Path, args: &[&str]) -> bool {
                 let argv: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
-                run_git(&self.real, workdir, None, &argv)
+                run_git(&self.real, workdir, None, LazyFetch::Refuse, &argv)
                     .await
                     .is_ok_and(|output| output.status.success())
             }
@@ -1976,6 +1991,156 @@ mod tests {
             !subcommands.contains(&"mktree".to_string()),
             "never mktree: {subcommands:?}"
         );
+    }
+
+    /// The commit chain survives a base-tree blob the blobless fetch never
+    /// pulled — the defect behind [#428].
+    ///
+    /// `update-index` invalidates the cache-tree of every directory on the way
+    /// to the root, so `write-tree` rebuilds those trees and re-verifies every
+    /// entry under them, including the ones that came from `read-tree <base>`.
+    /// In a `--filter=blob:none` checkout those blobs are promisor objects the
+    /// clone does not hold, and git resolves a missing object by *fetching* it —
+    /// from a local plumbing command that carries no credential. Against a real
+    /// forge that dial is answered 401 and the classifier reports a rejected
+    /// credential, naming a token that is fine.
+    ///
+    /// The premise is asserted before the behaviour: a base blob that is
+    /// actually present would make the whole row green with the fix reverted.
+    ///
+    /// Reds on: dropping `--missing-ok` (the chain then dies at `write-tree`
+    /// with `could not fetch <sha> from promisor remote`); or allowing the lazy
+    /// fetch on the local lane, which silently resolves the object and makes the
+    /// scenario unobservable — which is exactly why the suite missed it.
+    ///
+    /// [#428]: https://github.com/ocx-sh/ocx/issues/428
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_tree_tolerates_a_base_blob_the_blobless_fetch_never_pulled() {
+        let fixture = Fixture::new().await;
+        let base = fixture.remote_sha("main").await;
+        let workspace = GitWorkspace::open(&fixture.shim, &fixture.remote(), "main", None, None)
+            .await
+            .expect("open");
+
+        // The premise. `rev-parse` names the blob out of the *tree*, which the
+        // filtered fetch did carry; `cat-file -e` is what needs the object
+        // itself, and `try_git` refuses the lazy fetch so its answer is the
+        // clone's real contents rather than the remote's.
+        let seeded = fixture
+            .git(workspace.directory(), &["rev-parse", &format!("{base}:base.json")])
+            .await;
+        assert!(
+            !fixture
+                .try_git(workspace.directory(), &["cat-file", "-e", &seeded])
+                .await,
+            "the blobless fetch must leave {seeded} absent, or this row proves nothing"
+        );
+
+        let coordinate = "acme/index"
+            .parse::<crate::forge::RepoCoordinate>()
+            .expect("a coordinate");
+        workspace
+            .commit_files(
+                "claim",
+                CommitBase {
+                    repo: &coordinate,
+                    sha: &base,
+                    branch: "main",
+                },
+                "claim acme/widget",
+                &claim_files(),
+                RefUpdate::FastForward,
+            )
+            .await
+            .expect("the commit chain must not need a blob the base tree already has");
+
+        let write_tree = fixture
+            .invocations()
+            .into_iter()
+            .find(|invocation| invocation.subcommand() == "write-tree")
+            .expect("the chain runs write-tree");
+        assert!(
+            write_tree.carries("--missing-ok"),
+            "write-tree must tolerate the promisor objects: {:?}",
+            write_tree.args
+        );
+    }
+
+    /// `GIT_NO_LAZY_FETCH` rides every local invocation and no network one.
+    ///
+    /// The local half is the guard [#428] asks for: a plumbing command that
+    /// resolves a missing object over the network turns a local failure into a
+    /// transport one, and `git_stderr.rs` then reports an auth error for a
+    /// credential that was never offered. With the fetch refused, the same state
+    /// fails as `invalid object` in the command that needed it.
+    ///
+    /// The network half is why this cannot be a [`table::SET`] row: `fetch` and
+    /// `push` generate packs against the promisor remote and legitimately depend
+    /// on the behaviour it removes.
+    ///
+    /// Reds on: moving the name into `SET` (the two network invocations then
+    /// carry it); deriving the lane from `injection.is_some()` (precedence rung
+    /// three fetches with no injection and would be mislabelled local).
+    ///
+    /// [#428]: https://github.com/ocx-sh/ocx/issues/428
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn no_lazy_fetch_rides_the_local_invocations_only() {
+        let fixture = Fixture::new().await;
+        let base = fixture.remote_sha("main").await;
+        let credential = credential();
+        let workspace = GitWorkspace::open(&fixture.shim, &fixture.remote(), "main", None, Some(&credential))
+            .await
+            .expect("open");
+        let coordinate = "acme/index"
+            .parse::<crate::forge::RepoCoordinate>()
+            .expect("a coordinate");
+        workspace
+            .commit_files(
+                "claim",
+                CommitBase {
+                    repo: &coordinate,
+                    sha: &base,
+                    branch: "main",
+                },
+                "claim acme/widget",
+                &claim_files(),
+                RefUpdate::FastForward,
+            )
+            .await
+            .expect("the commit chain");
+
+        let invocations = fixture.invocations();
+        let mut locals = 0;
+        let mut networks = 0;
+        for invocation in &invocations {
+            let refused = invocation.env.get("GIT_NO_LAZY_FETCH").map(String::as_str) == Some("1");
+            if matches!(invocation.subcommand(), "fetch" | "push") {
+                networks += 1;
+                assert!(
+                    !refused,
+                    "{} generates a pack against the promisor remote: {:?}",
+                    invocation.subcommand(),
+                    invocation.args
+                );
+            } else {
+                locals += 1;
+                assert!(
+                    refused,
+                    "{} is local and must not dial out: {:?}",
+                    invocation.subcommand(),
+                    invocation.args
+                );
+            }
+        }
+        // Without these the walk is green over an empty list, which is the state
+        // a recording shim that stopped reporting the name would also be in.
+        assert!(
+            networks > 0,
+            "the run must contain a network invocation: {invocations:?}"
+        );
+        assert!(locals > 0, "the run must contain a local invocation: {invocations:?}");
     }
 
     /// A branch that does not exist yet is created by an `update-ref` whose

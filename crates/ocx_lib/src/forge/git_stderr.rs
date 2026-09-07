@@ -370,6 +370,13 @@ const CREDENTIAL_REJECTED_DETAIL: &str = ": the git remote rejected the credenti
 /// `rev-parse` and `rev-list` speak to no server — so a caller reading a
 /// non-push invocation's stderr does not have to know which of them touched the
 /// network to use this safely.
+///
+/// **True once `git_command`'s `GIT_NO_LAZY_FETCH` refusal is in effect, and
+/// best-effort below the git version that honours it** (see that constant's
+/// doc for the floor). Below it, `write-tree` can still resolve a missing
+/// promisor blob by fetching it — the one member of this list that reaches the
+/// network anyway — and the fetch is credential-less, so it fails as a rejected
+/// credential rather than as a network error.
 #[must_use]
 pub fn credential_rejection_status(stderr: &Redacted, invocation: GitInvocation) -> Option<u16> {
     CREDENTIAL_REJECTIONS
