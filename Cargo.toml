@@ -39,11 +39,11 @@ strip = "symbols"
 # Size-tuned profile for the committed Windows shim blob (crates/ocx_shim,
 # issue #66). A dedicated profile (not a per-crate `release` override, which
 # Cargo does not support) keeps every other crate's `release`/`dist` build
-# untouched. Build the blob with:
-#   cargo xwin build -p ocx_shim --profile shim --target x86_64-pc-windows-msvc
-#   cargo xwin build -p ocx_shim --profile shim --target aarch64-pc-windows-msvc
-# then commit the stripped bytes + record the SHA-256 (see crates/ocx_lib/
-# src/shim.rs refresh-PR comment).
+# untouched. The refresh flow (build both gnullvm arches through
+# `task rust:shim:build`, commit the stripped bytes, re-record the SHA-256) is
+# documented once, in crates/ocx_lib/src/shim.rs § "Blob refresh-PR flow" — do
+# not restate the commands here; the copy that lived here went stale against
+# cargo-xwin/msvc and outlived the toolchain it named.
 [profile.shim]
 inherits = "release"
 opt-level = "z"
@@ -235,9 +235,20 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
+    # SetEnvironmentVariableW — the shim deletes OCX_GLOBAL / OCX_PROJECT from
+    # its own block before spawning, which is how they are stripped from the
+    # child (CreateProcessW runs with lpEnvironment = NULL). Already in the
+    # pinned 0.61.2; no new crate.
+    "Win32_System_Environment",
     "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
+    # WP-11's session-PATH registration: `HKCU\Environment\Path` is written as
+    # REG_EXPAND_SZ through Win32_System_Registry, then announced with a
+    # `WM_SETTINGCHANGE` broadcast (`SendMessageTimeoutW`) from
+    # Win32_UI_WindowsAndMessaging. Both in the pinned 0.61.2; no new crate.
+    "Win32_System_Registry",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
     "Win32_Security",
 ] }
 

@@ -523,3 +523,53 @@ fn unknown_schema_kind_returns_none() {
         "empty schema kind must return None"
     );
 }
+
+/// C-020 — the `config.toml` schema publishes `toolchain-dir` as a root-level
+/// key, spelled in **kebab-case**, as an optional string.
+///
+/// The generated file is gitignored (`website/.gitignore`), regenerated on
+/// every build, so a stale committed copy cannot drift and no diff gate can
+/// catch one. This test is C-020's only durable check: drop the
+/// `#[serde(rename = "toolchain-dir")]` on `Config::toolchain_dir` and the
+/// published key silently becomes `toolchain_dir`, which every editor bound to
+/// the schema then flags on a file `ocx` itself accepts.
+///
+/// The `toolchain_dir` half is not decoration: asserting only that
+/// `toolchain-dir` is absent-or-present would pass on a schema publishing both
+/// spellings, and the snake_case one is what a dropped rename emits.
+#[test]
+fn config_schema_publishes_the_toolchain_dir_root_key_in_kebab_case() {
+    let schema = parse("config");
+    let properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .expect("config schema must have a top-level `properties` object");
+
+    let toolchain_dir = properties.get("toolchain-dir").unwrap_or_else(|| {
+        panic!(
+            "config schema must publish the root-level `toolchain-dir` key (C-016); got {:?}",
+            properties.keys().collect::<Vec<_>>()
+        )
+    });
+    assert!(
+        !properties.contains_key("toolchain_dir"),
+        "the published key is kebab-case only — a snake_case twin means the `#[serde(rename)]` was dropped"
+    );
+
+    let types: Vec<&str> = toolchain_dir
+        .get("type")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_else(|| {
+            toolchain_dir
+                .get("type")
+                .and_then(Value::as_str)
+                .map(|single| vec![single])
+                .unwrap_or_default()
+        });
+    assert_eq!(
+        types,
+        vec!["string", "null"],
+        "`toolchain-dir` is an optional path scalar, so the schema admits a string or null; got {toolchain_dir}"
+    );
+}

@@ -264,6 +264,14 @@ jobs:
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
       - name: Run Acceptance Tests
         shell: bash
+        # `ubuntu-latest` ships systemd, so its `environment.d` generator is
+        # present and a skip in `test_session_path.py` would mean the binary
+        # moved — not that the host lacks it. The `environment.d` prepend has
+        # open upstream reports of not landing for PATH (systemd/systemd#40430),
+        # so this is the one leg where "skipped" and "passed" must not read the
+        # same. Fails closed: any value but empty or `0` arms the gate.
+        env:
+          __OCX_TESTING_REQUIRE_ENVIRONMENT_D: "1"
         run: task test -- --junit-xml=results/junit.xml
       - name: Stop Registry
         if: ${{ always() }}

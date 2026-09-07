@@ -117,6 +117,9 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 @pytest.fixture(scope="session")
 def registry() -> str:
+    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
+        pytest.skip("OCX_TESTS_NO_REGISTRY=1: registry not started")
+
     addr = os.environ.get("REGISTRY", _DEFAULT_REGISTRY)
     start_registry(addr)
     return addr
@@ -209,12 +212,29 @@ def legacy_registry() -> str:
 
 @pytest.fixture(scope="session")
 def ocx_binary() -> Path:
+    """The `ocx` under test.
+
+    Registry-independent opt-out (``OCX_TESTS_NO_REGISTRY=1``): the runner that
+    sets it — ``build-windows-shims.yml``'s ``acceptance-windows`` job — builds
+    only ``ocx_shim`` and starts no registry, so an ``ocx`` is neither present
+    nor useful there (every test reaching this fixture also depends on
+    ``registry``, which skips under the same flag). Both halves are *observed*
+    before the skip: the flag is set and the binary is genuinely absent. On any
+    runner that does build one, a missing binary stays a hard failure — a
+    silent skip of the whole acceptance suite is the false green this guard
+    must not create.
+    """
     if env_path := os.environ.get("OCX_COMMAND"):
         p = Path(env_path)
     else:
         p = PROJECT_ROOT / "test" / "bin" / "ocx"
         if sys.platform == "win32" and not p.suffix:
             p = p.with_suffix(".exe")
+    if not p.exists() and os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
+        pytest.skip(
+            f"OCX_TESTS_NO_REGISTRY=1 and no ocx binary at {p}: this runner "
+            "builds ocx_shim only (see build-windows-shims.yml)"
+        )
     assert p.exists(), f"ocx binary not found at {p}"
     return p
 

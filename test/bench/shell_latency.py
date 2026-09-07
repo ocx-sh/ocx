@@ -284,6 +284,90 @@ runner lands worse than 4.614 ms the same re-derivation applies again — as it
 does in the other direction if a further optimisation drops the figure far
 enough to red the band for being too loose.
 
+The `bin`-mode row, and what it is allowed to be fast for (D-V5)
+----------------------------------------------------------------
+Everything above measures a project whose `activate` is `env`: the prompt
+composes two tiers and emits variables. `activate = "bin"` (C-012) takes a
+different path through the same command — read the render stamp, recompute the
+`bin/` fingerprint, heal the default group's links, emit **one directory** and
+zero variables (C-061, C-062, S-001). Not a cheaper path, a different-shaped
+one: a directory read, N body hashes and N `readlink`s land on the one code path
+every prompt takes, and the 10 ms ceiling has about 2.4 ms of headroom over the
+worst observation on a GitHub runner. So it is measured, against the **same**
+:data:`RECONCILE_BUDGET_MS` ceiling: how long a prompt may take is a product
+answer, and which mode the project picked is not the user's problem. The
+marginal `bin - env` figure is recorded and never asserted — it is a difference
+of two arenas' deltas, so its noise is the sum of both, and the total is already
+bounded.
+
+The row needs its own arena, and the arena is where the vacuity lives.
+`bin` mode contributes **nothing** unless a render stamp exists, names this home
+*and* this project, and matches the `bin/` on disk — five conditions, every one
+of which fails to a silent `None` plus a hint, never an error (C-061, C-064).
+An arena that trips any of them runs a stamp read and an early return: fast,
+green, and about nothing. That is the same defect this file already met three
+times over (a tool-free lock, unmaterialized packages, a missing global tier),
+and it has the same tell — the missing work makes the number *smaller*. Hence
+:func:`_bin_arena_gates`, two assertions that no wall-clock number here can
+make:
+
+* the arena's `bin/` holds trampolines, counted by the marker the binary itself
+  reads (:func:`count_trampolines`), against a floor constant and never against
+  the arena's own tool count;
+* the **first fire** actually emits that directory, matched by the project
+  home's resolved absolute path — never by the substring `toolchain/bin`, which
+  `shell_matrix.SESSION_BIN_DIRS` already carries for the *global* session
+  directory that every prompt emits in every mode.
+
+The stamp is produced by the real renderer, through `ocx --offline lock`
+(D-V8, C-054), and is deliberately **not** hand-written: a forged stamp that
+happened to match would make the row a measurement of this file's idea of a
+fingerprint, and would hide the one state the stamp exists to catch.
+
+Validation item 37 — trampoline re-entry
+-----------------------------------------
+The ADR asks for the ocx-side cost of a trampoline invocation against a direct
+``ocx exec -- <tool>`` and against the package binary run by absolute path, with
+a **red control**: a no-op binary invoked directly, so that a green is
+distinguishable from a measurement that never ran. :func:`measure_reentry` runs
+all four as interleaved min-of-N series and :func:`_reentry_gates` holds both
+ends — the control must read ~zero on two spawns of the *same* payload, and the
+trampoline must cost measurably more than that payload. The overhead itself is
+**recorded**, against :data:`REENTRY_OWNER_TRIGGER_MS`: the NFR row accepts the
+cost and asks for an escalation on measurement, and the escalation is a decision
+to file an issue, which no exit code can take.
+
+This is also the only row here that ever observes C-069's per-resolution cost —
+one `stat` and one bounded read per candidate on every bare-name resolution
+(R-W15). :data:`RECONCILE_BUDGET_MS` gates a command that never calls
+`resolve_command`, and the `bin` row above does not see it either: the
+reconciler puts a *directory* on `PATH` and resolves nothing. Reporting either
+of those numbers as the cost of C-069 answers a question nobody asked.
+
+**All four series run the shipped environment, and the network is taken away
+from them rather than flagged out of them.** Until 2026-09-06 they ran with
+``OCX_OFFLINE`` forced, which was the defect: the shipped trampoline body passes
+no ``--offline``, so the gate pinned a budget against a path no trampoline
+takes. The flag removed more than the network — measured on the release binary
+at 4581c075 with egress blocked, ``ocx status`` cost 44.0 ms (min of 80) in the
+shipped shape against 11.4 ms with ``--offline``, and all 33 ms of that gap was
+local: two ``reqwest``/rustls client builds, each parsing the ~150 bundled CA
+roots, constructed by ``Context::try_init`` on every non-offline invocation.
+Against the same harness the trampoline overhead read **8.069 ms with the flag
+and 56.524 ms without it**, so the certified number described a path costing
+seven times what it claimed.
+
+Both client builds are now deferred to first use (``oci::Client::transport``,
+``ReqwestIndexTransport::client``), and :class:`_EgressTrap` takes the network
+instead — every proxy variable pointed at a counting dead loopback socket. That
+answers this paragraph's original and still-correct worry ("a bench that dials
+the public internet is a bench whose green can come from a network") without
+also answering a question nobody asked. The trap is asserted in **both**
+directions: a control that must dial has to be blocked *and* has to show up on
+its counter, and the four timed series then have to leave that counter at zero —
+so "the shipped trampoline shape makes no outbound request" is a check with a
+reachable red rather than a belief. See :func:`measure_reentry`.
+
 Cold and warm
 -------------
 ``HostCapabilities`` persists its per-host answer at
@@ -341,15 +425,17 @@ import platform
 import re
 import shlex
 import shutil
+import socketserver
 import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 # ---------------------------------------------------------------------------
 # Path bootstrap — allow `python bench/shell_latency.py` from test/
@@ -597,6 +683,127 @@ INJECT_ENV = "__OCX_TESTING_LATENCY_INJECT_MS"
 #: what makes a sample cold — see "Cold and warm" in the module docstring.
 CAPABILITY_RECORD = Path("state") / "host" / "capabilities.json"
 
+#: The owner's escalation threshold for validation item 37, in ms
+#: (`adr_toolchain_activation.md`, § *Deferred* + the NFR row *Latency —
+#: trampoline exec*, 2026-09-05): **above 10 ms of ocx-side re-entry overhead
+#: the composed-env-cache follow-up issue is filed**.
+#:
+#: **Asserted since [#423](https://github.com/ocx-sh/ocx/issues/423) was
+#: answered.** It was recorded-and-reported while the NFR row still read
+#: "Unmeasured; accepted, escalate on measurement" — a gate then would have
+#: redded the build for a state the ADR accepted. The measurement has since been
+#: taken and answered: [#424](https://github.com/ocx-sh/ocx/issues/424) brought
+#: the overhead from a 10.046 ms median (8.529-14.290 ms over eight
+#: observations) to an 8.069 ms median (7.800-8.569 ms over eight), and #423 was
+#: closed without the composed-env cache because the budget is met without one.
+#: What is left to protect is the *budget*, not the mechanism that meets it —
+#: which is the better thing to pin, since it stays true whether a store probe
+#: or a cache meets it later.
+#:
+#: **⚠ Every number in the paragraph above was measured on the OFFLINE shape**,
+#: which the module docstring now records as the defect this file carried: the
+#: 8.069 ms median #423 was closed on describes `ocx exec` with `OCX_OFFLINE`
+#: forced, and the trampoline that ships passes no such flag. Against the same
+#: harness with the flag removed, the binary those observations were taken from
+#: measures **56.524 ms**. The paragraph is kept rather than rewritten because
+#: the store probe it names is still load-bearing — what is wrong is the scale,
+#: not the mechanism.
+#:
+#: **Why the number moved, and what must not be "optimised" away.** With the
+#: flag, the ~175 ms per-invocation index dial #424 removed was never in this
+#: number. What was in it: `resolve_top_manifest`'s blob read and JSON parse
+#: plus a `refs/blobs` upsert, per tool, per invocation. `PackageManager::find`
+#: now answers a digest-addressed identifier that is already in the store from
+#: path arithmetic alone, skipping the whole resolve — that store probe is
+#: load-bearing for this budget, not a latency nicety.
+#:
+#: **What the shipped shape costs, and why this constant did not move.** Two
+#: eager `reqwest`/rustls client builds — the OCI registry client and one
+#: `OcxIndex` source per index-bearing namespace, each parsing the ~150 bundled
+#: CA roots in `Context::try_init` — were most of the gap the flag was hiding.
+#: Both are now built on first request (`oci::Client::transport`,
+#: `ReqwestIndexTransport::client`), and **the budget is met on the shape that
+#: ships**: 8.604 / 9.261 / 9.442 ms over three consecutive runs on a quiet box
+#: (bare-exec floor scatter 2.473 / 0.751 / 2.073 ms, so the middle run's
+#: verdict is admissible and green rather than abstaining). Under contention —
+#: six parallel builds on the same host — the same harness read 10.262 ms and
+#: then 16.9-18.7 ms, and the gate abstained exactly where it should.
+#:
+#: The ceiling therefore stays at 10.0, unmoved: it was never raised to
+#: accommodate the shipped shape, the shipped shape came in under it. ~14%
+#: headroom on the best observation, against ~19% for the offline shape it
+#: replaces — a real but small loss of margin, on a number that now describes
+#: what a trampoline actually costs.
+#:
+#: **Margin, and what happens on a slower runner.** A runner slower than this
+#: box does not flake the gate: :func:`_budget_gate` rule 3 abstains
+#: (INCONCLUSIVE, not FAIL) whenever the bare-exec floor scattered wider than
+#: the margin, which is the same protection every other budget here relies on
+#: rather than a second, CI-specific ceiling. That is deliberate — a flaky
+#: latency gate gets disabled by the next person who hits it, and then the
+#: budget is unguarded while looking guarded.
+REENTRY_OWNER_TRIGGER_MS = 10.0
+
+#: The band the item-37 **red control** has to land in. Two identical spawns of
+#: the same no-op payload, min-of-N each, subtracted: the instrument reports the
+#: overhead of nothing, so anything much above zero means the two series are not
+#: measuring the same thing.
+#:
+#: 1 ms, from the same-work measurements :data:`STARTUP_WORK_FLOOR_MS` records
+#: (min Δ −0.132 … +0.142 ms over eight reps of a command against itself) —
+#: ~7x the worst of them, and ~10x under the 10.6 ms overhead the real
+#: comparison measures on this box, so the control separates the two states by an
+#: order of magnitude on each side. It abstains rather than reds on a runner
+#: whose bare-exec floor scattered wider than the miss, like every other budget
+#: here.
+REENTRY_CONTROL_BUDGET_MS = 1.0
+
+#: The identifier item 37's egress control asks :program:`ocx index update` to
+#: refresh, purely so the attempt has to leave the machine.
+#:
+#: Fully qualified against `ocx.sh` on purpose: that namespace carries an
+#: `index` field in the compiled-in defaults tier, so the refresh routes through
+#: `index.ocx.sh` and cannot be answered from a local index copy the arena does
+#: not have. The package deliberately does not exist — the control asserts the
+#: dial was *attempted and blocked*, never that it succeeded, so a name nobody
+#: will ever publish is the right one and no fixture has to be kept alive for it.
+_EGRESS_CONTROL_PACKAGE = "ocx.sh/latency-egress-control"
+
+#: The item-37 **positive** control's floor: how much more than its own payload a
+#: trampoline invocation must cost for the pair to be measuring different things.
+#:
+#: Not a measured band, unlike :data:`STARTUP_WORK_FLOOR_MS`, and it is not
+#: pretending to be: a trampoline `exec`s a whole ocx that loads two config
+#: files and composes two tiers, so the question this floor answers is "did an
+#: ocx run at all", not "how big is the difference". The payload is a 0.7 ms
+#: `/bin/sh` no-op and the trampoline measured 8.5-14.3 ms across five runs, so
+#: any value between the two answers it; 4 ms is where it sits and **the reason
+#: is the classifier, not the gap**.
+#:
+#: It was 1 ms, and the mutation that collapses the trampoline comparand onto its
+#: payload then produced an **abstention** rather than a red: at a 0.069 ms
+#: observation the miss is 0.931 ms, and this box's bare-exec floor scattered
+#: 2.390 ms in that run, so :func:`_budget_gate` rule 3 correctly declined to
+#: decide. A lower bound is missed *downwards*, so its margin is `budget -
+#: observed` — the budget IS the margin here — and a budget under the runner's
+#: own scatter is a gate that can never red on that runner. 4 ms clears the
+#: 0.35-2.97 ms scatters observed across this file's whole measured history, and
+#: still sits at half the smallest real overhead ever seen, so a genuine
+#: halving of the trampoline's cost would report a red rather than a silence —
+#: which is the right way round for a control.
+REENTRY_WORK_FLOOR_MS = 4.0
+
+#: The second line of every rendered POSIX trampoline
+#: (`crates/ocx_lib/src/env.rs` — `TRAMPOLINE_MARKER`), mirrored so
+#: :func:`count_trampolines` can tell a trampoline from any other file that
+#: happens to sit in a `bin/`.
+#:
+#: A mirrored constant that drifts **fails closed**: a rename in the Rust
+#: constant makes the count zero, and the non-vacuity gate below reds. The
+#: opposite arrangement — counting directory entries — would keep passing while
+#: the renderer wrote something else entirely.
+TRAMPOLINE_MARKER = "# ocx-toolchain-trampoline"
+
 #: The two `--expect-fail-gate` substrings `test/taskfile.yml` passes. Held here
 #: so :func:`self_check` can prove each one matches its own gate and *only* its
 #: own gate: a gate rename then reds the self-check, which runs before any
@@ -604,6 +811,14 @@ CAPABILITY_RECORD = Path("state") / "host" / "capabilities.json"
 #: from the other side — an unmatched needle exits 1.
 STARTUP_GATE_NEEDLE = "shell startup <="
 RECONCILE_GATE_NEEDLE = "per-prompt reconcile"
+
+#: The third needle, for the `bin`-mode row (D-V5). Deliberately shares no
+#: substring with :data:`RECONCILE_GATE_NEEDLE`: `unmatched_gate_needles` matches
+#: by substring, so a `bin` gate named `"per-prompt reconcile in bin mode"` would
+#: be satisfied by — and would satisfy — the `env`-mode needle, and one red would
+#: certify both. :func:`self_check` asserts each of the three matches its own gate
+#: and only its own.
+RECONCILE_BIN_GATE_NEEDLE = "bin-mode prompt reconcile"
 
 
 # ---------------------------------------------------------------------------
@@ -949,6 +1164,147 @@ def _composition_gates(streams: Mapping[str, float]) -> list[Gate]:
     ]
 
 
+def _bin_arena_gates(bin_arena: Mapping[str, float]) -> list[Gate]:
+    """The `bin`-mode arena's non-vacuity, as a pair (D-V5, plan step 5.2).
+
+    Same shape and same reason as :func:`_composition_gates`, one *mode* over.
+    A `bin`-mode reconcile does no composition at all — C-061 is a stamp read, a
+    `bin/` fingerprint and a link heal, and its whole product is **one directory
+    on PATH**. So none of the gates above can see whether this arena's `bin` row
+    measured anything: an arena whose `bin/` is empty and whose project entry is
+    withheld runs the *cheapest* possible path, and the wall clock reports a
+    flattering number that passes. Third time this file has met that shape (a
+    tool-free lock, an unmaterialized package set, a missing global tier) and,
+    like both of those, the symptom is a **smaller** number.
+
+    Two gates, because neither implies the other:
+
+    1. **`bin/` holds trampolines.** Against :data:`WALL_MIN_TRAMPOLINES`, a
+       property — never :data:`WALL_PROJECT_TOOLS`, the arena's own sizing knob,
+       which a gate cannot both set and check. Counted by the marker on line two
+       (:func:`count_trampolines`), not by directory entries, so a renderer that
+       wrote something else into `bin/` reds instead of counting its output.
+    2. **The first fire actually puts that directory on `PATH`.** Gate 1 says the
+       *render* worked; it says nothing about the **prompt**, which withholds the
+       entry on any of five independent conditions (no stamp, a stamp naming
+       another home, a stamp naming another project, a `bin/` fingerprint
+       mismatch, a home ocx may not own) — every one of which is a silent `None`
+       and a hint, never an error (C-061, C-064). Under any of them the timed
+       command is a stamp read and an early return.
+
+    Gate 2 is asserted by the project home's **resolved absolute path**, read
+    back from `ocx shell state`, and never by the substring `toolchain/bin`:
+    `shell_matrix.SESSION_BIN_DIRS` already carries `"toolchain/bin"` as the
+    *global* session entry under `$OCX_HOME` (C-059), which every prompt emits in
+    every mode — so a substring assertion is satisfied with `bin` mode entirely
+    dead. Identity, not spelling.
+    """
+    trampolines = bin_arena.get("trampolines", 0.0)
+    applied = bin_arena.get("project_bin_applied", 0.0)
+    return [
+        Gate(
+            name="the timed bin arena renders trampolines",
+            observed=trampolines,
+            budget=float(WALL_MIN_TRAMPOLINES),
+            passed=trampolines >= WALL_MIN_TRAMPOLINES,
+            unit="tramps",
+            note=""
+            if trampolines >= WALL_MIN_TRAMPOLINES
+            else (
+                f"the arena's `bin/` holds {trampolines:.0f} trampoline(s), under the "
+                f"{WALL_MIN_TRAMPOLINES} it takes for the per-name fingerprint loop to be a loop at "
+                "all — the delta below is a stamp read over an empty directory"
+            ),
+        ),
+        Gate(
+            name="the first bin-mode fire puts the project's toolchain bin on PATH",
+            observed=applied,
+            budget=1.0,
+            passed=applied >= 1.0,
+            unit="entries",
+            note=""
+            if applied >= 1.0
+            else (
+                "the first fire emitted no apply line for the project's own toolchain `bin/`, so "
+                "C-061 withheld the entry (no stamp, an identity mismatch, a fingerprint mismatch, or "
+                "an unownable home) — the timed command returned before doing any `bin`-mode work"
+            ),
+        ),
+    ]
+
+
+def _reentry_gates(reentry: Mapping[str, float], spread: float) -> list[Gate]:
+    """Validation item 37's two controls — the instrument, in both colours.
+
+    Item 37 measures the **ocx-side** cost of a trampoline invocation against a
+    direct `ocx exec` and against the payload run by absolute path, and the ADR
+    attaches one obligation to the measurement itself: *"Red control for the
+    harness itself: measure a no-op binary invoked directly and confirm the
+    instrument reports near zero, so a green is distinguishable from a
+    measurement that never ran."*
+
+    That is one half. The control alone is satisfied by an instrument that
+    reports near zero for **everything** — which is exactly what a harness whose
+    "trampoline" comparand silently degraded to the payload would do, and it is
+    the state that would report "no overhead, no follow-up issue" for a
+    trampoline path nobody measured. So the pair:
+
+    * the **negative** control (`control_delta_ms`): the same payload spawned as
+      two independent interleaved series, subtracted. Near zero, held to
+      :data:`REENTRY_CONTROL_BUDGET_MS`.
+    * the **positive** control (`trampoline_overhead_ms`): the trampoline must
+      cost at least :data:`REENTRY_WORK_FLOOR_MS` more than that same payload —
+      a whole ocx process, two config loads and two composed tiers cannot be
+      free.
+
+    The **number** item 37 exists to produce — the overhead against the owner's
+    :data:`REENTRY_OWNER_TRIGGER_MS` trigger — is the third gate, and is
+    asserted since #423 was answered without a cache: see that constant for what
+    changed and why the budget rather than the mechanism is what gets pinned.
+    """
+    control = reentry.get("control_delta_ms", 0.0)
+    overhead = reentry.get("trampoline_overhead_ms", 0.0)
+    return [
+        _budget_gate(
+            name="the re-entry instrument reads ~zero on two identical payload spawns",
+            observed=abs(control),
+            budget=REENTRY_CONTROL_BUDGET_MS,
+            spread=spread,
+            breach=(
+                f"item 37's red control: two interleaved series of the SAME no-op payload differ by "
+                f"{control:+.3f} ms, so the instrument does not read zero on identical work and the "
+                "overhead it reports beside this is not attributable to the trampoline"
+            ),
+        ),
+        _budget_gate(
+            name="a trampoline costs measurably more than its own payload",
+            observed=overhead,
+            budget=REENTRY_WORK_FLOOR_MS,
+            spread=spread,
+            bound="lower",
+            breach=(
+                f"the trampoline measured {overhead:.3f} ms over its payload, under the "
+                f"{REENTRY_WORK_FLOOR_MS:.3f} ms a whole ocx process costs — the two comparands are "
+                "running the same thing, so the reported overhead is a measurement of nothing"
+            ),
+        ),
+        _budget_gate(
+            name="trampoline re-entry stays under the owner's composed-env-cache trigger",
+            observed=overhead,
+            budget=REENTRY_OWNER_TRIGGER_MS,
+            spread=spread,
+            breach=(
+                f"trampoline re-entry cost {overhead:.3f} ms, over the "
+                f"{REENTRY_OWNER_TRIGGER_MS:.3f} ms owner trigger. Two things hold this number down and "
+                "either one regressing shows up here: `PackageManager::find` answering an "
+                "already-stored digest without resolving (#424), and `oci::Client` / `OcxIndex` "
+                "building their HTTP clients on first request rather than in `Context::try_init` — "
+                "the eager pair cost ~46 ms per invocation"
+            ),
+        ),
+    ]
+
+
 def _consent_gates(consent: Mapping[str, float]) -> list[Gate]:
     """The arena's own non-vacuity, as a pair — same shape and same reason as
     :func:`_fixed_point_gates`.
@@ -1038,10 +1394,13 @@ def evaluate(
     floor_samples: Sequence[float],
     startup_samples: Sequence[float],
     reconcile_samples: Sequence[float],
+    reconcile_bin_samples: Sequence[float],
     cold_reconcile_samples: Sequence[float],
     exec_counts: Mapping[str, int],
     streams: Mapping[str, float],
     consent: Mapping[str, float],
+    bin_arena: Mapping[str, float],
+    reentry: Mapping[str, float],
     capability_record: bool,
     budget_ms: float = DELTA_BUDGET_MS,
     reconcile_budget_ms: float = RECONCILE_BUDGET_MS,
@@ -1070,11 +1429,23 @@ def evaluate(
         :func:`measure_reconcile_streams`' mapping. ``ms_per_apply`` is recorded
         only; ``first_applies`` / ``steady_applies`` are gated — they are the
         reconciler's fixed point (ocx-sh/ocx#342).
+    reconcile_bin_samples:
+        The same command, one process spawn per sample, in the **`bin`-mode**
+        arena (D-V5). Held to the same :data:`RECONCILE_BUDGET_MS` product
+        ceiling as ``reconcile_samples``: 10 ms is how long a prompt may take,
+        and which activation mode the project chose is not the user's problem.
     consent:
         :func:`measure_clause_two`' mapping. Gated: it is what makes the timed
         reconcile's per-tool consent work non-vacuous, and a wall-clock number
         measured over a lock the store cannot corroborate is a number about a
         one-iteration loop.
+    bin_arena:
+        :func:`measure_bin_arena`' mapping. Gated, and it is what stops the
+        ``bin`` row measuring an empty directory — see :func:`_bin_arena_gates`.
+    reentry:
+        :func:`measure_reentry`' mapping (validation item 37). Its two controls
+        are gated; the overhead number itself is recorded — see
+        :data:`REENTRY_OWNER_TRIGGER_MS`.
     capability_record:
         Whether a host-capability record existed to delete, i.e. whether
         ``cold_reconcile_samples`` measured a genuinely colder path. Recorded
@@ -1096,9 +1467,11 @@ def evaluate(
     floor = min(floor_samples)
     startup = min(startup_samples)
     reconcile = min(reconcile_samples)
+    reconcile_bin = min(reconcile_bin_samples)
     cold = min(cold_reconcile_samples)
     startup_delta = startup - floor
     reconcile_delta = reconcile - floor
+    reconcile_bin_delta = reconcile_bin - floor
     cold_delta = cold - floor
     # The positive control's statistic, and not the one the budgets use. See
     # STARTUP_WORK_FLOOR_MS for the measurements that separate the two.
@@ -1185,9 +1558,26 @@ def evaluate(
                 f"budget is {reconcile_budget_ms:.3f} ms"
             ),
         ),
+        # D-V5's `bin`-mode row, against the SAME product ceiling. `bin` mode
+        # trades composition for a directory read, N body hashes, N `readlink`s
+        # and a stamp compare — a different shape of work on the one path every
+        # prompt takes, not a cheaper one, and the ~2.4 ms of headroom the 10 ms
+        # ceiling has left is why it is measured rather than assumed smaller.
+        _budget_gate(
+            name="bin-mode prompt reconcile <= exec_floor + delta",
+            observed=reconcile_bin_delta,
+            budget=reconcile_budget_ms,
+            spread=spread,
+            breach=(
+                f"C-044/C-061: the per-prompt reconcile in `bin` mode costs floor + "
+                f"{reconcile_bin_delta:.3f} ms, budget is {reconcile_budget_ms:.3f} ms"
+            ),
+        ),
         *_fixed_point_gates(streams),
         *_composition_gates(streams),
         *_consent_gates(consent),
+        *_bin_arena_gates(bin_arena),
+        *_reentry_gates(reentry, spread),
     ]
 
     records = {
@@ -1212,8 +1602,23 @@ def evaluate(
             "cold_delta_ms": cold_delta,
             "cold_record": capability_record,
         },
+        "reconcile_bin": {
+            "total_ms": reconcile_bin,
+            "delta_ms": reconcile_bin_delta,
+            "contract_budget_ms": reconcile_budget_ms,
+            "contract_met": reconcile_bin_delta <= reconcile_budget_ms,
+            # The marginal cost of the mode, RECORDED and never asserted (plan
+            # step 5.2). It is a difference of two min-of-N deltas measured in
+            # two different arenas, so its noise is the sum of both — and the
+            # thing under contract is the total a prompt pays, which the gate
+            # above already bounds. A budget on this would be a second, looser
+            # opinion about the same measurement.
+            "marginal_ms": reconcile_bin_delta - reconcile_delta,
+        },
         "eval": dict(streams),
         "consent": dict(consent),
+        "bin_arena": dict(bin_arena),
+        "reentry": dict(reentry),
         "samples": len(floor_samples),
         "quiet_prompts": quiet,
     }
@@ -1255,6 +1660,22 @@ def format_report(report: LatencyReport) -> str:
             f"(record present to delete: {cold['cold_record']})"
         ),
         (
+            f"  ... same, in `bin` mode               {rec['reconcile_bin']['delta_ms']:>9.3f} ms  "
+            f"(asserted against the same {cold['contract_budget_ms']:.1f} ms ceiling; marginal over "
+            f"`env` mode {rec['reconcile_bin']['marginal_ms']:+.3f} ms, recorded only — D-V5)"
+        ),
+        (
+            f"  trampoline re-entry overhead         {rec['reentry']['trampoline_overhead_ms']:>9.3f} ms  "
+            f"(item 37, over a {rec['reentry']['payload_ms']:.3f} ms payload; owner trigger "
+            f"{REENTRY_OWNER_TRIGGER_MS:.1f} ms -> "
+            f"{'OVER — see the gate below' if rec['reentry']['over_owner_trigger'] else 'within budget'})"
+        ),
+        (
+            f"  ... `ocx exec` for the same tool     {rec['reentry']['exec_overhead_ms']:>9.3f} ms  "
+            f"(so the trampoline's own shell + `exec` costs "
+            f"{rec['reentry']['trampoline_over_exec_ms']:+.3f} ms on top)"
+        ),
+        (
             f"  shell-side eval of one apply         {rec['eval']['ms_per_apply']:>9.3f} ms  "
             f"({rec['eval']['stream_bytes']:.0f} bytes over a "
             f"{rec['eval']['path_segments']:.0f}-segment PATH, {rec['eval']['iterations']:.0f} applies)"
@@ -1289,6 +1710,85 @@ def _sample(cmd: Sequence[str], *, cwd: Path, env: Mapping[str, str]) -> float:
     start = time.perf_counter()
     subprocess.run(list(cmd), cwd=str(cwd), env=dict(env), capture_output=True, check=False)
     return (time.perf_counter() - start) * 1000.0
+
+
+class _EgressTrap:
+    """A dead HTTP proxy on loopback that **counts** what tried to leave.
+
+    Two jobs, and the second is what makes it more than a firewall:
+
+    * **Block.** Every ocx HTTP client is a `reqwest` client, and `reqwest`
+      honours ``HTTP_PROXY``/``HTTPS_PROXY``/``ALL_PROXY`` from the environment,
+      so pointing all three here routes every outbound request into a socket
+      that accepts and immediately closes. The request fails in microseconds
+      instead of reaching the public internet — which is what
+      :func:`measure_reentry` needs, since a bench whose green can come from a
+      network is not a bench. The idiom is the repository's own
+      (``test/tests/test_attest.py``'s dead-proxy port, ``src/forward_proxy.py``'s
+      loopback server); this one only adds the counter.
+    * **Count.** ``connections`` is the number of dials that reached it. That
+      turns "the shipped trampoline shape makes no outbound HTTP request" from
+      an assumption into an assertion with a reachable red — and the positive
+      control in :func:`measure_reentry` proves the counter can move, so a zero
+      is a measurement rather than the state a broken counter is always in.
+
+    Scope, stated rather than implied: this sees **HTTP egress**. A bare DNS
+    lookup does not traverse a proxy, so a zero here says "no request left",
+    not "no packet left". That is the property the number needs — a DNS lookup
+    is not what made the offline and online shapes differ.
+    """
+
+    def __init__(self) -> None:
+        self._server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _EgressTrap._Handler)
+        self._server.daemon_threads = True
+        self._server.connections = 0  # type: ignore[attr-defined]
+        self._lock = threading.Lock()
+        self._server.counter_lock = self._lock  # type: ignore[attr-defined]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    class _Handler(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            # Counted, then closed without a reply: the client's `CONNECT` (or
+            # plain proxied `GET`) fails, which is the blocking half.
+            with self.server.counter_lock:  # type: ignore[attr-defined]
+                self.server.connections += 1  # type: ignore[attr-defined]
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    @property
+    def connections(self) -> int:
+        with self._lock:
+            return self._server.connections  # type: ignore[attr-defined,no-any-return]
+
+    def reset(self) -> None:
+        with self._lock:
+            self._server.connections = 0  # type: ignore[attr-defined]
+
+    def env(self, base: Mapping[str, str]) -> dict[str, str]:
+        """`base` with every proxy variable pointed here and every bypass cleared."""
+        trapped = dict(base)
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            trapped[key] = self.url
+        # An inherited `NO_PROXY` naming the index or registry host would send
+        # that one destination direct and quietly reopen the hole this closes.
+        for key in ("NO_PROXY", "no_proxy"):
+            trapped[key] = ""
+        return trapped
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
 
 #: The shipped POSIX shim, as source. ``ENV_SH`` is byte-identical across
@@ -1434,6 +1934,9 @@ def measure_wall_clock(
     env: Mapping[str, str],
     startup: Sequence[str],
     reconcile: Sequence[str],
+    bin_cwd: Path,
+    bin_env: Mapping[str, str],
+    bin_reconcile: Sequence[str],
     samples: int = SAMPLES,
 ) -> dict[str, list[float]]:
     """Interleaved min-of-N sampling of floor, startup and applying reconcile.
@@ -1457,7 +1960,16 @@ def measure_wall_clock(
     gate reds for no one. Each measured command consumes it at its own seam —
     startup inside ``hook::registration``, reconcile inside ``hook::checkpoint``
     — so a command that emits neither gets no delay and ``--expect-fail`` fails
-    rather than passing on a measurement of something else.
+    rather than passing on a measurement of something else. The `bin`-mode
+    reconcile is a `--reconcile` invocation like its `env`-mode sibling, so it
+    pays at the same ``checkpoint`` seam and reds under the same injection.
+
+    A fifth series, ``reconcile_bin``, is the same derived command run in the
+    **`bin`-mode** arena (D-V5) — its own project directory and its own consent
+    grant, hence the second ``cwd``/``env`` pair. It is interleaved with the rest
+    against the **same** floor series, which is the only reason the two mode
+    deltas are comparable at all: two floors measured in two loops would put the
+    marginal figure inside the difference of two runs' scheduling luck.
     """
     inject = _inject_ms()
     commands = {
@@ -1465,8 +1977,12 @@ def measure_wall_clock(
         "startup": list(startup),
         "reconcile": list(reconcile),
         "reconcile_cold": list(reconcile),
+        "reconcile_bin": list(bin_reconcile),
     }
+    cwds = {name: cwd for name in commands}
+    cwds["reconcile_bin"] = bin_cwd
     envs = {name: dict(env) for name in commands}
+    envs["reconcile_bin"] = dict(bin_env)
     if inject:
         for name in commands:
             if name != "floor":
@@ -1474,7 +1990,7 @@ def measure_wall_clock(
 
     record = Path(env["OCX_HOME"]) / CAPABILITY_RECORD
     warm = {
-        name: subprocess.run(cmd, cwd=str(cwd), env=envs[name], capture_output=True, check=False, text=True)
+        name: subprocess.run(cmd, cwd=str(cwds[name]), env=envs[name], capture_output=True, check=False, text=True)
         for name, cmd in commands.items()
     }
     # The floor's other half: it has to be a command that does *not* do the
@@ -1490,7 +2006,7 @@ def measure_wall_clock(
         for name, cmd in commands.items():
             if name == "reconcile_cold":
                 record.unlink(missing_ok=True)
-            out[name].append(_sample(cmd, cwd=cwd, env=envs[name]))
+            out[name].append(_sample(cmd, cwd=cwds[name], env=envs[name]))
     return out
 
 
@@ -1897,6 +2413,24 @@ WALL_GLOBAL_TOOLS = 7
 #: regression class under test.
 WALL_MIN_COMPOSED_KEYS = 2
 
+#: The key prefix the **`bin`-mode** arena's tools declare. A third prefix rather
+#: than a reuse of :data:`WALL_TOOL_ENV_PREFIX`: the two arenas share one
+#: ``$OCX_HOME`` (a prompt composes one global tier whichever project it is in),
+#: and a shared prefix would let the composition gates read the `bin` arena's
+#: tools as the `env` arena's.
+BIN_TOOL_ENV_PREFIX = "LATENCY_BIN_"
+
+#: The floor :func:`_bin_arena_gates` holds the rendered ``bin/`` to —
+#: deliberately **not** :data:`WALL_PROJECT_TOOLS`, for the same reason
+#: :data:`WALL_MIN_TOOLS` and :data:`WALL_MIN_COMPOSED_KEYS` are not: a gate whose
+#: budget is the arena's own sizing knob passes for every value of that knob,
+#: zero included.
+#:
+#: Two, because the per-prompt cost `bin` mode adds is a **loop** — one `readdir`
+#: entry, one `stat` and (on a difference) one content hash per exposed name
+#: (C-061) — and one trampoline cannot tell a loop from a single call.
+WALL_MIN_TRAMPOLINES = 2
+
 #: The one externally observable spelling of `Decision::Activate(Grant::Namespace)`.
 #:
 #: Emitted by `command/self_group/activate.rs` when consent was granted by
@@ -2057,7 +2591,7 @@ def _write_blob(ocx_home: Path, registry: str, payload: bytes) -> str:
     return f"sha256:{hex_digest}"
 
 
-def _tool_metadata(key: str) -> dict[str, object]:
+def _tool_metadata(key: str, *, binaries: Sequence[str] | None = None) -> dict[str, object]:
     """The bundle metadata one arena tool declares, for both places it is needed.
 
     The project tier reads it from ``metadata.json`` in the package directory;
@@ -2080,8 +2614,15 @@ def _tool_metadata(key: str) -> dict[str, object]:
 
     Both interpolate ``${installPath}``, so the template resolver runs per entry
     rather than being skipped on a literal.
+
+    ``binaries`` is the third axis and only the `bin`-mode arena needs it:
+    `exposed_names` (`package_manager/tasks/toolchain_names.rs`) unions
+    ``binaries`` with the declared entry points and renders **one trampoline per
+    name**, so a package claiming neither contributes no name, `bin/` comes out
+    empty, and the whole `bin` row measures a stamp read over nothing. Absent for
+    the two composing tiers, which never reach the renderer.
     """
-    return {
+    metadata: dict[str, object] = {
         "type": "bundle",
         "version": 1,
         "env": [
@@ -2101,9 +2642,12 @@ def _tool_metadata(key: str) -> dict[str, object]:
             },
         ],
     }
+    if binaries is not None:
+        metadata["binaries"] = list(binaries)
+    return metadata
 
 
-def _materialize_tool(package: Path, key: str) -> None:
+def _materialize_tool(package: Path, key: str, *, binaries: Sequence[str] | None = None) -> None:
     """Put the three files on disk that make one locked tool **compose**.
 
     ``shell_matrix.record_origin`` supplies the store record consent reads. That
@@ -2130,13 +2674,358 @@ def _materialize_tool(package: Path, key: str) -> None:
     tier's config blob so one tool cannot compose down one call path and not the
     other.
     """
-    (package / "content" / "bin").mkdir(parents=True, exist_ok=True)
-    (package / "metadata.json").write_text(json.dumps(_tool_metadata(key)), encoding="utf-8")
+    binroot = package / "content" / "bin"
+    binroot.mkdir(parents=True, exist_ok=True)
+    for name in binaries or ():
+        # A payload only the `bin` arena needs, and only for item 37: a
+        # trampoline `exec`s ocx, which composes `${installPath}/bin` as a
+        # `required` entry and then resolves the name inside it. `exit 0` is the
+        # smallest thing that is a real `exec` — it is also item 37's "no-op
+        # binary invoked directly", i.e. the red control's own comparand.
+        payload = binroot / name
+        payload.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        payload.chmod(0o755)
+    (package / "metadata.json").write_text(json.dumps(_tool_metadata(key, binaries=binaries)), encoding="utf-8")
     # A leaf: the closure walk still runs, over zero deps. Materializing a real
     # dependency graph would need a second package per edge and is not what the
     # [High] asks for — see `test/bench/README.md` for what that leaves off the
     # clock.
     (package / "resolve.json").write_text(json.dumps({"dependencies": []}), encoding="utf-8")
+
+
+def _publish_tool(ocx_home: Path, registry: str, metadata: Mapping[str, object]) -> str:
+    """Publish one tool's metadata into the arena's blob cache; return its manifest digest.
+
+    The chain a digest-pinned identifier resolves through, and nothing more: the
+    metadata as the **config** blob, an image manifest naming that config, and
+    the manifest's own digest as the leaf the lock pins. Every digest is derived
+    from the bytes it addresses (:func:`_write_blob`), so the content-addressing
+    the binary checks is real rather than asserted.
+
+    ``artifactType`` is not decoration. ``ocx lock``'s install step fetches the
+    package artifact through the client's `fetch_single_layer_artifact`, which
+    refuses a manifest whose `artifactType` is not
+    ``application/vnd.sh.ocx.package.v1`` — an arena without it fails the whole
+    lock with `unexpected artifact type: … got None`, which is loud, so this
+    comment records why the field is here rather than warning about its absence.
+
+    Mirrors the three steps :func:`_write_global_toolchain` grew first, and is
+    deliberately **not** a shared implementation with it: that tier is reached
+    through `manager.find`, which never validates an artifact type, so its
+    manifests carry none — folding the two would rewrite every global digest for
+    a field that tier does not read. What must not diverge is the *layout*, and
+    that is :func:`_write_blob`'s, which both call.
+    """
+    config = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+    config_digest = _write_blob(ocx_home, registry, config)
+    manifest = json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "artifactType": "application/vnd.sh.ocx.package.v1",
+            "config": {
+                "mediaType": "application/vnd.sh.ocx.package.v1+json",
+                "digest": config_digest,
+                "size": len(config),
+            },
+            # No layers: nothing here extracts, and the payload the trampoline
+            # eventually `exec`s is written straight into the package directory
+            # after the lock (see `_write_bin_project`).
+            "layers": [],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return _write_blob(ocx_home, registry, manifest)
+
+
+def _write_bin_project(project: Path, *, env: Mapping[str, str], ocx: Path) -> dict[str, Any]:
+    """Fill ``project`` with the **`bin`-mode** project D-V5's row is timed in.
+
+    Three differences from :func:`_write_wall_project`, and each one is what
+    makes the row measure `bin` mode rather than nothing:
+
+    * ``activate = "bin"`` in ``ocx.toml`` (C-012) — the mode under test.
+    * The tools are **declared** in ``[tools]``, digest-pinned, rather than
+      spliced into a generated lock. The `env` arena splices because an offline
+      ``ocx lock`` cannot resolve a tool it has never seen; here every tool's
+      manifest chain is already in the arena's blob cache
+      (:func:`_publish_tool`), so ``ocx --offline lock`` resolves each one,
+      writes the lock **itself**, and — this is the point —
+      ``project::mutation`` re-renders the toolchain behind it (D-V8, C-054).
+    * That render is what writes the **render stamp**, and the stamp is what
+      `bin` mode gates on (C-061). It is deliberately **not** forged: a
+      hand-written `render_stamp.json` that happened to match would make the row
+      a measurement of this fixture's idea of a fingerprint, and the one defect
+      class the stamp exists to catch — a `bin/` that does not match the lock —
+      is exactly the one a forged stamp would hide.
+
+    Nothing here reaches a registry or the network: ``--offline`` is on the lock
+    invocation (`shell_matrix.run_lock`), and every byte the resolver reads was
+    put in the blob cache by this function.
+
+    **The payloads go in after the lock**, and that ordering is forced: the
+    install step rewrites each package's ``content/`` from the manifest's layer
+    list, which is empty here, so anything written before the lock is gone
+    afterwards. Writing them after leaves the stamp valid — it fingerprints
+    ``bin/`` and the `<group>/<entry>` links, never the package contents.
+
+    Returns the arena's facts, so no caller has to re-derive them: ``names`` (the
+    exposed names, which are also the trampoline file names) and ``payloads``
+    (the absolute path of each name's real executable, item 37's third
+    comparand).
+    """
+    ocx_home = Path(env["OCX_HOME"])
+    registry, _, org = WALL_TOOL_NAMESPACE.partition("/")
+    declarations: list[str] = []
+    names: list[str] = []
+    keys: list[str] = []
+    packages: list[Path] = []
+    for index in range(1, WALL_PROJECT_TOOLS + 1):
+        name = f"b{index}"
+        key = f"{BIN_TOOL_ENV_PREFIX}{index}"
+        metadata = _tool_metadata(key, binaries=[name])
+        digest = _publish_tool(ocx_home, registry, metadata)
+        # `record_origin` for the package directory it derives, exactly as the
+        # global tier uses it: the store layout is mirrored once, in
+        # `shell_matrix`, and a second spelling here is how a correct-looking
+        # package lands where the binary does not look.
+        marker = matrix.record_origin(ocx_home, registry=registry, digest=digest, origin=f"{registry}/{org}/{name}")
+        packages.append(marker.parents[2])
+        declarations.append(f'{name} = "{WALL_TOOL_NAMESPACE}/{name}@{digest}"')
+        names.append(name)
+        keys.append(key)
+
+    entries = "\n".join(
+        f'B{index} = {{ type = "path", value = "bin{index}" }}' for index in range(1, WALL_PROJECT_ENTRIES + 1)
+    )
+    matrix.write_project(
+        project,
+        entries,
+        tools_block="[tools]\n" + "\n".join(declarations) + "\n",
+        preamble='activate = "bin"',
+    )
+    locked = matrix.run_lock(ocx, project, dict(env))
+    if locked.returncode != 0:
+        raise RuntimeError(f"`ocx lock` failed in the bin arena ({locked.returncode})\n{locked.stderr}")
+
+    payloads = {}
+    for name, key, package in zip(names, keys, packages, strict=True):
+        _materialize_tool(package, key, binaries=[name])
+        payloads[name] = package / "content" / "bin" / name
+    return {"names": names, "payloads": payloads}
+
+
+def count_trampolines(bin_dir: Path) -> int:
+    """How many files in ``bin_dir`` are ocx trampolines, by their own marker.
+
+    :data:`TRAMPOLINE_MARKER` as **line two**, which is where
+    `crates/ocx_lib/src/env.rs` emits it and where `is_ocx_trampoline` reads it —
+    the same rule, so this counts what the binary would recognise rather than
+    what the directory happens to hold. Counting entries instead would report a
+    full `bin/` for a renderer that wrote anything at all into it.
+    """
+    if not bin_dir.is_dir():
+        return 0
+    count = 0
+    for entry in sorted(bin_dir.iterdir()):
+        if not entry.is_file():
+            continue
+        # A prefix, like the predicate it mirrors: the marker sits at bytes
+        # 10..36 of every body, and the line after it carries an absolute
+        # project root of unbounded length.
+        head = entry.read_bytes()[:256].split(b"\n")
+        if len(head) > 1 and head[1] == TRAMPOLINE_MARKER.encode("utf-8"):
+            count += 1
+    return count
+
+
+def measure_bin_arena(
+    ocx: Path,
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    reconcile: Sequence[str],
+) -> tuple[dict[str, float], Path]:
+    """The `bin` row's two non-vacuity observations, and the home they are about.
+
+    Returns ``({"trampolines": n, "project_bin_applied": 0|1, ...}, <home>/bin)``.
+
+    The home is **read back from the binary** (``ocx shell state``'s
+    ``toolchain_home``, the field WP-9 added for exactly this) and never joined
+    here from `ocx.toml` and a convention. Two reasons, and the second is the
+    load-bearing one: ``toolchain-dir`` (C-017–C-019) can move the home
+    anywhere, and a fixture that re-derives the path agrees with itself instead
+    of with the code — which is how this file's own store-layout mirrors are
+    written, always fail-closed and always with the binary as the authority.
+
+    ``project_bin_applied`` looks for the apply line carrying that home's own
+    ``bin/`` **by absolute path**, quoted exactly as the emitter writes it. Never
+    the substring ``toolchain/bin``: `shell_matrix.SESSION_BIN_DIRS` carries that
+    same spelling for the *global* session directory under ``$OCX_HOME``, which
+    every prompt emits in every mode (C-059), so a substring test passes with
+    `bin` mode completely dead.
+
+    The reconcile is run **once, in a fresh process with no** ``__OCX_ENV_STATE``
+    **carrier**, which is what makes it the *first* fire: a second one would take
+    the settled path and emit nothing, and reading "no apply line" off that would
+    be indistinguishable from the withheld-entry state this gate exists to catch.
+    """
+    state = matrix.shell_state(ocx, cwd, dict(env))
+    home = Path(state["toolchain_home"])
+    bin_dir = home / "bin"
+    result = subprocess.run(list(reconcile), cwd=str(cwd), env=dict(env), capture_output=True, check=False, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"the bin-mode first fire exited {result.returncode}; the hook path exits 0 in every state "
+            f"(C-051), so this is not an inert arena but a broken one\nstderr:\n{result.stderr}"
+        )
+    needle = f"{PATH_APPLY_MARKER}{_sh_quote(str(bin_dir))}"
+    return {
+        "trampolines": float(count_trampolines(bin_dir)),
+        "project_bin_applied": float(needle in result.stdout),
+        "first_applies": float(result.stdout.count(PATH_APPLY_MARKER)),
+        "first_stream_bytes": float(len(result.stdout)),
+    }, bin_dir
+
+
+def measure_reentry(
+    ocx: Path,
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    bin_dir: Path,
+    name: str,
+    payload: Path,
+    samples: int = SAMPLES,
+) -> dict[str, float]:
+    """Validation item 37 — the ocx-side cost of a trampoline invocation.
+
+    Four interleaved min-of-N series, in the `bin` arena, all with the same
+    ``cwd`` and the same environment:
+
+    * ``payload`` — the package's own executable by absolute path. The ADR's
+      third comparand *and* the subtrahend of every figure below: "ocx-side"
+      means "everything the trampoline costs that running the tool directly does
+      not".
+    * ``payload_control`` — the **same command again**, as an independent series.
+      The ADR's red control: ``min(control) - min(payload)`` is the overhead of
+      nothing, so an instrument that cannot read zero there is not reading the
+      trampoline's overhead either (:func:`_reentry_gates`).
+    * ``exec`` — ``ocx exec -- <name>``, the ADR's second comparand.
+    * ``trampoline`` — ``<home>/bin/<name>``, the shipped artifact, whose body
+      `exec`s ocx itself.
+
+    **The shipped shape is what runs, and the network is taken away from it
+    rather than flagged out of it.** Until 2026-09-06 all four series ran with
+    ``OCX_OFFLINE`` set, and that was the finding this paragraph replaces: the
+    shipped trampoline body passes no ``--offline`` (`launcher/body.rs`), so the
+    gate certified a path the artifact does not take. The flag was not merely
+    removing the network — measured on the release binary at 4581c075, `ocx
+    status` under the shipped default config cost **44.0 ms** (min of 80) with no
+    flag against **11.4 ms** with ``--offline``, and the whole 33 ms gap
+    reproduced with egress blocked, so it was local work: two `reqwest`/rustls
+    client builds, each parsing the ~150 bundled CA roots, constructed eagerly by
+    `Context::try_init` whenever the invocation was not offline. Forcing the flag
+    therefore deleted the exact cost a trampoline pays. It is now deferred to
+    first use (`oci::Client::transport`, `ReqwestIndexTransport::client`), and
+    the same measurement reads **6.7 ms**.
+
+    So the series run the shipped environment, and :class:`_EgressTrap` takes the
+    network instead — every proxy variable pointed at a dead loopback socket,
+    every bypass cleared. That is the docstring's original worry ("a bench that
+    dials the public internet is a bench whose green can come from a network")
+    answered without also answering a question nobody asked.
+
+    **The trap is asserted in both directions**, because a blocker that blocks
+    nothing and a blocker that is never reached look identical from here:
+
+    * ``ocx index update`` — a command that *must* dial — is run through the trap
+      first. It has to fail, and it has to leave a connection on the counter. If
+      it does not, the trap is not in ocx's path and every zero below is vacuous.
+    * The four series then have to leave the counter at **zero**. That is item
+      37's real network claim, stated as a check rather than as a belief: a
+      regression that reintroduces a per-invocation dial reds here, where before
+      it was invisible because the flag suppressed it.
+
+    Every command is run once before sampling and **must exit 0** — a comparand
+    that fails fast is the cheapest possible measurement and would report the
+    trampoline as free. The trampoline is also checked to be one, by its own
+    marker: timing an arbitrary file in ``bin/`` would answer a question about
+    the fixture.
+    """
+    trampoline = bin_dir / name
+    if count_trampolines(bin_dir) < 1 or not trampoline.is_file():
+        raise RuntimeError(f"'{trampoline}' is not a rendered trampoline, so item 37 has nothing to time")
+    commands = {
+        "payload": [str(payload)],
+        "payload_control": [str(payload)],
+        "exec": [str(ocx), "exec", "--", name],
+        "trampoline": [str(trampoline)],
+    }
+
+    with _EgressTrap() as trap:
+        trapped = trap.env(env)
+
+        # Positive control, first and separately: the counter must be able to
+        # move, and the block must be able to bite. `index update` resolves
+        # through the index chain and cannot answer locally, so it dials.
+        control = subprocess.run(
+            [str(ocx), "index", "update", _EGRESS_CONTROL_PACKAGE],
+            cwd=str(cwd),
+            env=trapped,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        if control.returncode == 0 or trap.connections == 0:
+            raise RuntimeError(
+                "item 37's egress trap is not in ocx's path: the control "
+                f"`ocx index update` exited {control.returncode} after "
+                f"{trap.connections} trapped connection(s), where a blocked dial is a non-zero exit "
+                "and at least one connection. Every 'no network' claim below would be vacuous.\n"
+                f"stderr:\n{control.stderr}"
+            )
+        trap.reset()
+
+        for label, cmd in commands.items():
+            probe = subprocess.run(cmd, cwd=str(cwd), env=trapped, capture_output=True, check=False, text=True)
+            if probe.returncode != 0:
+                raise RuntimeError(
+                    f"item 37's `{label}` comparand exited {probe.returncode}, so its samples measure a "
+                    f"failure and the reported overhead is not one: {cmd}\nstderr:\n{probe.stderr}"
+                )
+
+        series: dict[str, list[float]] = {label: [] for label in commands}
+        for _ in range(samples):
+            for label, cmd in commands.items():
+                series[label].append(_sample(cmd, cwd=cwd, env=trapped))
+
+        dials = trap.connections
+
+    if dials:
+        raise RuntimeError(
+            f"item 37's four series made {dials} outbound HTTP request(s). The shipped trampoline "
+            "shape resolves every locked tool out of the local store and must dial nothing; a "
+            "number measured against a network is not comparable between commits, and the "
+            "per-invocation dial itself is the regression to fix."
+        )
+
+    best = {label: min(values) for label, values in series.items()}
+    overhead = best["trampoline"] - best["payload"]
+    return {
+        "payload_ms": best["payload"],
+        "exec_ms": best["exec"],
+        "trampoline_ms": best["trampoline"],
+        "control_delta_ms": best["payload_control"] - best["payload"],
+        "trampoline_overhead_ms": overhead,
+        "exec_overhead_ms": best["exec"] - best["payload"],
+        "trampoline_over_exec_ms": best["trampoline"] - best["exec"],
+        # 1.0 means "file the composed-env-cache follow-up issue" — the owner's
+        # 2026-09-05 trigger. A float, not a bool, so this mapping stays the same
+        # `Mapping[str, float]` shape every other measurement here returns.
+        "over_owner_trigger": float(overhead > REENTRY_OWNER_TRIGGER_MS),
+        "samples": float(samples),
+    }
 
 
 def measure_clause_two(
@@ -2241,8 +3130,22 @@ def run_gate(ocx: Path, *, samples: int = SAMPLES) -> tuple[LatencyReport, dict[
             OCX_CONSENT_PATHS=str(project.resolve()),
         )
         _write_wall_project(project, env=env, ocx=ocx)
-        # After the project's `ocx lock`, never before: that run is what stamps
-        # consent for this directory, and a global toolchain in place first would
+        # The `bin`-mode arena (D-V5): its own project directory and its own
+        # consent grant, sharing one `$OCX_HOME` with the `env` arena because a
+        # prompt composes one global tier whichever project it stands in.
+        # Ordered after the `env` project (two `ocx lock` runs over one store,
+        # one at a time) and before the global tier, for the reason the next
+        # comment gives: its own `ocx lock` is what stamps consent here.
+        bin_project = wall_root / "bin-project"
+        bin_env = matrix.clean_env(
+            wall_root,
+            shell,
+            ocx_home=wall_root / "ocx",
+            OCX_CONSENT_PATHS=str(bin_project.resolve()),
+        )
+        bin_arena_files = _write_bin_project(bin_project, env=bin_env, ocx=ocx)
+        # After both projects' `ocx lock`, never before: that run is what stamps
+        # consent for its directory, and a global toolchain in place first would
         # put this fixture's own seeding inside the command the arena depends on.
         _write_global_toolchain(Path(env["OCX_HOME"]))
         # One activation run decides both what gets timed and whether it is the
@@ -2253,12 +3156,22 @@ def run_gate(ocx: Path, *, samples: int = SAMPLES) -> tuple[LatencyReport, dict[
         # under test") and not on a `--hook` override no shell passes.
         activation = _activation_stream(startup, cwd=project, env=env)
         reconcile = _derive_reconcile_command(activation, ocx)
+        # Derived a second time, from the `bin` project's OWN emitted hook. The
+        # two argvs are expected to be identical — the hook body does not vary by
+        # activation mode — and re-deriving is still not redundant: it is what
+        # proves this arena emits a hook at all, on the same production rung, and
+        # it keeps the `bin` row from timing a command copied out of the `env`
+        # row should the two ever diverge.
+        bin_reconcile = _derive_reconcile_command(_activation_stream(startup, cwd=bin_project, env=bin_env), ocx)
         wall = measure_wall_clock(
             ocx,
             cwd=project,
             env=env,
             startup=startup,
             reconcile=reconcile,
+            bin_cwd=bin_project,
+            bin_env=bin_env,
+            bin_reconcile=bin_reconcile,
             samples=samples,
         )
         # Read inside the arena's lifetime, and after sampling: the cold leg
@@ -2266,6 +3179,21 @@ def run_gate(ocx: Path, *, samples: int = SAMPLES) -> tuple[LatencyReport, dict[
         # presence here is the evidence that the cold samples were cold.
         capability_record = (Path(env["OCX_HOME"]) / CAPABILITY_RECORD).exists()
         streams = measure_reconcile_streams(root=wall_root, cwd=project, env=env, startup=startup, reconcile=reconcile)
+        # The `bin` row's non-vacuity pair, and item 37's four series. Both
+        # inside the arena and after the timed samples: each runs the reconcile
+        # or a whole `ocx exec` again, and neither belongs on the clock the row
+        # above reports.
+        bin_arena, bin_dir = measure_bin_arena(ocx, cwd=bin_project, env=bin_env, reconcile=bin_reconcile)
+        first_name = bin_arena_files["names"][0]
+        reentry = measure_reentry(
+            ocx,
+            cwd=bin_project,
+            env=bin_env,
+            bin_dir=bin_dir,
+            name=first_name,
+            payload=bin_arena_files["payloads"][first_name],
+            samples=samples,
+        )
         # Last, and inside the arena: it swaps the grant, so it must not run
         # before anything that is timed or read under the paths grant.
         consent = measure_clause_two(cwd=project, env=env, reconcile=reconcile)
@@ -2274,10 +3202,13 @@ def run_gate(ocx: Path, *, samples: int = SAMPLES) -> tuple[LatencyReport, dict[
         floor_samples=wall["floor"],
         startup_samples=wall["startup"],
         reconcile_samples=wall["reconcile"],
+        reconcile_bin_samples=wall["reconcile_bin"],
         cold_reconcile_samples=wall["reconcile_cold"],
         exec_counts=exec_counts,
         streams=streams,
         consent=consent,
+        bin_arena=bin_arena,
+        reentry=reentry,
         capability_record=capability_record,
     )
     artifact = {
@@ -2293,7 +3224,12 @@ def run_gate(ocx: Path, *, samples: int = SAMPLES) -> tuple[LatencyReport, dict[
         "reconcile_budget_ms": RECONCILE_BUDGET_MS,
         # The exact argv behind every number, so a reader never has to trust
         # that the gate measured what its prose says it measured.
-        "commands": {"floor": [str(ocx), "version"], "startup": startup, "reconcile": reconcile},
+        "commands": {
+            "floor": [str(ocx), "version"],
+            "startup": startup,
+            "reconcile": reconcile,
+            "reconcile_bin": bin_reconcile,
+        },
         "gates": [asdict(g) for g in report.gates],
         "passed": report.passed,
         **report.records,
@@ -2333,6 +3269,17 @@ def _summarize(artifact: dict[str, Any]) -> None:
                         f"(recorded; record present to delete: {reconcile['cold_record']})"
                     ),
                     (
+                        f"- `bin`-mode per-prompt reconcile Δ: **{artifact['reconcile_bin']['delta_ms']:.3f} ms** "
+                        f"(same {reconcile['contract_budget_ms']:.1f} ms ceiling, asserted; marginal over `env` "
+                        f"{artifact['reconcile_bin']['marginal_ms']:+.3f} ms, recorded)"
+                    ),
+                    (
+                        f"- trampoline re-entry overhead (item 37): "
+                        f"**{artifact['reentry']['trampoline_overhead_ms']:.3f} ms** against the "
+                        f"{REENTRY_OWNER_TRIGGER_MS:.1f} ms owner trigger — "
+                        f"{'**over — the gate reds**' if artifact['reentry']['over_owner_trigger'] else 'within budget'}"
+                    ),
+                    (
                         f"- steady-state apply lines: **{artifact['eval']['steady_applies']:.0f}** "
                         f"(fixed point, must be 0)"
                     ),
@@ -2357,6 +3304,11 @@ _GREEN = {
     "floor_samples": [3.0, 3.4, 3.2],
     "startup_samples": [3.9, 4.1, 4.4],
     "reconcile_samples": [4.5, 4.9, 5.0],
+    # `bin` mode trades composition for a stamp read and N body hashes, so its
+    # samples sit near the `env` ones rather than under them. Distinct values,
+    # not a copy of the list above: a fixture that shared one series could not
+    # tell the two gates apart when one of them is wired to the wrong input.
+    "reconcile_bin_samples": [4.2, 4.6, 4.8],
     "cold_reconcile_samples": [6.5, 6.9, 7.0],
     "exec_counts": {"quiet": 0, "after_touch": 1},
     # Every key `measure_reconcile_streams` returns, not just the gated two: a
@@ -2377,6 +3329,29 @@ _GREEN = {
     "consent": {
         "locked_tools": float(WALL_PROJECT_TOOLS),
         "corroborated_tools": float(WALL_PROJECT_TOOLS),
+    },
+    "bin_arena": {
+        "trampolines": float(WALL_PROJECT_TOOLS),
+        "project_bin_applied": 1.0,
+        "first_applies": 4.0,
+        "first_stream_bytes": 2100.0,
+    },
+    # Shaped after a real run on this box: an 11.2 ms trampoline over a 0.6 ms
+    # payload, `ocx exec` a shade under the trampoline, and a control that reads
+    # essentially zero. Every recorded key, not just the two gated ones, for the
+    # reason `streams` carries all of its: `format_report` renders a failing case
+    # into its own assertion message, and a missing key turns that diagnostic
+    # into a KeyError.
+    "reentry": {
+        "payload_ms": 0.6,
+        "exec_ms": 8.0,
+        "trampoline_ms": 8.7,
+        "control_delta_ms": 0.04,
+        "trampoline_overhead_ms": 8.1,
+        "exec_overhead_ms": 7.4,
+        "trampoline_over_exec_ms": 0.7,
+        "over_owner_trigger": 0.0,
+        "samples": float(SAMPLES),
     },
     "capability_record": True,
 }
@@ -2599,6 +3574,25 @@ def self_check() -> None:
     )
     assert not slow_reconcile.records["reconcile"]["contract_met"]
 
+    # D-V5's row, against the same ceiling. Its own series, so a wiring mistake
+    # that pointed both gates at one sample list reds here.
+    slow_bin = case(
+        expect_pass=False,
+        why="a bin-mode reconcile over budget must fail on its own gate, not the env one",
+        red_gate="bin-mode prompt reconcile <= exec_floor + delta",
+        reconcile_bin_samples=[3.0 + RECONCILE_BUDGET_MS + 0.5] * 3,
+    )
+    assert not slow_bin.records["reconcile_bin"]["contract_met"]
+    # The marginal figure is recorded, never asserted (plan step 5.2), so no gate
+    # reds when it is computed from the wrong pair. Its whole content is the
+    # identity below.
+    marginal = green.records["reconcile_bin"]["marginal_ms"]
+    want_marginal = min(_GREEN["reconcile_bin_samples"]) - min(_GREEN["reconcile_samples"])  # type: ignore[arg-type]
+    assert abs(marginal - want_marginal) < 1e-9, (
+        f"the recorded bin-vs-env marginal must be the difference of the two deltas: got {marginal:.6f} ms, "
+        f"want {want_marginal:.6f} ms"
+    )
+
     # The budget's positive control: a startup indistinguishable from the floor
     # satisfies `delta <= budget` for free, and that is what a gate pointed at
     # the wrong command looks like. Under the old `> 0` threshold this case
@@ -2664,6 +3658,22 @@ def self_check() -> None:
         f"{control!r} must match no --expect-fail-gate needle: the injection cannot red it, so a needle "
         "that reached it would demand a red state no run can demonstrate"
     )
+    # The same rule, generalised over every gate the injection cannot red — which
+    # is now most of them: the arena gates are counts, and item 37's two controls
+    # time `ocx exec`, which emits no hook and so receives no delay at either
+    # seam. A needle reaching any of them would demand a red state no run can
+    # demonstrate, and the taskfile step would fail forever.
+    injectable = {
+        "shell startup <= exec_floor + delta",
+        "per-prompt reconcile <= exec_floor + delta",
+        "bin-mode prompt reconcile <= exec_floor + delta",
+    }
+    unreachable = [gate.name for gate in green.gates if gate.name not in injectable]
+    for needle in (STARTUP_GATE_NEEDLE, RECONCILE_GATE_NEEDLE, RECONCILE_BIN_GATE_NEEDLE):
+        matched = [name for name in unreachable if needle in name]
+        assert not matched, (
+            f"{needle!r} matches {matched}, which the fault injection cannot red — see the assert above"
+        )
 
     # ocx-sh/ocx#342's pair. A steady-state fire that still applies is the
     # unfixed reconciler; a first fire that applies nothing is an inert arena,
@@ -2755,6 +3765,76 @@ def self_check() -> None:
     assert WALL_PROJECT_TOOLS >= WALL_MIN_TOOLS, (
         f"the arena is sized at {WALL_PROJECT_TOOLS} tool(s), under the {WALL_MIN_TOOLS} its own "
         "gate demands — every run would red on an arena the constant asked for"
+    )
+
+    # D-V5's pair, and the reason the `bin` row above is not free to be fast: an
+    # empty `bin/` and a withheld PATH entry are both states in which the timed
+    # command is a stamp read and an early return. Same direction as every other
+    # defect this file has met — the missing work makes the number SMALLER.
+    case(
+        expect_pass=False,
+        why="a bin arena with no trampolines must fail: the per-name fingerprint loop never runs",
+        red_gate="the timed bin arena renders trampolines",
+        bin_arena={**_GREEN["bin_arena"], "trampolines": 0.0},  # type: ignore[dict-item]
+    )
+    case(
+        expect_pass=False,
+        why="a single trampoline must fail: one name cannot demonstrate the per-name loop",
+        red_gate="the timed bin arena renders trampolines",
+        bin_arena={**_GREEN["bin_arena"], "trampolines": 1.0},  # type: ignore[dict-item]
+    )
+    # The half a full `bin/` cannot see: the render worked and the PROMPT still
+    # withheld the entry (C-061's five refusing conditions, every one of them a
+    # silent `None` plus a hint). A gate on the tree alone would pass through all
+    # five.
+    case(
+        expect_pass=False,
+        why="a first fire that emits no project bin entry must fail: bin mode did no work",
+        red_gate="the first bin-mode fire puts the project's toolchain bin on PATH",
+        bin_arena={**_GREEN["bin_arena"], "project_bin_applied": 0.0},  # type: ignore[dict-item]
+    )
+    assert WALL_PROJECT_TOOLS >= WALL_MIN_TRAMPOLINES, (
+        f"the bin arena is sized at {WALL_PROJECT_TOOLS} tool(s), under the {WALL_MIN_TRAMPOLINES} "
+        "trampolines its own gate demands — every run would red on an arena the constant asked for"
+    )
+
+    # Item 37's instrument, both colours. The negative control first: two series
+    # of the same payload that disagree by more than a millisecond are not
+    # measuring the same command, so the overhead beside them is not the
+    # trampoline's.
+    for label, control in (("slower", 3.0), ("faster", -3.0)):
+        case(
+            expect_pass=False,
+            why=f"a re-entry control {label} than its own twin must fail: the instrument does not read zero",
+            red_gate="the re-entry instrument reads ~zero on two identical payload spawns",
+            reentry={**_GREEN["reentry"], "control_delta_ms": control},  # type: ignore[dict-item]
+        )
+    # And the positive half, which the ADR's red control alone does not cover: an
+    # instrument that reads zero for EVERYTHING passes the control and reports a
+    # trampoline that costs nothing — the exact shape of "no follow-up issue
+    # needed" for a path nobody measured.
+    case(
+        expect_pass=False,
+        why="a trampoline indistinguishable from its payload must fail: nothing ocx-shaped ran",
+        red_gate="a trampoline costs measurably more than its own payload",
+        reentry={**_GREEN["reentry"], "trampoline_overhead_ms": 0.05},  # type: ignore[dict-item]
+    )
+    # The owner's trigger is a gate since #423 closed without a cache, so a
+    # green run is by construction under it and the recorded flag must agree.
+    # The flag stays in the artifact — it is what a report reader sees — and
+    # this keeps it from drifting away from the gate that now decides the same
+    # question.
+    assert green.records["reentry"]["over_owner_trigger"] == 0.0, (
+        "the _GREEN fixture is under the owner trigger; the flag beside it must agree"
+    )
+    # And the red half, which is the whole point of gating it: an overhead over
+    # the trigger must FAIL rather than be reported and shrugged at. Without
+    # this the gate is indistinguishable from the advisory print it replaced.
+    case(
+        expect_pass=False,
+        why="re-entry over the owner trigger must fail: the budget is asserted, not reported",
+        red_gate="trampoline re-entry stays under the owner's composed-env-cache trigger",
+        reentry={**_GREEN["reentry"], "trampoline_overhead_ms": 10.6},  # type: ignore[dict-item]
     )
 
     # The margin, not the budget, is what the floor has to be able to resolve.
@@ -2856,6 +3936,13 @@ def self_check() -> None:
     for needle, red_here, green_here in (
         (RECONCILE_GATE_NEEDLE, slow_reconcile, over_budget),
         (STARTUP_GATE_NEEDLE, over_budget, slow_reconcile),
+        # The two reconcile needles, against each other. This pair is the reason
+        # the `bin` gate is not named "per-prompt reconcile in bin mode": these
+        # needles match by SUBSTRING, so that spelling would make one red satisfy
+        # both needles and the taskfile's three-needle injection would certify a
+        # gate it never observed.
+        (RECONCILE_GATE_NEEDLE, slow_reconcile, slow_bin),
+        (RECONCILE_BIN_GATE_NEEDLE, slow_bin, slow_reconcile),
     ):
         assert unmatched_gate_needles([needle], red_here.gates) == [], (
             f"{needle!r} must match the gate that failed\n{format_report(red_here)}"
@@ -2881,12 +3968,12 @@ def self_check() -> None:
     )
     needles.append(False)
 
-    # Both needles at once is what the taskfile passes: one injected run has to
-    # red both budgets, and a single red must not stand in for the pair.
-    assert unmatched_gate_needles([STARTUP_GATE_NEEDLE, RECONCILE_GATE_NEEDLE], over_budget.gates) == [
-        RECONCILE_GATE_NEEDLE
-    ]
-    needles.append(False)
+    # All three needles at once is what the taskfile passes: one injected run has
+    # to red all three budgets, and a single red must not stand in for the set.
+    assert unmatched_gate_needles(
+        [STARTUP_GATE_NEEDLE, RECONCILE_GATE_NEEDLE, RECONCILE_BIN_GATE_NEEDLE], over_budget.gates
+    ) == [RECONCILE_GATE_NEEDLE, RECONCILE_BIN_GATE_NEEDLE]
+    needles += [False, False]
 
     # The summary word, in all three colours. The abstaining one is the case
     # ocx-sh/ocx#360 was filed about, and it is the reason this is asserted at

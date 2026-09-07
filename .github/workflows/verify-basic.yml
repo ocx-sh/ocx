@@ -238,6 +238,50 @@ jobs:
       - name: Test
         run: cargo nextest run --workspace --locked --profile ci
 
+  smoke-macos:
+    name: Smoke (macOS)
+    # The macOS twin of `smoke-windows`, for the same reason and in the same
+    # shape: `cfg(target_os = "macos")` code is invisible to a Linux build, so
+    # without this leg the LaunchAgent session-PATH writer
+    # (`setup/session_path/macos.rs`) is compiled and executed by nothing on a
+    # pull request. `verify-deep.yml` has a macOS leg, but it is
+    # dispatch/call/weekly by design -- the deliberate distinction between a
+    # per-PR gate and a manual pre-merge one, which putting a 3-OS matrix plus
+    # Docker acceptance on every PR would destroy.
+    #
+    # `needs: smoke` is the same cost policy (subsystem-ci.md "Cost Factors":
+    # gate macOS/Windows behind Linux passing). macOS minutes bill at ~10x
+    # Linux, which is why this leg runs the tests and nothing else -- no release
+    # build, no artifact, no schema.
+    needs: smoke
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          matcher: true
+          # Same reason as the Linux leg: denial lives in [workspace.lints.rust]
+          # so the path-vendored forks stay capped.
+          rustflags: ""
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install nextest
+        uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
+        with:
+          tool: cargo-nextest
+      # Byte-for-byte the command the Windows leg and `verify-deep.yml` run, so
+      # the three cannot drift into disagreeing about what "the tests pass"
+      # means. `--profile ci` sets `fail-fast = false`: a leg that stops at the
+      # first failure hides most of what it catches.
+      - name: Test
+        run: cargo nextest run --workspace --locked --profile ci
+
   acceptance-tests:
     name: Acceptance Tests
     needs: smoke

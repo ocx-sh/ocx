@@ -1,5 +1,5 @@
 # Builds + attests the committed Windows native launcher shims (issue #66,
-# adr_windows_exe_shim.md). The shim is cross-compiled on Linux via cargo-xwin
+# adr_windows_exe_shim.md). The shim is cross-built on Linux via cargo-zigbuild
 # (no Windows runner needed for the build), so the per-arch matrix legs are
 # gated behind a cheap Linux gate job rather than a Windows runner.
 #
@@ -15,7 +15,7 @@ on:
     branches: [main]
     # Also watch the build inputs that change the emitted PE bytes — a
     # toolchain / dependency / profile / build-flag change must not bypass
-    # the byte-equality drift gate (Codex finding 2).
+    # the provenance gate (fresh hermetic build + SHA canary; Codex finding 2).
     paths:
       - 'crates/ocx_shim/**'
       - 'crates/ocx_lib/src/shims/**'
@@ -25,6 +25,9 @@ on:
       - 'rust-toolchain.toml'
       - 'taskfiles/rust.taskfile.yml'
       - '.github/workflows/build-windows-shims.yml'
+      - 'test/tests/test_windows_shim.py'
+      - 'test/tests/test_trampoline_exec.py'
+      - 'test/conftest.py'
   pull_request:
     branches: [main]
     paths:
@@ -36,6 +39,9 @@ on:
       - 'rust-toolchain.toml'
       - 'taskfiles/rust.taskfile.yml'
       - '.github/workflows/build-windows-shims.yml'
+      - 'test/tests/test_windows_shim.py'
+      - 'test/tests/test_trampoline_exec.py'
+      - 'test/conftest.py'
 
 permissions:
   contents: read
@@ -95,7 +101,7 @@ jobs:
       id-token: write       # SLSA provenance (Sigstore/Rekor OIDC)
       attestations: write   # actions/attest-build-provenance
     strategy:
-      # Both arches are independent and both must pass the byte-equality
+      # Both arches are independent and both must pass the blob validation
       # gate; fail-fast would mask one arch's status behind the other's.
       fail-fast: false
       matrix:
@@ -107,6 +113,8 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: true
+          # The drift check below walks `git log` per path.
+          fetch-depth: 0
       - name: Install Task
         uses: arduino/setup-task@b91d5d2c96a56797b48ac1e0e89220bf64044611 # v2.0.0
         with:
@@ -119,34 +127,29 @@ jobs:
           # rust-toolchain.toml pins channel + rust-src (build-std) + the
           # gnullvm targets; this only adds the per-matrix target redundantly.
 
-      # Pinned Zig = the hermetic toolchain. The committed blob is
-      # byte-reproducible only against a fixed (rustc, zig) pair, so the Zig
-      # version is part of the reproducibility contract — bump deliberately
-      # in a blob-refresh PR (see adr_shim_hermetic_zigbuild.md).
+      # Zig = the hermetic toolchain: it bundles clang, lld and the libc
+      # headers, so the build depends on no floating Microsoft SDK. The blob
+      # is NOT byte-reproducible (see the provenance-gate step below), but the
+      # Zig version does change the emitted bytes — bump it in a blob-refresh
+      # PR, never on its own (see adr_shim_hermetic_zigbuild.md).
       # Stable release fetched directly from the canonical permanent URL.
       # Rationale: (1) ziglang.org dev builds 404 within weeks; only stable
-      # tarballs are permanent — required for the reproducibility contract.
+      # tarballs are permanent, and this job must still build a year from now.
       # (2) mlugg/setup-zig's community-mirror index proved unreliable here
       # (every mirror + official 404'd). A pinned ziglang.org/download URL is
       # immutable for a stable release and removes the third-party + mirror
-      # dependency entirely. ZIG_VERSION is part of the reproducibility
-      # contract — bump deliberately in a blob-refresh PR.
+      # dependency entirely. ZIG_VERSION changes the emitted bytes — bump
+      # deliberately in a blob-refresh PR.
       - name: Setup Zig
+        env:
+          ZIG_VERSION: "0.16.0"
+          ZIG_SHA256: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
         run: |
           set -euo pipefail
-          # Resolve the exact tarball URL + shasum from ziglang.org's
-          # authoritative index (avoids filename-scheme / version guessing).
-          # Pin to the latest tagged stable (exclude the rolling "master").
-          # The resolved version is echoed and the shasum verified, so the
-          # build is tamper-evident; hard-pin the version here once the
-          # reproducible blob is established (blob-refresh PR).
-          curl -fsSL --retry 3 -o zig-index.json https://ziglang.org/download/index.json
-          ver="$(jq -r 'keys_unsorted | map(select(. != "master")) | .[0]' zig-index.json)"
-          url="$(jq -r --arg v "$ver" '.[$v]["x86_64-linux"].tarball' zig-index.json)"
-          sum="$(jq -r --arg v "$ver" '.[$v]["x86_64-linux"].shasum' zig-index.json)"
-          echo "Resolved Zig $ver -> $url"
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          echo "Zig ${ZIG_VERSION} -> $url"
           curl -fsSL --retry 3 -o zig.tar.xz "$url"
-          echo "${sum}  zig.tar.xz" | sha256sum -c -
+          echo "${ZIG_SHA256}  zig.tar.xz" | sha256sum -c -
           mkdir -p zig-dist && tar -xf zig.tar.xz -C zig-dist --strip-components=1
           echo "$PWD/zig-dist" >> "$GITHUB_PATH"
       - name: Install cargo-zigbuild
@@ -169,7 +172,7 @@ jobs:
           echo "built=${built}" >> "$GITHUB_OUTPUT"
           echo "committed=${committed}" >> "$GITHUB_OUTPUT"
 
-      # Canonical hermetic bytes, uploaded BEFORE the byte-equality gate and
+      # Canonical hermetic bytes, uploaded BEFORE the validation gate and
       # even if it fails: this is the authoritative source for the blob-refresh
       # PR flow (a dev machine cannot necessarily install the pinned Zig).
       - name: Upload freshly built blob (refresh source)
@@ -246,6 +249,51 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+      # The three provenance controls above (SLSA attestation, the SHIM_SHA256
+      # canary, this job's path filter) all answer "have the committed bytes
+      # been corrupted". NONE answers "were the committed bytes built from the
+      # committed source" -- SHIM_SHA256 matches a stale blob perfectly, so a
+      # shim source change that forgets the refresh passes every existing gate
+      # while the shipped reader and the shipped writer disagree about the wire
+      # format between them.
+      #
+      # Not hypothetical: the `.exec` sidecar gained a second line in source
+      # while the blobs kept the one-line parser, which made every Windows
+      # trampoline exit 78 with a fully green tree.
+      #
+      # Byte-reproducibility cannot close this (see above -- lld embeds a
+      # per-link build id). Reachability can. Runs LAST so the fresh-blob
+      # artifact this failure tells you to use has already been uploaded.
+      - name: Committed blobs must be re-cut when shim sources change
+        run: |
+          set -euo pipefail
+          # Recency, not membership. A range check ("did this branch touch both
+          # trees?") passes a branch that re-cut the blobs early and then changed
+          # the shim again -- which is exactly the state that ships a two-line
+          # sidecar against a one-line parser. Compare the last commit to touch
+          # each tree instead: the blobs must be at or after the sources.
+          last_src="$(git log -1 --format=%H HEAD -- crates/ocx_shim/)"
+          last_blob="$(git log -1 --format=%H HEAD -- crates/ocx_lib/src/shims/)"
+          if [ -z "$last_src" ]; then
+            echo "no shim source history; nothing to compare"; exit 0
+          fi
+          if [ -z "$last_blob" ]; then
+            echo "::error::shim sources exist but no committed blob was ever recorded"; exit 1
+          fi
+          if [ "$last_src" = "$last_blob" ]; then
+            echo "shim sources and blobs move together at $(git log -1 --format=%h "$last_src")"; exit 0
+          fi
+          if git merge-base --is-ancestor "$last_src" "$last_blob"; then
+            echo "blobs re-cut at $(git log -1 --format=%h "$last_blob"), at or after the last source change"
+            exit 0
+          fi
+          echo "::error::the committed shim blobs are older than the shim sources."
+          echo "last shim source change: $(git log -1 --format='%h %s' "$last_src")"
+          echo "last blob re-cut:        $(git log -1 --format='%h %s' "$last_blob")"
+          echo "Re-cut them from THIS run's ocx-shim-fresh-<target> artifacts and update"
+          echo "both SHIM_SHA256 constants in crates/ocx_lib/src/shim.rs (ritual: shim.rs:19-33)."
+          exit 1
+
   # Windows acceptance: the genuinely Win32-dependent shim behaviours
   # (PATHEXT resolution, CreateProcessW argv passthrough, the BatBadBut
   # `& whoami` regression, exit-code propagation, missing/malformed sidecar,
@@ -291,7 +339,7 @@ jobs:
           # Registry-independent: skip the `docker compose up registry:2`
           # session hook (Docker registry is Linux-only — system_design §8).
           OCX_TESTS_NO_REGISTRY: "1"
-        run: uv run pytest tests/test_windows_shim.py -v
+        run: uv run pytest tests/test_windows_shim.py tests/test_trampoline_exec.py -v
 
   # Phase-2 placeholder (NOT implemented): Authenticode signing via SignPath
   # Foundation. Prerequisites (ocx.sh /code-signing-policy page, maintainer
