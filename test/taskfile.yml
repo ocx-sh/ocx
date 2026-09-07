@@ -27,6 +27,44 @@ vars:
   # for a run that needs to land elsewhere.
   TEST_TMPDIR:
     sh: mkdir -p "${TEST_TMPDIR:-$HOME/.cache/ocx-test-tmp}" && printf '%s' "${TEST_TMPDIR:-$HOME/.cache/ocx-test-tmp}"
+  # Where pytest puts `tmp_path` itself, decided by this file rather than by an
+  # environment variable.
+  #
+  # The `TMPDIR` block below is not enough, and the reason is the one
+  # `taskfiles/rust.taskfile.yml` records for `RUSTFLAGS`: **go-task's `env:`
+  # loses to an inherited OS variable.** Measured here — `TMPDIR=/tmp task test`
+  # reaches pytest with `TMPDIR=/tmp`, not with the value below — so any caller,
+  # CI leg or wrapper that exports `TMPDIR` puts every `tmp_path` back on /tmp,
+  # which on this class of host is a tmpfs declared larger than RAM+swap: filling
+  # it is an out-of-memory that takes the whole box down and reads back as dozens
+  # of unrelated test failures with nothing naming the cause. `--basetemp` is an
+  # argument, so nothing in the environment can shadow it (verified: with
+  # `TMPDIR=/tmp` inherited, `tmp_path` still landed under this var).
+  #
+  # `TMPDIR` stays: it moves everything pytest does NOT own, and it must keep
+  # pointing off /tmp for the same reason. What it may not be is the only guard.
+  #
+  # It must be a DEDICATED directory: pytest deletes the basetemp's contents at
+  # startup (verified — a canary file placed there is gone after one run), so
+  # pointing this at a directory that holds anything else deletes it. The
+  # `mkdir -p` is not decoration either: under `pytest-xdist -n auto` each
+  # worker creates `<basetemp>/popen-gwN` with a NON-recursive mkdir, which
+  # raises `FileNotFoundError` (an xdist INTERNALERROR, verified) when the
+  # basetemp's own parent chain is missing.
+  #
+  # The leaf is the **checkout's own directory name**, not a fixed one, and that
+  # is the same "it wipes" property read the other way: this repository's
+  # workflow keeps four fixed worktrees plus per-agent ones, and two `task test`
+  # runs sharing one basetemp would delete each other's live `tmp_path` trees at
+  # startup — phantom failures in whichever run is older, with nothing in either
+  # output naming the cause. `TASKFILE_DIR`'s parent is the checkout root, and it
+  # resolves identically whether this file is entered directly or through the
+  # root taskfile's `test:` include (verified with `--dry` from both).
+  # Override with TEST_BASETEMP=… .
+  TEST_BASETEMP:
+    sh: >-
+      dir="${TEST_BASETEMP:-$HOME/.cache/ocx-pytest/$(basename "$(dirname "{{.TASKFILE_DIR}}")")}";
+      mkdir -p "$dir"; printf '%s' "$dir"
 
 # Applies to every task in this file, so no pytest leg can miss it.
 env:
@@ -57,7 +95,7 @@ tasks:
       - task: build
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
-      - uv run pytest {{.CLI_ARGS | default "-v"}}
+      - uv run pytest --basetemp={{.TEST_BASETEMP}} {{.CLI_ARGS | default "-v"}}
     env:
       OCX_COMMAND: "{{.OCX_BINARY}}"
       # _find_shim_binary() honours OCX_SHIM_BINARY first; pointing it at the
@@ -171,6 +209,12 @@ tasks:
       # The list is per image (SHELLS_REQUIRE_LIVE above), not the intersection
       # of the two: pwsh, nushell and elvish exist on the Debian leg, so a skip
       # there is a defect rather than an environment fact.
+      #
+      # No `--basetemp` here, deliberately, unlike every host-side pytest leg
+      # above: the container writes to its own ephemeral upper layer, not to
+      # this host's /tmp tmpfs, so the failure `--basetemp` exists to prevent is
+      # not reachable in here — and a host path passed into the container names
+      # a directory that does not exist there.
       - >-
         docker run --rm
         -v "{{.SHELLS_OCX_BINARY}}:/work/ocx:ro"
@@ -189,8 +233,11 @@ tasks:
     desc: >-
       NFR latency gate for the per-prompt reconciler (C-044): zero execs on the
       no-op prompt path, shell startup within exec_floor + 2 ms and the
-      per-prompt reconcile within exec_floor + 10 ms - two budgets, not one
-      shared number - with the floor measured in the same run. Both
+      per-prompt reconcile - in `env` mode AND in `bin` mode (D-V5) - within
+      exec_floor + 10 ms, with the floor measured in the same run. It also
+      measures validation item 37, the trampoline re-entry overhead, against the
+      owner's 10 ms composed-env-cache trigger; that number is reported, not
+      asserted. Both
       measured commands are DERIVED at run time - startup from the shipped
       env.sh sourced by a real interactive bash, reconcile from the hook body
       the binary just emitted - so the gate drives the production interactivity
@@ -266,9 +313,25 @@ tasks:
       #    variable; the floor never receives it. `--expect-fail` inverts the exit
       #    code, so this step fails if the gate PASSES, and `--expect-fail-gate`
       #    is repeatable with EVERY named gate required to be red - so a red on
-      #    one budget cannot stand in for the other's, which is what a single
+      #    one budget cannot stand in for another's, which is what a single
       #    unnamed `--expect-fail` would have allowed. Running this on every
       #    invocation is what makes step 2's green mean something.
+      #
+      #    THREE needles since D-V5, not two: the `bin`-mode reconcile row is a
+      #    third `--reconcile` process, so it pays at the same `hook::checkpoint`
+      #    seam and reds under the same 11 ms. Its gate is named `bin-mode prompt
+      #    reconcile` and NOT `per-prompt reconcile in bin mode`, because needles
+      #    match by substring: under the second spelling either row's red would
+      #    satisfy both needles and this step would certify a gate it never
+      #    observed. `shell_latency.py`'s self-check asserts that disjointness on
+      #    every invocation, before a process is spawned.
+      #
+      #    The gates the injection CANNOT red are deliberately unnamed: the arena
+      #    non-vacuity counts (locked tools, composed keys, trampolines, the bin
+      #    PATH entry) and item 37's two instrument controls, which time an
+      #    `ocx exec` that emits no hook and therefore receives no delay. Naming
+      #    one would demand a red state no run can produce. Their own red states
+      #    are demonstrated in the self-check, on inputs nobody has to schedule.
       #
       #    It is also the live control on the contention classifier that gives
       #    those two asserts their INCONCLUSIVE outcome. The injected delay lands
@@ -287,6 +350,7 @@ tasks:
         uv run --no-project python bench/shell_latency.py --expect-fail
         --expect-fail-gate 'shell startup <='
         --expect-fail-gate 'per-prompt reconcile'
+        --expect-fail-gate 'bin-mode prompt reconcile'
         --out {{.LATENCY_RESULTS_DIR}}/shell-latency-injected.json
 
   # ---------------------------------------------------------------------------
@@ -464,7 +528,7 @@ tasks:
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
       - >-
-        uv run pytest -n auto
+        uv run pytest -n auto --basetemp={{.TEST_BASETEMP}}
         tests/test_doc_scripts.py
         tests/test_doc_binding.py
         tests/test_doc_scripts_parser.py

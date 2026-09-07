@@ -38,6 +38,13 @@ on:
       - crates/ocx_lib/src/shell/**
       - crates/ocx_cli/src/command/self_group/**
       - crates/ocx_cli/src/command/shell_state.rs
+      # The C-044 latency gate times the composed-env resolve path, not just
+      # activation plumbing — a regression here must fire the same gate.
+      - crates/ocx_lib/src/package_manager.rs
+      - crates/ocx_lib/src/package_manager/**
+      - crates/ocx_lib/src/oci/index.rs
+      - crates/ocx_lib/src/oci/index/**
+      - crates/ocx_lib/src/activation.rs
       - test/tests/test_shell_activation.py
       - test/tests/test_self_activate.py
       - test/tests/test_shell_reconcile.py

@@ -3,14 +3,20 @@
 version: '3'
 
 includes:
+  # `--all-targets` on the check variants only. Without it `cargo check`
+  # compiles the lib and the bins and stops, so every `#[cfg(test)]` module is
+  # invisible — and three of the five real Windows breaks this gate has caught
+  # lived in one. The build variants below must NOT carry it: they exist to
+  # produce `ocx.exe`, and `build --release --all-targets` would also build
+  # every test and bench target for a binary nobody runs.
   xwin-check-x86:
     taskfile: ./xwin.taskfile.yml
     internal: true
-    vars: { TARGET: x86_64-pc-windows-msvc, SUBCOMMAND: check }
+    vars: { TARGET: x86_64-pc-windows-msvc, SUBCOMMAND: check --all-targets }
   xwin-check-arm:
     taskfile: ./xwin.taskfile.yml
     internal: true
-    vars: { TARGET: aarch64-pc-windows-msvc, SUBCOMMAND: check }
+    vars: { TARGET: aarch64-pc-windows-msvc, SUBCOMMAND: check --all-targets }
   xwin-build-x86:
     taskfile: ./xwin.taskfile.yml
     internal: true
@@ -51,7 +57,8 @@ tasks:
       Runs all Rust-specific checks sequentially (fail-fast):
         1. cargo fmt --check
         2. cargo clippy
-        3. cargo check on both Windows MSVC targets
+        3. cargo check of ocx_shim on both Windows MSVC targets
+           (see check:windows-cfg for why ocx_lib cannot join it here)
         4. hawkeye license headers
         5. cargo-deny license audit
         6. cargo-about third-party notice freshness
@@ -79,12 +86,29 @@ tasks:
 
       `cargo check` does no linking, and both `*-pc-windows-msvc` targets have
       std installed via rustup — so this needs neither xwin nor zig, unlike
-      `check:windows` (which cross-*builds* the whole workspace through Docker
+      `check:windows` (which type-checks the whole workspace through Docker
       and stays the gate for the rest of the crates).
 
-      Scoped to `ocx_shim` deliberately: it is the only crate whose primary
-      code path exists solely under `cfg(windows)`, and it has no dependencies
-      off Windows, so this costs seconds rather than a workspace metadata pass.
+      Scoped to `ocx_shim` because it CANNOT be widened here, not because
+      widening it would merely be slow. `ocx_lib` pulls `aws-lc-sys`, whose
+      build script compiles C for the *target*; on a Linux host with no
+      MSVC-targeting C toolchain `cargo check -p ocx_lib --target
+      x86_64-pc-windows-msvc` dies in cc-rs (measured: exit 101,
+      "command did not execute successfully", `pthread_rwlock_t` undeclared)
+      before rustc ever type-checks a line of `ocx_lib`. Adding `-p ocx_lib`
+      here buys a gate that is red for a reason nobody can fix. `ocx_shim`
+      escapes it by having no dependencies off Windows.
+
+      So `ocx_lib`'s own `cfg(windows)` code is covered elsewhere, and is
+      covered — the claim that nothing sees it is wrong:
+        * `Smoke (Windows)` in verify-basic.yml runs
+          `cargo nextest run --workspace` on windows-latest on EVERY pull
+          request, which compiles the lib and every test target natively.
+          It is the gate that has actually caught these breaks.
+        * `check:windows` below is its local mirror, through cargo-xwin in
+          Docker, and now carries `--all-targets` for the same reason.
+      Both inherit `-D warnings` from `[workspace.lints.rust]`, so neither
+      needs a RUSTFLAGS of its own.
     sources: *rust-sources
     cmds:
       - cargo check -p ocx_shim --locked --all-targets --target x86_64-pc-windows-msvc
@@ -258,34 +282,57 @@ tasks:
       vars: [TARGET]
     deps:
       - install:cargo-zigbuild
-    # Hermetic + reproducible: Zig bundles its own clang/lld/libc, so output
-    # bytes depend only on pinned rustc (rust-toolchain.toml) + pinned zig +
-    # source — no floating Microsoft SDK manifest (the old cargo-xwin
-    # treadmill). `-Zbuild-std` + `-Cpanic=immediate-abort` sheds std's
-    # backtrace machinery (gimli/addr2line/object/miniz) → ~65 KiB blob,
-    # well under SHIM_SIZE_BUDGET. The gnullvm targets need the stack-probe
-    # builtins; crates/ocx_shim/src/chkstk.rs supplies them inline.
-    # RUSTC_BOOTSTRAP=1 enables -Z on the pinned stable toolchain. CI must
-    # call this task, never raw cargo.
-    # Reproducibility: `/Brepro` zeroes the COFF TimeDateStamp + makes the
-    # PE deterministic (lld-link embeds wall-clock time otherwise). NO
-    # -Zbuild-std: rebuilding std per run is not byte-reproducible (verified —
-    # two identical CI runs differed even with /Brepro), and it forced a
-    # nightly bootstrap. The toolchain's prebuilt std is deterministic. The
-    # gnullvm stack-probe gap is covered by crates/ocx_shim/src/chkstk.rs
-    # (independent of build-std). Pure stable; larger blob (~280 KiB) is
-    # within SHIM_SIZE_BUDGET — an accepted trade-off for reproducibility.
-    env:
-      RUSTFLAGS: '-Clink-arg=/Brepro'
-    cmd: cargo zigbuild -p ocx_shim --profile shim --locked --target {{.TARGET}}
+    vars:
+      # rustc translates the virtual `/rustc/<hash>/library/…` spans carried by
+      # the prebuilt std back to the REAL local rust-src checkout whenever that
+      # component is installed (rust-analyzer pulls it in). The translated paths
+      # reach the blob through the `core::panic::Location` values codegen'd here
+      # for generic std instantiations, so a dev box bakes `$HOME/.rustup/…`
+      # into an executable every Windows user runs — CI has no rust-src and
+      # never saw it. Remapping the checkout back onto the virtual prefix
+      # restores CI's exact spelling and works on the pinned stable toolchain;
+      # `-Ztrim-paths` would need the nightly bootstrap this task refuses.
+      RUST_SRC_DIR:
+        sh: printf '%s/lib/rustlib/src/rust' "$(rustc --print sysroot)"
+      RUSTC_COMMIT_HASH:
+        sh: "rustc -vV | awk '/^commit-hash: /{print $2}'"
+    # Hermetic: Zig bundles its own clang/lld/libc, so the output depends only
+    # on pinned rustc (rust-toolchain.toml) + pinned zig + source — no floating
+    # Microsoft SDK manifest (the old cargo-xwin treadmill). NOT byte-
+    # reproducible: the gnullvm PE link embeds a per-link build id, so two runs
+    # differ and CI compares no bytes — integrity is SLSA attestation + the
+    # SHIM_SHA256 canary + this job's path filter (adr_shim_hermetic_zigbuild.md
+    # addendum 2, "gate redesign"). NO -Zbuild-std: it is not reproducible
+    # either and forces a nightly bootstrap, so the toolchain's prebuilt std
+    # ships as-is — which is why the blob is ~239–333 KiB rather than the
+    # ~65 KiB the build-std PoC produced, still well within SHIM_SIZE_BUDGET.
+    # The gnullvm targets need the stack-probe builtins;
+    # crates/ocx_shim/src/chkstk.rs supplies them inline, independent of
+    # build-std. CI must call this task, never raw cargo.
+    #
+    # RUSTFLAGS is assigned on the command line rather than through `env:`:
+    # go-task's task-level `env:` LOSES to an inherited variable, and CI's
+    # setup-rust-toolchain exports `RUSTFLAGS=-D warnings`. That is how the
+    # former `-Clink-arg=/Brepro` here was silently inert in CI for every blob
+    # ever shipped while making any clean dev shell fail at link — `zig cc`
+    # rejects the MSVC-style flag outright, and rejects `-Wl,--no-insert-
+    # timestamp` too, so the COFF TimeDateStamp is simply not zeroed.
+    cmd: >-
+      RUSTFLAGS="-D warnings --remap-path-prefix={{.RUST_SRC_DIR}}=/rustc/{{.RUSTC_COMMIT_HASH}}"
+      cargo zigbuild -p ocx_shim --profile shim --locked --target {{.TARGET}}
 
   check:windows:
     desc: Cross-compile-check both Windows MSVC targets via Docker (cargo-xwin, cached)
     summary: |
-      Runs `cargo xwin check` for x86_64-pc-windows-msvc and
+      Runs `cargo xwin check --all-targets` for x86_64-pc-windows-msvc and
       aarch64-pc-windows-msvc inside the messense/cargo-xwin Docker image.
-      Mirrors the CI cross-compile (verify-deep.yml) so Windows-only build
-      breakage is catchable locally without a Windows host. First run
+      This is the ONLY local gate that type-checks `ocx_lib`'s `cfg(windows)`
+      code — `check:windows-cfg` cannot reach it on the host (see there) — and
+      it covers the aarch64 arm that no CI leg on a pull request does. Not in
+      `verify`: it needs Docker and a ~250 MiB SDK download, and every pull
+      request already runs `Smoke (Windows)`, which compiles the same code
+      natively. Run it before pushing anything under a `cfg(windows)` or
+      `cfg(not(unix))` branch and save a CI round-trip. First run
       downloads the MSVC SDK headers (~250 MiB) and crate registry into
       .cache/xwin/; subsequent runs reuse both caches plus target/xwin/
       so an unchanged tree finishes in seconds.
