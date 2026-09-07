@@ -183,7 +183,7 @@ pub(super) async fn probe_git_binary_at(program: &Path) -> Result<GitBinary, For
     let output = tokio::process::Command::new(program)
         .arg("--version")
         .env_clear()
-        .envs(git_child_env(|name| std::env::var_os(name), None).iter())
+        .envs(git_child_env(|name| std::env::var_os(name), None, LazyFetch::Refuse).iter())
         .kill_on_drop(true)
         .output()
         .await
@@ -335,6 +335,32 @@ mod table {
     /// invocation carries one (DX-97).
     pub const INJECTED: &[&str] = &["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"];
 
+    /// Set on a **local** invocation and on no other.
+    ///
+    /// A conditional group for the same reason [`INJECTED`] is, and the
+    /// condition is the opposite one. The fetch is deliberately blobless
+    /// (C-036), so every blob the base tree names is a promisor object the
+    /// checkout does not hold — and git resolves a missing object by *fetching
+    /// it*, from a local plumbing command that carries no credential. That dial
+    /// is answered 401, `GIT_TERMINAL_PROMPT` refuses the prompt, and the
+    /// classifier reads git's own words as a rejected credential: an auth error
+    /// naming a credential that is fine.
+    ///
+    /// So on a git that honours this variable, the local lane refuses the lazy
+    /// fetch outright and a missing object fails as `invalid object` in the
+    /// command that needed it — the truthful error. It cannot ride [`SET`]:
+    /// `fetch` and `push` generate packs against the promisor remote and
+    /// legitimately depend on the behaviour this removes.
+    ///
+    /// **Best-effort below the git that documents honouring it.** `GIT_NO_LAZY_FETCH`
+    /// itself is undocumented; its flag twin, `--no-lazy-fetch`, first appears in
+    /// git's release notes at 2.45.0 — above [`GitVersion::MINIMUM`] (2.31.0), the
+    /// floor this crate otherwise enforces. Below whatever version actually reads
+    /// it, this row is inert and a missing object still triggers the
+    /// credential-less fetch it exists to prevent; `write-tree --missing-ok`
+    /// (`git_workspace`) closes that gap independently of the git version.
+    pub const NO_LAZY_FETCH: &[(&str, &str)] = &[("GIT_NO_LAZY_FETCH", "1")];
+
     /// Name **prefixes** that must never reach the child, whatever the parent
     /// holds.
     ///
@@ -445,6 +471,7 @@ pub(super) struct CredentialInjection<'a> {
 pub(super) fn git_child_env(
     lookup: impl Fn(&str) -> Option<OsString>,
     injection: Option<&CredentialInjection<'_>>,
+    lazy_fetch: LazyFetch,
 ) -> Env {
     // `Env::clean` is the whole allowlist: `Env::new` (and `Env::default`,
     // which delegates to it) collects `std::env::vars_os`, so the child would
@@ -461,6 +488,12 @@ pub(super) fn git_child_env(
         env.set(*name, *value);
     }
 
+    if lazy_fetch == LazyFetch::Refuse {
+        for (name, value) in table::NO_LAZY_FETCH {
+            env.set(*name, *value);
+        }
+    }
+
     if let Some(injection) = injection {
         env.set("GIT_CONFIG_COUNT", "1");
         env.set("GIT_CONFIG_KEY_0", format!("http.{}.extraHeader", injection.url_prefix));
@@ -471,6 +504,20 @@ pub(super) fn git_child_env(
     }
 
     env
+}
+
+/// Whether an invocation may resolve a missing object over the network.
+///
+/// The distinction the credential cannot express: precedence rung three injects
+/// nothing and still talks to the remote, so `injection.is_none()` is not "this
+/// is local". Local and network are a property of the *call*, and the caller is
+/// the only thing that knows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LazyFetch {
+    /// A network invocation: promisor semantics stay on.
+    Allow,
+    /// A local plumbing invocation: a missing object is an error, never a fetch.
+    Refuse,
 }
 
 /// Run one `git` invocation to completion and hand back what it printed.
@@ -512,9 +559,10 @@ pub(super) async fn run_git(
     git: &GitBinary,
     workdir: &Path,
     injection: Option<&CredentialInjection<'_>>,
+    lazy_fetch: LazyFetch,
     args: &[&OsStr],
 ) -> Result<std::process::Output, ForgeError> {
-    let env = git_child_env(|name| std::env::var_os(name), injection);
+    let env = git_child_env(|name| std::env::var_os(name), injection, lazy_fetch);
     let mut command = git_child_command(git, workdir, &env);
     command.args(args);
     command.output().await.map_err(|error| ForgeError::GitUnavailable {
@@ -1275,6 +1323,7 @@ mod tests {
                 ("OCX_ANNOUNCE_TOKEN", "glpat-notarealvalue"),
             ]),
             None,
+            LazyFetch::Allow,
         );
 
         let allowed: Vec<&str> = table::PASSTHROUGH
@@ -1372,6 +1421,12 @@ mod tests {
             "a row was added to SET without a by-name assertion here"
         );
 
+        assert_eq!(
+            table::NO_LAZY_FETCH,
+            &[("GIT_NO_LAZY_FETCH", "1")],
+            "the local lane refuses the promisor fetch, and only that"
+        );
+
         #[cfg(not(windows))]
         assert_eq!(
             table::PASSTHROUGH,
@@ -1391,7 +1446,7 @@ mod tests {
             .iter()
             .map(|name| (*name, "carried-verbatim"))
             .collect();
-        let child = git_child_env(parent_env(&parent), None);
+        let child = git_child_env(parent_env(&parent), None, LazyFetch::Allow);
         for name in table::PASSTHROUGH {
             assert_eq!(
                 child_value(&child, name).as_deref(),
@@ -1424,6 +1479,7 @@ mod tests {
             .copied()
             .chain(table::SET.iter().map(|(name, _)| *name))
             .chain(table::INJECTED.iter().copied())
+            .chain(table::NO_LAZY_FETCH.iter().map(|(name, _)| *name))
             .collect();
 
         for name in &admitted {
@@ -1450,7 +1506,11 @@ mod tests {
     /// Reds on: filtering empty values out of the passthrough loop.
     #[test]
     fn an_empty_passthrough_value_reaches_the_child_verbatim() {
-        let child = git_child_env(parent_env(&[("http_proxy", ""), ("PATH", "/usr/bin")]), None);
+        let child = git_child_env(
+            parent_env(&[("http_proxy", ""), ("PATH", "/usr/bin")]),
+            None,
+            LazyFetch::Allow,
+        );
         assert_eq!(
             child_value(&child, "http_proxy").as_deref(),
             Some(""),
@@ -1471,7 +1531,7 @@ mod tests {
     /// Reds on: setting the triple unconditionally.
     #[test]
     fn the_credential_triple_is_conditional_on_an_injected_credential() {
-        let without = git_child_env(parent_env(&[("PATH", "/usr/bin")]), None);
+        let without = git_child_env(parent_env(&[("PATH", "/usr/bin")]), None, LazyFetch::Allow);
         for name in table::INJECTED {
             assert_eq!(
                 child_value(&without, name),
@@ -1489,7 +1549,7 @@ mod tests {
             url_prefix: &scope,
             credential: &credential,
         };
-        let with = git_child_env(parent_env(&[("PATH", "/usr/bin")]), Some(&injection));
+        let with = git_child_env(parent_env(&[("PATH", "/usr/bin")]), Some(&injection), LazyFetch::Allow);
 
         // Built from the injection's own prefix rather than from a parallel
         // literal: a scope assertion fed from a second copy of the string agrees
@@ -1500,6 +1560,52 @@ mod tests {
             child_value(&with, "GIT_CONFIG_KEY_0").as_deref(),
             Some(expected_key.as_str()),
             "the scope must carry the full project path, never just the host"
+        );
+    }
+
+    /// `GIT_NO_LAZY_FETCH` is conditional on the lane, and the lane is not the
+    /// credential.
+    ///
+    /// Both halves matter. Absent on a network invocation, `fetch` and `push`
+    /// keep the promisor semantics their pack generation depends on. Present on
+    /// a local one, a plumbing command that needs a missing object fails as
+    /// `invalid object` instead of dialling a remote it holds no credential for
+    /// and being reported as an auth error ([#428]).
+    ///
+    /// The pairing with `injection` is what pins the seam: an implementation
+    /// that derived the lane from `injection.is_none()` would set the name on
+    /// the credential-less network fetch of precedence rung three, so both rows
+    /// here carry a credential state that contradicts their lane.
+    ///
+    /// Reds on: moving the name into `SET`; keying it on `injection`.
+    ///
+    /// [#428]: https://github.com/ocx-sh/ocx/issues/428
+    #[test]
+    fn the_lazy_fetch_refusal_is_conditional_on_the_lane_not_the_credential() {
+        let credential = GitPushCredential {
+            username: "gitlab-ci-token".to_string(),
+            secret: ForgeToken::new("glpat-notarealpushvalue".to_string()),
+        };
+        let scope = project_scope();
+        let injection = CredentialInjection {
+            url_prefix: &scope,
+            credential: &credential,
+        };
+
+        // Local, and injecting: still refused.
+        let local = git_child_env(parent_env(&[("PATH", "/usr/bin")]), Some(&injection), LazyFetch::Refuse);
+        assert_eq!(
+            child_value(&local, "GIT_NO_LAZY_FETCH").as_deref(),
+            Some("1"),
+            "a local invocation must not resolve a missing object over the network"
+        );
+
+        // Network, and injecting nothing — rung three's own shape: still allowed.
+        let network = git_child_env(parent_env(&[("PATH", "/usr/bin")]), None, LazyFetch::Allow);
+        assert_eq!(
+            child_value(&network, "GIT_NO_LAZY_FETCH"),
+            None,
+            "fetch and push generate packs against the promisor remote"
         );
     }
 
@@ -1531,7 +1637,7 @@ mod tests {
             url_prefix: &scope,
             credential: &credential,
         };
-        let child = git_child_env(parent_env(&[]), Some(&injection));
+        let child = git_child_env(parent_env(&[]), Some(&injection), LazyFetch::Allow);
 
         let value = child_value(&child, "GIT_CONFIG_VALUE_0").expect("the credential value must be injected");
         let header = value
@@ -1665,6 +1771,7 @@ mod tests {
             &git,
             &workdir,
             None,
+            LazyFetch::Refuse,
             &[OsStr::new("rev-parse"), OsStr::new("--verify"), OsStr::new("HEAD")],
         )
         .await

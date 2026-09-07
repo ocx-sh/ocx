@@ -570,6 +570,72 @@ def test_first_push_absent_branch_one_refspec(
     )
 
 
+def test_write_tree_survives_siblings_the_blobless_fetch_never_pulled(
+    ocx: OcxRunner, fake_forge: FakeForge, git_package: tuple[str, str, str], tmp_path: Path
+) -> None:
+    """#428: a root whose `p/<ns>/` subtree holds other entries still commits.
+
+    The reported failure, end to end. `update-index` invalidates the cache-tree
+    of every directory up to the root, so `write-tree` rebuilds those trees and
+    re-verifies each entry under them — including the neighbours that came from
+    `read-tree <base>` rather than from `hash-object -w`. The clone is blobless by
+    design (C-036, the row above), so those blobs are promisor objects it does not
+    hold, and git resolves a missing object by fetching it: a network dial from a
+    *local* plumbing command, which carries no credential by design. Against the
+    reporter's GitLab that dial was answered 401 and surfaced as
+    `the git remote rejected the credential` — exit 80, naming a token that was
+    fine.
+
+    The neighbours are seeded rather than assumed: `git_index_project` writes one
+    file, and a `p/<ns>/` holding only the entry being rewritten re-verifies
+    nothing, which would make this row green with the fix reverted. The blobless
+    assertion is the other half of the premise — together they are the state the
+    report describes.
+
+    **`git_http_private` is the third**, and without it the sentence above is
+    about a run this row never made: the bridge serves `upload-pack` to anyone
+    unless it is set (`git_http_fixture.py`), so the promisor dial would be
+    answered rather than refused and no 401 would exist to reproduce. It is the
+    read half that has to close, not the write half — the dial is a fetch.
+
+    Two guards defend one property here, and the measured reds say which is
+    catching what. Dropping `--missing-ok` alone reds at exit 1 on
+    `could not fetch <oid> from promisor remote` — the *other* guard, refusing
+    the dial. Dropping both reds at exit **80** on a 401, which is the reported
+    failure verbatim. Making the project public as well turns that same doubly
+    mutated build green on the run and leaves only the two flag assertions to
+    red, which is what this row measured before `git_http_private` was set.
+    """
+    package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
+    fake_forge.git_http_private = True
+    namespace = package.split("/")[0]
+    fake_forge.git_seed_files(
+        INDEX_FULL,
+        INITIAL_BRANCH,
+        {
+            f"p/{namespace}/neighbour.json": b'{"name":"ocx.sh/acme/neighbour"}\n',
+            f"p/{package}/o/sha256/{'a' * 64}.json": b'{"schemaVersion":2}\n',
+        },
+    )
+
+    result = announce_over_git(ocx, fake_forge, package, shim, home)
+
+    assert report(result)["status"] == "updated"
+    fetch = one_invocation(shim, "fetch")
+    assert "--filter=blob:none" in fetch.argv, (
+        "the premise: without the filter the neighbours' blobs are present and "
+        f"write-tree verifies them locally, proving nothing: {fetch.argv[1:]}"
+    )
+    write_tree = one_invocation(shim, "write-tree")
+    assert "--missing-ok" in write_tree.argv, (
+        f"write-tree must tolerate the promisor objects: {write_tree.argv[1:]}"
+    )
+    assert "GIT_NO_LAZY_FETCH" in write_tree.env, (
+        "and the lane must refuse the fetch outright, so a future miss fails as "
+        f"`invalid object` rather than as somebody's expired token: {write_tree.env}"
+    )
+
+
 def test_two_refspec_form_fails_without_branch(
     fake_forge: FakeForge, git_package: tuple[str, str, str], tmp_path: Path
 ) -> None:
