@@ -33,7 +33,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Designing a new feature | [arch-principles.md](./rules/arch-principles.md), [workflow-feature.md](./rules/workflow-feature.md), `subsystem-{target}.md`, skill `architect` |
 | Fixing a bug | [workflow-bugfix.md](./rules/workflow-bugfix.md) — Reproduce → RCA → Regression Test → Fix → Verify |
 | Refactoring code | [workflow-refactor.md](./rules/workflow-refactor.md) — Safety Net → Scope → Transform → Verify → Repeat |
-| Website / docs work | [quality-typescript.md](./rules/quality-typescript.md), [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md), skill `docs` |
+| Website / docs work | [quality-typescript.md](./rules/quality-typescript.md), [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md), [docs-quality.md](./rules/docs-quality.md), skill `docs` |
 | Security-sensitive change | [quality-security.md](./rules/quality-security.md), [subsystem-ci.md](./rules/subsystem-ci.md), skill `security-auditor` |
 | CLI command changes | [subsystem-cli.md](./rules/subsystem-cli.md), [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
 | Shell activation / per-prompt env reconciliation, consent stamps | [subsystem-cli.md](./rules/subsystem-cli.md) (`ocx shell state`), [subsystem-file-structure.md](./rules/subsystem-file-structure.md) (`state/projects/<key>/` layout), `arch-principles.md` (ADR index + State glossary) |
@@ -54,14 +54,16 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Starlark host API (`ocx package test --script`, typed values) | [subsystem-script.md](./rules/subsystem-script.md), [subsystem-tests.md](./rules/subsystem-tests.md) |
 | Taskfiles / build pipeline / caching | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
 | Releases | [workflow-release.md](./rules/workflow-release.md) |
+| Bazel builds (`BUILD`/`MODULE.bazel`/Starlark) | [bazel-quality.md](./rules/bazel-quality.md) (shareable), skills `bazel-adopt`, `bazel-diagnose` |
+| Hex mode state (discussion artifacts, `/hex-finalize` backup refs, re-anchor after compaction) | [hex-state.md](./rules/hex-state.md) (global), skills `hex-discuss`, `hex-finalize` |
 
 ## By language
 
 | Language | Quality rule | Related |
 |---|---|---|
 | Rust | [quality-rust.md](./rules/quality-rust.md) | [rust-quality.md](./rules/rust-quality.md), [rust-cargo.md](./rules/rust-cargo.md), [quality-rust-errors.md](./rules/quality-rust-errors.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md), [arch-principles.md](./rules/arch-principles.md), [quality-core.md](./rules/quality-core.md), [subsystem-deps.md](./rules/subsystem-deps.md) |
-| Python (acceptance tests) | [quality-python.md](./rules/quality-python.md) | [subsystem-tests.md](./rules/subsystem-tests.md) |
-| TypeScript (website) | [quality-typescript.md](./rules/quality-typescript.md) | [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md) |
+| Python (acceptance tests) | [quality-python.md](./rules/quality-python.md) | [subsystem-tests.md](./rules/subsystem-tests.md), [python-quality.md](./rules/python-quality.md) (shareable), [python-packaging.md](./rules/python-packaging.md) (shareable) |
+| TypeScript (website) | [quality-typescript.md](./rules/quality-typescript.md) | [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md), [typescript-quality.md](./rules/typescript-quality.md) (shareable), [typescript-packaging.md](./rules/typescript-packaging.md) (shareable) |
 | Bash (tasks, hooks) | [quality-bash.md](./rules/quality-bash.md) | — |
 | Vue / VitePress | [quality-vite.md](./rules/quality-vite.md) | [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md) |
 
@@ -100,17 +102,20 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `crates/ocx_cli/src/**` | + [subsystem-cli.md](./rules/subsystem-cli.md), [quality-cli-help.md](./rules/quality-cli-help.md) |
 | `crates/ocx_cli/src/api/**`, `command/**` | + [subsystem-cli-api.md](./rules/subsystem-cli-api.md), [subsystem-cli-commands.md](./rules/subsystem-cli-commands.md) |
 | `test/**` | [subsystem-tests.md](./rules/subsystem-tests.md) |
-| `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md) |
-| `website/**` | [quality-typescript.md](./rules/quality-typescript.md), [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md), [product-context.md](./rules/product-context.md) |
-| `**/*.ts`, `**/*.tsx`, `**/tsconfig*.json` | [quality-typescript.md](./rules/quality-typescript.md) |
+| `test/**/*.py`, `**/*.py` | + [quality-python.md](./rules/quality-python.md), [python-quality.md](./rules/python-quality.md) |
+| `**/pyproject.toml`, `**/uv.lock` | [python-packaging.md](./rules/python-packaging.md) |
+| `website/**` | [quality-typescript.md](./rules/quality-typescript.md), [quality-vite.md](./rules/quality-vite.md), [subsystem-website.md](./rules/subsystem-website.md), [docs-style.md](./rules/docs-style.md), [docs-quality.md](./rules/docs-quality.md), [product-context.md](./rules/product-context.md) |
+| `**/*.ts`, `**/*.tsx`, `**/tsconfig*.json` | [quality-typescript.md](./rules/quality-typescript.md), [typescript-quality.md](./rules/typescript-quality.md) |
+| `**/package.json`, `**/eslint.config.*`, `**/biome.json(c)` | [typescript-packaging.md](./rules/typescript-packaging.md) |
 | `**/vite.config.*`, `**/.vitepress/config.*` | [quality-vite.md](./rules/quality-vite.md) |
 | `**/*.sh`, `**/*.bash` | [quality-bash.md](./rules/quality-bash.md) |
+| `**/BUILD.bazel`, `**/*.bzl`, `**/MODULE.bazel`, `**/.bazelrc` | [bazel-quality.md](./rules/bazel-quality.md) |
 | `.github/workflows/**`, `.github/actions/**`, `renovate.json` | [subsystem-ci.md](./rules/subsystem-ci.md), [quality-security.md](./rules/quality-security.md) |
 | `.github/ISSUE_TEMPLATE/**` | [workflow-github.md](./rules/workflow-github.md) |
-| `dist-workspace.toml`, `cliff.toml`, `CHANGELOG.md`, release workflows | [workflow-release.md](./rules/workflow-release.md), [workflow-git.md](./rules/workflow-git.md) |
+| `dist-workspace.toml`, `cliff.toml`, `CHANGELOG.md`, release workflows | [workflow-release.md](./rules/workflow-release.md), [workflow-git.md](./rules/workflow-git.md), [docs-quality.md](./rules/docs-quality.md) |
 | `taskfile.yml`, `taskfiles/**/*.yml`, `**/taskfile.yml` | [subsystem-taskfiles.md](./rules/subsystem-taskfiles.md) |
 | `.claude/**` | [meta-ai-config.md](./rules/meta-ai-config.md) |
-| `.claude/agents/**`, `.claude/skills/swarm-*/**` | + [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md) |
+| `.claude/agents/**`, `.claude/skills/hex-*/**` | + [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md) |
 
 Globals (always loaded or imported into `CLAUDE.md`): [quality-core.md](./rules/quality-core.md),
 [product-tech-strategy.md](./rules/product-tech-strategy.md), [workflow-intent.md](./rules/workflow-intent.md), this catalog.
@@ -132,11 +137,11 @@ Exempt from overlap detection (intended broad coupling):
 | Declared group | Shared scope |
 |---|---|
 | `quality-security.md` + `subsystem-ci.md` | `.github/workflows/**`, `.github/actions/**` |
-| `workflow-git.md` + `workflow-release.md` | `CHANGELOG.md`, `cliff.toml`, `dist-workspace.toml` |
-| `docs-style.md` + `subsystem-website.md` + `product-context.md` | `website/**` |
+| `workflow-git.md` + `workflow-release.md` + `docs-quality.md` | `CHANGELOG.md`, `cliff.toml`, `dist-workspace.toml` |
+| `docs-style.md` + `subsystem-website.md` + `product-context.md` + `docs-quality.md` | `website/**` |
 | `product-context.md` + `workflow-feature.md` | `.claude/artifacts/**` |
 | `subsystem-cli-api.md` + `subsystem-cli-commands.md` | `crates/ocx_cli/src/command/**` |
-| `workflow-feature.md` + `workflow-swarm.md` | `.claude/agents/**`, `.claude/skills/swarm-*/**` |
+| `workflow-feature.md` + `workflow-swarm.md` | `.claude/agents/**`, `.claude/skills/hex-*/**` |
 | `subsystem-script.md` + `subsystem-tests.md` | `test/tests/test_package_test_script.py` |
 
 ## Skills by task topic
