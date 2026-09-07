@@ -39,11 +39,12 @@ Fourth tier `state/` for **ephemeral, non-content-addressed runtime state** (TTL
 | `package_store.rs` | Assembled package storage | `PackageStore`, `PackageDir` |
 | `symlink_store.rs` | Install symlinks (candidate/current) | `SymlinkStore`, `SymlinkKind` |
 | `temp_store.rs` | Temp dirs for in-progress downloads | `TempStore`, `TempDir`, `TempAcquireResult`, `StaleEntry`, `TempEntry` |
-| `state_store.rs` | Persistent + ephemeral runtime state per subsystem (update-check throttle, managed-config, OCI Referrers capability cache, offline-verify trust-root cache) — named per-subsystem accessors, no generic `StateKey` | `StateStore` |
+| `state_store.rs` | Persistent + ephemeral runtime state per subsystem (update-check throttle, managed-config, OCI Referrers capability cache, offline-verify trust-root cache) — named per-subsystem accessors, no generic `StateKey`; also the toolchain **render stamps** (C-003) | `StateStore`, `RenderStamp`, `RenderStampScope`, `RenderStampTarget`, `BinEntryStamp` |
 | `cas_path.rs` | Digest sharding; `CasTier` enum | `cas_shard_path()`, `is_valid_cas_path()`, `write_digest_file()` |
 | `index_store.rs` | Local index collection — wire-grammar store (root docs + dispatch-object CAS, A2); config blobs route through the machine-global `BlobStore` instead | `IndexStore`, `CatalogEntryStatus`, `CatalogTransaction`, `RootReadResult` |
 | `shim_store.rs` | Generated shim directories — the on-disk form of a **deferred** tool | `ShimStore`, `ShimDir` |
 | `shim_bin_store.rs` | Flat CAS for the embedded Windows `ocx-shim` executable blob | `ShimBinStore` |
+| `toolchain_store.rs` | Rendered toolchain home — one grammar, two tiers: the store wraps the **global** home, the home is the value type a project tier reuses | `ToolchainStore`, `ToolchainHome`, `ToolchainPathComponent`, `ToolchainPathError` |
 | `reference_manager.rs` | Forward symlinks + back-references for GC | `ReferenceManager` |
 
 ### Cross-cutting link primitives
@@ -69,6 +70,7 @@ pub struct FileStructure {
     pub temp: TempStore,
     pub shim_bin: ShimBinStore,
     pub shims: ShimStore,
+    pub toolchain: ToolchainStore,  // the GLOBAL rendered home; a project home is a value, not a field (C-002)
     pub locks: PathBuf,
 }
 ```
@@ -83,9 +85,9 @@ the GC graph. Locking policy (when to lock the data file in place vs. `lock_scop
 Never `<Store>::new(root.join("blobs"))` / etc. to reach a store — that
 re-constructs a store `FileStructure` already owns, via a literal path join instead of the
 canonical accessor. Always reach a store through the already-constructed `FileStructure`
-(`FileStructure::with_root(root)` builds all nine stores in one place): `fs.blobs`,
+(`FileStructure::with_root(root)` builds all ten stores in one place): `fs.blobs`,
 `fs.layers`, `fs.packages`, `fs.index`, `fs.symlinks`, `fs.state`, `fs.temp`, `fs.shim_bin`,
-`fs.shims`. A literal `.join(...)`
+`fs.shims`, `fs.toolchain`. A literal `.join(...)`
 is fine when it is a genuine SUB-PATH under an already-correct store root (e.g. a scratch subdir
 under `fs.temp.root()`) — the rule is against RE-CONSTRUCTING the store, not against every join.
 The one sanctioned exception is the `--index`/`OCX_INDEX` override seam in `context.rs`, which
@@ -102,10 +104,12 @@ deleted" above.
 | `state/patch-descriptors/<registry-slug>/<repo>.json` | Patch-descriptor discovery record — the three-state `__ocx.patch` key in a `BTreeMap<String,String>` tag→digest map (`FileStructure::patch_descriptor_path`). |
 | `state/patch-companions/<registry-slug>/<repo>.json` | **Patch-tier companion pins** — the same tag→digest map shape, one ordinary tag key per pinned companion tag, holding the TOP (image-index) manifest digest (`FileStructure::patch_companion_path`). A companion is a package the user never named, so its binding lives here and NEVER in the local index (`subsystem-oci`: a pin moves only when named). Written by `install_companion` after the pinned pull succeeds; advanced only by `ocx patch sync`. Both patch state paths are keyed off the `FileStructure` root and never carry `--index` / `OCX_INDEX` redirection — `ocx patch test` therefore pins into its scratch root, which is where its compose reads back from. |
 | `state/projects/<key>/consent.json` | **Per-project shell-activation consent stamp** (`adr_shell_env_overhaul.md` Decision 2). `<key>` = the same `name_for_path(dunce::canonicalize(canonicalize(<project file>).parent()))` derivation the `projects/` ledger uses. `StateStore::project_state_dir(key)` / `consent_stamp_file(key)` / `project_state_root()`. Written by exactly six call sites — the toolchain-tier mutation commands (`add`/`remove`/`lock`/`update`/`run`/`pull`) — never by `ocx shell state` or `ocx self activate`, which are read-only. Replaced atomically via `write_bytes_atomic`, never edited in place. **GC is the one exception to "`state/` is not walked by `ocx clean`" below**: swept iff the stamp deserializes at an understood `v` AND a pre-removal re-probe proves its own recorded `project_dir` is definitively absent — never derived from the `projects/` ledger, which the stamp does not consult. See `arch-principles.md`'s **State** glossary entry for the one-exception framing. |
+| `state/projects/<key>/render_stamp.json` | **Per-project toolchain render stamp** (C-003, D-V13) — beside the consent stamp, same `<key>` derivation, same deletable-at-any-time lifetime, and swept by the same `state/projects/<key>/` sweep. Carries `home`, a tagged `scope` (`project` with the canonical project dir, or `global`) and the exposed name set the render wrote into `bin/`. No field is `Option`-shaped and none covers mtime — a dropped key is a deserialize error, which reads as absent. |
+| `state/render_stamp.json` | **Global toolchain render stamp** — `StateStore::global_render_stamp_file()`, directly under `state/` and never under `projects/<key>/`: `consent::record_in` refuses to stamp `$OCX_HOME` at all (A-44), and `ocx clean` classifies a `state/projects/<key>/` whose stamp records `$OCX_HOME` as `SweepReason::OcxHome` and removes the whole directory, which would delete the global stamp on every sweep. |
 
 `$OCX_HOME/projects.json` and `$OCX_HOME/.projects.lock` from the prior JSON ledger are obsolete — safe to delete. `ocx clean` removes them opportunistically with a single debug log if encountered.
 
-## Nine Stores
+## Ten Stores
 
 ### BlobStore — Raw OCI blobs
 
@@ -207,6 +211,32 @@ content identity, not mutual exclusion: both racers write byte-identical bytes.
 Outside the three GC tiers — never walked or collected by `ocx clean`. A superseded blob (after an
 `ocx` version bump changes the digest) is orphaned litter accepted by design, like `locks/` litter.
 
+### ToolchainStore — The rendered toolchain home
+
+Layout: `{root}/toolchain/` — `.gitignore` (the bytes `*\n`, C-004), `bin/` holding one launcher
+trampoline per exposed name (DEFAULT group only; on Windows `<name>.exe` **plus** its `<name>.exec`
+sidecar, two entries), and one `<group>/<entry>/` directory link (junction on Windows) to a package
+root per selected group.
+
+**One grammar, two tiers.** `ToolchainStore` wraps the **global** home (`$OCX_HOME/toolchain`) and
+forwards every accessor to a `ToolchainHome`, the value type that owns the shape — so store and
+project home cannot drift into two layouts. A project's home is the same tree at a different root
+and is deliberately NOT a `FileStructure` field: it depends on which project is in scope, so it is
+resolved per call by `project::resolve_toolchain_home` (C-002), which is also where the
+`toolchain-dir` config root applies. The global home ignores that key entirely (C-016).
+
+Key methods: `home()`, `root()`, `bin()`, `gitignore()`, `ensure_gitignore()`, `entry(group, entry)`.
+**Never join a group or entry name onto `root()`** — `entry()` validates both components (`bin` and
+`.gitignore` are reserved on each, C-013) and is the only sanctioned route into the tree, returning
+`ToolchainPathError` naming the refused `ToolchainPathComponent`. `bin()` is also where C-010's
+lookup-PATH exclusion is derived from, never a literal `toolchain/bin` join.
+
+Outside the three GC tiers — never walked or collected by `ocx clean`, exactly as `ShimBinStore` is.
+The tree is **derived state, not reference-counted**: a stale home is rebuilt by the next render and
+a superseded entry is litter accepted by design. Freshness is decided by the render stamp
+(`StateStore::render_stamp`), never by a `refs/` walk — see the ARCH-4b sibling carve-out under
+"symlink Module".
+
 ### SymlinkStore — Install symlinks
 
 Layout: `{root}/symlinks/{registry_slug}/{repo_path}/candidates/{tag}` + `current`
@@ -228,7 +258,12 @@ shape `state/{subsystem}/{key}.json` (e.g. `state/referrers/<registry-slug>.json
 host libc-detection cache, one flat file with no per-key sharding since it is keyed on the local
 machine rather than a registry).
 
-Key methods: `root()`, `update_check_dir()`, `update_check_file(identifier)`; signing/trust caches: `referrers_capability_file(registry)` (`state/referrers/<registry-slug>.json`) and `trust_root_file(rekor_authority)` (`state/trust_root/<rekor-authority-slug>.json`) — both slug via `to_relaxed_slug` (dots preserved) and are the layout owners for the OCI referrer capability + offline-verify trust-root caches; managed-config tier: `managed_config_dir()`, `managed_config_snapshot_file()` (metadata JSON) + `managed_config_toml_file()` (readable `config.toml` payload sibling) — the snapshot persists as **two** files (payload written first, metadata last, each its own atomic temp+rename; metadata absent ⟹ whole snapshot reads absent), `managed_config_refresh_marker()` (zero-byte throttle marker), `managed_config_pause_file()` (content-bearing `pause.json` written by `ocx config update --pause`), plus the pure associated `managed_config_snapshot_path(ocx_home)` and `managed_config_toml_path_for_snapshot(snapshot_path)` (sibling derivation) shared with the config loader. Generic throttle primitives (promoted from `package_manager/tasks/update_check.rs`): `is_throttled(path, interval) -> bool` (sync, blocking I/O) and `touch(path) -> impl Future` (async, atomic write via temp+rename, logs failure at debug — never propagates). Callers own the state-file path (e.g. via `update_check_file`); these two methods are path-agnostic.
+Key methods: `root()`, `update_check_dir()`, `update_check_file(identifier)`; signing/trust caches: `referrers_capability_file(registry)` (`state/referrers/<registry-slug>.json`) and `trust_root_file(rekor_authority)` (`state/trust_root/<rekor-authority-slug>.json`) — both slug via `to_relaxed_slug` (dots preserved) and are the layout owners for the OCI referrer capability + offline-verify trust-root caches; managed-config tier: `managed_config_dir()`, `managed_config_snapshot_file()` (metadata JSON) + `managed_config_toml_file()` (readable `config.toml` payload sibling) — the snapshot persists as **two** files (payload written first, metadata last, each its own atomic temp+rename; metadata absent ⟹ whole snapshot reads absent), `managed_config_refresh_marker()` (zero-byte throttle marker), `managed_config_pause_file()` (content-bearing `pause.json` written by `ocx config update --pause`), plus the pure associated `managed_config_snapshot_path(ocx_home)` and `managed_config_toml_path_for_snapshot(snapshot_path)` (sibling derivation) shared with the config loader. Generic throttle primitives (promoted from `package_manager/tasks/update_check.rs`): `is_throttled(path, interval) -> bool` (sync, blocking I/O) and `touch(path) -> impl Future` (async, atomic write via temp+rename, logs failure at debug — never propagates). Callers own the state-file path (e.g. via `update_check_file`); these two methods are path-agnostic. Toolchain render stamps (C-003): `render_stamp(target)` /
+`set_render_stamp(target, stamp)` take a `RenderStampTarget` so a tier cannot be stamped at the
+other tier's path, over the ungated path accessors `render_stamp_file(key)`
+(`state/projects/<key>/render_stamp.json`) and `global_render_stamp_file()`
+(`state/render_stamp.json`). An unusable stamp — absent, corrupt, unknown `v` — reads as absent at
+debug level and the caller's answer is "re-render".
 
 **Definitional contract** (applies to every `state/{subsystem}/...` entry — e.g. the OCI
 Referrers capability cache and the offline-verify trust-root cache, both introduced by
@@ -236,7 +271,7 @@ Referrers capability cache and the offline-verify trust-root cache, both introdu
 
 - **Purpose:** ephemeral, non-content-addressed, registry-scoped or subsystem-scoped runtime state. NOT for content (use `blobs/`), extracted files (`layers/`), assembled packages (`packages/`), persistent metadata mirror (`tags/`), or install pointers (`symlinks/`).
 - **Lifetime:** TTL-bound per subsystem (the Referrers capability cache uses a flat 6h TTL, ADR Amendment 6). Stale entries are safe to delete at any time without integrity loss.
-- **GC:** **not walked** by `ocx clean`, with exactly **one exception**: `state/projects/<key>/` (the shell-activation consent stamp, see "Root-level state files" above) is swept on the stamp's own recorded `project_dir` liveness, one call site in `clean.rs` — never on `refs/` reachability and never on the `projects/` ledger, which this sweep does not consult (`adr_shell_env_overhaul.md` Decision 2). Every other `state/{subsystem}/...` entry has no refs, no digest, no GC role. v2 may add `ocx clean --state` to truncate the rest.
+- **GC:** **not walked** by `ocx clean`, with exactly **one exception**: `state/projects/<key>/` (the shell-activation consent stamp and the project render stamp, see "Root-level state files" above) is swept on the stamp's own recorded `project_dir` liveness, one call site in `clean.rs` — never on `refs/` reachability and never on the `projects/` ledger, which this sweep does not consult (`adr_shell_env_overhaul.md` Decision 2). Every other `state/{subsystem}/...` entry has no refs, no digest, no GC role. v2 may add `ocx clean --state` to truncate the rest.
 - **Atomicity:** writes via `tempfile::NamedTempFile` + `std::fs::rename` (Windows-safe across existing targets). The `tempfile::persist` shortcut does **not** replace-existing on Windows.
 - **Concurrency:** advisory file lock optional per subsystem. Capability cache reads tolerate fail-open ("file missing → unknown, reprobe").
 - **Schema:** each subsystem owns its JSON schema. No registry-wide invariants beyond filename layout.
@@ -327,9 +362,11 @@ Windows: use NTFS junction points (no privilege escalation needed).
 
 **ARCH-4b — sanctioned exception for `$OCX_HOME/projects/`:** `ProjectRegistry` uses `symlink::create`/`update` (via `symlink::replace_atomic`) directly, bypassing `ReferenceManager`. This is intentional and must not be "fixed":
 
-- `projects/` links target an absolute path **outside** `$OCX_HOME` (the project directory). `ReferenceManager::link()` validates containment inside `refs/` — that check is correct for install back-refs and must reject external targets.
+- `projects/` links target an absolute path **outside** `$OCX_HOME` (the project directory), and `ReferenceManager::link()` has **no containment check** to stop it: it derives the back-ref path through `PackageStore::refs_symlinks_dir_for_content`, which canonicalizes, strips a trailing `content` component and joins `refs/symlinks` — pure sibling navigation, with nothing asserting the result is under `$OCX_HOME/packages`. Routing a `projects/` link through it would write a `refs/symlinks/` directory into the user's own tree.
 - `projects/` links are categorically not install back-refs. They are GC-root registrations with a flat-symlink liveness model (ADR: `adr_project_gc_symlink_ledger.md`).
 - Any future reviewer who sees raw `symlink::` calls in `project/registry.rs` should recognise this carve-out, not re-flag it as a violation of the "always use `ReferenceManager`" rule.
+
+**ARCH-4b sibling — no back-reference for a toolchain link (C-052):** the `<group>/<entry>` links a render writes into a toolchain home also use `symlink::update` directly, and for the *opposite* reason to `projects/`. Their targets ARE package roots, so `ReferenceManager::link()` would navigate cleanly to exactly that package's live `refs/symlinks/` — and a back-reference is a GC root, so the link would pin the package forever, on every project that ever rendered a tree. The toolchain home is derived state rebuilt by the next render, never a reference-counted install (see `ToolchainStore` above), so it is exempt from reference counting by design: it takes no forward-ref, no back-ref, and no `refs/` edge of any kind. Reaching for `ReferenceManager` in `tasks/render_toolchain.rs` is the right rule against the wrong tree.
 
 ## hardlink Module
 
