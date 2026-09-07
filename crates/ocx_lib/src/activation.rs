@@ -221,8 +221,8 @@ pub struct SessionInput<'a> {
 /// [`Shell::export_path`](crate::shell::Shell::export_path) *prepends*
 /// ([`utility::path::move_to_front`](crate::utility::path::move_to_front)), so
 /// the **last** entry a plan emits ends up frontmost on `PATH`. C-060's order,
-/// front to back, is [`Self::install_bin`], then [`Self::project_bin`], then
-/// [`Self::global_bin`] — so the desired vector runs the other way, and the
+/// front to back, is [`Self::project_bin`], then [`Self::global_bin`], then
+/// [`Self::install_bin`] — so the desired vector runs the other way, and the
 /// field declaration order below *is* that vector.
 ///
 /// [`setup::session_path_directories`](crate::setup::session_path_directories)
@@ -232,28 +232,49 @@ pub struct SessionInput<'a> {
 /// test on the vector still green — which is why the ordering is pinned by
 /// asserting the **resulting `PATH` string**, never this vector.
 ///
-/// # Why `install_bin` is frontmost, stated honestly
+/// # Why `install_bin` is backmost, stated honestly
 ///
-/// Not because a `PATH` hijack of `ocx` is otherwise live: a rendered
-/// trampoline bakes an **absolute** `ocx` path (`launcher::generate`'s
-/// `trampoline_ocx_binary`), so it does not resolve `ocx` through `PATH` at
-/// all. The ordering is kept
-/// because C-060 states it, because it costs nothing, and because it is what
-/// makes the one remaining bare-name case — a trampoline rendered when both
-/// rungs of that ladder declined — resolve the installed `ocx` rather than
-/// whatever a project happens to put in front of it.
+/// Because a toolchain that pins `ocx` has to be able to win. D-4 removed the
+/// `ShimNameShadowsOcx` refusal so that a project — or the global tier — may
+/// pin its own `ocx`, and an ordering that put the installed binary in front of
+/// both made that pin unreachable by construction: the name rendered, and
+/// nothing could ever resolve it. `ocx` therefore reads the same way as every
+/// other name — project, then global, then the installed binary as the floor.
+///
+/// What used to justify the other order does not survive. A rendered trampoline
+/// bakes an **absolute** `ocx` path (`launcher::generate`'s
+/// `trampoline_ocx_binary`), so it does not resolve `ocx` through `PATH` at all,
+/// and the one remaining bare-name case — a trampoline rendered when both rungs
+/// of that ladder declined — is defended where the resolution actually happens
+/// rather than by ordering: [`resolve_command_excluding`](crate::env) drops
+/// every trampoline directory from its **lookup copy** of `PATH`, and
+/// `is_ocx_trampoline` re-checks the resolved answer independently.
 ///
 /// # Why a struct and not a `Vec<PathBuf>`
 ///
 /// The project slot is filled a long way after the other two — after consent,
-/// after the C-061 stamp gate, after the C-062 heal — and it belongs in the
-/// **middle**. A `Vec` would take a `push` (wrong end, silently) or an
-/// `insert(1, …)` (a magic index nothing checks). A named `Option` field cannot
-/// be filled at the wrong position.
+/// after the C-061 stamp gate, after the C-062 heal. A `Vec` would take a
+/// `push` or an `insert(n, …)`, and neither states which end it meant: a `push`
+/// is correct for today's order and was silently wrong for the one this file
+/// carried until the tiers were re-ordered. A named `Option` field cannot be
+/// filled at the wrong position, whatever the order becomes next.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPath {
+    /// [`setup::ocx_install_bin_path`](crate::setup::ocx_install_bin_path) —
+    /// the directory the installed `ocx` itself resolves from. Backmost of the
+    /// three on `PATH`, so it is emitted **first**: it is the floor a bare
+    /// `ocx` falls back to when no toolchain pins one, never a lid over a
+    /// toolchain that does.
+    ///
+    /// One spelling of this directory, workspace-wide (RUL-63, R-W29): a second
+    /// derivation makes `repair_owned_segments` delete one spelling and add the
+    /// other on every prompt, because both sit under `$OCX_HOME` and only one of
+    /// them is ever in the desired set.
+    pub install_bin: PathBuf,
+
     /// `$OCX_HOME/toolchain/bin` — the global rendered toolchain's trampolines.
-    /// Backmost of the three on `PATH`, so it is emitted **first**.
+    /// Between the other two on `PATH`, so it is emitted **second**: a global
+    /// pin shadows the installed binary, and a project's pin shadows it in turn.
     ///
     /// [`ToolchainStore::bin`](crate::file_structure::ToolchainStore::bin),
     /// never a literal `toolchain/bin` join (C-001).
@@ -263,19 +284,9 @@ pub struct SessionPath {
     /// `None` in `env` and `none` mode, and `None` in `bin` mode whenever the
     /// C-061 stamp gate withheld it.
     ///
-    /// Between the other two on `PATH`: a project's trampolines shadow the
-    /// global tier's, and the installed `ocx` shadows both.
+    /// Frontmost of the three on `PATH`, so it is emitted **last**: the most
+    /// specific tier that pinned a name is the one that answers for it.
     pub project_bin: Option<PathBuf>,
-
-    /// [`setup::ocx_install_bin_path`](crate::setup::ocx_install_bin_path) —
-    /// the directory the installed `ocx` itself resolves from. Frontmost of the
-    /// three on `PATH`, so it is emitted **last**.
-    ///
-    /// One spelling of this directory, workspace-wide (RUL-63, R-W29): a second
-    /// derivation makes `repair_owned_segments` delete one spelling and add the
-    /// other on every prompt, because both sit under `$OCX_HOME` and only one of
-    /// them is ever in the desired set.
-    pub install_bin: PathBuf,
 }
 
 impl SessionPath {
@@ -321,9 +332,9 @@ impl SessionPath {
         // The desired vector, back to front on `PATH`: see the type docs
         // (RUL-62) for why this order is the reverse of the documented one.
         [
+            Some(&self.install_bin),
             Some(&self.global_bin),
             self.project_bin.as_ref(),
-            Some(&self.install_bin),
         ]
         .into_iter()
         .flatten()
@@ -1475,14 +1486,14 @@ pub(crate) async fn bin_mode_entry(
 /// contract rather than an arrangement. Entries later in this vector end up
 /// nearer the front of `PATH` ([`Shell::export_path`](crate::shell::Shell::export_path)
 /// prepends), so front to back a shell reads: the project's composed entries,
-/// [`SessionPath::install_bin`], the project's `bin/`,
-/// `$OCX_HOME/toolchain/bin`, the global tier's composed entries.
+/// the project's `bin/`, `$OCX_HOME/toolchain/bin`,
+/// [`SessionPath::install_bin`], the global tier's composed entries.
 ///
 /// Putting the session block last instead would place the **global** tier's
 /// composed entries ahead of the project's own trampoline directory, so a
 /// globally installed `cmake` would shadow the project's — the tier inversion
-/// C-018 forbids. Putting it first would put both tiers ahead of the installed
-/// `ocx`.
+/// C-018 forbids. Putting it first would put both tiers behind the global
+/// tier's composed entries, which is the same inversion one tier up.
 pub fn desired_entries(outcome: &Outcome) -> Vec<Entry> {
     let mut desired = outcome.global.clone();
     desired.extend(outcome.session.entries());
@@ -2345,9 +2356,12 @@ mod session_path_tests {
 
     // ── C-060 / RUL-62 — the order, read off `PATH` ─────────────────────────
 
-    /// **C-060, RUL-62.** Front to back on `PATH`: `ocx_install_bin_path`, then
-    /// the project's `<home>/toolchain/bin` (`bin` mode only), then
-    /// `$OCX_HOME/toolchain/bin`.
+    /// **C-060, RUL-62.** Front to back on `PATH`: the project's
+    /// `<home>/toolchain/bin` (`bin` mode only), then `$OCX_HOME/toolchain/bin`,
+    /// then `ocx_install_bin_path`.
+    ///
+    /// The most specific tier that pinned a name answers for it, `ocx`
+    /// included — the installed binary is the floor, never a lid (D-4).
     ///
     /// Asserted on the *resulting `PATH`*, which is the whole of RUL-62: the
     /// desired vector runs the other way because `export_path` prepends, so an
@@ -2359,7 +2373,7 @@ mod session_path_tests {
     /// *documented on `PATH`* rather than in the reverse — i.e. hand
     /// `session_path_directories`' slice to the splice.
     #[test]
-    fn c060_rul62_the_resulting_path_leads_with_install_bin_then_project_bin_then_global_bin() {
+    fn c060_rul62_the_resulting_path_leads_with_project_bin_then_global_bin_then_install_bin() {
         let session = SessionPath {
             global_bin: global_bin(),
             project_bin: Some(project_bin()),
@@ -2371,8 +2385,8 @@ mod session_path_tests {
         let project = position(&path, &project_bin());
         let global = position(&path, &global_bin());
         assert!(
-            install < project && project < global,
-            "C-060: front to back is install_bin ▸ project bin/ ▸ $OCX_HOME/toolchain/bin; got {path:#?}"
+            project < global && global < install,
+            "C-060: front to back is project bin/ ▸ $OCX_HOME/toolchain/bin ▸ install_bin; got {path:#?}"
         );
     }
 
@@ -2385,9 +2399,9 @@ mod session_path_tests {
         let path = resulting_path(&[Path::new("/usr/bin")], &session().entries());
 
         assert_eq!(
-            position(&path, &global_bin()),
-            position(&path, &install_bin()) + 1,
-            "C-060: with no project slot the pair is adjacent, install_bin in front; got {path:#?}"
+            position(&path, &install_bin()),
+            position(&path, &global_bin()) + 1,
+            "C-060: with no project slot the pair is adjacent, global_bin in front; got {path:#?}"
         );
     }
 
@@ -2395,8 +2409,8 @@ mod session_path_tests {
 
     /// **RUL-87 (C-018 × C-059).** The desired vector is
     /// `global ++ session ++ project`, so `PATH` front to back reads:
-    /// project-composed ▸ `install_bin` ▸ project `bin/` ▸
-    /// `$OCX_HOME/toolchain/bin` ▸ global-composed.
+    /// project-composed ▸ project `bin/` ▸ `$OCX_HOME/toolchain/bin` ▸
+    /// `install_bin` ▸ global-composed.
     ///
     /// The load-bearing half is the **last** comparison: the alternative
     /// splice (`global ++ project ++ session`, or session first) puts the
@@ -2428,8 +2442,8 @@ mod session_path_tests {
         let global = position(&path, &global_bin());
         let composed_global = position(&path, Path::new(&global_tool));
         assert!(
-            composed_project < install && install < project && project < global && global < composed_global,
-            "RUL-87: project-composed ▸ install_bin ▸ project bin/ ▸ global toolchain bin ▸ global-composed; \
+            composed_project < project && project < global && global < install && install < composed_global,
+            "RUL-87: project-composed ▸ project bin/ ▸ global toolchain bin ▸ install_bin ▸ global-composed; \
              got {path:#?}"
         );
     }
@@ -2768,12 +2782,14 @@ mod session_path_tests {
     }
 
     /// C-059, C-060 — `none → bin`. The project's trampoline directory arrives
-    /// **between** the two session entries, not in front of them.
+    /// **in front of** both session entries, and the pair behind it keeps
+    /// `$OCX_HOME/toolchain/bin` ahead of the installed binary.
     ///
-    /// Red state: append the project slot to the desired vector instead of
-    /// filling [`SessionPath::project_bin`], and it lands frontmost.
+    /// Red state: leave [`SessionPath::project_bin`] empty on the transition and
+    /// the directory never arrives at all; or swap the session pair, and a
+    /// globally pinned `ocx` stops being reachable.
     #[test]
-    fn c060_entering_bin_mode_inserts_the_trampoline_directory_between_the_session_pair() {
+    fn c060_entering_bin_mode_puts_the_trampoline_directory_in_front_of_the_session_pair() {
         use crate::activate::ActivateMode::{Bin, None as NoneMode};
 
         let before = outcome_for(NoneMode);
@@ -2790,8 +2806,8 @@ mod session_path_tests {
         let project = position(&path_after, &project_bin());
         let global = position(&path_after, &global_bin());
         assert!(
-            install < project && project < global,
-            "C-060: `none → bin` inserts between the pair; got {path_after:#?}"
+            project < global && global < install,
+            "C-060: `none → bin` inserts in front of the pair; got {path_after:#?}"
         );
     }
 }
@@ -4351,8 +4367,8 @@ mod session_composition_tests {
         let install = position(&path, &outcome.session.install_bin);
         let global_bin = position(&path, &outcome.session.global_bin);
         assert!(
-            install < global_bin && global_bin < position(&path, Path::new(&global_tool)),
-            "C-059/C-060/RUL-87: install_bin ▸ $OCX_HOME/toolchain/bin ▸ global-composed, \
+            global_bin < install && install < position(&path, Path::new(&global_tool)),
+            "C-059/C-060/RUL-87: $OCX_HOME/toolchain/bin ▸ install_bin ▸ global-composed, \
              even with no project; got {path:#?}"
         );
     }

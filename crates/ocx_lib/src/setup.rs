@@ -421,12 +421,14 @@ pub fn ocx_install_bin_path(file_structure: &FileStructure) -> PathBuf {
 /// The two directories `ocx self setup` registers at session level, **in the
 /// order they must appear on PATH** (C-060).
 ///
-/// [`ocx_install_bin_path`] leads and `$OCX_HOME/toolchain/bin` follows, so the
-/// `ocx` a session resolves is the installed binary rather than whatever a
-/// composed toolchain happens to render under the same name. Every session-PATH
-/// writer takes this slice verbatim and prepends it in the order given, so the
-/// order decided here is the order that reaches the registry value, the
-/// `environment.d` line and the LaunchAgent script alike.
+/// `$OCX_HOME/toolchain/bin` leads and [`ocx_install_bin_path`] follows, so a
+/// global toolchain that pins `ocx` is the one a session resolves and the
+/// installed binary is the floor beneath it. D-4 removed the refusal that used
+/// to stop a toolchain rendering that name; an ordering that kept the installed
+/// binary in front would have left the pin rendered and permanently unreachable.
+/// Every session-PATH writer takes this slice verbatim and prepends it in the
+/// order given, so the order decided here is the order that reaches the registry
+/// value, the `environment.d` line and the LaunchAgent script alike.
 ///
 /// A named function rather than a `vec![]` inline in [`run`] because the order
 /// is a decision with a contract number attached, and an ordering nobody can
@@ -437,7 +439,7 @@ pub fn ocx_install_bin_path(file_structure: &FileStructure) -> PathBuf {
 /// second spelling here is what would keep pointing at the old place the day
 /// the layout moves.
 pub fn session_path_directories(file_structure: &FileStructure) -> Vec<PathBuf> {
-    vec![ocx_install_bin_path(file_structure), file_structure.toolchain.bin()]
+    vec![file_structure.toolchain.bin(), ocx_install_bin_path(file_structure)]
 }
 
 /// Adopt (or clear) the managed-config tier from an already-resolved
@@ -1018,7 +1020,7 @@ mod tests {
 
     // ── C-060: the session-PATH directory order ──────────────────────────────
 
-    /// C-060: the install bin directory leads, `$OCX_HOME/toolchain/bin`
+    /// C-060: `$OCX_HOME/toolchain/bin` leads, the install bin directory
     /// follows, and there are exactly those two.
     ///
     /// This is the **one** site that decides the order — the writers prepend
@@ -1034,7 +1036,7 @@ mod tests {
     /// Windows would drive-join and stop matching (`quality-rust.md`,
     /// "Cross-Platform Path Handling").
     #[test]
-    fn the_session_path_directories_put_the_install_bin_dir_ahead_of_the_toolchain_one() {
+    fn the_session_path_directories_put_the_toolchain_bin_dir_ahead_of_the_install_one() {
         let home = tempfile::TempDir::new().unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
 
@@ -1047,13 +1049,13 @@ mod tests {
         );
         assert_eq!(
             directories[0],
-            ocx_install_bin_path(&file_structure),
-            "the installed ocx's own bin directory must lead, so a composed toolchain cannot shadow it"
+            home.path().join("toolchain").join("bin"),
+            "the rendered toolchain bin directory must lead, so a pinned `ocx` can win"
         );
         assert_eq!(
             directories[1],
-            home.path().join("toolchain").join("bin"),
-            "the rendered toolchain bin directory must follow it"
+            ocx_install_bin_path(&file_structure),
+            "the installed ocx's own bin directory is the floor beneath it"
         );
         assert_ne!(
             directories[0], directories[1],

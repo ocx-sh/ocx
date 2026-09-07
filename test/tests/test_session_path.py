@@ -294,8 +294,12 @@ def _store(result: subprocess.CompletedProcess[str]) -> Path:
 
 
 def _ocx_directories(ocx_home: Path) -> list[str]:
-    """The two directories C-060 registers, in order."""
-    return [str(ocx_home / _INSTALL_BIN_REL), str(ocx_home / _TOOLCHAIN_BIN_REL)]
+    """The two directories C-060 registers, in order.
+
+    ``toolchain/bin`` leads: a global toolchain that pins ``ocx`` is what a
+    session resolves, and the installed binary is the floor beneath it (D-4).
+    """
+    return [str(ocx_home / _TOOLCHAIN_BIN_REL), str(ocx_home / _INSTALL_BIN_REL)]
 
 
 linux_only = pytest.mark.skipif(
@@ -326,8 +330,8 @@ def test_setup_registers_both_directories_in_the_environment_d_store(ocx: OcxRun
     assert store.name == "ocx.conf", store
     assert store.parent.name == "environment.d", store
 
-    install_bin, toolchain_bin = _ocx_directories(Path(ocx.env["OCX_HOME"]))
-    assert store.read_text() == f"PATH={install_bin}:{toolchain_bin}:$PATH\n"
+    toolchain_bin, install_bin = _ocx_directories(Path(ocx.env["OCX_HOME"]))
+    assert store.read_text() == f"PATH={toolchain_bin}:{install_bin}:$PATH\n"
 
 
 @linux_only
@@ -599,7 +603,10 @@ def test_an_unencodable_ocx_home_is_refused_before_the_store_is_written(
         f"expected exit 78 (ConfigError), got {result.returncode}\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    assert str(hostile_home / _INSTALL_BIN_REL) in result.stderr, result.stderr
+    # The refusal names the first directory it reaches, so this follows
+    # `_ocx_directories`' order rather than restating it — a re-ordering of the
+    # two must not read as a regression here.
+    assert _ocx_directories(hostile_home)[0] in result.stderr, result.stderr
     assert format_phrase in result.stderr, result.stderr
 
     # Refused *before* writing: the store this host owns must not exist.

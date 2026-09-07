@@ -136,7 +136,7 @@ Recomposing a whole toolchain on every prompt costs a little work per prompt and
 | `none` | `false` | nothing | through the `<group>/<entry>` links | `bin/` and the links |
 | `none` | `true` | nothing | digest paths from `ocx.lock`, consulting no link | `bin/` only |
 
-The session's own directories — OCX's install directory and `$OCX_HOME/toolchain/bin` — are on `PATH` in every row, including `none`. They are minted at shell start and again per prompt, by neither toolchain's mode.
+The session's own directories — `$OCX_HOME/toolchain/bin` and OCX's install directory behind it — are on `PATH` in every row, including `none`. They are minted at shell start and again per prompt, by neither toolchain's mode.
 
 Two things the matrix's shape is saying:
 
@@ -154,7 +154,7 @@ The `bin` rows carry one gate. The `<home>/toolchain/bin` entry is added only wh
 ocx: /home/dana/work/api: its toolchain has not been rendered for this lock; run `ocx pull` here
 ```
 
-Within one prompt the entries land front-to-back as: the project's composed entries, OCX's own install directory, the project's `<home>/toolchain/bin`, `$OCX_HOME/toolchain/bin`, then the global tier's composed entries. A globally installed tool therefore never shadows the project's own — the [tier inversion](#strict-isolation) this page opens with, enforced by ordering.
+Within one prompt the entries land front-to-back as: the project's composed entries, the project's `<home>/toolchain/bin`, `$OCX_HOME/toolchain/bin`, OCX's own install directory, then the global tier's composed entries. A globally installed tool therefore never shadows the project's own — the [tier inversion](#strict-isolation) this page opens with, enforced by ordering. `ocx` itself is no exception: the install directory is last, so a toolchain that pins `ocx` is the one that answers for the name.
 
 ::: info The same two positions mise and rustup take
 [mise][mise-shims] ships both shapes and names them the same way round: `mise activate` recomposes the environment on every prompt, `mise activate --shims` puts one shim directory on `PATH` instead. [rustup][rustup-proxies] only ever ships the second — `~/.cargo/bin/cargo` is a proxy that forwards to whichever toolchain is active. `env` and `bin` are those two positions, chosen per toolchain rather than once per install.

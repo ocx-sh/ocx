@@ -862,8 +862,8 @@ mod tests {
 
     fn directories() -> Vec<PathBuf> {
         vec![
-            PathBuf::from("/Users/u/.ocx/symlinks/abc/current/content/bin"),
             PathBuf::from("/Users/u/.ocx/toolchain/bin"),
+            PathBuf::from("/Users/u/.ocx/symlinks/abc/current/content/bin"),
         ]
     }
 
@@ -997,7 +997,7 @@ mod tests {
     fn the_composed_value_differs_with_the_session_value_it_was_loaded_against() {
         let dirs = directories();
         let script = merge_script(&dirs).expect("representable");
-        let (bin, toolchain) = (dirs[0].display().to_string(), dirs[1].display().to_string());
+        let (toolchain, bin) = (dirs[0].display().to_string(), dirs[1].display().to_string());
 
         let first = run_merge_script(&script, Some("/usr/bin:/bin")).expect("setenv was called");
         let second = run_merge_script(&script, Some("/opt/homebrew/bin:/usr/bin:/bin")).expect("setenv was called");
@@ -1008,8 +1008,8 @@ mod tests {
         );
         for composed in [&first, &second] {
             assert!(
-                composed.starts_with(&format!("{bin}:{toolchain}:")),
-                "C-060 front-to-back order: the install bin directory leads, then the toolchain bin: {composed}"
+                composed.starts_with(&format!("{toolchain}:{bin}:")),
+                "C-060 front-to-back order: the toolchain bin directory leads, then the install bin: {composed}"
             );
         }
         assert!(
@@ -1027,13 +1027,13 @@ mod tests {
     fn an_empty_session_value_falls_back_to_the_system_default() {
         let dirs = directories();
         let script = merge_script(&dirs).expect("representable");
-        let (bin, toolchain) = (dirs[0].display().to_string(), dirs[1].display().to_string());
+        let (toolchain, bin) = (dirs[0].display().to_string(), dirs[1].display().to_string());
 
         for current in [None, Some("")] {
             let composed = run_merge_script(&script, current).expect("setenv was called");
             assert_eq!(
                 composed,
-                format!("{bin}:{toolchain}:/usr/bin:/bin:/usr/sbin:/sbin"),
+                format!("{toolchain}:{bin}:/usr/bin:/bin:/usr/sbin:/sbin"),
                 "an empty read must fall back to the system default, not to an OCX-only PATH"
             );
         }

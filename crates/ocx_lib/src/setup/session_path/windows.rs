@@ -745,7 +745,7 @@ mod tests {
 
     #[cfg(windows)]
     fn merged(existing: &str) -> String {
-        merged_value(existing, &[BIN, TOOLCHAIN])
+        merged_value(existing, &[TOOLCHAIN, BIN])
     }
 
     /// C-038 / E-W3, E-W4: an absent or empty value becomes exactly the two
@@ -756,21 +756,21 @@ mod tests {
         for existing in ["", ";", ";;"] {
             assert_eq!(
                 merged(existing),
-                format!("{BIN};{TOOLCHAIN}"),
+                format!("{TOOLCHAIN};{BIN}"),
                 "for existing {existing:?}"
             );
         }
     }
 
-    /// C-038 / C-060 / E-X10: the install bin directory leads, then the
-    /// toolchain bin directory, then every surviving foreign segment in its
+    /// C-038 / C-060 / E-X10: the toolchain bin directory leads, then the
+    /// install bin directory, then every surviving foreign segment in its
     /// original order.
     #[cfg(windows)]
     #[test]
     fn the_two_directories_lead_and_foreign_segments_keep_their_order() {
         assert_eq!(
             merged(r"C:\Windows;C:\Windows\System32"),
-            format!(r"{BIN};{TOOLCHAIN};C:\Windows;C:\Windows\System32")
+            format!(r"{TOOLCHAIN};{BIN};C:\Windows;C:\Windows\System32")
         );
     }
 
@@ -780,7 +780,7 @@ mod tests {
     #[test]
     fn empty_segments_are_dropped_and_foreign_ones_survive() {
         let composed = merged(r"C:\Windows;;C:\Tools;");
-        assert_eq!(composed, format!(r"{BIN};{TOOLCHAIN};C:\Windows;C:\Tools"));
+        assert_eq!(composed, format!(r"{TOOLCHAIN};{BIN};C:\Windows;C:\Tools"));
         assert!(!composed.ends_with(';'), "no trailing delimiter: {composed}");
         assert!(!composed.contains(";;"), "no empty segment: {composed}");
     }
@@ -807,8 +807,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_wrong_order_pair_is_re_prepended_in_contract_order() {
-        let existing = format!(r"{TOOLCHAIN};C:\Windows;{BIN}");
-        assert_eq!(merged(&existing), format!(r"{BIN};{TOOLCHAIN};C:\Windows"));
+        let existing = format!(r"{BIN};C:\Windows;{TOOLCHAIN}");
+        assert_eq!(merged(&existing), format!(r"{TOOLCHAIN};{BIN};C:\Windows"));
     }
 
     /// C-038 / item 4 / E-W10, behavioural half: an existing occurrence that
@@ -824,7 +824,7 @@ mod tests {
     fn a_trailing_separator_spelling_is_not_left_behind_as_a_duplicate() {
         let existing = format!(r"{BIN}\;C:\Windows;{TOOLCHAIN}/");
         let composed = merged(&existing);
-        assert_eq!(composed, format!(r"{BIN};{TOOLCHAIN};C:\Windows"));
+        assert_eq!(composed, format!(r"{TOOLCHAIN};{BIN};C:\Windows"));
         assert_eq!(
             composed.split(';').count(),
             3,
@@ -847,7 +847,7 @@ mod tests {
     fn an_existing_occurrence_is_matched_case_insensitively() {
         let existing = format!("{};C:\\Windows", BIN.to_lowercase());
         let composed = merged(&existing);
-        assert_eq!(composed, format!(r"{BIN};{TOOLCHAIN};C:\Windows"));
+        assert_eq!(composed, format!(r"{TOOLCHAIN};{BIN};C:\Windows"));
         assert_eq!(
             composed.split(';').count(),
             3,

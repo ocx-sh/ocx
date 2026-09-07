@@ -716,8 +716,8 @@ A `$OCX_HOME/state/no-modify-path` sentinel file that persists the preference au
 
 Reaching those is exactly what the [session-PATH registration][cmd-self-setup-session-path] is for, and it is the half this variable also suppresses. Without the opt-out, `ocx self setup` registers **two** directories, in this order:
 
-1. `$OCX_HOME/symlinks/<ocx cli id>/current/content/bin` — where the installed `ocx` binary itself resolves from. It leads, so a session resolves the installed `ocx` rather than whatever a composed toolchain renders under that name.
-2. `$OCX_HOME/toolchain/bin` — the global toolchain's launcher trampolines.
+1. `$OCX_HOME/toolchain/bin` — the global toolchain's launcher trampolines. It leads, so a global toolchain that pins `ocx` is the one a session resolves.
+2. `$OCX_HOME/symlinks/<ocx cli id>/current/content/bin` — where the installed `ocx` binary itself resolves from. It is the floor: the name a session falls back to when no toolchain pins it.
 
 There is no `$OCX_HOME/bin`; the install directory is the symlink path above, derived from the store rather than joined from a literal.
 

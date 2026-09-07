@@ -224,6 +224,9 @@ impl SelfActivate {
             activate,
             completion: completion.as_deref(),
             hook_binary: hook_enabled.then(|| ocx_binary_path(&bin_path)).as_deref(),
+            wrapper_binary: hook_enabled
+                .then(|| wrapper_binary_path(&file_structure, &bin_path))
+                .as_deref(),
             watch: &watch,
             seed: hook_enabled.then(|| seed_carrier(&tiers, &watch)).flatten().as_deref(),
         });
@@ -914,6 +917,33 @@ fn ocx_binary_path(bin_path: &Path) -> PathBuf {
     bin_path.join(if cfg!(windows) { "ocx.exe" } else { "ocx" })
 }
 
+/// The `ocx` the emitted **wrapper function** calls.
+///
+/// A global toolchain may pin `ocx` — D-4 removed the refusal that used to stop
+/// it — and after C-060's re-ordering `$OCX_HOME/toolchain/bin` sits in front of
+/// the installed binary, so a bare `ocx` on `PATH` resolves the pin. The wrapper
+/// is a shell *function* of the same name, and a function shadows `PATH`
+/// outright: left on the install path it would quietly re-introduce, for exactly
+/// the interactive shells the pin is typed in, the precedence the ordering just
+/// removed.
+///
+/// Resolved once at login rather than per call. C-045 requires every emitted
+/// invocation to name an absolute binary, and the alternative — a
+/// `PATH`-resolving `command ocx` written four times, once per shell dialect —
+/// trades that contract away. A pin added after the shell started therefore
+/// lands at the next login, like every other decision this stream bakes.
+///
+/// Falls back to the installed binary whenever the toolchain renders no `ocx`,
+/// which is the ordinary case.
+fn wrapper_binary_path(file_structure: &FileStructure, install_bin: &Path) -> PathBuf {
+    let pinned = ocx_binary_path(&file_structure.toolchain.bin());
+    if pinned.is_file() {
+        pinned
+    } else {
+        ocx_binary_path(install_bin)
+    }
+}
+
 /// Everything one login stream is built from.
 ///
 /// A borrowed request struct rather than eight positional parameters, the same
@@ -927,12 +957,15 @@ struct LoginStream<'a> {
     shell: Shell,
 
     /// The installed `ocx`'s own `bin` directory — [`ocx_install_bin_path`]'s
-    /// answer, prepended last so it lands frontmost on `PATH`.
+    /// answer, prepended first so it lands **behind** the toolchain trampolines
+    /// on `PATH`: it is the floor a bare `ocx` falls back to, not a lid over a
+    /// toolchain that pins one (C-060).
     bin_path: &'a Path,
 
     /// The global rendered toolchain's trampolines, `$OCX_HOME/toolchain/bin`
     /// — [`ToolchainStore::bin`](ocx_lib::file_structure::ToolchainStore::bin)'s
-    /// answer, never a literal join (C-001).
+    /// answer, never a literal join (C-001). Prepended last, so it lands
+    /// frontmost of the two.
     toolchain_bin: &'a Path,
 
     /// The **global** tier's resolved mode. Gates exactly one line, the global
@@ -946,7 +979,20 @@ struct LoginStream<'a> {
 
     /// The absolute binary the per-prompt hook body invokes, or `None` when the
     /// hook is disabled for this session.
+    ///
+    /// Deliberately **not** [`Self::wrapper_binary`]: the hook runs
+    /// `self activate --reconcile` on every prompt, speaking the private
+    /// `__OCX_ENV_STATE` ledger protocol, so a toolchain-pinned `ocx` of another
+    /// version — or a broken one — would break the prompt of every shell rather
+    /// than one command.
     hook_binary: Option<&'a Path>,
+
+    /// The absolute binary the emitted `ocx` **wrapper function** invokes, or
+    /// `None` when the hook is disabled (the wrapper is emitted only with it).
+    ///
+    /// See [`wrapper_binary_path`] for why this follows the toolchain pin where
+    /// [`Self::hook_binary`] does not.
+    wrapper_binary: Option<&'a Path>,
 
     /// The watch set the emitted hook body stats on each prompt.
     watch: &'a [PathBuf],
@@ -979,6 +1025,7 @@ fn activation_lines(request: &LoginStream<'_>) -> Vec<String> {
         activate,
         completion,
         hook_binary,
+        wrapper_binary,
         watch,
         seed,
     } = request;
@@ -999,17 +1046,20 @@ fn activation_lines(request: &LoginStream<'_>) -> Vec<String> {
     // is safe here: each arm's own value escaper leaves a path carrying no shell
     // metacharacters byte-identical.
     //
-    // Two session directories, in the order C-059 gives them: `toolchain/bin`
-    // first so the later `install_bin` prepend lands in front of it, exactly as
-    // the reconciler's desired fold leaves them (`SessionPath::global_bin` is
-    // "backmost of the three on PATH, so it is emitted first"). Both are
-    // **unconditional in every mode** — dropping either in `bin`/`none` would
-    // leave a login shell with no global tools at all wherever the OS
-    // session-registration channel `ocx self setup` writes is absent or ignored
-    // (a container, a host without systemd user env, `--no-modify-path`, a
-    // non-interactive `sh` that never renders a prompt to be repaired at).
-    lines.extend(path_prepend_line(shell, toolchain_bin));
+    // Two session directories, in the order C-059/C-060 give them: the install
+    // bin first so the later `toolchain_bin` prepend lands in front of it,
+    // exactly as the reconciler's desired fold leaves them
+    // (`SessionPath::install_bin` is "backmost of the three on PATH, so it is
+    // emitted first"). A global toolchain that pins `ocx` therefore wins over
+    // the installed binary, which is the whole point of being allowed to pin it
+    // (D-4). Both are **unconditional in every mode** — dropping either in
+    // `bin`/`none` would leave a login shell with no global tools at all
+    // wherever the OS session-registration channel `ocx self setup` writes is
+    // absent or ignored (a container, a host without systemd user env,
+    // `--no-modify-path`, a non-interactive `sh` that never renders a prompt to
+    // be repaired at).
     lines.extend(path_prepend_line(shell, bin_path));
+    lines.extend(path_prepend_line(shell, toolchain_bin));
 
     // ── Global toolchain env ─────────────────────────────────────────────────
     // Evaluate the global toolchain env — in `env` mode only. `bin` and `none`
@@ -1052,7 +1102,11 @@ fn activation_lines(request: &LoginStream<'_>) -> Vec<String> {
         // C-045 — a latency optimization for same-command-line chaining, never
         // the correctness floor. Every way of escaping the function name
         // degrades to next-prompt correctness rather than breaking.
-        lines.extend(hook::wrapper(shell, binary));
+        //
+        // `wrapper_binary`, not `binary`: the wrapper is a shell function named
+        // `ocx`, so it shadows `PATH` outright and has to follow the same
+        // precedence `PATH` now gives — see [`wrapper_binary_path`].
+        lines.extend(hook::wrapper(shell, wrapper_binary.unwrap_or(binary)));
     }
 
     lines
@@ -1651,16 +1705,17 @@ mod reconcile_tests {
     /// already applied — i.e. every prompt after a session's first, and what
     /// `ocx self setup` leaves behind at session level.
     ///
-    /// Spelled in the order the desired set's fold leaves them (`install_bin`
-    /// frontmost, C-060/RUL-62), because that is what makes the fold a genuine
-    /// no-op: `plan`'s settling test asks whether applying the desired set to
-    /// this environment changes it, and an environment holding the same two
-    /// directories in the other order still moves.
+    /// Spelled in the order the desired set's fold leaves them
+    /// (`$OCX_HOME/toolchain/bin` frontmost, C-060/RUL-62), because that is what
+    /// makes the fold a genuine no-op: `plan`'s settling test asks whether
+    /// applying the desired set to this environment changes it, and an
+    /// environment holding the same two directories in the other order still
+    /// moves.
     fn settled_env() -> Env {
         let mut env = Env::clean();
         env.set(
             "PATH",
-            std::env::join_paths([bin_dir().as_os_str(), toolchain_bin_dir().as_os_str()]).expect("the seed joins"),
+            std::env::join_paths([toolchain_bin_dir().as_os_str(), bin_dir().as_os_str()]).expect("the seed joins"),
         );
         env
     }
@@ -1682,6 +1737,7 @@ mod reconcile_tests {
             activate,
             completion: super::generate_completion_inline(shell).as_deref(),
             hook_binary: binary.as_deref(),
+            wrapper_binary: None,
             watch: &[PathBuf::from("/work/acme/ocx.lock")],
             seed: None,
         })
@@ -3100,6 +3156,7 @@ mod bare_ocx_tests {
                 activate: ActivateMode::Env,
                 completion: generate_completion_inline(shell).as_deref(),
                 hook_binary: Some(&binary),
+                wrapper_binary: None,
                 watch: &[PathBuf::from("/work/acme/ocx.lock")],
                 seed: None,
             })
@@ -3148,6 +3205,42 @@ mod bare_ocx_tests {
                 "{shell:?} global env eval must name the resolved binary; got: {line:?}"
             );
         }
+    }
+
+    /// C-060 / D-4 — the wrapper follows a global `ocx` pin; without one it is
+    /// the installed binary.
+    ///
+    /// The wrapper is a shell *function* named `ocx`, so it shadows `PATH`
+    /// outright: left on the install path it would re-introduce, at exactly the
+    /// interactive prompt the pin is typed at, the precedence C-060's re-order
+    /// removed everywhere else.
+    ///
+    /// Both branches in one test, because either alone is satisfiable by a
+    /// constant — a body that always answers the trampoline passes the pinned
+    /// row, and today's shipped body passes the unpinned one.
+    #[test]
+    fn c060_the_wrapper_follows_a_global_ocx_pin_and_falls_back_to_the_install() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let file_structure = ocx_lib::file_structure::FileStructure::with_root(home.path().to_path_buf());
+        let install_bin = ocx_lib::setup::ocx_install_bin_path(&file_structure);
+
+        assert_eq!(
+            super::wrapper_binary_path(&file_structure, &install_bin),
+            ocx_binary_path(&install_bin),
+            "with no rendered `ocx` trampoline the wrapper must name the installed binary"
+        );
+
+        let toolchain_bin = file_structure.toolchain.bin();
+        std::fs::create_dir_all(&toolchain_bin).expect("mkdir toolchain/bin");
+        let trampoline = ocx_binary_path(&toolchain_bin);
+        std::fs::write(&trampoline, b"#!/bin/sh\n").expect("write trampoline");
+
+        assert_eq!(
+            super::wrapper_binary_path(&file_structure, &install_bin),
+            trampoline,
+            "a rendered `ocx` trampoline is what a bare `ocx` resolves on PATH, so the wrapper \
+             must name it too"
+        );
     }
 
     /// Live proof, on the shells this host can run: with a function named `ocx`
@@ -3505,6 +3598,7 @@ mod ordering_tests {
             activate: super::ActivateMode::Env,
             completion: None,
             hook_binary: Some(&binary),
+            wrapper_binary: None,
             watch: &[],
             seed: Some(&seed),
         });
@@ -3812,8 +3906,8 @@ mod emitted_path_tests {
         let composed_global = position(&path, Path::new(&global_tool));
 
         assert!(
-            composed_project < install && install < project && project < global && global < composed_global,
-            "C-060/RUL-87: project-composed ▸ install_bin ▸ project bin/ ▸ global toolchain bin ▸ \
+            composed_project < project && project < global && global < install && install < composed_global,
+            "C-060/RUL-87: project-composed ▸ project bin/ ▸ global toolchain bin ▸ install_bin ▸ \
              global-composed; got {path:#?}"
         );
     }
@@ -3844,9 +3938,9 @@ mod emitted_path_tests {
 
         let path = path_after(&seed, &plan_lines(Shell::Bash, &plan));
         assert_eq!(
-            position(&path, &global_bin()),
-            position(&path, &install_bin()) + 1,
-            "C-059/C-060: both come back, install_bin in front; got {path:#?}"
+            position(&path, &install_bin()),
+            position(&path, &global_bin()) + 1,
+            "C-059/C-060: both come back, the toolchain bin in front; got {path:#?}"
         );
     }
 }
@@ -4097,6 +4191,7 @@ mod global_activate_tests {
             activate,
             completion: None,
             hook_binary: Some(&super::ocx_binary_path(&bin_dir())),
+            wrapper_binary: None,
             watch: &[],
             seed: None,
         })
@@ -4194,13 +4289,13 @@ mod global_activate_tests {
         );
     }
 
-    /// The two session directories arrive in C-060's order: the installed `ocx`
-    /// in front of the global trampolines, so a trampoline can never shadow the
-    /// binary it re-enters.
+    /// The two session directories arrive in C-060's order: the global
+    /// trampolines in front of the installed `ocx`, so a global toolchain that
+    /// pins `ocx` is the one a login shell resolves (D-4).
     ///
     /// Red state: swap the two `path_prepend_line` calls in `activation_lines`.
     #[test]
-    fn c060_the_login_stream_puts_the_install_bin_in_front_of_the_toolchain_bin() {
+    fn c060_the_login_stream_puts_the_toolchain_bin_in_front_of_the_install_bin() {
         for shell in GATE_SHELLS {
             let (Some(install), Some(toolchain)) = (
                 super::path_prepend_line(shell, &bin_dir()),
@@ -4216,8 +4311,8 @@ mod global_activate_tests {
                     .unwrap_or_else(|| panic!("{shell:?}: the stream must carry {needle:?}; got {stream:#?}"))
             };
             assert!(
-                at(&toolchain) < at(&install),
-                "{shell:?}: the toolchain bin is emitted FIRST so the install bin lands in front of \
+                at(&install) < at(&toolchain),
+                "{shell:?}: the install bin is emitted FIRST so the toolchain bin lands in front of \
                  it on PATH (C-060); got {stream:#?}"
             );
         }

@@ -4,7 +4,7 @@
 //! Session-level PATH registration for `ocx self setup`, per platform.
 //!
 //! `ocx self setup` puts two directories on the PATH of every process started
-//! afterwards: the ocx install `bin` directory and `$OCX_HOME/toolchain/bin`,
+//! afterwards: `$OCX_HOME/toolchain/bin` and the ocx install `bin` directory,
 //! in that order. Only the global tier is registered — a project's
 //! `.ocx/toolchain/bin` never reaches a session PATH by ocx's own hand.
 //!

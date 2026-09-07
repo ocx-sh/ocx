@@ -498,13 +498,13 @@ mod tests {
 
     fn directories() -> Vec<PathBuf> {
         vec![
-            PathBuf::from("/home/u/.ocx/symlinks/abc/current/content/bin"),
             PathBuf::from("/home/u/.ocx/toolchain/bin"),
+            PathBuf::from("/home/u/.ocx/symlinks/abc/current/content/bin"),
         ]
     }
 
-    /// C-039 / C-060 / E-L12: the value is a **prepend**, and the install bin
-    /// directory leads the toolchain bin directory.
+    /// C-039 / C-060 / E-L12: the value is a **prepend**, and the toolchain bin
+    /// directory leads the install bin directory.
     ///
     /// The prepend is the assertion that reds if the writer emits an append:
     /// `PATH=$PATH:…` puts every session directory ahead of OCX's, which is the
@@ -515,7 +515,7 @@ mod tests {
         let rendered = render_conf(&directories()).expect("representable");
         assert_eq!(
             rendered.trim_end_matches('\n'),
-            "PATH=/home/u/.ocx/symlinks/abc/current/content/bin:/home/u/.ocx/toolchain/bin:$PATH",
+            "PATH=/home/u/.ocx/toolchain/bin:/home/u/.ocx/symlinks/abc/current/content/bin:$PATH",
             "rendered: {rendered:?}"
         );
         assert!(

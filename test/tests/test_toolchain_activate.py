@@ -253,7 +253,7 @@ def _session_dirs(ocx: OcxRunner, arena: Arena, project_free: Path) -> tuple[str
     A rename on either side then reds here, once, instead of silently making
     every ordering row below compare two spellings of nothing.
     """
-    install_bin, global_bin = matrix.session_path_dirs(arena.ocx_home)
+    global_bin, install_bin = matrix.session_path_dirs(arena.ocx_home)
     reported_global = resolved_toolchain_home(ocx, project_free) / "bin"
     assert _real(global_bin) == _real(reported_global), (
         "the global session directory the fixture puts on PATH must be the one "
@@ -310,10 +310,14 @@ def _clone(project: Path, destination: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_bin_mode_path_leads_install_then_project_then_global(
+def test_bin_mode_path_leads_project_then_global_then_install(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
-    """C-060: install ▸ project ▸ global, read off a real shell's ``PATH``.
+    """C-060: project ▸ global ▸ install, read off a real shell's ``PATH``.
+
+    The most specific tier that pinned a name answers for it, ``ocx`` included:
+    the installed binary is the floor, never a lid over a toolchain that pins
+    one (D-4).
 
     Pinned on the *emitted* order, never on ``SessionPath``'s field order —
     the struct's own documentation says the vector is the reverse of the PATH
@@ -337,21 +341,27 @@ def test_bin_mode_path_leads_install_then_project_then_global(
 
     for name, directory in (("install", install_bin), ("project", project_bin), ("global", global_bin)):
         assert directory in segments, f"the {name} session directory must be on PATH: {directory!r} not in {segments}"
-    assert segments.index(install_bin) < segments.index(project_bin) < segments.index(global_bin), (
-        "C-060 orders the three session directories install ▸ project ▸ global on PATH; got "
+    assert segments.index(project_bin) < segments.index(global_bin) < segments.index(install_bin), (
+        "C-060 orders the three session directories project ▸ global ▸ install on PATH; got "
         f"{[s for s in segments if s in {install_bin, project_bin, global_bin}]}"
     )
 
 
-def test_a_bare_ocx_lookup_resolves_to_the_installed_binary(
+def test_a_bare_ocx_lookup_resolves_the_projects_ocx_pin(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
-    """C-060's reason: a project cannot shadow ``ocx`` itself (CWE-426).
+    """C-060's reason: a toolchain that pins ``ocx`` is one that can win.
+
+    D-4 removed the ``ShimNameShadowsOcx`` refusal so a project may pin its own
+    ``ocx``. An ordering that kept the installed binary in front made that pin
+    render and stay permanently unreachable, which is the defect this row now
+    guards against — the inverse of what it asserted before the tiers were
+    re-ordered.
 
     ``command -v`` only, and the name is **never run** (RUL-110): a project
-    trampoline called ``ocx`` re-execs itself inside ``/bin/sh``, so the
-    regression this defends against hangs rather than exiting, and the
-    ``timeout=`` on the session is what turns that back into a failure.
+    trampoline called ``ocx`` re-execs itself inside ``/bin/sh``, so a
+    regression here hangs rather than exiting, and the ``timeout=`` on the
+    session is what turns that back into a failure.
     """
     label = uuid4().hex[:8]
     package = make_package(ocx, f"t_{label}_shadow", "1.0.0", tmp_path, cascade=False, bins=["ocx"])
@@ -381,13 +391,68 @@ def test_a_bare_ocx_lookup_resolves_to_the_installed_binary(
     )
     segments = _segments(result)
     assert _real(home / "bin") in segments, (
-        "the project's trampoline directory must be on PATH, or the shadowing this row "
-        f"refutes never happened: {segments}"
+        "the project's trampoline directory must be on PATH, or the resolution this row "
+        f"asserts never had a candidate: {segments}"
+    )
+    assert _real(install_bin) in segments, (
+        "the install directory must also be on PATH, or `ocx` resolving the pin proves "
+        f"nothing about precedence: {segments}"
     )
     lookup = matrix.probes(result.stdout).get("lookup")
     assert lookup and lookup != matrix.ABSENT, f"`command -v ocx` resolved nothing:\n{result.stdout}"
-    assert _real(lookup) == _real(Path(install_bin) / "ocx"), (
-        f"a bare `ocx` must resolve to the installed binary, not to a project trampoline; got {lookup!r}"
+    assert _real(lookup) == _real(home / "bin" / "ocx"), (
+        f"a bare `ocx` must resolve the project's pin, not the installed binary; got {lookup!r}"
+    )
+
+
+def test_a_bare_ocx_lookup_resolves_the_global_ocx_pin(ocx: OcxRunner, arena: Arena, tmp_path: Path) -> None:
+    """The owner-reported case: pin ``ocx`` globally and a bare ``ocx`` finds it.
+
+    No project anywhere — this is a plain shell in a plain directory, which is
+    where ``$OCX_HOME/toolchain/bin`` versus the install directory is the whole
+    of the question. Before the tiers were re-ordered the pin rendered and was
+    unreachable for the life of every shell.
+
+    ``command -v`` only, never an execution (RUL-110): a trampoline named
+    ``ocx`` re-enters ocx, so running it would hang rather than fail.
+    """
+    label = uuid4().hex[:8]
+    package = make_package(ocx, f"t_{label}_gpin", "1.0.0", tmp_path, cascade=False, bins=["ocx"])
+    (arena.ocx_home / "ocx.toml").write_text(f'[tools]\ngpin{label} = "{package.fq}"\n', encoding="utf-8")
+    assert run_in(ocx, tmp_path, "--global", "lock").returncode == EXIT_SUCCESS
+    assert run_in(ocx, tmp_path, "--global", "pull").returncode == EXIT_SUCCESS
+
+    project_free = tmp_path / f"plain-{label}"
+    project_free.mkdir()
+    global_home = resolved_toolchain_home(ocx, project_free)
+    assert "ocx" in bin_entries(global_home), (
+        f"the global tier must render a trampoline named `ocx`; got {bin_entries(global_home)}"
+    )
+    install_bin, global_bin = _session_dirs(ocx, arena, project_free)
+
+    result = _session(
+        arena,
+        matrix.cd_to(SHELL, project_free),
+        matrix.prompt(SHELL),
+        '__ocx_lookup="$(command -v ocx)"',
+        matrix.probe(SHELL, "lookup", "__ocx_lookup"),
+        matrix.probe(SHELL, "path", "PATH"),
+        cwd=project_free,
+        extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
+    )
+    segments = _segments(result)
+    for name, directory in (("install", install_bin), ("global", global_bin)):
+        assert directory in segments, (
+            f"the {name} session directory must be on PATH, or the precedence this row "
+            f"asserts was never contested: {directory!r} not in {segments}"
+        )
+    assert segments.index(global_bin) < segments.index(install_bin), (
+        f"the global toolchain bin must precede the install bin; got {segments}"
+    )
+    lookup = matrix.probes(result.stdout).get("lookup")
+    assert lookup and lookup != matrix.ABSENT, f"`command -v ocx` resolved nothing:\n{result.stdout}"
+    assert _real(lookup) == _real(Path(global_bin) / "ocx"), (
+        f"a bare `ocx` must resolve the global toolchain's pin, not the installed binary; got {lookup!r}"
     )
 
 

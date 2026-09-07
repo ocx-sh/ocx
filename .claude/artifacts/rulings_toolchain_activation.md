@@ -443,13 +443,13 @@ rounds after the stub, Specify and Implement passes.
 
 #### RUL-62 — C-060's PATH order is the reverse of the desired vector
 `Shell::export_path` prepends (`utility::path::move_to_front`), so the **last** entry emitted ends
-up frontmost on PATH. To satisfy C-060 — `ocx_install_bin_path`, then the project `bin/`, then
-`$OCX_HOME/toolchain/bin`, front to back — the desired order is the reverse: `$OCX_HOME/toolchain/bin`,
-project `bin/` (bin mode only), `ocx_install_bin_path` **last**. **Do not reuse
-`setup::session_path_directories`'s slice verbatim**: it documents `directories[0]` as nearest the
-front, because its consumers build `PATH=d0:d1:$PATH`, and copying it yields exactly the CWE-426
-order C-060 exists to forbid. The test asserts the **resulting PATH string**, never the desired
-vector — an assertion on the vector's order cannot red the defect it is meant to catch.
+up frontmost on PATH. To satisfy C-060 — the project `bin/`, then `$OCX_HOME/toolchain/bin`, then
+`ocx_install_bin_path`, front to back (**A-16**, 2026-09-07) — the desired order is the reverse:
+`ocx_install_bin_path`, `$OCX_HOME/toolchain/bin`, project `bin/` (bin mode only) **last**. **Do not
+reuse `setup::session_path_directories`'s slice verbatim**: it documents `directories[0]` as nearest
+the front, because its consumers build `PATH=d0:d1:$PATH`, so copying it yields the reverse of the
+order C-060 states. The test asserts the **resulting PATH string**, never the desired vector — an
+assertion on the vector's order cannot red the defect it is meant to catch.
 
 #### RUL-63 — one spelling of one directory
 `ocx_install_bin_path` exists twice: `crates/ocx_lib/src/setup.rs:365` and a private duplicate at
@@ -503,12 +503,15 @@ re-derives the install bin directory inline, so RUL-63 would otherwise leave two
 it through `setup::ocx_install_bin_path`. WP-6's file, merged, no concurrent writer.
 
 #### RUL-87 — C-018 × C-059 interleaving order
-Desired is `global ++ session ++ project`, front-to-back: project-composed ▸ `install_bin` ▸
-project `bin/` ▸ `$OCX_HOME/toolchain/bin` ▸ global-composed. C-060 fixes only the relative order of
-its three, which this keeps; the alternative puts the **global** tier's composed entries ahead of
-the project's own `bin/`, so a global tool shadows a project trampoline. C-060's CWE-426 rationale
-no longer describes a reachable attack: post-D-V19 the body execs a single-quoted absolute
-`$__ocx_binary`, never a bare `ocx` through PATH.
+Desired is `global ++ session ++ project`, front-to-back: project-composed ▸ project `bin/` ▸
+`$OCX_HOME/toolchain/bin` ▸ `install_bin` ▸ global-composed (**A-16**, 2026-09-07). C-060 fixes only
+the relative order of its three, which this keeps; the alternative puts the **global** tier's
+composed entries ahead of the project's own `bin/`, so a global tool shadows a project trampoline.
+C-060's CWE-426 rationale no longer describes a reachable attack: post-D-V19 the body execs a
+single-quoted absolute `$__ocx_binary`, never a bare `ocx` through PATH — which is also why
+`install_bin` no longer needs to lead. A toolchain that pins `ocx` must be able to win (D-4);
+the bare-word residual is defended by `resolve_command_excluding`'s lookup-copy exclusion and the
+independent `is_ocx_trampoline` re-check, not by ordering.
 
 #### RUL-88 — C-061's hint rides `Outcome::messages`, not `debug!`
 Every emitted hook redirects stderr to `/dev/null`, so a debug line cannot deliver the hint S-001

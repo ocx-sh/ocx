@@ -67,14 +67,18 @@ Both session directories are in the reconciler's desired set on **every** prompt
 Front to back, a converged `PATH` reads:
 
 1. the project scope's composed entries (`env` mode only)
-2. the ocx installation's `bin` directory
-3. the project's `<home>/toolchain/bin` (`bin` mode only)
-4. `$OCX_HOME/toolchain/bin`
+2. the project's `<home>/toolchain/bin` (`bin` mode only)
+3. `$OCX_HOME/toolchain/bin`
+4. the ocx installation's `bin` directory
 5. the global toolchain's composed entries
 
-The session block sits **between** the two tiers, and that position is the contract rather than an arrangement. Putting it after both would place the global tier's composed entries ahead of a project's own trampoline directory, so a globally installed `cmake` would shadow the project's — the tier inversion [strict isolation][user-guide-isolation] exists to forbid. Putting it before both would put both tiers ahead of the installed `ocx`.
+The session block sits **between** the two tiers, and that position is the contract rather than an arrangement. Putting it after both would place the global tier's composed entries ahead of a project's own trampoline directory, so a globally installed `cmake` would shadow the project's — the tier inversion [strict isolation][user-guide-isolation] exists to forbid.
 
-Within the session block the install directory leads, and the honest reason is not that it closes a `PATH` hijack of `ocx`: a rendered trampoline bakes an **absolute** `ocx` path and never resolves that name through `PATH` at all. It leads because it costs nothing and because it settles the one remaining bare-name case — a trampoline rendered when both rungs of that ladder declined — in favour of the installed binary rather than whatever a project puts in front of it.
+Within the session block the install directory comes **last**, and `ocx` reads like every other name: the most specific toolchain that pinned it answers for it, and the installed binary is the floor beneath both. A toolchain may pin `ocx` itself — nothing refuses the name — so an order that kept the installed binary in front would leave such a pin rendered and permanently unreachable. The bare-word `ocx` a trampoline falls back to when no install path exists is not what the ordering defends: a rendered trampoline bakes an **absolute** `ocx` path, and the one remaining bare-name case is settled where the lookup happens, by excluding trampoline directories from it.
+
+::: tip Pinning your own ocx
+`ocx --global add ocx.sh/ocx/cli:0.9` puts that version in front of the one that installed it, for every shell started afterwards. `command -v ocx` shows which one answers. Interactive shells also carry an `ocx` function that ocx emits; it follows the same pin, and picks up a change at the next shell start.
+:::
 
 ### What `bin` mode costs a prompt {#session-path-bin-gate}
 
