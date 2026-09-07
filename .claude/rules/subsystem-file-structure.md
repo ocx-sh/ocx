@@ -213,10 +213,18 @@ Outside the three GC tiers — never walked or collected by `ocx clean`. A super
 
 ### ToolchainStore — The rendered toolchain home
 
-Layout: `{root}/toolchain/` — `.gitignore` (the bytes `*\n`, C-004), `bin/` holding one launcher
-trampoline per exposed name (DEFAULT group only; on Windows `<name>.exe` **plus** its `<name>.exec`
-sidecar, two entries), and one `<group>/<entry>/` directory link (junction on Windows) to a package
-root per selected group.
+Layout: `{root}/toolchain/` — depth 1 is a **closed, tree-owned set** (C-071): `.gitignore` (the
+bytes `*\n`, C-004); `active`, a symlink (junction on Windows) to `shells/default/`, the
+**PATH-facing** prefix (C-078/C-079); `links/`, holding one `<group>/<entry>/` directory link
+(junction on Windows) to a package root per selected group — every user-supplied name lives one
+level below `links/`, never at depth 1 (C-072); and `shells/`, holding the **physical render
+target** `shells/default/bin/` — one launcher trampoline per exposed name (DEFAULT group only; on
+Windows `<name>.exe` **plus** its `<name>.exec` sidecar, two entries). Depth 1 being closed by
+construction is what retires the old `bin`/`.gitignore` reservation (C-073) instead of enforcing it
+— `[group.bin]` renders at `links/bin/<entry>` and collides with nothing. Multi-shell selection is
+out of scope ([#363](https://github.com/ocx-sh/ocx/issues/363),
+[#189](https://github.com/ocx-sh/ocx/issues/189) stay open and undesigned); `shells/` holds exactly
+one entry, `default`, today.
 
 **One grammar, two tiers.** `ToolchainStore` wraps the **global** home (`$OCX_HOME/toolchain`) and
 forwards every accessor to a `ToolchainHome`, the value type that owns the shape — so store and
@@ -225,11 +233,18 @@ and is deliberately NOT a `FileStructure` field: it depends on which project is 
 resolved per call by `project::resolve_toolchain_home` (C-002), which is also where the
 `toolchain-dir` config root applies. The global home ignores that key entirely (C-016).
 
-Key methods: `home()`, `root()`, `bin()`, `gitignore()`, `ensure_gitignore()`, `entry(group, entry)`.
-**Never join a group or entry name onto `root()`** — `entry()` validates both components (`bin` and
-`.gitignore` are reserved on each, C-013) and is the only sanctioned route into the tree, returning
-`ToolchainPathError` naming the refused `ToolchainPathComponent`. `bin()` is also where C-010's
-lookup-PATH exclusion is derived from, never a literal `toolchain/bin` join.
+Key methods: `home()`, `root()`, `bin()`, `shell_bin(shell)`, `gitignore()`, `ensure_gitignore()`,
+`entry(group, entry)`, `links_group(group)`. **Never join a group or entry name onto `root()`** —
+`entry()` renders `<root>/links/<group>/<entry>` and `links_group()` renders `<root>/links/<group>`;
+each validates every component and is a sanctioned route into the tree, returning
+`ToolchainPathError` naming the refused `ToolchainPathComponent`. Neither `bin` nor `.gitignore` is
+reserved as a group or tool name any more — `links`, `shells` and `active` are not reserved either,
+since a group name is a component one level below every tree-owned name and cannot collide with
+one. `bin()` stays the **PATH-facing** accessor (`<root>/active/bin`, through the `active` link) —
+C-010's lookup-PATH exclusion is still derived from it, never a literal join. `shell_bin(shell)` is
+the **render-target** accessor (`<root>/shells/<shell>/bin`) the renderer writes, prunes,
+fingerprints and guards through exclusively; the two are equal only through the `active` link,
+never by string equality (C-078).
 
 Outside the three GC tiers — never walked or collected by `ocx clean`, exactly as `ShimBinStore` is.
 The tree is **derived state, not reference-counted**: a stale home is rebuilt by the next render and
@@ -366,7 +381,7 @@ Windows: use NTFS junction points (no privilege escalation needed).
 - `projects/` links are categorically not install back-refs. They are GC-root registrations with a flat-symlink liveness model (ADR: `adr_project_gc_symlink_ledger.md`).
 - Any future reviewer who sees raw `symlink::` calls in `project/registry.rs` should recognise this carve-out, not re-flag it as a violation of the "always use `ReferenceManager`" rule.
 
-**ARCH-4b sibling — no back-reference for a toolchain link (C-052):** the `<group>/<entry>` links a render writes into a toolchain home also use `symlink::update` directly, and for the *opposite* reason to `projects/`. Their targets ARE package roots, so `ReferenceManager::link()` would navigate cleanly to exactly that package's live `refs/symlinks/` — and a back-reference is a GC root, so the link would pin the package forever, on every project that ever rendered a tree. The toolchain home is derived state rebuilt by the next render, never a reference-counted install (see `ToolchainStore` above), so it is exempt from reference counting by design: it takes no forward-ref, no back-ref, and no `refs/` edge of any kind. Reaching for `ReferenceManager` in `tasks/render_toolchain.rs` is the right rule against the wrong tree.
+**ARCH-4b sibling — no back-reference for a toolchain link (C-052):** the `links/<group>/<entry>` links a render writes into a toolchain home also use `symlink::update` directly, and for the *opposite* reason to `projects/`. Their targets ARE package roots, so `ReferenceManager::link()` would navigate cleanly to exactly that package's live `refs/symlinks/` — and a back-reference is a GC root, so the link would pin the package forever, on every project that ever rendered a tree. The toolchain home is derived state rebuilt by the next render, never a reference-counted install (see `ToolchainStore` above), so it is exempt from reference counting by design: it takes no forward-ref, no back-ref, and no `refs/` edge of any kind. Reaching for `ReferenceManager` in `tasks/render_toolchain.rs` is the right rule against the wrong tree.
 
 ## hardlink Module
 
