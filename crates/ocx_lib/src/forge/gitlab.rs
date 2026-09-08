@@ -393,9 +393,10 @@ impl GitLabForge {
     /// because the false-refusal direction is the one that costs a user a
     /// working run: a 403 is the *production-common* answer (both endpoints want
     /// Maintainer or Owner on the index project, while this preflight's own bar
-    /// is Developer), a 404 is an instance older than the endpoint, and a body
-    /// whose entries carry no name this client understands is a shape it cannot
-    /// read. A 5xx is not a capability answer and propagates.
+    /// is Developer), a **401 under a job token** is the same closed door wearing
+    /// the other status (see below), a 404 is an instance older than the
+    /// endpoint, and a body whose entries carry no name this client understands
+    /// is a shape it cannot read. A 5xx is not a capability answer and propagates.
     ///
     /// `admits` is a plain `fn` pointer rather than a closure or a type
     /// parameter: it keeps one monomorphisation of a method `async_trait` must
@@ -413,7 +414,17 @@ impl GitLabForge {
         for page in 1..=ALLOWLIST_MAX_PAGES {
             let url = self.project_url(repo, &format!("/{endpoint}?per_page={ALLOWLIST_PER_PAGE}&page={page}"));
             let (status, body) = self.send(self.request(Method::GET, &url), &url).await?;
-            if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND {
+            // A job token earns 401, not 403, on an endpoint outside the set
+            // GitLab opens to it -- observed on a self-hosted 19.3, where both
+            // scope lists answer `401 Unauthorized` to a `JOB-TOKEN` header, the
+            // same status the users API gives it (`users_api_is_out_of_reach`).
+            // Under a job token that 401 is a closed door, not a rejected
+            // credential, and reading it as one exits 80 naming a credential
+            // that is fine (#432). The `api_is_job_token` gate is what keeps a
+            // revoked personal access token on the `AuthError` path where it
+            // belongs.
+            let closed_to_job_token = status == StatusCode::UNAUTHORIZED && self.credentials.api_is_job_token();
+            if status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND || closed_to_job_token {
                 return Ok(AllowlistAnswer::Unreadable(endpoint));
             }
             if !status.is_success() {
@@ -2575,6 +2586,13 @@ mod tests {
         /// override, resolved for the **api** transport — a job-token push
         /// credential on a run that will never push.
         PushHalfUnderApi,
+        /// The documented split pair: an ordinary API token for the reads,
+        /// `OCX_ANNOUNCE_GIT_TOKEN` carrying the job token for the push, over
+        /// the **git** transport. `push_is_job_token` is true and
+        /// `api_is_job_token` is false, so the allowlist walk happens — and
+        /// happens under `PRIVATE-TOKEN`, which is the posture where a 401 is a
+        /// rejected credential rather than a closed door.
+        PushHalfOnly,
     }
 
     fn credentials_for(env: &crate::test::env::EnvLock, shape: CredentialShape) -> ForgeCredentials {
@@ -2590,6 +2608,11 @@ mod tests {
                 env.set("OCX_ANNOUNCE_TOKEN", "glpat-notarealpat");
                 env.set("OCX_ANNOUNCE_GIT_TOKEN", JOB_TOKEN);
                 ForgeCredentials::resolve(WriteTransport::Api)
+            }
+            CredentialShape::PushHalfOnly => {
+                env.set("OCX_ANNOUNCE_TOKEN", "glpat-notarealpat");
+                env.set("OCX_ANNOUNCE_GIT_TOKEN", JOB_TOKEN);
+                ForgeCredentials::resolve(WriteTransport::Git)
             }
         }
     }
@@ -3992,16 +4015,28 @@ mod tests {
     ///
     /// The false-refusal direction is the one that costs a user a working run,
     /// so 403 (the production-common answer: the endpoint wants Maintainer),
-    /// 404 (an instance older than the endpoint), a non-array body and entries
-    /// that carry no `path_with_namespace` all proceed. A 5xx is not a
-    /// capability answer at all and propagates.
+    /// 401 under a job token (the same closed door wearing the other status —
+    /// what a real GitLab answers a `JOB-TOKEN` header here, #432), 404 (an
+    /// instance older than the endpoint), a non-array body and entries that
+    /// carry no `path_with_namespace` all proceed. A 5xx is not a capability
+    /// answer at all and propagates.
+    ///
+    /// The 401 row's gate lives in
+    /// `a_non_job_token_401_on_the_allowlist_stays_a_status_error`: without it
+    /// this table would pass against a build that read every 401 as unreadable
+    /// and pushed on a revoked personal access token.
     #[tokio::test]
     async fn allowlist_unreadable_answers_are_unknown_never_a_miss() {
-        let cases: [(&str, u16, Value); 4] = [
+        let cases: [(&str, u16, Value); 5] = [
             (
                 "403 — the endpoint wants Maintainer",
                 403,
                 json!({ "message": "403 Forbidden" }),
+            ),
+            (
+                "401 — what a real GitLab answers a JOB-TOKEN here (#432)",
+                401,
+                json!({ "message": "401 Unauthorized" }),
             ),
             (
                 "404 — an instance older than the endpoint",
@@ -4059,6 +4094,51 @@ mod tests {
         assert!(
             matches!(error, ForgeError::Status { status: 503, .. }),
             "a 5xx propagates rather than becoming a capability verdict; got {error:?}"
+        );
+    }
+
+    /// A 401 on the allowlist under a credential that is **not** the job token
+    /// stays an ordinary status error.
+    ///
+    /// The other half of the #432 fix, and the half that makes the first one
+    /// mean something. `Unreadable` proceeds to the push; `Status` classifies to
+    /// `AuthError` (80) and tells the operator to replace the credential. A
+    /// status-only gate — one that mapped every 401 to `Unreadable` — would pass
+    /// the row above while silently pushing on a revoked personal access token
+    /// and reporting the allowlist as `unknown`.
+    ///
+    /// The split pair is the posture that reaches this line at all: the push
+    /// half is the job token, so the walk runs, while the API half is a PAT, so
+    /// the walk travels as `PRIVATE-TOKEN`. That is the arrangement the docs
+    /// call the split credential pair.
+    #[tokio::test]
+    async fn a_non_job_token_401_on_the_allowlist_stays_a_status_error() {
+        let env = isolated_env();
+        env.set("CI_PROJECT_PATH", "acme/widget");
+        let credentials = credentials_for(&env, CredentialShape::PushHalfOnly);
+        assert!(
+            credentials.push_is_job_token() && !credentials.api_is_job_token(),
+            "the fixture must produce a job-token push with an ordinary API half, or this row \
+             measures the job-token posture a second time"
+        );
+        let fake = FakeGitLab::start(|_, target| {
+            if target.contains("job_token_scope") {
+                return (401, json!({ "message": "401 Unauthorized" }).to_string());
+            }
+            let mut project = pushable_project();
+            project["ci_push_repository_for_job_token_allowed"] = json!(true);
+            (200, project.to_string())
+        })
+        .await;
+
+        let error = fake
+            .git_forge(credentials)
+            .ensure_push_access(&index_repo())
+            .await
+            .expect_err("a rejected API credential is not a closed door");
+        assert!(
+            matches!(error, ForgeError::Status { status: 401, .. }),
+            "a 401 that is not a job token's closed door must stay a status error; got {error:?}"
         );
     }
 
