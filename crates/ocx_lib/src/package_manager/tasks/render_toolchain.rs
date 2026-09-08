@@ -1807,9 +1807,20 @@ async fn prune_outcome(home: &ToolchainHome, artifact: &RenderedArtifact, dry_ru
     let pruned = blocking(path.clone(), move || prune_within(&ToolchainHome::new(root), &owned)).await;
     match pruned {
         Ok(()) => RenderOutcome::Pruned,
+        // The reason has to *be* the remedy, the same way
+        // [`refuse_dereferenced_copy`]'s does: `Error::InternalFile`'s `Display`
+        // names only its path, so `to_string` here would report a group
+        // directory the render cannot remove without ever saying why or what to
+        // do about it. `render_chain` supplies the cause — `ENOTEMPTY` for the
+        // one that actually happens, a containment refusal for the rest — and
+        // the sentence supplies the action.
         Err(error) => RenderOutcome::Skipped {
+            reason: format!(
+                "{} — it is left in place rather than deleted recursively. Remove '{}' and run `ocx pull` again",
+                crate::error::render_chain(&error),
+                path.display()
+            ),
             path,
-            reason: error.to_string(),
         },
     }
 }
