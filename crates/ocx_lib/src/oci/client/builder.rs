@@ -95,7 +95,7 @@ pub(crate) const REGISTRY_CONNECT_TIMEOUT: std::time::Duration = std::time::Dura
 /// no-redirect twin), each of which parses the whole set into a rustls trust
 /// store: ~28 ms of pure CPU on every invocation that constructs a [`Client`],
 /// paid whether or not a request is ever made. A rendered trampoline
-/// (`<home>/toolchain/bin/<name>`) constructs one on every `cmake`, and resolves
+/// (`<home>/toolchain/active/bin/<name>`) constructs one on every `cmake`, and resolves
 /// every locked tool out of the local store without dialling anything.
 ///
 /// So the recipe is what a [`Client`] carries around, and the transport is built

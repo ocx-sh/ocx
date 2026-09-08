@@ -8190,8 +8190,10 @@ mod wp15_following_lane_spec_tests {
         // `<project>/.ocx` as a symlink — one component above the home root, the
         // hole `ensure_home_root` cannot see from where it stands (RUL-44).
         let elsewhere = tree.tmp.path().join("elsewhere");
-        std::fs::create_dir_all(elsewhere.join("toolchain").join(DEFAULT_GROUP))
-            .expect("the relocated tree is creatable");
+        // The home root only: the group directory moved under `links/` and
+        // `symlink::create` makes the entry's parents anyway, so pre-creating
+        // it here would be a second spelling of the tree shape (C-010).
+        std::fs::create_dir_all(elsewhere.join("toolchain")).expect("the relocated tree is creatable");
         crate::symlink::create(&elsewhere, tree.project_dir.join(".ocx")).expect("the hostile link is creatable");
 
         let entry = tree.entry(DEFAULT_GROUP, "cmake");
@@ -8238,9 +8240,15 @@ mod wp15_following_lane_spec_tests {
 
         let elsewhere = tree.tmp.path().join("elsewhere-group");
         std::fs::create_dir_all(&elsewhere).expect("the relocated group is creatable");
-        std::fs::create_dir_all(tree.home.root()).expect("the home root is creatable");
-        crate::symlink::create(&elsewhere, tree.home.root().join(DEFAULT_GROUP))
-            .expect("the hostile group link is creatable");
+        // The group directory lives under `links/` now, so the hostile link has
+        // to be planted where the composer actually walks — through the
+        // accessor, never a literal join.
+        let group = tree
+            .home
+            .links_group(DEFAULT_GROUP)
+            .expect("the default group is a valid component");
+        std::fs::create_dir_all(group.parent().expect("<root>/links")).expect("the links directory is creatable");
+        crate::symlink::create(&elsewhere, &group).expect("the hostile group link is creatable");
 
         let entry = tree.entry(DEFAULT_GROUP, "cmake");
         crate::symlink::create(&digest_root, &entry).expect("the fixture link is creatable");

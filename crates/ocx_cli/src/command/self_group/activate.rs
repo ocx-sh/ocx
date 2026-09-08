@@ -156,7 +156,7 @@ impl SelfActivate {
         // overhead (OCI client, OciIndex, PackageManager) on every shell startup.
         let file_structure = FileStructure::new();
         let bin_path = ocx_install_bin_path(&file_structure);
-        // C-001 — the store owns the spelling; never a literal `toolchain/bin`
+        // C-001 — the store owns the spelling; never a literal `toolchain/active/bin`
         // join here.
         let toolchain_bin = file_structure.toolchain.bin();
 
@@ -664,12 +664,12 @@ fn message_lines(
 /// # `bin` and `none` are the same `PATH` at this tier
 ///
 /// C-059 makes the two global session directories
-/// ([`ocx_install_bin_path`] and `$OCX_HOME/toolchain/bin`) desired
+/// ([`ocx_install_bin_path`] and `$OCX_HOME/toolchain/active/bin`) desired
 /// unconditionally, in every mode — they are session-level facts, and dropping
 /// them would have `repair_owned_segments` delete the registration `ocx self
 /// setup` just wrote. So at the **global** tier `bin` and `none` both compose
 /// nothing and produce an identical `PATH`: under either, a global tool resolves
-/// through its trampoline in `$OCX_HOME/toolchain/bin`. The two modes differ
+/// through its trampoline in `$OCX_HOME/toolchain/active/bin`. The two modes differ
 /// only at the project tier. That is a consequence of C-059, not a gap.
 ///
 /// # Cost
@@ -920,7 +920,7 @@ fn ocx_binary_path(bin_path: &Path) -> PathBuf {
 /// The `ocx` the emitted **wrapper function** calls.
 ///
 /// A global toolchain may pin `ocx` — D-4 removed the refusal that used to stop
-/// it — and after C-060's re-ordering `$OCX_HOME/toolchain/bin` sits in front of
+/// it — and after C-060's re-ordering `$OCX_HOME/toolchain/active/bin` sits in front of
 /// the installed binary, so a bare `ocx` on `PATH` resolves the pin. The wrapper
 /// is a shell *function* of the same name, and a function shadows `PATH`
 /// outright: left on the install path it would quietly re-introduce, for exactly
@@ -935,8 +935,23 @@ fn ocx_binary_path(bin_path: &Path) -> PathBuf {
 ///
 /// Falls back to the installed binary whenever the toolchain renders no `ocx`,
 /// which is the ordinary case.
+///
+/// # Why the probe is on the physical directory (C-080)
+///
+/// `Path::is_file` follows **every** component, including the final one, so a
+/// probe on [`ToolchainStore::bin`](ocx_lib::file_structure::ToolchainStore::bin)
+/// would resolve through the `active` link and answer about whatever that link
+/// currently names. The answer is then baked as the absolute program behind a
+/// shell *function* — which shadows `PATH` outright — for every login on the
+/// **global** tier, so a repoint would substitute the program rather than merely
+/// reorder a lookup. Both the probe and the value it yields are therefore the
+/// physical `shells/<shell>/bin`, which no link can redirect.
 fn wrapper_binary_path(file_structure: &FileStructure, install_bin: &Path) -> PathBuf {
-    let pinned = ocx_binary_path(&file_structure.toolchain.bin());
+    let pinned = ocx_binary_path(
+        &file_structure
+            .toolchain
+            .shell_bin(ocx_lib::file_structure::DEFAULT_SHELL),
+    );
     if pinned.is_file() {
         pinned
     } else {
@@ -962,7 +977,7 @@ struct LoginStream<'a> {
     /// toolchain that pins one (C-060).
     bin_path: &'a Path,
 
-    /// The global rendered toolchain's trampolines, `$OCX_HOME/toolchain/bin`
+    /// The global rendered toolchain's trampolines, `$OCX_HOME/toolchain/active/bin`
     /// — [`ToolchainStore::bin`](ocx_lib::file_structure::ToolchainStore::bin)'s
     /// answer, never a literal join (C-001). Prepended last, so it lands
     /// frontmost of the two.
@@ -1064,7 +1079,7 @@ fn activation_lines(request: &LoginStream<'_>) -> Vec<String> {
     // ── Global toolchain env ─────────────────────────────────────────────────
     // Evaluate the global toolchain env — in `env` mode only. `bin` and `none`
     // compose nothing here and reach their tools through the trampolines in the
-    // `toolchain/bin` prepended above, which is the whole point of the mode; the
+    // `toolchain/active/bin` prepended above, which is the whole point of the mode; the
     // per-prompt arm has drawn this same line since A-12 (`global_prompt_entries`),
     // and a login stream that composed anyway is what made a global
     // `activate = "bin"` look inert for a whole session.
@@ -1695,7 +1710,7 @@ mod reconcile_tests {
         PathBuf::from("/tmp/ocx_home/symlinks/ocx_sh/ocx/cli/current/content/bin")
     }
 
-    /// The other of C-059's two session directories — `$OCX_HOME/toolchain/bin`,
+    /// The other of C-059's two session directories — `$OCX_HOME/toolchain/active/bin`,
     /// the global rendered toolchain's trampolines.
     fn toolchain_bin_dir() -> PathBuf {
         PathBuf::from("/tmp/ocx_home/toolchain/bin")
@@ -1706,7 +1721,7 @@ mod reconcile_tests {
     /// `ocx self setup` leaves behind at session level.
     ///
     /// Spelled in the order the desired set's fold leaves them
-    /// (`$OCX_HOME/toolchain/bin` frontmost, C-060/RUL-62), because that is what
+    /// (`$OCX_HOME/toolchain/active/bin` frontmost, C-060/RUL-62), because that is what
     /// makes the fold a genuine no-op: `plan`'s settling test asks whether
     /// applying the desired set to this environment changes it, and an
     /// environment holding the same two directories in the other order still
@@ -3218,8 +3233,16 @@ mod bare_ocx_tests {
     /// Both branches in one test, because either alone is satisfiable by a
     /// constant — a body that always answers the trampoline passes the pinned
     /// row, and today's shipped body passes the unpinned one.
+    ///
+    /// C-080's second amendment: the probe is on the **physical**
+    /// `shells/<shell>/bin`, never on `bin()`. `Path::is_file` follows every
+    /// component, and this answer is baked as the absolute program behind a
+    /// login-emitted `ocx` shell *function* — which shadows `PATH` outright —
+    /// on the global tier.
     #[test]
     fn c060_the_wrapper_follows_a_global_ocx_pin_and_falls_back_to_the_install() {
+        use ocx_lib::file_structure::DEFAULT_SHELL;
+
         let home = tempfile::TempDir::new().expect("tempdir");
         let file_structure = ocx_lib::file_structure::FileStructure::with_root(home.path().to_path_buf());
         let install_bin = ocx_lib::setup::ocx_install_bin_path(&file_structure);
@@ -3230,8 +3253,8 @@ mod bare_ocx_tests {
             "with no rendered `ocx` trampoline the wrapper must name the installed binary"
         );
 
-        let toolchain_bin = file_structure.toolchain.bin();
-        std::fs::create_dir_all(&toolchain_bin).expect("mkdir toolchain/bin");
+        let toolchain_bin = file_structure.toolchain.shell_bin(DEFAULT_SHELL);
+        std::fs::create_dir_all(&toolchain_bin).expect("mkdir the physical toolchain bin");
         let trampoline = ocx_binary_path(&toolchain_bin);
         std::fs::write(&trampoline, b"#!/bin/sh\n").expect("write trampoline");
 
@@ -3240,6 +3263,40 @@ mod bare_ocx_tests {
             trampoline,
             "a rendered `ocx` trampoline is what a bare `ocx` resolves on PATH, so the wrapper \
              must name it too"
+        );
+    }
+
+    /// C-080 — the probe never resolves through `active`.
+    ///
+    /// Nothing is rendered: the physical `shells/<shell>/bin` does not exist.
+    /// Only `<root>/active` does, as an ordinary directory holding an `ocx` —
+    /// the shape a `cp -rL` leaves behind, and the shape a repoint produces.
+    /// `Path::is_file` follows every intermediate component, so a probe on
+    /// `bin()` answers `true` here and bakes *that* file as the absolute
+    /// program the login-emitted `ocx` function calls, on the global tier.
+    ///
+    /// RED: probe `file_structure.toolchain.bin()` instead and this fails,
+    /// naming `<root>/active/bin/ocx`.
+    #[cfg(unix)]
+    #[test]
+    fn c080_the_wrapper_probe_never_resolves_through_active() {
+        let home = tempfile::TempDir::new().expect("tempdir");
+        let file_structure = ocx_lib::file_structure::FileStructure::with_root(home.path().to_path_buf());
+        let install_bin = ocx_lib::setup::ocx_install_bin_path(&file_structure);
+
+        let through_active = file_structure.toolchain.bin();
+        std::fs::create_dir_all(&through_active).expect("mkdir a real active/bin");
+        std::fs::write(ocx_binary_path(&through_active), b"#!/bin/sh\n").expect("plant the decoy");
+        assert!(
+            ocx_binary_path(&through_active).is_file(),
+            "the premise: `is_file` follows `active`, so the unanchored probe would answer `true`"
+        );
+
+        assert_eq!(
+            super::wrapper_binary_path(&file_structure, &install_bin),
+            ocx_binary_path(&install_bin),
+            "C-080 — nothing was rendered, so the wrapper must fall back to the installed binary \
+             however `active` is shaped"
         );
     }
 
@@ -3866,8 +3923,8 @@ mod emitted_path_tests {
     /// **C-060, RUL-62, RUL-87 — the order, read off the shell's own `PATH`.**
     ///
     /// Front to back: the project's composed entries, then
-    /// `ocx_install_bin_path`, then the project's `<home>/toolchain/bin`, then
-    /// `$OCX_HOME/toolchain/bin`, then the global tier's composed entries.
+    /// `ocx_install_bin_path`, then the project's `<home>/toolchain/active/bin`, then
+    /// `$OCX_HOME/toolchain/active/bin`, then the global tier's composed entries.
     ///
     /// The last comparison is RUL-87's: a splice that put the global tier after
     /// the session block would let a globally installed tool shadow the
@@ -4250,7 +4307,7 @@ mod global_activate_tests {
 
     /// C-059 — both session directories reach a login shell in **every** mode.
     ///
-    /// `$OCX_HOME/toolchain/bin` is a session-level fact, not a composition:
+    /// `$OCX_HOME/toolchain/active/bin` is a session-level fact, not a composition:
     /// the reconciler holds it desired unconditionally
     /// (`SessionPath::global_bin`), and the login stream now emits it too, so
     /// `bin` mode still resolves its tools where the OS session-registration

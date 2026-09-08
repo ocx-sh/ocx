@@ -6,7 +6,7 @@
 //!
 //! [`ActivateMode`] decides how a project's rendered toolchain reaches a
 //! shell: `env` composes the environment per prompt (today's behaviour),
-//! `bin` puts `<home>/toolchain/bin` on `PATH` instead, `none` does neither.
+//! `bin` puts `<home>/toolchain/active/bin` on `PATH` instead, `none` does neither.
 //! [`pinned_from_env`] reads the sibling `pinned` setting, which decides
 //! whether composed paths follow the `<group>/<entry>` links or pin to
 //! digests.
@@ -54,7 +54,7 @@ pub enum ActivateMode {
     /// Compose the toolchain environment on every prompt — the shipped
     /// behaviour, and the ladder's floor.
     Env,
-    /// Put `<home>/toolchain/bin` on `PATH` and compose nothing else, so a
+    /// Put `<home>/toolchain/active/bin` on `PATH` and compose nothing else, so a
     /// tool is resolved by its launcher trampoline at invocation time.
     Bin,
     /// Neither. The reconciler withdraws whatever it owns and adds nothing.

@@ -366,7 +366,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
 /// wrong on one a machine issues:
 ///
 /// - `Exec` (and its deprecated `run` spelling) is what every rendered
-///   `<home>/toolchain/bin/<name>` trampoline `exec`s — the user typed `cmake`,
+///   `<home>/toolchain/active/bin/<name>` trampoline `exec`s — the user typed `cmake`,
 ///   not `ocx`, and a quarter-second stall on the first build of the day is
 ///   attributed to the tool, not to ocx.
 /// - `Env` and `Direnv` compose an environment for a shell to evaluate:
@@ -851,7 +851,7 @@ mod tests {
     /// command must NOT be — the pair, so a green here cannot come from a
     /// predicate that skips everything.
     ///
-    /// `Exec` is what a rendered `<home>/toolchain/bin/<name>` trampoline
+    /// `Exec` is what a rendered `<home>/toolchain/active/bin/<name>` trampoline
     /// `exec`s (`package_manager::launcher::body`), `DeprecatedRun` is its
     /// still-shipped `ocx run` spelling, and `Env`/`Direnv` are what a shell
     /// evaluates — `.envrc` re-runs `ocx direnv export` on every directory

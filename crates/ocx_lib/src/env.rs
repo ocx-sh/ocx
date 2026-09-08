@@ -5888,7 +5888,7 @@ mod tests {
     /// home's trampoline on the lookup `PATH`.
     ///
     /// C-010's exclusion set can only ever name *this* invocation's own homes,
-    /// so a second project's `<home>/toolchain/bin` on the same `PATH` is a
+    /// so a second project's `<home>/toolchain/active/bin` on the same `PATH` is a
     /// directory the exclusion structurally cannot name. Under C-010 alone the
     /// invocation loops A → B → A forever, one full compose per hop, with no
     /// error and no depth counter.
