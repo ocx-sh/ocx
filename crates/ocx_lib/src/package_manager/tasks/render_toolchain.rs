@@ -1722,8 +1722,11 @@ fn publish_link_within(entry: &Path, target: &Path, dry_run: bool) -> RenderOutc
     let published = (|| {
         if let Some(parent) = entry.parent() {
             // Owner-only at create time, like the home root and `bin/`
-            // (R-W19(a)) — not the ambient umask.
-            create_owner_only(parent)?;
+            // (R-W19(a)) — not the ambient umask. `ensure_link_group`, never
+            // `create_owner_only`: the recursive create follows a symlinked
+            // `links/` on the way to the group, and the check above judges only
+            // the group itself.
+            ensure_link_group(parent)?;
         }
         // C-082 — dispatch on the *observed* kind before renaming. A
         // symlink-dereferencing copy (`cp -rL`, `unzip`, `rsync` without `-l`,
@@ -2352,8 +2355,9 @@ pub(crate) async fn heal_links(
 ///
 /// # Errors
 ///
-/// A symlinked `<group>/` directory (the same refusal
-/// [`publish_link_within`] makes on the render side), the group directory's
+/// A symlinked `links/` or `<group>/` directory (the same refusal
+/// [`publish_link_within`] makes on the render side, through the same
+/// [`ensure_link_group`]), the group directory's
 /// creation, the lock acquisition, or the atomic replace — every one of which
 /// [`heal_links`] turns into an uncounted, un-repaired entry inside
 /// [`HealOutcome::Healed`] rather than a failure, with one `debug!` line
@@ -2370,17 +2374,12 @@ async fn repoint_link(file_structure: &FileStructure, name: &str, entry: &Path, 
 
     // RUL-29: an absent link is created, which is the commonest post-`git pull`
     // state — so the group directory may not exist yet. Owner-only at create
-    // time (R-W19(a)), and never *through* a symlinked group directory: heal
-    // runs on every composing emit, so this is the write side's most-travelled
-    // path into an attacker-shaped tree.
+    // time (R-W19(a)), and never *through* a symlinked `links/` or group
+    // directory: heal runs on every composing emit, so this is the write side's
+    // most-travelled path into an attacker-shaped tree. `ensure_link_group`
+    // carries both refusals, so this path and the render's share one rule.
     let created = group_directory.clone();
-    blocking(group_directory.clone(), move || {
-        if std::fs::symlink_metadata(&created).is_ok_and(|metadata| metadata.is_symlink()) {
-            return Err(refuse_symlink(&created));
-        }
-        create_owner_only(&created)
-    })
-    .await?;
+    blocking(group_directory.clone(), move || ensure_link_group(&created)).await?;
 
     let _guard = heal_lock_parameters(file_structure, group_directory, name)
         .acquire()
@@ -2754,6 +2753,37 @@ fn ensure_shell_tree(home: &ToolchainHome, shell: &str) -> crate::Result<()> {
         create_directory_owner_only(level)?;
     }
     Ok(())
+}
+
+/// Create `<root>/links` and `<root>/links/<group>`, one guarded level at a
+/// time — the link tree's counterpart to [`ensure_shell_tree`].
+///
+/// Not [`create_owner_only`], for the reason stated there: it is
+/// `create_dir_all`, and `create_dir_all` on `<root>/links/<group>` **creates
+/// `links` and follows it if it is a symlink to a directory**. `links` was the
+/// one tree-own directory nothing ever created under a guard — it came into
+/// existence only as that call's side effect, so its only check was
+/// [`ensure_home_root`]'s at step 2, and the render lock's unbounded wait sits
+/// between the two. A local writer that swaps `links` for a symlink inside that
+/// window sends the group create and the entry's `replace_atomic` into an
+/// attacker-chosen directory. `bin/` and `shells/` already re-judge at the
+/// moment of use; this is the same rule for the third level.
+///
+/// The group level goes through the same helper, so the write side's refusal of
+/// a symlinked `<group>/` is [`create_directory_owner_only`]'s `EEXIST` arm
+/// rather than a second `symlink_metadata` check beside it.
+///
+/// # Errors
+///
+/// Whatever [`create_directory_owner_only`] refuses at either level. Both are
+/// non-recursive, so a home root that does not exist is an error rather than a
+/// tree conjured from nothing — every caller has already run
+/// [`ensure_home_root`].
+fn ensure_link_group(group_directory: &Path) -> crate::Result<()> {
+    if let Some(links) = group_directory.parent() {
+        create_directory_owner_only(links)?;
+    }
+    create_directory_owner_only(group_directory)
 }
 
 /// Bring `<root>/active` to its one legal shape, by the kind observed there
@@ -8039,8 +8069,11 @@ mod tests {
     /// existing regular file** — so a bare `ocx pull` destroyed an
     /// attacker-chosen file outside the home.
     ///
-    /// RED: drop the `symlink_metadata(parent)` refusal in
-    /// `publish_link_within` — `outside/cmake` is then replaced by a symlink.
+    /// RED: **two** mutations, because two guards now defend this and either
+    /// alone leaves the row green — drop the `symlink_metadata(parent)` refusal
+    /// in `publish_link_within` *and* give `ensure_link_group` back the
+    /// recursive `create_owner_only`, whose `create_dir_all` follows the link.
+    /// `outside/cmake` is then replaced by a symlink.
     #[cfg(unix)]
     #[tokio::test]
     async fn publishing_a_link_refuses_a_symlinked_group_directory() {
@@ -8078,6 +8111,55 @@ mod tests {
         assert_eq!(std::fs::read_link(honest.join("cmake")).unwrap(), target);
     }
 
+    /// S1 — `publish_link` refuses a symlinked **`links/`**, one level above
+    /// the group directory it already refuses.
+    ///
+    /// `links` was the one tree-own directory nothing ever created under a
+    /// guard: it came into existence only as `create_dir_all(<root>/links/
+    /// <group>)`'s side effect, so its only check was `ensure_home_root`'s at
+    /// step 2 — and the render lock's unbounded wait sits between that check and
+    /// this write. A local writer that swaps `links` for a symlink inside that
+    /// window sends the group create and the entry's `replace_atomic` into an
+    /// attacker-chosen directory. `bin/` and `shells/` already re-judge at the
+    /// moment of use; this is the third level joining them.
+    ///
+    /// **The plant stands in for that swap.** Through the public render entry,
+    /// step 2 refuses a pre-existing symlinked `links` and the whole render
+    /// skips, so the write-side re-judgement is only reachable by calling the
+    /// write directly — which is precisely the post-step-2 state a concurrent
+    /// writer produces. The positive control is the whole rest of this module:
+    /// every render row publishes through a real `links/`, so a guard that
+    /// refused everything could not stay green here.
+    ///
+    /// RED: give `ensure_link_group` back the recursive `create_owner_only` —
+    /// `create_dir_all` follows the link, `outside/` gains the group directory,
+    /// and the entry is published inside it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn publishing_a_link_refuses_a_symlinked_links_directory() {
+        let tree = Tree::new();
+        let outside = tree.tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("bystander"), b"someone else's file\n").unwrap();
+        std::fs::create_dir_all(tree.home.root()).unwrap();
+        std::os::unix::fs::symlink(&outside, links_root(&tree.home)).unwrap();
+        let before = snapshot_subtree(&outside);
+
+        let target = tree.tmp.path().join("package-root");
+        let entry = tree.home.entry(DEFAULT_GROUP, "cmake").expect("an admitted pair");
+        let outcome = publish_link(&entry, &target, false).await;
+
+        assert!(
+            is_skipped(&outcome),
+            "a symlinked `links/` is a skip, not a write and not an error; got {outcome:?}"
+        );
+        assert_eq!(
+            snapshot_subtree(&outside),
+            before,
+            "…and nothing was created inside the directory that link points at"
+        );
+    }
+
     /// B2/RUL-36 — the same refusal on the heal side: `repoint_link` never
     /// writes through a symlinked `<group>/`, and the entry stays uncounted.
     ///
@@ -8088,7 +8170,8 @@ mod tests {
     /// group directory is ever touched — a second guard that makes this
     /// mutation green for the wrong reason.
     ///
-    /// RED: drop the `symlink_metadata` refusal in `repoint_link`.
+    /// RED: give `ensure_link_group` back the recursive `create_owner_only` —
+    /// `create_dir_all` follows the link, and the repoint lands in its target.
     #[cfg(unix)]
     #[tokio::test]
     async fn healing_refuses_a_symlinked_group_directory() {
