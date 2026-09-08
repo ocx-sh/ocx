@@ -39,6 +39,7 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | Shell activation / per-prompt env reconciliation, consent stamps | [subsystem-cli.md](./rules/subsystem-cli.md) (`ocx shell state`), [subsystem-file-structure.md](./rules/subsystem-file-structure.md) (`state/projects/<key>/` layout), `arch-principles.md` (ADR index + State glossary) |
 | CLI help / `--help` text wording | [quality-cli-help.md](./rules/quality-cli-help.md), [subsystem-cli.md](./rules/subsystem-cli.md), [quality-rust.md](./rules/quality-rust.md) (two-register) |
 | Writing tests | [subsystem-tests.md](./rules/subsystem-tests.md), [quality-python.md](./rules/quality-python.md), [quality-rust.md](./rules/quality-rust.md), skill `qa-engineer` |
+| Diagnosing a slow or hung acceptance run | [subsystem-tests.md](./rules/subsystem-tests.md) "Observing a Running Suite" — the slow-vs-hung discriminator, and the three checks that lie (piped exit codes, `find`, parent CPU time) |
 | Metadata / schema changes | [subsystem-metadata-schema.md](./rules/subsystem-metadata-schema.md), [subsystem-package.md](./rules/subsystem-package.md) |
 | CI / workflows | [subsystem-ci.md](./rules/subsystem-ci.md), [workflow-release.md](./rules/workflow-release.md) |
 | AI config changes | [meta-ai-config.md](./rules/meta-ai-config.md) + this catalog, skill `meta-maintain-config` |
