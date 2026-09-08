@@ -260,8 +260,8 @@ pub enum ForgeError {
     /// [`Self::GitCommandFailed`], so the one variant that promises to pass a
     /// server's own words through is also the one that cannot pass a secret
     /// through with them.
-    #[error("git push failed: {stderr}")]
-    GitPushFailed { stderr: Redacted },
+    #[error("git push failed ({status}): {stderr}")]
+    GitPushFailed { status: String, stderr: Redacted },
 
     /// A leased force-push was refused because the branch moved since it was
     /// read.
@@ -635,6 +635,7 @@ mod tests {
             ),
             (
                 ForgeError::GitPushFailed {
+                    status: "exit status: 1".to_string(),
                     stderr: redact("remote: a refusal shape no classifier models", &[]),
                 },
                 None,

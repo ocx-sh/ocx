@@ -628,7 +628,17 @@ impl GitWorkspace {
         // (measured against 2.54.0); leaving the options where they used to be —
         // after the refspec — would put them past the separator and turn each one
         // into a refspec.
-        let mut flags = Vec::with_capacity(1 + options.len() * 2);
+        let mut flags = Vec::with_capacity(2 + options.len() * 2);
+        // `--porcelain` is what makes the rejection *readable*, not merely
+        // pretty. Without it the per-ref verdict is only in git's prose on
+        // stderr, so classifying a non-fast-forward meant matching a sentence;
+        // CI was observed emitting an empty stderr for a rejected push on both
+        // Linux and macOS, and an empty body matches no needle, so an ordinary
+        // concurrent-writer rejection reached the operator as an unclassified
+        // exit 1. With it git writes a tab-separated status line per ref to
+        // **stdout** — a form it documents for scripts — and the classifier
+        // reads both channels.
+        flags.push("--porcelain");
         if let Some(leased) = &leased {
             flags.push(leased.as_str());
         }
@@ -643,18 +653,76 @@ impl GitWorkspace {
         if output.status.success() {
             return Ok(());
         }
+        // `code()` is `None` on exactly one state: the child was killed by a
+        // signal, so it never reached the point where it prints a verdict.
+        // Nothing below can read one out of two empty channels.
+        if output.status.code().is_none() {
+            return self.verdict_after_signal(branch).await;
+        }
         // Uncapped on the way into the classifier: the phrases it matches are
         // written behind the server's own `remote:` banner, at the tail, and a
         // cap applied first would turn every recognised refusal into an
         // unclassified exit 1. Capping is the error boundary's.
+        let stdout = redact(&String::from_utf8_lossy(&output.stdout), &self.secrets());
         let stderr = redact(&String::from_utf8_lossy(&output.stderr), &self.secrets());
         Err(classify_push_failure(
+            output.status.to_string(),
+            &stdout,
             stderr,
             refusal.preflight,
             branch,
             refusal.repo,
             &self.remote,
         ))
+    }
+
+    /// The verdict for a push whose child was **killed by a signal**, read from
+    /// the remote instead of from the corpse.
+    ///
+    /// A signalled `git push` printed nothing: no porcelain ref status, no
+    /// prose, no exit code. [`classify_push_failure`] then has no input at all,
+    /// matches no needle, and answers [`ForgeError::GitPushFailed`] — an
+    /// unclassified, terminal exit 1 — for what is ordinarily a retryable race.
+    ///
+    /// **It is reachable, and it is the flake this function exists for.**
+    /// `send-pack` writes its push-option section to `receive-pack`
+    /// unconditionally, but `receive-pack` reads that section only when at least
+    /// one ref command was sent. A push whose only refspec is skipped
+    /// *client-side* — rejected as a non-fast-forward, or already up to date —
+    /// sends zero commands, so `receive-pack` exits without draining the
+    /// options; the client's write then hits `EPIPE`, and git's `write_or_die`
+    /// deliberately re-raises `SIGPIPE` rather than reporting it. Whether the
+    /// option bytes reach the pipe buffer before the reader disappears is pure
+    /// scheduling, which is why it is intermittent. Measured on git 2.54.0
+    /// against a `file://` remote: with an option payload past the 64 KiB pipe
+    /// buffer the push dies on signal 13 every time, with **zero bytes on both
+    /// channels**; a fast-forwardable refspec with the same payload exits 0.
+    /// The stateless-RPC transports (`https://`) buffer the section into the
+    /// request instead of a child's stdin, so this is the local and `ssh://`
+    /// shape.
+    ///
+    /// Zero commands sent is also what makes the remote authoritative here: the
+    /// branch stands at the sha this push carried, so the update is in effect —
+    /// it landed, or it was already there — and the run succeeded. It stands
+    /// anywhere else, so the update is not in effect and the caller must re-read
+    /// the winning head and regenerate, which is exactly
+    /// [`ForgeError::NonFastForward`]'s contract. One read and no second push:
+    /// re-pushing from here would paper over the state this is reporting.
+    async fn verdict_after_signal(&self, branch: &str) -> Result<(), ForgeError> {
+        let reference = format!("refs/heads/{branch}");
+        let pushed = self.run_local("rev-parse", &["--verify"], &[&reference]).await?;
+        let advertised = self
+            .run_network("ls-remote", &[], &[self.remote.as_str(), &reference])
+            .await?;
+        // `git ls-remote` prints `<sha>\t<ref>` per match and nothing at all for
+        // a ref the remote does not carry, so an absent branch reads as "not the
+        // sha we pushed" without a special case.
+        if advertised.split_whitespace().next() == Some(pushed.as_str()) {
+            return Ok(());
+        }
+        Err(ForgeError::NonFastForward {
+            branch: branch.to_string(),
+        })
     }
 
     // ── The recipe's shared parts ────────────────────────────────────────────
@@ -2634,6 +2702,119 @@ mod tests {
             matches!(outcome, Err(ForgeError::NonFastForward { .. })),
             "a moved branch is a non-fast-forward, got {outcome:?}; the workspace ran {:?}",
             fixture.invocations()
+        );
+
+        // **The producer half, pinned.** The verdict above now arrives on
+        // stdout, so it exists only because the push asked for `--porcelain`.
+        // Asserting the outcome alone would stay green if the flag were
+        // dropped *and* git happened to keep writing the phrase to stderr —
+        // which is exactly the arrangement that was green here and red on CI.
+        let pushed = fixture
+            .invocations()
+            .into_iter()
+            .find(|invocation| invocation.args.iter().any(|arg| arg == "push"))
+            .expect("the push invocation was recorded");
+        assert!(
+            pushed.args.iter().any(|arg| arg == "--porcelain"),
+            "the push must ask for the machine-readable ref status, or the classifier is reading \
+             git's prose again; argv was {:?}",
+            pushed.args
+        );
+    }
+
+    /// A push whose child is **killed by a signal** printed no verdict at all,
+    /// and the verdict is then read from the remote rather than invented from
+    /// two empty channels.
+    ///
+    /// **Forced, not waited for.** `send-pack` writes its push-option section to
+    /// `receive-pack` unconditionally, but `receive-pack` reads that section
+    /// only when at least one ref command was sent — and a refspec skipped
+    /// client-side (moved, or already up to date) sends none, so the client's
+    /// write races the reader's exit. An option payload past the 64 KiB pipe
+    /// buffer makes that write block until `receive-pack` is gone, so the
+    /// `EPIPE` — and the `SIGPIPE` git's `write_or_die` re-raises for it — is
+    /// certain instead of intermittent. Each half of `bulk` stays under the
+    /// 65516-byte pkt-line ceiling `render_push_options` enforces, so what is
+    /// exceeded is the pipe and nothing else. That is the CI flake
+    /// (`GitPushFailed { status: "signal: 13 (SIGPIPE)", stderr: Redacted("") }`)
+    /// reproduced on demand.
+    ///
+    /// The `ls-remote` count is the **producer half**, and it is what keeps both
+    /// assertions honest: an unsignalled push reaches the same verdicts through
+    /// the classifier, so without it a payload that stopped forcing the signal —
+    /// a larger pipe, another git — would leave this test green while measuring
+    /// nothing.
+    ///
+    /// Reds on: dropping the `code().is_none()` arm from `push` (the moved half
+    /// and the `ls-remote` count fail); answering the landed half with an error;
+    /// answering the moved half with `Ok`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_signal_killed_push_reads_its_verdict_from_the_remote() {
+        let bulk = "b".repeat(60_000);
+        let fixture = Fixture::new().await;
+        fixture.branch_at("claim", "main", 1).await;
+        let base = fixture.remote_sha("main").await;
+        let workspace = GitWorkspace::open(&fixture.shim, &fixture.remote(), "main", Some("claim"), None)
+            .await
+            .expect("open");
+        let coordinate = "acme/index"
+            .parse::<crate::forge::RepoCoordinate>()
+            .expect("a coordinate");
+        workspace
+            .commit_files(
+                "claim",
+                CommitBase {
+                    repo: &coordinate,
+                    sha: &base,
+                    branch: "main",
+                },
+                "claim acme/widget",
+                &claim_files(),
+                RefUpdate::Accumulate,
+            )
+            .await
+            .expect("the commit chain");
+
+        let access = preflight();
+        workspace
+            .push("claim", "main", "title", "body", None, refusal(&access))
+            .await
+            .expect("the ordinary push lands");
+
+        // Nothing left to send: the branch is already at the sha the push
+        // carries, so git sends zero commands and dies on the option write for a
+        // push that failed at nothing.
+        let landed = workspace
+            .push("claim", "main", &bulk, &bulk, None, refusal(&access))
+            .await;
+        assert!(
+            landed.is_ok(),
+            "a signalled push whose branch already stands at the pushed sha changed nothing and \
+             failed at nothing, got {landed:?}"
+        );
+
+        // A second writer wins the race, and now the same signal means the
+        // opposite thing.
+        fixture.branch_at("claim", "claim", 1).await;
+        let moved = workspace
+            .push("claim", "main", &bulk, &bulk, None, refusal(&access))
+            .await;
+        assert!(
+            matches!(moved, Err(ForgeError::NonFastForward { .. })),
+            "a signalled push to a moved branch is a non-fast-forward, got {moved:?}"
+        );
+
+        assert_eq!(
+            fixture.calls("ls-remote").len(),
+            2,
+            "both pushes must have been signalled and answered from the remote, or these \
+             assertions are measuring the ordinary classifier; the workspace ran {:?}",
+            fixture
+                .invocations()
+                .iter()
+                .map(|invocation| invocation.subcommand().to_string())
+                .collect::<Vec<_>>()
         );
     }
 
