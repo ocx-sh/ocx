@@ -21,7 +21,7 @@ use ocx_lib::{oci::Algorithm, package::tag::Tag};
 /// Rows in the vendored fixture. Asserted exactly: a fixture that silently
 /// shrinks would otherwise pass vacuously, and the row set is the entire answer
 /// to "do the two implementations still agree?".
-const EXPECTED_ROW_COUNT: usize = 17;
+const EXPECTED_ROW_COUNT: usize = 19;
 
 fn verdict_cases() -> Vec<serde_json::Value> {
     let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/index_wire/tag_verdicts.json");
