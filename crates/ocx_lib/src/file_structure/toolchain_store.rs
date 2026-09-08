@@ -1654,35 +1654,82 @@ mod tests {
     /// `target.starts_with("shells")` and the wrong-shell, dot-prefixed and
     /// `..`-traversing rows all flip to `true` — the wrong-shell row is the
     /// security-relevant one, since it names another shell's real `bin`.
+    /// One contained row's target, spelled the way the platform stores one.
+    ///
+    /// POSIX keeps the relative `shells/ghost`; Windows keeps an absolute
+    /// `<root>\\shells\\ghost`, because [`expected_active_target`] derives an
+    /// absolute target there and a junction accepts nothing else. A row planted
+    /// with the POSIX spelling on Windows is refused for being *relative*, so it
+    /// answers `false` without ever reaching the comparison it exists to
+    /// exercise — the whole row would be a green that cannot go red.
+    ///
+    /// Component-wise rather than by separator substitution: the point is to
+    /// name a real, contained, wrong directory, and only `join` spells that
+    /// correctly on both platforms.
+    fn contained(root: &Path, components: &[&str]) -> String {
+        let mut path = if cfg!(windows) {
+            root.to_path_buf()
+        } else {
+            PathBuf::new()
+        };
+        for component in components {
+            path.push(component);
+        }
+        path.to_string_lossy().into_owned()
+    }
+
     #[test]
     fn active_is_valid_admits_exactly_the_derived_target() {
         let tmp = tempfile::tempdir().unwrap();
 
-        // The one legal value.
+        // The one legal value, derived exactly as the renderer derives it —
+        // relative on POSIX, absolute on Windows. Not circular: the literal
+        // output of `expected_active_target` is pinned on both platforms by
+        // `targets_match_folds_case_only_when_told_to` below, so this row
+        // asserts what it says it does — the predicate *admits* that value.
+        let legal_root = tmp.path().join("v0");
+        let legal = expected_active_target(&legal_root, DEFAULT_SHELL);
         assert!(
-            active_link_to(&tmp.path().join("v0"), "shells/default"),
-            "C-079 — the derived relative target is the one valid value"
+            active_link_to(&legal_root, &legal.to_string_lossy()),
+            "C-079 — the derived target is the one valid value"
         );
 
-        // Every other link target.
-        for target in [
-            "shells/ghost",             // a shell that does not exist
-            "shells/other",             // a real, wrong shell — the security row
-            "active",                   // self
+        // Every other link target. The first four are real, contained, wrong
+        // directories and are spelled per platform; the rest are *about* their
+        // raw spelling (traversal, trailing separator, a differently-spelled
+        // equivalent) or are absolute-outside, and so are planted verbatim on
+        // both platforms, where each is a distinct stored target either way.
+        let contained_rows = [
+            vec!["shells", "ghost"], // a shell that does not exist
+            vec!["shells", "other"], // a real, wrong shell — the security row
+            vec!["active"],          // self
+            vec!["shells"],          // one component short
+        ];
+        let verbatim_rows = [
             "/tmp/evil",                // absolute, outside the home
             "../../escape",             // relative, outside the home
             "./shells/default",         // resolves correctly, spelled differently
             "shells/../shells/default", // resolves correctly, contained, traversing
             "shells/default/",          // resolves correctly, trailing separator
-            "shells",                   // one component short
-        ] {
+        ];
+
+        let mut row = 0;
+        let refuse = |root: PathBuf, target: String| {
             assert!(
-                !active_link_to(
-                    &tmp.path().join(format!("v-{}", target.replace(['/', '.'], "_"))),
-                    target
-                ),
+                !active_link_to(&root, &target),
                 "C-080 — `active -> {target:?}` is not the derived target and must be invalid"
             );
+        };
+        for components in &contained_rows {
+            let root = tmp.path().join(format!("v-{row}"));
+            row += 1;
+            let target = contained(&root, components);
+            refuse(root, target);
+        }
+        for target in verbatim_rows {
+            let root = tmp.path().join(format!("v-{row}"));
+            row += 1;
+            refuse(root, target.to_string());
         }
     }
 

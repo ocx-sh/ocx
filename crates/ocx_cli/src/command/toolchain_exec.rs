@@ -845,16 +845,24 @@ mod tests {
 
         // Literals beside the derivation: a derivation compared only against
         // itself agrees with any accessor, including a wrong one.
+        //
+        // The tail is joined with `MAIN_SEPARATOR_STR` rather than written with
+        // `/`, because the accessors build it with `Path::join` and Windows
+        // renders that as `\\`. Spelling it `/` asserted the separator instead
+        // of the shape and reddened this row on the Windows leg for a reason
+        // this test is not about. The roots keep their own `/` — they are given
+        // as literals and no `join` touches them, on either platform.
+        let sep = std::path::MAIN_SEPARATOR_STR;
         assert_eq!(
             excluded
                 .iter()
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect::<Vec<_>>(),
             vec![
-                "/w/.ocx-home/toolchain/active/bin",
-                "/w/toolchains/0123456789abcdef/toolchain/active/bin",
-                "/w/.ocx-home/toolchain/shells/default/bin",
-                "/w/toolchains/0123456789abcdef/toolchain/shells/default/bin",
+                format!("/w/.ocx-home{sep}toolchain{sep}active{sep}bin"),
+                format!("/w/toolchains/0123456789abcdef/toolchain{sep}active{sep}bin"),
+                format!("/w/.ocx-home{sep}toolchain{sep}shells{sep}default{sep}bin"),
+                format!("/w/toolchains/0123456789abcdef/toolchain{sep}shells{sep}default{sep}bin"),
             ],
             "C-010 — each entry is `<home root>/...`, never `<something>/toolchain/bin` re-joined"
         );
