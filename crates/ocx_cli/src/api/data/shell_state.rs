@@ -326,6 +326,29 @@ pub struct ShellStateReport {
     /// is always spellable, whether or not it has ever been rendered.
     pub toolchain_home: PathBuf,
 
+    /// The **PATH-facing trampoline directory** for the same tier — the
+    /// directory a consumer outside ocx puts on `PATH` (G-1, S-004).
+    ///
+    /// [`toolchain_home`](Self::toolchain_home) answers *where the tree is*;
+    /// this answers *what to export*, and the two are not one join apart.
+    /// Every published recipe used to build the second from the first with
+    /// `.toolchain_home + "/bin"`, which the tree layout falsified — and
+    /// falsified silently, because a `jq` concatenation exits 0 whatever it
+    /// produces and the failure surfaces steps later in someone else's
+    /// automation with no ocx process in the trace.
+    ///
+    /// Publishing the resolved value is the only fix that survives the next
+    /// layout change: a documented `<toolchain_home>/active/bin` would leak a
+    /// tree-internal name into every consumer's YAML and re-create the identical
+    /// defect the day that name moves.
+    ///
+    /// **Always present whenever [`toolchain_home`](Self::toolchain_home) is**,
+    /// which is always (RUL-51), so no consumer has to branch. It names a
+    /// directory that need not exist yet: nothing here renders, and a home that
+    /// has never been pulled reports the path it *would* hold — the same
+    /// promise `toolchain_home` already makes.
+    pub toolchain_bin: PathBuf,
+
     /// The **effective** `activate` mode, past the whole ladder — the flag tier
     /// (absent here), then `ocx.toml`, then `OCX_TOOLCHAIN_ACTIVATE`, then the
     /// floor (C-005, C-056).
@@ -552,6 +575,10 @@ impl ShellStateReport {
             theme.label("toolchain:"),
             quoted_path(&self.toolchain_home)
         ));
+        // G-1 — the same answer the JSON field carries, for the reader who is
+        // about to export it by hand. A user given only the home derives the
+        // rest, and the derivation is what broke.
+        out.push(theme.field("  ", "bin", quoted_path(&self.toolchain_bin)));
         out.push(theme.field("  ", "activate", self.activate.to_string()));
         out.push(theme.field("  ", "pinned", if self.pinned { "yes" } else { "no" }));
 
@@ -1471,6 +1498,7 @@ mod tests {
             // corpus only covers a rendering of this field if the fixture makes
             // it differ from a path already in the report.
             toolchain_home: PathBuf::from("/home/u/toolchains/0123456789abcdef/toolchain"),
+            toolchain_bin: PathBuf::from("/home/u/toolchains/0123456789abcdef/toolchain/active/bin"),
             activate: ocx_lib::activate::ActivateMode::Bin,
             pinned: false,
             lock_refusal: None,
@@ -2430,13 +2458,14 @@ mod tests {
                 "the default rendering must carry {lead:?}: {default:#?}"
             );
         }
-        // Twelve before C-056, fifteen after: the resolved toolchain home and
-        // the two effective settings are three lines the *answer* owes a user
-        // (a home a `toolchain-dir` relocated is named nowhere else in the
-        // report), so the budget moves by exactly what the contract added and
-        // by nothing else.
+        // Twelve before C-056, fifteen after, sixteen after G-1: the resolved
+        // toolchain home, the launcher directory and the two effective settings
+        // are four lines the *answer* owes a user (a home a `toolchain-dir`
+        // relocated is named nowhere else in the report, and the directory to
+        // export is not one join from it), so the budget moves by exactly what
+        // each contract added and by nothing else.
         assert!(
-            default.len() <= 15,
+            default.len() <= 16,
             "the default rendering is the answer, not the state dump; got {} lines: {default:#?}",
             default.len()
         );
@@ -2789,6 +2818,9 @@ mod tests {
     fn with_home(home: &str) -> ShellStateReport {
         let mut report = base(None);
         report.toolchain_home = PathBuf::from(home);
+        // The pair travels together: a fixture that moved one and left the
+        // other would exercise a state the builder cannot produce.
+        report.toolchain_bin = PathBuf::from(home).join("active").join("bin");
         report
     }
 
@@ -2814,6 +2846,56 @@ mod tests {
                 .as_str()
                 .unwrap_or_else(|| panic!("arm `{arm}`: `toolchain_home` must serialize as a path string, got {home}"));
             assert!(!home.is_empty(), "arm `{arm}`: an empty home names nothing");
+        }
+    }
+
+    /// **G-1 / S-004** — `toolchain_bin` is a contract field on the same terms
+    /// as `toolchain_home`: present in every reportable state, never `null`,
+    /// and never equal to the home.
+    ///
+    /// The last clause is the one that matters. A field that answered the home
+    /// itself, or that a consumer could reconstruct by appending `/bin`, would
+    /// leave every published recipe exactly as broken as the concatenation this
+    /// field replaces — and both would still exit 0.
+    ///
+    /// Mutation that reds it: populate it as `toolchain_home.join("bin")`, or
+    /// make it `Option<PathBuf>`.
+    #[test]
+    fn the_json_report_always_carries_a_launcher_directory_the_home_does_not_yield() {
+        for (arm, report) in every_arm() {
+            let value = serde_json::to_value(&report).expect("the report serializes");
+            let bin = value
+                .get("toolchain_bin")
+                .unwrap_or_else(|| panic!("arm `{arm}`: `toolchain_bin` must be a field of the JSON report"));
+            assert!(
+                !bin.is_null(),
+                "arm `{arm}`: G-1 — the launcher directory is present whenever the home is, so no \
+                 consumer has to branch"
+            );
+            let bin = bin
+                .as_str()
+                .unwrap_or_else(|| panic!("arm `{arm}`: `toolchain_bin` must serialize as a path string, got {bin}"));
+            let home = value
+                .get("toolchain_home")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("arm `{arm}`: the home is the field this one is paired with"));
+
+            assert!(
+                !bin.is_empty(),
+                "arm `{arm}`: an empty launcher directory names nothing"
+            );
+            assert_ne!(bin, home, "arm `{arm}`: the launcher directory is not the home");
+            assert_ne!(
+                bin,
+                format!("{home}/bin"),
+                "arm `{arm}`: G-1 exists because `.toolchain_home + \"/bin\"` is not the answer; a field \
+                 that reproduced it would leave every published recipe broken and still exit 0"
+            );
+            assert!(
+                bin.starts_with(home),
+                "arm `{arm}`: the launcher directory lives inside the home it belongs to; got {bin} \
+                 under {home}"
+            );
         }
     }
 
@@ -2861,6 +2943,37 @@ mod tests {
         assert!(
             diagnostics(&report).contains(&home),
             "C-056 — the --verbose rendering must name it too ({home}):\n{}",
+            diagnostics(&report)
+        );
+    }
+
+    /// **G-1** — the human rendering names the launcher directory at **both**
+    /// verbosity tiers, and names it as something the home does not already say.
+    ///
+    /// The default tier especially: the reader who is about to export a
+    /// directory by hand is exactly the reader this field exists for, and the
+    /// answer they used to reach for was `<home>/bin`.
+    ///
+    /// Mutation that reds it: drop the `bin` line from `toolchain_lines` — the
+    /// half-landed state where the wire field ships and the text does not, which
+    /// the JSON assertions above cannot see.
+    #[test]
+    fn both_verbosity_tiers_name_the_launcher_directory() {
+        let report = base(None);
+        let bin = report.toolchain_bin.display().to_string();
+        assert_ne!(
+            bin,
+            fixture_toolchain_home(),
+            "the fixture must differ from the home, or naming one would satisfy both assertions"
+        );
+        assert!(
+            answer(&report).contains(&bin),
+            "G-1 — the default rendering must name the launcher directory ({bin}):\n{}",
+            answer(&report)
+        );
+        assert!(
+            diagnostics(&report).contains(&bin),
+            "G-1 — the --verbose rendering must name it too ({bin}):\n{}",
             diagnostics(&report)
         );
     }

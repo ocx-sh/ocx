@@ -183,6 +183,7 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
         ocx_home_present,
         shell_integration_installed,
         toolchain_home: toolchain.home,
+        toolchain_bin: toolchain.bin,
         activate: toolchain.activate,
         pinned: toolchain.pinned,
         lock_refusal: project.and_then(|project| project.lock_refusal.clone()),
@@ -210,14 +211,18 @@ async fn derive(context: &crate::app::Context) -> anyhow::Result<ShellStateRepor
     })
 }
 
-/// The three toolchain facts C-056 adds to the report, plus the row a manifest
+/// The toolchain facts C-056 and G-1 add to the report, plus the row a manifest
 /// that will not parse owes the user.
 ///
-/// One struct rather than a tuple: three values of two types, two of which are
-/// `bool`-adjacent, is exactly the shape a positional return gets transposed in.
+/// One struct rather than a tuple: four values of three types, two of which are
+/// `bool`-adjacent and two of which are paths into one tree, is exactly the
+/// shape a positional return gets transposed in.
 struct ToolchainState {
     /// The resolved home — see [`ShellStateReport::toolchain_home`].
     home: PathBuf,
+    /// The PATH-facing trampoline directory of the same tier — see
+    /// [`ShellStateReport::toolchain_bin`].
+    bin: PathBuf,
     /// The effective `activate` mode, past the whole ladder.
     activate: ocx_lib::activate::ActivateMode,
     /// The effective `pinned` value, past the same ladder.
@@ -266,6 +271,12 @@ async fn toolchain_state(
 
     Ok(ToolchainState {
         home: home.root().to_path_buf(),
+        // G-1 — through the home's own accessor, so the reported directory is
+        // the one every PATH route derives and cannot drift from the tree
+        // shape. A `home.join("bin")` here would be the second spelling C-001
+        // forbids, and would republish exactly the broken concatenation this
+        // field exists to retire.
+        bin: home.bin(),
         activate,
         pinned,
         note,
