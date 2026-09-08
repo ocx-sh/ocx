@@ -29,8 +29,6 @@ import subprocess
 import uuid
 from pathlib import Path
 
-import pytest
-
 from src.runner import OcxRunner
 
 # ---------------------------------------------------------------------------
@@ -368,13 +366,21 @@ def test_project_flag_canonicalized_for_registry(
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 bootstrap — ProjectConfig parsing via the CLI boundary
+# ProjectConfig parsing via the CLI boundary
 #
-# Phase 2 lands the schema (``ProjectConfig``, ``ProjectLock``, declaration
-# hash) but NO CLI command consumes the project config yet. End-to-end
-# parsing acceptance is deferred to Phase 3 (``ocx lock``) and Phase 4
-# (``ocx exec -g``). These xfail tests encode the fixture shapes so the
-# implementer can flip the marker once a CLI surface is available.
+# The three rows below were `xfail` bootstraps while no command consumed the
+# project config. Phase 3 shipped the surface their markers named — `ocx lock`
+# routes the file through `ProjectConfig::from_path` — so the markers are gone
+# and the command under test is `lock`. It is not `index catalog`: that reaches
+# `Context::try_init` and never reads the file's bytes, so a row asserting
+# exit 0 against it passes under every parse behaviour there is, the deferred
+# one included. That is what the `xpass` on two of these was reporting.
+#
+# `--offline` is what makes the pair discriminating without a registry. A
+# parsed `[tools]` table reaches the *resolver* and is refused there — exit 81
+# naming the identifier the file declared; an unparseable one never gets that
+# far — exit 78 naming the offending key and value. A parse regression turns
+# the first into the second.
 # ---------------------------------------------------------------------------
 
 
@@ -397,6 +403,18 @@ mytool = "ghcr.io/acme/mytool:1.0"
 shellcheck = "ocx.sh/shellcheck:0.10"
 """
 
+# The identifiers ``VALID_OCX_TOML`` declares, spelled out rather than re-parsed
+# out of it: an expectation derived from the fixture text is satisfied by every
+# fixture text. Which one the offline resolver refuses first is its own business
+# — the property is that the refusal names a reference *this file* declared, so
+# the row asserts membership and not a fixed element.
+VALID_IDENTIFIERS = (
+    "ocx.sh/cmake:3.28",
+    "ocx.sh/ninja:1.11",
+    "ghcr.io/acme/mytool:1.0",
+    "ocx.sh/shellcheck:0.10",
+)
+
 # Bare-tag form is rejected at the schema layer per plan_project_toolchain.md
 # Phase 2.1 finding F1: identifiers must be fully qualified
 # (registry/repo[:tag][@digest]) — no env-var expansion of the default
@@ -410,85 +428,54 @@ cmake = "3.28"
 """
 
 
-# xfail until Phase 3 (see plan_project_toolchain.md § Phase 3 — `ocx lock`
-# command — adds the first CLI surface that parses ProjectConfig end-to-end).
-@pytest.mark.xfail(
-    reason=(
-        "Phase 2 has no CLI surface that parses ProjectConfig; landing in "
-        "Phase 3 with `ocx lock` / Phase 4 with `ocx exec -g`. Bootstrap "
-        "test encoded now so the fixture shape is locked in."
-    ),
-    strict=False,
-)
 def test_project_config_loads_via_project_flag(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """``ocx --project fixture/ocx.toml <cmd>`` parses without erroring.
+    """``ocx --project fixture/ocx.toml lock`` parses the file and resolves from it.
 
-    Once a CLI surface lands that consumes the project config (e.g.
-    ``ocx lock``), this test should replace ``index catalog`` with the
-    real subcommand and assert on its output. The fixture shape captures
-    the Phase 2 contract: flat ``[tools]``, a named ``[group.*]``.
+    The fixture shape is the schema contract: flat ``[tools]``, a named
+    ``[group.*]``. Reaching the resolver is the observable that the table was
+    parsed — a parse failure exits 78 before any reference is looked up.
     """
     project_file = _write_fixture(tmp_path, VALID_OCX_TOML)
 
-    result = _run_with_env(ocx, "--project", str(project_file), "index", "catalog")
+    result = _run_with_env(ocx, "--offline", "--project", str(project_file), "lock")
 
-    # When a real CLI surface exists, this should assert structured
-    # output. For now, non-zero exit with a config-parse trace is the
-    # signal we're past the path-discovery layer.
-    assert result.returncode == 0, (
-        f"valid ocx.toml via --project should be accepted; "
-        f"rc={result.returncode}, stderr={result.stderr!r}"
+    assert result.returncode == 81, (
+        f"a valid ocx.toml via --project must reach the resolver, not a parse "
+        f"error; rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert any(identifier in result.stderr for identifier in VALID_IDENTIFIERS), (
+        f"…and the refusal names an identifier the file declared, which is what "
+        f"makes this a parse observation rather than an exit-code coincidence: "
+        f"{result.stderr!r}"
     )
 
 
-# xfail until Phase 3 (see plan_project_toolchain.md § Phase 3 — `ocx lock`
-# command — adds the first CLI surface that parses ProjectConfig end-to-end).
-@pytest.mark.xfail(
-    reason=(
-        "Phase 2 has no CLI surface that parses ProjectConfig; landing in "
-        "Phase 3 with `ocx lock` / Phase 4 with `ocx exec -g`. Bootstrap "
-        "test encoded now so the env-var path is locked in."
-    ),
-    strict=False,
-)
-def test_project_config_loads_via_env_var(
-    ocx: OcxRunner, tmp_path: Path
-) -> None:
+def test_project_config_loads_via_env_var(ocx: OcxRunner, tmp_path: Path) -> None:
     """``OCX_PROJECT=fixture/ocx.toml`` parses without erroring.
 
-    Symmetric with ``--project``: the env-var resolution path must reach
-    the parse layer once a consumer exists.
+    Symmetric with ``--project``: the env-var resolution path reaches the same
+    parse layer, and is observed the same way.
     """
     project_file = _write_fixture(tmp_path, VALID_OCX_TOML)
 
     result = _run_with_env(
         ocx,
-        "index",
-        "catalog",
+        "--offline",
+        "lock",
         extra_env={"OCX_PROJECT": str(project_file)},
     )
 
-    assert result.returncode == 0, (
-        f"valid ocx.toml via OCX_PROJECT should be accepted; "
-        f"rc={result.returncode}, stderr={result.stderr!r}"
+    assert result.returncode == 81, (
+        f"a valid ocx.toml via OCX_PROJECT must reach the resolver, not a parse "
+        f"error; rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert any(identifier in result.stderr for identifier in VALID_IDENTIFIERS), (
+        f"…and the refusal names an identifier the file declared: {result.stderr!r}"
     )
 
 
-# xfail until Phase 3 wires `ProjectConfig::from_path` into a CLI surface
-# that actually parses the file. Today's `Context::try_init` only resolves
-# the project *path* via `ConfigLoader::project_path`; nothing reads the
-# bytes. Once `ocx lock` lands, this test should flip to passing.
-@pytest.mark.xfail(
-    reason=(
-        "Phase 2 has no CLI surface that parses ProjectConfig; the bare-tag "
-        "rejection diagnostic only fires once Phase 3 (`ocx lock`) routes "
-        "the file through `ProjectConfig::from_path`. Bootstrap test encoded "
-        "now so the diagnostic shape is locked in."
-    ),
-    strict=False,
-)
 def test_bare_tag_in_project_config_exits_78(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
@@ -501,7 +488,7 @@ def test_bare_tag_in_project_config_exits_78(
     """
     project_file = _write_fixture(tmp_path, BARE_TAG_OCX_TOML)
 
-    result = _run_with_env(ocx, "--project", str(project_file), "index", "catalog")
+    result = _run_with_env(ocx, "--offline", "--project", str(project_file), "lock")
 
     assert result.returncode == 78, (
         f"bare-tag ocx.toml should exit 78 (ConfigError), got "
