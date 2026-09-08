@@ -44,9 +44,9 @@ Structural tests in `.claude/tests/test_ai_config.py` fail when catalog drifts f
 | CI / workflows | [subsystem-ci.md](./rules/subsystem-ci.md), [workflow-release.md](./rules/workflow-release.md) |
 | AI config changes | [meta-ai-config.md](./rules/meta-ai-config.md) + this catalog, skill `meta-maintain-config` |
 | GitHub issues & PRs / planning artifacts | [workflow-github.md](./rules/workflow-github.md), [workflow-feature.md](./rules/workflow-feature.md) |
-| Commits, branches, rebasing, landing on main | [workflow-git.md](./rules/workflow-git.md), skills `commit`, `finalize` |
-| Plan progress tracking (Status block + `.claude/state/current_plan.md`) | [meta-ai-config.md](./rules/meta-ai-config.md) "Plan Status Protocol", skills `swarm-plan`, `swarm-execute`, `swarm-review`, `commit`, `finalize`, `next` |
-| Swarm / multi-agent workflows | [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md), skills `swarm-plan`, `swarm-execute`, `swarm-review` |
+| Commits, branches, rebasing, landing on main | [workflow-git.md](./rules/workflow-git.md), skills `commit`, `hex-finalize` |
+| Plan progress tracking (Status block + `.claude/state/current_plan.md`) | [meta-ai-config.md](./rules/meta-ai-config.md) "Plan Status Protocol", skills `hex-plan`, `hex-execute`, `hex-review`, `commit`, `hex-finalize`, `next` |
+| Swarm / multi-agent workflows | [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md), skills `hex-plan`, `hex-execute`, `hex-review` |
 | Code quality audit | [quality-core.md](./rules/quality-core.md), `quality-{lang}.md`, skill `code-check` |
 | Error type design (Rust) | [quality-rust.md](./rules/quality-rust.md), [quality-rust-errors.md](./rules/quality-rust-errors.md) |
 | CLI exit code design (Rust) | [quality-rust.md](./rules/quality-rust.md), [quality-rust-exit_codes.md](./rules/quality-rust-exit_codes.md) |
@@ -118,7 +118,8 @@ Mirrors subsystem table in `CLAUDE.md`. Catalog = single source of truth — `CL
 | `.claude/agents/**`, `.claude/skills/hex-*/**` | + [workflow-swarm.md](./rules/workflow-swarm.md), [workflow-feature.md](./rules/workflow-feature.md) |
 
 Globals (always loaded or imported into `CLAUDE.md`): [quality-core.md](./rules/quality-core.md),
-[product-tech-strategy.md](./rules/product-tech-strategy.md), [workflow-intent.md](./rules/workflow-intent.md), this catalog.
+[product-tech-strategy.md](./rules/product-tech-strategy.md), [workflow-intent.md](./rules/workflow-intent.md),
+[hex-state.md](./rules/hex-state.md), this catalog.
 
 Scoped workflow rules (loaded by path match, consumed by skills on demand):
 [quality-security.md](./rules/quality-security.md) (`.github/workflows/**`, `.github/actions/**`),
@@ -151,19 +152,19 @@ Exempt from overlap detection (intended broad coupling):
 | Adding/choosing a dependency | `deps` |
 | Writing docs | `docs` |
 | Security review | `security-auditor` |
-| Architecture decision | `architect` |
+| Architecture decision | `hex-architect` |
 | Code quality audit | `code-check` |
 | Triaging a large diff — what to actually read | `review-surface` |
 | Implementation / debugging | `builder` |
 | Test strategy | `qa-engineer` |
-| Planning a feature (multi-agent) | `swarm-plan` |
-| Executing a feature (multi-agent) | `swarm-execute` |
-| Adversarial review | `swarm-review` |
-| One issue end-to-end (design→build→review→merge→consistency) | `swarm-loop` |
-| Whole milestone: split into issues + drive on a long-living branch | `swarm-x` |
+| Planning a feature (multi-agent) | `hex-plan` |
+| Executing a feature (multi-agent) | `hex-execute` |
+| Adversarial review | `hex-review` |
+| Talking a fuzzy problem through before a plan exists | `hex-discuss` |
+| Cross-model adversarial review under a second harness | `nox-review` |
 | Releases | (see [workflow-release.md](./rules/workflow-release.md)) |
 | AI config maintenance | `meta-maintain-config`, `meta-validate-context` |
 | Roadmap sync | `ocx-sync-roadmap` |
 | Commits (working phase) | `commit` |
-| Finalize branch for merge onto main | `finalize` |
+| Finalize branch for merge onto main | `hex-finalize` |
 | Suggest next slash command from current state | `next` |

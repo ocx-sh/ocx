@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import glob
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,56 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 CLAUDE_DIR = ROOT / ".claude"
 CLAUDE_MD = ROOT / "CLAUDE.md"
+GRIMOIRE_LOCK = ROOT / "grimoire.lock"
+
+
+# ---------------------------------------------------------------------------
+# Vendored vs. project-authored config
+# ---------------------------------------------------------------------------
+#
+# `grim` installs skills and rules into `.claude/` from OCI bundles pinned in
+# `grimoire.lock`, and overwrites them wholesale on the next `grim install`.
+# A *project-authoring* property — description wording, body-length budget,
+# `triggers:` frontmatter, `disable-model-invocation` intent — is therefore
+# upstream's contract for those files, not this repo's. Asserting it against a
+# vendored file reds this gate on an upstream refresh with nothing here to fix,
+# and the only "fix" would be hand-editing a file the next pull clobbers.
+#
+# The split is read from the lockfile rather than a hand-maintained list, so
+# dropping a bundle from `grimoire.toml` puts its artifacts back under this
+# repo's authoring rules automatically. A missing lockfile raises rather than
+# silently exempting nothing — the strict direction.
+
+
+def _vendored(kind: str) -> frozenset[str]:
+    """Names of `[[skill]]` / `[[rule]]` entries in `grimoire.lock`."""
+    lock = tomllib.loads(GRIMOIRE_LOCK.read_text())
+    return frozenset(entry["name"] for entry in lock.get(kind, []))
+
+
+VENDORED_SKILLS = _vendored("skill")
+VENDORED_RULES = _vendored("rule")
+
+
+def project_skills() -> list[Path]:
+    """`SKILL.md` paths this repo authors — vendored skills excluded."""
+    return [
+        p
+        for p in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md"))
+        if p.parent.name not in VENDORED_SKILLS
+    ]
+
+
+def is_vendored(md: Path) -> bool:
+    """True for a markdown file `grim` installs (vendored skill or rule)."""
+    parts = md.relative_to(CLAUDE_DIR).parts
+    if len(parts) < 2:
+        return False
+    if parts[0] == "skills":
+        return parts[1] in VENDORED_SKILLS
+    if parts[0] == "rules":
+        return parts[1].removesuffix(".md") in VENDORED_RULES
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -724,6 +775,8 @@ class TestRuleCatalog:
                 continue  # test file itself doesn't reference rule files
             if "worktrees" in md.parts or "node_modules" in md.parts:
                 continue  # nested worktrees + their node_modules are not OCX config
+            if is_vendored(md):
+                continue  # grim-installed — its internal refs are upstream's
             targets.append(md)
 
         missing: list[tuple[str, str]] = []
@@ -881,169 +934,6 @@ class TestTaskfileLint:
 
 
 # ---------------------------------------------------------------------------
-# Swarm tier dispatch: progressive disclosure invariants
-# Parametrized across all tiered swarm skills.
-# ---------------------------------------------------------------------------
-
-
-# Skills that use the progressive-disclosure tier dispatch pattern.
-# Each entry: (skill-dir name, flag grammar that must appear verbatim in
-# both SKILL.md and overlays.md). The flag grammar is the subset unique
-# to that skill — `--codex` is shared and always required.
-_TIERED_SWARM_SKILLS = [
-    (
-        "swarm-plan",
-        (
-            "--architect=inline|sonnet|opus",
-            "--research=skip|1|3",
-            "--codex",
-        ),
-    ),
-    (
-        "swarm-execute",
-        (
-            "--builder=sonnet|opus",
-            "--loop-rounds=1|2|3",
-            "--review=minimal|full|adversarial",
-            "--codex",
-        ),
-    ),
-    (
-        "swarm-review",
-        (
-            "--breadth=minimal|full|adversarial",
-            "--rca=on|off",
-            "--codex",
-        ),
-    ),
-]
-
-
-class TestSwarmTiers:
-    """Tiered swarm skills use progressive disclosure — SKILL.md is a
-    thin dispatch layer that reads one of `tier-{low,high,max}.md`. The
-    classifier and overlay axis definitions live in their own files.
-    These tests lock in the structural invariants of that layout across
-    every tiered swarm skill."""
-
-    _TIER_FILES = ("tier-low.md", "tier-high.md", "tier-max.md")
-    _SUPPORT_FILES = ("classify.md", "overlays.md")
-
-    @pytest.mark.parametrize(
-        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
-    )
-    def test_skill_md_under_200_lines(self, skill_name: str) -> None:
-        """SKILL.md must stay under 200 lines — dispatch-only.
-
-        Per meta-ai-config.md, SKILL.md bodies should stay ≤500, but
-        tiered swarm skills adopt a tighter ceiling since phase content
-        has been extracted into tier files. 200 is the hard ceiling.
-        """
-        skill = CLAUDE_DIR / "skills" / skill_name / "SKILL.md"
-        line_count = len(skill.read_text().splitlines())
-        assert line_count < 200, (
-            f"{skill_name}/SKILL.md is {line_count} lines (ceiling: 199). "
-            f"Phase plans belong in tier-*.md; shared content here."
-        )
-
-    @pytest.mark.parametrize(
-        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
-    )
-    def test_tier_files_exist(self, skill_name: str) -> None:
-        """Each tier file referenced by SKILL.md must exist on disk."""
-        skill_dir = CLAUDE_DIR / "skills" / skill_name
-        skill_text = (skill_dir / "SKILL.md").read_text()
-        missing = [t for t in self._TIER_FILES if not (skill_dir / t).exists()]
-        # SKILL.md must reference them by name (dispatch contract)
-        unreferenced = [
-            t for t in self._TIER_FILES
-            if t not in skill_text and t.replace("-", "") not in skill_text
-        ]
-        assert not missing, f"{skill_name} tier files missing from disk: {missing}"
-        assert not unreferenced, (
-            f"{skill_name}/SKILL.md must reference each tier file by name: "
-            f"{unreferenced}"
-        )
-
-    @pytest.mark.parametrize(
-        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
-    )
-    def test_support_files_exist(self, skill_name: str) -> None:
-        """classify.md and overlays.md must exist and be referenced
-        from SKILL.md."""
-        skill_dir = CLAUDE_DIR / "skills" / skill_name
-        skill_text = (skill_dir / "SKILL.md").read_text()
-        for name in self._SUPPORT_FILES:
-            path = skill_dir / name
-            assert path.exists(), f"Missing {skill_name} support file: {name}"
-            assert name in skill_text, (
-                f"{skill_name}/SKILL.md must reference {name} so the "
-                f"dispatch knows to Read it."
-            )
-
-    @pytest.mark.parametrize(
-        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
-    )
-    def test_classify_has_example_per_tier(self, skill_name: str) -> None:
-        """classify.md must show at least one example per tier (low /
-        high / max) so the classifier has concrete anchors."""
-        text = (CLAUDE_DIR / "skills" / skill_name / "classify.md").read_text()
-        missing = [
-            t for t in ("**low**", "**high**", "**max**")
-            if t not in text
-        ]
-        assert not missing, (
-            f"{skill_name}/classify.md missing examples for: {missing}. "
-            f"Each tier needs at least one example signal."
-        )
-
-    @pytest.mark.parametrize(
-        ("skill_name", "required_forms"), _TIERED_SWARM_SKILLS
-    )
-    def test_overlays_match_skill_flag_grammar(
-        self, skill_name: str, required_forms: tuple[str, ...]
-    ) -> None:
-        """overlays.md axis values must match the flag grammar declared
-        in SKILL.md. Drift between the two produces parser bugs."""
-        skill_dir = CLAUDE_DIR / "skills" / skill_name
-        skill_text = (skill_dir / "SKILL.md").read_text()
-        overlays_text = (skill_dir / "overlays.md").read_text()
-
-        drift = []
-        for form in required_forms:
-            if form not in skill_text:
-                drift.append((skill_name, "SKILL.md", form))
-            if form not in overlays_text:
-                drift.append((skill_name, "overlays.md", form))
-        assert not drift, (
-            f"Flag grammar drift between SKILL.md and overlays.md: "
-            f"{drift}. Keep the two in lockstep."
-        )
-
-    @pytest.mark.parametrize(
-        "skill_name", [name for name, _ in _TIERED_SWARM_SKILLS]
-    )
-    def test_tier_files_preserve_contract_first_tdd(
-        self, skill_name: str
-    ) -> None:
-        """Every tier must preserve the contract-first TDD skeleton
-        (Stub → Specify → Implement → Review). Dropping it at any tier
-        breaks the plan→execute handoff contract."""
-        skill_dir = CLAUDE_DIR / "skills" / skill_name
-        skeleton_anchors = ["Stub", "Specify", "Implement", "Review"]
-        violations = []
-        for tier in self._TIER_FILES:
-            text = (skill_dir / tier).read_text()
-            missing = [a for a in skeleton_anchors if a not in text]
-            if missing:
-                violations.append((skill_name, tier, missing))
-        assert not violations, (
-            f"Tier files must keep the contract-first TDD skeleton. "
-            f"Missing anchors: {violations}"
-        )
-
-
-# ---------------------------------------------------------------------------
 # AI config overhaul — Phase 1 invariants
 # ---------------------------------------------------------------------------
 
@@ -1080,10 +970,16 @@ class TestAiConfigOverhaulPhase1:
 
         A global rule is any `.claude/rules/*.md` file without a non-empty
         `paths:` frontmatter entry. Post Phase 1 of the AI config overhaul,
-        the authoritative count is 3 and the list appears in meta-ai-config.md
+        the authoritative count is 4 and the list appears in meta-ai-config.md
         under `### Current Global Rules`. `rules.md` and `CLAUDE.md` reach
         Claude by a different mechanism (`@`-import / root instructions) and
         are not counted here.
+
+        Vendored rules count. A grim-installed rule with no `paths:` loads
+        every session exactly like a hand-written one, so it belongs in the
+        always-loaded baseline this test guards — `hex-state.md` is one. What
+        this repo controls is the bundle set in `grimoire.toml`, and a bundle
+        that adds a new global is a change worth noticing.
         """
         rules_dir = CLAUDE_DIR / "rules"
         globals_found = []
@@ -1091,8 +987,8 @@ class TestAiConfigOverhaulPhase1:
             paths = TestRuleGlobs._extract_paths(rule)
             if not paths:
                 globals_found.append(rule.name)
-        assert len(globals_found) == 3, (
-            f"Expected exactly 3 global rules (no `paths:` frontmatter), "
+        assert len(globals_found) == 4, (
+            f"Expected exactly 4 global rules (no `paths:` frontmatter), "
             f"got {len(globals_found)}: {globals_found}"
         )
         meta_text = (rules_dir / "meta-ai-config.md").read_text()
@@ -1186,11 +1082,6 @@ class TestAiConfigOverhaulPhase2:
     # Per-skill `disable-model-invocation` intent table. Prevents accidental
     # flips (action skill losing the flag, or pure-advisory skill gaining it).
     _EXPECTED_DISABLE_MODEL_INVOCATION = {
-        # Owner-unlocked (2026-08-18): `/finalize` is model-invocable so an
-        # autonomous run can close out a branch through the documented rebase
-        # workflow (scripted todo file, never force-push, never auto-resolve a
-        # conflict) instead of improvising equivalent git calls.
-        "finalize": False,
         # Owner-unlocked (2026-07-21): `/commit` is model-invocable so an agent
         # follows the documented workflow (stage by name, never push, never
         # `--no-verify`) instead of improvising equivalent git calls. Mirrored
@@ -1198,17 +1089,7 @@ class TestAiConfigOverhaulPhase2:
         "commit": False,
         "meta-maintain-config": True,
         "ocx-sync-roadmap": True,
-        # Owner-unlocked for autonomous multi-agent workflows (2026-05-16):
-        # the swarm pipeline + Codex gate are model-invocable so an
-        # autonomous run can plan → execute → cross-model-review without a
-        # manual gate at each hop. Reversible by flipping frontmatter back.
-        "codex-adversary": False,
-        "swarm-plan": False,
-        "swarm-execute": False,
-        "swarm-loop": False,
-        "swarm-x": False,
         # Pure analysis / advisory — auto-invocation safe
-        "architect": False,
         "builder": False,
         "code-check": False,
         "deps": False,
@@ -1222,7 +1103,6 @@ class TestAiConfigOverhaulPhase2:
         # useful the moment a diff is too large to eyeball.
         "review-surface": False,
         "security-auditor": False,
-        "swarm-review": False,
     }
 
     @staticmethod
@@ -1254,9 +1134,12 @@ class TestAiConfigOverhaulPhase2:
         descriptions are single-line; multi-line (block-scalar) is disallowed
         because the simple parser above would truncate and the real context
         loader would concatenate — both paths degrade discoverability.
+
+        Scoped to project-authored skills: CSO is this repo's ADR, and a
+        vendored skill's description is written upstream.
         """
         violations: list[tuple[str, str]] = []
-        for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
+        for skill_md in project_skills():
             name = skill_md.parent.name
             fm = self._parse_frontmatter(skill_md)
             desc = fm.get("description", "")
@@ -1278,15 +1161,21 @@ class TestAiConfigOverhaulPhase2:
         )
 
     def test_skill_description_budget_under_cap(self) -> None:
-        """Sum of all skill description chars must stay under the 4000-char
-        cap (buffer below Anthropic's 1% context-window description budget).
+        """Sum of project-authored skill description chars must stay under
+        the 4000-char cap (buffer below Anthropic's 1% context-window
+        description budget).
 
         Pre-Phase-2 baseline was 5004 chars; Phase 2 target is ≤4000, giving
         ≈20% headroom for future skill growth before hitting the cap.
+
+        Vendored descriptions cost context too, and cost more than this cap.
+        They are excluded because no edit here can shrink them — the only
+        lever over a vendored description is dropping its bundle from
+        `grimoire.toml`, which is a decision, not a gate failure.
         """
         total = 0
         per_skill: list[tuple[str, int]] = []
-        for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
+        for skill_md in project_skills():
             fm = self._parse_frontmatter(skill_md)
             desc = fm.get("description", "")
             total += len(desc)
@@ -1303,10 +1192,13 @@ class TestAiConfigOverhaulPhase2:
         Prevents accidental flips — e.g. an action skill losing the flag
         (silently auto-invoked by Claude), or a pure-advisory skill gaining
         it (needlessly removed from auto-invocation).
+
+        Scoped to project-authored skills: an accidental flip is an edit made
+        here, and a vendored skill's flag arrives set by upstream.
         """
         mismatches: list[tuple[str, object, object]] = []
         unlisted: list[str] = []
-        for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
+        for skill_md in project_skills():
             name = skill_md.parent.name
             if name not in self._EXPECTED_DISABLE_MODEL_INVOCATION:
                 unlisted.append(name)
@@ -1398,10 +1290,6 @@ class TestAiConfigOverhaulPhase5:
     # the canonical markers themselves. Prevents accidental fourth carrier.
     _POINTER_ONLY_FILES = (
         CLAUDE_DIR / "rules" / "workflow-feature.md",
-        CLAUDE_DIR / "skills" / "swarm-execute" / "SKILL.md",
-        CLAUDE_DIR / "skills" / "swarm-execute" / "tier-low.md",
-        CLAUDE_DIR / "skills" / "swarm-execute" / "tier-high.md",
-        CLAUDE_DIR / "skills" / "swarm-execute" / "tier-max.md",
     )
 
     _BEGIN_MARKER = "<!-- REVIEW_FIX_LOOP_CANONICAL_BEGIN -->"
@@ -1417,10 +1305,9 @@ class TestAiConfigOverhaulPhase5:
         Review-Fix Loop blocks between the HTML comment markers.
 
         Carriers: `workflow-swarm.md`, `workflow-bugfix.md`,
-        `workflow-refactor.md`. Pointer-only files (workflow-feature.md,
-        swarm-execute SKILL + tier files) must NOT contain the markers
-        (they link to the canonical) and MUST contain a pointer to
-        `workflow-swarm.md#review-fix-loop`.
+        `workflow-refactor.md`. Pointer-only files (workflow-feature.md)
+        must NOT contain the markers (they link to the canonical) and MUST
+        contain a pointer to `workflow-swarm.md#review-fix-loop`.
         """
         # Every carrier must have exactly one BEGIN and one END marker
         carrier_blocks: dict[str, str] = {}
@@ -1495,9 +1382,12 @@ class TestAiConfigOverhaulPhase5:
         stays ≤200 via progressive disclosure (`references/` subdir for
         detail material). Exceptions live in
         `_SKILL_BODY_BUDGET_EXCEPTIONS` with a docstring justification.
+
+        Scoped to project-authored skills — a vendored SKILL.md is sized by
+        its upstream author and cannot be split here.
         """
         violations: list[tuple[str, int]] = []
-        for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
+        for skill_md in project_skills():
             name = skill_md.parent.name
             if name in self._SKILL_BODY_BUDGET_EXCEPTIONS:
                 continue
@@ -1527,7 +1417,7 @@ class TestPromptRoutingTriggers:
     matcher, so natural-language prompts never route to it.
     """
 
-    _ALLOWED_SINGLE_WORD_TRIGGERS = {"deps", "commit", "finalize"}
+    _ALLOWED_SINGLE_WORD_TRIGGERS = {"deps", "commit"}
     _MIN_TRIGGERS = 3
     _MAX_TRIGGERS = 7
 
@@ -1576,8 +1466,15 @@ class TestPromptRoutingTriggers:
 
     @classmethod
     def _user_invocable_skills(cls) -> list[tuple[str, dict]]:
+        """Project-authored user-invocable skills.
+
+        A vendored skill declares (or omits) `triggers:` upstream; adding the
+        field here would be undone by the next `grim install`. No vendored
+        skill currently ships triggers, so this narrows the subject without
+        dropping any trigger from the uniqueness and discrimination checks.
+        """
         out: list[tuple[str, dict]] = []
-        for skill_md in sorted((CLAUDE_DIR / "skills").glob("*/SKILL.md")):
+        for skill_md in project_skills():
             fm = cls._parse_frontmatter(skill_md.read_text())
             if fm.get("user-invocable") == "true":
                 out.append((skill_md.parent.name, fm))
