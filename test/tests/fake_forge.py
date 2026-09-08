@@ -545,10 +545,19 @@ class FakeForge(GitHttpRoutes, GitLabRoutes, http.server.ThreadingHTTPServer):
         # `gitlab_job_token_allowlist` keeps meaning exactly what it means
         # today — neither list admits, which is still a miss.
         self.gitlab_job_token_groups_allowlist: dict[str, list[str]] = {}
-        # No `..._unreadable` knob for either list: the 403 one would arm is
+        # No `..._unreadable` knob for either list: the refusal one would arm is
         # already what `gl_job_token_refuses` answers a bare job token, which is
         # the posture that meets it in production. A knob no row arms is a
         # branch no row covers.
+
+        # `"<project>/<branch>"` -> how many more branch reads must answer "no
+        # such branch" while the bare repository still holds the ref (#436).
+        # Reproduces the one state the whole defect turns on and the one the
+        # reporter could not explain: the forge's branch listing denied a branch
+        # its own git side had, ~12s after the push that created it. Consumed per
+        # read, so a row can say "lie once, then tell the truth" and watch the run
+        # converge — a permanent lie would only ever measure the refusal.
+        self.gitlab_branch_reads_denied: dict[str, int] = {}
 
         self.git_http_init()
 

@@ -187,9 +187,16 @@ pub async fn claim(forge: Option<&dyn Forge>, request: ClaimRequest) -> Result<C
     // is repointed with a lease; every other state fast-forwards, which is a
     // real compare-and-swap. `pull_request_mergeability` is never consulted
     // (C-053): the rebuild makes the request mergeable by construction.
+    //
+    // `Accumulate` rather than `FastForward`, and the difference is the parent
+    // rather than the ref update. A claim root is rendered wholly from the
+    // request — it is derived from `base_sha` in no way at all — so a branch
+    // merely `Ahead` of the base must be built on, not refused. `FastForward`
+    // means "the payload came from `base.sha`, so refuse any other head", which
+    // is announce's contract and would strand every `Ahead` re-claim here.
     let update = match comparison {
         Some(BranchComparison::Behind | BranchComparison::Diverged) => RefUpdate::Reset,
-        _ => RefUpdate::FastForward,
+        _ => RefUpdate::Accumulate,
     };
 
     // The one state that may write nothing: a branch strictly ahead of the base
@@ -259,9 +266,15 @@ pub async fn claim(forge: Option<&dyn Forge>, request: ClaimRequest) -> Result<C
     let files = BTreeMap::from([(root_path.clone(), root_bytes)]);
     let message = request_title(&name);
     let body = request_body(&name, &repository, &branch, &owners, source);
-    // Every claim commit is parented on the index base — never on the branch.
-    // A claim root accumulates nothing, so there is no branch content to build
-    // on, and basing on the base is what keeps `Behind`/`Diverged` mergeable.
+    // Every claim commit is BASED on the index base — the sha read here is the
+    // one handed to `commit_files`, on every transport and in every state. What
+    // the commit is PARENTED on is the transport's business and is not always
+    // this sha: under `Accumulate` the git workspace and GitLab's commits API
+    // both build on the branch head when the branch is already there. That is
+    // deliberate (see the `RefUpdate::Accumulate` reasoning above) — a claim
+    // root accumulates nothing, so an `Ahead` branch must be built on rather
+    // than refused, and reading the base here is what keeps `Behind`/`Diverged`
+    // mergeable.
     let base_sha = read_base_sha(forge, &request.index_repo).await?;
     // The commit and the pull request are **one unit of work** for the purposes
     // of the race, because which of the two loses it depends on the transport
@@ -958,8 +971,10 @@ pub(crate) mod tests {
     /// Reds on: calling `compare_branch` on an absent branch (a contract, not an
     /// optimisation — there is no second ref to compare); `RefUpdate::Reset` on
     /// `Absent`/`Identical`/`Ahead` (weakening a real compare-and-swap into a
-    /// lease); `RefUpdate::FastForward` on `Behind`/`Diverged` (a behind branch
-    /// can then never merge); parenting a commit anywhere but the index base;
+    /// lease); `RefUpdate::Accumulate` on `Behind`/`Diverged` (a behind branch
+    /// can then never merge); `RefUpdate::FastForward` anywhere (its contract is
+    /// "the payload came from `base.sha`", which a claim root never did, and it
+    /// refuses every `Ahead` branch); parenting a commit anywhere but the index base;
     /// writing at all on the byte-identical-with-open-request row; or skipping the
     /// request-ensure on the byte-identical-without-one row.
     #[test]
@@ -974,13 +989,13 @@ pub(crate) mod tests {
         //  request, expected update, expects a commit, expects a request ensure)
         type StateRow = (bool, Option<BranchComparison>, bool, bool, RefUpdate, bool, bool);
         let rows: [StateRow; 8] = [
-            (false, None, false, false, RefUpdate::FastForward, true, true),
+            (false, None, false, false, RefUpdate::Accumulate, true, true),
             (
                 true,
                 Some(BranchComparison::Identical),
                 false,
                 false,
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
                 true,
                 true,
             ),
@@ -989,7 +1004,7 @@ pub(crate) mod tests {
                 Some(BranchComparison::Ahead),
                 true,
                 true,
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
                 false,
                 false,
             ),
@@ -998,7 +1013,7 @@ pub(crate) mod tests {
                 Some(BranchComparison::Ahead),
                 true,
                 false,
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
                 false,
                 true,
             ),
@@ -1007,7 +1022,7 @@ pub(crate) mod tests {
                 Some(BranchComparison::Ahead),
                 false,
                 false,
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
                 true,
                 true,
             ),

@@ -188,6 +188,36 @@ pub fn resolve_curated_tags(
     Ok(ResolvedTags { tags, reserved_dropped })
 }
 
+/// The committed tags a regenerated root would delete.
+///
+/// The measurable half of the invariant
+/// `adr_announce_diverged_branch_rebuild.md` states — *no tag announced into an
+/// open pull request is ever lost*. Three routes to breaking it have been found
+/// in production ([#228], [#399], [#436]), each after a silent loss and none
+/// resembling the last, so the answer here is a tripwire rather than another
+/// case: whatever the next route is, it still has to delete a tag to matter.
+///
+/// `reserved_dropped` is excluded because D7 removes those on purpose, and the
+/// caller excludes [`TagSelection::Replace`](crate::announce::TagSelection::Replace)
+/// for the same reason. Empty means nothing was lost.
+///
+/// The comparison is only as good as `committed`: it must be the root the
+/// commit will actually be parented on, which is what
+/// [`RefUpdate::FastForward`](crate::forge::RefUpdate::FastForward) now
+/// guarantees for announce.
+///
+/// [#228]: https://github.com/ocx-sh/ocx/issues/228
+/// [#399]: https://github.com/ocx-sh/ocx/issues/399
+/// [#436]: https://github.com/ocx-sh/ocx/issues/436
+pub fn dropped_committed_tags(committed: &[String], regenerated: &Value, reserved_dropped: &[String]) -> Vec<String> {
+    let kept = committed_tag_names(regenerated);
+    committed
+        .iter()
+        .filter(|tag| !kept.contains(tag) && !reserved_dropped.contains(tag))
+        .cloned()
+        .collect()
+}
+
 /// The additive merge shared by `--tags-file` and `--tags-from-registry`: the
 /// committed set in its on-disk order, then whatever `additions` contributes
 /// that is not already there. A committed tag is never dropped by either — only
@@ -1599,6 +1629,46 @@ mod tests {
         let regenerated = regenerate(&committed, &[observed("1.0.0", 'a')], "2099-12-31T00:00:00Z");
         assert!(regenerated["tags"].get("2.0.0").is_none());
         assert!(regenerated["tags"].get("1.0.0").is_some());
+    }
+
+    /// The #436 tripwire, both ways.
+    ///
+    /// A predicate whose production path is meant never to fire needs its red
+    /// state produced by hand, or it ships as a habit rather than a check: under
+    /// `UnionFile`/`Refresh`/`FromRegistry` the curated set is a superset of the
+    /// committed one by construction, so nothing reachable today makes it
+    /// non-empty. What it guards is the fourth route nobody has found yet.
+    #[test]
+    fn dropped_committed_tags_names_a_loss_and_stays_silent_otherwise() {
+        let mut committed = committed_root("oci://ghcr.io/x/y");
+        committed["tags"]["2.0.0"] =
+            serde_json::json!({ "content": digest_string('b'), "observed": "2026-02-02T00:00:00Z" });
+        let names = committed_tag_names(&committed);
+        assert!(
+            names.contains(&"2.0.0".to_string()),
+            "the fixture must commit the tag the loss is measured on: {names:?}"
+        );
+
+        let kept = regenerate(
+            &committed,
+            &[observed("1.0.0", 'a'), observed("2.0.0", 'b')],
+            "2099-12-31T00:00:00Z",
+        );
+        assert!(
+            dropped_committed_tags(&names, &kept, &[]).is_empty(),
+            "a run that re-observed everything committed loses nothing"
+        );
+
+        let lost = regenerate(&committed, &[observed("1.0.0", 'a')], "2099-12-31T00:00:00Z");
+        assert_eq!(
+            dropped_committed_tags(&names, &lost, &[]),
+            vec!["2.0.0".to_string()],
+            "and a run that did not re-observe `2.0.0` is naming a deletion"
+        );
+        assert!(
+            dropped_committed_tags(&names, &lost, &["2.0.0".to_string()]).is_empty(),
+            "unless D7 dropped it on purpose, which is not a loss"
+        );
     }
 
     #[test]
