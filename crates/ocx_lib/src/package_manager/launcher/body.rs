@@ -17,7 +17,7 @@
 //!   package on first invocation.
 //! - a **root flag first**, then `exec` — `--project '<abs root>' exec --
 //!   <argv0> [args...]`, or `--global exec -- <argv0> [args...]` — the
-//!   toolchain **trampoline** a rendered `<home>/toolchain/bin/<name>` gets
+//!   toolchain **trampoline** a rendered `<home>/toolchain/active/bin/<name>` gets
 //!   (`plan_toolchain_activation.md` C-028, C-032). It bakes only the home
 //!   selector: no group, no entry, no digest, no flag beyond the selector.
 //!
@@ -167,7 +167,7 @@ const TRAMPOLINE_BINARY_VAR: &str = "__ocx_binary";
 const TRAMPOLINE_BINARY_FALLBACK: &str = "ocx";
 
 /// Produces the body of a POSIX toolchain **trampoline** — the executable
-/// `<home>/toolchain/bin/<name>` a rendered toolchain puts on `PATH`
+/// `<home>/toolchain/active/bin/<name>` a rendered toolchain puts on `PATH`
 /// (C-028, C-030).
 ///
 /// # Shape
@@ -213,7 +213,7 @@ const TRAMPOLINE_BINARY_FALLBACK: &str = "ocx";
 /// # Why the absolute `ocx`, and why it is single-quoted
 ///
 /// R-W12: a project may pin its own `ocx` (ADR D-4 removed the refusal), and in
-/// `bin` mode the interactive shell has `toolchain/bin` **prepended** while
+/// `bin` mode the interactive shell has `toolchain/active/bin` **prepended** while
 /// carrying no `OCX_BINARY_PIN`. A bare `${OCX_BINARY_PIN:-ocx}` fallback would
 /// then make `/bin/sh` re-resolve the trampoline as itself — an infinite loop
 /// **before any ocx process starts**, which no in-process guard can see
@@ -305,7 +305,7 @@ pub(crate) fn unix_trampoline_body(
 /// under an overridable pin. Windows had no equivalent, so its shim resolved
 /// the literal `ocx` and spawned with `lpApplicationName = NULL` — a search
 /// that begins at **the directory the calling image loaded from**,
-/// `<home>/toolchain/bin` itself. A package claiming the name `ocx` is
+/// `<home>/toolchain/active/bin` itself. A package claiming the name `ocx` is
 /// admitted by design (ADR D-4 removed `ShimNameShadowsOcx`), so `ocx pull`
 /// renders `bin\ocx.exe` there and every trampoline beside it spawned *that* —
 /// unbounded, and independent of `PATH`.
@@ -1164,7 +1164,7 @@ mod tests {
     ///
     /// Without it the shim resolves the bare name `ocx`, and `CreateProcessW`
     /// with a NULL `lpApplicationName` searches the calling image's own
-    /// directory FIRST — `<home>/toolchain/bin`, where a package claiming the
+    /// directory FIRST — `<home>/toolchain/active/bin`, where a package claiming the
     /// name `ocx` renders `ocx.exe`. Every trampoline beside it then spawns
     /// that instead, without bound and without consulting `PATH`.
     ///

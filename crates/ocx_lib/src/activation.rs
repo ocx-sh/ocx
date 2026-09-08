@@ -272,15 +272,15 @@ pub struct SessionPath {
     /// them is ever in the desired set.
     pub install_bin: PathBuf,
 
-    /// `$OCX_HOME/toolchain/bin` — the global rendered toolchain's trampolines.
+    /// `$OCX_HOME/toolchain/active/bin` — the global rendered toolchain's trampolines.
     /// Between the other two on `PATH`, so it is emitted **second**: a global
     /// pin shadows the installed binary, and a project's pin shadows it in turn.
     ///
     /// [`ToolchainStore::bin`](crate::file_structure::ToolchainStore::bin),
-    /// never a literal `toolchain/bin` join (C-001).
+    /// never a literal `toolchain/active/bin` join (C-001).
     pub global_bin: PathBuf,
 
-    /// The consented project's `<home>/toolchain/bin`, in `bin` mode only —
+    /// The consented project's `<home>/toolchain/active/bin`, in `bin` mode only —
     /// `None` in `env` and `none` mode, and `None` in `bin` mode whenever the
     /// C-061 stamp gate withheld it.
     ///
@@ -1365,13 +1365,18 @@ fn bin_matches_recorded(bin_dir: &Path, recorded: &BTreeMap<String, file_structu
 ///    projects colliding in `name_for_path`'s 64 bits share one home *and* one
 ///    stamp, and the project half is what tells them apart — without it project
 ///    B's prompt passes over trampolines that bake `--project '<A>'`.
-/// 3. [`bin_stamp_matches`] over `<home>/bin`. A mismatch yields `Ok(None)`.
+/// 3. Two gates, in order. First C-080: `<home>/active` must be the derived
+///    link, or the value step 5 returns names whatever a repoint chose — the
+///    CWE-426 primitive the clause exists to close. Then
+///    [`bin_stamp_matches`] over the **physical** `<home>/shells/<shell>/bin`,
+///    never through `active`. Either negative yields `Ok(None)`.
 /// 4. Only then, C-062: heal the **default group's** links
 ///    ([`heal_links`](crate::package_manager::tasks::render_toolchain)) so the
 ///    trampolines the entry is about to expose dereference to the digests the
 ///    lock names. Strictly after the gate, and strictly after consent — the
 ///    caller cannot reach here without a [`ConsentProof`].
-/// 5. Return `<home>/bin` — **unless the heal refused the tree**, which is one
+/// 5. Return the PATH-facing `<home>/active/bin` — **unless the heal refused
+///    the tree**, which is one
 ///    more `None`. A refusal means a symlink on the home root, on `bin/`, or on
 ///    a component above them, and the return value of this function goes on
 ///    `PATH`; the repair count is not consulted, only the refusal.
@@ -1433,8 +1438,24 @@ pub(crate) async fn bin_mode_entry(
         return Ok(None);
     }
 
-    // 3. The gate. A mismatch is the same answer no stamp gives: withhold.
-    if !bin_stamp_matches(&home.bin(), &stamp).await {
+    // 3a. C-080, before the content gate and for a different question: is
+    //     `<root>/active` the derived link? `bin()` — the value step 5 returns
+    //     and the value `PATH` receives — resolves *through* it, so a repoint
+    //     is an arbitrary-directory-on-PATH primitive (CWE-426). Read-only: a
+    //     `false` withholds here and is healed by the render (C-081), because
+    //     a prompt must never write. Two syscalls, `lstat` + `readlink`, which
+    //     is why this stays inline rather than taking a blocking hop.
+    if !home.active_is_valid(file_structure::DEFAULT_SHELL) {
+        return Ok(None);
+    }
+
+    // 3b. The content gate, over the **physical** directory (C-078, C-080's
+    //     second amendment). `lstat` does not follow a path's final component
+    //     but does follow every intermediate one, so a gate reading through
+    //     `active` would judge whatever `active` currently names — and would
+    //     agree with a stamp written through the same link. A mismatch is the
+    //     same answer no stamp gives: withhold.
+    if !bin_stamp_matches(&home.shell_bin(file_structure::DEFAULT_SHELL), &stamp).await {
         return Ok(None);
     }
 
@@ -1486,7 +1507,7 @@ pub(crate) async fn bin_mode_entry(
 /// contract rather than an arrangement. Entries later in this vector end up
 /// nearer the front of `PATH` ([`Shell::export_path`](crate::shell::Shell::export_path)
 /// prepends), so front to back a shell reads: the project's composed entries,
-/// the project's `bin/`, `$OCX_HOME/toolchain/bin`,
+/// the project's `bin/`, `$OCX_HOME/toolchain/active/bin`,
 /// [`SessionPath::install_bin`], the global tier's composed entries.
 ///
 /// Putting the session block last instead would place the **global** tier's
@@ -2386,7 +2407,7 @@ mod session_path_tests {
     // ── C-060 / RUL-62 — the order, read off `PATH` ─────────────────────────
 
     /// **C-060, RUL-62.** Front to back on `PATH`: the project's
-    /// `<home>/toolchain/bin` (`bin` mode only), then `$OCX_HOME/toolchain/bin`,
+    /// `<home>/toolchain/active/bin` (`bin` mode only), then `$OCX_HOME/toolchain/active/bin`,
     /// then `ocx_install_bin_path`.
     ///
     /// The most specific tier that pinned a name answers for it, `ocx`
@@ -2422,7 +2443,7 @@ mod session_path_tests {
     /// C-060 — the project slot is `bin` mode's alone. In `env` and `none` mode
     /// the two global entries are adjacent on `PATH` with nothing between them.
     ///
-    /// Red state: emit `<home>/toolchain/bin` unconditionally.
+    /// Red state: emit `<home>/toolchain/active/bin` unconditionally.
     #[test]
     fn c060_without_the_project_slot_the_two_global_entries_are_adjacent() {
         let path = resulting_path(&[Path::new("/usr/bin")], &session().entries());
@@ -2438,7 +2459,7 @@ mod session_path_tests {
 
     /// **RUL-87 (C-018 × C-059).** The desired vector is
     /// `global ++ session ++ project`, so `PATH` front to back reads:
-    /// project-composed ▸ project `bin/` ▸ `$OCX_HOME/toolchain/bin` ▸
+    /// project-composed ▸ project `bin/` ▸ `$OCX_HOME/toolchain/active/bin` ▸
     /// `install_bin` ▸ global-composed.
     ///
     /// The load-bearing half is the **last** comparison: the alternative
@@ -2812,7 +2833,7 @@ mod session_path_tests {
 
     /// C-059, C-060 — `none → bin`. The project's trampoline directory arrives
     /// **in front of** both session entries, and the pair behind it keeps
-    /// `$OCX_HOME/toolchain/bin` ahead of the installed binary.
+    /// `$OCX_HOME/toolchain/active/bin` ahead of the installed binary.
     ///
     /// Red state: leave [`SessionPath::project_bin`] empty on the transition and
     /// the directory never arrives at all; or swap the session pair, and a
@@ -2906,7 +2927,7 @@ mod stamp_gate_tests {
     }
 
     /// **S-003, RUL-67 — the discriminating case.** A fresh clone force-commits
-    /// `.ocx/toolchain/bin/cmake` beside a legitimately rendered tree. Every
+    /// `.ocx/toolchain/shells/default/bin/cmake` beside a legitimately rendered tree. Every
     /// name the stamp records is present and matches; the hostile file is the
     /// one thing the stamp does *not* name.
     ///
@@ -3282,13 +3303,36 @@ mod activate_ladder_tests {
 /// [`bin_mode_entry`] sequences stamp identity ▸ the C-061 gate ▸ the C-062
 /// heal ▸ the entry, and the order is the contract. Everything below drives
 /// that one function against a real tree.
+/// Seed the physical `<root>/shells/<shell>/bin` and plant the `active` link a
+/// render publishes (C-078, C-081) — **derived**, never spelled.
+///
+/// The target comes from `ToolchainHome::expected_active_target`, the same
+/// derivation C-080's predicate compares against, so a fixture can never plant
+/// a link the gate would reject for a reason the test did not intend.
+///
+/// Every arena that drives [`bin_mode_entry`] needs it: after C-080 the gate
+/// withholds on an `active` that is not the derived link, so a fixture that
+/// only created directories would make every positive row unreachable.
+#[cfg(test)]
+fn plant_active(home: &file_structure::ToolchainHome) {
+    std::fs::create_dir_all(home.shell_bin(file_structure::DEFAULT_SHELL)).expect("mkdir <root>/shells/<shell>/bin");
+    let _ = std::fs::remove_file(home.active());
+    crate::symlink::create(
+        home.expected_active_target(file_structure::DEFAULT_SHELL),
+        home.active(),
+    )
+    .expect("plant <root>/active");
+}
+
 #[cfg(test)]
 #[cfg(unix)]
 mod bin_mode_entry_tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
-    use crate::file_structure::{BinEntryStamp, FileStructure, RenderStamp, RenderStampScope, RenderStampTarget};
+    use crate::file_structure::{
+        BinEntryStamp, DEFAULT_SHELL, FileStructure, RenderStamp, RenderStampScope, RenderStampTarget,
+    };
     use crate::oci::index::{ChainMode, Index, LocalConfig, LocalIndex};
     use crate::package::metadata::env::entry::Entry;
     use crate::package_manager::{Concurrency, PackageManager};
@@ -3344,6 +3388,15 @@ mod bin_mode_entry_tests {
         home: crate::file_structure::ToolchainHome,
     }
 
+    /// What `<root>/active` holds, for [`Arena::corrupt_active`].
+    enum ActiveState<'a> {
+        Absent,
+        RealDirectory,
+        LinkTo(&'a Path),
+    }
+
+    use super::plant_active;
+
     impl Arena {
         fn new() -> Self {
             let tmp = tempfile::tempdir().expect("tempdir");
@@ -3361,7 +3414,7 @@ mod bin_mode_entry_tests {
             std::fs::write(dir.join("ocx.toml"), "[tools]\n").expect("write ocx.toml");
 
             let home = crate::file_structure::ToolchainHome::new(dir.join(".ocx").join("toolchain"));
-            std::fs::create_dir_all(home.bin()).expect("mkdir <home>/bin");
+            plant_active(&home);
 
             let project = ProjectIdentity {
                 config_path: dir.join("ocx.toml"),
@@ -3376,9 +3429,10 @@ mod bin_mode_entry_tests {
             }
         }
 
-        /// Write one trampoline into `<home>/bin` and answer its stamp.
+        /// Write one trampoline into the **physical** `<home>/shells/default/bin`
+        /// and answer its stamp — where a render writes (C-078).
         fn render_trampoline(&self, name: &str, body: &str) -> BinEntryStamp {
-            let path = self.home.bin().join(name);
+            let path = self.home.shell_bin(DEFAULT_SHELL).join(name);
             std::fs::write(&path, body).expect("write the trampoline");
             let metadata = std::fs::symlink_metadata(&path).expect("stat the trampoline");
             let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(body.as_bytes()));
@@ -3398,6 +3452,28 @@ mod bin_mode_entry_tests {
 
         fn package_root(&self, hex: &str) -> PathBuf {
             self.file_structure.packages.path(&pinned(hex))
+        }
+
+        /// Replace `<root>/active` with `state` (C-080's four negative rows).
+        ///
+        /// Removes whatever is there first, by observed kind, so one helper
+        /// serves the link rows and the real-directory row alike.
+        fn corrupt_active(&self, state: ActiveState<'_>) {
+            let active = self.home.active();
+            if std::fs::symlink_metadata(&active).is_ok_and(|meta| meta.is_dir() && !meta.is_symlink()) {
+                std::fs::remove_dir_all(&active).expect("remove the directory at active");
+            } else {
+                let _ = std::fs::remove_file(&active);
+            }
+            match state {
+                ActiveState::Absent => {}
+                ActiveState::RealDirectory => {
+                    std::fs::create_dir_all(active.join("bin")).expect("mkdir a real active/bin");
+                }
+                ActiveState::LinkTo(target) => {
+                    crate::symlink::create(target, &active).expect("repoint active");
+                }
+            }
         }
 
         /// Persist `stamp` under this project's key, the way the renderer does.
@@ -3557,6 +3633,128 @@ mod bin_mode_entry_tests {
         );
     }
 
+    // ── C-080 / ADR item 43 — the gate withholds on every `active` that is
+    //    not the derived link ─────────────────────────────────────────────────
+
+    /// A fully valid arena — matching stamp, healed link — so the *only*
+    /// variable in the four rows below is what `<root>/active` holds.
+    ///
+    /// Shared so each row is one line of setup: a row that rebuilt the fixture
+    /// itself could withhold for a reason other than the one it names, and the
+    /// positive control (`c061_a_matching_stamp_emits_the_homes_bin_directory`)
+    /// proves this same shape emits.
+    async fn valid_arena() -> Arena {
+        let arena = Arena::new();
+        let cmake = arena.render_trampoline("cmake", "#!/bin/sh\ncmake\n");
+        arena.link_default_cmake_at(DIGEST_A);
+        arena.persist(&arena.stamp(BTreeMap::from([("cmake".to_owned(), cmake)])));
+        arena
+    }
+
+    async fn entry_of(arena: &Arena) -> Option<PathBuf> {
+        let session = Session::new(&arena.file_structure);
+        bin_mode_entry(
+            &session.input(&arena.file_structure, &[]),
+            &arena.project,
+            &arena.home,
+            &lock_pinning(DIGEST_A),
+        )
+        .await
+        .expect("an invalid `active` is a withhold, never an error")
+    }
+
+    /// C-080 row 1 — `active` absent. The tree renders trampolines the stamp
+    /// still matches, and `bin()` names a path that does not resolve.
+    ///
+    /// RED: drop the `active_is_valid` call from `bin_mode_entry` — the stamp
+    /// gate reads the *physical* directory and passes, so `Some(active/bin)`
+    /// is emitted for a directory that does not exist.
+    #[tokio::test]
+    async fn c080_an_absent_active_withholds_the_entry() {
+        let arena = valid_arena().await;
+        arena.corrupt_active(ActiveState::Absent);
+
+        assert_eq!(
+            entry_of(&arena).await,
+            None,
+            "C-080: `bin()` resolves through `active`; without it there is nothing to put on PATH"
+        );
+    }
+
+    /// C-080 row 2 — `active` is a **real directory**, the `cp -rL` / Docker
+    /// `COPY` outcome (C-081). The prompt path may only read, so the directory
+    /// must still be there afterwards: healing it is the render's job.
+    ///
+    /// RED: weaken the predicate to "exists" and the row emits; add a heal here
+    /// and the surviving-payload assertion fails.
+    #[tokio::test]
+    async fn c080_a_real_directory_at_active_withholds_the_entry_and_is_not_healed() {
+        let arena = valid_arena().await;
+        arena.corrupt_active(ActiveState::RealDirectory);
+
+        assert_eq!(
+            entry_of(&arena).await,
+            None,
+            "C-080: a dereferenced copy is not the derived link"
+        );
+        assert!(
+            std::fs::symlink_metadata(arena.home.active())
+                .expect("the directory is still there")
+                .is_dir(),
+            "C-080 is read-only at the prompt (C-064): the heal is the render's, not this path's"
+        );
+    }
+
+    /// C-080 row 3 — `active` repointed **outside** the home. This is the
+    /// CWE-426 primitive the clause exists to close: whatever the link names
+    /// would go on `PATH` for every command the user types.
+    ///
+    /// RED: replace the equality with a containment test and this row still
+    /// fails, but replace it with `is_link` alone and it emits an
+    /// attacker-owned directory.
+    #[tokio::test]
+    async fn c080_an_active_repointed_outside_the_home_withholds_the_entry() {
+        let arena = valid_arena().await;
+        let outside = arena.project.dir.with_file_name("attacker");
+        std::fs::create_dir_all(outside.join("bin")).expect("the outside tree is creatable");
+        arena.corrupt_active(ActiveState::LinkTo(&outside));
+
+        assert_eq!(
+            entry_of(&arena).await,
+            None,
+            "C-080: a link that escapes the home is an arbitrary-directory-on-PATH primitive"
+        );
+    }
+
+    /// C-080 row 4 — `active` repointed at a **sibling `shells/<other>` that
+    /// exists**, so it is contained, resolvable and still wrong.
+    ///
+    /// The row a containment test cannot catch, and the reason C-080 is an
+    /// equality against a derived value: the target is inside the home and
+    /// names a real `bin` directory holding a real executable.
+    ///
+    /// RED: weaken the predicate to a containment test, or to `is_link` alone,
+    /// and this row emits another shell's tree.
+    #[tokio::test]
+    async fn c080_an_active_repointed_at_a_sibling_shell_withholds_the_entry() {
+        let arena = valid_arena().await;
+        let sibling = arena.home.shell_bin("other");
+        std::fs::create_dir_all(&sibling).expect("the sibling shell tree is creatable");
+        std::fs::write(sibling.join("cmake"), "#!/bin/sh\nother\n").expect("write the sibling trampoline");
+        let target = sibling.parent().expect("<root>/shells/other");
+        let relative = target
+            .strip_prefix(arena.home.root())
+            .expect("the sibling is under the root")
+            .to_path_buf();
+        arena.corrupt_active(ActiveState::LinkTo(&relative));
+
+        assert_eq!(
+            entry_of(&arena).await,
+            None,
+            "C-080: contained and resolvable is not the same question as derived"
+        );
+    }
+
     /// C-061, D-V13 — identity before content. Under `toolchain-dir` two
     /// projects colliding in `name_for_path`'s 64 bits share one home *and* one
     /// stamp; the scope's project directory is what tells them apart. Without
@@ -3662,7 +3860,7 @@ mod bin_mode_entry_tests {
     // ── S-003 — the committed hostile `bin/` ────────────────────────────────
 
     /// **S-003 end to end.** A fresh clone force-commits
-    /// `.ocx/toolchain/bin/cmake`; consent is granted; the first prompt in
+    /// `.ocx/toolchain/shells/default/bin/cmake`; consent is granted; the first prompt in
     /// `bin` mode emits **no** `PATH` entry, so the hostile file never reaches
     /// `PATH`.
     ///
@@ -3676,7 +3874,11 @@ mod bin_mode_entry_tests {
         let arena = Arena::new();
         let ninja = arena.render_trampoline("ninja", "#!/bin/sh\nninja\n");
         arena.persist(&arena.stamp(BTreeMap::from([("ninja".to_owned(), ninja)])));
-        std::fs::write(arena.home.bin().join("cmake"), "#!/bin/sh\nexfiltrate\n").expect("force-commit");
+        std::fs::write(
+            arena.home.shell_bin(DEFAULT_SHELL).join("cmake"),
+            "#!/bin/sh\nexfiltrate\n",
+        )
+        .expect("force-commit");
         let session = Session::new(&arena.file_structure);
 
         let entry = bin_mode_entry(
@@ -3710,7 +3912,8 @@ mod bin_mode_entry_tests {
         let ninja = arena.render_trampoline("ninja", "#!/bin/sh\nninja\n");
         arena.link_default_cmake_at(DIGEST_A);
         arena.persist(&arena.stamp(BTreeMap::from([("ninja".to_owned(), ninja)])));
-        std::fs::write(arena.home.bin().join("cmake"), "#!/bin/sh\nstale\n").expect("the stale trampoline");
+        std::fs::write(arena.home.shell_bin(DEFAULT_SHELL).join("cmake"), "#!/bin/sh\nstale\n")
+            .expect("the stale trampoline");
 
         let before = snapshot(arena.home.root());
         assert!(
@@ -3751,7 +3954,11 @@ mod bin_mode_entry_tests {
         let ninja = arena.render_trampoline("ninja", "#!/bin/sh\nninja\n");
         arena.link_default_cmake_at(DIGEST_A);
         arena.persist(&arena.stamp(BTreeMap::from([("ninja".to_owned(), ninja)])));
-        std::fs::write(arena.home.bin().join("cmake"), "#!/bin/sh\nhostile\n").expect("force-commit");
+        std::fs::write(
+            arena.home.shell_bin(DEFAULT_SHELL).join("cmake"),
+            "#!/bin/sh\nhostile\n",
+        )
+        .expect("force-commit");
 
         let session = Session::new(&arena.file_structure);
         let entry = bin_mode_entry(
@@ -3952,7 +4159,7 @@ mod bin_mode_entry_tests {
         // the wrong reason if the gate rejected the relocated tree, because
         // step 3 returns `None` before the heal is ever reached.
         assert!(
-            super::bin_stamp_matches(&arena.home.bin(), &stamp).await,
+            super::bin_stamp_matches(&arena.home.shell_bin(DEFAULT_SHELL), &stamp).await,
             "the relocation is invisible to the C-061 gate — that is what makes the heal's \
              refusal load-bearing here"
         );
@@ -4097,7 +4304,7 @@ mod session_composition_tests {
 
     use crate::env::Env;
     use crate::file_structure::{
-        BinEntryStamp, FileStructure, RenderStamp, RenderStampScope, RenderStampTarget, ToolchainHome,
+        BinEntryStamp, DEFAULT_SHELL, FileStructure, RenderStamp, RenderStampScope, RenderStampTarget, ToolchainHome,
     };
     use crate::oci::index::{ChainMode, Index, LocalConfig, LocalIndex};
     use crate::package::metadata::env::entry::Entry;
@@ -4194,7 +4401,7 @@ mod session_composition_tests {
             .expect("write ocx.lock");
 
             let home = ToolchainHome::new(dir.join(".ocx").join("toolchain"));
-            std::fs::create_dir_all(home.bin()).expect("mkdir <home>/bin");
+            super::plant_active(&home);
             Self {
                 _tmp: tmp,
                 file_structure,
@@ -4208,7 +4415,7 @@ mod session_composition_tests {
         /// leaves behind, which is what the C-061 gate demands before the
         /// project's `bin/` may be emitted.
         fn render(&self, key: &str) {
-            let path = self.home.bin().join("cmake");
+            let path = self.home.shell_bin(DEFAULT_SHELL).join("cmake");
             let body = "#!/bin/sh\ncmake\n";
             std::fs::write(&path, body).expect("write the trampoline");
             let metadata = std::fs::symlink_metadata(&path).expect("stat the trampoline");
@@ -4309,7 +4516,7 @@ mod session_composition_tests {
 
     /// **C-018 x RUL-87, composed by [`session`] rather than assembled by the
     /// test.** A `bin`-mode project whose home is rendered contributes its
-    /// `<home>/toolchain/bin`, and that directory lands **ahead** of everything
+    /// `<home>/toolchain/active/bin`, and that directory lands **ahead** of everything
     /// the global tier composed: a globally installed `cmake` must never win
     /// over the project's own `cmake` trampoline.
     ///
