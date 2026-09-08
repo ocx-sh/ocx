@@ -1005,8 +1005,8 @@ fn is_reserved_toolchain_name(name: &str, reserved: &str) -> bool {
 /// in both directions, before the writer was routed here.
 ///
 /// `scope` names the call site for the diagnostic (`"tools"`,
-/// `"group.<g>.tools"`, or `"group"` — see [`ProjectErrorKind::ReservedToolchainName`]
-/// / [`ProjectErrorKind::InvalidToolchainNameCharset`]). `name` is the
+/// `"group.<g>.tools"`, or `"group"` — see
+/// [`ProjectErrorKind::InvalidToolchainNameCharset`]). `name` is the
 /// as-written string, checked against [`TOOLCHAIN_NAME_PATTERN_STR`] and
 /// [`SLUG_MAX_LEN`].
 ///
