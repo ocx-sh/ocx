@@ -315,8 +315,8 @@ make:
   reads (:func:`count_trampolines`), against a floor constant and never against
   the arena's own tool count;
 * the **first fire** actually emits that directory, matched by the project
-  home's resolved absolute path — never by the substring `toolchain/bin`, which
-  `shell_matrix.SESSION_BIN_DIRS` already carries for the *global* session
+  home's resolved absolute path — never by the substring `toolchain/active/bin`,
+  which `shell_matrix.SESSION_BIN_DIRS` already carries for the *global* session
   directory that every prompt emits in every mode.
 
 The stamp is produced by the real renderer, through `ocx --offline lock`
@@ -1269,8 +1269,8 @@ def _bin_arena_gates(bin_arena: Mapping[str, float]) -> list[Gate]:
        command is a stamp read and an early return.
 
     Gate 2 is asserted by the project home's **resolved absolute path**, read
-    back from `ocx shell state`, and never by the substring `toolchain/bin`:
-    `shell_matrix.SESSION_BIN_DIRS` already carries `"toolchain/bin"` as the
+    back from `ocx shell state`, and never by the substring `toolchain/active/bin`:
+    `shell_matrix.SESSION_BIN_DIRS` already carries `"toolchain/active/bin"` as the
     *global* session entry under `$OCX_HOME` (C-059), which every prompt emits in
     every mode — so a substring assertion is satisfied with `bin` mode entirely
     dead. Identity, not spelling.
@@ -2863,7 +2863,8 @@ def _write_bin_project(project: Path, *, env: Mapping[str, str], ocx: Path) -> d
     install step rewrites each package's ``content/`` from the manifest's layer
     list, which is empty here, so anything written before the lock is gone
     afterwards. Writing them after leaves the stamp valid — it fingerprints
-    ``bin/`` and the `<group>/<entry>` links, never the package contents.
+    ``shells/default/bin`` and the `links/<group>/<entry>` links, never the
+    package contents.
 
     Returns the arena's facts, so no caller has to re-derive them: ``names`` (the
     exposed names, which are also the trampoline file names) and ``payloads``
@@ -2955,11 +2956,14 @@ def measure_bin_arena(
     written, always fail-closed and always with the binary as the authority.
 
     ``project_bin_applied`` looks for the apply line carrying that home's own
-    ``bin/`` **by absolute path**, quoted exactly as the emitter writes it. Never
-    the substring ``toolchain/bin``: `shell_matrix.SESSION_BIN_DIRS` carries that
-    same spelling for the *global* session directory under ``$OCX_HOME``, which
-    every prompt emits in every mode (C-059), so a substring test passes with
-    `bin` mode completely dead.
+    trampoline directory **by absolute path**, quoted exactly as the emitter
+    writes it. The tail is `shell_matrix.TOOLCHAIN_BIN_REL` — the PATH-facing
+    ``active/bin`` the emitter registers, not the physical ``shells/default/bin``
+    the renderer writes, because this is a byte-exact match against the emitted
+    line rather than an identity test. Never the substring ``toolchain/active/bin``:
+    `shell_matrix.SESSION_BIN_DIRS` carries that same spelling for the *global*
+    session directory under ``$OCX_HOME``, which every prompt emits in every mode
+    (C-059), so a substring test passes with `bin` mode completely dead.
 
     The reconcile is run **once, in a fresh process with no** ``__OCX_ENV_STATE``
     **carrier**, which is what makes it the *first* fire: a second one would take
@@ -2968,7 +2972,7 @@ def measure_bin_arena(
     """
     state = matrix.shell_state(ocx, cwd, dict(env))
     home = Path(state["toolchain_home"])
-    bin_dir = home / "bin"
+    bin_dir = home / matrix.TOOLCHAIN_BIN_REL
     result = subprocess.run(list(reconcile), cwd=str(cwd), env=dict(env), capture_output=True, check=False, text=True)
     if result.returncode != 0:
         raise RuntimeError(

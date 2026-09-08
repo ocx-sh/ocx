@@ -77,14 +77,21 @@ BASE_PATH = os.pathsep.join(["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "
 # stdlib-only; `crates/ocx_lib/src/setup.rs::session_path_directories` is the
 # producer.
 #
-# Only the install-bin string is pinned against the binary:
-# `test_self_activate.py` asserts it appears in the emitted startup stream.
-# `"toolchain/bin"` is asserted nowhere else in this tree, so a rename of it
-# would not be caught here — it is caught one layer out, by `test_ec_path_005`
-# and `test_ec_rec_001`, which compare a live shell's PATH against
-# `session_path_dirs()` element for element and fail the moment the string
-# below stops naming what the reconciler contributes.
-SESSION_BIN_DIRS = ("toolchain/bin", "symlinks/ocx.sh/ocx/cli/current/content/bin")
+# Both strings are pinned against the binary, one layer out:
+# `test_self_activate.py` asserts the install-bin half appears in the emitted
+# startup stream, and `test_toolchain_activate._session_dirs` asserts the
+# toolchain half equals the `toolchain_bin` field `ocx shell state` reports.
+# `test_ec_path_005` and `test_ec_rec_001` then compare a live shell's PATH
+# against `session_path_dirs()` element for element, and fail the moment either
+# string below stops naming what the reconciler contributes.
+#
+# `active/bin`, never `bin`: the trampoline directory moved one level down
+# behind the `active` link (C-078), and `setup::session_path_directories`
+# registers `ToolchainHome::bin()` — the PATH-facing spelling, which resolves
+# *through* that link. Split out so the tail has one spelling here, in the
+# bench, and in `test_session_path.py`.
+TOOLCHAIN_BIN_REL = "active/bin"
+SESSION_BIN_DIRS = (f"toolchain/{TOOLCHAIN_BIN_REL}", "symlinks/ocx.sh/ocx/cli/current/content/bin")
 
 
 def session_path_dirs(ocx_home: Path) -> list[str]:

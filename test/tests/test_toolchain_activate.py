@@ -66,15 +66,19 @@ from src import shell_matrix as matrix
 from src.helpers import make_package, write_ocx_toml
 from src.runner import OcxRunner
 from src.toolchain_fixtures import (
+    DEFAULT_GROUP,
     EXIT_SUCCESS,
     assert_key_and_binary_namespaces_stay_disjoint,
     bin_entries,
+    entry_link,
     git,
     link_entries,
     locked_project,
     read_render_stamp,
+    resolved_toolchain_bin,
     resolved_toolchain_home,
     run_in,
+    shell_bin,
     snapshot_tree,
     two_branch_checkout,
     write_toolchain_dir_config,
@@ -248,13 +252,13 @@ def _session_dirs(ocx: OcxRunner, arena: Arena, project_free: Path) -> tuple[str
     ``setup::session_path_directories``; it is what the fixture's ``PATH``
     carries, so it has to be what an assertion names. Both halves are checked
     against something the binary produced rather than trusted: the global
-    directory against the home ``ocx shell state`` reports with no project in
+    directory against the ``toolchain_bin`` ``ocx shell state`` reports with no project in
     scope, and the install directory against the candidate this arena seeded.
     A rename on either side then reds here, once, instead of silently making
     every ordering row below compare two spellings of nothing.
     """
     global_bin, install_bin = matrix.session_path_dirs(arena.ocx_home)
-    reported_global = resolved_toolchain_home(ocx, project_free) / "bin"
+    reported_global = resolved_toolchain_bin(ocx, project_free)
     assert _real(global_bin) == _real(reported_global), (
         "the global session directory the fixture puts on PATH must be the one "
         f"`ocx shell state` reports: {global_bin!r} vs {reported_global!r}"
@@ -273,7 +277,7 @@ def _composed_path_dirs(ocx: OcxRunner, cwd: Path, *args: str) -> list[str]:
     satisfied by the command text a stream match would also see.
 
     Returned unresolved, and that is the whole point of returning them
-    separately from :func:`_real`. ``<home>/<group>/<entry>`` *is a symlink into
+    separately from :func:`_real`. ``<home>/links/<group>/<entry>`` *is a symlink into
     the package store*, so the following lane and the pinned lane realpath to
     the **same** directory — realpathing here would erase the only difference
     between them and make a lane assertion pass in both states. Which lane a
@@ -327,7 +331,7 @@ def test_bin_mode_path_leads_project_then_global_then_install(
     assert_key_and_binary_namespaces_stay_disjoint(project)
     home = resolved_toolchain_home(ocx, project.directory)
     install_bin, global_bin = _session_dirs(ocx, arena, tmp_path)
-    project_bin = _real(home / "bin")
+    project_bin = _real(shell_bin(home))
 
     result = _session(
         arena,
@@ -390,7 +394,7 @@ def test_a_bare_ocx_lookup_resolves_the_projects_ocx_pin(
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
     segments = _segments(result)
-    assert _real(home / "bin") in segments, (
+    assert _real(shell_bin(home)) in segments, (
         "the project's trampoline directory must be on PATH, or the resolution this row "
         f"asserts never had a candidate: {segments}"
     )
@@ -400,7 +404,7 @@ def test_a_bare_ocx_lookup_resolves_the_projects_ocx_pin(
     )
     lookup = matrix.probes(result.stdout).get("lookup")
     assert lookup and lookup != matrix.ABSENT, f"`command -v ocx` resolved nothing:\n{result.stdout}"
-    assert _real(lookup) == _real(home / "bin" / "ocx"), (
+    assert _real(lookup) == _real(shell_bin(home) / "ocx"), (
         f"a bare `ocx` must resolve the project's pin, not the installed binary; got {lookup!r}"
     )
 
@@ -409,7 +413,7 @@ def test_a_bare_ocx_lookup_resolves_the_global_ocx_pin(ocx: OcxRunner, arena: Ar
     """The owner-reported case: pin ``ocx`` globally and a bare ``ocx`` finds it.
 
     No project anywhere — this is a plain shell in a plain directory, which is
-    where ``$OCX_HOME/toolchain/bin`` versus the install directory is the whole
+    where ``$OCX_HOME/toolchain/active/bin`` versus the install directory is the whole
     of the question. Before the tiers were re-ordered the pin rendered and was
     unreachable for the life of every shell.
 
@@ -488,12 +492,12 @@ def test_a_tool_in_both_toolchains_resolves_to_the_projects_trampoline(
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
     segments = _segments(result)
-    assert _real(global_home / "bin") in segments, (
+    assert _real(shell_bin(global_home)) in segments, (
         f"the global trampoline directory must be on PATH for this row to mean anything: {segments}"
     )
     lookup = matrix.probes(result.stdout).get("lookup")
     assert lookup and lookup != matrix.ABSENT, f"`command -v {binary}` resolved nothing:\n{result.stdout}"
-    assert _real(lookup) == _real(home / "bin" / binary), (
+    assert _real(lookup) == _real(shell_bin(home) / binary), (
         f"the project's trampoline must win over the global tier's; got {lookup!r}"
     )
 
@@ -501,7 +505,7 @@ def test_a_tool_in_both_toolchains_resolves_to_the_projects_trampoline(
 def test_env_mode_never_puts_the_project_trampoline_dir_on_path(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
-    """C-005: ``bin/`` is ``bin`` mode's, and ``env`` mode composes instead.
+    """C-005: ``shells/default/bin`` is ``bin`` mode's, and ``env`` mode composes instead.
 
     Both halves in one probe: the trampoline directory is **rendered on disk**
     and still absent from ``PATH``, while the composed package directory *is*
@@ -523,7 +527,7 @@ def test_env_mode_never_puts_the_project_trampoline_dir_on_path(
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "env"},
     )
     segments = _segments(result)
-    assert _real(home / "bin") not in segments, (
+    assert _real(shell_bin(home)) not in segments, (
         f"`env` mode must never put the trampoline directory on PATH: {segments}"
     )
     for directory in composed:
@@ -606,7 +610,8 @@ def test_every_ordered_activate_transition_keeps_both_session_directories(
     Three things are asserted per prompt, and they fail independently:
 
     1. both session directories survive (C-059);
-    2. the project's ``bin/`` is on ``PATH`` in ``bin`` mode and **gone** in the
+    2. the project's ``shells/default/bin`` is on ``PATH`` in ``bin`` mode and
+       **gone** in the
        other two — it lives outside ``$OCX_HOME``, so only ``owned_home``
        authorises removing it, and a ``None`` there strands it for the shell's
        whole life (C-063, RUL-91);
@@ -620,7 +625,7 @@ def test_every_ordered_activate_transition_keeps_both_session_directories(
         "and OCX_TOOLCHAIN_ACTIVATE is inert"
     )
     home = resolved_toolchain_home(ocx, project.directory)
-    project_bin = _real(home / "bin")
+    project_bin = _real(shell_bin(home))
     install_bin, global_bin = _session_dirs(ocx, arena, tmp_path)
     foreign = tmp_path / "someone-elses-bin"
     foreign.mkdir()
@@ -671,7 +676,7 @@ def _poison_trampoline(home: Path, name: str) -> bytes:
     documented accepted residual (R-W4). Growing the file moves the size, so
     the gate reaches the content hash it is really about.
     """
-    trampoline = home / "bin" / name
+    trampoline = shell_bin(home) / name
     poisoned = trampoline.read_bytes() + b"\n# not what the stamp recorded\n"
     trampoline.write_bytes(poisoned)
     return poisoned
@@ -703,7 +708,7 @@ def test_a_lock_change_without_pull_withholds_the_project_dir_and_names_ocx_pull
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
     segments = _segments(result)
-    assert _real(home / "bin") not in segments, (
+    assert _real(shell_bin(home)) not in segments, (
         f"a tree that does not match its render stamp must be withheld from PATH: {segments}"
     )
     assert install_bin in segments and global_bin in segments, (
@@ -722,7 +727,7 @@ def test_the_prompt_path_never_prunes_the_stale_trampolines(
 
     A prompt that pruned would be a whole-directory delete inside an
     attacker-writable tree, running before every command the user types.
-    Byte-identity over the whole home, not just over ``bin/``.
+    Byte-identity over the whole home, not just over ``shells/default/bin``.
     """
     project = locked_project(ocx, tmp_path, label="c2")
     home = resolved_toolchain_home(ocx, project.directory)
@@ -739,7 +744,7 @@ def test_the_prompt_path_never_prunes_the_stale_trampolines(
     )
     _segments(result)  # the prompt ran; without this the comparison is of two untouched trees
 
-    assert (home / "bin" / project.default_binary).read_bytes() == poisoned, (
+    assert (shell_bin(home) / project.default_binary).read_bytes() == poisoned, (
         "the prompt path must leave a stale trampoline exactly as it found it"
     )
     assert snapshot_tree(home) == before, "the prompt path must not write anywhere under the home"
@@ -752,7 +757,7 @@ def test_the_stale_window_closes_at_the_next_pull(ocx: OcxRunner, arena: Arena, 
     poisoned = _poison_trampoline(home, project.default_binary)
 
     assert run_in(ocx, project.directory, "pull").returncode == EXIT_SUCCESS
-    assert (home / "bin" / project.default_binary).read_bytes() != poisoned, (
+    assert (shell_bin(home) / project.default_binary).read_bytes() != poisoned, (
         "`ocx pull` must re-render the trampoline the prompt refused to touch"
     )
 
@@ -765,7 +770,7 @@ def test_the_stale_window_closes_at_the_next_pull(ocx: OcxRunner, arena: Arena, 
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
     segments = _segments(result)
-    assert _real(home / "bin") in segments, f"a freshly pulled tree must reach PATH again: {segments}"
+    assert _real(shell_bin(home)) in segments, f"a freshly pulled tree must reach PATH again: {segments}"
     assert _HINT not in result.stderr, f"the stale-window hint must be gone after a pull:\n{result.stderr}"
 
 
@@ -805,7 +810,7 @@ def test_the_activate_pinned_matrix_emits_the_contracted_set(
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": mode},
     )
     segments = _segments(result)
-    project_bin = _real(home / "bin")
+    project_bin = _real(shell_bin(home))
 
     if mode == "bin":
         assert project_bin in segments, (
@@ -864,7 +869,7 @@ def test_activate_in_ocx_toml_beats_the_environment_variable(
     assert install_bin in segments and global_bin in segments, (
         f"`none` still carries the two session directories (C-059): {segments}"
     )
-    assert _real(home / "bin") not in segments, (
+    assert _real(shell_bin(home)) not in segments, (
         f"`activate = \"none\"` in ocx.toml must beat OCX_TOOLCHAIN_ACTIVATE=bin: {segments}"
     )
     for directory in composed:
@@ -890,7 +895,7 @@ def test_the_environment_tier_speaks_when_the_file_tier_is_absent(
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
     segments = _segments(result)
-    assert _real(home / "bin") in segments, (
+    assert _real(shell_bin(home)) in segments, (
         f"with no `activate` key, OCX_TOOLCHAIN_ACTIVATE=bin must reach the tree: {segments}"
     )
 
@@ -968,17 +973,18 @@ def test_pinned_cli_beats_the_file_which_beats_the_environment(ocx: OcxRunner, t
 def test_a_committed_hostile_bin_never_reaches_path_before_a_render(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
-    """S-003: consent is not a render. A clone's committed ``bin/`` is not trusted.
+    """S-003: consent is not a render. A clone's committed trampoline directory
+    is not trusted.
 
     The clone inherits the tree and neither stamp — both are keyed on the
     canonical project directory — so ``bin_mode_entry`` finds no stamp for it
     and withholds. Consent is granted explicitly through ``[shell.consent]
     paths``, which is the point: a user who *did* authorise the directory still
-    must not get an unrendered ``bin/`` on ``PATH``.
+    must not get an unrendered ``shells/default/bin`` on ``PATH``.
     """
     project = locked_project(ocx, tmp_path, label="d6")
     clone = _clone(project.directory, tmp_path / "hostile-clone")
-    hostile = resolved_toolchain_home(ocx, clone) / "bin" / f"hostile{uuid4().hex[:8]}"
+    hostile = shell_bin(resolved_toolchain_home(ocx, clone)) / f"hostile{uuid4().hex[:8]}"
     hostile.write_text("#!/bin/sh\necho owned\n", encoding="utf-8")
     hostile.chmod(0o755)
     _write_home_config(arena, f"[shell.consent]\npaths = [{json.dumps(str(clone))}]\n")
@@ -999,8 +1005,8 @@ def test_a_committed_hostile_bin_never_reaches_path_before_a_render(
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
     segments = _segments(result)
-    assert _real(Path(state["toolchain_home"]) / "bin") not in segments, (
-        f"a committed, unstamped bin/ must never reach PATH: {segments}"
+    assert _real(shell_bin(Path(state["toolchain_home"]))) not in segments, (
+        f"a committed, unstamped shells/default/bin must never reach PATH: {segments}"
     )
     assert install_bin in segments and global_bin in segments, (
         f"refusing the clone must not cost the two session directories: {segments}"
@@ -1015,7 +1021,7 @@ def test_the_hostile_entry_is_replaced_and_the_dir_appears_after_pull(
     clone = _clone(project.directory, tmp_path / "clone-then-pull")
     home = resolved_toolchain_home(ocx, clone)
     hostile_name = f"hostile{uuid4().hex[:8]}"
-    hostile = home / "bin" / hostile_name
+    hostile = shell_bin(home) / hostile_name
     hostile.write_text("#!/bin/sh\necho owned\n", encoding="utf-8")
     hostile.chmod(0o755)
     _write_home_config(arena, f"[shell.consent]\npaths = [{json.dumps(str(clone))}]\n")
@@ -1034,7 +1040,7 @@ def test_the_hostile_entry_is_replaced_and_the_dir_appears_after_pull(
         extra_env={"OCX_TOOLCHAIN_ACTIVATE": "bin"},
     )
     segments = _segments(result)
-    assert _real(home / "bin") in segments, f"a rendered, stamped tree reaches PATH: {segments}"
+    assert _real(shell_bin(home)) in segments, f"a rendered, stamped tree reaches PATH: {segments}"
 
 
 def test_owned_prefixes_exclude_a_sibling_project_and_the_toolchain_dir_root(
@@ -1066,8 +1072,8 @@ def test_owned_prefixes_exclude_a_sibling_project_and_the_toolchain_dir_root(
     )
     assert _real(home) != _real(sibling_home), "the two projects must not share a home"
 
-    stale = _real(home / "bin")
-    planted = os.pathsep.join([str(root), str(sibling_home / "bin"), stale])
+    stale = _real(shell_bin(home))
+    planted = os.pathsep.join([str(root), str(shell_bin(sibling_home)), stale])
 
     result = _session(
         arena,
@@ -1082,7 +1088,7 @@ def test_owned_prefixes_exclude_a_sibling_project_and_the_toolchain_dir_root(
     assert _real(root) in segments, (
         f"the bare `toolchain-dir` root holds other projects' homes and may never be owned: {segments}"
     )
-    assert _real(sibling_home / "bin") in segments, (
+    assert _real(shell_bin(sibling_home)) in segments, (
         f"a sibling project's trampoline directory may never be owned: {segments}"
     )
     assert stale not in segments, (
@@ -1102,7 +1108,7 @@ def test_no_project_prefix_is_owned_before_consent(ocx: OcxRunner, arena: Arena,
     state = json.loads(run_in(ocx, clone, "--format", "json", "shell", "state").stdout)
     assert state["grant"] is None, f"this row needs a genuinely unconsented project: {state}"
     home = Path(state["toolchain_home"])
-    planted = _real(home / "bin")
+    planted = _real(shell_bin(home))
 
     install_bin, global_bin = _session_dirs(ocx, arena, tmp_path)
     result = _session(
@@ -1171,9 +1177,10 @@ def test_a_symlinked_project_home_is_refused_from_the_owned_set(
 def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     ocx: OcxRunner, arena: Arena, tmp_path: Path
 ) -> None:
-    """C-062: ``bin/`` matching its stamp is not enough — the links must resolve.
+    """C-062: ``shells/default/bin`` matching its stamp is not enough — the links
+    must resolve.
 
-    The repoint leaves ``bin/`` byte-identical, so a gate that fingerprinted
+    The repoint leaves ``shells/default/bin`` byte-identical, so a gate that fingerprinted
     only the trampolines would pass it through and expose a trampoline that
     dereferences to the wrong package. Either outcome the design allows is
     accepted (heal, or withhold); what is refused is exposing the directory
@@ -1181,15 +1188,17 @@ def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     """
     project = locked_project(ocx, tmp_path, label="d11")
     home = resolved_toolchain_home(ocx, project.directory)
-    before = snapshot_tree(home / "bin")
+    before = snapshot_tree(shell_bin(home))
     correct = link_entries(home)[f"default/{project.default_key}"]
     other = link_entries(home)[f"{project.group}/{project.group_key}"]
     assert correct != other, "the two groups must point at different digests for this row to discriminate"
 
-    link = home / "default" / project.default_key
+    link = entry_link(home, DEFAULT_GROUP, project.default_key)
     link.unlink()
     link.symlink_to(other)
-    assert snapshot_tree(home / "bin") == before, "the repoint must leave bin/ byte-untouched"
+    assert snapshot_tree(shell_bin(home)) == before, (
+        "the repoint must leave shells/default/bin byte-untouched"
+    )
 
     result = _session(
         arena,
@@ -1201,7 +1210,7 @@ def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     )
     segments = _segments(result)
     healed = link_entries(home)[f"default/{project.default_key}"] == correct
-    exposed = _real(home / "bin") in segments
+    exposed = _real(shell_bin(home)) in segments
     assert healed or not exposed, (
         "a repointed link must be healed before its trampolines reach PATH, or the directory "
         f"must be withheld; link={link_entries(home)[f'default/{project.default_key}']!r} segments={segments}"
@@ -1221,7 +1230,7 @@ def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
     """
     checkout = two_branch_checkout(ocx, tmp_path, label="d12")
     assert run_in(ocx, checkout.directory, "pull").returncode == EXIT_SUCCESS
-    trampoline = checkout.home / "bin" / checkout.binary
+    trampoline = shell_bin(checkout.home) / checkout.binary
     before = trampoline.read_bytes()
     stale_target = link_entries(checkout.home)[f"default/{checkout.key}"]
 
@@ -1234,7 +1243,7 @@ def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
 
     assert git(checkout.directory, "checkout", "-q", checkout.other_branch).returncode == EXIT_SUCCESS
     assert trampoline.read_bytes() == before, (
-        "the switch must leave bin/ byte-identical, or the stamp — not the link — is what notices"
+        "the switch must leave shells/default/bin byte-identical, or the stamp — not the link — is what notices"
     )
 
     result = _session(
@@ -1250,7 +1259,7 @@ def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
     after = subprocess.run(
         [str(trampoline)], capture_output=True, text=True, env=dict(ocx.env), check=False, timeout=_TIMEOUT
     )
-    exposed = _real(checkout.home / "bin") in segments
+    exposed = _real(shell_bin(checkout.home)) in segments
     healed = link_entries(checkout.home)[f"default/{checkout.key}"] != stale_target
     # The link half is asserted separately from the run half **because the run
     # half is defended twice**: a trampoline re-resolves `ocx.lock` at run time

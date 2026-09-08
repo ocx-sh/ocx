@@ -3,7 +3,8 @@
 """Acceptance tests for the session-PATH arm of ``ocx self setup`` (WP-12c).
 
 ``ocx self setup`` registers two directories at **session** level, in order:
-the ocx install ``bin`` directory and ``$OCX_HOME/toolchain/bin`` (S-002,
+the ocx install ``bin`` directory and ``$OCX_HOME/toolchain/active/bin``
+(S-002,
 C-036). Each platform owns one store — ``HKCU\\Environment\\Path`` on Windows,
 ``~/.config/environment.d/ocx.conf`` on Linux, a ``RunAtLoad`` LaunchAgent on
 macOS (C-038 / C-039 / C-040).
@@ -54,6 +55,7 @@ from pathlib import Path
 
 import pytest
 
+from src import shell_matrix as matrix
 from src.runner import OcxRunner
 
 # The install-layout path the bootstrap candidate lives at, relative to
@@ -63,8 +65,14 @@ _CANDIDATE_REL = Path("symlinks") / "ocx.sh" / "ocx" / "cli" / "current" / "cont
 
 # The two directories `setup::session_path_directories` registers, in the order
 # C-060 fixes them: the installed ocx first, the composed toolchain second.
+#
+# The toolchain half is taken from `shell_matrix.SESSION_BIN_DIRS`, not spelled
+# again here: that tuple is this suite's one mirror of the Rust producer, and a
+# second copy would let the two disagree about `active/bin` silently. It stays
+# a mirror either way — what the binary actually writes into the platform store
+# is the thing under test.
 _INSTALL_BIN_REL = _CANDIDATE_REL.parent
-_TOOLCHAIN_BIN_REL = Path("toolchain") / "bin"
+_TOOLCHAIN_BIN_REL = Path(matrix.SESSION_BIN_DIRS[0])
 
 # systemd ships the user-environment generators under `/usr/lib` on a merged-
 # /usr distribution and under `/lib` on the split layout; Fedora and some
@@ -296,7 +304,7 @@ def _store(result: subprocess.CompletedProcess[str]) -> Path:
 def _ocx_directories(ocx_home: Path) -> list[str]:
     """The two directories C-060 registers, in order.
 
-    ``toolchain/bin`` leads: a global toolchain that pins ``ocx`` is what a
+    ``toolchain/active/bin`` leads: a global toolchain that pins ``ocx`` is what a
     session resolves, and the installed binary is the floor beneath it (D-4).
     """
     return [str(ocx_home / _TOOLCHAIN_BIN_REL), str(ocx_home / _INSTALL_BIN_REL)]
