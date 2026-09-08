@@ -1685,18 +1685,46 @@ def _path_segments(ocx: OcxRunner, cwd: Path) -> tuple[list[str], str]:
     ``ocx shell state`` cannot stand in: it reports ``toolchain_bin``
     unconditionally (RUL-51), by design, so a withhold is invisible there.
 
-    The segments are read out of the emitted ``__ocx_p='…'`` assignments — the
-    single spelling every shell arm uses for the value it prepends. The second
-    element is the emitted stream itself, because a prompt's diagnostics travel
-    inside it as ``printf … >&2`` rather than on the binary's own stderr, which
-    the hook discards unconditionally (A-21).
+    ``--shell=bash`` is pinned, and it is load-bearing twice over. Without it
+    the arm is chosen by ``Shell::detect``, which walks the **process tree** for
+    a recognised shell and falls back to ``$SHELL`` — a variable ``OcxRunner``
+    deliberately does not set. A suite run detached from its launching shell
+    (``nohup … &``, a CI step, anything reparented to init) therefore has no
+    shell anywhere in the chain, and the emitter then prints *nothing at all*
+    and exits 0. Measured: 2372 bytes and two segments with a shell ancestor,
+    0 bytes and none without, same binary and same environment. That is not a
+    hypothetical — it is what made three rows in this module fail in the full
+    suite while passing file-scoped. The second reason is that ``__ocx_p='…'``
+    is the bash/zsh spelling, not a universal one: fish emits
+    ``set __ocx_p "…"``, which this pattern would silently read as zero
+    segments.
+
+    The empty-set assertion below is the guard that keeps the pin honest. Every
+    caller that asserts a path is **absent** from the result is satisfied by an
+    emitter that said nothing, so a silent no-emission arm would turn every
+    withhold row in this module vacuously green. The two ``$OCX_HOME`` segments
+    are contributed unconditionally, so an empty list means the emitter did not
+    speak, never that it withheld.
+
+    The second element is the emitted stream itself, because a prompt's
+    diagnostics travel inside it as ``printf … >&2`` rather than on the binary's
+    own stderr, which the hook discards unconditionally (A-21).
     """
-    result = run_in(ocx, cwd, "self", "activate", "--reconcile", env_extra=_BIN_MODE)
+    result = run_in(
+        ocx, cwd, "self", "activate", "--reconcile", "--shell=bash", env_extra=_BIN_MODE
+    )
     assert result.returncode == EXIT_SUCCESS, (
         f"the emitter must succeed before its output means anything; "
         f"rc={result.returncode}\n{result.stderr}"
     )
-    return re.findall(r"__ocx_p='([^']*)'", result.stdout), result.stdout
+    segments = re.findall(r"__ocx_p='([^']*)'", result.stdout)
+    assert segments, (
+        f"the emitter contributed no `PATH` segment at all, not even the two "
+        f"`$OCX_HOME` ones every arm carries — so this result cannot tell a "
+        f"withhold from an emitter that never spoke, and no absence assertion "
+        f"built on it would mean anything. Emitted:\n{result.stdout}"
+    )
+    return segments, result.stdout
 
 
 def test_a_lock_swap_renders_the_new_locks_tools_groups_and_stamp(
