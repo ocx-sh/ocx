@@ -278,6 +278,23 @@ pub struct SessionPath {
     ///
     /// [`ToolchainStore::bin`](crate::file_structure::ToolchainStore::bin),
     /// never a literal `toolchain/active/bin` join (C-001).
+    ///
+    /// # No `active_is_valid` gate here, unlike the project tier — deliberate
+    ///
+    /// The project slot resolves through its own `active` too and **is** gated
+    /// (C-080), because a repointed link there is an
+    /// arbitrary-directory-on-`PATH` primitive a repository can commit. This
+    /// entry is not gated, and adding the gate would be a bug rather than a
+    /// hardening: it is unconditional by [`SessionPath::new`]'s contract, and a
+    /// prompt that dropped it from the desired set would make
+    /// `repair_owned_segments` **delete** the session-`PATH` registration
+    /// `ocx self setup` wrote — `$OCX_HOME` is an owned prefix, so omitted
+    /// means removed, never left alone.
+    ///
+    /// The asymmetry is sound because the threat models differ: `$OCX_HOME` is
+    /// the user's own installation root, outside anything a checked-out
+    /// repository controls, so a rewritten `active` there is already a
+    /// compromise of the tier that would do the gating.
     pub global_bin: PathBuf,
 
     /// The consented project's `<home>/toolchain/active/bin`, in `bin` mode only —
