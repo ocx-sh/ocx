@@ -174,7 +174,7 @@ impl Remove {
         // stamp, opting in explicitly. AFTER the commit, so the stamp records
         // the source set the user just asked for rather than the one it
         // replaced. Best-effort; never fails the mutation.
-        record_activation_consent(&commit.config_path, &new_lock).await;
+        record_activation_consent(&commit.config_path, &new_lock, None).await;
 
         // Best-effort uninstall after commit. Tools may not be installed
         // (lock-only workflow); errors here do not roll back. One batched

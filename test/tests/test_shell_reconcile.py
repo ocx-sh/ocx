@@ -1669,7 +1669,13 @@ def test_a_fresh_clone_is_inert(arena: Arena) -> None:
     )
 
 
-def _consent(arena: Arena, verb: str, cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _consent(
+    arena: Arena,
+    verb: str,
+    cwd: Path,
+    *args: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run ``ocx shell allow`` / ``ocx shell revoke`` in ``cwd``."""
     return subprocess.run(
         [str(arena.ocx), "--offline", *args, "shell", verb],
@@ -1677,7 +1683,49 @@ def _consent(arena: Arena, verb: str, cwd: Path, *args: str) -> subprocess.Compl
         capture_output=True,
         check=False,
         text=True,
-        env=arena.env(),
+        env=arena.env() if env is None else env,
+    )
+
+
+def _all_stamps(arena: Arena) -> list[Path]:
+    """Every consent stamp under this run's isolated ``$OCX_HOME``."""
+    return sorted((arena.ocx_home / "state" / "projects").glob("*/consent.json"))
+
+
+def test_shell_allow_ignores_the_no_consent_env_var(arena: Arena) -> None:
+    """``OCX_NO_CONSENT=1 ocx shell allow`` stamps anyway (ocx-sh/ocx#400).
+
+    The one invariant here whose regression is a silent security *downgrade* in
+    reverse: every other writer routes through
+    ``project_context::record_activation_consent_over``, where the variable is
+    read, and ``shell allow`` deliberately does not — it calls
+    ``project::consent::record`` directly, because it **is** the explicit human
+    gesture the variable exists to tell machine invocation apart from. Move the
+    gate down into ``record`` and an exported variable silently disables the
+    command a user reaches for to undo exactly that state.
+
+    The ``ocx lock`` arm is a negative control on the same arena and the same
+    env dict: without it, a run where ``OCX_NO_CONSENT`` never reached the
+    binary at all would pass this test.
+    """
+    env = arena.env(OCX_NO_CONSENT="1")
+
+    project = arena.projects / "suppressed"
+    matrix.write_project(project, _ENV_BLOCK_A)
+    locked = matrix.run_lock(arena.ocx, project, env)
+    assert locked.returncode == 0, f"ocx lock must succeed for the fixture; stderr:\n{locked.stderr}"
+    assert _all_stamps(arena) == [], (
+        "negative control: OCX_NO_CONSENT must suppress `ocx lock`'s stamp, or the "
+        "arm below proves nothing about `ocx shell allow` ignoring it"
+    )
+
+    allowed = _consent(arena, "allow", project, env=env)
+    assert allowed.returncode == 0, f"`ocx shell allow` must succeed:\n{allowed.stderr}"
+
+    key = matrix.project_key(arena.ocx, project, env)
+    assert _all_stamps(arena) == [matrix.stamp_dir(arena.ocx_home, key) / "consent.json"], (
+        "`ocx shell allow` must write exactly one stamp, for this project, even "
+        f"under OCX_NO_CONSENT=1; got {_all_stamps(arena)}"
     )
 
 

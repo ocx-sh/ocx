@@ -255,9 +255,9 @@ Each token names one **source** — `<registry>/<first-path-segment>`, exactly t
 
 This answers a different question than `OCX_CONSENT_PATHS` does: *whose binaries may reach my `PATH`*, rather than *which checkout may activate at all*. See [Shell Integration → Consent grants][in-depth-shell-grants] for why both exist and how a project satisfies either one independently. Additive only, same rule as `OCX_CONSENT_PATHS`: unioned with `[shell.consent] namespaces` from `config.toml`, and an unset or empty value grants nothing.
 
-**The match is against the package store's record, not against the lock's text.** `ocx.lock` is project-supplied text, so a clone naming a listed organization proves nothing on its own. What is matched is the store's own record of the coordinate each locked digest was materialized under *on this machine* — so a lock that borrows a listed organization's name for content this machine never pulled under it is refused, and [`ocx shell state`][cmd-shell-state] names the disagreement. Writing that record takes an act of pulling here under that name: on a machine that has not cached the digest the bytes come off the wire under it, and where the layer cache already holds them one `ocx pull` naming the granted organization is enough. A project whose tools this machine has not fetched yet is simply inert until the first [`ocx pull`][cmd-pull], which writes a per-project consent stamp anyway. What the grant still cannot confirm is *who* published the bytes: publishing into a listed organization needs that organization's publish credential and nothing more, and the recorded coordinate is the one you named rather than the endpoint your own `[mirrors]` or index routing dialled. See [Shell Integration → What consent does not cover][in-depth-shell-residual]. List organizations whose publish credentials you actually control, and no others.
+**The match is against the package store's record, not against the lock's text.** `ocx.lock` is project-supplied text, so a clone naming a listed organization proves nothing on its own. What is matched is the store's own record of the coordinate each locked digest was materialized under *on this machine* — so a lock that borrows a listed organization's name for content this machine never pulled under it is refused, and [`ocx shell state`][cmd-shell-state] names the disagreement. Writing that record takes an act of pulling here under that name: on a machine that has not cached the digest the bytes come off the wire under it, and where the layer cache already holds them one `ocx pull` naming the granted organization is enough. A project whose tools this machine has not fetched yet is simply inert until the first [`ocx pull`][cmd-pull], which writes a per-project consent stamp anyway — unless that pull declined to, under [`OCX_NO_CONSENT`](#ocx-no-consent) or `--no-consent`. What the grant still cannot confirm is *who* published the bytes: publishing into a listed organization needs that organization's publish credential and nothing more, and the recorded coordinate is the one you named rather than the endpoint your own `[mirrors]` or index routing dialled. See [Shell Integration → What consent does not cover][in-depth-shell-residual]. List organizations whose publish credentials you actually control, and no others.
 
-**This grant does not extend to a project's own `[env]` table.** It authorizes the tools `ocx.lock` resolved, never the `[env]` entries a project's own `ocx.toml` declares — that table has no publisher at all, so a relative `type = "path"` value works from clone content alone, with no registry served bytes to record. A namespace-granted project that also declares `[env]` still gets its tools; OCX withholds the table and prints a hint naming the fix: run [`ocx pull`][cmd-pull] there once (which also writes a consent stamp), or list this exact directory — not a subtree — in `[shell.consent] paths`, which authorizes the `[env]` table too. See [Shell Integration → What consent does not cover][in-depth-shell-residual].
+**This grant does not extend to a project's own `[env]` table.** It authorizes the tools `ocx.lock` resolved, never the `[env]` entries a project's own `ocx.toml` declares — that table has no publisher at all, so a relative `type = "path"` value works from clone content alone, with no registry served bytes to record. A namespace-granted project that also declares `[env]` still gets its tools; OCX withholds the table and prints a hint naming the fix: run [`ocx pull`][cmd-pull] there once (which also writes a consent stamp, unless [`OCX_NO_CONSENT`](#ocx-no-consent) or `--no-consent` declines it — in which case the pull leaves the project exactly as inert as it found it), or list this exact directory — not a subtree — in `[shell.consent] paths`, which authorizes the `[env]` table too. See [Shell Integration → What consent does not cover][in-depth-shell-residual].
 
 ### `OCX_DEFAULT_REGISTRY` {#ocx-default-registry}
 
@@ -689,6 +689,28 @@ OCX_NO_PROJECT=1 ocx --project /ci/ocx.toml exec -- cmake --version
 
 `OCX_NO_PROJECT` is available only as an environment variable. A `--no-project` CLI flag would duplicate surface without solving a new problem — the hermetic-CI use case is best expressed via env vars, matching the [`OCX_NO_CONFIG`](#ocx-no-config) pattern.
 
+### `OCX_NO_CONSENT` {#ocx-no-consent}
+
+When set to a [truthy value](#truthy-values), the seven commands that record a [shell-activation consent stamp][in-depth-shell-grants] as a side effect — [`add`][cmd-add], [`remove`][cmd-remove], [`lock`][cmd-lock], [`update`][cmd-update], [`pull`][cmd-pull], [`exec`][cmd-run] and [`init`][cmd-init] — run without writing one. Nothing else changes: the pull still pulls, the child process still runs, the lock is still written.
+
+```sh
+OCX_NO_CONSENT=1 ocx --project /work/checkout/ocx.toml pull
+```
+
+Set it wherever a machine drives OCX against a checkout its operator did not choose. Running a mutating command in a directory is normally consent, and that is the right default for a person at a keyboard — but a Bazel repository rule, a CI job or a generated launcher makes the same gesture on someone's behalf, and the stamp it leaves authorizes that project's [`[env]` table][project-env] on every later `cd` once the [shell hook][in-depth-shell-integration] is installed. This variable is how automation declines to answer a question it was never asked.
+
+[`ocx shell allow`][cmd-shell-allow] ignores it. That command is the explicit gesture this variable exists to tell machine invocation apart from, so it always writes the stamp; [`ocx shell revoke`][cmd-shell-revoke] is still how you take one back.
+
+`ocx init`, `ocx pull` and `ocx exec` also carry a `--consent` / `--no-consent` flag pair, and **the flag outranks this variable** — `OCX_NO_CONSENT=1 ocx pull --consent` records a stamp. The variable decides only where no flag was given, which is what makes it usable as a blanket setting for a whole pipeline while a single step opts back in.
+
+It is forwarded to child `ocx` processes, so a script run under [`ocx exec`][cmd-run] that itself calls `ocx pull` inherits the same answer rather than stamping on the way through — including across `ocx exec --clean`, which otherwise hands the child an empty environment.
+
+`ocx exec --no-consent` sets this variable on the child environment too, so the flag reaches that nested `ocx pull` exactly as an exported variable would. A command line does not cross a spawn, so without it the explicit gesture would carry less far than the blanket one. The reverse is deliberately not true: `ocx exec --consent` does **not** clear a variable the child would otherwise inherit. `--consent` answers for the one project that invocation targets, not for whatever the child goes on to touch — refusal inherits downward, permission does not.
+
+::: warning Exporting it in your own shell will make working projects go inert
+A stamp records the OCI sources its project's lock resolved against, and growing the lock past that set re-confirms by re-recording. With `OCX_NO_CONSENT` exported globally, that re-record never happens: [`ocx add`][cmd-add] pulls in a tool from a source the stamp does not cover, nothing re-stamps, and the project you were working in five minutes ago is inert at the next prompt. That is the fail-safe direction, and it is still surprising. Set the variable in the pipeline, the image or the build rule that needs it — not in your interactive profile. [`ocx shell state`][cmd-shell-state] names this state, and [`ocx shell allow`][cmd-shell-allow] clears it in one gesture.
+:::
+
 ### `OCX_HOME` role in setup {#ocx-home-setup}
 
 When you run [`ocx self setup`][cmd-self-setup], it uses `OCX_HOME` (default `~/.ocx`) as the root for two things: the location it writes the five env shim files (`env.sh`, `env.fish`, `env.ps1`, `env.nu`, `env.elv`), and the directory that the shims themselves resolve at runtime via shell-native assign-if-unset syntax (e.g. `: "${OCX_HOME:=$HOME/.ocx}"`). Setting `OCX_HOME` to a non-default path before running `ocx self setup` puts all shims and the object store under that path consistently. See [`OCX_HOME`](#ocx-home) for the full data-directory reference.
@@ -1086,8 +1108,12 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cmd-direnv]: command-line.md#direnv
 [cmd-direnv-export]: command-line.md#direnv-export
 [cmd-add]: command-line.md#add
+[cmd-remove]: command-line.md#remove
+[cmd-init]: command-line.md#init
 [cmd-lock]: command-line.md#lock
+[cmd-update]: command-line.md#update
 [cmd-shell-allow]: command-line.md#shell-allow
+[cmd-shell-revoke]: command-line.md#shell-revoke
 [cmd-pull]: command-line.md#pull
 [cmd-shell-state]: command-line.md#shell-state
 [cmd-package-sign]: command-line.md#package-sign
@@ -1140,6 +1166,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [in-depth-shell-integration]: ../in-depth/shell-integration.md
 [in-depth-shell-state-carrier]: ../in-depth/shell-integration.md#activation-state-carrier
 [in-depth-shell-grants]: ../in-depth/shell-integration.md#consent
+[project-env]: ../in-depth/project.md#running-project-env
 [in-depth-shell-repair]: ../in-depth/shell-integration.md#repair
 [in-depth-shell-residual]: ../in-depth/shell-integration.md#residual
 [in-depth-shell-coexistence]: ../in-depth/shell-integration.md#coexistence

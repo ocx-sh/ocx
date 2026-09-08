@@ -61,6 +61,11 @@ pub struct Pull {
     /// runs, in whatever environment a later `ocx exec` or `ocx env` composes.
     #[clap(flatten)]
     pub lazy_mode: options::LazyMode,
+
+    // `--consent` (the default) / `--no-consent`. A `///` here would be dead
+    // text: clap renders the flattened struct's own field docs, not this one.
+    #[clap(flatten)]
+    pub consent: options::Consent,
 }
 
 impl Pull {
@@ -77,7 +82,12 @@ impl Pull {
         // Consent write seam (C-024, A-29): `pull` is one of the commands
         // that opt in. `load_project_with_lock`, which four read-only callers
         // share, stamps nothing.
-        let ctx = load_project_with_lock_consenting(&context).await?;
+        //
+        // The tri-state travels rather than a resolved bool: build tooling
+        // drives `pull` against a checkout its operator never chose, so
+        // `OCX_NO_CONSENT` must be able to suppress the stamp — but only where
+        // no flag spoke (ocx-sh/ocx#400). The seam resolves the ladder.
+        let ctx = load_project_with_lock_consenting(&context, self.consent.explicit()).await?;
 
         // Validate requested groups against the loaded config (unknown → 64).
         crate::app::project_context::ensure_groups_known(&self.groups, &ctx.config)?;

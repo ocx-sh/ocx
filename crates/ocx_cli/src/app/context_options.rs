@@ -172,6 +172,11 @@ impl ContextOptions {
             config: self.config.clone(),
             project: self.project.clone(),
             global: self.global,
+            // The consent tri-state is a per-command flag pair (`ocx exec`),
+            // not a root flag, so the parser tier starts as "did not refuse".
+            // Only a command that carries `--no-consent` sets this, on the view
+            // it forwards to its own child.
+            no_consent: false,
             index: self.index.clone(),
             // The resolved toolchain root is not derivable from
             // `ContextOptions`: `toolchain-dir` is a `config.toml` key with no

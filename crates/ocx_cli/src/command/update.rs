@@ -191,7 +191,7 @@ impl Update {
         // stamp, opting in explicitly. AFTER the commit, so the stamp records
         // the source set the user just asked for rather than the one it
         // replaced. Best-effort; never fails the mutation.
-        record_activation_consent(&commit.config_path, &new_lock).await;
+        record_activation_consent(&commit.config_path, &new_lock, None).await;
 
         // Best-effort materialization AFTER the commit lands. A failure here
         // does not roll back the lock — the declaration is committed; only

@@ -511,7 +511,7 @@ pub enum Revoked {
 /// # The write seam is a closed allowlist, stated as a negative contract
 ///
 /// A-29 — the **only** writers are the seven explicit project-scoped
-/// commands: `add`, `remove`, `lock`, `update`, `pull`, `run`, and `init`,
+/// commands: `add`, `remove`, `lock`, `update`, `pull`, `exec`, and `init`,
 /// which consents to the project it creates. Every other command —
 /// explicitly including `ocx env`, `ocx inspect`, `ocx shell state`,
 /// `ocx self activate` (with and without `--reconcile`), `ocx list`,
@@ -525,6 +525,16 @@ pub enum Revoked {
 /// `patch freeze`, `ocx env`, and `ocx lock --check`), so a blanket stamp
 /// there would auto-grant consent on read-only commands — silently widening a
 /// security control beyond its stated set.
+///
+/// Membership is **suppressible, not conditional** (ocx-sh/ocx#400). Those
+/// seven resolve a flag/`OCX_NO_CONSENT` ladder in
+/// `app::project_context::record_activation_consent_over` and may reach an
+/// invocation where they write nothing. That narrows the allowlist's effect,
+/// never widens it, so A-29 is unchanged: it constrains which commands *may*
+/// write, and no eighth one gained the ability. The gate deliberately does
+/// **not** live in this function — `ocx shell allow` calls it directly, and it
+/// is the explicit human gesture the variable exists to distinguish machine
+/// invocation *from*.
 ///
 /// A-26 — **grants do not stamp.** Nothing on the activation path writes here.
 ///
@@ -782,7 +792,7 @@ fn load_at(path: &Path) -> Option<ConsentStamp> {
 /// [`record`] against an explicit store.
 fn record_in(store: &StateStore, project_dir: &Path, sources: &BTreeSet<String>) -> crate::Result<Recorded> {
     // A-44 — the ocx home toolchain is always consented, so `$OCX_HOME` is
-    // never a consent subject and must never own a stamp. Every one of the six
+    // never a consent subject and must never own a stamp. Every one of the seven
     // writers reaches here with `project_dir == $OCX_HOME` when invoked
     // `--global`; without this guard `ocx --global lock` writes
     // `state/projects/<key-for-$OCX_HOME>/consent.json`, which falsifies the
