@@ -28,7 +28,7 @@ pub struct Pinned {
     /// Compose digest paths instead of the toolchain links.
     ///
     /// The environment then names the exact packages `ocx.lock` pins right now
-    /// and consults no `<group>/<entry>` link.
+    /// and consults no `links/<group>/<entry>` link.
     ///
     /// When neither flag is given, the value is read from `ocx.toml` (the
     /// `pinned` key), then from the `OCX_TOOLCHAIN_PINNED` environment
@@ -42,7 +42,7 @@ pub struct Pinned {
 
     /// Compose through the toolchain links instead of digest paths.
     ///
-    /// The rendered `<group>/<entry>` links are followed, so a later
+    /// The rendered `links/<group>/<entry>` links are followed, so a later
     /// `ocx update` takes effect with no re-render. This is the default; pass
     /// it to override an `ocx.toml` or `OCX_TOOLCHAIN_PINNED` that asked for
     /// digest paths.
