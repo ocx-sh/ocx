@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from src import shell_matrix as matrix
 from src.runner import OcxRunner
 
 # `ocx self activate` is a Phase C deliverable.  The sub-command does not exist
@@ -1024,7 +1025,7 @@ def test_activate_omits_global_env_eval_when_mode_is_not_env(
     )
     assert "--global env" not in result.stdout, (
         f"activate = {mode!r} must not compose the global environment at login - "
-        f"the tools come from the trampolines in toolchain/bin; got:\n{result.stdout}"
+        f"the tools come from the trampolines in toolchain/active/bin; got:\n{result.stdout}"
     )
 
 
@@ -1057,7 +1058,7 @@ def test_activate_prepends_the_global_toolchain_bin_in_every_mode(
     tmp_path: Path,
     mode: str | None,
 ) -> None:
-    """`$OCX_HOME/toolchain/bin` reaches a login shell whatever the mode says.
+    """`$OCX_HOME/toolchain/active/bin` reaches a login shell whatever the mode says.
 
     It is a session-level directory, not a composition (C-059): the reconciler
     holds it desired in every mode, and the login stream emits it too, so `bin`
@@ -1065,7 +1066,7 @@ def test_activate_prepends_the_global_toolchain_bin_in_every_mode(
     `ocx self setup` writes is absent or ignored.
     """
     result = _run_activate_with_activate_mode(ocx, tmp_path, mode)
-    expected = str(tmp_path / "activate home" / "toolchain" / "bin")
+    expected = str(tmp_path / "activate home" / matrix.SESSION_BIN_DIRS[0])
 
     assert result.returncode == 0, (
         f"activation must succeed with activate = {mode!r}; "

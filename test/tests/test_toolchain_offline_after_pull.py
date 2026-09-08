@@ -70,7 +70,7 @@ from src import static_index
 from src.helpers import make_package, write_ocx_toml
 from src.registry import fetch_manifest_raw
 from src.runner import OcxRunner, current_platform
-from src.toolchain_fixtures import resolved_toolchain_home, run_in
+from src.toolchain_fixtures import resolved_toolchain_home, run_in, shell_bin
 
 EXIT_SUCCESS = 0
 
@@ -244,10 +244,10 @@ def pulled_toolchain(
     cold_requests = len(index_server.requests)
 
     home = resolved_toolchain_home(ocx, directory)
-    trampoline = home / "bin" / BINARY
+    trampoline = shell_bin(home) / BINARY
     assert trampoline.is_file(), (
         f"the pull must render a trampoline at {trampoline}; the tree holds "
-        f"{sorted(p.name for p in (home / 'bin').glob('*'))}"
+        f"{sorted(p.name for p in shell_bin(home).glob('*'))}"
     )
 
     # The #424 condition, applied explicitly. Asserted before it is removed:
@@ -482,7 +482,7 @@ def _cold_index_pull(
         ocx=ocx,
         server=index_server,
         directory=directory,
-        trampoline=home / "bin" / BINARY,
+        trampoline=shell_bin(home) / BINARY,
         marker=pkg.marker,
         root_path=local_index / "ocx.sh" / "p" / f"{repository}.json",
         physical_repository=f"oci://{ocx.registry}/{pkg.repo}",

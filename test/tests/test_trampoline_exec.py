@@ -74,9 +74,11 @@ from src.toolchain_fixtures import (
     DEFAULT_GROUP,
     ToolchainProject,
     bin_entries,
+    entry_link,
     locked_project,
     run_in,
     sha256_of,
+    shell_bin,
 )
 
 EXIT_SUCCESS = 0
@@ -168,7 +170,7 @@ def stale_trampoline(project: ToolchainProject, name: str) -> Path:
     ``ocx.toml`` without a re-render — the state D-V1's two-home loop needs,
     and the one thing the composition itself will not provide.
     """
-    target = project.home / "bin" / name
+    target = shell_bin(project.home) / name
     shutil.copy(project.default_trampoline, target)
     return target
 
@@ -194,7 +196,8 @@ def test_item22_a_name_the_composition_does_not_provide_exits_65_naming_the_sear
 ) -> None:
     """C-010: both trampoline directories are dropped from the **lookup** PATH.
 
-    The name exists as a stale trampoline in the project's own ``bin/`` and
+    The name exists as a stale trampoline in the project's own
+    ``shells/default/bin`` and
     nowhere else, so the two guards give visibly different answers: with the
     exclusion in force the lookup never sees the file (**NotFound**, and the
     reported ``searched:`` list omits both trampoline directories); without it
@@ -212,8 +215,8 @@ def test_item22_a_name_the_composition_does_not_provide_exits_65_naming_the_sear
     ghost = f"ghost{project.default_binary}"
     stale_trampoline(project, ghost)
 
-    project_bin = str(project.home / "bin")
-    global_bin = str(Path(ocx.env["OCX_HOME"]) / "toolchain" / "bin")
+    project_bin = str(shell_bin(project.home))
+    global_bin = str(shell_bin(Path(ocx.env["OCX_HOME"]) / "toolchain"))
     Path(global_bin).mkdir(parents=True, exist_ok=True)
     # `bin` mode is what puts these two on an interactive shell's PATH, and it
     # is the arrangement C-010 exists for — `ocx exec` does not add them itself.
@@ -269,7 +272,7 @@ def test_item22_nothing_is_spawned_on_the_refusal(ocx: OcxRunner, tmp_path: Path
         ghost,
         env_extra={
             "OCX_BINARY_PIN": str(observer),
-            "PATH": f"{project.home / 'bin'}{os.pathsep}{ocx.env['PATH']}",
+            "PATH": f"{shell_bin(project.home)}{os.pathsep}{ocx.env['PATH']}",
         },
     )
 
@@ -317,8 +320,8 @@ def test_item22_a_foreign_home_trampoline_on_path_is_refused_by_identity(
             # only the file-level predicate stops the hop from being taken.
             "PATH": os.pathsep.join(
                 [
-                    str(project_a.home / "bin"),
-                    str(project_b.home / "bin"),
+                    str(shell_bin(project_a.home)),
+                    str(shell_bin(project_b.home)),
                     ocx.env["PATH"],
                 ]
             )
@@ -383,7 +386,7 @@ def test_item22_a_marker_bearing_project_path_is_not_refused(
     )
 
     home = directory / ".ocx" / "toolchain"
-    resolved = (home / DEFAULT_GROUP / key).resolve() / "content" / "bin" / name
+    resolved = entry_link(home, DEFAULT_GROUP, key).resolve() / "content" / "bin" / name
     prefix = resolved.read_bytes()[:TRAMPOLINE_PROBE_BYTES]
     assert TRAMPOLINE_MARKER.encode() in prefix, (
         "precondition: the marker must sit inside the probe window, or the "
@@ -401,7 +404,7 @@ def test_item22_a_marker_bearing_project_path_is_not_refused(
     )
     assert f"ran-{label}" in result.stdout, result.stdout
 
-    trampoline = home / "bin" / name
+    trampoline = shell_bin(home) / name
     body = trampoline.read_text()
     assert f"'{directory}'" in body, (
         f"the marker-spelling root is baked inside single quotes; got {body!r}"
@@ -460,7 +463,7 @@ def test_c057_launcher_exec_propagates_65_for_a_name_that_resolves_to_a_trampoli
         text=True,
         check=False,
         timeout=TIMEOUT,
-        env={**ocx.env, "PATH": f"{project.home / 'bin'}{os.pathsep}{ocx.env['PATH']}"},
+        env={**ocx.env, "PATH": f"{shell_bin(project.home)}{os.pathsep}{ocx.env['PATH']}"},
     )
 
     assert result.returncode == EXIT_DATA, (
@@ -689,9 +692,9 @@ def test_item16_a_package_claiming_the_name_ocx_renders_a_trampoline_and_runs(
     # `bin` mode: the trampoline directory is PATH-front when this runs, which
     # is what makes the re-entry's own lookup for the name `ocx` a live question.
     ran = run_file(
-        home / "bin" / "ocx",
+        shell_bin(home) / "ocx",
         cwd=tmp_path,
-        env={**ocx.env, "PATH": f"{home / 'bin'}{os.pathsep}{ocx.env['PATH']}"},
+        env={**ocx.env, "PATH": f"{shell_bin(home)}{os.pathsep}{ocx.env['PATH']}"},
     )
     assert ran.returncode == EXIT_SUCCESS, (
         f"the rendered `ocx` trampoline must run the package's tool; rc={ran.returncode}\n"
@@ -740,7 +743,7 @@ def test_item16_two_packages_claiming_one_name_render_one_trampoline_last_wins(
         f"two claims on one name render exactly one trampoline; got {bin_entries(home)}"
     )
 
-    ran = run_file(home / "bin" / shared, cwd=tmp_path, env=dict(ocx.env))
+    ran = run_file(shell_bin(home) / shared, cwd=tmp_path, env=dict(ocx.env))
     assert ran.returncode == EXIT_SUCCESS, ran.stderr
     assert second.marker in ran.stdout, (
         f"the last-walked claim owns the name; got {ran.stdout!r}"
@@ -770,7 +773,7 @@ def test_item33_flipping_pinned_changes_the_composed_path_without_re_rendering(
     lane, no composition flag — so the ladder is re-read by the ocx the
     trampoline re-enters. Flipping ``pinned`` in ``ocx.toml`` with **no
     ``ocx pull`` between** must therefore change what composes while leaving
-    ``bin/`` untouched, and flipping back must restore it.
+    ``shells/default/bin`` untouched, and flipping back must restore it.
 
     Both halves are asserted every time, because either alone is satisfiable by
     the wrong implementation: a body that baked the flag would keep the old
@@ -781,13 +784,13 @@ def test_item33_flipping_pinned_changes_the_composed_path_without_re_rendering(
     composition still emits link paths.
     """
     project = locked_project(ocx, tmp_path)
-    link_lane = str(project.home / DEFAULT_GROUP / project.default_key)
+    link_lane = str(entry_link(project.home, DEFAULT_GROUP, project.default_key))
     digest_lane = str(Path(ocx.env["OCX_HOME"]) / "packages")
     rendered = sha256_of(project.default_trampoline)
 
     following = composed_path(ocx, project.directory)[0]
     assert following.startswith(link_lane), (
-        f"the default lane composes through the `<group>/<entry>` link; got {following}"
+        f"the default lane composes through the `links/<group>/<entry>` link; got {following}"
     )
 
     write_ocx_toml(project.directory, project.config_body(pinned=True))
@@ -1143,7 +1146,7 @@ def test_v9_a_co_resident_ocx_exe_cannot_capture_a_trampoline_spawn(tmp_path: Pa
     """V-9: a trampoline spawns the **baked** ocx, never ``bin\\ocx.exe``.
 
     ``CreateProcessW`` with a NULL ``lpApplicationName`` begins its search at
-    *the directory the calling image loaded from* — ``<home>/toolchain/bin``
+    *the directory the calling image loaded from* — ``<home>/toolchain/shells/default/bin``
     itself — before the working directory, the system directories or ``PATH``.
     A package claiming the name ``ocx`` is admitted by design (item 16 / ADR
     D-4 removed ``ShimNameShadowsOcx``), and ``ocx pull`` then renders
@@ -1159,7 +1162,7 @@ def test_v9_a_co_resident_ocx_exe_cannot_capture_a_trampoline_spawn(tmp_path: Pa
     ``lpApplicationName`` so no search happens at all.
 
     The layout is the failing one verbatim: ``tcbin`` and ``ocx`` are both
-    rendered trampolines in one ``bin/``. The decoy carries its own baked
+    rendered trampolines in one ``shells/default/bin``. The decoy carries its own baked
     recorder so a regression is *observed* rather than inferred — and so it
     terminates instead of fork-bombing the runner.
 

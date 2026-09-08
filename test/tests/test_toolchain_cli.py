@@ -33,6 +33,7 @@ import pytest
 
 from src.helpers import make_package
 from src.runner import OcxRunner
+from src.toolchain_fixtures import shell_bin
 
 # ---------------------------------------------------------------------------
 # Exit code constants — mirror crates/ocx_lib/src/cli/exit_code.rs
@@ -131,7 +132,7 @@ def locked_project(ocx: OcxRunner, tmp_path: Path) -> tuple[Path, str]:
     """A project with one default-group tool and a current ``ocx.lock``.
 
     Returns ``(project_dir, tool_binary_name)``. The binary name is what a
-    rendered ``bin/`` must carry a trampoline for.
+    rendered ``shells/default/bin`` must carry a trampoline for.
     """
     package = _published_tool(ocx, tmp_path, "locked", bins=["wp8tool"])
     project = tmp_path / "proj"
@@ -516,7 +517,7 @@ def test_pull_renders_the_toolchain_bin_directory(
     result = _run(ocx, project, "pull")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
-    trampoline = _toolchain_home(project) / "bin" / binary
+    trampoline = shell_bin(_toolchain_home(project)) / binary
     assert trampoline.exists(), (
         f"C-054 — `ocx pull` must render a trampoline for {binary}; "
         f"{_toolchain_home(project)} holds {_snapshot(_toolchain_home(project))}"
@@ -552,7 +553,7 @@ def test_the_rendered_trampoline_executes_the_tool_it_names(
     assert _run(ocx, project, "lock").returncode == EXIT_SUCCESS
     assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
 
-    trampoline = _toolchain_home(project) / "bin" / "wp8smoke"
+    trampoline = shell_bin(_toolchain_home(project)) / "wp8smoke"
     assert trampoline.exists(), (
         "the control: `ocx pull` must have rendered the trampoline, or this row "
         f"tests nothing; {_toolchain_home(project)} holds "
@@ -600,7 +601,7 @@ def test_add_renders_the_new_tool_s_trampoline(
     result = _run(ocx, project, "add", f"added={package.fq}")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
-    assert (_toolchain_home(project) / "bin" / "wp8added").exists(), (
+    assert (shell_bin(_toolchain_home(project)) / "wp8added").exists(), (
         "C-054 — `ocx add` must re-render, so the new tool's trampoline appears"
     )
 
@@ -612,7 +613,7 @@ def test_remove_prunes_the_removed_tool_s_trampoline(
     takes the trampoline with it. No other name changes."""
     project, binary = locked_project
     assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
-    trampoline = _toolchain_home(project) / "bin" / binary
+    trampoline = shell_bin(_toolchain_home(project)) / binary
     assert trampoline.exists(), "the control: the trampoline must exist before removal"
 
     result = _run(ocx, project, "remove", "wp8")
@@ -633,7 +634,7 @@ def test_lock_and_update_re_render(
     """
     project, binary = locked_project
     assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
-    assert (_toolchain_home(project) / "bin" / binary).exists(), (
+    assert (shell_bin(_toolchain_home(project)) / binary).exists(), (
         "the control: `ocx pull` must have rendered the tree first, or this case "
         "cannot tell a re-render from a tree that was never built"
     )
@@ -643,7 +644,7 @@ def test_lock_and_update_re_render(
 
     result = _run(ocx, project, command)
     assert result.returncode == EXIT_SUCCESS, result.stderr
-    assert (_toolchain_home(project) / "bin" / binary).exists(), (
+    assert (shell_bin(_toolchain_home(project)) / binary).exists(), (
         f"C-054 — `ocx {command}` must re-render the toolchain home"
     )
 
@@ -656,7 +657,7 @@ def test_update_narrowed_to_one_group_still_re_renders_the_whole_home(
     mutation command the ruling can read on.)
 
     Mutation that reds it: narrowing the render to the groups ``-g`` named,
-    which would leave ``bin/`` — the default group's directory — describing a
+    which would leave ``shells/default/bin`` — the default group's directory — describing a
     lock that no longer exists.
     """
     default_tool = _published_tool(ocx, tmp_path, "dflt", bins=["wp8default"])
@@ -670,7 +671,7 @@ def test_update_narrowed_to_one_group_still_re_renders_the_whole_home(
 
     assert _run(ocx, project, "lock").returncode == EXIT_SUCCESS
     home = _toolchain_home(project)
-    assert (home / "bin" / "wp8default").exists(), (
+    assert (shell_bin(home) / "wp8default").exists(), (
         "the control: the whole-home render must have run once, or a narrowed "
         "re-render cannot be told from a tree that was never built"
     )
@@ -681,8 +682,8 @@ def test_update_narrowed_to_one_group_still_re_renders_the_whole_home(
     result = _run(ocx, project, "update", "-g", "ci")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
-    assert (home / "bin" / "wp8default").exists(), (
-        "RUL-59 — `-g ci` narrows resolution, not the tree: `bin/` still covers "
+    assert (shell_bin(home) / "wp8default").exists(), (
+        "RUL-59 — `-g ci` narrows resolution, not the tree: `shells/default/bin` still covers "
         "the default group"
     )
 
@@ -701,7 +702,7 @@ def test_a_render_skip_never_rolls_the_commit_back(
     project, binary = locked_project
     assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
     home = _toolchain_home(project)
-    assert (home / "bin" / binary).exists(), (
+    assert (shell_bin(home) / binary).exists(), (
         "the control: there must be a rendered tree to make unwritable, or the "
         "skip this case is about can never be provoked"
     )
@@ -744,7 +745,7 @@ def test_pull_dry_run_over_a_poisoned_tree_writes_nothing(
     assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
 
     # Poison: repoint the rendered trampoline at a foreign body.
-    poisoned = _toolchain_home(project) / "bin" / binary
+    poisoned = shell_bin(_toolchain_home(project)) / binary
     assert poisoned.exists(), (
         "the control: there must be a rendered trampoline to poison, or "
         "'the poisoned link is still present afterwards' is vacuous"
@@ -788,7 +789,7 @@ def test_exec_never_resolves_a_command_out_of_a_trampoline_directory(
     """
     project, binary = locked_project
     assert _run(ocx, project, "pull").returncode == EXIT_SUCCESS
-    trampoline = _toolchain_home(project) / "bin" / binary
+    trampoline = shell_bin(_toolchain_home(project)) / binary
     assert trampoline.exists(), "the control: the trampoline must exist"
 
     # Replace the body with one that still carries the trampoline marker but
@@ -836,7 +837,7 @@ def test_exec_refuses_a_foreign_trampoline_answer(
     the input on which C-069 is the only defence.
     """
     project, _ = locked_project
-    foreign_bin = tmp_path / "foreign" / "toolchain" / "bin"
+    foreign_bin = shell_bin(tmp_path / "foreign" / "toolchain")
     foreign_bin.mkdir(parents=True)
     foreign = foreign_bin / "wp8foreign"
     foreign.write_text(
