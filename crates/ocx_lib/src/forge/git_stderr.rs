@@ -175,6 +175,8 @@ const CAPABILITY_REMEDY: &str = "field unreadable (GitLab < 18.4 or hidden); pus
 /// credential is reported against.
 #[must_use]
 pub fn classify_push_failure(
+    status: String,
+    stdout: &Redacted,
     stderr: Redacted,
     preflight: &PushAccess,
     branch: &str,
@@ -200,7 +202,16 @@ pub fn classify_push_failure(
     let refusal = REFUSAL_NEEDLES
         .iter()
         .find(|&&(needle, scope, _)| match scope {
-            MatchScope::Body => stderr.as_str().contains(needle),
+            // **Both channels, because `--porcelain` moves the ref-status line
+            // onto stdout.** The reject reason (`(fetch first)`, `(stale info)`)
+            // is written per-ref, and with `--porcelain` git writes that table
+            // to stdout in a tab-separated form it documents for scripts, while
+            // the prose `error:`/`hint:` frame stays on stderr. Reading only
+            // stderr made the verdict depend on git's *prose*, which CI was
+            // observed to emit as nothing at all — an empty body matches no
+            // needle, so a plain non-fast-forward reached the operator as an
+            // unclassified exit 1.
+            MatchScope::Body => stdout.as_str().contains(needle) || stderr.as_str().contains(needle),
             MatchScope::RemoteLine => stderr
                 .as_str()
                 .lines()
@@ -210,7 +221,7 @@ pub fn classify_push_failure(
         .map(|&(_, _, refusal)| refusal);
 
     let Some(refusal) = refusal else {
-        return ForgeError::GitPushFailed { stderr };
+        return ForgeError::GitPushFailed { status, stderr };
     };
     let branch = branch.to_string();
     match refusal {
@@ -483,7 +494,15 @@ mod tests {
 
     /// Classify `text` with a `job-token-push` row reading `status`.
     fn classify(text: &str, status: CheckStatus) -> ForgeError {
-        classify_push_failure(redacted(text), &preflight(status), BRANCH, REPO, REMOTE)
+        classify_push_failure(
+            STATUS.to_string(),
+            &redacted(""),
+            redacted(text),
+            &preflight(status),
+            BRANCH,
+            REPO,
+            REMOTE,
+        )
     }
 
     /// git's own frame around a rejection line, in the shape git 2.54.0 prints
@@ -668,11 +687,15 @@ mod tests {
     fn unrecognised_stderr_is_exit_1_redacted() {
         let text = push_stderr("error: remote unpack failed: unable to create temporary object directory");
         match classify(&text, CheckStatus::Unknown) {
-            ForgeError::GitPushFailed { stderr } => {
+            ForgeError::GitPushFailed { status, stderr } => {
                 assert_eq!(
                     stderr.as_str(),
                     text,
                     "the fallback passes the redacted text through unchanged"
+                );
+                assert_eq!(
+                    status, STATUS,
+                    "…and names the exit status, so an unclassified failure is diagnosable at all"
                 );
             }
             other => panic!("an unmodelled refusal must fall through; got {other:?}"),
@@ -906,17 +929,97 @@ mod tests {
     fn empty_and_whitespace_only_stderr_degrade_to_the_bare_form() {
         for text in ["", "   \n\t\n"] {
             match classify(text, CheckStatus::Unknown) {
-                ForgeError::GitPushFailed { stderr } => {
+                ForgeError::GitPushFailed { status, stderr } => {
                     assert_eq!(stderr.as_str(), text, "the empty body is passed through as it arrived");
-                    let rendered = ForgeError::GitPushFailed { stderr }.to_string();
+                    let rendered = ForgeError::GitPushFailed { status, stderr }.to_string();
                     assert!(
-                        rendered.starts_with("git push failed:"),
-                        "an empty payload must still render the bare sentence, got {rendered:?}"
+                        rendered.starts_with("git push failed (") && rendered.contains(STATUS),
+                        "an empty payload must still render the bare sentence, and it names the \
+                         exit status so an unclassified failure is diagnosable, got {rendered:?}"
                     );
                 }
                 other => panic!("an empty body has no phrase to match; got {other:?}"),
             }
         }
+    }
+
+    /// The ref-status line on **stdout** classifies on its own, with stderr
+    /// empty.
+    ///
+    /// This is the shipped shape after `--porcelain`: git writes the per-ref
+    /// verdict to stdout as `!\t<refspec>\t[rejected] (fetch first)` and the
+    /// prose frame to stderr. It is also the exact state CI was observed in —
+    /// a rejected push whose stderr arrived empty on both Linux and macOS,
+    /// where reading stderr alone made an ordinary concurrent-writer rejection
+    /// an unclassified exit 1.
+    ///
+    /// RED: drop `stdout.as_str().contains(needle) ||` from the `Body` arm of
+    /// the needle scan — the row falls through to `Unrecognised`, which is the
+    /// defect this pair exists to keep out.
+    #[test]
+    fn a_porcelain_reject_on_stdout_classifies_with_an_empty_stderr() {
+        let porcelain = "To file:///tmp/remote\n\
+             !\trefs/heads/claim:refs/heads/claim\t[rejected] (fetch first)\n\
+             Done\n";
+        let classified = classify_push_failure(
+            STATUS.to_string(),
+            &redacted(porcelain),
+            redacted(""),
+            &preflight(CheckStatus::Unknown),
+            BRANCH,
+            REPO,
+            REMOTE,
+        );
+        assert_eq!(
+            outcome_of(&classified),
+            Outcome::NonFastForward,
+            "the verdict is on stdout under `--porcelain`; an empty stderr must not lose it, got {classified:?}"
+        );
+
+        // The stale-lease reason travels the same channel, so the two rows move
+        // together or neither does.
+        let leased = "To file:///tmp/remote\n\
+             !\trefs/heads/claim:refs/heads/claim\t[rejected] (stale info)\n\
+             Done\n";
+        assert_eq!(
+            outcome_of(&classify_push_failure(
+                STATUS.to_string(),
+                &redacted(leased),
+                redacted(""),
+                &preflight(CheckStatus::Unknown),
+                BRANCH,
+                REPO,
+                REMOTE,
+            )),
+            Outcome::StaleLease,
+            "a lease refusal is a stdout verdict too"
+        );
+    }
+
+    /// Neither channel carrying a phrase still degrades to the fallback — and
+    /// the fallback now names the exit status.
+    ///
+    /// The positive control for the row above: it proves the stdout arm reads
+    /// the *needle* rather than answering `NonFastForward` for any non-empty
+    /// stdout at all.
+    #[test]
+    fn a_porcelain_success_line_on_stdout_is_not_a_refusal() {
+        let porcelain = "To file:///tmp/remote\n\
+             \trefs/heads/claim:refs/heads/claim\t[up to date]\n\
+             Done\n";
+        assert_eq!(
+            outcome_of(&classify_push_failure(
+                STATUS.to_string(),
+                &redacted(porcelain),
+                redacted(""),
+                &preflight(CheckStatus::Unknown),
+                BRANCH,
+                REPO,
+                REMOTE,
+            )),
+            Outcome::Unrecognised,
+            "a stdout body with no refusal phrase must not manufacture a verdict"
+        );
     }
 
     /// A redaction marker landing mid-phrase degrades the run, and can never
@@ -947,6 +1050,8 @@ mod tests {
         );
         assert_eq!(
             outcome_of(&classify_push_failure(
+                STATUS.to_string(),
+                &redacted(""),
                 shredded,
                 &preflight(CheckStatus::Unknown),
                 BRANCH,
@@ -963,6 +1068,8 @@ mod tests {
         );
         assert_eq!(
             outcome_of(&classify_push_failure(
+                STATUS.to_string(),
+                &redacted(""),
                 masked,
                 &preflight(CheckStatus::Unknown),
                 BRANCH,
@@ -1090,6 +1197,10 @@ mod tests {
     /// The remote every case below is opened against. Carries no credential,
     /// which is the property that makes it safe to name in an error.
     const REMOTE: &str = "https://gitlab.example/acme/index.git";
+
+    /// The exit status the classifier's fallback carries, for the tests that do
+    /// not care which one it was.
+    const STATUS: &str = "exit status: 1";
 
     /// The three recorded rejection shapes, verbatim, as git 2.54.0 printed them
     /// against a loopback server answering `GET /info/refs`.
