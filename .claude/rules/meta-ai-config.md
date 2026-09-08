@@ -21,11 +21,14 @@ Path-scoped rules no fire during plan/research/architecture — no file open. Sk
 
 ### Current Global Rules (no `paths:` frontmatter)
 
-Three rules under `.claude/rules/` no `paths:` frontmatter, load unconditional every session. Also list in `rules.md` "Globals" footer. Any change to set must update both enumeration and `rules.md`.
+Four rules under `.claude/rules/` no `paths:` frontmatter, load unconditional every session. Also list in `rules.md` "Globals" footer. Any change to set must update both enumeration and `rules.md`.
 
 1. `quality-core.md` — universal code quality
 2. `product-tech-strategy.md` — tech golden paths
 3. `workflow-intent.md` — work-type router (must fire at first touch)
+4. `hex-state.md` — hex mode state lives in files (vendored via `hex` bundle, `grimoire.lock`)
+
+A vendored global cost same context as hand-written one, so count it. Lever over it = bundle set in `grimoire.toml`, not an edit to the file.
 
 Two more always-load files reach Claude by different mechanism, *not* count here because no use path-scope frontmatter layer:
 
@@ -34,7 +37,7 @@ Two more always-load files reach Claude by different mechanism, *not* count here
 
 `meta-ai-config.md` path-scoped to `.claude/**` (not true global); load when AI config files edit.
 
-If strict count drift from 3, `test_global_rule_count_matches` fail.
+If strict count drift from 4, `test_global_rule_count_matches` fail.
 
 ## Core Principle: Context Budget
 
@@ -94,8 +97,8 @@ See `/swarm-plan` "Research as a Reusable Primitive" for full pattern contract.
 - `description` = #1 discovery factor — write trigger phrasing (Contextual Signal Only / CSO policy, see `.claude/artifacts/adr_ai_config_skill_description_csopolicy.md`). Forbidden verbs: `dispatches|runs|iterates|orchestrates|performs|executes|handles` — cause Claude read description as workflow and skip body. Front-load discriminating keywords (truncation cut from end). Max 1024 chars per skill.
 - `argument-hint` must be quoted string
 - `allowed-tools` NOT supported in frontmatter
-- `disable-model-invocation: true` for action skills with side effects (deploy, release, config mutation). Owner may unlock one deliberately when the skill's own workflow is the safety rail (`swarm-plan`, `swarm-execute`, `codex-adversary`, `commit`, `finalize`) — record it in `_EXPECTED_DISABLE_MODEL_INVOCATION` and `MODEL_INVOCABLE_ACTION_SKILLS` in `.claude/tests/test_ai_config.py` the same commit
-- `triggers:` (required for `user-invocable: true` skills) — list of 3–7 literal phrases UserPromptSubmit routing hook match against user prompts (case-insensitive substring match). Hook read field at runtime from each SKILL.md — no encode triggers in hook code. Rules: each trigger ≥2 words OR clear domain token (`deps`, `commit`, `finalize`); no duplicates across skills. When add new user-invocable skill, add `triggers:` same commit or `test_user_invocable_skills_have_triggers` fail.
+- `disable-model-invocation: true` for action skills with side effects (deploy, release, config mutation). Owner may unlock one deliberately when the skill's own workflow is the safety rail (`commit`) — record it in `_EXPECTED_DISABLE_MODEL_INVOCATION` and `MODEL_INVOCABLE_ACTION_SKILLS` in `.claude/tests/test_ai_config.py` the same commit. Both tables scope to project-authored skills; a vendored skill's flag is upstream's
+- `triggers:` (required for `user-invocable: true` skills) — list of 3–7 literal phrases UserPromptSubmit routing hook match against user prompts (case-insensitive substring match). Hook read field at runtime from each SKILL.md — no encode triggers in hook code. Rules: each trigger ≥2 words OR clear domain token (`deps`, `commit`); no duplicates across skills. When add new user-invocable skill, add `triggers:` same commit or `test_user_invocable_skills_have_triggers` fail.
 - Progressive disclosure: SKILL.md <500 lines, reference files for details
 - `context: fork` to run in isolated subagent (protect main context)
 - **No category subdirectories.** Claude Code discover skills at `.claude/skills/<name>/SKILL.md` exact, no recurse deeper for in-project skills. Nest for grouping (e.g., `personas/`, `operations/`) silently break `/slash-command` discovery. Enforce at test layer.
@@ -238,7 +241,7 @@ When edit any `.claude/` artifact:
 - [ ] Cross-refs point to existing files
 - [ ] New rules reference subsystem context rules where relevant
 - [ ] CLAUDE.md stay under 200 lines
-- [ ] Global rules total manageable (current 3 — monitor growth; see `### Current Global Rules` above for strict definition)
+- [ ] Global rules total manageable (current 4 — monitor growth; see `### Current Global Rules` above for strict definition)
 - [ ] AI config structural tests pass: `task claude:tests`
 
 ## Structural Validation Tests

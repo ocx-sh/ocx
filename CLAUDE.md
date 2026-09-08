@@ -141,13 +141,13 @@ On user feedback or corrections, evaluate if insight should persist as AI config
 
 Commits: [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `ci:`, `chore:`). No `Co-Authored-By` trailers. `chore:` for AI settings/CLAUDE.md/tooling (no changelog).
 
-Dev cycle: `task checkpoint` (amends single "Checkpoint" commit). Landing: `/finalize` (clean → conventional commits → fast-forward onto main). Full → [workflow-git.md](./.claude/rules/workflow-git.md).
+Dev cycle: `task checkpoint` (amends single "Checkpoint" commit). Landing: `/hex-finalize` (clean → conventional commits → fast-forward onto main). Full → [workflow-git.md](./.claude/rules/workflow-git.md).
 
 Planning flow: ADR → Design Spec → Plan → Implementation. Artifacts → `./.claude/artifacts/`; templates → `./.claude/templates/artifacts/`. Filename patterns: `adr_<topic>.md`, `system_design_<comp>.md`, `design_spec_<comp>.md`, `plan_<task>.md`, `security_audit_<date>.md`.
 
 ## Skills & Personas
 
-Persona skills (`/architect`, `/builder`, `/qa-engineer`, `/security-auditor`, `/code-check`, `/swarm-plan`, `/swarm-execute`, `/swarm-review`) + task skills in `.claude/skills/`. Map → "Skills by task topic" in [.claude/rules.md](./.claude/rules.md). Check before ad-hoc gen.
+Persona skills (`/builder`, `/qa-engineer`, `/security-auditor`, `/code-check`) + the vendored hex multi-agent bundle (`/hex-discuss`, `/hex-architect`, `/hex-plan`, `/hex-execute`, `/hex-review`, `/hex-finalize`) + task skills in `.claude/skills/`. Map → "Skills by task topic" in [.claude/rules.md](./.claude/rules.md). Check before ad-hoc gen.
 
 ## Starting Work
 
