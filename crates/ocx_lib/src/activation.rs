@@ -2672,6 +2672,88 @@ mod session_path_tests {
         );
     }
 
+    /// **C-078's routed edge, refuted.** A dangling `active` does not shelter
+    /// the physical spelling from the reconciler's repair.
+    ///
+    /// The concern routed here was that `owned_spellings`
+    /// (`shell/reconcile/plan.rs:768-779`) derives its second spelling with
+    /// `std::fs::canonicalize`, which fails on a broken link — so with `active`
+    /// dangling only the literal spelling would count as owned and a stale
+    /// `shells/<shell>/bin` segment would survive on `PATH`.
+    ///
+    /// It cannot happen, and the reason is what `owned_prefixes` holds:
+    /// `$OCX_HOME` and the project's toolchain **home root** (C-063), never a
+    /// `bin` directory and never `active`. `is_owned` is a component-wise
+    /// `starts_with` against those roots, so both `<root>/active/bin` and
+    /// `<root>/shells/<shell>/bin` are owned by their shared prefix, and
+    /// canonicalising `<root>` never traverses `<root>/active` at all.
+    ///
+    /// Driven over a **real** tree rather than this module's synthetic paths,
+    /// because the claim is about what `canonicalize` does: the home root
+    /// resolves, `active` does not, and the removal happens anyway. The narrow
+    /// twin below keeps it from passing for the wrong reason.
+    ///
+    /// RED: drop the project home from `owned_prefixes` (the `narrow` half), or
+    /// re-derive ownership from the resolved `bin()` path instead of the root.
+    #[test]
+    #[cfg(unix)]
+    fn c078_a_dangling_active_does_not_shelter_the_physical_segment_from_the_repair() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("toolchain");
+        let home = crate::file_structure::ToolchainHome::new(&root);
+        let physical = home.shell_bin(crate::file_structure::DEFAULT_SHELL);
+        std::fs::create_dir_all(&physical).expect("the physical tree is creatable");
+        std::os::unix::fs::symlink("shells/gone", home.active()).expect("a dangling `active` is creatable");
+
+        // The premise, asserted rather than assumed: this is the state the
+        // routed concern is about, and the home root still resolves.
+        assert!(
+            std::fs::canonicalize(home.active()).is_err(),
+            "precondition: `active` must not resolve"
+        );
+        assert!(
+            std::fs::canonicalize(&root).is_ok(),
+            "precondition: the owned prefix resolves — `active` is not on its path"
+        );
+
+        let mut current = Env::clean();
+        current.set(
+            "PATH",
+            std::env::join_paths([physical.as_os_str(), std::ffi::OsStr::new("/usr/bin")]).expect("joins"),
+        );
+
+        // `bin` mode last prompt, `none` this one, so nothing under the home is
+        // contributed and every owned segment is stale.
+        let was_bin = outcome(
+            SessionPath {
+                global_bin: global_bin(),
+                project_bin: Some(home.bin()),
+                install_bin: install_bin(),
+            },
+            Vec::new(),
+            Vec::new(),
+            Some(root.clone()),
+        );
+        let ledger = next_ledger(&Ledger::empty(), "fp-1", &was_bin, &Env::clean());
+        let now_none = outcome(session(), Vec::new(), Vec::new(), Some(root.clone()));
+
+        let owned: Vec<&Path> = vec![Path::new(OCX_HOME), root.as_path()];
+        let plan = plan_for(&ledger, &now_none, &owned, &current);
+        let removed: Vec<&str> = plan.removes.iter().map(|(_, element, _)| element.as_str()).collect();
+        assert!(
+            removed.contains(&physical.to_string_lossy().as_ref()),
+            "C-078: ownership is component-wise against the home root, which a broken `active` \
+             cannot reach; got {removed:#?}"
+        );
+
+        let narrow = plan_for(&ledger, &now_none, &[Path::new(OCX_HOME)], &current);
+        assert!(
+            narrow.removes.is_empty(),
+            "the two operands must genuinely differ, or the assertion above is vacuous; got {:#?}",
+            narrow.removes
+        );
+    }
+
     /// C-063 — the negative half, and the security-relevant one:
     /// `owned_prefixes` may never carry the bare `toolchain-dir` root. That
     /// root holds **other projects'** homes, so owning it makes this prompt a
