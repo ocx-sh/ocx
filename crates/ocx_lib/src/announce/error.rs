@@ -127,6 +127,24 @@ pub enum AnnounceError {
     #[error("__ocx.desc disappeared from {repository} (was {digest})")]
     DescDisappeared { repository: String, digest: String },
 
+    /// The regenerated root would delete a tag the root it was built from
+    /// carried, under a selection that never deletes.
+    ///
+    /// The invariant `adr_announce_diverged_branch_rebuild.md` states — *no tag
+    /// announced into an open pull request is ever lost* — asserted at the one
+    /// place it can be measured cheaply. #228, #399 and #436 are three routes to
+    /// breaking it, each found in production after a silent loss; this refuses
+    /// the fourth without knowing what it is.
+    ///
+    /// It reads the base root, so it means something only because
+    /// `GitWorkspace::commit_files` now refuses a fast-forward onto a head the
+    /// run did not read: that is what makes the root this was built from the
+    /// tree the commit lands on. Reserved tags (D7) and
+    /// [`TagSelection::Replace`](crate::announce::TagSelection::Replace) are
+    /// excluded at the call site — both delete by design.
+    #[error("regenerating {path} would drop committed tags never selected for removal: {}", tags.join(", "))]
+    CommittedTagsDropped { path: String, tags: Vec<String> },
+
     /// Listing the physical repository's tags failed (`--tags-from-registry`).
     ///
     /// Boxed for the same reason as [`Self::Observe`].
@@ -222,6 +240,11 @@ impl crate::cli::ClassifyExitCode for AnnounceError {
             // category, same as `TagIsNotAnImageIndex`, and discriminable from
             // an unclassified crash.
             Self::DescDisappeared { .. } => Some(crate::cli::ExitCode::DataError),
+            // The two sides disagree and only a human can say which is right —
+            // the same category and the same precedent as `DescDisappeared`.
+            // Never `TempFail`: a rerun reproduces it exactly, so inviting a
+            // retry would loop a publisher on a defect that needs reporting.
+            Self::CommittedTagsDropped { .. } => Some(crate::cli::ExitCode::DataError),
             // A publisher typo — the tag genuinely does not exist on the
             // physical registry. Same category as `ClientError::ManifestNotFound`.
             Self::UnresolvedTag { .. } => Some(crate::cli::ExitCode::NotFound),
@@ -414,6 +437,35 @@ mod tests {
             message.contains(&format!("sha256:{}", "a".repeat(64))),
             "the message must name the digest the root recorded: {message}"
         );
+    }
+
+    /// The #436 tripwire classifies like its `DescDisappeared` sibling, and the
+    /// message names every tag it refused to delete.
+    ///
+    /// The guard's whole point is that nothing reachable today fires it — which
+    /// is exactly why the arm needs a row of its own. Without one, both the
+    /// exit code a release wrapper branches on and the message an operator has
+    /// to act on are green only because no test and no production path ever ran
+    /// them. Never `TempFail`: a rerun reproduces it, so a retry would loop.
+    #[test]
+    fn committed_tags_dropped_classifies_as_data_error() {
+        let error = AnnounceError::CommittedTagsDropped {
+            path: "p/acme/widget.json".to_string(),
+            tags: vec!["0.4.6".to_string(), "1.2.0".to_string()],
+        };
+        assert_eq!(error.classify(), Some(ExitCode::DataError));
+        let message = error.to_string();
+        assert!(
+            message.contains("p/acme/widget.json"),
+            "the message must name the root that would have lost them: {message}"
+        );
+        for tag in ["0.4.6", "1.2.0"] {
+            assert!(
+                message.contains(tag),
+                "the message must name every tag, or the operator cannot tell what was \
+                 about to be deleted; {tag} is missing from: {message}"
+            );
+        }
     }
 
     /// D2's refusal is the one announce failure a rerun cannot clear, so a

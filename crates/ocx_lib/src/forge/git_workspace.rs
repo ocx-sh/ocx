@@ -422,11 +422,34 @@ impl GitWorkspace {
     /// one. Reading `base.sha` unconditionally would drop every tag the branch
     /// already carried.
     ///
+    /// **Accumulating, that head must be the base the caller read.** The files
+    /// it hands over were regenerated from one commit's root, and laying them on
+    /// a different commit's tree deletes whatever that commit added — silently,
+    /// because parenting on the remote head makes the push a genuine
+    /// fast-forward and no refusal is ever raised ([#436]). A head this run did
+    /// not read is therefore [`ForgeError::NonFastForward`], the same answer a
+    /// push race already gets, so the caller re-reads it and rebuilds on it.
+    ///
+    /// The REST arms need no such check, each for its own reason, and neither
+    /// is this one — the guarantee below is the git workspace's alone. GitHub
+    /// builds every commit on the base tree with `base.sha` as its parent
+    /// (`github.rs`, `commit_files_once`) and updates the ref with
+    /// `force: false`, so a branch that moved is not a descendant and the ref
+    /// update refuses. GitLab does parent on the branch head once the branch
+    /// exists — `start_sha`/`start_project` are sent only when it does not, or
+    /// under `Reset` — but every file action carries the `last_commit_id` read
+    /// at `base.sha`, and a head whose root was written by another commit fails
+    /// that per-file compare-and-swap. This is the only place a commit can end
+    /// up parented on something the caller never saw *and* be accepted.
+    ///
+    /// [#436]: https://github.com/ocx-sh/ocx/issues/436
+    ///
     /// # Errors
     ///
     /// Returns [`ForgeError::NonFastForward`] when the local ref moved under a
-    /// fast-forward-only update, or [`ForgeError::GitCommandFailed`] when a
-    /// plumbing step fails.
+    /// fast-forward-only update, or when the branch head a fast-forward would
+    /// parent on is not the base the caller read; [`ForgeError::GitCommandFailed`]
+    /// when a plumbing step fails.
     pub async fn commit_files(
         &self,
         branch: &str,
@@ -442,8 +465,16 @@ impl GitWorkspace {
         let expected = self.resolve(&format!("refs/heads/{branch}")).await?;
         let head = self.resolve(&self.tracking(branch)).await?;
         let parent = match (update, head) {
-            (RefUpdate::FastForward, Some(head)) => head,
-            (RefUpdate::Reset, _) | (RefUpdate::FastForward, None) => base.sha.to_string(),
+            // The caller read its root at `base.sha`; a head that is not that
+            // commit carries content the root was never derived from. See the
+            // doc comment above — this is #436, and it is silent without the arm.
+            (RefUpdate::FastForward, Some(head)) if head != base.sha => {
+                return Err(ForgeError::NonFastForward {
+                    branch: branch.to_string(),
+                });
+            }
+            (RefUpdate::FastForward | RefUpdate::Accumulate, Some(head)) => head,
+            (RefUpdate::Reset, _) | (RefUpdate::FastForward | RefUpdate::Accumulate, None) => base.sha.to_string(),
         };
 
         let staging = self.repository().join(STAGING_DIRECTORY);
@@ -1797,7 +1828,7 @@ mod tests {
                 },
                 "claim acme/widget",
                 &claim_files(),
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
             )
             .await
             .expect("the commit chain");
@@ -1949,7 +1980,7 @@ mod tests {
                 },
                 "claim acme/widget",
                 &claim_files(),
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
             )
             .await
             .expect("the commit chain");
@@ -2050,7 +2081,7 @@ mod tests {
                 },
                 "claim acme/widget",
                 &claim_files(),
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
             )
             .await
             .expect("the commit chain must not need a blob the base tree already has");
@@ -2106,7 +2137,7 @@ mod tests {
                 },
                 "claim acme/widget",
                 &claim_files(),
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
             )
             .await
             .expect("the commit chain");
@@ -2172,7 +2203,7 @@ mod tests {
                 },
                 "claim acme/widget",
                 &claim_files(),
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
             )
             .await
             .expect("the commit chain");
@@ -2240,11 +2271,11 @@ mod tests {
         };
 
         let first = workspace
-            .commit_files("claim", commit_base, "first", &claim_files(), RefUpdate::FastForward)
+            .commit_files("claim", commit_base, "first", &claim_files(), RefUpdate::Accumulate)
             .await
             .expect("the first commit creates the branch");
         let second = workspace
-            .commit_files("claim", commit_base, "second", &claim_files(), RefUpdate::FastForward)
+            .commit_files("claim", commit_base, "second", &claim_files(), RefUpdate::Accumulate)
             .await
             .expect("the second commit accumulates");
 
@@ -2327,7 +2358,7 @@ mod tests {
                 },
                 "claim acme/widget",
                 &claim_files(),
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
             )
             .await
             .expect("the commit chain");
@@ -2348,6 +2379,91 @@ mod tests {
         assert!(
             committer.starts_with("committer ocx <noreply@ocx.sh>"),
             "the committer is ocx's fixed identity, got {committer:?}"
+        );
+    }
+
+    /// #436: a `FastForward` whose branch head is not the base the caller read
+    /// is refused, and nothing is written.
+    ///
+    /// The shape a production announce hit: the run read its root from the index
+    /// base because the forge's branch listing answered "no branch", the git
+    /// fetch then found one, and the commit was parented on that head. The push
+    /// was a genuine fast-forward, so no CAS anywhere refused it, and a released
+    /// version tag left the index with both runs reporting success.
+    ///
+    /// Two clauses, and the second is the one that matters. "It returned an
+    /// error" would pass for a build that refused *after* writing the commit and
+    /// moving the local ref — the ref move is what the push would then carry —
+    /// so the absence of a `commit-tree` is what says the refusal came first.
+    ///
+    /// `Accumulate` is the control: the identical fixture, differing only in the
+    /// caller's declared relationship to its base, must still commit. Without it
+    /// this row passes against a build that refuses every fast-forward onto an
+    /// existing head, which would strand every `Ahead` claim.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fast_forward_refuses_a_head_the_caller_did_not_read() {
+        let fixture = Fixture::new().await;
+        fixture.branch_at("claim", "main", 1).await;
+        let base = fixture.remote_sha("main").await;
+        let head = fixture.remote_sha("claim").await;
+        assert_ne!(base, head, "the fixture must put the branch ahead of the base");
+        let workspace = GitWorkspace::open(&fixture.shim, &fixture.remote(), "main", Some("claim"), None)
+            .await
+            .expect("open");
+        let coordinate = "acme/index"
+            .parse::<crate::forge::RepoCoordinate>()
+            .expect("a coordinate");
+        let commit_base = CommitBase {
+            repo: &coordinate,
+            sha: &base,
+            branch: "main",
+        };
+
+        let refused = workspace
+            .commit_files(
+                "claim",
+                commit_base,
+                "derived from main",
+                &claim_files(),
+                RefUpdate::FastForward,
+            )
+            .await
+            .expect_err("a payload derived from the base may not be laid on another head");
+        assert!(
+            matches!(refused, ForgeError::NonFastForward { ref branch } if branch == "claim"),
+            "the caller retries a race, so the refusal must be spelled as one; got {refused:?}"
+        );
+        assert!(
+            fixture.calls("commit-tree").is_empty(),
+            "the refusal precedes the write, or a commit the caller never learned about \
+             is already sitting on the local ref: {:?}",
+            fixture.calls("commit-tree")
+        );
+
+        workspace
+            .commit_files(
+                "claim",
+                commit_base,
+                "authored whole",
+                &claim_files(),
+                RefUpdate::Accumulate,
+            )
+            .await
+            .expect("a payload independent of the base still accumulates onto the head");
+        let commits = fixture.calls("commit-tree");
+        assert_eq!(commits.len(), 1, "exactly the control commit: {commits:?}");
+        let parents: Vec<&String> = commits[0]
+            .args
+            .iter()
+            .skip_while(|argument| *argument != "-p")
+            .skip(1)
+            .take(1)
+            .collect();
+        assert_eq!(
+            parents.first().map(|sha| sha.as_str()),
+            Some(head.as_str()),
+            "and it parents on the head, which is the behaviour `FastForward` refuses"
         );
     }
 
@@ -2387,7 +2503,7 @@ mod tests {
                 commit_base,
                 "accumulate",
                 &claim_files(),
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
             )
             .await
             .expect("the accumulating commit");
@@ -2502,7 +2618,7 @@ mod tests {
                 },
                 "claim acme/widget",
                 &claim_files(),
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
             )
             .await
             .expect("the commit chain");
@@ -2553,7 +2669,7 @@ mod tests {
                 commit_base,
                 "claim acme/widget",
                 &claim_files(),
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
             )
             .await
             .expect("the first commit");
@@ -2578,7 +2694,7 @@ mod tests {
                 commit_base,
                 "claim acme/widget",
                 &claim_files(),
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
             )
             .await
             .expect("the regenerated commit");
@@ -2647,7 +2763,7 @@ mod tests {
                 },
                 "claim acme/widget",
                 &claim_files(),
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
             )
             .await
             .expect("the commit chain");
@@ -2989,7 +3105,7 @@ mod tests {
                 },
                 "claim acme/widget",
                 &claim_files(),
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
             )
             .await
             .expect("the commit chain");
@@ -3172,7 +3288,7 @@ mod tests {
                 },
                 "claim three",
                 &files,
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
             )
             .await
             .expect("the commit chain");
@@ -3322,7 +3438,7 @@ mod tests {
                 },
                 "claim acme/widget",
                 &claim_files(),
-                RefUpdate::FastForward,
+                RefUpdate::Accumulate,
             )
             .await
             .expect("the commit chain");

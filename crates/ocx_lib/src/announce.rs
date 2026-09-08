@@ -318,6 +318,21 @@ pub async fn announce(
             // `open_or_update_pull_request`, so the rejection arrives there.
             // Retrying around the commit alone therefore lets a concurrent
             // announce be lost under exactly the transport that needs it most.
+            // The one line this path emits, and it exists because #436 could
+            // not be explained from a run's own output: two announces both
+            // reported `updated` and exit 0 while one deleted the other's tag,
+            // and reconstructing which commit each had been built on took a
+            // commit-diff forensics session. These four fields name that
+            // directly. INFO because it is the default console level, so the
+            // next report of this class arrives with the answer attached.
+            tracing::info!(
+                branch = %branch,
+                state = branch_state.name(),
+                base_ref = %base_branch,
+                base_sha = %base_sha,
+                ref_update = ?branch_state.ref_update(),
+                "committing the announce"
+            );
             let first_attempt = match forge
                 .commit_files(
                     &commit_repo,
@@ -361,23 +376,51 @@ pub async fn announce(
                 // could tell the two behaviours apart.
                 Err(crate::forge::ForgeError::NonFastForward { .. } | crate::forge::ForgeError::StaleLease { .. }) => {
                     // WHOSE head to re-read is the same question the first
-                    // attempt already answered. An accumulating run raced
+                    // attempt already answered — and the ref update it chose is
+                    // what recorded the answer. An accumulating run raced
                     // another announce on the branch, so the branch head is the
                     // winner. A rebuilt run (spent or stale) never based on the
                     // branch at all — it lost to the index main moving under it,
                     // and re-reading the branch head here would turn the rebuild
                     // straight back into accumulate-on-stale, which is #399 in
                     // the retry path.
-                    let (retry_repo, retry_branch) = match root_read.branch_sha {
-                        Some(_) => (&commit_repo, branch.as_str()),
-                        None => (&request.index_repo, INDEX_BASE_REF),
+                    //
+                    // `root_read.branch_sha` stood in for this and is wrong on
+                    // one arm: it is `None` for a rebuild AND for an `Absent`
+                    // accumulate, so an `Absent` run that raced re-read the index
+                    // main, regenerated the same main-derived root, and was
+                    // refused again — one silent tag loss traded for a permanent
+                    // exit 75 (#436). `ref_update()` separates the two, and it is
+                    // what the ADR's own wording names ("whenever the first
+                    // attempt used `Reset`").
+                    // Announce never renders a root independently of its base,
+                    // so it never asks for `Accumulate`; the arm is here because
+                    // the enum is total, not because the state machine reaches it.
+                    let branch_head = match branch_state.ref_update() {
+                        RefUpdate::FastForward | RefUpdate::Accumulate => {
+                            forge.get_ref_sha(&commit_repo, &format!("heads/{branch}")).await?
+                        }
+                        RefUpdate::Reset => None,
                     };
-                    let head_sha = forge
-                        .get_ref_sha(retry_repo, &format!("heads/{retry_branch}"))
-                        .await?
-                        .ok_or_else(|| AnnounceError::MissingBaseRef {
-                            repo: retry_repo.full_path(),
-                        })?;
+                    // No branch head on an accumulating retry means the branch
+                    // genuinely is not there — the rejection came from somewhere
+                    // other than a race on it (the open call, under `api`) — and
+                    // the index base is the only head there is. Should the ref
+                    // read be lying, as it was in #436, the commit is refused a
+                    // second time and the run exits 75 rather than deriving from
+                    // main unnoticed: `commit_files` backstops this arm.
+                    let (retry_repo, retry_branch, head_sha) = match branch_head {
+                        Some(sha) => (&commit_repo, branch.as_str(), sha),
+                        None => {
+                            let sha = forge
+                                .get_ref_sha(&request.index_repo, &format!("heads/{INDEX_BASE_REF}"))
+                                .await?
+                                .ok_or_else(|| AnnounceError::MissingBaseRef {
+                                    repo: request.index_repo.full_path(),
+                                })?;
+                            (&request.index_repo, INDEX_BASE_REF, sha)
+                        }
+                    };
                     let head_bytes = forge
                         .get_file_contents(retry_repo, &root_path, &head_sha)
                         .await?
@@ -428,6 +471,21 @@ pub async fn announce(
                         // the winning commit is never stranded without a request.
                         refuse_if_unmergeable(forge, &request.index_repo, &branch_state, &branch).await?;
                     } else {
+                        // The retry commits against a different ref than the
+                        // line above announced — the branch's own repository
+                        // when accumulating, the index main when rebuilding —
+                        // so a run that raced would otherwise leave a trace
+                        // naming a base it never committed on, which is the
+                        // exact reading #436 needed and did not have.
+                        tracing::info!(
+                            branch = %branch,
+                            state = branch_state.name(),
+                            base_ref = %retry_branch,
+                            base_sha = %head_sha,
+                            ref_update = ?branch_state.ref_update(),
+                            retry = true,
+                            "committing the announce"
+                        );
                         forge
                             // Same ref discipline as the first attempt, for the
                             // same reasons. Accumulating: the winning head IS
@@ -564,6 +622,32 @@ async fn observe_and_rebuild(
     // blobs ride along on every run regardless, exactly as the curated tags' do.
     let desc = pipeline::observe_desc(publisher, &physical, base_root).await?;
     let mut root = pipeline::regenerate(base_root, &observed, now);
+    // #436's second guard, and it is load-bearing only because of the first:
+    // `GitWorkspace::commit_files` now refuses a fast-forward onto a head this
+    // run did not read, so `base_root` IS the tree the commit lands on. A tag it
+    // carries that the regenerated set does not is therefore a deletion from the
+    // index, not the artefact of having read one commit and committed onto
+    // another — which is exactly what made #436 invisible.
+    //
+    // Scoped to the additive selections: `Replace` names its own universe (C3)
+    // and `reserved_dropped` is D7's deliberate removal, so both are excluded
+    // rather than refused. `regenerate` is the only step that rewrites `tags`;
+    // `apply_yank_markers` below marks entries and never removes one.
+    // Spelled as the three positives rather than `!Replace`: a negation opts a
+    // total match out of the exhaustiveness the compiler would otherwise give
+    // it, so a fifth selection would silently join the refusing set.
+    if matches!(
+        request.curated,
+        TagSelection::UnionFile(_) | TagSelection::Refresh | TagSelection::FromRegistry
+    ) {
+        let dropped = pipeline::dropped_committed_tags(&base_tags, &root, &reserved_dropped);
+        if !dropped.is_empty() {
+            return Err(AnnounceError::CommittedTagsDropped {
+                path: root_path.to_string(),
+                tags: dropped,
+            });
+        }
+    }
     if let Some(updated) = &desc.desc
         && let Some(object) = root.as_object_mut()
     {
@@ -680,6 +764,19 @@ enum BranchState {
 }
 
 impl BranchState {
+    /// The state's name, for the one log line the announce path emits.
+    ///
+    /// Not `Debug`: `Stale` carries a whole [`PullRequest`], and a log line that
+    /// prints it is one nobody reads.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Live => "live",
+            Self::Stale(_) => "stale",
+            Self::Spent => "spent",
+        }
+    }
+
     /// Whether the branch's own head may serve as the committed root for this
     /// announce. A stale branch may not: its shape is the frozen one.
     fn is_live(&self) -> bool {
@@ -1814,6 +1911,49 @@ mod tests {
         );
         let outcome = result.expect("a lost lease is a race, and a race is retried");
         assert!(outcome.pull_request.is_some(), "the retry produced a request");
+    }
+
+    /// The retry's fallback has nowhere to fall back to, and says so.
+    ///
+    /// An accumulating retry re-reads the branch; a branch that is genuinely
+    /// absent leaves the index base as the only head there is. That arm is
+    /// already ridden by every `Absent` retry row in this module — `FakeForge`
+    /// arms no `BRANCH_REF` unless a row asks for one, so each of them reaches
+    /// the fallback and would red with `MissingBaseRef` if it were deleted.
+    /// What none of them reaches is the fallback's own refusal, because they
+    /// all arm a base that repeats.
+    ///
+    /// A base that answers once and then vanishes is the one shape that gets
+    /// there: an index whose main was deleted under a racing announce. The
+    /// refusal has to be that error and not a panic or a silent absent-root,
+    /// because the retry would otherwise commit against no base at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_retry_whose_base_ref_vanished_names_the_missing_ref() {
+        let (registry, _) = seed_tags(&["1.0.0"]);
+        let forge = FakeForge::new()
+            .with_ref(MAIN_REF, &[Some("base"), None])
+            .with_root("base", &committed_root(serde_json::json!({})))
+            .failing_opens(vec![Some(ForgeError::NonFastForward {
+                branch: BRANCH.to_string(),
+            })]);
+
+        let result = run_announce(
+            &forge,
+            TagSelection::Replace(vec!["1.0.0".to_string()]),
+            AnnounceTarget::Direct,
+            registry,
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(AnnounceError::MissingBaseRef { .. })),
+            "a vanished base is named, never guessed at: {result:?}"
+        );
+        assert_eq!(
+            forge.commits().len(),
+            1,
+            "and nothing is committed against a base the run could not read"
+        );
     }
 
     /// A failure that is **not** a race must not retry.

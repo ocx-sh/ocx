@@ -1216,6 +1216,71 @@ def test_moved_target_refetch_and_second_push_succeeds(
     )
 
 
+def test_a_branch_the_forge_denies_never_loses_the_earlier_release(
+    ocx: OcxRunner, fake_forge: FakeForge, git_package: tuple[str, str, str], tmp_path: Path
+) -> None:
+    """#436, end to end: the forge's branch listing denies a branch its own git
+    side has, and the earlier release's tag survives anyway.
+
+    The reported run. Two releases a minute apart accumulate onto one open merge
+    request as designed; the second one's branch read answers "no branch" ~12s
+    after the first one's push created it, so the root is read from the index
+    base — which never carried the first tag — while the git fetch finds the head
+    and the commit is parented on it. The push is then a genuine fast-forward,
+    nothing refuses it, both runs report `updated` and exit 0, and a released
+    version tag is simply gone from the index.
+
+    Denied **once**, not permanently, and that is the difference between
+    measuring a refusal and measuring convergence: a fixture that lied on every
+    read would leave the run nowhere to retry to, and the row could then assert
+    nothing better than "it did not lose the tag because it did nothing".
+
+    The tag assertion is the invariant; the two clauses above it are what keep it
+    from reading a root nothing wrote. `--tags-file` rather than `--tags`, on
+    purpose: `Replace` names its own universe, so `2.0.0` would drop under it by
+    design and the row would be about C3 instead of about the parent.
+
+    Mutations, and each reds differently, which is what says they are two guards
+    and not one:
+
+    - Delete the `head != base.sha` arm of `commit_files` — the run exits 0 and
+      the tag assertion reds with `["1.0.0"]`. The defect verbatim.
+    - Keep that arm and key the retry on `root_read.branch_sha` again — the run
+      re-reads the index base, regenerates the same root, is refused a second
+      time and exits **75**, so `report` reds before any assertion runs.
+    """
+    package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
+    branch = branch_name(package)
+    # The earlier release, already announced onto the still-open branch.
+    branch_root = index_root_bytes(package, git_package[1], {"2.0.0": {"digest": "sha256:" + "0" * 64}})
+    head = fake_forge.git_seed_files(INDEX_FULL, branch, {f"p/{package}.json": branch_root})
+    denial = f"{INDEX_FULL}/{branch}"
+    fake_forge.gitlab_branch_reads_denied[denial] = 1
+
+    tags_file = tmp_path / "tags.txt"
+    tags_file.write_text("1.0.0\n", encoding="utf-8")
+    parsed = report(
+        announce_over_git(ocx, fake_forge, package, shim, home, "--tags-file", str(tags_file), tags=None)
+    )
+
+    assert fake_forge.gitlab_branch_reads_denied[denial] == 0, (
+        "the premise never fired: the run never listed the branch, so this row is "
+        "an ordinary accumulate wearing #436's name"
+    )
+    assert parsed["status"] == "updated", f"the announce must be a write: {parsed}"
+    pushes = fake_forge.git_pushes(INDEX_FULL)
+    assert len(pushes) == 1 and pushes[0].updates[0].old == head, (
+        f"one push, fast-forwarding the branch from the head it was denied: {pushes}"
+    )
+
+    await_import(fake_forge, branch)
+    root = json.loads(fake_forge.read_file(INDEX_OWNER, INDEX_REPO, f"p/{package}.json", branch=branch))
+    assert sorted(root["tags"]) == ["1.0.0", "2.0.0"], (
+        "the earlier release's tag must survive the second announce — its loss is "
+        f"the whole of #436: {root['tags']}"
+    )
+
+
 def test_stale_lease_on_a_rebuild_exits_75(
     ocx: OcxRunner, fake_forge: FakeForge, git_package: tuple[str, str, str], tmp_path: Path
 ) -> None:

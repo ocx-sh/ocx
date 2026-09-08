@@ -85,8 +85,35 @@ pub enum Mergeability {
 /// with [`ForgeError::NonFastForward`], never succeed by clobbering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefUpdate {
-    /// Reject an update that is not a fast-forward.
+    /// Reject an update that is not a fast-forward, and build on the base the
+    /// caller read — never on some other head the branch happens to carry.
+    ///
+    /// For a payload **derived from** the content at `base.sha`: an index root
+    /// regenerated from the root committed there. Laying such a payload on a
+    /// different commit's tree deletes whatever that commit added, and does it
+    /// silently, because parenting on the remote head makes the push a genuine
+    /// fast-forward and no refusal is ever raised ([#436]). So a branch head
+    /// that is not `base.sha` is [`ForgeError::NonFastForward`] — the same
+    /// answer a push race gets, which the caller already knows how to retry.
+    ///
+    /// [#436]: https://github.com/ocx-sh/ocx/issues/436
     FastForward,
+    /// Reject an update that is not a fast-forward, tolerating a branch head
+    /// the caller did not read.
+    ///
+    /// For a payload **independent of** `base.sha` — a claim root is rendered
+    /// wholly from the request, so there is nothing on the branch it could be
+    /// out of date with respect to, and refusing the existing head would strand
+    /// a branch that is merely ahead. The distinction from
+    /// [`FastForward`](Self::FastForward) is the parent, never the ref update:
+    /// both refuse a non-fast-forward push.
+    ///
+    /// Only the git workspace acts on that distinction, because it is the only
+    /// arm that chooses a parent at all: the REST arms parent identically under
+    /// both variants (GitHub always on `base.sha`; GitLab on the branch head
+    /// once the branch exists) and refuse the #436 shape by their own
+    /// compare-and-swap, so the two are interchangeable there.
+    Accumulate,
     /// Repoint the ref even when the new commit is not a descendant.
     Reset,
 }
