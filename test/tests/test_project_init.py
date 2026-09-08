@@ -22,14 +22,22 @@ EXIT_SUCCESS = 0
 EXIT_USAGE_ERROR = 64
 
 
-def _run_init(ocx: OcxRunner, cwd: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+def _run_init(
+    ocx: OcxRunner,
+    cwd: Path,
+    *extra: str,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     cmd = [str(ocx.binary), "init", *extra]
+    env = dict(ocx.env)
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         cmd,
         cwd=cwd,
         capture_output=True,
         text=True,
-        env=ocx.env, check=False,
+        env=env, check=False,
     )
 
 
@@ -212,4 +220,52 @@ def test_init_no_consent_writes_no_stamp(ocx: OcxRunner, tmp_path: Path) -> None
     assert (project_dir / "ocx.toml").exists(), "--no-consent must still create ocx.toml"
     assert _consent_stamps(ocx.ocx_home) == [], (
         "--no-consent must write no consent stamp"
+    )
+
+
+def test_init_with_no_consent_env_writes_no_stamp(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``OCX_NO_CONSENT=1 ocx init`` scaffolds without consenting (ocx-sh/ocx#400).
+
+    ``ocx init`` is the one allowlist member that reaches the write seam by a
+    different route than the six mutators, so the env var has to be proven
+    here separately — a gate that covered only the shared wrapper would leave
+    this command stamping.
+    """
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+
+    result = _run_init(ocx, project_dir, extra_env={"OCX_NO_CONSENT": "1"})
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx init failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert (project_dir / "ocx.toml").exists(), (
+        "OCX_NO_CONSENT must still create ocx.toml"
+    )
+    assert _consent_stamps(ocx.ocx_home) == [], (
+        "OCX_NO_CONSENT=1 must write no consent stamp"
+    )
+
+
+def test_init_consent_flag_outranks_the_env_var(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``OCX_NO_CONSENT=1 ocx init --consent`` stamps anyway.
+
+    The ladder is flag, then env, then stamp. A resolution that read the env
+    before the flag would pass the test above and fail only here.
+    """
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+
+    result = _run_init(
+        ocx, project_dir, "--consent", extra_env={"OCX_NO_CONSENT": "1"}
+    )
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx init --consent failed: rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    stamps = _consent_stamps(ocx.ocx_home)
+    assert len(stamps) == 1, (
+        f"--consent must outrank OCX_NO_CONSENT and stamp; got {stamps}"
     )

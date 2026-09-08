@@ -899,6 +899,7 @@ ocx exec [OPTIONS] [NAME...] -- ARGV...
 | `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Only the segment before that first `=` is checked for a `:TYPE[:SEP]` qualifier — an environment variable name can never contain `:`, so a Windows-style value with its own colon (`--env PATH:path=C:\tools\bin`) is read correctly, and `--env FOO:constant=a=b` sets `FOO` to `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends) — the same three kinds [`[env]`][config-project-env] uses. `SEP` qualifies `list` only: the string a `list` contribution is joined to the existing value with (`--env GODEBUG:list:,=gctrace=1`); omitted, the key inherits whatever separator another contributor already declared, or a single space if none did — see [Env Composition][env-composition-list]. A relative `path` value resolves against the **current directory** the flag was invoked from, not the project root [`[env]`][config-project-env] resolves against: a checked-in file must mean the same thing from any subdirectory, while a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
 | `--records-dir <DIR>` | — | Sink directory for the [exec-time resolution record][execution-records-ref] — one JSON file written immediately before the child starts, naming every package digest that composed the environment plus the resolved executable. Overrides the [`[records]` `dir`][config-records-dir] config key and [`OCX_RECORDS_DIR`][env-ocx-records-dir]. Unset at every tier means no record is written. | *(unset — recording off)* |
 | `--records-name <TEMPLATE>` | — | Filename template for the sink, over the closed placeholder set in [Filename grammar][execution-records-filename]. Has no effect unless a sink directory is also active. Overrides the [`[records]` `name`][config-records-name] config key and [`OCX_RECORDS_NAME`][env-ocx-records-name]. | `{time}-{pid}-{rand}.json` |
+| `--consent` / `--no-consent` | — | Whether to record a [consent stamp][shell-consent] for the project. Running `exec` in a directory is normally consent, which is wrong when a generated launcher re-enters as `ocx --project <baked home> exec` on a machine whose operator never chose that checkout. Outranks [`OCX_NO_CONSENT`][env-ocx-no-consent], which sets the default for a whole pipeline. `--no-consent` also sets that variable on the child environment, so a nested `ocx` the child launches declines too; `--consent` does not clear one it inherited. Suppressing the stamp never suppresses the child. | `--consent` |
 | `--help` | `-h` | Print help information. | — |
 
 ::: tip Target the global toolchain
@@ -1605,7 +1606,7 @@ The generated file contains a [`#:schema` directive][config-schemas] and an empt
 
 The command is an idempotent failure: if `ocx.toml` already exists (or a symlink at that path exists), it exits with code 64 without overwriting the existing file.
 
-It also records a [consent stamp][shell-consent] for the project it creates, so the next shell prompt in that directory applies it — creating an `ocx.toml` is at least as deliberate a gesture as the `ocx add` that already writes one. The stamp records an empty source set, because the project has no lock yet; the first `ocx add` re-records it. Pass `--no-consent` to skip it and consent later with [`ocx shell allow`](#shell-allow).
+It also records a [consent stamp][shell-consent] for the project it creates, so the next shell prompt in that directory applies it — creating an `ocx.toml` is at least as deliberate a gesture as the `ocx add` that already writes one. The stamp records an empty source set, because the project has no lock yet; the first `ocx add` re-records it. Pass `--no-consent` to skip it and consent later with [`ocx shell allow`](#shell-allow), or set [`OCX_NO_CONSENT`][env-ocx-no-consent] to make that the default for every command in a pipeline. The flag outranks the variable, so `--consent` stamps even where the variable is set.
 
 **Usage**
 
@@ -1615,8 +1616,8 @@ ocx init [OPTIONS]
 
 **Options**
 
-- `--consent`: Record a consent stamp for the new project. This is the default.
-- `--no-consent`: Create the project without consenting to its shell activation.
+- `--consent`: Record a consent stamp. This is the default unless [`OCX_NO_CONSENT`][env-ocx-no-consent] is set.
+- `--no-consent`: Run without consenting to this project's shell activation.
 - `-h`, `--help`: Print help information.
 
 **Exit codes**
@@ -1939,6 +1940,7 @@ ocx pull [OPTIONS]
 | `--dry-run` | — | Print which locked tools are already cached vs. would be fetched, then exit without writing to the store. | off |
 | `--platform <PLATFORM>` | `-p` | Pre-warm the leaf for the named platform instead of the host — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Selects which already-locked leaf to fetch (the lock stays host-agnostic — an amd64 host can pre-warm an arm64 leaf); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
 | [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `pull` composes nothing, so `always` changes *what* is pre-warmed instead of what reaches `PATH`: a tool the ladder resolves to `always` gets its metadata, its dependency closure's config blobs, and its generated shim launchers — no content. The content downloads the first time one of those launchers runs, in whatever environment a later `ocx exec` or `ocx env` composes. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
+| `--consent` / `--no-consent` | — | Whether to record a [consent stamp][shell-consent] for the project. Running `pull` in a directory is normally consent, which is wrong when a build system drives it against a checkout nobody chose. Outranks [`OCX_NO_CONSENT`][env-ocx-no-consent], which sets the default for a whole pipeline. Suppressing the stamp never suppresses the pull. | `--consent` |
 | `--help` | `-h` | Print help information. | — |
 
 ::: tip Target the global toolchain
@@ -6099,6 +6101,8 @@ or a registry error) — the report then degrades to a local-state-only summary
 [in-depth-versioning-cascades]: ../in-depth/versioning.md#cascades
 [env-ocx-managed-config]: ./environment.md#ocx-managed-config
 [env-ocx-no-hook]: ./environment.md#ocx-no-hook
+[env-ocx-no-consent]: ./environment.md#ocx-no-consent
+[shell-consent]: ../in-depth/shell-integration.md#consent
 [env-ocx-records-dir]: ./environment.md#ocx-records-dir
 [env-ocx-records-name]: ./environment.md#ocx-records-name
 [user-guide-managed-config]: ../user-guide.md#managed-config

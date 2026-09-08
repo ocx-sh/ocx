@@ -1688,3 +1688,142 @@ repository = "{bare_repo}"
         f"offline stderr must still mention 'ocx update'; "
         f"got:\n{result_offline.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# OCX_NO_CONSENT — the consent stamp is suppressible for a machine caller
+# ---------------------------------------------------------------------------
+
+
+def _consent_stamps(ocx_home: Path) -> list[Path]:
+    """Every consent stamp under this run's isolated ``$OCX_HOME``.
+
+    Globbed rather than keyed: the home is per-test, so the set is the answer
+    to "did this invocation stamp anything", and no assertion here has to
+    re-derive ``ReferenceManager::name_for_path`` (which would make the test
+    agree with itself instead of with the binary).
+    """
+    return sorted((ocx_home / "state" / "projects").glob("*/consent.json"))
+
+
+def _consent_fixture(ocx: OcxRunner, tmp_path: Path, label: str) -> Path:
+    """A locked single-tool project, ready for ``ocx pull``, with no stamp yet.
+
+    ``ocx lock --no-pull`` is itself a member of the consent-stamp allowlist,
+    so it is run with ``OCX_NO_CONSENT=1`` — otherwise setup would leave the
+    very stamp these tests are about to look for.
+    """
+    repo, tag = _published_tool(ocx, tmp_path, label)
+    project = tmp_path / f"proj_{label}"
+    project.mkdir()
+    _write_ocx_toml(
+        project,
+        f"""\
+[tools]
+tool = "{ocx.registry}/{repo}:{tag}"
+""",
+    )
+    cmd = _ocx_cmd(ocx, "lock", "--no-pull")
+    lock = subprocess.run(
+        cmd,
+        cwd=project,
+        capture_output=True,
+        text=True,
+        env={**ocx.env, "OCX_NO_CONSENT": "1"}, check=False,
+    )
+    assert lock.returncode == EXIT_SUCCESS, (
+        f"ocx lock failed: rc={lock.returncode}\nstderr:\n{lock.stderr}"
+    )
+    assert _consent_stamps(Path(ocx.env["OCX_HOME"])) == [], (
+        "setup must leave no consent stamp, or the assertions below are "
+        "reading someone else's write"
+    )
+    return project
+
+
+def test_pull_records_a_consent_stamp(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx pull`` stamps consent by default (ocx-sh/ocx#400).
+
+    The positive arm. Without it every "no stamp was written" assertion below
+    would also pass on a binary that stopped stamping altogether.
+    """
+    project = _consent_fixture(ocx, tmp_path, "consent_default")
+    ocx_home = Path(ocx.env["OCX_HOME"])
+
+    result = _run_pull(ocx, project)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx pull failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    stamps = _consent_stamps(ocx_home)
+    assert len(stamps) == 1, (
+        f"ocx pull must write exactly one consent stamp; got {stamps}"
+    )
+
+
+def test_pull_with_no_consent_env_writes_no_stamp(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``OCX_NO_CONSENT=1 ocx pull`` pulls without consenting.
+
+    Build tooling drives ``ocx pull`` against a checkout its operator never
+    chose; a stamp there authorizes that project's ``[env]`` on every later
+    ``cd``. The pull itself must still succeed — this suppresses a side
+    effect, not the command.
+    """
+    project = _consent_fixture(ocx, tmp_path, "consent_env")
+    ocx_home = Path(ocx.env["OCX_HOME"])
+
+    result = _run_pull(ocx, project, extra_env={"OCX_NO_CONSENT": "1"})
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx pull failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    assert _consent_stamps(ocx_home) == [], (
+        "OCX_NO_CONSENT=1 must write no consent stamp"
+    )
+    assert _packages_present_count(ocx_home, ocx.registry) == 1, (
+        "OCX_NO_CONSENT suppresses the stamp, never the pull"
+    )
+
+
+def test_pull_consent_flag_outranks_the_env_var(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``OCX_NO_CONSENT=1 ocx pull --consent`` stamps anyway.
+
+    The precedence proof. The ladder is flag, then env, then stamp — the same
+    order every other switch in this CLI resolves in. A resolution that read
+    the env before the flag would pass both tests above and fail only here.
+    """
+    project = _consent_fixture(ocx, tmp_path, "consent_flag")
+    ocx_home = Path(ocx.env["OCX_HOME"])
+
+    result = _run_pull(
+        ocx, project, "--consent", extra_env={"OCX_NO_CONSENT": "1"}
+    )
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx pull failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    stamps = _consent_stamps(ocx_home)
+    assert len(stamps) == 1, (
+        f"--consent must outrank OCX_NO_CONSENT and stamp; got {stamps}"
+    )
+
+
+def test_pull_no_consent_flag_writes_no_stamp(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx pull --no-consent`` suppresses the stamp with no env var set."""
+    project = _consent_fixture(ocx, tmp_path, "consent_noflag")
+    ocx_home = Path(ocx.env["OCX_HOME"])
+
+    result = _run_pull(ocx, project, "--no-consent")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx pull failed: rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+
+    assert _consent_stamps(ocx_home) == [], (
+        "--no-consent must write no consent stamp"
+    )

@@ -43,7 +43,7 @@ Canonical form: `ocx --global <subcommand>`.
 - `ocx [--global] env [-g GROUP]... [--env KEY[:TYPE]=VALUE]... [--shell[=NAME]] [--ci[=PROVIDER]] [--export-file PATH] [--pull/--no-pull] [--pinned | --no-pinned]` — compose toolchain env. Output format is a **context-only concern** (root `--format`, default **plain** like every command — no subcommand `--format`, handshake §3 amended 2026-05-19); `--shell[=NAME]` is the ONLY eval-safe channel; `--ci` writes to a CI sink (see below). Installs on miss by default (`options::Pull`, eager default): a present tool resolves locally with no network, only a genuine miss pulls; `--no-pull` opts out to an offline local probe (warn on stderr + omit); the global tier never installs
 
 ### `ocx shell` — carries `{allow, completion, revoke, state}`
-- `ocx shell allow [PATH]` — write a consent stamp for the project governing PATH (default: cwd), resolved through the full precedence chain with PATH substituting for the CWD (`project_context::resolve_project_paths`'s `walk_from`). One of the two stamp writers outside the six mutating commands — `ocx init` is the other, stamping the project it creates unless `--no-consent` is passed (`options::Consent`). Exit 64 when no `ocx.toml` governs PATH, and exit 64 when the target is `$OCX_HOME` — A-44, enforced once in `consent::record`'s `same_dir` guard and surfaced by the `Recorded::OcxHomeNeedsNoStamp` return, never re-tested at the CLI
+- `ocx shell allow [PATH]` — write a consent stamp for the project governing PATH (default: cwd), resolved through the full precedence chain with PATH substituting for the CWD (`project_context::resolve_project_paths`'s `walk_from`). One of the two stamp writers outside the six mutating commands — `ocx init` is the other, stamping the project it creates unless `--no-consent` is passed (`options::Consent`). **The one writer `OCX_NO_CONSENT` does not reach**: it calls `consent::record` directly rather than through `project_context::record_activation_consent_over`, where that ladder resolves, because it *is* the explicit gesture the variable exists to tell machine invocation apart from. Exit 64 when no `ocx.toml` governs PATH, and exit 64 when the target is `$OCX_HOME` — A-44, enforced once in `consent::record`'s `same_dir` guard and surfaced by the `Recorded::OcxHomeNeedsNoStamp` return, never re-tested at the CLI
 - `ocx shell revoke [PATH]` — delete that stamp (`consent::revoke`). Idempotent: an absent stamp is exit 0 with a `nothing to revoke` status line. Never touches `[shell.consent]` grants, which live in `config.toml`
 - `ocx shell completion <name>` — **keep** (genuinely shell-scoped, static)
 - `ocx shell state [-v/--verbose]` — **new** (ADR Decision 10, C-050) — read-only per-prompt-reconciliation diagnostics. The **default** rendering is the answer only: `$OCX_HOME`, the project in effect, the active/inert verdict, and — when inert — the enumerated reason plus a one-line `fix:`. `--verbose` adds the evidence (decoded ledger + carrier accounting, fingerprint watch set with sizes/mtimes, project state key + stamp, hook ladder). `--verbose` is a **plain-rendering tier, not a payload** — `VerboseShellState` serializes as its inner `ShellStateReport`, so root `--format json` emits the complete report at either verbosity (same contract `VerboseVersionData` keeps for `ocx version --verbose`). Colour comes from `DataInterface::theme()` (`Theme::alert`/`ok`/`label`), never raw ANSI. **Never eval-able** — no line is valid `export`/`set`/`$env.` syntax in any arm, at either detail tier, coloured or not (the assertions strip ANSI first, and pair that with a colour-parity check). Exit 0 in every reportable state (including inert/corrupt-ledger/over-cap/yielded); exit 74 only if `$OCX_HOME` is unreadable. Not a stamp writer — a named non-member of the consent-stamp allowlist
@@ -158,6 +158,23 @@ struct — never read the two raw booleans at the call site.
   "off" (`--bin-scan`/`--no-bin-scan`: neither given is `Auto` — a mode of its own, not
   equivalent to `--no-bin-scan`'s `Off`). Model tri-state as an enum returned from a
   `mode()` method; never overload a single `bool` to mean three things.
+- **A pair whose ladder resolves elsewhere returns `Option<bool>`, not a `bool` and not
+  an enum.** `options::Consent` is the instance: `--consent`/`--no-consent` sit above
+  `OCX_NO_CONSENT`, which is read once at the write seam
+  (`project_context::record_activation_consent_over`) rather than at the seven commands
+  that reach it. So `Consent::explicit()` answers "what did the user type" — `None` for
+  neither — and the seam fills a `None` in from the env. `Option<bool>` is the whole
+  surface: a collapsing `bool` accessor answering for a user who typed nothing would make
+  the env var unheard, and reading the env at *both* levels would make it outrank the
+  flag. Neither failure is visible in a diff of either site alone, which is why
+  `c400_the_consent_env_var_is_read_only_at_the_seam` pins the read to one depth.
+- **The refusal, and only the refusal, crosses a spawn.** `ocx exec` sets
+  `OcxConfigView.no_consent` from `self.consent.explicit() == Some(false)`, and
+  `Env::apply_ocx_config` ORs that with the ambient `OCX_NO_CONSENT` — so a nested ocx
+  the child launches inherits a `--no-consent` that would otherwise die with argv.
+  Asymmetric on purpose: a `--consent` leaves the field `false` and never *clears* an
+  inherited refusal, because it answers for the one project this invocation targets, not
+  for everything the child goes on to touch.
 - **Never read the raw booleans directly** in a command's `execute` — always go through
   the struct's resolution method, so the mode name (not two independently-checked flags)
   is what call sites and tests reason about.

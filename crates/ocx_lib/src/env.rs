@@ -42,6 +42,33 @@ pub mod keys {
     /// Boolean — when truthy, skip the CWD walk and the [`OCX_PROJECT`]
     /// env var. Explicit `--project` paths still load.
     pub const OCX_NO_PROJECT: &str = "OCX_NO_PROJECT";
+    /// Boolean — when truthy, the seven project-scoped commands that stamp
+    /// shell-activation consent as a side effect (`add`, `remove`, `lock`,
+    /// `update`, `pull`, `exec`, `init`) run without writing one.
+    ///
+    /// For a caller that is not a consenting human: build tooling drives
+    /// `ocx --project <abs> pull` against a checkout it did not choose, and a
+    /// stamp there grants `Grant::Stamp`, which authorizes the project's own
+    /// `[env]` table on every later `cd` (ocx-sh/ocx#400).
+    ///
+    /// **Outranked by the flag.** `--consent` / `--no-consent` on the commands
+    /// that carry the pair decides first; this speaks only where neither was
+    /// given. Read at exactly one site,
+    /// `app::project_context::record_activation_consent_over` — the point every
+    /// automatic writer routes through.
+    ///
+    /// **`ocx shell allow` ignores it.** That command is the explicit gesture
+    /// this variable exists to distinguish machine invocation *from*, and it
+    /// calls `project::consent::record` directly, past the seam.
+    ///
+    /// Forwarded to child ocx processes via [`Env::apply_ocx_config`], from
+    /// either the ambient value or an `ocx exec --no-consent` on the frame that
+    /// spawns them. `ocx exec` composes its child from [`Env::inherited`] by
+    /// default and from [`Env::clean`] under `--clean`, so the ambient half
+    /// earns its keep on that second arm; the flag half has no other channel at
+    /// all, because argv does not cross a spawn. Without both, a script `ocx
+    /// exec` runs that itself calls `ocx pull` would stamp after all.
+    pub const OCX_NO_CONSENT: &str = "OCX_NO_CONSENT";
     /// Boolean — when truthy, select the global toolchain
     /// (`$OCX_HOME/ocx.toml`) as the in-effect project file instead of
     /// discovering one via the CWD walk. Mirrors `--global`.
@@ -412,6 +439,17 @@ pub struct OcxConfigView {
     /// forbids by design. The block-tier "resolution flag forwarded"
     /// contract is fully pinned at the unit layer.
     pub global: bool,
+    /// When true, the invocation's own `--no-consent` said this command must
+    /// not stamp. Forwarded as [`keys::OCX_NO_CONSENT`] so a nested ocx a
+    /// child process launches inherits the refusal.
+    ///
+    /// **Suppression-only, deliberately asymmetric.** A `--consent` leaves
+    /// this `false` and therefore never *clears* an ambient
+    /// `OCX_NO_CONSENT` from the child env: `--consent` is a statement about
+    /// the one project this invocation targets, not a grant covering
+    /// everything the child goes on to touch. Refusal inherits downward;
+    /// permission does not (ocx-sh/ocx#400).
+    pub no_consent: bool,
     pub index: Option<PathBuf>,
     /// Root under which project toolchain homes are rendered — the resolved
     /// `toolchain-dir` (C-008). `None` when no tier set one, which is the
@@ -494,6 +532,7 @@ impl OcxConfigView {
             config: None,
             project: None,
             global: false,
+            no_consent: false,
             index: None,
             toolchain_dir: None,
             mirrors: Vec::new(),
@@ -768,6 +807,12 @@ impl Env {
     /// Materializes resolution-affecting OCX configuration onto this env so a
     /// child ocx process sees the same policy the parent saw.
     ///
+    /// [`keys::OCX_NO_CONSENT`] is the one member that is **not**
+    /// resolution-affecting: it changes nothing a child resolves, only whether
+    /// a child writes a consent stamp. It rides here because this is the one
+    /// channel that survives a deliberately emptied child env
+    /// ([`Env::clean`]) — the reason at its own block below.
+    ///
     /// Always sets [`keys::OCX_BINARY_PIN`]. Sets [`keys::OCX_OFFLINE`] /
     /// [`keys::OCX_REMOTE`] / [`keys::OCX_FROZEN`] / [`keys::OCX_GLOBAL`] /
     /// [`keys::OCX_NO_VERIFY`] / [`keys::OCX_NO_CONFIG`] only
@@ -895,6 +940,34 @@ impl Env {
             self.set(keys::OCX_ALLOW_YANKED, "1");
         } else {
             self.remove(keys::OCX_ALLOW_YANKED);
+        }
+        // Two independent refusals, one key: `cfg.no_consent` is what this
+        // invocation's own `--no-consent` said, the ambient read is what the
+        // environment said, and either one suppresses. Not a second spelling of
+        // the flag > env > stamp ladder — that still resolves at exactly one
+        // site, `project_context::record_activation_consent_over`; this only
+        // ORs two refusals that have already been decided.
+        //
+        // The halves cover different hops. `ocx exec` builds its child from
+        // `Env::inherited` by default, so the ambient half already survives
+        // that hop untouched and earns its keep on the `--clean` arm
+        // (`toolchain_exec.rs` takes `Env::clean` there), where the child map
+        // starts empty. The flag half has no other channel at all: a
+        // `--no-consent` lives in argv, which no child process ever sees, so
+        // without it the explicit gesture would propagate less far than the
+        // ambient one — failing OPEN on a security control.
+        //
+        // One-way on purpose: a `--consent` leaves `cfg.no_consent` false
+        // and therefore never clears an inherited refusal. Refusal inherits
+        // downward, permission does not (ocx-sh/ocx#400).
+        //
+        // Not resolution-affecting, unlike everything above it: it changes no
+        // resolution, only whether a side-effect write happens. It rides here
+        // because this is the one channel that crosses a clean env.
+        if cfg.no_consent || flag(keys::OCX_NO_CONSENT, false) {
+            self.set(keys::OCX_NO_CONSENT, "1");
+        } else {
+            self.remove(keys::OCX_NO_CONSENT);
         }
     }
 
@@ -4073,6 +4146,88 @@ mod tests {
         assert!(
             env.get(keys::OCX_ALLOW_YANKED).is_none(),
             "an absent OCX_ALLOW_YANKED must not be set on the child env"
+        );
+    }
+
+    /// ocx-sh/ocx#400 — the consent opt-out survives the hop into a child ocx.
+    ///
+    /// `ocx exec --clean` composes its child from [`Env::clean`], so a script
+    /// it runs that itself calls `ocx pull` sees only what this function wrote.
+    /// Without the forward that inner frame stamps a consent the outer
+    /// invocation was explicitly told not to record — the defect is invisible
+    /// from the outer command's own behaviour, which is why it is asserted
+    /// here. The sibling below covers the other half, an `ocx exec
+    /// --no-consent` whose refusal lives in argv and reaches the child only
+    /// through this key.
+    ///
+    /// Red state: delete either arm of the `OCX_NO_CONSENT` block in
+    /// [`Env::apply_ocx_config`].
+    #[test]
+    fn apply_ocx_config_forwards_no_consent_from_ambient() {
+        let guard = crate::test::env::lock();
+
+        guard.set(keys::OCX_NO_CONSENT, "1");
+        let mut env = Env::clean();
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert_eq!(
+            env.get(keys::OCX_NO_CONSENT).and_then(std::ffi::OsStr::to_str),
+            Some("1"),
+            "a truthy OCX_NO_CONSENT must forward to the child env"
+        );
+
+        // Absent (or falsy) → not set on the child env, so a stale export in
+        // the parent shell cannot suppress a stamp the child should write.
+        guard.remove(keys::OCX_NO_CONSENT);
+        let mut env = Env::clean();
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert!(
+            env.get(keys::OCX_NO_CONSENT).is_none(),
+            "an absent OCX_NO_CONSENT must not be set on the child env"
+        );
+    }
+
+    /// ocx-sh/ocx#400 — an `ocx exec --no-consent` reaches the nested ocx a
+    /// child launches, and an `ocx exec --consent` does not clear an inherited
+    /// refusal.
+    ///
+    /// The flag lives in argv, which no child process ever sees, so this key is
+    /// its only channel. Both arms are asserted because they are the two
+    /// directions of one deliberate asymmetry: refusal inherits downward,
+    /// permission does not.
+    ///
+    /// Red state, first arm: delete the `cfg.no_consent ||` half of the
+    /// `OCX_NO_CONSENT` block in [`Env::apply_ocx_config`] — the flag then
+    /// stops at the process boundary and the nested `ocx pull` stamps.
+    /// Red state, second arm: make the block mirror the flag both ways
+    /// (`if cfg.no_consent { set } else { remove }`) — a `--consent` then wipes
+    /// an ambient refusal on the way down.
+    #[test]
+    fn apply_ocx_config_forwards_no_consent_from_the_invocation_flag() {
+        let guard = crate::test::env::lock();
+
+        // The flag refused, the ambient environment said nothing: the refusal
+        // must still reach the child.
+        guard.remove(keys::OCX_NO_CONSENT);
+        let mut cfg = view("/abs/ocx");
+        cfg.no_consent = true;
+        let mut env = Env::clean();
+        env.apply_ocx_config(&cfg);
+        assert_eq!(
+            env.get(keys::OCX_NO_CONSENT).and_then(std::ffi::OsStr::to_str),
+            Some("1"),
+            "an invocation's own --no-consent must forward to the child env"
+        );
+
+        // The mirror image: no flag refusal, but the environment refused. A
+        // `--consent` decides the one project this invocation targets and must
+        // not grant anything the child goes on to touch.
+        guard.set(keys::OCX_NO_CONSENT, "1");
+        let mut env = Env::clean();
+        env.apply_ocx_config(&view("/abs/ocx"));
+        assert_eq!(
+            env.get(keys::OCX_NO_CONSENT).and_then(std::ffi::OsStr::to_str),
+            Some("1"),
+            "--consent must not clear an inherited OCX_NO_CONSENT from the child env"
         );
     }
 

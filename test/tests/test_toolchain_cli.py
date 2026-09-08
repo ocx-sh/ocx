@@ -922,3 +922,148 @@ def test_remove_no_longer_answers_a_group_name_from_its_own_charset_copy(
         f"the deleted pre-C-014 validator must not answer for 'a.b'; "
         f"stderr={dotted.stderr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# OCX_NO_CONSENT — `ocx exec` carries the same suppression as `ocx pull`
+# ---------------------------------------------------------------------------
+
+
+def _consent_stamps(ocx_home: Path) -> list[Path]:
+    """Every consent stamp under this run's isolated ``$OCX_HOME``."""
+    return sorted((ocx_home / "state" / "projects").glob("*/consent.json"))
+
+
+def _unconsented_project(
+    ocx: OcxRunner, tmp_path: Path, name: str = "proj_noconsent"
+) -> tuple[Path, str]:
+    """``locked_project``'s setup, with the lock's own stamp suppressed.
+
+    ``ocx lock`` is itself a consent writer, so it runs under
+    ``OCX_NO_CONSENT=1`` — otherwise setup leaves the very stamp these tests
+    are about to look for, and every assertion below reads someone else's write.
+
+    ``name`` exists so one test can build two projects with distinct stamp keys.
+    """
+    package = _published_tool(ocx, tmp_path, "noconsent", bins=["wp8tool"])
+    project = tmp_path / name
+    project.mkdir()
+    _write_ocx_toml(project, f'[tools]\nwp8 = "{package.fq}"\n')
+    result = _run(
+        ocx, project, "lock", "--no-pull", extra_env={"OCX_NO_CONSENT": "1"}
+    )
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    assert _consent_stamps(ocx.ocx_home) == [], (
+        "setup must leave no consent stamp"
+    )
+    return project, "wp8tool"
+
+
+def test_exec_records_a_consent_stamp(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx exec`` stamps consent by default (ocx-sh/ocx#400).
+
+    The positive arm — without it the suppression test below would also pass
+    on a binary that stopped stamping altogether.
+    """
+    project, binary = _unconsented_project(ocx, tmp_path)
+
+    result = _run(ocx, project, "exec", "--", binary)
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+
+    stamps = _consent_stamps(ocx.ocx_home)
+    assert len(stamps) == 1, (
+        f"ocx exec must write exactly one consent stamp; got {stamps}"
+    )
+
+
+def test_exec_with_no_consent_env_writes_no_stamp(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``OCX_NO_CONSENT=1 ocx exec`` runs the child without consenting.
+
+    A generated launcher re-enters as ``ocx --project <baked home> exec`` on a
+    machine whose operator never chose that checkout; the stamp it would leave
+    authorizes the project's ``[env]`` on every later ``cd``.
+    """
+    project, binary = _unconsented_project(ocx, tmp_path)
+
+    result = _run(
+        ocx, project, "exec", "--", binary, extra_env={"OCX_NO_CONSENT": "1"}
+    )
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+
+    assert _consent_stamps(ocx.ocx_home) == [], (
+        "OCX_NO_CONSENT=1 must write no consent stamp"
+    )
+
+
+def test_exec_consent_flag_outranks_the_env_var(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``OCX_NO_CONSENT=1 ocx exec --consent`` stamps anyway.
+
+    ``exec`` declares the flag pair after ``--records`` and before the
+    positional ``names``/``argv``, per the flags-before-positional-arguments
+    convention, so this also pins that the flag is reachable at all.
+    """
+    project, binary = _unconsented_project(ocx, tmp_path)
+
+    result = _run(
+        ocx,
+        project,
+        "exec",
+        "--consent",
+        "--",
+        binary,
+        extra_env={"OCX_NO_CONSENT": "1"},
+    )
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+
+    stamps = _consent_stamps(ocx.ocx_home)
+    assert len(stamps) == 1, (
+        f"--consent must outrank OCX_NO_CONSENT and stamp; got {stamps}"
+    )
+
+
+def test_exec_no_consent_reaches_a_nested_ocx(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``ocx exec --no-consent`` declines for the ocx its child launches too.
+
+    A ``--no-consent`` lives in argv, which no child process ever sees, so the
+    only channel to a nested frame is ``OCX_NO_CONSENT`` on the child
+    environment. Without that forward the explicit gesture would carry *less*
+    far than the ambient variable already does — failing open on a security
+    control (ocx-sh/ocx#400).
+
+    The nested ocx targets a **second** project, so its stamp lands under a
+    different key than the outer ``exec``'s. That is what makes the control arm
+    below name the inner frame specifically: the outer command cannot write the
+    second stamp.
+
+    Red state: delete the ``cfg.no_consent ||`` half of the
+    ``OCX_NO_CONSENT`` block in ``Env::apply_ocx_config`` — the last arm then
+    finds the inner frame's stamp.
+    """
+    outer, _ = _unconsented_project(ocx, tmp_path, "proj_outer")
+    inner, _ = _unconsented_project(ocx, tmp_path, "proj_inner")
+    nested = [str(ocx.binary), "--project", str(inner / "ocx.toml"), "pull"]
+
+    # Control: nothing suppresses, so both frames stamp — two keys, two stamps.
+    # Without it the arm below would also pass on an `exec` that never reached
+    # the nested ocx at all.
+    control = _run(ocx, outer, "exec", "--consent", "--", *nested)
+    assert control.returncode == EXIT_SUCCESS, control.stderr
+    stamps = _consent_stamps(ocx.ocx_home)
+    assert len(stamps) == 2, (
+        f"the nested `ocx pull` must stamp its own project, or the arm below "
+        f"proves nothing about the forward; got {stamps}"
+    )
+    for stamp in stamps:
+        stamp.unlink()
+
+    result = _run(ocx, outer, "exec", "--no-consent", "--", *nested)
+    assert result.returncode == EXIT_SUCCESS, result.stderr
+    assert _consent_stamps(ocx.ocx_home) == [], (
+        "`ocx exec --no-consent` must suppress the nested ocx's stamp too"
+    )

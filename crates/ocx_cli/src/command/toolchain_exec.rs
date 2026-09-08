@@ -93,6 +93,13 @@ pub struct ToolchainExec {
     #[clap(flatten)]
     pub records: options::Records,
 
+    // `--consent` (the default) / `--no-consent`. Declared before `names` and
+    // `argv`, per the project's flags-before-positional-arguments convention.
+    // A `///` here would be dead text: clap renders the flattened struct's own
+    // field docs, not this one.
+    #[clap(flatten)]
+    pub consent: options::Consent,
+
     /// Binding names to compose into the child env. Each name must
     /// resolve unambiguously inside the selected scope. Only the named
     /// tools are resolved to a host leaf, so an unrelated tool in scope
@@ -188,7 +195,13 @@ impl ToolchainExec {
         // `ocx --project '<baked home>' exec` from whatever directory the user
         // was in, so a failure to resolve must name the **selection**, not the
         // working directory the walk happened to start at.
-        let ctx = load_project_with_lock_consenting(&context)
+        //
+        // The tri-state travels rather than a resolved bool: a generated
+        // launcher re-enters as `ocx --project <baked home> exec` on a machine
+        // whose operator never chose that checkout, so `OCX_NO_CONSENT` must be
+        // able to suppress the stamp — but only where no flag spoke
+        // (ocx-sh/ocx#400). The seam resolves the ladder.
+        let ctx = load_project_with_lock_consenting(&context, self.consent.explicit())
             .await
             .map_err(|error| attribute_to_selected_project(context.project_path(), error))?;
 
@@ -363,6 +376,13 @@ impl ToolchainExec {
         // somewhere else — or, since `apply_ocx_config` is set-or-remove,
         // nowhere — and the entrypoint pair would lose its inner half.
         forwarded_config.records = records.forwarded();
+        // Same move, for the consent refusal: argv does not cross a spawn, so
+        // without this a `--no-consent` would stop at this process and a nested
+        // ocx the child launches would stamp the very project the caller
+        // declined. Refusal inherits downward; permission does not, which is
+        // why a `--consent` leaves this false rather than clearing an inherited
+        // OCX_NO_CONSENT.
+        forwarded_config.no_consent = self.consent.explicit() == Some(false);
         // Composed entries + forwarded ocx config + forwarded stages 4-6, in the
         // one order that is correct — see `Env::apply_child_env`. `project_env`
         // (stages 4-6) is the forwarded slice, NOT the whole composed set: the

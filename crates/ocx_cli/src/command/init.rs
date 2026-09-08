@@ -45,12 +45,16 @@ impl Init {
         // it just created as inert. The empty source set is the honest record
         // for a project with no lock; the first `ocx add` re-records.
         //
+        // The tri-state travels rather than a resolved bool, so the flag/env
+        // ladder has one definition, at the seam: deciding `enabled(true)` here
+        // would answer for a user who typed nothing and leave `OCX_NO_CONSENT`
+        // unheard by the one command that scaffolds a project non-interactively
+        // (ocx-sh/ocx#400).
+        //
         // A-44 keeps `ocx init` inside `$OCX_HOME` a no-op rather than an error:
         // `consent::record` answers `OcxHomeNeedsNoStamp` there, and the stamp
         // is best-effort in every direction anyway.
-        if self.consent.enabled(true) {
-            record_activation_consent_over(&toml_path, std::collections::BTreeSet::new()).await;
-        }
+        record_activation_consent_over(&toml_path, std::collections::BTreeSet::new(), self.consent.explicit()).await;
 
         context.ui().success(format!("created {}", toml_path.display()));
 

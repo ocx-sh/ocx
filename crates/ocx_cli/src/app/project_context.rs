@@ -387,15 +387,20 @@ pub async fn toolchain_links(
 /// `ocx inspect`, `ocx patch freeze`, `ocx env` and `ocx lock --check` call
 /// the plain loader and stamp nothing.
 ///
+/// `consent` is what the caller's `--consent` / `--no-consent` said, or `None`
+/// when it said nothing — forwarded untouched to
+/// [`record_activation_consent`], which is where the ladder resolves.
+///
 /// # Errors
 ///
 /// Exactly [`load_project_with_lock`]'s. Recording is best-effort and never
 /// converts a working command into a failing one.
 pub async fn load_project_with_lock_consenting(
     context: &crate::app::Context,
+    consent: Option<bool>,
 ) -> Result<ProjectContext, ProjectContextError> {
     let project = load_project_with_lock(context).await?;
-    record_activation_consent(&project.config_path, &project.lock).await;
+    record_activation_consent(&project.config_path, &project.lock, consent).await;
     Ok(project)
 }
 
@@ -403,7 +408,7 @@ pub async fn load_project_with_lock_consenting(
 /// source set `lock` resolves from (C-024, C-026, A-29).
 ///
 /// **The write seam is a closed allowlist of seven commands** — `add`, `remove`,
-/// `lock`, `update`, `pull`, `run`, and `init` through
+/// `lock`, `update`, `pull`, `exec`, and `init` through
 /// [`record_activation_consent_over`] — and it is **per-caller opt-in, never a
 /// hook in a shared loader**. `load_project_with_lock` has six call sites and
 /// only two are members: `inspect`, `patch freeze`, `ocx env` and
@@ -417,12 +422,23 @@ pub async fn load_project_with_lock_consenting(
 /// Nothing on the *activation* path calls this: a `paths` or `namespaces`
 /// grant activates directly and writes no stamp (A-26).
 ///
+/// Membership in the allowlist is **suppressible, not conditional**: `consent`
+/// carries the caller's `--consent` / `--no-consent`, or `None` where it has no
+/// such flag, and [`record_activation_consent_over`] resolves it against
+/// `OCX_NO_CONSENT`. A member that stamps nothing on a given invocation is
+/// still a member — the set of commands that *may* write is unchanged, which is
+/// what A-29 constrains (ocx-sh/ocx#400).
+///
 /// Best-effort, like the project ledger's `register_project_dir_best_effort`
 /// beside it: a failure to stamp is logged at WARN and swallowed, because the
 /// worst it costs is one inert prompt until the next explicit command — the
 /// fail-safe direction — while aborting `ocx add` over it is not.
-pub async fn record_activation_consent(config_path: &Path, lock: &ocx_lib::project::ProjectLock) {
-    record_activation_consent_over(config_path, ocx_lib::project::consent::lock_sources(lock)).await;
+pub async fn record_activation_consent(
+    config_path: &Path,
+    lock: &ocx_lib::project::ProjectLock,
+    consent: Option<bool>,
+) {
+    record_activation_consent_over(config_path, ocx_lib::project::consent::lock_sources(lock), consent).await;
 }
 
 /// [`record_activation_consent`] over a source set the caller already holds.
@@ -433,10 +449,41 @@ pub async fn record_activation_consent(config_path: &Path, lock: &ocx_lib::proje
 /// the first `ocx add` re-records the set it grew (C-026's drift check is what
 /// makes that safe rather than merely conventional).
 ///
-/// Every property of [`record_activation_consent`] holds here — same allowlist
-/// discipline, same best-effort failure posture — because that function is a
-/// thin wrapper over this one.
-pub async fn record_activation_consent_over(config_path: &Path, sources: std::collections::BTreeSet<String>) {
+/// The allowlist discipline and the best-effort failure posture
+/// [`record_activation_consent`] documents both hold here, because that
+/// function is a thin wrapper over this one. The asymmetry runs the other way
+/// for the decision itself: **this** is where the ladder below resolves, and
+/// the wrapper only forwards a tri-state through.
+///
+/// # The one place `OCX_NO_CONSENT` is read (ocx-sh/ocx#400)
+///
+/// `consent` is the caller's `--consent` / `--no-consent`, or `None` when
+/// neither was typed. The ladder is **flag, then env, then stamp**, and it
+/// resolves here rather than at the six call sites so there is one definition
+/// of it: a second ambient read further up would fire for a command whose flag
+/// had already answered, and `OCX_NO_CONSENT=1 ocx pull --consent` would then
+/// record nothing.
+///
+/// `ocx shell allow` does not route through here at all — it calls
+/// [`ocx_lib::project::consent::record`] directly, because it *is* the explicit
+/// gesture this variable exists to tell machine invocation apart from. Putting
+/// the gate in `record` instead would disable that command too.
+///
+/// A suppressed stamp is logged at debug, not warned: the caller asked for it,
+/// and the writers below already reserve WARN for a write that failed.
+pub async fn record_activation_consent_over(
+    config_path: &Path,
+    sources: std::collections::BTreeSet<String>,
+    consent: Option<bool>,
+) {
+    if !consent.unwrap_or_else(|| !ocx_lib::env::flag(ocx_lib::env::keys::OCX_NO_CONSENT, false)) {
+        ocx_lib::log::debug!(
+            "Shell-activation consent was not recorded for '{}': suppressed by --no-consent or OCX_NO_CONSENT",
+            config_path.display()
+        );
+        return;
+    }
+
     let config_path = config_path.to_path_buf();
 
     // Two filesystem resolutions plus an atomic write — all blocking, so the
@@ -942,6 +989,54 @@ mod tests {
             opt_in.contains("record_activation_consent("),
             "the opt-in loader must be the one that stamps, or the guard above is vacuous"
         );
+    }
+
+    /// ocx-sh/ocx#400 — `OCX_NO_CONSENT` is read at exactly one depth, and it
+    /// is the deepest one.
+    ///
+    /// The ladder is flag, then env, then stamp. A second ambient read in
+    /// either wrapper above the seam would fire for a caller whose
+    /// `--consent` had already answered, so `OCX_NO_CONSENT=1 ocx pull
+    /// --consent` would record nothing — a flag losing to an env var, which
+    /// inverts the house precedence everywhere else in this CLI. That defect
+    /// is invisible in a diff of either function alone, which is why the
+    /// property is asserted over all three at once.
+    ///
+    /// Red state: move the `ocx_lib::env::flag` call from
+    /// `record_activation_consent_over` up into `record_activation_consent`.
+    #[test]
+    fn c400_the_consent_env_var_is_read_only_at_the_seam() {
+        let source = include_str!("project_context.rs");
+
+        let seam = code_only(&function_body(source, "record_activation_consent_over"));
+        // The `flag(` half matters: the debug line below the gate names the
+        // variable too, so a guard that only looked for the spelling would stay
+        // green with the read itself deleted.
+        assert!(
+            seam.contains("env::flag(ocx_lib::env::keys::OCX_NO_CONSENT"),
+            "the seam must be the function that reads the env var, or the guard below is vacuous"
+        );
+
+        // The extraction-sanity marker must be a call each body makes, never a
+        // substring of its own signature: `function_body` slices from
+        // `fn <name>(` inclusive, so a signature-only extraction still contains
+        // `consent` for both of these and the guard below would pass watching
+        // nothing.
+        for (name, marker) in [
+            ("record_activation_consent", "record_activation_consent_over("),
+            ("load_project_with_lock_consenting", "load_project_with_lock("),
+        ] {
+            let body = code_only(&function_body(source, name));
+            assert!(
+                body.contains(marker),
+                "`fn {name}`'s body did not extract — the guard is watching nothing"
+            );
+            assert!(
+                !body.contains("OCX_NO_CONSENT"),
+                "`fn {name}` forwards the caller's tri-state and must not read the env itself; \
+                 a second read here outranks the `--consent` flag"
+            );
+        }
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
