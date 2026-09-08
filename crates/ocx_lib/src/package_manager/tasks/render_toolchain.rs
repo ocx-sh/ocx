@@ -9422,19 +9422,23 @@ mod tests {
         );
     }
 
-    /// C-081, row 5 — `active` occupied by a **regular file** is removed and
-    /// re-created, never renamed over.
+    /// C-081, row 5 — `active` occupied by a **regular file**, or by any other
+    /// non-directory, is cleared and re-created.
     ///
-    /// `rename(2)` replaces a regular file silently, so a heal that reached
-    /// `replace_atomic` unconditionally would lose the bytes without ever
-    /// observing the kind — and would say nothing about it.
+    /// **Both plants take the same arm, and neither discriminates the
+    /// primitive.** On POSIX `rename(2)` replaces a regular file and a FIFO
+    /// alike, so a heal that reached `symlink::replace_atomic` unconditionally
+    /// leaves a finished tree byte-identical to this one — the occupant's
+    /// bytes are gone either way, and no assertion over the result can tell
+    /// the two apart. The FIFO is planted because it is the second corrupt
+    /// state a user can reach, not because it observes the arm. What this row
+    /// pins is that the occupant is cleared **before** the link is published,
+    /// which is the whole of the non-directory arm's job.
     ///
-    /// RED: drop the kind dispatch and call `symlink::replace_atomic`
-    /// unconditionally. On POSIX the rename succeeds, so this row stays green
-    /// on the *outcome* — which is why it asserts the **file arm was taken**,
-    /// by planting a FIFO too: `rename` over a FIFO also succeeds, but
-    /// `remove_file` is the only path that can also clear a directory-free
-    /// non-file on Windows, where the rename fails.
+    /// RED: delete the `remove_file` from `heal_active`'s non-directory branch
+    /// and fall straight through to `symlink::create` — `symlink(2)` fails
+    /// `EEXIST` against the occupant, the heal only warns, and `active` stays
+    /// a file (or a FIFO) on both legs.
     #[cfg(unix)]
     #[tokio::test]
     async fn active_occupied_by_a_non_directory_is_removed_and_re_created() {
