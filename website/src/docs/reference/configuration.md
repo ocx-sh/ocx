@@ -1752,7 +1752,7 @@ ocx self setup --toolchain-activate bin
 That targets the ocx home's own `ocx.toml`, never the project in effect — `--project` and [`OCX_PROJECT`][env-ocx-project] name a different toolchain and this flag does not redirect onto it. A project's own `ocx.toml` still decides for that project.
 
 ::: tip `bin` and `none` are the same `PATH` for the global toolchain
-`$OCX_HOME/toolchain/active/bin` is a session-level directory: [`ocx self setup`][cmd-self-setup] registers it on `PATH` once, a shell start prepends it again, and a prompt never withdraws it. So a global `activate = "bin"` and a global `activate = "none"` both leave the global toolchain reachable through its trampolines and compose nothing else — the same `PATH`, by the same route. The two values part company only for a project's toolchain, whose `bin/` directory a prompt does add and remove.
+`$OCX_HOME/toolchain/active/bin` is a session-level directory: [`ocx self setup`][cmd-self-setup] registers it on `PATH` once, a shell start prepends it again, and a prompt never withdraws it. So a global `activate = "bin"` and a global `activate = "none"` both leave the global toolchain reachable through its trampolines and compose nothing else — the same `PATH`, by the same route. The two values part company only for a project's toolchain, whose `active/bin` directory a prompt does add and remove.
 :::
 
 ::: tip Both halves of a shell honour the mode
