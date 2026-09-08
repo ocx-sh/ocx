@@ -66,6 +66,12 @@ tasks:
 
   lint:links:
     desc: Check markdown cross-references in .claude/, CLAUDE.md, and AGENTS.md (offline)
+    # `rules/docs-quality/checks/fixtures` is excluded because those files are
+    # checker *inputs*, not documents: a fixture named `fail-dead-anchor.md`
+    # has to contain a dead anchor to be worth anything, so linting it asserts
+    # the opposite of what it exists to prove. 21 of the tree's errors, 0
+    # anywhere else. Same reasoning as `shell:shellcheck`'s exclusion of the
+    # shebang-less snippets next door.
     dir: '{{.TASKFILE_DIR}}'
     cmds:
       - mkdir -p {{.REPORTS_DIR}}
@@ -74,6 +80,7 @@ tasks:
         --exclude-path artifacts
         --exclude-path tests/.venv
         --exclude-path worktrees
+        --exclude-path rules/docs-quality/checks/fixtures
         --format json --output {{.REPORTS_DIR}}/lint-links.json
         ../CLAUDE.md ../AGENTS.md .
     sources: *claude-sources

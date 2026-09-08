@@ -8,7 +8,14 @@
 version: '3'
 
 vars:
-  SHELL_GLOB: "'*.sh' ':(exclude)website/src/_scripts/'"
+  # `docs-quality`'s own fixtures are excluded because they are checker *inputs*,
+  # not scripts this repo ships: three-line snippets modelling what a doc page
+  # contains, parsed by `checks/doc_examples.py` for their `# doc:` and
+  # `# expect_exit:` headers. A doc snippet carries no shebang, so shellcheck
+  # reports SC2148 on every one of them — and the fix cannot be to add one,
+  # because that would make the fixture stop modelling the thing it exists to
+  # model. Both the `.claude/` originals and their `.opencode/` mirrors.
+  SHELL_GLOB: "'*.sh' ':(exclude)website/src/_scripts/' ':(exclude,glob)**/docs-quality/checks/fixtures/**'"
 
 tasks:
   verify:
