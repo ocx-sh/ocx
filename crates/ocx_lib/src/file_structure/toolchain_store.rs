@@ -1627,6 +1627,12 @@ mod tests {
     /// "not a link", handled by the caller.
     fn active_link_to(root: &Path, target: &str) -> bool {
         std::fs::create_dir_all(root).unwrap();
+        // The derived target must exist on disk, or every row of the table
+        // below is decided by an I/O failure rather than by the predicate: a
+        // canonicalising mutation errors on all of them, fails closed, and reds
+        // the *positive* row instead of the ones it targets — a mutation
+        // killing the fixture, not the property. Measured, not reasoned.
+        std::fs::create_dir_all(root.join(super::SHELLS_DIR).join(DEFAULT_SHELL)).unwrap();
         let link = root.join("active");
         #[cfg(unix)]
         std::os::unix::fs::symlink(target, &link).unwrap();
