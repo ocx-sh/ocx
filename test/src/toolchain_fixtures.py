@@ -744,9 +744,19 @@ def two_branch_checkout(
         cascade=False,
         bins=[f"brbin{label}"],
     )
+    # One repository at two tags, not two repositories — and that is a
+    # consent constraint, not an economy. `[shell.consent]` clause 1 grants a
+    # stamped project only while its lock's source set stays a subset of the
+    # stamped one, and a source is `<registry>/<first path segment>`
+    # (`project/consent.rs`, `source_of`). Two repositories would make the
+    # branch-only tool a *new source* on the far side of every checkout, so
+    # the switch would answer with the consent refusal and no staleness row
+    # would ever reach the question it is about. The tool set still differs
+    # across the branches — different `[tools]` key, different exposed binary,
+    # different digest — which is what S-001 asks of this fixture.
     main_only_package = make_package(
         ocx,
-        f"t_{label}_monly",
+        f"t_{label}_only",
         "1.0.0",
         tmp_path,
         cascade=False,
@@ -754,8 +764,8 @@ def two_branch_checkout(
     )
     other_only_package = make_package(
         ocx,
-        f"t_{label}_oonly",
-        "1.0.0",
+        f"t_{label}_only",
+        "2.0.0",
         tmp_path,
         cascade=False,
         bins=[f"oobin{label}"],
