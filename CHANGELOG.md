@@ -5,6 +5,82 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-09-08
+
+### Added
+
+- Expose the transport and candidate APIs signing needs *(oci)*
+- Grant a whole subtree in [shell.consent] paths with a trailing /* *(shell)* **BREAKING**
+- Describe every report type with JsonSchema *(api)*
+- Publish the --format json report contract *(schema)*
+- Emit an exec-time resolution record *(record)*
+- Add exit code 86 for a forge capability a transport needs *(cli)*
+- Add the git write transport and the forge identity ladder *(forge)*
+- Claim a namespace from the CLI with ocx package claim *(package)* **BREAKING**
+- Take the package as a positional, add --transport git *(announce)* **BREAKING**
+- Render a project toolchain home and put it on the session PATH *(toolchain)* **BREAKING**
+- Let ocx init consent to the project it creates *(cli)*
+- Let a machine caller run without consenting to the project it touches *(cli)*
+- Allow "bin" as a group and tool name again *(project)*
+- Render the tree under links/ and shells/, behind an active link *(toolchain)* **BREAKING**
+- Report the toolchain launcher directory in `ocx shell state` *(cli)*
+
+### Changed
+
+- Expose the ocx crate as a library target *(cli)*
+- Make C-044's per-prompt budget a hard 10 ms ceiling *(shell)*
+- Move the announce clock into oci::index for claim *(index)*
+
+### Documentation
+
+- Size the latency injection against the runner, not the dev box *(shell)*
+- Document HTTP proxy support and the SSRF guard's behaviour behind one *(website)*
+- Document claiming a namespace, its env vars and exit 86 *(claim)*
+- Document toolchain activation, session PATH and the toolchain-dir key *(toolchain)*
+- Fold claiming into the authoring announce guide *(announce)*
+- Document the closed depth-1 tree and read `toolchain_bin` for PATH *(toolchain)*
+- Name links/&lt;group&gt;/&lt;entry&gt; and active/bin in help text and schemas *(toolchain)*
+- Name active/bin where the sentence names its global sibling *(toolchain)*
+- Point the --pinned help at the links/&lt;group&gt;/&lt;entry&gt; tree *(cli)*
+- Describe the rendered toolchain the same way in lock, update and remove help *(cli)*
+
+### Fixed
+
+- Sweep signs once per subject digest, not once per tag *(sign)*
+- Report a malformed paths entry even when it matches the project *(shell)*
+- Stop an abstaining latency run from reading as PASSED *(shell)*
+- Honour HTTP proxy settings in the SSRF guard so proxied networks can pull *(oci)*
+- Stop at an authoritative index miss instead of falling through to the registry for manifest and blob fetches *(oci)*
+- Exit 69, not 78 or 64, when a guarded registry or Sigstore host does not resolve *(oci)* **BREAKING**
+- Rebuild a diverged announce branch on the index base instead of reading it as truth *(announce)*
+- Name the per-package patch opt-out no_patches in JSON output *(status)* **BREAKING**
+- Drop the reserved platform features property and describe AliasTag as a string *(schema)*
+- Widen the non-fast-forward retry to commit and open *(announce)*
+- Run an already-pulled tool offline instead of asking the index where it lives *(oci)*
+- Name the claimed unit the package, not the namespace *(claim)* **BREAKING**
+- Honour the activate mode at login, not only at the prompt *(shell)* **BREAKING**
+- Let the global toolchain's ocx pin win over the installed binary *(shell)* **BREAKING**
+- Resolve script reads against the bundle content, not the store dir *(script)* **BREAKING**
+- Reconcile a project created where the shell already is *(shell)*
+- Watch the project file OCX_PROJECT names, not a hardcoded ocx.toml *(shell)*
+- Keep write-tree off the network in a blobless checkout *(announce)*
+- Read GitLab through endpoints a CI job token may call *(announce)*
+- Admit a publisher its index allowlists by group *(announce)*
+- Let a CI job token past the scope lists GitLab closes to it *(announce)*
+- Never commit an index root onto a branch head the run did not read *(announce)*
+- Heal a link a copy replaced with a directory, or name the fix *(toolchain)*
+- Exclude both trampoline directory spellings from command lookup *(exec)*
+- Withhold the toolchain PATH entry when `active` is not the derived link *(shell)*
+- Retire the stale `&lt;toolchain&gt;/bin` entry from the session PATH *(setup)*
+- Tell the user how to clear a group directory a render cannot prune *(toolchain)*
+- A group dropped from the lock now leaves the rendered tree *(toolchain)*
+- Keep the session PATH store unchanged when `ocx self setup` re-runs *(setup)*
+- A render never deletes a file ocx did not write from a group *(toolchain)*
+- Keep a foreign file at a pruned toolchain name instead of deleting it silently *(toolchain)*
+- Re-judge the toolchain `links/` directory at the moment a link is written *(toolchain)*
+- Read a signal-killed push's verdict from the remote, not from the corpse *(forge)*
+- Stop linting docs-quality's fixtures, which are checker inputs *(tasks)*
+
 ## [0.6.0] - 2026-08-30
 
 ### Added
@@ -71,6 +147,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - List every SBOM a cosign .sbom tag or referrer manifest carries, not just the first *(verify)*
 - Resolve each swept tag once instead of twice *(sign)*
 - Read a file:// trusted root at every door, not only verify and sbom *(trust)*
+
+### Release
+
+- V0.6.0
 
 ## [0.5.8] - 2026-08-11
 
@@ -984,6 +1064,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.6.1]: https://github.com/ocx-sh/ocx/compare/v0.6.0..v0.6.1
 [0.6.0]: https://github.com/ocx-sh/ocx/compare/v0.5.8..v0.6.0
 [0.5.8]: https://github.com/ocx-sh/ocx/compare/v0.5.7..v0.5.8
 [0.5.7]: https://github.com/ocx-sh/ocx/compare/v0.5.6..v0.5.7

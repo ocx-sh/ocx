@@ -3666,7 +3666,7 @@ dependencies = [
 
 [[package]]
 name = "ocx"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3694,7 +3694,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_lib"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "allocative",
  "anyhow",
@@ -3774,7 +3774,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_schema"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ocx",
  "ocx_lib",
@@ -3784,7 +3784,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_shim"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "dunce",
  "windows-sys 0.61.2",
