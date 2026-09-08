@@ -4,9 +4,9 @@
 //! Session-level PATH registration for `ocx self setup`, per platform.
 //!
 //! `ocx self setup` puts two directories on the PATH of every process started
-//! afterwards: `$OCX_HOME/toolchain/bin` and the ocx install `bin` directory,
+//! afterwards: `$OCX_HOME/toolchain/active/bin` and the ocx install `bin` directory,
 //! in that order. Only the global tier is registered — a project's
-//! `.ocx/toolchain/bin` never reaches a session PATH by ocx's own hand.
+//! `.ocx/toolchain/active/bin` never reaches a session PATH by ocx's own hand.
 //!
 //! Three properties shape every writer here, and each is a contract rather
 //! than an implementation detail:
@@ -268,7 +268,7 @@ pub fn stores_for(home: &HomeEnv) -> Vec<PathBuf> {
 ///
 /// `directories[0]` ends up nearest the front of the resulting PATH. Today's
 /// caller passes exactly two — the ocx install `bin` directory, then
-/// `$OCX_HOME/toolchain/bin` — but nothing here depends on the count.
+/// `$OCX_HOME/toolchain/active/bin` — but nothing here depends on the count.
 ///
 /// `ocx_home` is the store root the two directories belong to; it reaches
 /// [`HomeEnv`] as the home-directory fallback when `$HOME` is unset.
@@ -844,6 +844,48 @@ mod tests {
         assert!(
             code.contains("session_path_stores(") || code.contains("session_path::stores_for"),
             "C-043: the suppressed run still names the stores it did not touch"
+        );
+    }
+
+    /// **C-084 — the retirement is wired into `setup::run`, and it runs first.**
+    ///
+    /// Two claims, each red on its own:
+    ///
+    /// 1. `run` calls the deregistrar. Without it the entry an unreleased build
+    ///    wrote at `<root>/bin` is never subtracted, and on Windows and macOS —
+    ///    which merge into the stored value and never subtract — it survives
+    ///    every future run.
+    /// 2. It calls it **before** the registrar. Reversed, the subtraction would
+    ///    take out the entry the registration just added on any store where the
+    ///    two spellings overlap, and would report a `--dry-run` outcome the real
+    ///    run does not produce.
+    ///
+    /// A source assertion because the behavioural red is **not reachable on
+    /// Linux**, which regenerates `ocx.conf` wholesale from the directories it
+    /// is handed and therefore self-heals whether or not this call exists — the
+    /// same observation ADR item 46 makes about its own acceptance row. The
+    /// platform where dropping the call is observable is one no CI leg here
+    /// runs, so the choice is this check or none.
+    #[test]
+    fn the_retirement_runs_before_the_registration_in_setup_run() {
+        let code = shipped_code(include_str!("../setup.rs"));
+
+        let deregister = code
+            .find("deregister_session_path(")
+            .expect("C-084: `setup::run` must subtract the retired `<root>/bin` entry");
+        let register = code
+            .find("register_session_path(&ocx_home, &directories")
+            .expect("the registrar call must still be findable, or the ordering below proves nothing");
+
+        assert!(
+            deregister < register,
+            "C-084: the retirement must precede the registration; found deregister at {deregister} \
+             and register at {register}"
+        );
+        assert!(
+            code.contains("let retired = retired_session_path_directories("),
+            "C-084: the retired path is one named derivation, never a literal join at the call site — \
+             and this needle is the *call*, not the definition it would otherwise match in this same file"
         );
     }
 

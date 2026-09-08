@@ -30,7 +30,7 @@ pub enum SelfGroup {
     /// optional VERSION to install a specific release instead of the latest.
     ///
     /// Setup also registers the ocx install `bin` directory and
-    /// `$OCX_HOME/toolchain/bin` on the session PATH - the Windows user
+    /// `$OCX_HOME/toolchain/active/bin` on the session PATH - the Windows user
     /// environment, an `environment.d` drop-in on Linux, a login LaunchAgent
     /// on macOS - so processes started outside a shell find them too, such as
     /// desktop launchers, IDEs and services.

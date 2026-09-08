@@ -359,10 +359,29 @@ pub async fn run(
             .collect()
     } else {
         let directories = session_path_directories(file_structure);
+        let retired = retired_session_path_directories(file_structure);
         tokio::task::spawn_blocking({
             let ocx_home = ocx_home.to_path_buf();
             let dry_run = options.dry_run;
-            move || session_path::register_session_path(&ocx_home, &directories, dry_run)
+            move || {
+                // C-084, and strictly **before** the registration: Windows and
+                // macOS merge into the stored value and never subtract what a
+                // previous run wrote, so the entry an unreleased build left at
+                // `<root>/bin` would sit there forever beside the current one.
+                // Linux regenerates `ocx.conf` wholesale and self-heals, which
+                // is why this call is unconditional rather than platform-gated
+                // — a platform-gated one would be a branch no Linux run can
+                // observe.
+                //
+                // The outcome is dropped on purpose: `Unchanged` is the answer
+                // on every machine that never ran an unreleased build, and it
+                // is not a fact a user asked about. The `?` is C-037's encoding
+                // refusal only, and it is unreachable here — phase 0 already
+                // applied that refusal to the longer `active/bin` spelling
+                // under the same `$OCX_HOME`.
+                session_path::deregister_session_path(&ocx_home, &retired, dry_run)?;
+                session_path::register_session_path(&ocx_home, &directories, dry_run)
+            }
         })
         .await
         .map_err(|join| error::Error::Io {
@@ -421,7 +440,7 @@ pub fn ocx_install_bin_path(file_structure: &FileStructure) -> PathBuf {
 /// The two directories `ocx self setup` registers at session level, **in the
 /// order they must appear on PATH** (C-060).
 ///
-/// `$OCX_HOME/toolchain/bin` leads and [`ocx_install_bin_path`] follows, so a
+/// `$OCX_HOME/toolchain/active/bin` leads and [`ocx_install_bin_path`] follows, so a
 /// global toolchain that pins `ocx` is the one a session resolves and the
 /// installed binary is the floor beneath it. D-4 removed the refusal that used
 /// to stop a toolchain rendering that name; an ordering that kept the installed
@@ -434,12 +453,35 @@ pub fn ocx_install_bin_path(file_structure: &FileStructure) -> PathBuf {
 /// is a decision with a contract number attached, and an ordering nobody can
 /// call is an ordering no test can pin.
 /// The toolchain half is [`crate::file_structure::ToolchainStore::bin`], never
-/// a literal `toolchain/bin` join: C-001 builds that store once from the
+/// a literal `toolchain/active/bin` join: C-001 builds that store once from the
 /// composite root precisely so no caller re-derives the tree location, and a
 /// second spelling here is what would keep pointing at the old place the day
 /// the layout moves.
 pub fn session_path_directories(file_structure: &FileStructure) -> Vec<PathBuf> {
     vec![file_structure.toolchain.bin(), ocx_install_bin_path(file_structure)]
+}
+
+/// The session-PATH segment `<root>/bin`, which no longer exists (C-084).
+///
+/// The trampoline directory sat directly under the toolchain root until the
+/// `active` indirection moved it one level down, so a machine that ran `ocx
+/// self setup` against an unreleased build carries a session-PATH entry naming
+/// a directory that will never be written again. [`run`] subtracts it before it
+/// registers [`session_path_directories`].
+///
+/// A **named constant**, not an accessor: there is deliberately no live
+/// derivation for a path the tree no longer has, and inventing one would keep a
+/// dead shape spellable. It is deleted in the release after the one that
+/// introduces it — the batched-window shape, with its removal release named
+/// when the window opens.
+///
+/// Scope: only machines that ran `ocx self setup` against an unreleased build.
+/// Everywhere else this is an `Unchanged` nobody sees.
+pub fn retired_session_path_directories(file_structure: &FileStructure) -> Vec<PathBuf> {
+    /// The name the trampoline directory carried directly under the root.
+    const RETIRED_TOOLCHAIN_BIN: &str = "bin";
+
+    vec![file_structure.toolchain.root().join(RETIRED_TOOLCHAIN_BIN)]
 }
 
 /// Adopt (or clear) the managed-config tier from an already-resolved
@@ -1020,7 +1062,7 @@ mod tests {
 
     // ── C-060: the session-PATH directory order ──────────────────────────────
 
-    /// C-060: `$OCX_HOME/toolchain/bin` leads, the install bin directory
+    /// C-060: `$OCX_HOME/toolchain/active/bin` leads, the install bin directory
     /// follows, and there are exactly those two.
     ///
     /// This is the **one** site that decides the order — the writers prepend
@@ -1049,8 +1091,8 @@ mod tests {
         );
         assert_eq!(
             directories[0],
-            home.path().join("toolchain").join("bin"),
-            "the rendered toolchain bin directory must lead, so a pinned `ocx` can win"
+            home.path().join("toolchain").join("active").join("bin"),
+            "the PATH-facing trampoline directory must lead, so a pinned `ocx` can win"
         );
         assert_eq!(
             directories[1],
@@ -1060,6 +1102,36 @@ mod tests {
         assert_ne!(
             directories[0], directories[1],
             "the two entries must be distinct, or the ordering assertion above is vacuous"
+        );
+    }
+
+    /// C-084 — the retired entry is the *old* spelling, and it is not one of
+    /// the two the same run registers.
+    ///
+    /// Both halves matter. A retired set that answered `active/bin` would
+    /// subtract the entry the very next call adds — on Windows and macOS the
+    /// merge happens after, so the value would survive, but on a `--dry-run`
+    /// the reported outcome would be a lie, and any reordering would leave the
+    /// user with no toolchain on `PATH` at all.
+    ///
+    /// RED: derive it from `toolchain.bin()` and the disjointness assertion
+    /// fails; spell it `<root>/active/bin` and the literal fails.
+    #[test]
+    fn the_retired_session_path_entry_is_the_old_root_level_bin_directory() {
+        let home = tempfile::TempDir::new().unwrap();
+        let file_structure = FileStructure::with_root(home.path().to_path_buf());
+
+        let retired = retired_session_path_directories(&file_structure);
+        let registered = session_path_directories(&file_structure);
+
+        assert_eq!(
+            retired,
+            vec![home.path().join("toolchain").join("bin")],
+            "C-084 retires exactly `<root>/bin`, the directory the tree used to expose"
+        );
+        assert!(
+            retired.iter().all(|entry| !registered.contains(entry)),
+            "the retired entry must not be one this run registers: {retired:?} vs {registered:?}"
         );
     }
 

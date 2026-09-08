@@ -88,8 +88,8 @@ pub struct SelfSetup {
     /// nothing and adds nothing.
     ///
     /// For the global toolchain this flag writes, `bin` and `none` leave the
-    /// same PATH: `$OCX_HOME/toolchain/bin` is a session directory `ocx self
-    /// setup` registers once and no prompt withdraws, so the global tools stay
+    /// same PATH: `$OCX_HOME/toolchain/active/bin` is a session directory `ocx
+    /// self setup` registers once and no prompt withdraws, so the global tools stay
     /// reachable through their trampolines under either. The two values part
     /// company only for a project's own toolchain.
     ///
@@ -773,7 +773,7 @@ mod tests {
     /// The second literal is C-059's consequence, pinned in the help closest to
     /// the flag rather than only in `command-line.md` / `configuration.md` /
     /// the user guide: `session_path_holds_both_global_directories` keeps
-    /// `$OCX_HOME/toolchain/bin` desired in *every* mode, so at the one tier
+    /// `$OCX_HOME/toolchain/active/bin` desired in *every* mode, so at the one tier
     /// this flag writes, `bin` and `none` reach an identical `PATH`. Help text
     /// that said `none` "does neither" was false for that tier.
     #[test]
@@ -800,8 +800,9 @@ mod tests {
         assert!(
             rendered.contains(
                 "For the global toolchain this flag writes, `bin` and `none` leave the same PATH: \
-                 `$OCX_HOME/toolchain/bin` is a session directory `ocx self setup` registers once \
-                 and no prompt withdraws, so the global tools stay reachable through their \
+                 `$OCX_HOME/toolchain/active/bin` is a session directory `ocx self setup` \
+                 registers once and no prompt withdraws, so the global tools stay reachable \
+                 through their \
                  trampolines under either. The two values part company only for a project's own \
                  toolchain."
             ),
