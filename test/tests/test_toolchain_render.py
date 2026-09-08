@@ -1730,9 +1730,10 @@ def test_a_lock_swap_renders_the_new_locks_tools_groups_and_stamp(
       reds.
 
     The departed **group** directory is deliberately not asserted absent here;
-    ``test_a_departing_group_that_still_holds_its_links_is_reported_every_render``
-    states what ships, and the strict ``xfail`` beside it states the one half of
-    S-001 that still does not.
+    ``test_a_departed_group_directory_converges_instead_of_skipping_forever``
+    owns that clause exactly, and
+    ``test_a_departing_group_holding_a_foreign_file_is_reported_every_render``
+    owns the RUL-32 case where it must *not* go.
     """
     checkout = two_branch_checkout(ocx, tmp_path)
 
@@ -1787,30 +1788,32 @@ def test_a_lock_swap_renders_the_new_locks_tools_groups_and_stamp(
     )
 
 
-def test_a_departing_group_that_still_holds_its_links_is_reported_every_render(
+def test_a_departing_group_holding_a_foreign_file_is_reported_every_render(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """S-001's error clause, as it ships: the group directory is **reported**,
-    never silently deleted (RUL-32).
+    """S-001's error clause, and the asymmetry the convergence half rests on.
 
-    ``reconcile_links`` scans entries only for the groups the invocation
-    *selected*, and a group that left the lock is never selected — so its links
-    survive, ``remove_dir`` on the directory fails ``ENOTEMPTY``, and
-    ``prune_outcome`` turns that into ``RenderOutcome::Skipped``.
-    ``skipped_render_warnings`` puts one line on stderr per render.
+    The links under a departed group are ocx's own and go — that is the sibling
+    below. A file ocx did **not** write is a different thing entirely: the
+    prune sweep skips it, the non-recursive ``remove_dir`` then fails
+    ``ENOTEMPTY``, and the directory is reported — never silently deleted
+    (RUL-32) — on **every** render, not once. ``skipped_render_warnings`` puts
+    one line on stderr per render; the remedy half of that line is
+    ``test_a_skipped_group_directory_says_why_and_what_to_do``.
 
-    This case states what S-001 gets here: reported, named, never deleted, and
-    the render continues past it. The remedy half is
-    ``test_a_skipped_group_directory_says_why_and_what_to_do``, and the half
-    S-001 asks for and still does not get — convergence — is the strict
-    ``xfail`` below, stated as its own case so it turns red the day it is fixed
-    rather than being laundered into this one's docstring.
+    The planted file is what makes a skipped group directory reachable at all
+    once a departed group converges. It is planted **before** the first
+    post-switch render, because "reported forever" and "reported once" are the
+    same tree after one render and different trees after two.
 
     RED: change the ``GroupDirectory`` arm's directory branch from
-    ``std::fs::remove_dir`` to ``remove_dir_all`` — the link vanishes and the
-    survival assertion reds. (Second red, for the "reported" half: delete the
-    ``Skipped`` arm of ``skipped_render_warnings`` — the stderr assertion reds
-    while the survival one still passes; the two are independent.)
+    ``std::fs::remove_dir`` to ``remove_dir_all`` — the planted file vanishes
+    and the survival assertion reds. (Second red, for the "reported" half:
+    delete the ``Skipped`` arm of ``skipped_render_warnings`` — the stderr
+    assertion reds while the survival one still passes; the two are
+    independent.) Third: drop the sweep's ``is_symlink`` filter and the same
+    survival assertion reds, because ``crate::symlink::remove`` is
+    ``std::fs::remove_file`` on Unix.
     """
     checkout = two_branch_checkout(ocx, tmp_path)
     assert run_in(ocx, checkout.directory, "pull").returncode == EXIT_SUCCESS
@@ -1819,16 +1822,23 @@ def test_a_departing_group_that_still_holds_its_links_is_reported_every_render(
     )
 
     git(checkout.directory, "checkout", "-q", checkout.other_branch)
+    planted = checkout.main_group_dir / "not-ocxs.txt"
+    planted.write_bytes(b"planted\n")
+
     for run in (1, 2):
         result = run_in(ocx, checkout.directory, "pull")
         assert result.returncode == EXIT_SUCCESS, (
             f"C-050 — a skip never fails the render (run {run}); "
             f"rc={result.returncode}\n{result.stderr}"
         )
-        assert checkout.main_group_link_present(), (
+        assert planted.read_bytes() == b"planted\n", (
             f"RUL-32 — the departed group's directory is never removed "
             f"recursively (run {run}); {checkout.main_group_dir} holds "
             f"{sorted(p.name for p in checkout.main_group_dir.iterdir())}"
+        )
+        assert not checkout.main_group_link_present(), (
+            f"…while the link ocx itself wrote is pruned (run {run}) — that "
+            f"asymmetry is the whole rule"
         )
         assert str(checkout.main_group_dir) in result.stderr, (
             f"S-001 — …and the skip names the path, on every render, not once "
@@ -1843,31 +1853,22 @@ def test_a_departing_group_that_still_holds_its_links_is_reported_every_render(
         ), f"…and the render continued past the skip (run {run})"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "S-001 Expected: a departed group leaves no orphan group directory. "
-        "`reconcile_links` scans entries per *selected* group, so a departed "
-        "group's own links are never pruned, its directory never empties, and "
-        "`remove_dir` is ENOTEMPTY forever. The patch is in wp5-report.md § 4; "
-        "it is a behaviour change to the prune pass, not a diagnostic fix."
-    ),
-)
 def test_a_departed_group_directory_converges_instead_of_skipping_forever(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """S-001 *Expected* — "the rendered tree matches the new lock exactly — no
     orphan group directory".
 
-    Strict ``xfail``: it fails against the shipped renderer and turns **red** the
-    day the entry prune is keyed on what is under ``links/`` rather than on the
-    selected groups. A comment could not do that.
-
     A departed group holds nothing but links the renderer itself wrote, so
     emptying it is not the recursive delete RUL-32 forbids — it is the same
     per-entry ``symlink::remove`` the surviving groups already get. RUL-32 still
     binds whatever ocx did **not** write, which is the case the sibling above
     pins.
+
+    RED: drop the entry sweep from ``reconcile_links``'s ``links/``-orphan loop
+    (the ``for entry in read_dir_utf8_names(&group_directory)`` block) — the
+    departed group's link survives, ``link_entries`` gains a key the new lock
+    never declared, and the directory is still on disk.
     """
     checkout = two_branch_checkout(ocx, tmp_path)
     assert run_in(ocx, checkout.directory, "pull").returncode == EXIT_SUCCESS
@@ -1906,6 +1907,10 @@ def test_a_skipped_group_directory_says_why_and_what_to_do(
     checkout = two_branch_checkout(ocx, tmp_path)
     assert run_in(ocx, checkout.directory, "pull").returncode == EXIT_SUCCESS
     git(checkout.directory, "checkout", "-q", checkout.other_branch)
+    # A departed group whose contents are all ocx's own now converges, so a file
+    # ocx did not write is what keeps the directory unremovable — the only state
+    # in which there is a skip to read at all.
+    (checkout.main_group_dir / "not-ocxs.txt").write_bytes(b"planted\n")
     result = run_in(ocx, checkout.directory, "pull")
     assert result.returncode == EXIT_SUCCESS, result.stderr
 
