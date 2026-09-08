@@ -57,6 +57,20 @@ research-axes:
   (CLAUDE.md model policy; matches models.md Rule 4).
 
 ## Memory
+
+- Active plan: `.claude/artifacts/plan_toolchain_tree_layout.md` (toolchain tree
+  layout — the closed depth-1 set). **Moved out of `.claude/state/plans/` on
+  2026-09-08 — that tree is gitignored (`.gitignore:39`) and this plan must ship
+  with the branch.** ADR addendum in
+  `.claude/artifacts/adr_toolchain_activation.md`; research in
+  `research_toolchain_tree_doc_surface.md` and
+  `research_toolchain_tree_corrupt_states.md`; plan reviews in
+  `review_toolchain_tree_plan_{spec,adversary}.md`. All four owner questions
+  answered 2026-09-08: hold 0.6.1, **option B** (`active` + `links/` + `shells/`),
+  C-082 carried as WP-0 rather than filed, Windows verification ignored by
+  decision. Origin discussion parked at
+  `.agents/discussions/shell-multi-activation.md`.
+  State: `plan-approved` → executing on `feat/toolchain-tree-layout`.
 - **A structural check whose failure message renders the pattern it forbids seeds its own
   corpus (2026-09-06).** C-062's repo-wide `--package` sweep prints the offending command line
   when it fails; that message lands in the verify log, which sat inside its own "repo-wide"

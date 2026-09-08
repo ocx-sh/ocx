@@ -916,6 +916,581 @@ Every divergence the implementation recorded, and whether it touches this record
 | 39 | The generated LaunchAgent carries a `__OCX_TESTING_LAUNCHCTL` seam instead of naming `/bin/launchctl` absolutely | Testability seam; D5 unchanged |
 | 40 | The `environment.d` refusal set is derived from systemd's `parse_env_file`, not the man page's prose, and adds `\\` and a leading space | Widens D5's Linux encoding refusals |
 
+## Addendum — 2026-09-07 (layout: the closed depth-1 tree)
+
+**Append-only, and this one is a decision rather than a correction.** § A's rows record where the
+implementation moved a decision; this section changes the on-disk grammar C-001 states, so it is
+recorded as its own decision with its own options, its own contracts (**C-071 … C-084**, continuing
+*this record's* catalog) and its own validation items (**39 … 50**, continuing § *Validation*).
+Nothing above this line is rewritten.
+
+> **Numbering hazard, stated once.** `C-NNN` is per-record. This record's catalog runs C-001 … C-070
+> and continues at C-071 below; `design_spec_shell_env_overhaul.md` runs its own C-001 … C-0NN with
+> entirely different meanings (C-044 and C-045 as cited in § A's rows are *its* numbers, borrowed),
+> and the index-claim record's catalog also reaches C-071+ — cited today in
+> `crates/ocx_lib/src/cli/classify.rs:1370-1372`. A code comment citing a number below must therefore
+> sit in a file that already cites this catalog, or name the record.
+
+### Scope, and what is not being built
+
+The rendered tree is **unreleased** (`crates/ocx_lib/src/file_structure/toolchain_store.rs` is absent
+at `v0.6.0` — verified by the team lead; this session has no shell and did not re-check the tag), so
+there is no user migration to design. Multi-shell selection is **not** being built:
+[#363](https://github.com/ocx-sh/ocx/issues/363) (selection config) and
+[#189](https://github.com/ocx-sh/ocx/issues/189) (`ocx select`) stay open and undesigned. Nothing
+below adds a config key, a CLI flag, a lock entry or a resolution input.
+
+### Why now
+
+C-013/C-015 close the depth-1 collision class with a *validator plus a reservation*: `bin` and
+`.gitignore` are refused as group and tool names (`toolchain_store.rs:558-563`, and the parse-time
+arm in `project/config.rs`). That works, and it costs a published interface constraint on names the
+user authors. It is also not the module's own standard — `toolchain_store.rs:150-159` states that "a
+validator on one producer is not a guard", and two call sites still join a group name onto the root
+around the grammar: `reconcile_links` at `render_toolchain.rs:1437` and `observe_default_group_links`
+at `:1743`. Moving every user-supplied name one level down makes the depth-1 set closed *by
+construction*, which retires the reservation instead of enforcing it.
+
+### Considered options
+
+Weights: the security row is 5 because the tree sits inside a repository the ADR itself calls
+attacker-writable (R1, A-11); the namespace row is the motive; present PATH cost and next-layout cost
+are separated deliberately, because one is paid now and the other only if multi-shell ships.
+
+| Criterion (weight) | A — do nothing, ship flat | B — `active` + `links/` + `shells/` **(decision of record)** | C — `links/` only **(recommended)** | D — platform-divergent |
+|---|---|---|---|---|
+| Depth 1 closed by construction; reservation retired (**4**) | 2 | 5 | 5 | 5 |
+| Security surface, **and resilience to an out-of-sync tree, on the PATH path** (**5**) | 5 | 3 | 5 | 4 |
+| Cost of the *next* layout change, given the release boundary (**4**) | 1 | 5 | 3 | 5 |
+| PATH stability **now** — emitted values and the OS registration (**4**) | 5 | 3 | 4 | 3 |
+| Implementation + verification cost now (**3**) | 5 | 2 | 4 | 1 |
+| Platform uniformity — one shape everywhere (**3**) | 5 | 4 | 5 | 1 |
+| Reversibility (**2**) | 5 | 3 | 4 | 3 |
+| **Weighted total** | **97** | **91** | **108** | **84** |
+
+**The defensive mandate (owner, 2026-09-07) widened the gap rather than narrowing it**, and the row it
+moved is B's: a depth-1 link is exactly what an ordinary copy destroys. `cp -rL`, Docker `COPY`, most
+zip extractors and `rsync` without `-l` all **dereference** symlinks, so a copied checkout yields
+`active/` as a populated *real directory* — and on Windows a junction's target is absolute-only, so
+any copy between paths, users or machines leaves `active` naming the **original** tree. Under C the
+PATH-facing directory is a real directory already and none of that class touches it. B's score here
+went 4 → 3 for that reason; the clauses that buy it back are C-079 … C-083.
+
+**A — do nothing.** Its steelman is real and was the position before the owner chose otherwise: the
+depth-1 bug class is already closed by C-013/C-015, and a directory becoming a symlink *at the same
+path* is not a path change, so `bin/` can absorb any future indirection later at zero PATH cost. What
+sinks it is the release boundary on a *different* path: `<home>/toolchain/<group>/<entry>` is not
+internal — the following lane emits those values into user environments as `PATH` segments and as
+dereference values such as `JAVA_HOME` (C-065). Moving them is free today and a wire break the day
+after the tree ships. A defers the one change that is cheap now.
+
+**B — the proposed shape.** `{.gitignore, active -> shells/default/, links/<group>/<entry>/,
+shells/<name>/bin/}`. Depth 1 becomes tree-owned; the PATH-facing directory becomes `<root>/active/bin`,
+a name that survives any future per-shell or per-group layout because everything under `shells/` is
+tree-owned all the way down. It pays that future-proofing now, while the tree is unreleased, and it
+pays it in five places: a symlink on the PATH path inside an attacker-writable tree (C-079/C-080), a
+kind-change heal with no existing primitive that ordinary copy tools reach routinely (C-081), a
+Windows junction whose absolute target no copy survives (R13) and whose repoint is not atomic (R11),
+and a session-PATH entry two of the three writers strand (C-084).
+
+**C — `links/` only.** `{.gitignore, bin/, links/<group>/<entry>/}`. This is the finding the option
+table exists to surface: **C delivers the entire stated motive.** Depth 1 is equally closed — every
+user-supplied name lives under `links/`, so `bin` and `.gitignore` stop being collidable and the
+reservation is retired identically. It moves the emitted `<group>/<entry>` values once, while that is
+free, and changes *nothing* PATH-facing: `<home>/toolchain/bin` stays exactly where it is, so
+`session_path_directories` (`setup.rs:441-443`), the OS registration, the login stream, the per-prompt
+entry and C-010's exclusion set are all untouched, and questions 1, 2, 3, 4 and 6 below simply do not
+arise. Isolating the pieces shows where B's cost actually sits: renaming `bin/` to `active/` as a
+*real* directory would strand the session-PATH entry exactly as B does while buying nothing, so that
+cost belongs to the **rename**, not to the indirection.
+
+C's deferred cost, stated honestly: when a per-shell or per-group bin layout does arrive, `bin/` is a
+*flat namespace of user-supplied tool names*, so nesting inside it (`bin/<group>/<tool>`) collides
+with a trampoline named after a group — the same class this addendum closes. C would then need a
+tree-owned directory anyway, and adding one at depth 1 is cheap under C (depth 1 is already closed);
+what is *not* cheap then is converting `bin/` into the indirection, or moving the registered
+directory, on released machines.
+
+**D — platform-divergent** (POSIX symlink, Windows a rendered real directory, since Windows has no
+atomic reparse-point repoint). It buys a property nothing needs yet — nothing repoints `active` today
+— and costs two tree shapes, two golden sets and two prune rules, with the Windows arm compiled but
+exercised only by `verify-basic.yml`'s `smoke-windows` job (A-10). Rejected, but kept named: it is the
+escape hatch if multi-shell ever repoints `active` at runtime.
+
+### Recommendation, and the decision of record
+
+**Recommendation: C.** It is the same win for less, and the 17-point margin comes from rows B pays
+unconditionally against a benefit B collects only if multi-shell ships.
+
+**Decision of record: B**, the owner-settled shape. The one condition that makes B right rather than
+merely acceptable is stated as this addendum's open question, and the contracts are split so the
+owner can reverse it by striking one block: **C-071 … C-077 hold under B and C alike; C-078 … C-084
+are B-only, with the one exception C-082 marks** (the `<group>/<entry>` heal, which every option
+needs because every option has a link tree). Dropping Block 2 yields C exactly, with no edit to
+Block 1.
+
+### New contracts
+
+#### Block 1 — the closed depth-1 tree (holds under B and under C)
+
+- **C-071 — depth 1 is closed and tree-owned.** The set is `{.gitignore, active, links, shells}` under
+  B, `{.gitignore, bin, links}` under C. **No user-supplied name is ever a depth-1 component of a
+  rendered home.** Testable: for every group and entry name `validate_component` admits, the rendered
+  path's first component under the root is `links`.
+- **C-072 — one accessor per level, and no call site joins a name onto the root.**
+  `ToolchainHome::entry(group, entry) == <root>/links/<group>/<entry>` — one tree-owned literal plus
+  two validated components, three joins, never one `join(format!(…))`. A sibling
+  `links_group(group) -> Result<PathBuf, ToolchainPathError>` answers "the directory holding one
+  group's links" and **both existing raw joins route through it**:
+  `render_toolchain.rs:1437` (`home.root().join(*group)`) and `:1743`
+  (`home.root().join(DEFAULT_GROUP)`). `ToolchainStore` forwards both, as it forwards every other
+  accessor. Testable: an accepted pair resolves exactly three components below the root with `links`
+  first; the `HOSTILE_COMPONENTS` list is refused identically to today through *both* accessors.
+- **C-073 — the depth-1 reservation is deleted, not deprecated.** `ToolchainPathError::Reserved` and
+  the `eq_ignore_ascii_case(TOOLCHAIN_BIN_DIR) || eq_ignore_ascii_case(GITIGNORE_FILE)` arm
+  (`toolchain_store.rs:558-563`) are removed, together with the parse-time `bin` group-and-tool
+  refusal in `project/config.rs` that C-013/C-015 added. Every other refusal stands verbatim —
+  `Empty`, `ControlCharacter`, `Separator`, `PathPrefix`, `TrailingDotOrSpace`, `Relative` — because
+  each is about path *escape*, not name collision. `classify`'s wildcard-free match and the
+  `variant_name`/`one_of_every_variant`/expected-name triple shrink by one row each. Testable:
+  `[group.bin]`, `[tools] bin = "…"` and `[group.<g>.tools] bin = "…"` render (`links/bin/<entry>`,
+  `links/default/bin`) at exit 0; a group named `a b`, `a/b`, `C:`, `..`, `bin.` or carrying a control
+  byte still exits 78, and a CLI-supplied one still exits 64 (RUL-73).
+
+  **Three surfaces the rename falsifies, and one it does not.** The reservation is *documented* with a
+  rationale that dies with the layout — `website/src/docs/reference/configuration.md:1670-1684` says
+  `bin` names "the rendered toolchain's launcher directory, a sibling of every `<group>/`" and is held
+  "so a per-group `<group>/bin/` layout stays available later" — and the shipped CLI error repeats it
+  (`… 'bin' is reserved; `bin` is reserved for a future per-group launcher directory`). After the move,
+  `bin` is not a sibling of any `<group>/`, and the future it was held for is `shells/<name>/bin/`.
+  All three go together: the reserved-pair comparison at `toolchain_store.rs:558-563`, the doc rows,
+  and the error string — the string is deleted with its variant, not reworded, because there is no
+  remaining refusal for it to describe. **What does *not* follow**, and must not be adopted: `links`,
+  `shells` and `active` do **not** become reserved group names. A group name is a component of
+  `links/<group>/<entry>`, one level below every tree-owned name, so `[group.links]` renders at
+  `links/links/<entry>` and collides with nothing — that separation is the whole point of the move,
+  and re-reserving would reintroduce by hand the coupling C-071 removes by construction. Changelog
+  line: `feat(project): allow "bin" as a group and tool name again` — the commit subject *is* the
+  entry, and `CHANGELOG.md` is generated and never edited.
+- **C-074 — the home-root orphan scan is a closed-set comparison.** `reconcile_links`' depth-1 pass
+
+  > **AMENDMENT (2026-09-08, WP-2/WP-3 edge-case hunt).** Two implementation traps that a
+  > contract stated at this level does not by itself prevent, both found by census rather than
+  > by reading:
+  >
+  > 1. **`reserved_name(&home.bin())` (`render_toolchain.rs:1456`) must be deleted, not
+  >    re-anchored.** `reserved_name` is `path.file_name()` (`:1476-1478`), so it yields the
+  >    string `"bin"` for `bin()` and for `shell_bin()` alike. A mechanical `bin() → shell_bin()`
+  >    sweep therefore compiles, runs, and leaves the depth-1 keep-set unchanged — a legacy
+  >    `bin/` survives at the root forever, this contract and C-076 ship unimplemented, and
+  >    **nothing goes red**. The keep-set must become this contract's closed set outright.
+  > 2. **The leaf-symlink refusal must cover every tree-own depth-1 component.**
+  >    `refuse_symlinked_home_leaves` (`:2299-2308`) covers exactly `[root(), bin()]`;
+  >    `publish_link_within` (`:1544`) checks only an entry's *immediate* parent — `links/<group>`,
+  >    never `links`; and `create_owner_only` (`:2342`) is `DirBuilder::recursive(true)`, which
+  >    follows an existing symlink. A committed `.ocx/toolchain/links -> /outside` therefore
+  >    writes every group directory and every entry link outside the home on a plain `ocx pull`.
+  >    This is a regression **option B introduces**, not one it inherits: today `<group>/` sits at
+  >    depth 1 and so *is* the parent `publish_link_within` already checks. Inserting a component
+  >    above it without extending the guard is the whole defect.
+  keeps exactly C-071's set and prunes everything else; it **no longer consults the lock's group set**
+  (`locked_groups`, `render_toolchain.rs:1455`), because groups are no longer depth-1 entries. The
+  group-orphan pass moves under `links/` and keeps the lock-derived rule; the entry-orphan pass is
+  unchanged one level lower. `remove_dir` stays non-recursive under every condition (RUL-32, RUL-43),
+  so a non-empty orphan is still `Skipped`. Testable: a depth-1 directory named after a *locked* group
+  is pruned (it is no longer a group), and a `links/<group>` whose group left the lock is pruned.
+- **C-075 — prune containment extends by construction, and `shells/` is not scanned.** Every parent
+  `prune_within` derives is a physical directory under the root — `<root>` (depth 1), `<root>/links`,
+  `<root>/links/<group>`, and the trampoline directory — so its two-sided `dunce::canonicalize`
+  containment check (`render_toolchain.rs:2605-2613`) extends unchanged. Under B the trampoline parent
+  is the **physical** `shells/default/bin`, never the path through `active`, so a delete never
+  traverses the link. `shells/<name>` for any `<name>` other than the rendered one is **not scanned,
+  not pruned and not reported**: nothing there is reachable while C-080 pins `active`, and scanning it
+  would produce a permanent `Skipped` on a directory the render cannot remove. The scan arrives with
+  multi-shell, not before.
+- **C-076 — a legacy tree is reported with its remedy, never deleted.** A depth-1 orphan that cannot
+  be pruned non-recursively — a populated `bin/` under B, a populated `<group>/` under either — is
+  `RenderOutcome::Skipped` whose human-facing `reason` (RUL-41) names the home and the remedy: delete
+  the home directory; the next `ocx pull` rebuilds it. This is the abandoned-tree rule applied to a
+  shape change rather than to a `toolchain-dir` move, and it is why **no new delete primitive is
+  introduced**: a one-level "remove the symlink children, then the directory" sweep would be a delete
+  primitive over attacker-named children, which RUL-32 refuses for the same reason.
+- **C-077 — every clause and ruling text-anchored to a literal path is re-anchored to its accessor.**
+  The affected set is enumerated rather than left to a reader: **RUL-25** (a `-g`-narrowed pull
+  reconciles the trampoline directory only when the default group is selected), **RUL-33**
+  (`ensure_home_root` refuses a symlinked home root or trampoline directory), **RUL-46** (the
+  case-folded prune in both reconcilers), **RUL-67** (the stamp gate's set equality), **C-059/C-060**
+  and **RUL-62/RUL-87** and **A-15/A-16** (the session and login-stream `PATH` order). Their *text* in
+  `rulings_toolchain_activation.md` is deliberately left byte-identical — that document transcribes
+  rulings verbatim by design — so this clause is the authority for what each now names.
+
+#### Block 2 — the `active` indirection (B only; strike whole to obtain C)
+
+- **C-078 — one canonical spelling, two accessors, one question each.** `ToolchainHome::bin()` keeps
+
+  > **AMENDMENT (2026-09-08, WP-1) — the composition/resolution asymmetry, stated so it is not
+  > "fixed".** Two sites treat the physical spelling oppositely, and both are correct:
+  >
+  > | Site | Physical spelling on `PATH` | Why |
+  > |---|---|---|
+  > | `repair_owned_segments` (`shell/reconcile/plan.rs:637`) | **removed** | Composition is normative. ocx puts exactly one spelling on `PATH` — the PATH-facing `bin()`. An owned-but-undeclared segment is stale by definition, whichever spelling it wears. |
+  > | `trampoline_lookup_exclusions` (`toolchain_exec.rs:539`) | **tolerated, and skipped** | Resolution is defensive. At resolve time `PATH` may carry either spelling from a user's own export, an unreconciled shell, a CI step or a parent process. Skipping both is what prevents item 22's fork loop; refusing to skip one would make the loop reachable by whichever spelling ocx did not write. |
+  >
+  > Tolerating a spelling in resolution is not endorsing it in composition. Making the two
+  > "consistent" in either direction is a defect: delete from the exclusion set and the fork loop
+  > returns; stop removing it in the reconciler and `PATH` accumulates a stale duplicate every render.
+  >
+  > **A claimed edge here was WRONG, and the correction is the more useful record (WP-3,
+  > 2026-09-08).** This paragraph first warned that `owned_spellings` (`plan.rs:768-779`) derives
+  > its second spelling with `std::fs::canonicalize`, which fails on a broken symlink, so a
+  > dangling `active` would leave a stale physical segment on `PATH` un-removed. **That mechanism
+  > does not exist.** `owned_prefixes` is not a `bin` path: it is `[file_structure.root(),
+  > outcome.owned_home]` — `$OCX_HOME` and the consented project's toolchain **home root** (C-063,
+  > assembled at `self_group/activate.rs:376-390`) — and `is_owned` is a component-wise
+  > `starts_with` against those roots. `<root>/active/bin` and `<root>/shells/default/bin` both
+  > start with `<root>`, so both are owned in **every** state `active` can be in, and the
+  > canonicalisation is applied to a root that always exists. WP-3 proved it over a real tree:
+  > `canonicalize(<root>/active)` is `Err` while `canonicalize(<root>)` is `Ok`, and the physical
+  > segment is still removed; the `[$OCX_HOME]`-only twin gives zero removals in the same run.
+  > No change to `plan.rs`. The lesson is the one this record keeps relearning: a guard's input is
+  > not the path it defends, and reading the call site settles in one minute what reading the
+  > function cannot settle at all.
+  its name and its meaning — **the PATH-facing trampoline directory** — and returns
+  `<root>/active/bin`. It stays the single derivation for `setup::session_path_directories`
+  (`setup.rs:441-443`), `activation::bin_mode_entry`'s return, the login stream's `activation_lines`,
+  and C-010's `trampoline_lookup_exclusions` (`command/toolchain_exec.rs:539-544`). A second accessor
+  `shell_bin(shell: &str) -> <root>/shells/<shell>/bin` answers **where the renderer writes**, and the
+  renderer's write, prune, fingerprint and guard passes use it exclusively. `DEFAULT_SHELL = "default"`
+  is a module-private constant, not configuration. The two are equal *through the link*, never by
+  string equality — which is why **the exclusion set carries both spellings**:
+  `remove_segment` is segment-exact and "is therefore not a containment check and must not be read as
+  one" (`env.rs`, `resolve_command_excluding`), so a composed `PATH` carrying the physical spelling —
+  from a hand-written `.envrc`, an IDE recipe, or a `$GITHUB_PATH` line — would otherwise leave
+  `is_ocx_trampoline` as the only guard, against this record's own rule that deleting either guard must
+  leave the other observably firing.
+##### Defensive layout — the tree is a function of the lock, not of its own history
+
+**Owner mandate, 2026-09-07: the tree must be correct from *any* on-disk state, not merely from the
+state it last wrote.** The premise is ordinary, not exotic — a project directory gets copied. `cp -rL`,
+Docker `COPY`, most zip extractors and `rsync` without `-l` **dereference** symlinks, and a Windows
+junction stores an **absolute** target that no copy between paths, users or machines survives. Three
+clauses below give that one contract, and one design decision makes it cheap:
+
+> **The expected shape is *derived*, never *remembered*.** `active`'s legal target is a pure function
+> of the home root and the shell name, so validity is `read_link(active) == expected(root, shell)` and
+> nothing about it is persisted. This is a **correction to this addendum's own first draft**, which put
+> the target in the render stamp: a copied `$OCX_HOME` carries the stale absolute junction **and** the
+> stamp that agrees with it, so a stamped comparison passes on precisely the state it exists to catch.
+> A derived comparison cannot be copied into agreement. It is also strictly cheaper — no new
+> `RenderStamp` field, no wire-format change, no serde risk, one `read_link` and one string compare.
+
+- **C-079 — `active`'s target is derived, and containment falls out of the derivation.** POSIX: a
+  **relative** symlink whose target is exactly `shells/<name>` — two normal components, no leading `/`,
+  no `..` — so a copied or moved home still points inside itself, by construction. Windows: a
+  **junction** to the absolute `<root>\shells\<name>`, written through `crate::symlink`, which is
+  already junction-aware (`symlink.rs:63-77`); junctions take no privilege and accept absolute
+  local-drive targets only, where a directory symlink would need elevation or Developer Mode.
+  `expected_active_target(root, shell)` is the one derivation; on Windows the comparison is
+  case-insensitive after `dunce` simplification, matching how Windows paths are compared everywhere
+  else in this tree. **No separate containment check exists, because equality with the derived value
+  *is* containment** — every legal value resolves inside the home, and every other value is repointed.
+  Testability note: the suite's `snapshot_subtree` helper (`render_toolchain.rs:3367-3411`) records
+  kind, bytes, mtime and inode but **not a link's target**, so every "the render wrote nothing" and
+  "two renders are identical" assertion built on it is blind to a repoint; it gains a
+  `target: Option<PathBuf>` from `read_link` in the same change.
+- **C-080 — one validity predicate, read-only, shared by the gate and the heal.**
+
+  > **FOOTNOTE (2026-09-08, WP-3) — one stated rationale in this clause is wrong, and the
+  > re-anchor still belongs.** WP-3 could not produce a red for two of its thirteen mutations and
+  > did not claim them. The reason: with the C-080 gate ordered first, `bin()` and `shell_bin()`
+  > name **one directory**, so the stamp gate's spelling is unobservable at that point and no test
+  > can distinguish them. The clause's argument — that the gate is defeated by the spelling — does
+  > not hold there. The re-anchor is kept on a different and honest ground: it makes the reader
+  > consistent with WP-2's re-anchored `fingerprint_bin` **producer**, rather than leaving
+  > correctness resting on gate ordering that a later reordering could silently remove. Recorded
+  > because an unfalsifiable assertion left in the record reads as coverage.
+  >
+  > **Completed by WP-2 the same day — the producer IS falsifiable, and that is the point.**
+  > Reader-side re-anchors are unfalsifiable by construction, for WP-3's reason. The producer is
+  > not: `fingerprint_bin(&home.bin(), …)` reds
+  > `a_render_writes_prunes_and_stamps_through_the_physical_directory`, because that row reaches
+  > the one state where the two spellings diverge — `active` swung **after** the heal, which is
+  > what a concurrent writer does and which no ordering prevents. So this is not "one testable
+  > anchor and one untestable one": the producer decides whether the reader's check means anything
+  > at all, and it carries the whole falsifiable weight of C-080. Re-anchor the reader for
+  > consistency; rely on the producer for proof.
+  `active_is_valid(root, shell) = symlink::is_link(<root>/active) && read_link raw == expected(...)` —
+  `crate::symlink::is_link`, never `Path::is_symlink`, because Windows uses junctions (RUL-80); raw,
+  never canonicalised, for the reason RUL-80 already gives for `<group>/<entry>`. The **prompt path**
+  may only read: `activation::bin_mode_entry` withholds on `false` — the same `None` every other
+  negative outcome takes (C-061) — because a prompt must never write. The **render path** heals it
+  (C-081). `refuse_symlinked_home_leaves` (`render_toolchain.rs:2299-2308`) keeps refusing a symlinked
+  home root and gains `<root>/shells/<name>/bin`; `<root>/active` is deliberately **not** added to
+  that loop — it must *be* a link, so its rule is this predicate, not the leaf loop's negation.
+  **This is the addendum's security-relevant clause**: `active/bin` goes on `PATH`, so a link that
+  escapes the home is an arbitrary-directory-on-PATH primitive (CWE-426), and it is closed here rather
+  than by a containment test bolted on afterwards.
+
+  > **AMENDMENT (2026-09-08, review round 1).** This clause as first written re-anchored
+  > `refuse_symlinked_home_leaves` **only**, and that is insufficient. `lstat` does not follow a
+  > path's final component but does follow every intermediate one, so once `bin()` returns
+  > `<root>/active/bin`, *three* call sites resolve through `active` and see an ordinary directory:
+  >
+  > | Site | What it defends | Must re-anchor to |
+  > |---|---|---|
+  > | `refuse_symlinked_home_leaves` (`render_toolchain.rs:2299-2308`) | the write side's leaf refusal | physical `shell_bin()` |
+  > | `bin_matches_recorded` (`activation.rs:1279-1285`) | the read path — its own comment calls it "the second, independent guard" | physical `shell_bin()` |
+  > | `create_bin_owner_only` (`render_toolchain.rs:2388`) | owner-only creation; **it runs before any gate**, so the write lands first | physical `shell_bin()` |
+  >
+  > Until all three move, C-078's independence rule — deleting either guard must leave the other
+  > observably firing — is violated by construction: deleting this predicate leaves *neither*
+  > firing. **Option B is not safe to ship without this amendment.** Owner chose B on 2026-09-08
+  > with the finding on the record; the amendment is a prerequisite carried by WP-3 in
+  > `.claude/artifacts/plan_toolchain_tree_layout.md`.
+  >
+  > **SECOND AMENDMENT (2026-09-08, WP-1 edge-case hunt).** The table above is incomplete, and
+  > its omission is not a matter of degree. Two further sites resolve through `active`:
+  >
+  > | Site | What it does | Must re-anchor to |
+  > |---|---|---|
+  > | `fingerprint_bin` (`render_toolchain.rs:1679`, `symlink_metadata` at `:1721`) | **writes the render stamp** from `bin()` | physical `shell_bin()` |
+  > | `wrapper_binary_path` (`ocx_cli/src/command/self_group/activate.rs:939-940`) | `Path::is_file` on `bin()/ocx` — follows *every* component — and bakes the result as the absolute program behind the login-emitted `ocx` shell function, on the **global** tier | physical `shell_bin()` |
+  >
+  > `fingerprint_bin` is a **producer**, and that is the finding. Every site named above is a
+  > reader, so the natural reading of this clause is "harden the readers". A stamp written
+  > through `active` *certifies* whatever `active` points at: repoint it before a render and
+  > `bin_matches_recorded` — the "second, independent guard" — passes by **agreeing with a
+  > poisoned stamp**, so C-061's gate is satisfied rather than defeated. Re-anchoring the read
+  > side alone therefore makes the system strictly worse than leaving both unanchored, because
+  > it converts a detectable mismatch into a silent agreement. The render also publishes every
+  > trampoline into that directory via the publish path (`:1178`, `:1646`, `:2580`).
+  >
+  > **Six sites, split by file ownership** — four inside `render_toolchain.rs` to WP-2, two
+  > outside it to WP-3. The first amendment assigned two of WP-2's files to WP-3, which would
+  > have put both packages in the same file in the same wave.
+
+- **C-081 — one heal, by observed kind, and the only recursion in the module.** Inside the same
+  `lock_scoped` as the rest of the render body (RUL-30), **after** `ensure_home_root`, **after**
+  `shells/<name>/bin` exists, and **before** any trampoline is written. Neither shipped primitive can
+  do it: `symlink::update` calls `read_link` on the existing path and errors `InvalidInput` on a real
+  directory (`symlink.rs:89-91`), and `replace_atomic` renames a staged link onto the path, which a
+  populated directory refuses (`symlink.rs:147-180`). Both of those are the **common copy outcome**,
+  not an exotic one, so this is a steady-state heal path and not a migration step.
+
+  | Observed at `<root>/active` | Action | Diagnostic |
+  |---|---|---|
+  | Absent | `symlink::create` | none — first render, or after a `git clean` |
+  | A link, target == derived | nothing (C-047's byte-identical half) | none |
+  | A link, any other target — a copied Windows junction, a relocated home, a hostile repoint | `symlink::replace_atomic` (atomic on POSIX; the bounded window `symlink.rs:203-224` documents on Windows, R8) | `debug!` |
+  | A **real directory** — the `cp -rL` / Docker `COPY` / zip / `rsync` outcome | `remove_dir_all`, then create | `debug!` |
+  | Any other kind (a regular file, a FIFO) | `remove_file`, then create | `debug!` |
+  | Removal or creation fails (read-only tree, permissions, a concurrent swap) | `crate::log::warn!` naming the path; **the render continues** | the warn, plus C-080's gate withholding the PATH entry on the un-healed link |
+
+  > **AMENDMENT (2026-09-08, implementation).** The last row above originally said
+  > `RenderOutcome::Skipped` naming the path. The shipped code warns and continues
+  > (`render_toolchain.rs:917-948`), and **the code is right**: returning `Skipped` for the
+  > `active` link would make a home whose link cannot be repaired render *nothing at all* —
+  > every trampoline withheld because one link is stuck — where warning and continuing still
+  > renders `shells/default/bin` correctly and leaves only the PATH-facing indirection broken.
+  > The contract text was what was wrong, so it is the text that changed. The un-healed state
+  > is not silent: it warns, and C-080's gate withholds the toolchain PATH entry because
+  > `active_is_valid` is false, so no consumer follows a broken `active`. No `RenderedArtifact`
+  > variant names the `active` link (`:423-489`), which is why a `--format json` consumer sees
+  > the warn on stderr rather than a report item — accepted, because the report enumerates
+  > *rendered artifacts* and `active` is tree structure, not an artifact.
+
+  **Silent-by-default is a decision, not an omission**: healing a copied tree is the mandate, and a
+  warning on a state the user reaches by copying a directory is a warning on a common benign state,
+  which this record's own doctrine forbids. Only the *un-healable* case speaks.
+
+  **The `remove_dir_all` carve-out, stated narrowly.** RUL-32 refuses recursive deletion because a
+  delete primitive reachable from a hostile `ocx.lock` is not worth the convenience — and its subject
+  is `<group>/` and `<entry>`, whose names come from that lock. `<root>/active` is the opposite case:
+  **no untrusted string contributes to the path**, which is `<root>` (already guarded by
+  `refuse_symlinked_home_leaves`, RUL-44's component walk, and C-017–C-019 for a configured root) plus
+  one constant. `std::fs::remove_dir_all` removes a symlink entry rather than traversing it, so a
+  hostile `active/link-to-$HOME` costs the link, not the target. The rule this generalises to, and the
+  one a reviewer should apply: **recursion is permitted only on a path no untrusted string contributed
+  to.** Nothing else in the module qualifies.
+- **C-082 — the same heal covers `<group>/<entry>`, where it fixes a shipped defect** (and this clause
+  holds under **C too**, since the link tree exists in every option). A dereferencing
+  copy turns every entry link into a full *directory copy of the package*, and today the link publish
+  fails on it — **corrected 2026-09-08**: the path is `publish_link_within:1564`, which calls
+  `crate::symlink::replace_atomic` and whose own comment says "never `symlink::update`"; the rename
+  fails `EISDIR` against a real directory (measured on this host: `Is a directory (os error 21)`,
+  onto an *empty* one too), and `:1569-1572` maps that error to `RenderOutcome::Skipped`.
+  `symlink::update` (`symlink.rs:89-91`) would also fail, with `InvalidInput`, but it is not on this
+  path — any test mutation written
+  against it tests nothing, so every entry reports `Skipped` on every render,
+  forever, and the composing lane degrades to digest paths (C-067) with no route back. The link publish
+  therefore takes the same kind-dispatch: a link → today's behaviour; a directory → `remove_dir`
+  **only**, non-recursive (RUL-32 applies here in full, because both components come from `ocx.lock`),
+  so an empty one heals and a populated one is left byte-for-byte intact; then a `Skipped` whose reason
+  names the remedy, keyed on the kind **re-observed at error time** rather than on an errno — the
+  removal's `ENOTEMPTY` is discarded and the error the publish actually reports is the rename's
+  `EISDIR`, so the rename stays the authority and a path that stopped being a directory mid-publish
+  never earns the remedy. **Two clauses of the 2026-09-07 draft are corrected by the WP-0
+  implementation** (2026-09-08): (a) the remedy names the *entry path* to delete, not the home — it is
+  the precise, copy-pasteable step, and deleting the home is a bigger hammer than the state needs;
+  (b) the "a non-directory → `remove_file` then create" arm is **dropped as unnecessary and harmful**
+  — `rename(2)` already replaces a regular file, a FIFO or a device node, while an explicit
+  `remove_file` would open a window in which the entry is absent, which is the very window
+  `replace_atomic` exists to close (C-067 fires on an entry that is merely mid-publish). The same
+  publish's `Skipped` reasons are also walked through `error::render_chain`: `Error::InternalFile`
+  carries its cause by `#[source]` alone, so the shipped `to_string()` produced
+  `internal file error for '<path>'` and named neither errno nor cause — the non-directory half of the
+  same defect. The asymmetry with C-081 is the carve-out's whole
+  rule, visible in one diff.
+- **C-083 — ordering and crash safety, stated as an order rather than as a guarantee.** Within one
+  render: `ensure_home_root` → `shells/<name>/bin` created → `active` healed → trampolines written →
+  links written and pruned → stamp written **last** (C-048). Each interruption point has one answer,
+  and all four are already fail-closed: `active` pointing at an absent `shells/<name>` makes the gate's
+  `read_dir` fail, which is a mismatch, which withholds; `shells/<name>/` removed with `active` intact
+  is the same state; `active` absent for the Windows remove-then-create window makes a lookup **miss**,
+  never a wrong answer; and a crash before the stamp reads as "no stamp", which withholds. **No new
+  guarantee is introduced** — every one of these resolves into a mechanism that already ships, which is
+  why the clause is an ordering and not a new gate.
+- **C-084 — `ocx self setup` retires `<root>/bin` exactly once, subtractively.** Windows and macOS
+  **merge into** the stored value and never subtract what a previous run wrote
+  (`session_path/windows.rs:441` `merge_into_registry` → `merged_value`; `macos.rs:205` `merge_script`,
+  whose `grep -vxF` filters only the directories it is handed); Linux regenerates `ocx.conf` wholesale
+  (`linux.rs:203` → `render_conf(directories)`) and self-heals. `ocx self setup` therefore calls the
+  shipped `setup::session_path::deregister_in(&home, &[<ocx_home>/toolchain/bin], dry_run)`
+  (`session_path.rs:390`, exported at `setup.rs:33`, today called by nothing) **before**
+  `register_session_path`, unconditionally and on every platform; its `Unchanged` outcome is not
+  reported to the user. The path is one named constant, and it is deleted in the release after the one
+  that introduces it — the batched-window shape, with its removal release named when the window opens.
+  Scope: only machines that ran `ocx self setup` against an unreleased build carry the entry.
+
+### Migration and rollout
+
+**No user migration exists** — the tree is unreleased. Four waves, file-disjoint within each:
+
+| Wave | Scope | Files |
+|---|---|---|
+| 1 | The grammar: `entry` under `links/`, `links_group`, `shell_bin`/`active`, `DEFAULT_SHELL`; deletion of `ToolchainPathError::Reserved` and the parse-time `bin` reservation | `file_structure/toolchain_store.rs`, `project/config.rs`, `project/error.rs`, `cli/classify.rs` |
+| 2 | Renderer: write/prune/heal/fingerprint through the accessors, the depth-1 closed-set scan, the `active` publish step | `package_manager/tasks/render_toolchain.rs` |
+| 3 | Consumers: the prompt gate and `owned_prefixes`; the session-PATH order and the retirement call; the exclusion set; the composing link lane | `activation.rs`, `setup.rs`, `setup/session_path*.rs`, `command/toolchain_exec.rs`, `command/toolchain_env.rs`, `package_manager/composer.rs` |
+| 4 | Tests, benches, docs, rules — including the reservation's **documentation and error string** (C-073): `configuration.md:1670-1684`'s two rows and the shipped `'bin' is reserved …` message go with the variant, not reworded | `test/src/shell_matrix.py`, `test/bench/shell_latency.py`, `test/doc_scripts/user-guide__{toolchain-bin-mode,bin-mode-render}.sh`, `test/tests/test_{toolchain_render,toolchain_activate,session_path,self_activate,trampoline_exec,shell_reconcile}.py`, `website/src/docs/{in-depth/shell-integration.md,in-depth/storage.md,user-guide.md,installation.md,reference/{command-line,configuration,environment,env-composition}.md}`, `.claude/rules/subsystem-{file-structure,cli,package-manager}.md` |
+
+Blast radius, measured: the literal `toolchain/bin` occurs **199 times across 48 files**; under C only
+the `<group>/<entry>` half of that moves, under B both halves do. Verification is `task verify`.
+Rollback is a revert: a legacy-shaped tree is rebuilt by whichever render runs next, in either
+direction.
+
+**Commit subjects (the changelog is the subject — never `CHANGELOG.md`).** One per break:
+
+| Change | Subject |
+|---|---|
+| The link tree moves under `links/` | `feat(toolchain): render the group link tree under links/ so no user name sits at the tree root` |
+| The reservation is deleted | `feat(project): allow "bin" as a group and tool name again` |
+| B only — the PATH-facing directory moves | `feat(toolchain): expose the trampoline directory at active/bin and retire the old session PATH entry` |
+
+None takes a `!`: each is observable only on an artifact that has not shipped. **If the reservation
+did reach a release, the second subject becomes `feat(project)!:` and nothing else changes** — the
+direction is permissive, so no input that worked stops working.
+
+### Residual risk
+
+| # | Risk | CWE | Status |
+|---|---|---|---|
+| R11 | **No atomic repoint exists for a Windows junction.** `mklink /j` refuses an existing path, so delete-then-recreate is the only supported route and a `CreateProcess` inside that window fails | CWE-367 | **Accepted as a ceiling.** Nothing repoints `active` today: the render rewrites it only when the target is wrong, under `lock_scoped`, and the window's failure mode is a lookup miss. It becomes a live defect the day multi-shell repoints `active` at runtime; Option D is the escape hatch |
+| R12 | **One more component in an attacker-writable tree** — a link on the PATH path that a writer with access to the home can repoint between two prompts, which every live shell follows immediately | CWE-59 / CWE-426 | **Mitigated by C-079/C-080, residual stated.** Not new in kind — the same writer can overwrite `bin/<name>` today, and `BinEntryStamp` already records the in-place-overwrite residual (R-W4) — but *cheaper*, which is exactly why the gate must read the link rather than only the directory it resolves to |
+| R13 | **A Windows junction's target is absolute, so no copy between paths, users or machines survives it** — a copied home names the original tree, which on the same machine may be another user's | CWE-426 | **Healed, not merely detected.** C-079's derived expectation makes a copied junction unequal to `expected(root, shell)` by construction, so C-081 repoints it on the next render and C-080 withholds the entry until then — **for the project tier only.** The global tier's entry is unconditional by C-059: `SessionPath::global_bin` publishes `$OCX_HOME/toolchain/active/bin` with no `active_is_valid` gate, because `owned_prefixes` contains `$OCX_HOME`, so an arm that dropped the entry would make `repair_owned_segments` **delete** the session-PATH registration `ocx self setup` wrote. A copied `$OCX_HOME` on Windows therefore carries the stale junction on `PATH` until the next *global* render heals it. That residual is accepted — `$OCX_HOME` is outside the repository-controlled threat model — but it is the clause this row previously stated too broadly. The stamped alternative is *unsound here* and was struck for it: `state/` copies with the home, so the stale junction and its stamp agree (validation item 48). **Option D — rendering a real `active/` directory on Windows — is rejected**, not deferred: it would make the validity predicate a `cfg` branch no cross-host test can reach, which is the unreachable-red class RUL-10/C-025 already refused for `exposed_names`, and it would fork the tree shape, the goldens and the prune rules for a property the heal already delivers. D stays named only for R11's runtime-repoint case |
+
+### Validation
+
+Continuing § *Validation*'s numbering. Each item states the mutation that must turn it red.
+
+39. **Depth 1 is closed.** Over a lock whose group and tool keys include `default`, `bin`,
+    `.gitignore`, `links`, `active`, `shells`, `MSBuild` and `python3.13`: render, assert the depth-1
+    entry set equals C-071's set exactly, and that every group renders at `links/<group>` and every
+    entry at `links/<group>/<entry>`. **Red:** restore the `Reserved` refusal and watch two rows exit
+    78 instead of rendering.
+40. **The un-reservation reaches the parse seam too.** `[group.bin]`, `[tools] bin`,
+    `[group.ci.tools] bin` and `ocx add --group bin` each exit 0; `a b`, `a/b`, `a\b`, `C:`, `..`,
+    `bin.`, `bin ` and a control byte still exit 78 (64 from the command line, RUL-73). **Red:** keep
+    `ProjectErrorKind::ReservedGroupName`'s `bin` arm and watch the four positive rows exit 78.
+41. **A legacy tree is reported, not deleted.** Seed a home in the old shape (a populated `bin/`, and
+    `<group>/<entry>` links at depth 1); render; assert every stale depth-1 directory is `Skipped`
+    with a reason naming the home and the remedy, that nothing under it was removed, and that the new
+    tree rendered completely beside it. **Red:** make the prune recursive and watch the stale tree
+    vanish (RUL-32).
+42. **`active` is a link with the derived target.** After a render: `symlink::is_link` is true;
+    `read_link` is byte-exactly `shells/default` (POSIX) / `<root>\shells\default` (Windows); two
+    consecutive renders leave its inode unchanged. **Red:** canonicalise the value before comparing,
+    then render under a symlinked `$OCX_HOME` and watch a correct tree heal itself on every render.
+43. **The gate withholds on every `active` that is not the derived one.** Four rows, each asserting
+    the `bin`-mode entry is withheld and `PATH` is unchanged: absent; a real directory; repointed
+    outside the home; repointed at a sibling `shells/<other>` that exists. **Red, per row:** weaken
+    C-080's predicate to `is_link` alone, or to a containment test, and watch rows 3 and 4 emit.
+44. **The heal covers every kind, and the copy cases specifically.** One row per C-081 line, each
+    asserting the tree is correct *after one render* with no user action: absent → created; wrong
+    target → repointed; **a populated real directory (the `cp -rL` outcome) → removed and recreated**;
+    a regular file → removed and recreated. Drive the third row from a real `cp -rL` of a rendered
+    home, not from a hand-built fixture, so the test observes the tool's behaviour rather than an
+    assumption about it. **Red:** use `symlink::update` and observe `InvalidInput` (`symlink.rs:89-91`);
+    use `replace_atomic` and observe the rename refusal — each leaves the copied home broken forever.
+45. **Both spellings are excluded from the lookup PATH.** With a composed `PATH` carrying the
+    *physical* `<root>/shells/default/bin` rather than `<root>/active/bin`, invoking a name the
+    composition provides terminates in one hop. **Red:** return only `bin()` from
+    `trampoline_lookup_exclusions`, leaving `is_ocx_trampoline` as the sole guard; delete that too and
+    observe item 22's fork loop reached from the second spelling.
+46. **The legacy session-PATH entry is retired, subtractively.** Per platform: seed the store with
+    `<root>/bin` and a foreign segment; run `ocx self setup`; assert `<root>/active/bin` then
+    `ocx_install_bin_path` are present in that order, `<root>/bin` is gone, and the foreign segment
+    survives byte-exactly. **Red:** drop the `deregister_in` call — and note the red is **not
+    reachable on Linux**, which regenerates `ocx.conf` wholesale and self-heals, so a Linux-only run
+    of this item is a green that cannot go red.
+47. **A copied project heals, and is inert until it does.** Render a project, `cp -rL` the whole
+    checkout to a second path, then: (a) open a prompt there and assert **no** `bin`-mode entry is
+    emitted — the stamp is keyed by the canonical project directory, so the copy has none, and the
+    dereferenced `active/` fails C-080 besides; (b) run `ocx pull` and assert `active` is a link again
+    **and every `<group>/<entry>` is reported `Skipped` with the remedy naming it**; then delete those
+    directories and assert the next `ocx pull` renders every link. **Red for (b):**
+    drop C-082's kind-dispatch and watch the report degrade to a raw `EISDIR` with no remedy.
+
+    > **AMENDMENT (2026-09-08, WP-0).** As first written, (b) asserted "every `<group>/<entry>` a link
+    > again" after one render. That contradicts item 49 — a populated `links/<group>/<entry>` is **not**
+    > removed; it reports `Skipped` and its contents survive byte-for-byte — and it could never have
+    > passed, because a `cp -rL` copy is populated by construction. The conflation is between two
+    > different names: `active` is **ocx's own**, so item 44 rightly removes and recreates it even when
+    > populated, while `<group>/<entry>` holds a **user's package payload**, which RUL-32 forbids
+    > deleting. C-082 makes the refusal *legible* — it does not make it heal (S-002 says so explicitly).
+    > Found by WP-0 while implementing C-082, outside its own file set, and applied here.
+48. **A copied `$OCX_HOME` heals on Windows, and this is the case a stamped target could not catch.**
+    Render the global home, copy `$OCX_HOME` to a second absolute path (carrying `state/` with it, so
+    any persisted expectation is copied into agreement), and run `ocx pull` there: assert the junction
+    is repointed at the **new** root. **Red:** compare `active` against a value read from the render
+    stamp instead of the derived one, and watch the stale absolute junction pass — every command then
+    resolving tools out of the original tree, which may belong to another user (CWE-426).
+49. **Recursion is bounded to the one tree-owned path.** `<root>/active` as a populated real directory
+    is removed recursively; `<root>/links/<group>/<entry>` as a populated real directory is **not** —
+    it reports `Skipped` with its remedy and its contents survive byte-for-byte. **Red:** widen the
+    recursion to the link publish and watch a dereferenced package copy be deleted (RUL-32).
+50. **Ordering, at each interruption point.** Four states, each asserting the prompt withholds and the
+    next render converges: `active` present with `shells/default/` absent; `shells/default/` removed
+    with `active` intact; the render killed between the trampolines and the stamp; the render killed
+    inside the Windows remove-then-create window. **Red:** write the stamp first (C-048) and watch the
+    third state report as complete.
+
+### Open question
+
+**One, and only the owner can close it: is multi-shell selection ([#363](https://github.com/ocx-sh/ocx/issues/363),
+[#189](https://github.com/ocx-sh/ocx/issues/189)) going to be built?** If yes, B is right and paying
+the indirection now, pre-release, is the whole point. If no — or not for several releases — C is the
+same win for less, and Block 2 should be struck. This addendum is written so that answer costs one
+edit either way.
+
+### Constitution check
+
+`.claude/rules/arch-principles.md`, re-verified against the changed files: **no deviation.**
+`file_structure` still imports no `project` — `toolchain_store.rs` reaches only `crate::cli` and
+`crate::utility::fs` (`:91-94`) — and the new accessors add no import in either direction. The
+`package_manager → project` direction and `activation.rs`'s crate-root position are untouched. The
+`ToolchainStore`-forwards-to-one-`ToolchainHome` rule (D-V14) is preserved by C-072's requirement that
+the store forward the two new accessors like every other.
+
 ## Links
 
 - Predecessor, amended here: [`adr_project_toolchain_links.md`](./adr_project_toolchain_links.md)
@@ -943,4 +1518,6 @@ Every divergence the implementation recorded, and whether it touches this record
 | 2026-09-06 | **Item 37 measured and answered — the 10 ms trigger becomes a GATE, and no composed-env cache is built.** The NFR row *Latency — trampoline exec* read "Unmeasured; accepted, escalate on measurement"; it is now measured. [#423](https://github.com/ocx-sh/ocx/issues/423) recorded a 10.046 ms median (8.529-14.290 ms, eight observations) and filed the follow-up the trigger asks for. [#424](https://github.com/ocx-sh/ocx/issues/424)'s store probe — `PackageManager::find` answering an already-stored digest from path arithmetic instead of resolving — brought it to an **8.069 ms median (7.800-8.569 ms, eight observations)**, with the spread collapsing 5.761 -> 0.769 ms. **#423 is therefore closed without the cache**: the budget is met, and an unbuilt cache has no invalidation bug, where a real one is keyed on the lock, the config (including `activate` and `toolchain-dir`), the render stamp, the selected groups, the tier and the platform — a stale-environment surface that fails silently. What ships instead is the *budget as an assertion*: `REENTRY_OWNER_TRIGGER_MS` is a third gate in `_reentry_gates` (`test/bench/shell_latency.py`), so the win cannot regress unobserved. Pinning the budget rather than the mechanism is deliberate — it stays true whether a store probe meets it today or a cache meets it later. **Note for a future reader**: the bench forces `OCX_OFFLINE` on all four series, so #424's ~175 ms index dial was never in this number; what moved was `resolve_top_manifest`'s blob read and JSON parse plus a `refs/blobs` upsert, per tool, per invocation. That store probe is load-bearing for this budget. A slower runner abstains rather than flakes — `_budget_gate` rule 3 returns INCONCLUSIVE when the bare-exec floor scatters wider than the margin. |
 | 2026-09-07 | **A-15 recorded: the login stream honours `activate` too, and carries the session directory itself.** A-12 gated the per-prompt emitter; the login stream `ocx self activate` emits at shell start kept composing the global environment in every mode, so `activate = "bin"` was inert for every process that never reaches a prompt — scripts, `ssh host cmd`, git hooks, the `sh` arm. The same resolver now gates both emitters. Separately, that stream prepends `$OCX_HOME/toolchain/bin` unconditionally (behind `ocx_install_bin_path`), so C-059's session directory no longer depends on the OS registration alone. `ocx --global env` / `ocx --global exec` unchanged. |
 | 2026-09-07 | **A-16 recorded: the tiers now read project pin ▸ global pin ▸ installed binary.** *(Owner: "i cannot overwrite my ocx version via the global toolchain, but this should work" … "yes dropping 1 is the right call".)* A-2's install-ahead-of-project ground is **withdrawn** — it contradicted D-4, which removed the `ShimNameShadowsOcx` refusal so a toolchain may pin its own `ocx`; the old order left every such pin rendered and unreachable. Its bare-word residual survives, defended by `resolve_command_excluding`'s lookup-copy exclusion and the independent `is_ocx_trampoline` re-check. All three emitters moved in lockstep. The emitted `ocx` wrapper function follows the pin (it shadows `PATH` outright, so the reorder would otherwise be invisible at an interactive prompt); the per-prompt hook body deliberately stays on the installed binary. |
-| 2026-09-07 (latest) | **Item 37's trigger is asserted above the bare-exec floor — the raw form was unmeetable on macOS.** The 2026-09-06 row above closed with "a slower runner abstains rather than flakes"; the first macOS run of that gate falsified it ([run 34115369610](https://github.com/ocx-sh/ocx/actions/runs/34115369610), `macos-26-arm64`). A trampoline `exec`s a whole ocx, so its overhead contains one bare-exec floor **by construction**, and that runner's floor is 11.242 ms — over the 10 ms trigger on its own, before ocx does any work at all. The run read 20.651 ms and missed by 10.651 ms against 5.406 ms of floor scatter, so `_budget_gate` rule 3 correctly declined to excuse a *resolvable* miss and the gate went red on a state no ocx change of any size could have made green. Abstention protects against noise; a platform tax is not noise, and a gate whose green is unreachable on the platform it runs on has stopped measuring the code. `_reentry_gates` now observes `trampoline_overhead_ms - floor_ms` against `REENTRY_OWNER_TRIGGER_MS` — the same `exec_floor + Δ` form every other C-044 budget takes, and the part a composed-env cache could actually remove; the macOS run reads **9.409 ms** on it. **The NFR row's meaning is unchanged**: the raw overhead and `over_owner_trigger` are still recorded and still carry the owner's escalation — above 10 ms of raw re-entry the composed-env-cache issue is filed — so a green gate beside a set flag is a real state (a slow platform) and is pinned as its own self-check case. Cost: one bare-exec floor of headroom per platform. |
+| 2026-09-07 | **Item 37's trigger is asserted above the bare-exec floor — the raw form was unmeetable on macOS.** The 2026-09-06 row above closed with "a slower runner abstains rather than flakes"; the first macOS run of that gate falsified it ([run 34115369610](https://github.com/ocx-sh/ocx/actions/runs/34115369610), `macos-26-arm64`). A trampoline `exec`s a whole ocx, so its overhead contains one bare-exec floor **by construction**, and that runner's floor is 11.242 ms — over the 10 ms trigger on its own, before ocx does any work at all. The run read 20.651 ms and missed by 10.651 ms against 5.406 ms of floor scatter, so `_budget_gate` rule 3 correctly declined to excuse a *resolvable* miss and the gate went red on a state no ocx change of any size could have made green. Abstention protects against noise; a platform tax is not noise, and a gate whose green is unreachable on the platform it runs on has stopped measuring the code. `_reentry_gates` now observes `trampoline_overhead_ms - floor_ms` against `REENTRY_OWNER_TRIGGER_MS` — the same `exec_floor + Δ` form every other C-044 budget takes, and the part a composed-env cache could actually remove; the macOS run reads **9.409 ms** on it. **The NFR row's meaning is unchanged**: the raw overhead and `over_owner_trigger` are still recorded and still carry the owner's escalation — above 10 ms of raw re-entry the composed-env-cache issue is filed — so a green gate beside a set flag is a real state (a slow platform) and is pinned as its own self-check case. Cost: one bare-exec floor of headroom per platform. |
+| 2026-09-07 | **Layout addendum: the closed depth-1 tree.** Every user-supplied name moves one level down, so depth 1 becomes a tree-owned set and C-013/C-015's `bin`/`.gitignore` reservation is retired by construction rather than enforced by a validator — the shipped `[group.bin]` refusal is deleted, not deprecated, and the two raw `root().join(<group>)` sites at `render_toolchain.rs:1437` and `:1743` route through an accessor. Four options weighed (do-nothing 97, the owner's `active`+`links/`+`shells/` shape 96, `links/`-only 108, platform-divergent 84). **Decision of record is the owner's shape; the recommendation is `links/`-only**, and the contracts are split so striking Block 2 (C-078…C-082) yields it with no edit to Block 1. Twelve contracts C-071…C-082 and eight validation items 39…46, the load-bearing ones being: the render stamp gains the raw `read_link` value of `active` and the prompt gate checks its target *and* its shape before reading through it (without which a foreign link escapes the very gate the stamp exists to be); the dir→symlink conversion is spelled out because neither `symlink::update` nor `replace_atomic` can perform it; `ocx self setup` retires the stranded `<root>/bin` session entry, which Windows and macOS merge-but-never-subtract while Linux self-heals — so a Linux-only test of that item is a green that cannot go red. `shells/<name>` other than the rendered one is deliberately not scanned; no new delete primitive is introduced, and a legacy tree is `Skipped` with its remedy in the reason. |
+| 2026-09-07 (latest) | **Defensive layout folded into the addendum (owner mandate), and the addendum's own first draft corrected.** The tree must be correct from any on-disk state, not only from the state it wrote: an ordinary copy destroys the depth-1 link, because `cp -rL`, Docker `COPY`, most zip extractors and `rsync` without `-l` dereference symlinks, and a Windows junction's absolute target survives no copy at all. **The correction**: `active`'s legal target is now *derived* from the home root and the shell name, not recorded in the render stamp — a copied `$OCX_HOME` carries `state/` with it, so a stamped comparison passes on exactly the state it exists to catch (item 48). One `RenderStamp` field dropped, no wire-format change, and containment stops being a separate test because equality with the derived value *is* containment. C-079/C-080/C-081 rewritten as derive → validate → heal-by-observed-kind, silent at debug for every healable state (a warning on a state reached by copying a directory is a warning on a common benign state); C-082 extends the same kind-dispatch to `<group>/<entry>`, where it fixes a **shipped** defect — a dereferenced copy is unhealable today because `publish_link_within:1564`'s `replace_atomic` rename errors `EISDIR` on a real directory, empty or not (`symlink::update` is *not* on this path; corrected 2026-09-08) — and C-083 fixes the ordering. `remove_dir_all` is carved out for `<root>/active` alone under a rule a reviewer can apply: recursion only on a path no untrusted string contributed to; the link tree keeps RUL-32 in full, and item 49 pins the asymmetry. **Option D rejected** rather than deferred (R13): a `cfg`-branched validity predicate is the unreachable-red class RUL-10/C-025 already refused. Items 47–50 added for the copied project, the copied `$OCX_HOME`, the recursion bound and the four interruption points. C-073 now names the three surfaces the rename falsifies — `configuration.md:1670-1684` and the shipped `'bin' is reserved …` string die with the variant — and refutes the claim that `links`/`shells`/`active` need reserving: a group name is a component of `links/<group>/<entry>`, one level below every tree-own name, so `[group.links]` collides with nothing. The mandate moved the option table's resilience row against B (4 → 3): under C the PATH-facing directory is a real directory already, so none of this class touches it. Totals now A 97, B 91, C 108, D 84. |
