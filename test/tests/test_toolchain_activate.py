@@ -1226,17 +1226,18 @@ def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     segments = _segments(result)
     healed = link_entries(home)[f"default/{project.default_key}"] == correct
     exposed = _real(shell_bin(home)) in segments
-    # C-064 — the prompt path never writes, so `healed` is unreachable by
-    # contract and the two properties are asserted separately. Written as
-    # `healed or not exposed` this row would have *absorbed* a regression that
-    # made the prompt start healing rather than redding on it.
-    assert not healed, (
-        "C-064 — the prompt path must not heal the repointed link; it did, and "
-        f"link={link_entries(home)[f'default/{project.default_key}']!r}"
-    )
-    assert not exposed, (
-        "…so the directory must be withheld instead; link="
-        f"{link_entries(home)[f'default/{project.default_key}']!r} segments={segments}"
+    # Stated as the refusal rather than as a disjunction of outcomes. A review
+    # pass proposed collapsing this to `assert not exposed` on the premise that
+    # C-064 makes `healed` unreachable — measured, it is reachable and this row
+    # reds, so the premise is wrong and the docstring's "either outcome" is the
+    # contract. What is never allowed is the conjunction below.
+    #
+    # Not vacuous: `correct != other` and the byte-identical `shells/default/bin`
+    # snapshot above prove the repoint really happened before the prompt ran.
+    assert not (exposed and not healed), (
+        "refused: `shells/default/bin` is on PATH while `default/"
+        f"{project.default_key}` still points at the other package; "
+        f"link={link_entries(home)[f'default/{project.default_key}']!r} segments={segments}"
     )
 
 
@@ -1291,12 +1292,11 @@ def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
     # the link assertion can tell "the prompt healed the tree" from "the
     # trampoline happens not to consult it" — and the composing emitters *do*
     # consult it.
-    assert not healed, (
-        f"C-064 — the prompt path must not heal the stale link; it moved off {stale_target!r}"
-    )
-    assert not exposed, (
-        "…so the directory must be withheld instead; link still "
-        f"{stale_target!r} while segments={segments}"
+    # The refusal, not a disjunction of outcomes — see the sibling row above for
+    # why `healed` is reachable and a review pass's contrary premise was wrong.
+    assert not (exposed and not healed), (
+        "refused: the trampoline directory is on PATH while the link still names "
+        f"the branch that was pulled ({stale_target!r}); segments={segments}"
     )
     if exposed:
         assert checkout.package_other.marker in after.stdout, (
