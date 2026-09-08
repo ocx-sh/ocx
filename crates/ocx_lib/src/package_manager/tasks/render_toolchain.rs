@@ -2849,12 +2849,17 @@ fn refuse_symlink(path: &Path) -> crate::Error {
     )
 }
 
-/// A `<group>/<entry>` name occupied by something other than a link — a
-/// foreign file, or the real directory a dereferencing copy leaves (C-082).
+/// A name occupied by something other than a link — a foreign file, or the
+/// real directory a dereferencing copy leaves (C-082).
 ///
 /// The prune side's counterpart to [`publish_link_within`]'s kind dispatch:
 /// ocx removes what it wrote, and a name it did not write is reported rather
 /// than deleted (RUL-32).
+///
+/// One helper for both refusing arms, not just `<group>/<entry>`: a
+/// non-directory at `<home>/<name>` or `<home>/links/<name>` is as foreign as
+/// one at a link's name, and answering the two differently is exactly how the
+/// `links/` level this layout added became a silent-delete path.
 fn refuse_not_a_link(path: &Path) -> crate::Error {
     crate::error::file_error(
         path,
@@ -2874,6 +2879,31 @@ fn refuse_escape(path: &Path) -> crate::Error {
             "a rendered toolchain artifact does not resolve inside its home; refusing to remove it",
         ),
     )
+}
+
+/// The stem every case probe writes, and the one shape [`prune_within`] will
+/// delete a regular file for.
+///
+/// One constant rather than two literals because the two are one contract:
+/// [`filesystem_is_case_insensitive`] writes the name, [`is_leaked_case_probe`]
+/// recognises it, and a probe whose stem drifted from the predicate would leak
+/// a file the prune then reports `Skipped` on every render forever.
+const CASE_PROBE_PREFIX: &str = ".ocx-case-probe-";
+
+/// Whether `name` is a probe file [`filesystem_is_case_insensitive`] leaked.
+///
+/// The suffix is `<pid>-<nanos>`, so digits and `-` and nothing else: a name
+/// carrying anything further is not a probe this module wrote, and
+/// [`prune_within`] refuses to delete it. ASCII-case-insensitive on the stem
+/// because the probe writes both spellings, and on a case-insensitive
+/// filesystem `read_dir` answers with whichever one that filesystem stored.
+fn is_leaked_case_probe(name: &str) -> bool {
+    let (name, prefix) = (name.as_bytes(), CASE_PROBE_PREFIX.as_bytes());
+    name.len() > prefix.len()
+        && name[..prefix.len()].eq_ignore_ascii_case(prefix)
+        && name[prefix.len()..]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || *byte == b'-')
 }
 
 /// Whether the filesystem holding `directory` resolves two names differing
@@ -2922,17 +2952,18 @@ pub(crate) async fn filesystem_is_case_insensitive(directory: &Path) -> crate::R
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |since| since.as_nanos())
         );
-        let lower = directory.join(format!(".ocx-case-probe-{suffix}"));
-        let upper = directory.join(format!(".OCX-CASE-PROBE-{suffix}"));
+        let lower = directory.join(format!("{CASE_PROBE_PREFIX}{suffix}"));
+        let upper = directory.join(format!("{}{suffix}", CASE_PROBE_PREFIX.to_ascii_uppercase()));
 
         std::fs::File::create(&lower).map_err(|error| crate::error::file_error(&lower, error))?;
         let answer = std::fs::symlink_metadata(&upper).is_ok();
         // Deliberately ignored: the answer is already read, and a probe file
         // that outlives its probe is pruned by the very next render as the
         // orphan it is — which is true only because [`prune_within`]'s
-        // home-root arm removes a regular file with `remove_file`. With a
-        // `remove_dir` there, a leaked probe file would be reported `Skipped`
-        // on every render forever.
+        // home-root arm removes a regular file whose name
+        // [`is_leaked_case_probe`] recognises. With a `remove_dir` there, a
+        // leaked probe file would be reported `Skipped` on every render
+        // forever.
         let _ = std::fs::remove_file(&lower);
         Ok(answer)
     })
@@ -3006,6 +3037,17 @@ pub(crate) async fn filesystem_is_case_insensitive(directory: &Path) -> crate::R
 /// not a symlink is therefore refused here, for both sweeps at once, and
 /// reported [`RenderOutcome::Skipped`]: ocx removes what it wrote, and the
 /// dereferenced package copy C-082 names survives byte-for-byte.
+///
+/// # No arm of this `match` deletes a regular file ocx did not write
+///
+/// The rule above is the *function's*, not that one variant's. A
+/// [`RenderedArtifact::GroupDirectory`] or [`RenderedArtifact::RootEntry`]
+/// that is neither a symlink nor a directory earns the same
+/// [`refuse_not_a_link`] refusal — a regular file at `<home>/<name>` or
+/// `<home>/links/<name>` survives byte-for-byte and is named, rather than
+/// being deleted on an ordinary `ocx pull` by a report (`Pruned`) that carries
+/// no warn line. The one exception is the probe file this module itself writes
+/// and [`is_leaked_case_probe`] recognises by name.
 ///
 /// # The home root's own entries, which are not groups (C-074, C-076)
 ///
@@ -3103,6 +3145,16 @@ fn prune_within(home: &ToolchainHome, artifact: &RenderedArtifact) -> crate::Res
         // `filesystem_is_case_insensitive`'s "pruned by the very next render"
         // would be false. Still never `remove_dir_all`, and still never
         // recursive.
+        //
+        // `remove_file` is reached for that probe name and for nothing else.
+        // The type check answers "which removal", never "may this be removed":
+        // a plain `remove_file` fallthrough deletes a user's file at
+        // `<home>/<name>` or `<home>/links/<name>` on an ordinary `ocx pull`,
+        // silently, since `Pruned` carries no warn line — the same measured
+        // data loss the `Link` arm above was hardened against, reached through
+        // the other half of one `match`. Everything else takes that arm's
+        // refusal: ocx removes what ocx wrote, and anything else survives
+        // byte-for-byte and is named.
         RenderedArtifact::GroupDirectory(_) | RenderedArtifact::RootEntry(_) => {
             let metadata =
                 std::fs::symlink_metadata(&victim).map_err(|error| crate::error::file_error(&victim, error))?;
@@ -3110,8 +3162,10 @@ fn prune_within(home: &ToolchainHome, artifact: &RenderedArtifact) -> crate::Res
                 crate::symlink::remove(&victim)
             } else if metadata.is_dir() {
                 std::fs::remove_dir(&victim).map_err(|error| crate::error::file_error(&victim, error))
-            } else {
+            } else if is_leaked_case_probe(&name) {
                 std::fs::remove_file(&victim).map_err(|error| crate::error::file_error(&victim, error))
+            } else {
+                Err(refuse_not_a_link(&victim))
             }
         }
     }
@@ -8542,6 +8596,59 @@ mod tests {
             "RUL-32 — a non-empty group directory is still refused, never recursed"
         );
         assert!(occupied.join("foreign").exists());
+    }
+
+    /// RUL-32 — a foreign **regular file** at `<home>/<name>` or at
+    /// `<home>/links/<name>` survives byte-for-byte on an ordinary render, and
+    /// is named in the report.
+    ///
+    /// Both names reach the one shared `GroupDirectory | RootEntry` prune arm,
+    /// whose `remove_file` fallthrough dispatched on the on-disk type alone —
+    /// so anything that was neither a symlink nor a directory was deleted and
+    /// reported `Pruned`, which carries **no** warn line. A user's file
+    /// therefore vanished on a plain `ocx pull` with nothing said. The
+    /// `links/<name>` half is the one this layout newly reaches: before
+    /// `links/` existed there was no second level for a foreign file to sit
+    /// on. The rule the `Link` arm already follows now holds for the whole
+    /// function — ocx removes what ocx wrote, and anything else survives and
+    /// is named.
+    ///
+    /// RED: restore the unconditional `std::fs::remove_file` fallthrough in
+    /// that arm (drop the `is_leaked_case_probe` guard and the
+    /// `refuse_not_a_link` else). Both files are deleted and both outcomes
+    /// read `Pruned`.
+    #[tokio::test]
+    async fn a_foreign_file_at_a_pruned_name_survives_and_is_reported() {
+        let tree = Tree::new();
+        std::fs::create_dir_all(links_root(&tree.home)).unwrap();
+        let at_root = tree.home.root().join("notes.txt");
+        let under_links = links_root(&tree.home).join("notes.txt");
+        std::fs::write(&at_root, b"mine, not ocx's\n").unwrap();
+        std::fs::write(&under_links, b"mine either\n").unwrap();
+
+        let report = render_a_default_tool(&tree).await;
+
+        // Both survivals in **one** assertion, so a red names both halves at
+        // once: asserting them in the loop below stops at the depth-1 file and
+        // says nothing about the `links/` level, which is the half this layout
+        // newly reaches.
+        assert_eq!(
+            (std::fs::read(&at_root).ok(), std::fs::read(&under_links).ok()),
+            (Some(b"mine, not ocx's\n".to_vec()), Some(b"mine either\n".to_vec())),
+            "both planted files survive byte-for-byte"
+        );
+
+        for (planted, artifact) in [
+            (&at_root, root_entry("notes.txt")),
+            (&under_links, group_directory("notes.txt")),
+        ] {
+            let outcome = outcome_of(&report, &artifact);
+            let RenderOutcome::Skipped { path, reason } = outcome else {
+                panic!("{artifact:?} must be reported Skipped, not {outcome:?}");
+            };
+            assert_eq!(path, planted, "…and the report names the path it left alone");
+            assert!(!reason.is_empty(), "…with a reason the user can act on");
+        }
     }
 
     /// W8/RUL-44 — a symlink on a component **between** the project directory
