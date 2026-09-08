@@ -123,24 +123,24 @@ The two flags are mutually exclusive — combining `--global` with `--project` e
 
 A tier being *selected* and a tier *reaching your shell* are two different things. Selection answers which `ocx.toml` is in effect; activation answers what that toolchain puts in the environment, and when.
 
-Recomposing a whole toolchain on every prompt costs a little work per prompt and rewrites `PATH` under you. Composing nothing and letting a launcher resolve each tool at invocation time costs nothing per prompt but gives a shell no declared variables. Neither is right for every toolchain, so two `ocx.toml` keys decide per toolchain: [`activate`][config-activate] picks the shape, and [`pinned`][config-pinned] picks whether composed paths follow the rendered `<group>/<entry>` links or name digest paths straight out of `ocx.lock`.
+Recomposing a whole toolchain on every prompt costs a little work per prompt and rewrites `PATH` under you. Composing nothing and letting a launcher resolve each tool at invocation time costs nothing per prompt but gives a shell no declared variables. Neither is right for every toolchain, so two `ocx.toml` keys decide per toolchain: [`activate`][config-activate] picks the shape, and [`pinned`][config-pinned] picks whether composed paths follow the rendered `links/<group>/<entry>` links or name digest paths straight out of `ocx.lock`.
 
 ### The `activate` × `pinned` matrix {#toolchain-activation-matrix}
 
 | [`activate`][config-activate] | [`pinned`][config-pinned] | What the project contributes to `PATH` | What a composing emitter composes | What [`ocx pull`][cmd-pull] renders |
 |---|---|---|---|---|
-| `env` | `false` | its composed entries — each tool's own `PATH` directories | through the `<group>/<entry>` links | `bin/` and the links |
-| `env` | `true` | its composed entries — each tool's own `PATH` directories | digest paths from `ocx.lock`, consulting no link | `bin/` only — the link pass writes and prunes nothing |
-| `bin` | `false` | `<home>/toolchain/bin`, and nothing else | through the `<group>/<entry>` links | `bin/` and the links |
-| `bin` | `true` | `<home>/toolchain/bin`, and nothing else | digest paths from `ocx.lock`, consulting no link | `bin/` only |
-| `none` | `false` | nothing | through the `<group>/<entry>` links | `bin/` and the links |
-| `none` | `true` | nothing | digest paths from `ocx.lock`, consulting no link | `bin/` only |
+| `env` | `false` | its composed entries — each tool's own `PATH` directories | through the `links/<group>/<entry>` links | the trampolines and the links |
+| `env` | `true` | its composed entries — each tool's own `PATH` directories | digest paths from `ocx.lock`, consulting no link | the trampolines only — the link pass writes and prunes nothing |
+| `bin` | `false` | `<home>/toolchain/active/bin`, and nothing else | through the `links/<group>/<entry>` links | the trampolines and the links |
+| `bin` | `true` | `<home>/toolchain/active/bin`, and nothing else | digest paths from `ocx.lock`, consulting no link | the trampolines only |
+| `none` | `false` | nothing | through the `links/<group>/<entry>` links | the trampolines and the links |
+| `none` | `true` | nothing | digest paths from `ocx.lock`, consulting no link | the trampolines only |
 
-The session's own directories — `$OCX_HOME/toolchain/bin` and OCX's install directory behind it — are on `PATH` in every row, including `none`. They are minted at shell start and again per prompt, by neither toolchain's mode.
+The session's own directories — `$OCX_HOME/toolchain/active/bin` and OCX's install directory behind it — are on `PATH` in every row, including `none`. They are minted at shell start and again per prompt, by neither toolchain's mode.
 
 Two things the matrix's shape is saying:
 
-**The prompt's own `PATH` takes the lane too.** In `env` mode the per-prompt reconciler is itself a composing emitter: it composes the project's default group and, with `pinned` false, follows that group's `<group>/<entry>` links — so the project entries on your `PATH` are link paths. It carries no flag of its own, so [`ocx.toml`][config-pinned] and [`OCX_TOOLCHAIN_PINNED`][env-ocx-toolchain-pinned] are the only tiers that answer for it.
+**The prompt's own `PATH` takes the lane too.** In `env` mode the per-prompt reconciler is itself a composing emitter: it composes the project's default group and, with `pinned` false, follows that group's `links/<group>/<entry>` links — so the project entries on your `PATH` are link paths. It carries no flag of its own, so [`ocx.toml`][config-pinned] and [`OCX_TOOLCHAIN_PINNED`][env-ocx-toolchain-pinned] are the only tiers that answer for it.
 
 **Five emitters compose, two carry the flag.** [`ocx env`][cmd-env-root], [`ocx exec`][cmd-run], [`ocx direnv export`][cmd-direnv-export], the `env`-mode reconciler and the `env`-mode login exporter all take a lane; only `ocx env` and `ocx exec` declare [`--pinned` / `--no-pinned`][arg-pinned]. The last two read the *global* tier's `activate`, so under `bin` or `none` neither composes at all and the lane question does not arise for them. `pinned` selects the lane for all five, and separately decides whether a render writes links at all.
 
@@ -148,13 +148,13 @@ Two things the matrix's shape is saying:
 
 **Turning `pinned` on never deletes a tree.** The link pass is suppressed, not reconciled to empty: switching the key on and back off again takes effect with no re-render.
 
-The `bin` rows carry one gate. The `<home>/toolchain/bin` entry is added only when the tree's render stamp matches what is on disk for this project and this lock. When it does not — an unrendered tree, or a lock that has moved since — nothing is added and the prompt prints one line instead:
+The `bin` rows carry one gate. The `<home>/toolchain/active/bin` entry is added only when the tree's render stamp matches what is on disk for this project and this lock. When it does not — an unrendered tree, or a lock that has moved since — nothing is added and the prompt prints one line instead:
 
 ```
 ocx: /home/dana/work/api: its toolchain has not been rendered for this lock; run `ocx pull` here
 ```
 
-Within one prompt the entries land front-to-back as: the project's composed entries, the project's `<home>/toolchain/bin`, `$OCX_HOME/toolchain/bin`, OCX's own install directory, then the global tier's composed entries. A globally installed tool therefore never shadows the project's own — the [tier inversion](#strict-isolation) this page opens with, enforced by ordering. `ocx` itself is no exception: the install directory is last, so a toolchain that pins `ocx` is the one that answers for the name.
+Within one prompt the entries land front-to-back as: the project's composed entries, the project's `<home>/toolchain/active/bin`, `$OCX_HOME/toolchain/active/bin`, OCX's own install directory, then the global tier's composed entries. A globally installed tool therefore never shadows the project's own — the [tier inversion](#strict-isolation) this page opens with, enforced by ordering. `ocx` itself is no exception: the install directory is last, so a toolchain that pins `ocx` is the one that answers for the name.
 
 ::: info The same two positions mise and rustup take
 [mise][mise-shims] ships both shapes and names them the same way round: `mise activate` recomposes the environment on every prompt, `mise activate --shims` puts one shim directory on `PATH` instead. [rustup][rustup-proxies] only ever ships the second — `~/.cargo/bin/cargo` is a proxy that forwards to whichever toolchain is active. `env` and `bin` are those two positions, chosen per toolchain rather than once per install.
@@ -162,7 +162,7 @@ Within one prompt the entries land front-to-back as: the project's composed entr
 
 ### A trampoline composes at call time {#toolchain-activation-trampolines}
 
-The surprising part of `bin` mode is that a trampoline in `<home>/toolchain/bin/` carries **no frozen environment**. It re-enters `ocx exec` against its own home, so the environment is composed at the moment the tool runs — from `ocx.toml` and `ocx.lock`, project [`[env]`](#project-env) and sibling packages included, not just the one package the tool came from.
+The surprising part of `bin` mode is that a trampoline in `<home>/toolchain/active/bin/` carries **no frozen environment**. It re-enters `ocx exec` against its own home, so the environment is composed at the moment the tool runs — from `ocx.toml` and `ocx.lock`, project [`[env]`](#project-env) and sibling packages included, not just the one package the tool came from.
 
 The whole body is five lines, and what it bakes is the entire story:
 
@@ -181,11 +181,11 @@ Two consequences follow directly:
 - **A config edit takes effect with no re-render.** Change `[env]`, add a tool, flip [`pinned`][config-pinned] — the next invocation composes against the new file. The trampoline body is byte-identical either way.
 - **There is no baked value that can drift.** The tool a name resolves to is decided by the lock at call time, not by what the renderer saw.
 
-The absolute `ocx` path is baked rather than left as a bare `ocx` for a specific reason: in `bin` mode the interactive shell has `toolchain/bin` prepended, and a project may pin its own `ocx`. A bare-name fallback would make `/bin/sh` re-resolve the trampoline as itself — an infinite loop before any ocx process starts, which no in-process guard can see. [asdf hit exactly this][asdf-shim-loop] — a shim of `asdf` itself on `PATH`, re-resolving to the shim, hundreds of frames deep and hanging every command. [`OCX_BINARY_PIN`][env-ocx-binary-pin] still overrides the baked path.
+The absolute `ocx` path is baked rather than left as a bare `ocx` for a specific reason: in `bin` mode the interactive shell has `toolchain/active/bin` prepended, and a project may pin its own `ocx`. A bare-name fallback would make `/bin/sh` re-resolve the trampoline as itself — an infinite loop before any ocx process starts, which no in-process guard can see. [asdf hit exactly this][asdf-shim-loop] — a shim of `asdf` itself on `PATH`, re-resolving to the shim, hundreds of frames deep and hanging every command. [`OCX_BINARY_PIN`][env-ocx-binary-pin] still overrides the baked path.
 
 ### Name collisions {#toolchain-activation-collisions}
 
-Two packages in one closure can claim the same tool name. OCX resolves it and moves on: **the last one walked wins**, matching composed-`PATH` order, so the name in `bin/` and the name that wins a `PATH` lookup are decided by one rule rather than two.
+Two packages in one closure can claim the same tool name. OCX resolves it and moves on: **the last one walked wins**, matching composed-`PATH` order, so the trampoline name and the name that wins a `PATH` lookup are decided by one rule rather than two.
 
 There is no warning and no refusal. The collision is logged at **debug** level, and the losing claim is recorded against the winning name so it can be reported rather than lost. A refusal here would be wrong on its face: a project may legitimately pin its own `ocx`, or its own `python`, and shadowing that name for itself is the declared intent, not an accident.
 

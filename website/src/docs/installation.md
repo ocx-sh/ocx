@@ -56,7 +56,7 @@ The installer takes a few knobs, passed as flags after `-s --` (POSIX `sh`) or a
 curl -fsSL https://setup.ocx.sh/sh | sh -s -- --no-modify-path
 ```
 
-You can also set [`OCX_NO_MODIFY_PATH=1`][env-no-modify-path]. Either way, add both directories the installer would have registered to your `PATH` yourself, toolchain bin first: `~/.ocx/toolchain/bin`, then `~/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin`.
+You can also set [`OCX_NO_MODIFY_PATH=1`][env-no-modify-path]. Either way, add both directories the installer would have registered to your `PATH` yourself, toolchain bin first: `~/.ocx/toolchain/active/bin`, then `~/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin`.
 
 **Pin a version.** The `OCX_INSTALL_VERSION` env knob is the portable way to install an exact release — `<VERSION>` is the semver string with no leading `v`:
 
