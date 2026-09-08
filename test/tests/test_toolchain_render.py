@@ -1731,8 +1731,8 @@ def test_a_lock_swap_renders_the_new_locks_tools_groups_and_stamp(
 
     The departed **group** directory is deliberately not asserted absent here;
     ``test_a_departing_group_that_still_holds_its_links_is_reported_every_render``
-    states what ships, and the strict ``xfail`` beside it states what S-001 asks
-    for and does not get.
+    states what ships, and the strict ``xfail`` beside it states the one half of
+    S-001 that still does not.
     """
     checkout = two_branch_checkout(ocx, tmp_path)
 
@@ -1799,10 +1799,12 @@ def test_a_departing_group_that_still_holds_its_links_is_reported_every_render(
     ``prune_outcome`` turns that into ``RenderOutcome::Skipped``.
     ``skipped_render_warnings`` puts one line on stderr per render.
 
-    This case states the half S-001 gets: reported, named, never deleted, and
-    the render continues past it. The two halves it does **not** get are the
-    strict ``xfail``s below — stated as their own cases so each turns red on the
-    day it is fixed rather than being laundered into this one's docstring.
+    This case states what S-001 gets here: reported, named, never deleted, and
+    the render continues past it. The remedy half is
+    ``test_a_skipped_group_directory_says_why_and_what_to_do``, and the half
+    S-001 asks for and still does not get — convergence — is the strict
+    ``xfail`` below, stated as its own case so it turns red the day it is fixed
+    rather than being laundered into this one's docstring.
 
     RED: change the ``GroupDirectory`` arm's directory branch from
     ``std::fs::remove_dir`` to ``remove_dir_all`` — the link vanishes and the
@@ -1847,8 +1849,8 @@ def test_a_departing_group_that_still_holds_its_links_is_reported_every_render(
         "S-001 Expected: a departed group leaves no orphan group directory. "
         "`reconcile_links` scans entries per *selected* group, so a departed "
         "group's own links are never pruned, its directory never empties, and "
-        "`remove_dir` is ENOTEMPTY forever. Fix is in `render_toolchain.rs`, "
-        "which is WP-2's file — see wp5-report.md § 'the patch I did not apply'."
+        "`remove_dir` is ENOTEMPTY forever. The patch is in wp5-report.md § 4; "
+        "it is a behaviour change to the prune pass, not a diagnostic fix."
     ),
 )
 def test_a_departed_group_directory_converges_instead_of_skipping_forever(
@@ -1883,26 +1885,23 @@ def test_a_departed_group_directory_converges_instead_of_skipping_forever(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "S-001 Errors: the skip must carry `a remedy naming the path`. "
-        "`prune_outcome` builds its reason with `error.to_string()`, and "
-        "`Error::InternalFile` carries its cause by `#[source]` alone — so the "
-        "reason is `internal file error for '<path>'` and nothing else. "
-        "`publish_link_within` uses `render_chain` for exactly this reason; the "
-        "sibling site does not. Fix is in `render_toolchain.rs` (WP-2's file)."
-    ),
-)
 def test_a_skipped_group_directory_says_why_and_what_to_do(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
     """S-001 *Errors* — "reported ``Skipped`` with **a remedy** naming the path".
 
-    Strict ``xfail``. The path is named twice today; the cause and the fix are
-    named nowhere, which is the state C-082 was raised to end at the sibling
-    site (``publish_link_within``'s own doc comment says ``to_string`` there
-    would be "a refusal the user cannot act on").
+    ``prune_outcome`` built its reason with ``error.to_string()``, and
+    ``Error::InternalFile`` carries its cause by ``#[source]`` alone — so the
+    reason was ``internal file error for '<path>'`` and nothing else: the path,
+    twice, with no cause and no action. ``publish_link_within`` had already
+    solved this at the sibling site, and its own doc comment says why
+    (``to_string`` there "would name the path and nothing else — a refusal the
+    user cannot act on"); one producer of that contract was fixed and the other
+    was not.
+
+    RED: revert ``prune_outcome``'s reason to ``error.to_string()`` — the cause
+    assertion and the remedy assertion both red while the path assertion above
+    them still passes, which is what makes them the two halves this row adds.
     """
     checkout = two_branch_checkout(ocx, tmp_path)
     assert run_in(ocx, checkout.directory, "pull").returncode == EXIT_SUCCESS
