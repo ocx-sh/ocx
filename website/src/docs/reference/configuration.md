@@ -1653,7 +1653,9 @@ The `[tools]`, `[group.<name>]`, `[env]` and `[package."<id>"]` declarations par
 
 #### Names and reserved words {#project-config-names}
 
-Group names and binding names both become **path components** of the rendered [toolchain tree][storage-toolchain] — `<home>/<group>/<entry>/` — and in link-following mode [`ocx env`][cmd-env-root] emits those paths as environment values. So the grammar is a validation rule, not a style preference.
+Group names and binding names both become **path components** of the rendered [toolchain tree][storage-toolchain] — `<home>/links/<group>/<entry>/` — and in link-following mode [`ocx env`][cmd-env-root] emits those paths as environment values. So the grammar is a validation rule, not a style preference.
+
+Every name you declare sits one level below the tree's own directory names, under `links/`, so no name you pick can collide with the tree's structure: a group named `links` renders at `links/links/<entry>`, and a tool named `bin` renders at `links/default/bin`.
 
 Every `[group.<name>]` name, every `[tools]` key, and every `[group.<name>.tools]` key must match:
 
@@ -1667,21 +1669,14 @@ Every `[group.<name>]` name, every `[tools]` key, and every `[group.<name>.tools
 error: [tools] name 'my tool' must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ and be at most 64 bytes (the character set is wrong)
 ```
 
-Three names are reserved, and the namespace differs:
+Two names are reserved, both as **group names only**:
 
-| Reserved | Namespace | Why |
-|---|---|---|
-| `bin` | group name **and** binding name | the rendered toolchain's launcher directory, a sibling of every `<group>/` |
-| `default` | group name only | names the implicit top-level `[tools]` table |
-| `all` | group name only | the CLI keyword that expands to every declared group |
+| Reserved | Why |
+|---|---|
+| `default` | names the implicit top-level `[tools]` table |
+| `all` | the CLI keyword that expands to every declared group |
 
-`default` and `all` stay legal as binding names — `[tools] default = "ocx.sh/x:1"` and `[group.ci.tools] all = "ocx.sh/y:1"` both parse.
-
-`bin` is reserved on both namespaces so a per-group `<group>/bin/` layout stays available later without a break in the tree's shape. Its refusal names the scope it was found in:
-
-```
-error: [group] name 'bin' is reserved; `bin` is reserved for a future per-group launcher directory
-```
+Both stay legal as binding names — `[tools] default = "ocx.sh/x:1"` and `[group.ci.tools] all = "ocx.sh/y:1"` both parse.
 
 The reserved-word comparison **folds ASCII case**. `[group.Default]`, `[group.DEFAULT]` and `[group.default]` are one reservation, and all three are refused — a `[group.Default]` quietly coexisting beside the implicit default group is exactly the collision the reservation exists to stop.
 
@@ -1733,7 +1728,7 @@ activate = "bin"
 | Value | What reaches the shell |
 |---|---|
 | `"env"` *(default)* | The toolchain environment is composed on every prompt: each tool's own `PATH` entries and declared variables land in the shell. |
-| `"bin"` | Only `<home>/toolchain/bin` goes on `PATH`. Nothing else is composed — a tool is resolved by its [launcher trampoline][env-composition-activation] when it runs, and the trampoline composes the environment at that moment. |
+| `"bin"` | Only `<home>/toolchain/active/bin` goes on `PATH`. Nothing else is composed — a tool is resolved by its [launcher trampoline][env-composition-activation] when it runs, and the trampoline composes the environment at that moment. |
 | `"none"` | Neither. The reconciler withdraws whatever it owns and adds nothing. |
 
 An unrecognized value in `ocx.toml` is a **parse error**, exit 78 — the same treatment `lazy-mode` gets — for every command that loads the file. [`OCX_TOOLCHAIN_ACTIVATE`][env-ocx-toolchain-activate] is deliberately not symmetric: an unrecognized value there warns `Environment variable 'OCX_TOOLCHAIN_ACTIVATE' ignored: invalid activate mode 'shim' (expected 'env', 'bin' or 'none')` on stderr and falls through to the next tier, exit 0. A file you own may fail loudly; an inherited variable may not break every prompt in every project.
@@ -1757,7 +1752,7 @@ ocx self setup --toolchain-activate bin
 That targets the ocx home's own `ocx.toml`, never the project in effect — `--project` and [`OCX_PROJECT`][env-ocx-project] name a different toolchain and this flag does not redirect onto it. A project's own `ocx.toml` still decides for that project.
 
 ::: tip `bin` and `none` are the same `PATH` for the global toolchain
-`$OCX_HOME/toolchain/bin` is a session-level directory: [`ocx self setup`][cmd-self-setup] registers it on `PATH` once, a shell start prepends it again, and a prompt never withdraws it. So a global `activate = "bin"` and a global `activate = "none"` both leave the global toolchain reachable through its trampolines and compose nothing else — the same `PATH`, by the same route. The two values part company only for a project's toolchain, whose `bin/` directory a prompt does add and remove.
+`$OCX_HOME/toolchain/active/bin` is a session-level directory: [`ocx self setup`][cmd-self-setup] registers it on `PATH` once, a shell start prepends it again, and a prompt never withdraws it. So a global `activate = "bin"` and a global `activate = "none"` both leave the global toolchain reachable through its trampolines and compose nothing else — the same `PATH`, by the same route. The two values part company only for a project's toolchain, whose `bin/` directory a prompt does add and remove.
 :::
 
 ::: tip Both halves of a shell honour the mode
@@ -1768,7 +1763,7 @@ Two moments put a global environment into a shell, and both read this key: the l
 
 ### Toolchain-level `pinned` {#project-config-pinned}
 
-A rendered toolchain carries `<group>/<entry>` links pointing at package roots, and a composed environment can name either those links or the digest paths directly. `pinned` chooses.
+A rendered toolchain carries `links/<group>/<entry>` links pointing at package roots, and a composed environment can name either those links or the digest paths directly. `pinned` chooses.
 
 ```toml
 pinned = true
@@ -1776,7 +1771,7 @@ pinned = true
 
 | Value | What the composed environment names |
 |---|---|
-| `false` *(default)* | The rendered `<group>/<entry>` links are followed, so a later [`ocx update`][cmd-update] moves a **root**'s paths with no re-render. |
+| `false` *(default)* | The rendered `links/<group>/<entry>` links are followed, so a later [`ocx update`][cmd-update] moves a **root**'s paths with no re-render. |
 | `true` | Digest paths — exactly what `ocx.lock` pins right now, consulting no link, and reading no tree. |
 
 `true` is the setting for an environment that must not shift underneath a long-running process or a captured export: the paths name content, and content-addressed paths never change meaning.

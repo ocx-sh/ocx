@@ -62,7 +62,7 @@ Elvish registers its reconcile the same append-safe way the other hooked shells 
 
 The per-prompt hook can only run where there is a prompt. An IDE, a desktop launcher and a background service each start without one, so nothing in the mechanism above ever reaches them — which is why a `PATH` that is right in the terminal can be wrong everywhere else on the same machine.
 
-[`ocx self setup`][cmd-self-setup] answers that separately. It writes two directories — the ocx installation's `bin` directory and `$OCX_HOME/toolchain/bin` — into the one store per platform that a whole login session reads, once, at install time. That registration is **not** the hook and does not depend on it: every process started afterwards inherits those directories whether or not it ever runs a shell. The stores, the per-platform mechanisms and the six limits the registration does not promise are in the [user guide][user-guide-session-path] and the [command-line reference][cmd-self-setup-session-path].
+[`ocx self setup`][cmd-self-setup] answers that separately. It writes two directories — the ocx installation's `bin` directory and `$OCX_HOME/toolchain/active/bin` — into the one store per platform that a whole login session reads, once, at install time. That registration is **not** the hook and does not depend on it: every process started afterwards inherits those directories whether or not it ever runs a shell. The stores, the per-platform mechanisms and the six limits the registration does not promise are in the [user guide][user-guide-session-path] and the [command-line reference][cmd-self-setup-session-path].
 
 The two mechanisms then share one `PATH`. Three things decide how they fit.
 
@@ -77,8 +77,8 @@ Both session directories are in the reconciler's desired set on **every** prompt
 Front to back, a converged `PATH` reads:
 
 1. the project scope's composed entries (`env` mode only)
-2. the project's `<home>/toolchain/bin` (`bin` mode only)
-3. `$OCX_HOME/toolchain/bin`
+2. the project's `<home>/toolchain/active/bin` (`bin` mode only)
+3. `$OCX_HOME/toolchain/active/bin`
 4. the ocx installation's `bin` directory
 5. the global toolchain's composed entries
 
@@ -92,9 +92,11 @@ Within the session block the install directory comes **last**, and `ocx` reads l
 
 ### What `bin` mode costs a prompt {#session-path-bin-gate}
 
-In [`bin` mode][config-project-activate] the reconciler emits a project's `<home>/toolchain/bin` only when a render stamp exists for that home *and* the directory still holds exactly what the stamp recorded. The check is one directory read plus one `stat` per entry, and a content hash only for the entries the cheap comparison already found suspect. **No compose, no metadata read, no network** — that budget is most of why `bin` mode exists.
+In [`bin` mode][config-project-activate] the reconciler emits a project's `<home>/toolchain/active/bin` only when a render stamp exists for that home *and* the directory still holds exactly what the stamp recorded. The check is one directory read plus one `stat` per entry, and a content hash only for the entries the cheap comparison already found suspect. **No compose, no metadata read, no network** — that budget is most of why `bin` mode exists.
 
-It is set equality in both directions: every name the stamp records must be present, and every name present must be recorded. A one-way lookup over the stamp's own keys would pass the moment each recorded entry matched — which is precisely the case the gate is built for, a hostile clone force-committing one extra `bin/cmake` beside an otherwise legitimate tree. Every filesystem condition on that walk is a **mismatch** rather than an error: an unreadable `bin/`, an entry that vanished mid-walk, a `bin/` replaced by a symlink after a good render, a name that is not UTF-8. The entry is withheld and `PATH` does not change.
+It is set equality in both directions: every name the stamp records must be present, and every name present must be recorded. A one-way lookup over the stamp's own keys would pass the moment each recorded entry matched — which is precisely the case the gate is built for, a hostile clone force-committing one extra trampoline beside an otherwise legitimate tree. Every filesystem condition on that walk is a **mismatch** rather than an error: an unreadable trampoline directory, an entry that vanished mid-walk, one replaced by a symlink after a good render, a name that is not UTF-8. The entry is withheld and `PATH` does not change.
+
+The `active` link the path runs through is held to the same standard, and to the same effect: absent, not a link, or pointing anywhere other than `shells/default` is a mismatch, not a new failure mode. There is one symptom and one remedy for every state on this list.
 
 A mismatch and a missing stamp have one behaviour, so they get one sentence. The prompt emits nothing for that project and prints the line that names the fix:
 
@@ -173,6 +175,7 @@ ocx shell state
 ocx home: /home/you/.ocx
 project: /work/acme/api
 toolchain: /work/acme/api/.ocx/toolchain
+  bin: /work/acme/api/.ocx/toolchain/active/bin
   activate: env
   pinned: no
 
@@ -219,15 +222,16 @@ ocx shell state --verbose
 ocx --format json shell state   # complete, with or without --verbose
 ```
 
-Three of its fields are a contract other tools read rather than a diagnostic a person reads — the supported way for an editor, a [devcontainer feature][devcontainer-features] or a CI step to discover a toolchain from outside ocx:
+Four of its fields are a contract other tools read rather than a diagnostic a person reads — the supported way for an editor, a [devcontainer feature][devcontainer-features] or a CI step to discover a toolchain from outside ocx:
 
 | Field | What it carries |
 |---|---|
 | `toolchain_home` | The resolved toolchain home: `<project>/.ocx/toolchain`, or `<toolchain-dir>/<project-key>/toolchain` when [`toolchain-dir`][config-toolchain-dir] relocates it, or `$OCX_HOME/toolchain` when no project resolves. Always present, never `null` — a `toolchain-dir` the containment rules refuse is rejected at config load, so a report that exists at all has a spellable home. |
+| `toolchain_bin` | The directory to put on `PATH` for that same home — the trampolines [`bin` mode][config-project-activate] exposes. Present exactly when `toolchain_home` is, so no consumer has to branch, and it names a path that need not exist yet: a home that has never been pulled reports the directory it *would* hold. **Read this field rather than joining anything onto `toolchain_home`.** The two are not one path component apart, and a hand-built join produces a plausible string that names nothing — silently, because the tool that consumed it will not fail until several steps later. |
 | `activate` | The mode the project in effect resolves to — `env`, `bin` or `none` — through that project's own [`activate` key][config-project-activate] and then the environment, never one tier's raw value. With no project in effect the file tier is absent and the environment answers. |
-| `pinned` | The boolean, resolved through the same two tiers. `true` means a composing emitter yields digest paths and consults no `<group>/<entry>` link; `false` means it follows the rendered links, so an [`ocx update`][cmd-update] takes effect with no re-render. |
+| `pinned` | The boolean, resolved through the same two tiers. `true` means a composing emitter yields digest paths and consults no `links/<group>/<entry>` link; `false` means it follows the rendered links, so an [`ocx update`][cmd-update] takes effect with no re-render. |
 
-Without `toolchain_home` the only route to that directory is re-deriving a 16-hex project key from a path the caller would also have to canonicalize exactly the way ocx does. All three appear in the human rendering too, at both verbosity tiers: where a toolchain lives is an answer, not a diagnostic.
+Without `toolchain_home` the only route to that directory is re-deriving a 16-hex project key from a path the caller would also have to canonicalize exactly the way ocx does. All four appear in the human rendering too, at both verbosity tiers: where a toolchain lives is an answer, not a diagnostic.
 
 <Terminal src="/casts/in-depth/shell-integration/toolchain-state.cast" title="Reading the toolchain state" collapsed />
 

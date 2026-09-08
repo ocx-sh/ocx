@@ -431,7 +431,7 @@ See [Deferred Tools][in-depth-lazy-loading] for why `lazy-report` has no `[group
 
 ### `--pinned`, `--no-pinned` {#arg-pinned}
 
-Declared on [`ocx env`](#env-root) and [`ocx exec`](#exec), and on no other command. The pair picks which of two lanes the composed paths take: the digest roots [`ocx.lock`](#lock) pins, or the rendered `<group>/<entry>` links that point at them.
+Declared on [`ocx env`](#env-root) and [`ocx exec`](#exec), and on no other command. The pair picks which of two lanes the composed paths take: the digest roots [`ocx.lock`](#lock) pins, or the rendered `links/<group>/<entry>` links that point at them.
 
 Declaring the flag and composing a toolchain are two different lists. **Five** emitters compose a toolchain, and each one takes a lane: `ocx env`, `ocx exec`, [`ocx direnv export`](#direnv-export), the `env`-mode shell hook, and the global login exporter [`ocx self setup`](#self-setup) writes into your shell profile. The three that declare no flag resolve the lane from the lower tiers of the [ladder](#arg-pinned-ladder) alone.
 
@@ -439,8 +439,8 @@ The two lanes agree until the lock moves. An environment composed from links kee
 
 | Flag | Composed paths |
 |------|----------------|
-| `--pinned` | The digest roots `ocx.lock` pins right now. No `<group>/<entry>` link is consulted, and the rendered tree is never read — the lane is decided before any filesystem call. |
-| `--no-pinned` | The rendered `<group>/<entry>` links, so a later [`ocx update`](#update) reaches a [root](#arg-pinned-roots-only) with no re-render. This is the default. |
+| `--pinned` | The digest roots `ocx.lock` pins right now. No `links/<group>/<entry>` link is consulted, and the rendered tree is never read — the lane is decided before any filesystem call. |
+| `--no-pinned` | The rendered `links/<group>/<entry>` links, so a later [`ocx update`](#update) reaches a [root](#arg-pinned-roots-only) with no re-render. This is the default. |
 
 The difference is visible in the composed values themselves — the same toolchain, once through its rendered links and once through the digest roots the lock pins:
 
@@ -458,7 +458,7 @@ Neither flag takes a value: `--pinned=true` is a usage error (exit [`64`](#exit-
 
 #### A link that is not there degrades that one entry {#arg-pinned-degrade}
 
-The link lane is decided per entry, and it never fails. An entry composes on its digest path instead whenever its `<group>/<entry>` link is absent, is not a link at all, or points somewhere other than the digest root `ocx.lock` derives for this host — and the other entries in the same composition still compose through their links. Two conditions degrade the whole composition the same way: a toolchain home the symlink guards refuse, and a link probe that cannot complete. Nothing is printed, and no exit code changes.
+The link lane is decided per entry, and it never fails. An entry composes on its digest path instead whenever its `links/<group>/<entry>` link is absent, is not a link at all, or points somewhere other than the digest root `ocx.lock` derives for this host — and the other entries in the same composition still compose through their links. Two conditions degrade the whole composition the same way: a toolchain home the symlink guards refuse, and a link probe that cannot complete. Nothing is printed, and no exit code changes.
 
 **A digest path is correct when it appears.** It names the same package directory the link would have named — the two spellings are one directory, not a good result and a degraded one. The single property it does not carry is the one the link lane exists for: it does not follow a later [`ocx update`](#update).
 
@@ -466,7 +466,7 @@ One consequence is worth naming, because it is the one that surprises: two machi
 
 #### Only roots take the link lane {#arg-pinned-roots-only}
 
-A `<group>/<entry>` link points at a lock entry — a tool named in `[tools]` or a `[group.<name>]` table — and at nothing else. So a lock entry is the only thing the link lane can move. Everything a **dependency** contributes is a digest path in *both* lanes: the `PATH` directories a dependency adds to the composition, and every `${deps.<name>.installPath}` a package's `[env]` dereferences.
+A `links/<group>/<entry>` link points at a lock entry — a tool named in `[tools]` or a `[group.<name>]` table — and at nothing else. So a lock entry is the only thing the link lane can move. Everything a **dependency** contributes is a digest path in *both* lanes: the `PATH` directories a dependency adds to the composition, and every `${deps.<name>.installPath}` a package's `[env]` dereferences.
 
 The "no re-render" property is therefore a property of roots. After an [`ocx update`](#update), an already-composed environment picks the new root up through the root's link, while its dependency-contributed paths still name the packages the previous lock pinned, until something composes the environment again.
 
@@ -497,7 +497,7 @@ cmake = "ocx.sh/kitware/cmake:3.28"
 
 #### Not on `ocx pull` {#arg-pinned-pull}
 
-[`ocx pull`](#pull) declares neither flag, deliberately. `pull` *renders* the `<group>/<entry>` links rather than composing from them, and this setting selects the lane a composition takes — a flag on `pull` would be inert on the tree the command writes. The lower tiers still resolve: `pull` reads the `ocx.toml` key, then `OCX_TOOLCHAIN_PINNED`, and hands the result to the render.
+[`ocx pull`](#pull) declares neither flag, deliberately. `pull` *renders* the `links/<group>/<entry>` links rather than composing from them, and this setting selects the lane a composition takes — a flag on `pull` would be inert on the tree the command writes. The lower tiers still resolve: `pull` reads the `ocx.toml` key, then `OCX_TOOLCHAIN_PINNED`, and hands the result to the render.
 
 
 ## Commands
@@ -582,7 +582,7 @@ An object is unreferenced when nothing points to it — no candidate or current 
 Do not run `clean` concurrently with other OCX commands. A concurrent install may reference an object that `clean` is about to remove, causing the install to fail.
 :::
 
-The rendered toolchain tree is outside this graph entirely. `<home>/toolchain/` holds `bin/` trampolines and `<group>/<entry>` links — pure derived state that [`ocx pull`](#pull) rewrites from `ocx.lock` — so `clean` never walks it and never collects from it. The packages those links *point at* are ordinary object-store entries, held live by the project's own `ocx.lock` through the `$OCX_HOME/projects/` ledger like every other pinned tool.
+The rendered toolchain tree is outside this graph entirely. `<home>/toolchain/` holds `shells/default/bin` trampolines and `links/<group>/<entry>` links — pure derived state that [`ocx pull`](#pull) rewrites from `ocx.lock` — so `clean` never walks it and never collects from it. The packages those links *point at* are ordinary object-store entries, held live by the project's own `ocx.lock` through the `$OCX_HOME/projects/` ledger like every other pinned tool.
 
 **Usage**
 
@@ -761,7 +761,7 @@ ocx env [OPTIONS]
 | `--export-file=PATH` | — | Write GitLab CI/CD JSON-lines output to `PATH` instead of stdout. Requires `--ci=gitlab`. Rejected with exit 64 when combined with `--ci=github` (GitHub infers its sink from [`GITHUB_ENV`][env-github-env] and [`GITHUB_PATH`][env-github-path]) or when given without `--ci`. | *(unset — stdout for gitlab)* |
 | `--platform <PLATFORM>` | `-p` | Compose the environment for a single target platform instead of the host (cross-build export). Single-valued: passing more than one exits 64. A tool that ships no leaf for the target exits 78 (project tier) or is skipped (global tier, lenient). Defaults to the current host. | *(current host)* |
 | [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim for every tool the ladder resolves to `always`, instead of downloading its content up front. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
-| [`--pinned`](#arg-pinned), [`--no-pinned`](#arg-pinned) | — | Top tier of the [`pinned` resolution ladder](#arg-pinned-ladder). `--pinned` composes the digest roots `ocx.lock` names; `--no-pinned` composes the rendered `<group>/<entry>` links. Neither takes a value, and passing both is last-wins. | *(inherit from `ocx.toml` / `OCX_TOOLCHAIN_PINNED`)* |
+| [`--pinned`](#arg-pinned), [`--no-pinned`](#arg-pinned) | — | Top tier of the [`pinned` resolution ladder](#arg-pinned-ladder). `--pinned` composes the digest roots `ocx.lock` names; `--no-pinned` composes the rendered `links/<group>/<entry>` links. Neither takes a value, and passing both is last-wins. | *(inherit from `ocx.toml` / `OCX_TOOLCHAIN_PINNED`)* |
 | `--pull` | — | Materialise missing tools into the object store before composing (single batched install, like `ocx exec`). A tool already present resolves locally with no network — only a genuine miss pulls. Last-wins with `--no-pull`. Ignored under `--global` — the global tier never installs. | **default** |
 | `--no-pull` | — | Skip the install fallback: resolve against local state only. A lock-pinned tool that is not materialised is reported on stderr with an `ocx pull` hint and omitted from the composed env; the command never contacts the registry and the exit code stays 0. | — |
 | `--show-patches` | — | Annotate each entry with its origin. When [`[patches]`][config-patches] is configured, companion overlay entries are appended after the toolchain's own entries; this flag adds a `Source` column to the plain table (a `"source"` object in JSON) naming the descriptor rule and companion that produced each overlay entry. No effect when `[patches]` is not configured. Mutually exclusive with `--shell` and `--ci`. | false |
@@ -895,7 +895,7 @@ ocx exec [OPTIONS] [NAME...] -- ARGV...
 | `--group <NAME>` | `-g` | Scope env composition to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). `default` selects `[tools]`; `all` expands to `default` + every declared `[group.*]`. | `[tools]` only |
 | `--clean` | — | Start with a clean environment containing only the composed package variables, instead of inheriting the current shell environment. | off |
 | [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim for every tool the ladder resolves to `always`; its content downloads the first time the child process invokes it. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
-| [`--pinned`](#arg-pinned), [`--no-pinned`](#arg-pinned) | — | Top tier of the [`pinned` resolution ladder](#arg-pinned-ladder). `--pinned` composes the digest roots `ocx.lock` names; `--no-pinned` composes the rendered `<group>/<entry>` links. Neither takes a value, and passing both is last-wins. | *(inherit from `ocx.toml` / `OCX_TOOLCHAIN_PINNED`)* |
+| [`--pinned`](#arg-pinned), [`--no-pinned`](#arg-pinned) | — | Top tier of the [`pinned` resolution ladder](#arg-pinned-ladder). `--pinned` composes the digest roots `ocx.lock` names; `--no-pinned` composes the rendered `links/<group>/<entry>` links. Neither takes a value, and passing both is last-wins. | *(inherit from `ocx.toml` / `OCX_TOOLCHAIN_PINNED`)* |
 | `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Only the segment before that first `=` is checked for a `:TYPE[:SEP]` qualifier — an environment variable name can never contain `:`, so a Windows-style value with its own colon (`--env PATH:path=C:\tools\bin`) is read correctly, and `--env FOO:constant=a=b` sets `FOO` to `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends) — the same three kinds [`[env]`][config-project-env] uses. `SEP` qualifies `list` only: the string a `list` contribution is joined to the existing value with (`--env GODEBUG:list:,=gctrace=1`); omitted, the key inherits whatever separator another contributor already declared, or a single space if none did — see [Env Composition][env-composition-list]. A relative `path` value resolves against the **current directory** the flag was invoked from, not the project root [`[env]`][config-project-env] resolves against: a checked-in file must mean the same thing from any subdirectory, while a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
 | `--records-dir <DIR>` | — | Sink directory for the [exec-time resolution record][execution-records-ref] — one JSON file written immediately before the child starts, naming every package digest that composed the environment plus the resolved executable. Overrides the [`[records]` `dir`][config-records-dir] config key and [`OCX_RECORDS_DIR`][env-ocx-records-dir]. Unset at every tier means no record is written. | *(unset — recording off)* |
 | `--records-name <TEMPLATE>` | — | Filename template for the sink, over the closed placeholder set in [Filename grammar][execution-records-filename]. Has no effect unless a sink directory is also active. Overrides the [`[records]` `name`][config-records-name] config key and [`OCX_RECORDS_NAME`][env-ocx-records-name]. | `{time}-{pid}-{rand}.json` |
@@ -1969,25 +1969,41 @@ One reserved key sits beside the identifier keys: `advisories`, the same array [
 
 A warm object store is not yet a usable toolchain: something has to point at those packages under names a shell can resolve. `ocx pull` does both in one run. After the roots this invocation selected have resolved, it renders the toolchain home, so the tree the [shell integration][in-depth-shell-integration] and [`ocx exec`](#exec) read is current when the command returns — no second step.
 
-Three things are written under `<home>/toolchain/`:
+Four things are written under `<home>/toolchain/`, and those four names are the whole of what the tree owns at depth 1:
 
 | Written | What it is |
 |---------|-----------|
-| `bin/<name>` | One launcher trampoline per exposed name. On Windows this is two entries per name — `<name>.exe` plus its `<name>.exec` sidecar. |
-| `<group>/<entry>/` | A directory link to a package root, one per selected group. |
+| `shells/default/bin/<name>` | One launcher trampoline per exposed name. On Windows this is two entries per name — `<name>.exe` plus its `<name>.exec` sidecar. |
+| `active` | A link to `shells/default/`. It is the `PATH`-facing spelling: the directory to export is `<home>/toolchain/active/bin`, and [`ocx shell state`](#shell-state) reports it as `toolchain_bin`. |
+| `links/<group>/<entry>/` | A directory link to a package root, one per selected group. Every name you declared is a component here, one level below the four tree-owned names. |
 | `.gitignore` | A single `*` line, written on every render so the tree lands in a directory git already ignores — see [Storage][in-depth-storage-toolchain]. |
 
 The render stamp that records this run's entry set — written last, after the final entry and the final prune — is **not** part of this tree: it lives under `$OCX_HOME/state/` — per-project at `state/projects/<key>/render_stamp.json`, or directly at `state/render_stamp.json` for the global toolchain — precisely so it survives a `toolchain-dir` relocation and a checkout wipe of `<home>/toolchain/` alike.
 
-The render is a **reconcile**, not an append: the computed name set is written and every name no longer in it is pruned.
+The render is a **reconcile**, not an append: the computed name set is written and every name no longer in it is pruned. A group that leaves the lock is pruned at `links/<group>`, not at the tree root — so a depth-1 directory named after a locked group is an orphan of the tree's own namespace and is pruned as one.
 
-`-g` narrows it. A bare `ocx pull` covers every group the lock declares plus the default group unconditionally; a `-g ci,lint` run covers exactly those. `bin/` belongs to the default group and to nothing else, so a run that narrows the default group away leaves `bin/` **entirely untouched** rather than emptied — reconciling it would force the default group's metadata to resolve, growing a network dependency you did not ask for.
+`-g` narrows it. A bare `ocx pull` covers every group the lock declares plus the default group unconditionally; a `-g ci,lint` run covers exactly those. The trampoline directory belongs to the default group and to nothing else, so a run that narrows the default group away leaves `shells/default/bin/` **entirely untouched** rather than emptied — reconciling it would force the default group's metadata to resolve, growing a network dependency you did not ask for.
 
 **The heal is not this command's alone.** Every composing emitter repairs the groups it is about to emit *before* it probes a single link: it creates an absent link and repoints a stale one, then reads. That is a write on [`ocx env`](#env-root)'s per-prompt path, and it is what delivers the link lane's "no re-render" behaviour after an [`ocx update`](#update) without a `pull` in between. It is best-effort and silent — a read-only tree, a home the symlink guards refuse, or a link lock it cannot acquire leaves the entry unrepaired, and the composition emits that entry's [digest path](#arg-pinned-degrade) instead.
 
 [`--dry-run`](#pull-dry-run) reports the delta and writes nothing. It also **performs no heal**: a poisoned or stale link is still there afterwards, because every write step the heal needs is a step a dry run does not take.
 
 **A render failure never fails the pull.** The command's product is a warmed object store, and that work is finished before the render starts; a read-only checkout, a foreign-owned `.ocx/`, a lock timeout, or a metadata closure an offline invocation cannot walk are all states where the warming still succeeded. Whatever the render could not do is reported as a warning on stderr and `ocx pull` still exits 0. The render outcome is never the exit code — script against the warmed store, not against the tree.
+
+##### What a skipped entry looks like {#pull-render-skipped}
+
+Each thing the render could not write is one `warning:` line on stderr naming the artifact, the path, and the reason. The reason is what you act on; the exit code says nothing, by the paragraph above.
+
+The reason most people meet is a **directory sitting where a link belongs**. `cp -rL`, `rsync` without `-l`, Docker `COPY` and most zip extractors dereference symlinks, so a project copied by one of them arrives with `links/<group>/<entry>` as a full directory copy of the package instead of a link:
+
+```
+$ ocx pull
+warning: Toolchain render skipped link "cmake" in group "default" at "/work/copy/.ocx/toolchain/links/default/cmake": "a directory occupies this link's name — the mark of a symlink-dereferencing copy (`cp -rL`, `unzip`, `rsync` without `-l`, Docker `COPY`); it is left in place rather than deleted recursively. Remove '/work/copy/.ocx/toolchain/links/default/cmake' and run `ocx pull` again"
+```
+
+The remedy is the message's last clause: delete that one path, then pull again. The directory is left byte-for-byte intact rather than removed recursively, because both of its name components come from `ocx.lock` and a recursive delete driven by a file's contents is not a thing this command does. Until it is deleted the entry is skipped on **every** render, and that entry composes on its [digest path](#arg-pinned-degrade) — correct, just not moved by a later [`ocx update`](#update).
+
+The `active` link needs no such action. A copy that turned it into a real directory is repaired silently on the next render: no name in that path comes from a lock or a config file, so ocx can replace it without deciding anything about your data.
 
 #### Dry-run preview {#pull-dry-run}
 
@@ -2345,7 +2361,7 @@ A shell profile reaches login shells. It does not reach an IDE, a desktop launch
 
 Two directories are registered, in this order, so a global toolchain that pins `ocx` is what a session resolves and the installed binary is the floor beneath it:
 
-1. `$OCX_HOME/toolchain/bin` — the global toolchain's trampolines.
+1. `$OCX_HOME/toolchain/active/bin` — the global toolchain's trampolines.
 2. `$OCX_HOME/symlinks/<ocx cli id>/current/content/bin` — the directory the installed `ocx` itself resolves from.
 
 Each platform has exactly one store:
@@ -2595,7 +2611,7 @@ Emit eval-safe shell activation lines for the current OCX installation.
 
 Running `ocx self activate` prints three blocks of shell code to stdout:
 
-1. Two `PATH` prepends: the resolved absolute path to `<OCX_HOME>/symlinks/ocx.sh/ocx/cli/current/content/bin`, and then `<OCX_HOME>/toolchain/bin` — the global toolchain's trampolines — which lands in front of it, so a pinned `ocx` wins over the installed one. Both paths are resolved at runtime from the binary's own `OCX_HOME` — no shell variable reference is emitted. Both are emitted in **every** [`activate`][config-project-activate] mode: they are session-level directories, so a shell that opened before [`ocx self setup`][cmd-self-setup] registered them with the OS, or on a host where that registration does not apply, still reaches the global toolchain.
+1. Two `PATH` prepends: the resolved absolute path to `<OCX_HOME>/symlinks/ocx.sh/ocx/cli/current/content/bin`, and then `<OCX_HOME>/toolchain/active/bin` — the global toolchain's trampolines — which lands in front of it, so a pinned `ocx` wins over the installed one. Both paths are resolved at runtime from the binary's own `OCX_HOME` — no shell variable reference is emitted. Both are emitted in **every** [`activate`][config-project-activate] mode: they are session-level directories, so a shell that opened before [`ocx self setup`][cmd-self-setup] registered them with the OS, or on a host where that registration does not apply, still reaches the global toolchain.
 2. A completion script for the detected shell — emitted inline into the activation stream, only when completions are enabled (skipped silently when `OCX_NO_COMPLETIONS=1` is set, when `--no-completion` is passed, when the session is non-interactive, or when the shell has no [`clap_complete`][clap-complete] backend). The completion block is emitted **first** so that, for PowerShell, its `using namespace` directives lead the stream — `Invoke-Expression` accepts them only as the first statement. Every shim states its own interactivity explicitly through a hidden `--interactive`/`--no-interactive` flag pair, using the test its own shell language provides (`$-` on POSIX, `status is-interactive` on fish, `[Console]::IsInputRedirected` on pwsh, a `test -t 0` probe on elvish), and that answer feeds the completion gate; a direct `ocx self activate` with neither flag falls back to whether stdin **or** stderr is a terminal.
 3. A global env eval line — **only when the global [`activate`][config-project-activate] mode is `env`**, which is the ladder's floor and therefore the usual case. Under `bin` or `none` the line is absent and the global toolchain reaches the shell through the trampolines prepended in step 1 instead, exactly as it does at every later prompt. It is guarded by a **path test against the resolved absolute binary** — never a `$PATH` name lookup, which a shell function or an earlier `$PATH` entry could shadow. POSIX form shown, with `<ocx>` standing for that absolute path: `if [ -x '<ocx>' ]; then eval "$('<ocx>' --global env --shell=bash)"; fi`. Per-shell variants use the target shell's native idiom — `fish` uses `if test -x '<ocx>'; '<ocx>' --global env --shell=fish | source; end`; `powershell`/`pwsh` use `Test-Path -LiteralPath … -PathType Leaf` and `Invoke-Expression`; `elvish` uses `if ?(test -x '<ocx>') { eval ('<ocx>' --global env --shell=elvish | slurp) }`. `nushell` is the one arm that still probes by name (`which ocx`), because it applies the global env as JSON data rather than evaluating a string; that gap is pinned as a strict xfail.
 

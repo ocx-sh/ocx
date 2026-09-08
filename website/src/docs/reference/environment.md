@@ -738,7 +738,7 @@ A `$OCX_HOME/state/no-modify-path` sentinel file that persists the preference au
 
 Reaching those is exactly what the [session-PATH registration][cmd-self-setup-session-path] is for, and it is the half this variable also suppresses. Without the opt-out, `ocx self setup` registers **two** directories, in this order:
 
-1. `$OCX_HOME/toolchain/bin` — the global toolchain's launcher trampolines. It leads, so a global toolchain that pins `ocx` is the one a session resolves.
+1. `$OCX_HOME/toolchain/active/bin` — the global toolchain's launcher trampolines. It leads, so a global toolchain that pins `ocx` is the one a session resolves.
 2. `$OCX_HOME/symlinks/<ocx cli id>/current/content/bin` — where the installed `ocx` binary itself resolves from. It is the floor: the name a session falls back to when no toolchain pins it.
 
 There is no `$OCX_HOME/bin`; the install directory is the symlink path above, derived from the store rather than joined from a literal.
@@ -857,7 +857,7 @@ export OCX_TOOLCHAIN_ACTIVATE=bin
 | Value | Behaviour |
 |-------|-----------|
 | `env` | Compose the toolchain environment on every prompt. The default when no tier sets the key. |
-| `bin` | Put the toolchain home's `bin` directory on `PATH` and compose nothing else — each tool is resolved by its launcher trampoline at the moment it runs. |
+| `bin` | Put the toolchain home's `active/bin` directory on `PATH` and compose nothing else — each tool is resolved by its launcher trampoline at the moment it runs. |
 | `none` | Neither. The reconciler withdraws whatever it owns and adds nothing. |
 
 Parsed case-insensitively (`Bin`, `BIN` and `bin` are equivalent), unlike the `ocx.toml` key, which is case-sensitive lowercase. Whitespace is **not** trimmed: `OCX_TOOLCHAIN_ACTIVATE=" bin"` is an unrecognized value, not `bin`. An empty value reads as unset.
@@ -882,7 +882,7 @@ export OCX_TOOLCHAIN_DIR=~/.cache/ocx/toolchain
 
 **This variable is the weakest tier, not an override.** `config.toml` beats it, so a host that states the key wins over an exported value; the variable supplies continuity only where a child process cannot read that configuration for itself (`OCX_NO_CONFIG=1`, or a different `--config`). An empty value reads as absent at both tiers, so `OCX_TOOLCHAIN_DIR=""` does not erase a configured root.
 
-Unlike the two toolchain settings on either side of it, this one **is** resolution-affecting — it moves where the `<group>/<entry>` links and `bin/` trampolines live, so every composed path changes with it — and it is forwarded to child `ocx` processes. When the parent resolved no root, the forward **removes** any inherited value, so a stale export in your shell cannot outrank the outer ocx's parsed state.
+Unlike the two toolchain settings on either side of it, this one **is** resolution-affecting — it moves where the `links/<group>/<entry>` links and the `shells/default/bin` trampolines live, so every composed path changes with it — and it is forwarded to child `ocx` processes. When the parent resolved no root, the forward **removes** any inherited value, so a stale export in your shell cannot outrank the outer ocx's parsed state.
 
 #### Two expansion rules, and only two {#ocx-toolchain-dir-expansion}
 
@@ -908,7 +908,7 @@ The root does not have to exist. Resolution creates nothing — no directory, no
 
 ### `OCX_TOOLCHAIN_PINNED` {#ocx-toolchain-pinned}
 
-Whether a composed toolchain environment names the digest roots `ocx.lock` pins, or the rendered `<group>/<entry>` links that point at them.
+Whether a composed toolchain environment names the digest roots `ocx.lock` pins, or the rendered `links/<group>/<entry>` links that point at them.
 
 ```sh
 export OCX_TOOLCHAIN_PINNED=true

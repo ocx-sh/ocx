@@ -256,8 +256,20 @@ The stores above are keyed by digest, registry, or tag — none of them by the n
     <Node name=".gitignore" icon="📄">
       <Description>a single <code>*</code> line, kept present by the renderer</Description>
     </Node>
-    <Node name="bin/" icon="⚙️" open>
-      <Description>one launcher trampoline per exposed tool name — default group only</Description>
+    <Node name="active" icon="➡️">
+      <Description>link to <code>shells/default/</code> — the <code>PATH</code>-facing name, so the directory to export is always <code>active/bin</code></Description>
+    </Node>
+    <Node name="links/" icon="📁" open-icon="📂" open>
+      <Description>every name you declared lives under here</Description>
+      <Node name="{group}/" icon="📁" open-icon="📂" open>
+        <Description>one directory per selected group; the default group is <code>default/</code></Description>
+        <Node name="{entry}" icon="➡️">
+          <Description>directory link to a package root — an NTFS junction on Windows</Description>
+        </Node>
+      </Node>
+    </Node>
+    <Node name="shells/default/bin/" icon="⚙️" open>
+      <Description>one launcher trampoline per exposed tool name — default group only; <code>default</code> is the only name this level takes</Description>
       <Node name="cmake" icon="🚀">
         <Description>POSIX: a five-line <code>/bin/sh</code> trampoline that re-enters ocx</Description>
       </Node>
@@ -268,22 +280,20 @@ The stores above are keyed by digest, registry, or tag — none of them by the n
         <Description>Windows: one line carrying the home selector — the project root, or the literal <code>global</code></Description>
       </Node>
     </Node>
-    <Node name="{group}/" icon="📁" open-icon="📂" open>
-      <Description>one directory per selected group; the default group is <code>default/</code></Description>
-      <Node name="{entry}" icon="➡️">
-        <Description>directory link to a package root — an NTFS junction on Windows</Description>
-      </Node>
-    </Node>
   </Node>
 </Tree>
 
-`bin/` holds the trampolines that make [`activate = "bin"`][config-activate] work: one `PATH` entry, and each name resolved by its own launcher at invocation time. It covers the default group only — that is the group `PATH` exposes. On Windows each name is **two** files, an `.exe` and its `.exec` sidecar, and both are tracked independently.
+Depth 1 is a closed set the tree owns: `.gitignore`, `active`, `links/`, `shells/`. Every name *you* declare is a component of `links/<group>/<entry>`, one level below all four, so no group or binding name you pick can collide with the tree's own structure.
 
-`<group>/<entry>` is the link lane. Each entry is a directory link to a package root (the same target shape [`candidates/{tag}`](#symlinks) uses), so a composed environment can name `…/default/cmake/content/bin` instead of a digest path. Whether an environment *uses* those links is the [`pinned`][config-pinned] setting — see [Toolchain activation][env-composition-activation].
+`active` is why the two halves are separate. It is the name a shell, an editor and a CI step hold, and it points at the physical directory the renderer actually wrote — so the `PATH` entry stays `<home>/toolchain/active/bin` while what sits underneath is free to move. Ask [`ocx shell state`][cmd-shell-state] for the resolved value rather than joining it yourself; the JSON report's `toolchain_bin` field is that path.
+
+`shells/default/bin/` holds the trampolines that make [`activate = "bin"`][config-activate] work: one `PATH` entry — spelled `active/bin` — and each name resolved by its own launcher at invocation time. It covers the default group only, that being the group `PATH` exposes. On Windows each name is **two** files, an `.exe` and its `.exec` sidecar, and both are tracked independently.
+
+`links/<group>/<entry>` is the link lane. Each entry is a directory link to a package root (the same target shape [`candidates/{tag}`](#symlinks) uses), so a composed environment can name `…/links/default/cmake/content/bin` instead of a digest path. Whether an environment *uses* those links is the [`pinned`][config-pinned] setting — see [Toolchain activation][env-composition-activation].
 
 The lane holds one entry at a time and only for lock entries. A link that is absent, stale, or not a link leaves **that** entry on its digest path while the rest of the composition still follows its links, with nothing printed — and the digest path is the correct path, the same package directory under its other spelling. A dependency has no link at all, so its `PATH` contributions and every `${deps.<name>.installPath}` name digest paths whatever `pinned` says. Both are set out under [`--pinned`][arg-pinned-degrade].
 
-Every composing emitter repairs this lane before it reads it: it creates an absent link and repoints a stale one for the groups it is about to emit, then probes. The repair is best-effort — a read-only tree, a home the symlink guards refuse, or a link lock it cannot take leaves the entry as it found it, and that entry composes on its digest path.
+Every composing emitter repairs this lane before it reads it: it creates an absent link and repoints a stale one for the groups it is about to emit, then probes. The repair is best-effort — a read-only tree, a home the symlink guards refuse, or a link lock it cannot take leaves the entry as it found it, and that entry composes on its digest path. One state it cannot repair is a **directory** sitting where a link belongs, the mark of a copy that dereferenced symlinks; [`ocx pull`][cmd-pull] names it and the path to delete — see [what a skipped entry means][cmd-pull-render-skipped].
 
 A toolchain link takes **no** `refs/symlinks/` back-reference. That is the deliberate difference from an install symlink: a back-reference is a [GC root](#gc), and a toolchain link that took one would pin its package forever, on every project that ever rendered a tree.
 
@@ -295,7 +305,7 @@ By default a project renders into its own checkout, at `<project>/.ocx/toolchain
 
 ### The render stamp {#toolchain-stamp}
 
-A rendered tree is only usable if it matches the lock it was rendered from, and walking it on every shell prompt to find out is not an option. So each render writes a stamp describing the tree **as it stands on disk** — the `bin/` entry set with each file's identity, and the default group's links — and the prompt path compares against that instead.
+A rendered tree is only usable if it matches the lock it was rendered from, and walking it on every shell prompt to find out is not an option. So each render writes a stamp describing the tree **as it stands on disk** — the trampoline set with each file's identity, and the default group's links — and the prompt path compares against that instead.
 
 | Tier | Stamp |
 |---|---|
@@ -338,6 +348,8 @@ Deleting it is safe. The next [`ocx pull`][cmd-pull] rebuilds it from `ocx.toml`
 [cmd-exec]: ../reference/command-line.md#package-exec
 [cmd-package-env]: ../reference/command-line.md#package-env
 [cmd-pull]: ../reference/command-line.md#pull
+[cmd-pull-render-skipped]: ../reference/command-line.md#pull-render-skipped
+[cmd-shell-state]: ../reference/command-line.md#shell-state
 
 <!-- environment -->
 [env-ocx-home]: ../reference/environment.md#ocx-home
