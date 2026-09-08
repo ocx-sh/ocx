@@ -1504,8 +1504,9 @@ fn has_execute_bit(_path: &Path) -> bool {
     true
 }
 
-/// Reconcile every selected group's `<group>/<entry>` links, then the home
-/// root's own orphan group directories.
+/// Reconcile every selected group's `<group>/<entry>` links, then the orphans
+/// under `links/` — entries first, so a departed group's directory empties and
+/// can be removed — then the home root's own depth-1 names.
 ///
 /// `case_insensitive` reaches the **prune** comparisons and nothing else
 /// (RUL-46) — see [`is_expected`]. The write pass is untouched: group and entry
@@ -1570,6 +1571,52 @@ async fn reconcile_links(
     for name in read_dir_utf8_names(&links_root(home)).await {
         if is_expected(&locked_groups, &name, case_insensitive) {
             continue;
+        }
+        // The departed group's own entries first, or the directory never
+        // empties: `remove_dir` is non-recursive, so without this pass every
+        // render reports the same `ENOTEMPTY` skip forever and S-001's "the
+        // rendered tree matches the new lock exactly" is unreachable for a
+        // branch switch that drops a `[group.…]` table.
+        //
+        // **Links only, and the filter is load-bearing** —
+        // `crate::symlink::remove` is `std::fs::remove_file` on Unix
+        // (`symlink-0.1.0`, `remove_symlink_auto`), so it deletes a regular
+        // file just as happily as a link. Measured: without this filter a
+        // planted file in a departed group's directory is removed, the
+        // directory empties, and the render reports nothing at all — the
+        // silent deletion RUL-32 forbids and S-001's error clause names.
+        // A *selected* group's own unexpected names keep the older, unfiltered
+        // sweep: that directory is one the renderer is actively writing, and
+        // widening the change to it is not this fix's business.
+        //
+        // What survives the filter is therefore the identical
+        // `RenderedArtifact::Link` prune a selected group's entries take — one
+        // `symlink::remove` of one link, after [`prune_within`] has resolved
+        // the parent and refused anything escaping the home, removing the link
+        // and never what it points at. Anything else — a foreign file, a
+        // dereferenced package copy — is left untouched, the `remove_dir` below
+        // fails `ENOTEMPTY`, and the directory is reported with its remedy.
+        //
+        // The path is joined raw rather than through `links_group`, matching
+        // [`artifact_path`] (RUL-40): a group directory whose name the grammar
+        // validator refuses is exactly the leftover worth scanning, and
+        // containment is [`prune_within`]'s job, not this one's.
+        let group_directory = links_root(home).join(&name);
+        for entry in read_dir_utf8_names(&group_directory).await {
+            if !tokio::fs::symlink_metadata(group_directory.join(&entry))
+                .await
+                .is_ok_and(|metadata| metadata.is_symlink())
+            {
+                continue;
+            }
+            let artifact = RenderedArtifact::Link {
+                group: name.clone(),
+                entry,
+            };
+            items.push(RenderedItem {
+                outcome: prune_outcome(home, &artifact, request.dry_run).await,
+                artifact,
+            });
         }
         let artifact = RenderedArtifact::GroupDirectory(name);
         items.push(RenderedItem {
@@ -2961,9 +3008,12 @@ pub(crate) async fn filesystem_is_case_insensitive(directory: &Path) -> crate::R
 /// trampolines, a legacy `<group>/` holding links — fails `remove_dir` with
 /// `ENOTEMPTY` and is reported `Skipped`, on **every** render, with the
 /// contents byte-for-byte intact. That is C-076: reported with its remedy,
-/// never deleted. No one-level "remove the symlink children, then the
-/// directory" sweep is introduced, because that is a delete primitive over
-/// attacker-named children, which RUL-32 refuses for the same reason.
+/// never deleted. **Depth 1 gets no child sweep**, unlike a departed
+/// `links/<group>` (see [`reconcile_links`]): the renderer publishes nothing
+/// under a depth-1 name in this layout, so its children are not links ocx wrote
+/// but a pre-`links/` leftover or a third party's files, and sweeping them
+/// would be a delete primitive over children ocx cannot vouch for — which
+/// RUL-32 refuses.
 ///
 /// # Errors
 ///
