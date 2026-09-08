@@ -1623,6 +1623,14 @@ async fn reconcile_links(
     // is the same directory on a case-insensitive host, and a case-sensitive
     // comparison there would report the tree's own directory as an orphan and
     // `remove_dir` it.
+    //
+    // Its mirror consequence is accepted rather than overlooked: on a
+    // case-**sensitive** host a committed `LINKS/` or `Active` is a genuinely
+    // distinct name, and the fold keeps it forever — never reported, never
+    // removed. Nothing in the tree reads those names, so the residual is
+    // unread attacker-committed state and not a route anywhere; the
+    // alternative is a host-dependent comparison that deletes the tree's own
+    // directory on the other kind of filesystem.
     for name in read_dir_utf8_names(home.root()).await {
         if TREE_OWN_DEPTH1_NAMES
             .iter()
