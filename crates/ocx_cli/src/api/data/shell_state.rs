@@ -362,7 +362,7 @@ pub struct ShellStateReport {
     /// (C-056, C-066).
     ///
     /// `true` means a composing emitter yields digest paths and consults no
-    /// `<group>/<entry>` link; `false` means it follows the rendered links, so
+    /// `links/<group>/<entry>` link; `false` means it follows the rendered links, so
     /// an `ocx update` takes effect with no re-render.
     pub pinned: bool,
 

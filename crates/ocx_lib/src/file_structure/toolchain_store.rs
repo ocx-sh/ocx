@@ -7,9 +7,10 @@
 //!
 //! ```text
 //! {root}/
-//! ├── .gitignore          "*" — C-004
-//! ├── bin/                launcher trampolines, DEFAULT group only
-//! └── <group>/<entry>/    directory link (junction on Windows) to a package root
+//! ├── .gitignore                     "*" — C-004
+//! ├── active -> shells/default/      the PATH-facing indirection — C-078
+//! ├── links/<group>/<entry>/         directory link (junction on Windows) to a package root
+//! └── shells/default/bin/            launcher trampolines, DEFAULT group only
 //! ```
 //!
 //! **One grammar implementation, two owners.** [`ToolchainHome`] is the value
@@ -362,9 +363,10 @@ impl ClassifyExitCode for ToolchainPathError {
 ///
 /// ```text
 /// <root>/
-/// ├── .gitignore          "*" — C-004, ensure-present, both tiers
-/// ├── bin/                launcher trampolines, DEFAULT group only
-/// └── <group>/<entry>/    directory link to a package root
+/// ├── .gitignore                     "*" — C-004, ensure-present, both tiers
+/// ├── active -> shells/default/      the PATH-facing indirection — C-078
+/// ├── links/<group>/<entry>/         directory link to a package root
+/// └── shells/default/bin/            launcher trampolines, DEFAULT group only
 /// ```
 ///
 /// Every path question about that tree is answered here and nowhere else.

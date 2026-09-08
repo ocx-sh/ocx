@@ -56,8 +56,8 @@ pub use toolchain_store::{
 ///   repository IS part of its path, and its GC liveness is rooted directly in
 ///   the lock pins (see the `shim_store` module docs)
 /// - **`toolchain`** — the global rendered toolchain home (`toolchain/`):
-///   launcher trampolines under `bin/` and one `<group>/<entry>` directory
-///   link per locked tool. Outside the GC graph, never walked by `ocx clean`,
+///   launcher trampolines under `shells/default/bin` and one
+///   `links/<group>/<entry>` directory link per locked tool. Outside the GC graph, never walked by `ocx clean`,
 ///   and a wrapper over one `ToolchainHome` so the global tier and a project
 ///   tier share one grammar (see the `toolchain_store` module docs)
 ///
@@ -91,8 +91,10 @@ pub struct FileStructure {
     /// package. See the `shim_store` module docs.
     pub shims: ShimStore,
     /// The **global** rendered toolchain home (`$OCX_HOME/toolchain/`) —
-    /// launcher trampolines under `bin/`, `<group>/<entry>` directory links to
-    /// package roots, and the `.gitignore` that hides the tree (C-001).
+    /// launcher trampolines under `shells/default/bin`,
+    /// `links/<group>/<entry>` directory links to package roots, the `active`
+    /// link that puts them on `PATH`, and the `.gitignore` that hides the tree
+    /// (C-001).
     /// Outside the three GC tiers, never walked by `ocx clean`, exactly as
     /// [`ShimBinStore`] is. A project's home is the same grammar at a
     /// different root and is deliberately NOT a field here: it depends on
