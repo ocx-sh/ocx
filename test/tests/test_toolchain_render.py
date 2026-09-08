@@ -1811,9 +1811,9 @@ def test_a_departing_group_holding_a_foreign_file_is_reported_every_render(
     and the survival assertion reds. (Second red, for the "reported" half:
     delete the ``Skipped`` arm of ``skipped_render_warnings`` — the stderr
     assertion reds while the survival one still passes; the two are
-    independent.) Third: drop the sweep's ``is_symlink`` filter and the same
-    survival assertion reds, because ``crate::symlink::remove`` is
-    ``std::fs::remove_file`` on Unix.
+    independent.) Third: drop ``prune_within``'s ``is_symlink`` refusal on the
+    ``RenderedArtifact::Link`` arm and the same survival assertion reds,
+    because ``crate::symlink::remove`` is ``std::fs::remove_file`` on Unix.
     """
     checkout = two_branch_checkout(ocx, tmp_path)
     assert run_in(ocx, checkout.directory, "pull").returncode == EXIT_SUCCESS
@@ -1851,6 +1851,44 @@ def test_a_departing_group_holding_a_foreign_file_is_reported_every_render(
         assert bin_entries(checkout.home) == checkout.expected_bin(
             checkout.other_branch
         ), f"…and the render continued past the skip (run {run})"
+
+
+def test_a_foreign_file_in_a_live_group_directory_is_reported_never_removed(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """RUL-32 / C-082 on the path that runs every render — a group the lock
+    **still declares**.
+
+    The prune sweep removes every name in a group directory the computed set no
+    longer holds, and it removed them with ``crate::symlink::remove``, which is
+    ``std::fs::remove_file`` on Unix: a file ocx never wrote was deleted, in
+    silence, on an ordinary ``ocx pull``. The departed-group sibling proved the
+    shape; this is the same defect on the branch that runs far more often.
+
+    ocx removes what ocx wrote. Anything else survives byte-for-byte and is
+    named, so the user can see what is there rather than discovering it gone.
+
+    RED: drop ``prune_within``'s ``is_symlink`` refusal on the
+    ``RenderedArtifact::Link`` arm — the planted file is deleted and both the
+    survival and the report assertions red.
+    """
+    project = locked_project(ocx, tmp_path)
+    planted = entry_link(project.home, DEFAULT_GROUP, "not-ocxs.txt")
+    planted.write_bytes(b"planted\n")
+
+    result = run_in(ocx, project.directory, "pull")
+    assert result.returncode == EXIT_SUCCESS, (
+        f"C-050 — a skip never fails the render; rc={result.returncode}\n"
+        f"{result.stderr}"
+    )
+    assert planted.read_bytes() == b"planted\n", (
+        f"RUL-32 — a file ocx did not write survives the prune byte-for-byte; "
+        f"{planted.parent} holds {sorted(p.name for p in planted.parent.iterdir())}"
+    )
+    assert str(planted) in result.stderr, (
+        f"C-050 — …and the skip names it, so the user is not left guessing; "
+        f"stderr:\n{result.stderr}"
+    )
 
 
 def test_a_departed_group_directory_converges_instead_of_skipping_forever(

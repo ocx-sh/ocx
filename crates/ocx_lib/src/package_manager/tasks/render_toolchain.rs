@@ -1578,37 +1578,20 @@ async fn reconcile_links(
         // rendered tree matches the new lock exactly" is unreachable for a
         // branch switch that drops a `[group.…]` table.
         //
-        // **Links only, and the filter is load-bearing** —
-        // `crate::symlink::remove` is `std::fs::remove_file` on Unix
-        // (`symlink-0.1.0`, `remove_symlink_auto`), so it deletes a regular
-        // file just as happily as a link. Measured: without this filter a
-        // planted file in a departed group's directory is removed, the
-        // directory empties, and the render reports nothing at all — the
-        // silent deletion RUL-32 forbids and S-001's error clause names.
-        // A *selected* group's own unexpected names keep the older, unfiltered
-        // sweep: that directory is one the renderer is actively writing, and
-        // widening the change to it is not this fix's business.
-        //
-        // What survives the filter is therefore the identical
-        // `RenderedArtifact::Link` prune a selected group's entries take — one
-        // `symlink::remove` of one link, after [`prune_within`] has resolved
-        // the parent and refused anything escaping the home, removing the link
-        // and never what it points at. Anything else — a foreign file, a
-        // dereferenced package copy — is left untouched, the `remove_dir` below
-        // fails `ENOTEMPTY`, and the directory is reported with its remedy.
+        // **No new delete primitive.** Each entry takes the identical
+        // `RenderedArtifact::Link` prune a *selected* group's unexpected names
+        // already take, so what may be removed is decided in one place for both
+        // — [`prune_within`], which resolves the parent, refuses anything
+        // escaping the home, and refuses a name that is not a link at all. A
+        // foreign file therefore survives and is *reported*, the `remove_dir`
+        // below fails `ENOTEMPTY`, and the directory is reported with its
+        // remedy: S-001's error clause, and the RUL-32 asymmetry C-082 draws.
         //
         // The path is joined raw rather than through `links_group`, matching
         // [`artifact_path`] (RUL-40): a group directory whose name the grammar
         // validator refuses is exactly the leftover worth scanning, and
         // containment is [`prune_within`]'s job, not this one's.
-        let group_directory = links_root(home).join(&name);
-        for entry in read_dir_utf8_names(&group_directory).await {
-            if !tokio::fs::symlink_metadata(group_directory.join(&entry))
-                .await
-                .is_ok_and(|metadata| metadata.is_symlink())
-            {
-                continue;
-            }
+        for entry in read_dir_utf8_names(&links_root(home).join(&name)).await {
             let artifact = RenderedArtifact::Link {
                 group: name.clone(),
                 entry,
@@ -2866,6 +2849,22 @@ fn refuse_symlink(path: &Path) -> crate::Error {
     )
 }
 
+/// A `<group>/<entry>` name occupied by something other than a link — a
+/// foreign file, or the real directory a dereferencing copy leaves (C-082).
+///
+/// The prune side's counterpart to [`publish_link_within`]'s kind dispatch:
+/// ocx removes what it wrote, and a name it did not write is reported rather
+/// than deleted (RUL-32).
+fn refuse_not_a_link(path: &Path) -> crate::Error {
+    crate::error::file_error(
+        path,
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "this name holds something other than a link ocx wrote; refusing to remove it",
+        ),
+    )
+}
+
 /// An artifact whose resolved path is not inside its resolved home (C-053).
 fn refuse_escape(path: &Path) -> crate::Error {
     crate::error::file_error(
@@ -2999,6 +2998,15 @@ pub(crate) async fn filesystem_is_case_insensitive(directory: &Path) -> crate::R
 ///   `Skipped` with the refusal as its reason, so a hostile clone's committed
 ///   `bin./` shows up in the report instead of vanishing from it.
 ///
+/// # A `<group>/<entry>` is removed only when it is a link
+///
+/// [`RenderedArtifact::Link`] is removed with
+/// [`crate::symlink::remove`], which on Unix is `std::fs::remove_file` — it
+/// would take a foreign file at that name as happily as a link. A name that is
+/// not a symlink is therefore refused here, for both sweeps at once, and
+/// reported [`RenderOutcome::Skipped`]: ocx removes what it wrote, and the
+/// dereferenced package copy C-082 names survives byte-for-byte.
+///
 /// # The home root's own entries, which are not groups (C-074, C-076)
 ///
 /// [`RenderedArtifact::RootEntry`] takes the same non-recursive treatment, for
@@ -3063,7 +3071,24 @@ fn prune_within(home: &ToolchainHome, artifact: &RenderedArtifact) -> crate::Res
         RenderedArtifact::Trampoline(_) => {
             std::fs::remove_file(&victim).map_err(|error| crate::error::file_error(&victim, error))
         }
-        RenderedArtifact::Link { .. } => crate::symlink::remove(&victim),
+        // `crate::symlink::remove` is `std::fs::remove_file` on Unix
+        // (`symlink-0.1.0`'s `remove_symlink_auto` *is* that re-export), and
+        // the wrapper's own guard is `exists() || is_link()` — so a regular
+        // file at a link's name satisfies it and is deleted. Measured, from an
+        // unguarded first pass: a planted file inside a group directory
+        // vanished and the render reported nothing at all.
+        //
+        // Here rather than in either caller, because both the selected-group
+        // sweep and the departed-group sweep reach this one line: what ocx
+        // removes is decided once. The refusal is a `Skipped` item naming the
+        // path (C-050), so the file survives *and* the user is told which one
+        // is holding the directory open.
+        RenderedArtifact::Link { .. } => {
+            if !std::fs::symlink_metadata(&victim).is_ok_and(|metadata| metadata.is_symlink()) {
+                return Err(refuse_not_a_link(&victim));
+            }
+            crate::symlink::remove(&victim)
+        }
         // Non-recursive, under every condition (RUL-32): a directory under the
         // home is attacker-controlled, and a recursive delete primitive
         // reachable from a hostile `ocx.lock` is not worth tidying one
