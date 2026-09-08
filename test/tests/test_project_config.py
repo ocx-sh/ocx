@@ -518,9 +518,10 @@ def test_bare_tag_in_project_config_exits_78(
 # ``ocx lock`` against a real registry needs published packages in the
 # fixture; that infrastructure is in test_lock.py.  Here we only need the
 # *path discovery* surface to fire — an empty ``[tools]`` table is enough
-# to drive ``project_path()``'s home-tier branch.  If the empty-tools case
-# turns out to require a tool entry (Phase 5 may tighten this), the test
-# is marked ``xfail`` so Phase 5 implementation can flip it.
+# to drive ``project_path()``'s home-tier branch.  The empty-tools case did
+# not end up needing a tool entry, so the rows below assert outright — there
+# is no ``xfail`` marker anywhere in this file, and the sentence that once
+# promised one outlived it.
 # ---------------------------------------------------------------------------
 
 

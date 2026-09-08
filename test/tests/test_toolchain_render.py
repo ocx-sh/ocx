@@ -8,7 +8,8 @@ Two halves, both traced to ``.claude/state/plans/plan_toolchain_activation.md``:
   emit, not just the default one (C-065, C-067, C-070, S-006; ruling RUL-96).
 * **WP-12a's render / prune / stamp / config-refusal suite** — ADR validation
   items 2, 12, 13, 14, 17, 18, 23, 24, 25, 31, 32, 33, 34, 36 and scenario
-  S-004, at the *tree* level.
+  S-004 (toolchain_activation), at the *tree* level. This file now cites two
+  scenario catalogs, so every ``S-NNN`` in it names its record.
 
 Where WP-8's ``test_toolchain_cli.py`` already covers the CLI half of an item
 (does ``pull`` render, does ``remove`` prune, does a skip roll the commit back),
@@ -1234,8 +1235,14 @@ def test_an_entry_that_left_the_lock_loses_both_its_link_and_its_trampoline(
 def test_an_empty_orphan_group_directory_is_removed_and_a_populated_one_is_only_skipped(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Item 31, class 3 / C-044 / RUL-32 — the group-directory prune is a
+    """Item 31, class 3 / C-044 / RUL-32 — the depth-1 orphan prune is a
     **non-recursive** ``remove_dir``.
+
+    Both plants are at the **home root**, which under the closed depth-1 set
+    mints ``RenderedArtifact::RootEntry``, not ``GroupDirectory``. The two share
+    one ``prune_within`` arm, so the behaviour is covered either way — but the
+    title said ``GroupDirectory`` because it predates ``links/``. The
+    ``GroupDirectory`` path proper is covered under ``links/``.
 
     An emptied orphan group goes; one that still holds an entry is reported and
     left in place, because the only alternative is a recursive delete inside a
@@ -2048,6 +2055,15 @@ def test_a_dereferenced_toolchain_copy_reports_the_same_entry_on_every_pull(
         assert {p: p.read_bytes() for p in payload} == before, (
             f"RUL-32 — …and the copy is never removed recursively (run {run})"
         )
+        # ADR item 44 asks the `active` row to be driven from a *real*
+        # dereferencing copy rather than a hand-built fixture. The only test
+        # that did so was win32-only and runs on no CI leg (#419); this is the
+        # same assertion on the leg that actually executes.
+        assert_symlink_exists(active_link(alt_home))
+        assert os.readlink(active_link(alt_home)) == f"{SHELLS_DIR}/{DEFAULT_SHELL}", (
+            f"item 47(b) — a copy that dereferenced `active` into a directory is "
+            f"healed back into a link on run {run}, not left as the copy made it"
+        )
 
 
 def test_an_emptied_shells_directory_is_repopulated_by_the_next_pull(
@@ -2370,7 +2386,7 @@ def test_a_legacy_bin_directory_beside_the_new_names_is_pruned_when_empty_and_re
         f"row 17 — an empty legacy `bin/` is removed by the depth-1 scan; "
         f"{legacy} survived"
     )
-    assert "bin" not in first.stderr, (
+    assert str(legacy) not in first.stderr, (
         f"…silently: a `Pruned` outcome emits no warning; stderr:\n{first.stderr}"
     )
 
@@ -2712,7 +2728,7 @@ def test_a_prompt_writes_nothing_however_corrupt_the_tree_is(
 def test_shell_state_reports_the_launcher_directory_and_not_a_concatenation(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """G-1 / S-004 — ``toolchain_bin`` names the directory a consumer puts on
+    """G-1 / S-004 (toolchain_tree_layout) — ``toolchain_bin`` names the directory a consumer puts on
     ``PATH``, and it is not ``toolchain_home + "/bin"``.
 
     The end-to-end half of WP-3's field: its unit tests pin the wire contract,

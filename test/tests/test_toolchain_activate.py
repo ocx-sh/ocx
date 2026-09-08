@@ -1027,6 +1027,11 @@ def test_the_hostile_entry_is_replaced_and_the_dir_appears_after_pull(
     _write_home_config(arena, f"[shell.consent]\npaths = [{json.dumps(str(clone))}]\n")
 
     assert run_in(ocx, clone, "pull").returncode == EXIT_SUCCESS
+    # `bin_entries` answers `[]` for a missing directory, so the negative below
+    # is satisfied by an unrendered tree unless something pins the set non-empty.
+    assert project.default_binary in bin_entries(home), (
+        f"the witness: the clone rendered its own trampolines; got {bin_entries(home)}"
+    )
     assert hostile_name not in bin_entries(home), (
         f"a render must prune an entry it did not write: {bin_entries(home)}"
     )
@@ -1221,9 +1226,17 @@ def test_a_repointed_link_with_bin_untouched_is_healed_or_withheld(
     segments = _segments(result)
     healed = link_entries(home)[f"default/{project.default_key}"] == correct
     exposed = _real(shell_bin(home)) in segments
-    assert healed or not exposed, (
-        "a repointed link must be healed before its trampolines reach PATH, or the directory "
-        f"must be withheld; link={link_entries(home)[f'default/{project.default_key}']!r} segments={segments}"
+    # C-064 — the prompt path never writes, so `healed` is unreachable by
+    # contract and the two properties are asserted separately. Written as
+    # `healed or not exposed` this row would have *absorbed* a regression that
+    # made the prompt start healing rather than redding on it.
+    assert not healed, (
+        "C-064 — the prompt path must not heal the repointed link; it did, and "
+        f"link={link_entries(home)[f'default/{project.default_key}']!r}"
+    )
+    assert not exposed, (
+        "…so the directory must be withheld instead; link="
+        f"{link_entries(home)[f'default/{project.default_key}']!r} segments={segments}"
     )
 
 
@@ -1278,9 +1291,12 @@ def test_a_branch_switch_at_the_same_path_never_dereferences_the_other_branch(
     # the link assertion can tell "the prompt healed the tree" from "the
     # trampoline happens not to consult it" — and the composing emitters *do*
     # consult it.
-    assert healed or not exposed, (
-        "a stale link must be healed before its trampolines reach PATH, or the directory must be "
-        f"withheld; link still {stale_target!r} while segments={segments}"
+    assert not healed, (
+        f"C-064 — the prompt path must not heal the stale link; it moved off {stale_target!r}"
+    )
+    assert not exposed, (
+        "…so the directory must be withheld instead; link still "
+        f"{stale_target!r} while segments={segments}"
     )
     if exposed:
         assert checkout.package_other.marker in after.stdout, (
