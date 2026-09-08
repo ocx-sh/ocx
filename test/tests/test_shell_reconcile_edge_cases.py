@@ -3789,19 +3789,33 @@ def test_ec_ident_013_read_only_commands_never_create_a_project_state_dir(arena:
     # before it does any of the work this row is about, so the "no state dir"
     # assertion below would hold because nothing ran. Measured: rc 64, empty
     # output, from an orphaned process group.
-    for command in (["env"], ["inspect"], ["shell", "state"], ["self", "activate", "--shell=bash"]):
+    # Each command carries its OWN expected exit code, not a tolerated range.
+    # Without a witness this row cannot tell a command that ran and wrote
+    # nothing from one that exited before doing any work — the hazard that made
+    # `self activate` vacuous here until `--shell=bash` was pinned (#434).
+    #
+    # `env` and `inspect` are 78, not 0, and deliberately so: this project has
+    # no `ocx.lock` (it must stay genuinely unstamped, and `ocx lock` would
+    # create the very state directory this row asserts is absent), so both
+    # refuse with a config error. Those two arms therefore prove the weaker
+    # property — the config-refusal path does not stamp — and are kept for it
+    # rather than dropped. `shell state` and `self activate` do reach 0 and
+    # carry the full property. Pinning each exact code is what stops any of
+    # them silently becoming some *other* early exit; measured, not assumed.
+    for command, expected_rc in (
+        (["env"], 78),
+        (["inspect"], 78),
+        (["shell", "state"], 0),
+        (["self", "activate", "--shell=bash"], 0),
+    ):
         result = subprocess.run(
             [str(arena.ocx), "--offline", "--format", "json", *command],
             cwd=str(project), capture_output=True, check=False, text=True, env=arena.env(),
         )
-        # The witness the absence needs: without it this row cannot tell a
-        # command that ran and wrote nothing from one that exited before doing
-        # any work. Pinning `--shell=bash` closed the one cause that was
-        # measured (exit 64 on an undetectable shell, #434); this closes the
-        # class, so a future early exit in any of the four reds the row.
-        assert result.returncode == 0, (
-            f"`ocx {' '.join(command)}` must run before its non-effect means anything; "
-            f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        assert result.returncode == expected_rc, (
+            f"`ocx {' '.join(command)}` must reach its documented outcome before its "
+            f"non-effect means anything; expected rc={expected_rc}, got {result.returncode}\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         )
         assert not stamp.exists(), (
             f"`ocx {' '.join(command)}` must never create {stamp} — a read-only command must not silently consent "
