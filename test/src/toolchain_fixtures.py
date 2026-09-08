@@ -44,21 +44,32 @@ from src.helpers import make_package, write_ocx_toml
 from src.runner import OcxRunner, PackageInfo
 
 __all__ = [
+    "ACTIVE_LINK",
     "DEFAULT_GROUP",
+    "DEFAULT_SHELL",
     "EXIT_SUCCESS",
+    "LINKS_DIR",
+    "SHELLS_DIR",
     "ToolchainProject",
     "TwoBranchCheckout",
+    "active_link",
     "assert_key_and_binary_namespaces_stay_disjoint",
     "back_reference_entries",
     "bin_entries",
+    "entry_link",
     "git",
     "link_entries",
+    "links_group",
+    "links_root",
     "locked_project",
+    "path_facing_bin",
     "read_render_stamp",
     "render_stamp_path",
+    "resolved_toolchain_bin",
     "resolved_toolchain_home",
     "run_in",
     "sha256_of",
+    "shell_bin",
     "snapshot_tree",
     "toolchain_home",
     "two_branch_checkout",
@@ -69,6 +80,15 @@ EXIT_SUCCESS = 0
 
 #: The reserved group whose entries ``bin/`` exposes (C-045).
 DEFAULT_GROUP = "default"
+
+#: The tree's own depth-1 names, mirrored from the grammar
+#: (``file_structure/toolchain_store.rs`` ``LINKS_DIR``/``SHELLS_DIR``/
+#: ``ACTIVE_LINK``/``DEFAULT_SHELL``). Every user-supplied name lives one level
+#: *below* ``links/``, which is what retires the old depth-1 reservation.
+LINKS_DIR = "links"
+SHELLS_DIR = "shells"
+ACTIVE_LINK = "active"
+DEFAULT_SHELL = "default"
 
 #: Every subprocess here is bounded. ``OcxRunner`` passes no ``timeout=`` and
 #: the suite configures no ``pytest-timeout``, so a regression that reintroduced
@@ -178,6 +198,84 @@ def resolved_toolchain_home(
     return Path(payload["toolchain_home"])
 
 
+def links_root(home: Path) -> Path:
+    """``<home>/links`` — the one depth-1 directory holding group directories.
+
+    Every ``<group>/<entry>`` question goes through this or through
+    :func:`links_group` / :func:`entry_link`, never through a literal join onto
+    the home root: a test that spells the layout itself keeps passing after the
+    layout moves, because it moved its own expectation with it.
+    """
+    return home / LINKS_DIR
+
+
+def links_group(home: Path, group: Path | str) -> Path:
+    """``<home>/links/<group>`` — one group's directory of entry links."""
+    return links_root(home) / str(group)
+
+
+def entry_link(home: Path, group: Path | str, entry: Path | str) -> Path:
+    """``<home>/links/<group>/<entry>`` — the link a ``[tools]`` key renders as.
+
+    Built on :func:`links_group` rather than beside it, for the reason the
+    grammar's own ``entry()`` is built on ``links_group()``: nothing but this
+    construction makes ``entry_link(h, g, e).parent == links_group(h, g)`` true
+    by definition.
+    """
+    return links_group(home, group) / str(entry)
+
+
+def active_link(home: Path) -> Path:
+    """``<home>/active`` — the depth-1 link every ``PATH`` route resolves
+    through (C-078). A link, never a directory; its one legal target is
+    ``shells/<shell>``."""
+    return home / ACTIVE_LINK
+
+
+def shell_bin(home: Path, shell: str = DEFAULT_SHELL) -> Path:
+    """``<home>/shells/<shell>/bin`` — the **physical** trampoline directory.
+
+    Where the renderer writes. Every observation of *what a render produced*
+    uses this and never :func:`path_facing_bin`, so a repointed ``active``
+    cannot make a stale tree look freshly rendered.
+    """
+    return home / SHELLS_DIR / shell / "bin"
+
+
+def path_facing_bin(home: Path) -> Path:
+    """``<home>/active/bin`` — the spelling that goes on ``PATH`` (C-078).
+
+    Equal to :func:`shell_bin` only *through* the link, never by string
+    equality. Use it only where the property under test is the indirection
+    itself.
+    """
+    return active_link(home) / "bin"
+
+
+def resolved_toolchain_bin(
+    ocx: OcxRunner, cwd: Path, env_extra: dict[str, str] | None = None
+) -> Path:
+    """The launcher directory ``ocx`` itself reports for ``cwd`` (G-1, S-004).
+
+    Reads the ``toolchain_bin`` contract field of ``ocx --format json shell
+    state`` — the supported discovery path for a consumer that needs the
+    directory to put on ``PATH``. It is *not* ``toolchain_home + "/bin"``: that
+    concatenation names a directory which does not exist under this layout and
+    still exits 0, which is the silent failure the field replaces.
+    """
+    result = run_in(ocx, cwd, "--format", "json", "shell", "state", env_extra=env_extra)
+    assert result.returncode == EXIT_SUCCESS, (
+        f"`ocx shell state` must report the launcher directory; "
+        f"rc={result.returncode}\n{result.stderr}"
+    )
+    payload = json.loads(result.stdout)
+    assert "toolchain_bin" in payload, (
+        f"RUL-51 — `toolchain_bin` is present whenever `toolchain_home` is; "
+        f"got keys {sorted(payload)}"
+    )
+    return Path(payload["toolchain_bin"])
+
+
 def render_stamp_path(ocx: OcxRunner, home: Path) -> Path | None:
     """The render stamp describing ``home``, or ``None`` when none was written.
 
@@ -262,24 +360,38 @@ def snapshot_tree(root: Path) -> dict[str, tuple[str, str]]:
     return out
 
 
-def bin_entries(home: Path) -> list[str]:
-    """The on-disk entry names under ``<home>/bin/`` — the set
-    :external+ocx:``RenderStamp::names`` claims to mirror."""
-    directory = home / "bin"
+def bin_entries(home: Path, shell: str = DEFAULT_SHELL) -> list[str]:
+    """The on-disk entry names under :func:`shell_bin` — the set
+    :external+ocx:``RenderStamp::names`` claims to mirror.
+
+    The **physical** directory, deliberately: reading through ``active`` would
+    make "the render wrote these names" and "``active`` currently points at a
+    tree holding these names" the same observation, and the second is true of a
+    stale tree a repoint aimed at. :func:`path_facing_bin` is the other
+    spelling, for the rows whose subject *is* the indirection.
+    """
+    directory = shell_bin(home, shell)
     return sorted(p.name for p in directory.iterdir()) if directory.is_dir() else []
 
 
 def link_entries(home: Path) -> dict[str, str]:
-    """Every ``<group>/<entry>`` link in ``home``, as ``"group/entry" → target``.
+    """Every ``links/<group>/<entry>`` link in ``home``, as
+    ``"group/entry" → target``.
 
-    ``bin/`` is skipped: it holds trampolines, not links, and folding the two
-    together would let an assertion about one be satisfied by the other.
+    Keys stay ``"<group>/<entry>"`` with no ``links/`` prefix — that is the
+    shape the render stamp's ``link_fingerprint`` uses, and re-spelling it here
+    would make a stamp assertion compare two things this helper wrote.
+
+    Only ``links/`` is walked. The tree's other depth-1 names hold no entry
+    links, and folding them in would let an assertion about one namespace be
+    satisfied by another.
     """
     out: dict[str, str] = {}
-    if not home.is_dir():
+    root = links_root(home)
+    if not root.is_dir():
         return out
-    for group in sorted(home.iterdir()):
-        if not group.is_dir() or group.name == "bin":
+    for group in sorted(root.iterdir()):
+        if not group.is_dir() or group.is_symlink():
             continue
         for entry in sorted(group.iterdir()):
             if entry.is_symlink():
@@ -354,19 +466,20 @@ class ToolchainProject:
 
     @property
     def default_link(self) -> Path:
-        """``<home>/default/<[tools] key>`` — the default group's link."""
-        return self.home / DEFAULT_GROUP / self.default_key
+        """``<home>/links/default/<[tools] key>`` — the default group's link."""
+        return entry_link(self.home, DEFAULT_GROUP, self.default_key)
 
     @property
     def group_link(self) -> Path:
-        """``<home>/<group>/<key>`` — the named group's link."""
-        return self.home / self.group / self.group_key
+        """``<home>/links/<group>/<key>`` — the named group's link."""
+        return entry_link(self.home, self.group, self.group_key)
 
     @property
     def default_trampoline(self) -> Path:
-        """``<home>/bin/<binary name>`` — keyed on the exposed name, never the
-        ``[tools]`` key."""
-        return self.home / "bin" / self.default_binary
+        """``<home>/shells/default/bin/<binary name>`` — keyed on the exposed
+        name, never the ``[tools]`` key, and named by the **physical**
+        spelling, not through ``active``."""
+        return shell_bin(self.home) / self.default_binary
 
     def config_body(
         self, *, pinned: bool | None = None, group: str | None = None
@@ -487,25 +600,119 @@ def assert_key_and_binary_namespaces_stay_disjoint(project: ToolchainProject) ->
 class TwoBranchCheckout:
     """One test's private clone of a two-branch repository.
 
-    ``main`` locks ``package_main``, ``other`` locks ``package_other`` — same
-    ``[tools]`` key, same binary name, two different digests. Switching branches
-    is therefore exactly S-006's shape: the tree on disk still describes the
-    branch that was pulled.
+    The two branches differ in **three** independent ways, because a checkout
+    that swaps ``ocx.toml`` and ``ocx.lock`` can change any of them and S-001
+    asks that the rendered tree match the new lock *exactly*:
+
+    ===================== ================================ ============================
+    what differs          ``main``                         ``other``
+    ===================== ================================ ============================
+    a shared tool's digest ``key`` → ``package_main``       ``key`` → ``package_other``
+    the default tool set   ``+ main_only_key``              ``+ other_only_key``
+    the group set          ``[group.<main_group>]``         ``[group.<other_group>]``
+    ===================== ================================ ============================
+
+    The shared ``key`` is what makes a branch switch *stale* rather than merely
+    different (S-006): same key, same exposed binary, two digests. The other two
+    axes are what make a departed tool's trampoline and a departed group's
+    directory observable at all — with only the shared key, both sets are
+    identical on both branches and every prune assertion is vacuous.
+
+    The two group tools point at ``package_main``/``package_other`` rather than
+    at packages of their own: a group entry is a link and never a trampoline
+    (C-045), so no exposed-binary collision is possible and two more registry
+    pushes per call would buy nothing.
     """
 
     directory: Path
     home: Path
+
     key: str
     binary: str
     package_main: PackageInfo
     package_other: PackageInfo
+
+    main_only_key: str
+    main_only_binary: str
+    main_only_package: PackageInfo
+
+    other_only_key: str
+    other_only_binary: str
+    other_only_package: PackageInfo
+
+    main_group: str
+    main_group_key: str
+    other_group: str
+    other_group_key: str
+
     main_branch: str = "main"
     other_branch: str = "other"
 
     @property
     def link(self) -> Path:
-        """``<home>/default/<key>`` — the link a branch switch makes stale."""
-        return self.home / DEFAULT_GROUP / self.key
+        """``<home>/links/default/<key>`` — the link a branch switch makes
+        stale."""
+        return entry_link(self.home, DEFAULT_GROUP, self.key)
+
+    @property
+    def main_only_link(self) -> Path:
+        """The default-group link that exists on ``main`` and nowhere else."""
+        return entry_link(self.home, DEFAULT_GROUP, self.main_only_key)
+
+    @property
+    def other_only_link(self) -> Path:
+        """The default-group link that exists on ``other`` and nowhere else."""
+        return entry_link(self.home, DEFAULT_GROUP, self.other_only_key)
+
+    @property
+    def main_group_dir(self) -> Path:
+        """``<home>/links/<main_group>`` — the group directory ``other`` does
+        not declare."""
+        return links_group(self.home, self.main_group)
+
+    @property
+    def other_group_dir(self) -> Path:
+        """``<home>/links/<other_group>`` — the group directory ``main`` does
+        not declare."""
+        return links_group(self.home, self.other_group)
+
+    def main_group_link_present(self) -> bool:
+        """Whether ``main``'s group link is still on disk, as a **link**.
+
+        ``exists()`` would follow it and answer about the digest root instead —
+        and the digest root outlives the link, so that spelling is true in both
+        states this predicate exists to tell apart.
+        """
+        return (self.main_group_dir / self.main_group_key).is_symlink()
+
+    def expected_links(self, branch: str) -> set[str]:
+        """The ``"group/entry"`` keys ``branch``'s ``ocx.lock`` declares.
+
+        Derived from what this fixture *wrote into* ``ocx.toml``, never from the
+        tree — an expectation read back off the tree would be satisfied by any
+        tree at all.
+        """
+        if branch == self.main_branch:
+            return {
+                f"{DEFAULT_GROUP}/{self.key}",
+                f"{DEFAULT_GROUP}/{self.main_only_key}",
+                f"{self.main_group}/{self.main_group_key}",
+            }
+        return {
+            f"{DEFAULT_GROUP}/{self.key}",
+            f"{DEFAULT_GROUP}/{self.other_only_key}",
+            f"{self.other_group}/{self.other_group_key}",
+        }
+
+    def expected_bin(self, branch: str) -> list[str]:
+        """The exposed binary names ``branch`` puts in the trampoline directory.
+
+        Default group only (C-045), so the group tool contributes nothing here —
+        which is itself part of what the sync test pins.
+        """
+        if branch == self.main_branch:
+            return sorted([self.binary, self.main_only_binary])
+        return sorted([self.binary, self.other_only_binary])
 
 
 def two_branch_checkout(
@@ -537,32 +744,98 @@ def two_branch_checkout(
         cascade=False,
         bins=[f"brbin{label}"],
     )
+    main_only_package = make_package(
+        ocx,
+        f"t_{label}_monly",
+        "1.0.0",
+        tmp_path,
+        cascade=False,
+        bins=[f"mobin{label}"],
+    )
+    other_only_package = make_package(
+        ocx,
+        f"t_{label}_oonly",
+        "1.0.0",
+        tmp_path,
+        cascade=False,
+        bins=[f"oobin{label}"],
+    )
+
+    checkout = TwoBranchCheckout(
+        directory=tmp_path / f"checkout-{label}",
+        home=toolchain_home(tmp_path / f"checkout-{label}"),
+        key=key,
+        binary=f"brbin{label}",
+        package_main=package_main,
+        package_other=package_other,
+        main_only_key=f"mokey{label}",
+        main_only_binary=f"mobin{label}",
+        main_only_package=main_only_package,
+        other_only_key=f"ookey{label}",
+        other_only_binary=f"oobin{label}",
+        other_only_package=other_only_package,
+        main_group=f"mgrp{label}",
+        main_group_key=f"mgkey{label}",
+        other_group=f"ogrp{label}",
+        other_group_key=f"ogkey{label}",
+    )
+
+    def body(
+        shared: PackageInfo,
+        only_key: str,
+        only: PackageInfo,
+        group: str,
+        group_key: str,
+    ) -> str:
+        return (
+            f"[tools]\n"
+            f'{key} = "{shared.fq}"\n'
+            f'{only_key} = "{only.fq}"\n\n'
+            f"[group.{group}.tools]\n"
+            f'{group_key} = "{shared.fq}"\n'
+        )
 
     seed = tmp_path / f"seed-{label}"
     seed.mkdir()
     _git_ok(seed, "init", "-q", "-b", "main")
-    for branch, package in ((None, package_main), ("other", package_other)):
+    branches = (
+        (
+            None,
+            body(
+                package_main,
+                checkout.main_only_key,
+                main_only_package,
+                checkout.main_group,
+                checkout.main_group_key,
+            ),
+            package_main.tag,
+        ),
+        (
+            "other",
+            body(
+                package_other,
+                checkout.other_only_key,
+                other_only_package,
+                checkout.other_group,
+                checkout.other_group_key,
+            ),
+            package_other.tag,
+        ),
+    )
+    for branch, config, tag in branches:
         if branch:
             _git_ok(seed, "checkout", "-q", "-b", branch)
-        write_ocx_toml(seed, f'[tools]\n{key} = "{package.fq}"\n')
+        write_ocx_toml(seed, config)
         lock = run_in(ocx, seed, "lock")
         assert lock.returncode == EXIT_SUCCESS, (
             f"seeding `ocx lock` failed:\n{lock.stderr}"
         )
         _git_ok(seed, "add", "-A")
-        _git_ok(seed, "commit", "-qm", f"lock {package.tag}")
+        _git_ok(seed, "commit", "-qm", f"lock {tag}")
     _git_ok(seed, "checkout", "-q", "main")
 
     bare = tmp_path / f"origin-{label}.git"
     _git_ok(tmp_path, "clone", "-q", "--bare", str(seed), str(bare))
-    checkout = tmp_path / f"checkout-{label}"
-    _git_ok(tmp_path, "clone", "-q", str(bare), str(checkout))
+    _git_ok(tmp_path, "clone", "-q", str(bare), str(checkout.directory))
 
-    return TwoBranchCheckout(
-        directory=checkout,
-        home=toolchain_home(checkout),
-        key=key,
-        binary=f"brbin{label}",
-        package_main=package_main,
-        package_other=package_other,
-    )
+    return checkout
