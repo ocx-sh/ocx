@@ -485,7 +485,10 @@ pub enum RenderedArtifact {
     /// a third party put there. A populated one is **reported and never
     /// deleted** (C-076): [`prune_within`]'s `remove_dir` is non-recursive
     /// under every condition, so it fails `ENOTEMPTY` and the caller reports
-    /// [`RenderOutcome::Skipped`] naming the path.
+    /// [`RenderOutcome::Skipped`] naming the path. A name that is not a
+    /// directory is reported the same way, and only the leaked probe is
+    /// removed — the empty group directory and that probe are the whole of
+    /// what this variant ever deletes.
     RootEntry(String),
 }
 
@@ -3095,8 +3098,11 @@ pub(crate) async fn filesystem_is_case_insensitive(directory: &Path) -> crate::R
 /// third party put there. A **populated** one — a legacy `bin/` holding
 /// trampolines, a legacy `<group>/` holding links — fails `remove_dir` with
 /// `ENOTEMPTY` and is reported `Skipped`, on **every** render, with the
-/// contents byte-for-byte intact. That is C-076: reported with its remedy,
-/// never deleted. **Depth 1 gets no child sweep**, unlike a departed
+/// contents byte-for-byte intact. A name that is **not a directory at all** —
+/// a foreign regular file, a FIFO — gets the same answer for the reason the
+/// section above states, and only a leaked case probe is removed. That is
+/// C-076: reported with its remedy, never deleted, whatever kind it is.
+/// **Depth 1 gets no child sweep**, unlike a departed
 /// `links/<group>` (see [`reconcile_links`]): the renderer publishes nothing
 /// under a depth-1 name in this layout, so its children are not links ocx wrote
 /// but a pre-`links/` leftover or a third party's files, and sweeping them
