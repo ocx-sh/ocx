@@ -339,6 +339,18 @@ pub struct RenderStamp {
     /// `"<group>/<entry>"` → the digest root the link points at,
     /// **default group only**.
     ///
+    /// **The key is `<group>/<entry>`, not the on-disk path.** The links moved
+    /// under `links/` when depth 1 became a closed, tree-owned set (C-071), and
+    /// this key did **not** move with them: it is derived from the group name
+    /// and the entry name, never from where the render happens to put them, so
+    /// the next layout change does not rewrite a persisted format for nothing.
+    /// Nothing compares it against a path — see
+    /// `render_toolchain`'s
+    /// `the_stamped_link_fingerprint_key_is_group_slash_entry`, which is the
+    /// only thing standing between this format and a silent, unobservable
+    /// break — and which lives beside the producer, because a check over a
+    /// hand-built sample here would pin the sample and not the code.
+    ///
     /// Scoped to exactly what `bin` mode's per-prompt heal can repair (C-062).
     /// Widening it would make every non-default-group repoint mismatch the
     /// stamp on every prompt while the prompt path — which does not heal those

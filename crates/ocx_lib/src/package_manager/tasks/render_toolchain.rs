@@ -1,17 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Rendering a toolchain home — `bin/` trampolines and `<group>/<entry>`
-//! links (plan contracts C-044…C-053 and C-070,
+//! Rendering a toolchain home — trampolines and `links/<group>/<entry>`
+//! links (plan contracts C-044…C-053, C-070…C-084,
 //! `plan_toolchain_activation.md`).
 //!
 //! ```text
 //! <home>/
-//! ├── .gitignore          "*" — C-004, owned by `ToolchainHome`
-//! ├── bin/<name>          one launcher trampoline per exposed name, DEFAULT group only
-//! │                       (Windows: `<name>.exe` plus its `<name>.exec` sidecar — two entries)
-//! └── <group>/<entry>/    directory link to a package root, one per selected group
+//! ├── .gitignore                    "*" — C-004, owned by `ToolchainHome`
+//! ├── active -> shells/default      the depth-1 link every PATH route resolves through (C-078)
+//! ├── links/<group>/<entry>/        directory link to a package root, one per selected group
+//! └── shells/<shell>/bin/<name>     one launcher trampoline per exposed name, DEFAULT group only
+//!                                    (Windows: `<name>.exe` plus its `<name>.exec` sidecar — two entries)
 //! ```
+//!
+//! Depth 1 is **closed and tree-owned** (C-071): the four names above are the
+//! whole set, every user-supplied name lives one level below `links/`, and the
+//! orphan scan at the root is therefore a closed-set comparison rather than a
+//! lock-derived one (C-074). `bin/` is reached two ways and they are not
+//! interchangeable — `ToolchainHome::bin()` is the **PATH-facing**
+//! `<root>/active/bin` and `shell_bin()` is the **physical**
+//! `<root>/shells/<shell>/bin`. Every write, prune, fingerprint and guard in
+//! this module uses the physical one, so none of them can be redirected by a
+//! repointed `active` (C-080).
 //!
 //! # The order one render runs in
 //!
@@ -25,8 +36,8 @@
 //!    the home, so probing first made a first-ever `ocx pull` find no home,
 //!    fail the probe, and route itself to C-050's skip — a fresh home would
 //!    never render (RUL-37). This is also where a symlinked component above the
-//!    home root (RUL-44), and a symlinked home root or `bin/` (RUL-33), are
-//!    refused.
+//!    home root (RUL-44), and a symlink at the home root or at any of the
+//!    tree's own depth-1 directories (RUL-33, C-074), are refused.
 //! 3. [`ToolchainHome::ensure_gitignore`](crate::file_structure::ToolchainHome::ensure_gitignore)
 //!    — **the renderer calls it, and after step 2, never before.** C-004 has no
 //!    other home: that function has no production caller anywhere else in the
@@ -44,17 +55,24 @@
 //!    the guarded directory's file identity and documents that the directory
 //!    must already exist. **A lock timeout is C-050's skip, never an error** —
 //!    C-050's own trigger list names "lock timeout".
-//! 5. The case-fold probe ([`filesystem_is_case_insensitive`]), then
-//!    [`render_with`] — which performs steps 6 and 7 itself, at the end of its
+//! 5. The case-fold probe ([`filesystem_is_case_insensitive`]).
+//! 6. [`ensure_shell_tree`] then [`heal_active`], **in that order** (C-083).
+//!    The shell directory first, because `active` must never be published as a
+//!    link to a directory that does not exist: a render interrupted between
+//!    the two leaves `active` absent, which is a lookup *miss* and never a
+//!    wrong answer, whereas the reverse order leaves a link the gate follows
+//!    into nothing. Both sit inside step 4's lock and after step 2, which is
+//!    what C-081 requires of the heal.
+//! 7. [`render_with`] — which performs steps 8 and 9 itself, at the end of its
 //!    own body, because the stamp has to be written after the last entry and
 //!    the last prune and there is no way to observe that from outside.
-//! 6. For a project scope, the `projects/` GC ledger registration (C-052). A
+//! 8. For a project scope, the `projects/` GC ledger registration (C-052). A
 //!    **best-effort** step: a registration failure is a swallowed `warn!`,
 //!    matching the shipped
 //!    `project::registry::register_project_dir_best_effort` convention, and is
 //!    **not** an item in [`RenderReport`] (RUL-28) — the ledger is not part of
 //!    the rendered tree, so nothing in the report is about it.
-//! 7. The stamp, last (C-048).
+//! 9. The stamp, last (C-048).
 //!
 //! # `bin/` on Windows is two files per name, and both are stamped
 //!
@@ -118,7 +136,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::file_structure::{
-    BinEntryStamp, FileStructure, RenderStamp, RenderStampScope, RenderStampTarget, ShimBinStore, ToolchainHome,
+    BinEntryStamp, DEFAULT_SHELL, FileStructure, RenderStamp, RenderStampScope, RenderStampTarget, ShimBinStore,
+    TREE_OWN_DEPTH1_NAMES, ToolchainHome,
 };
 use crate::oci;
 use crate::package_manager::error::PackageErrorKind;
@@ -152,6 +171,18 @@ use super::toolchain_names::{NotEnumerablePolicy, exposed_names, fold_case_insen
 /// still writes a stamp for what it did land.
 #[cfg(any(test, feature = "__testing"))]
 pub const FAULT_AFTER_FIRST_ENTRY_WRITE: &str = "after_first_entry_write";
+
+/// The `__OCX_TESTING_RENDER_FAULT` value that aborts a render **between
+/// `shells/<shell>/` and the `active` link** (C-083).
+///
+/// C-083 states an order rather than a guarantee, and an order is only
+/// observable at the point it can be interrupted: once both writes have landed
+/// the finished tree is byte-identical either way, so a row asserting the
+/// finished state passes with the two calls swapped. This seam is what makes
+/// the *bad* interleaving — `active` published as a link into a directory that
+/// does not exist — reachable and therefore assertable.
+#[cfg(any(test, feature = "__testing"))]
+pub const FAULT_AFTER_SHELL_TREE: &str = "after_shell_tree";
 
 /// Everything one [`PackageManager::render_toolchain`] call needs, and nothing
 /// it can re-derive.
@@ -412,15 +443,15 @@ pub enum RenderedArtifact {
     /// it". The [`Self::Link`] arm already uses plain `String`s for the same
     /// reason.
     Trampoline(String),
-    /// A `<group>/<entry>` directory link to a package root.
+    /// A `links/<group>/<entry>` directory link to a package root.
     Link {
         /// The owning group.
         group: String,
         /// The tool's local binding name inside that group.
         entry: String,
     },
-    /// A whole `<group>/` directory under the home root — validation item 31's
-    /// fourth orphan class, the one that is a directory rather than a file.
+    /// A whole `links/<group>/` directory — validation item 31's fourth orphan
+    /// class, the one that is a directory rather than a file.
     ///
     /// Its own variant because neither of the two above can name it.
     /// [`Self::Link`] names an entry *inside* a group, so a group directory that
@@ -438,6 +469,24 @@ pub enum RenderedArtifact {
     /// would refuse. See [`prune_within`] for what happens to those, and to a
     /// group directory that still holds a foreign file.
     GroupDirectory(String),
+    /// A name at the **home root** that the tree does not own (C-074).
+    ///
+    /// A separate variant from [`Self::GroupDirectory`] because the two sit
+    /// under different parents and one `String` cannot say which: a group
+    /// directory is `<root>/links/<name>` and this is `<root>/<name>`. Folding
+    /// them would let a `links/`-parented orphan be removed at the root, and a
+    /// root name be removed from under `links/` — a wrong delete, silently, on
+    /// every render.
+    ///
+    /// **It is not a group**, and the wording of any report over it must not
+    /// say it is: depth 1 is closed and tree-owned (C-071), so everything the
+    /// scan finds here is either a leftover of the pre-`links/` layout — a
+    /// legacy `bin/`, a legacy `<group>/` — a leaked case probe, or something
+    /// a third party put there. A populated one is **reported and never
+    /// deleted** (C-076): [`prune_within`]'s `remove_dir` is non-recursive
+    /// under every condition, so it fails `ENOTEMPTY` and the caller reports
+    /// [`RenderOutcome::Skipped`] naming the path.
+    RootEntry(String),
 }
 
 /// What a render did to one [`RenderedArtifact`].
@@ -744,7 +793,8 @@ impl PackageManager {
     /// - A **lock timeout** on the render lock (RUL-30) — C-050 names it
     ///   outright. The call warns, returns empty
     ///   [`items`](RenderReport::items) and `stamp_written: false`, and is `Ok`.
-    /// - A **symlinked home root, or a symlinked `bin/`** (RUL-33) —
+    /// - A **symlink at the home root or at any directory the tree owns**
+    ///   (RUL-33, C-074) —
     ///   [`ensure_home_root`]'s refusal, warned **loudly** rather than at debug,
     ///   because unlike a read-only checkout it is not a benign state.
     /// - An **orphan that is a directory** the render cannot remove (RUL-32) —
@@ -862,6 +912,41 @@ impl PackageManager {
             }
         };
 
+        // Step 6: the shell directory, then `active` — in that order (C-083),
+        // inside the render lock (C-081), and before any trampoline is written.
+        // A failure here is a warn and not a return: the physical tree under
+        // `shells/` still renders correctly, and an `active` left wrong fails
+        // `active_is_valid`, so the prompt gate withholds rather than exposing
+        // anything. Returning instead would make a home whose `active` cannot
+        // be repaired render nothing at all, which is strictly worse for the
+        // read-only checkout C-050 exists for.
+        let root = request.home.root().to_path_buf();
+        let shell_tree =
+            tokio::task::spawn_blocking(move || ensure_shell_tree(&ToolchainHome::new(root), DEFAULT_SHELL)).await;
+
+        // C-083's one interruption point between the two writes: on abort
+        // `active` is **absent**, which is a lookup miss and never a wrong
+        // answer — the state the reverse order could not produce.
+        #[cfg(any(test, feature = "__testing"))]
+        maybe_inject_fault(fault, RenderStage::AfterShellTree)?;
+
+        let root = request.home.root().to_path_buf();
+        let healed = match shell_tree {
+            Ok(Ok(())) => {
+                tokio::task::spawn_blocking(move || heal_active(&ToolchainHome::new(root), DEFAULT_SHELL)).await
+            }
+            other => other,
+        };
+        match healed {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => crate::log::warn!(
+                "Toolchain '{}' has no usable '{}' link: {error}",
+                request.home.root().display(),
+                request.home.active().display()
+            ),
+            Err(join_error) => crate::log::warn!("The toolchain activation-link task failed: {join_error}"),
+        }
+
         render_with(file_structure, request, case_insensitive, fault).await
     }
 }
@@ -887,7 +972,7 @@ fn skipped_render() -> RenderReport {
 /// way indistinguishable from never having run.
 ///
 /// Owned rather than borrowed because one of its two producers keys on a
-/// `<group>/` directory it has just joined; a `PathBuf` clone per lock is noise
+/// `links/<group>` directory it was handed; a `PathBuf` clone per lock is noise
 /// beside the acquire itself.
 pub(crate) struct ScopedLockParameters {
     /// `$OCX_HOME/locks` — never a sidecar inside the guarded tree.
@@ -959,23 +1044,45 @@ pub(crate) fn render_lock_parameters(
 
 /// The lock parameters one [`heal_links`] repoint takes.
 ///
-/// Guarded by the `<group>/` directory and discriminated by the entry name, so
-/// two processes contend only when they repoint the *same* link — the whole
-/// heal is never serialized behind one lock, which matters because C-070 puts
-/// it on `ocx env`'s and `ocx exec`'s critical path.
+/// Guarded by the `links/<group>` directory and discriminated by the entry
+/// name, so two processes contend only when they repoint the *same* link — the
+/// whole heal is never serialized behind one lock, which matters because C-070
+/// puts it on `ocx env`'s and `ocx exec`'s critical path.
+///
+/// Takes the group **directory**, never the group name: it is the entry path's
+/// own parent by construction (C-072), and re-joining the name here would be a
+/// second spelling of one path — which is exactly what broke when `links/`
+/// moved every group one level down.
 pub(crate) fn heal_lock_parameters(
     file_structure: &FileStructure,
-    home: &ToolchainHome,
-    group: &str,
+    group_directory: PathBuf,
     entry: &str,
 ) -> ScopedLockParameters {
     ScopedLockParameters {
         locks_root: file_structure.locks.clone(),
         scope: HEAL_LOCK_SCOPE,
-        guarded_directory: home.root().join(group),
+        guarded_directory: group_directory,
         discriminator: entry.to_string(),
         timeout: TOOLCHAIN_LOCK_TIMEOUT,
     }
+}
+
+/// `<root>/links`, derived from the grammar rather than re-spelled here
+/// (C-072).
+///
+/// [`ToolchainHome::links_group`](crate::file_structure::ToolchainHome::links_group)
+/// owns the `links` component, so its parent is the one spelling of that name
+/// this module can hold and the two cannot drift. The derivation is total in
+/// practice — [`DEFAULT_GROUP`] is a constant the grammar admits, and a
+/// two-component path always has a parent — and
+/// `links_root_is_the_grammars_own_parent` pins both halves, so the fallback
+/// is unreachable rather than merely unlikely.
+fn links_root(home: &ToolchainHome) -> PathBuf {
+    home.links_group(DEFAULT_GROUP)
+        .ok()
+        .as_deref()
+        .and_then(Path::parent)
+        .map_or_else(|| home.root().to_path_buf(), Path::to_path_buf)
 }
 
 /// The key one tier's render stamp is addressed by, and the render lock
@@ -1119,7 +1226,12 @@ async fn reconcile_bin(
     let _ = fault;
 
     let home = request.home;
-    let bin = home.bin();
+    // The **physical** directory, never `bin()` (C-080): every write, prune and
+    // fingerprint below it would otherwise resolve through `active` and land
+    // wherever that link points — including the stamp, which would then
+    // *certify* an attacker's directory and make the prompt gate pass by
+    // agreeing with it.
+    let bin = home.shell_bin(DEFAULT_SHELL);
 
     // C-022/C-045: `Skip`, never `Refuse` — an ordinary package that claims
     // neither `binaries` nor entry points contributes nothing and is not an
@@ -1157,14 +1269,15 @@ async fn reconcile_bin(
     // the directory all three PATH routes point at, so a group-writable one is
     // a write primitive into everything the user's shell resolves.
     //
-    // `create_bin_owner_only`, never `create_owner_only`: RUL-33's check on
-    // `bin/` ran at Step 2, and the render **lock acquisition** sits between
+    // `create_directory_owner_only`, never `create_owner_only`: RUL-33's check
+    // on `bin/` ran at Step 2, and the render **lock acquisition** sits between
     // that check and this use, blocking for an unbounded time. See that
-    // function for why a recursive create cannot be used to close it.
+    // function for why a recursive create cannot be used to close it. Its
+    // parent, `shells/<shell>`, was created at Step 6.
     let mut writable = true;
     if !request.dry_run && !names.is_empty() {
         let target = bin.clone();
-        if let Err(error) = blocking(bin.clone(), move || create_bin_owner_only(&target)).await {
+        if let Err(error) = blocking(bin.clone(), move || create_directory_owner_only(&target)).await {
             crate::log::warn!("Toolchain '{}' is not writable: {error}", bin.display());
             writable = false;
         }
@@ -1434,7 +1547,7 @@ async fn reconcile_links(
             });
         }
 
-        for name in read_dir_utf8_names(&home.root().join(*group)).await {
+        for name in read_dir_utf8_names(&home.links_group(group)?).await {
             if is_expected(&expected, &name, case_insensitive) {
                 continue;
             }
@@ -1449,15 +1562,12 @@ async fn reconcile_links(
         }
     }
 
-    // The home root's own orphans (validation item 31's fourth class). Keyed on
-    // the **lock**, not on `request.groups`: a group the invocation did not
-    // select is not an orphan, it is simply out of scope (C-045).
+    // `links/`'s own orphans — validation item 31's fourth class, one level
+    // lower than it used to sit. Keyed on the **lock**, not on
+    // `request.groups`: a group the invocation did not select is not an orphan,
+    // it is simply out of scope (C-045).
     let locked_groups: BTreeSet<&str> = request.lock.tools.iter().map(|tool| tool.group.as_str()).collect();
-    let reserved = [reserved_name(&home.bin()), reserved_name(&home.gitignore())];
-    for name in read_dir_utf8_names(home.root()).await {
-        if reserved.iter().any(|kept| kept.eq_ignore_ascii_case(&name)) {
-            continue;
-        }
+    for name in read_dir_utf8_names(&links_root(home)).await {
         if is_expected(&locked_groups, &name, case_insensitive) {
             continue;
         }
@@ -1468,13 +1578,36 @@ async fn reconcile_links(
         });
     }
 
-    Ok(())
-}
+    // Depth 1: a **closed-set comparison** against the tree's own names, and
+    // nothing else (C-074). The lock is deliberately not consulted here —
+    // groups are no longer depth-1 entries, so a directory named after a locked
+    // group is a leftover of the pre-`links/` layout and is pruned like any
+    // other, not kept because the lock happens to mention its name.
+    //
+    // `TREE_OWN_DEPTH1_NAMES`, never a name derived from an accessor:
+    // `Path::file_name` yields the string `"bin"` for `bin()` and for
+    // `shell_bin()` alike, so a keep-set built that way would keep a legacy
+    // `bin/` at the root forever and no rename of the accessor could red it.
+    //
+    // The fold is unconditional, unlike `is_expected`'s: `LINKS` beside `links`
+    // is the same directory on a case-insensitive host, and a case-sensitive
+    // comparison there would report the tree's own directory as an orphan and
+    // `remove_dir` it.
+    for name in read_dir_utf8_names(home.root()).await {
+        if TREE_OWN_DEPTH1_NAMES
+            .iter()
+            .any(|kept| kept.eq_ignore_ascii_case(&name))
+        {
+            continue;
+        }
+        let artifact = RenderedArtifact::RootEntry(name);
+        items.push(RenderedItem {
+            outcome: prune_outcome(home, &artifact, request.dry_run).await,
+            artifact,
+        });
+    }
 
-/// The file name of one of the home's own reserved entries, for the orphan
-/// scan's exclusion list — derived from the home rather than re-spelled.
-fn reserved_name(path: &Path) -> String {
-    path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+    Ok(())
 }
 
 /// Whether `expected` retains `name` through the prune pass, ASCII-case-folded
@@ -1528,7 +1661,8 @@ async fn publish_link(entry: &Path, target: &Path, dry_run: bool) -> RenderOutco
 ///
 /// [`prune_within`] already refuses an entry reached through a symlinked group
 /// directory; without the same refusal here the *write* side has no
-/// counterpart, and [`ensure_home_root`] guards only the home root and `bin/`.
+/// counterpart, and [`ensure_home_root`] guards the tree's own directories,
+/// never a `links/<group>` whose name comes from the lock.
 /// `create_dir_all` succeeds silently through the link, and
 /// [`replace_atomic`](crate::symlink::replace_atomic)'s POSIX arm is a `rename`
 /// that replaces an existing regular file — so a bare `ocx pull` against a
@@ -1701,9 +1835,10 @@ async fn read_dir_utf8_names(directory: &Path) -> Vec<String> {
 /// validator (RUL-40) — containment is [`prune_within`]'s job, not this one's.
 fn artifact_path(home: &ToolchainHome, artifact: &RenderedArtifact) -> PathBuf {
     match artifact {
-        RenderedArtifact::Trampoline(name) => home.bin().join(name),
-        RenderedArtifact::Link { group, entry } => home.root().join(group).join(entry),
-        RenderedArtifact::GroupDirectory(group) => home.root().join(group),
+        RenderedArtifact::Trampoline(name) => home.shell_bin(DEFAULT_SHELL).join(name),
+        RenderedArtifact::Link { group, entry } => links_root(home).join(group).join(entry),
+        RenderedArtifact::GroupDirectory(group) => links_root(home).join(group),
+        RenderedArtifact::RootEntry(name) => home.root().join(name),
     }
 }
 
@@ -1734,7 +1869,12 @@ fn write_render_stamp(
     // its correct name set, so it carries the previous stamp's half forward
     // rather than claiming an empty directory it never read.
     let bin_fingerprint = if bin_in_scope {
-        fingerprint_bin(&home.bin(), landed)
+        // The **physical** directory (C-080). This is a *producer*: a stamp
+        // written through `active` certifies whatever `active` points at, and
+        // `bin_matches_recorded` — the second, independent guard — then passes
+        // by agreeing with it. Re-anchoring the readers and not this would be
+        // strictly worse than re-anchoring neither.
+        fingerprint_bin(&home.shell_bin(DEFAULT_SHELL), landed)
     } else {
         state
             .render_stamp(target)
@@ -1798,7 +1938,10 @@ fn fingerprint_bin(bin: &Path, landed: &BTreeSet<String>) -> BTreeMap<String, Bi
 /// matches the tree C-061's gate is about to read.
 fn observe_default_group_links(home: &ToolchainHome) -> BTreeMap<String, String> {
     let mut fingerprint = BTreeMap::new();
-    let Ok(entries) = std::fs::read_dir(home.root().join(DEFAULT_GROUP)) else {
+    let Ok(group_directory) = home.links_group(DEFAULT_GROUP) else {
+        return fingerprint;
+    };
+    let Ok(entries) = std::fs::read_dir(group_directory) else {
         return fingerprint;
     };
     for entry in entries.flatten() {
@@ -1872,7 +2015,8 @@ pub(crate) enum HealOutcome {
     /// written**.
     ///
     /// Either symlink guard ([`refuse_symlinked_project_path`] on the
-    /// components above the root, [`ensure_home_root`] on the root and `bin/`),
+    /// components above the root, [`ensure_home_root`] on the root and every
+    /// directory the tree owns),
     /// or that same call's ordinary I/O failure — a root that could not be
     /// created. One variant for all of them because they carry one meaning for
     /// a caller: this call verified nothing about the tree, so nothing under it
@@ -2043,7 +2187,8 @@ pub(crate) async fn heal_links(
     // component higher, as a symlink to `$HOME` would make `ocx env` and
     // `ocx exec` write outside the project on **every prompt**, which is
     // strictly more often than `ocx pull` reaches the render (C-070). RUL-33
-    // is the root and `bin/`; RUL-44/RUL-47 is every component between the
+    // is the root and every directory the tree owns; RUL-44/RUL-47 is every
+    // component between the
     // project directory and the root. A refusal degrades, never errors
     // (RUL-36).
     let guarded = ToolchainHome::new(home.root().to_path_buf());
@@ -2089,7 +2234,7 @@ pub(crate) async fn heal_links(
     // therefore still runs before a single path is touched, and the probes
     // that follow become one unit of work rather than N.
     let selected: BTreeSet<&str> = groups.iter().map(String::as_str).collect();
-    let mut candidates: Vec<(&str, &str, PathBuf, PathBuf)> = Vec::new();
+    let mut candidates: Vec<(&str, PathBuf, PathBuf)> = Vec::new();
     for group in &selected {
         for tool in lock.tools.iter().filter(|tool| tool.group == **group) {
             // `ocx.lock` is a file a hostile clone ships: bad configuration
@@ -2102,7 +2247,7 @@ pub(crate) async fn heal_links(
             let Some(target) = link_target(file_structure, tool, platform) else {
                 continue;
             };
-            candidates.push((group, tool.name.as_str(), entry, target));
+            candidates.push((tool.name.as_str(), entry, target));
         }
     }
 
@@ -2130,7 +2275,7 @@ pub(crate) async fn heal_links(
     // composing side degrades each to a digest path (C-067).
     let probes: Vec<(PathBuf, PathBuf)> = candidates
         .iter()
-        .map(|(_, _, entry, target)| (entry.clone(), target.clone()))
+        .map(|(_, entry, target)| (entry.clone(), target.clone()))
         .collect();
     let repairable = blocking(home.root().to_path_buf(), move || {
         Ok(probes
@@ -2147,11 +2292,11 @@ pub(crate) async fn heal_links(
     .unwrap_or_else(|_| vec![false; candidates.len()]);
 
     let mut repaired = 0usize;
-    for ((group, name, entry, target), repairable) in candidates.iter().zip(repairable) {
+    for ((name, entry, target), repairable) in candidates.iter().zip(repairable) {
         if !repairable {
             continue;
         }
-        match repoint_link(file_structure, home, group, name, entry, target).await {
+        match repoint_link(file_structure, name, entry, target).await {
             Ok(()) => repaired += 1,
             // RUL-36 — a repair that cannot land leaves the entry unrepaired
             // and uncounted; the composing side degrades it to a digest path
@@ -2172,20 +2317,21 @@ pub(crate) async fn heal_links(
 /// [`heal_links`] turns into an uncounted, un-repaired entry inside
 /// [`HealOutcome::Healed`] rather than a failure, with one `debug!` line
 /// (RUL-36). A whole-tree refusal is [`HealOutcome::Refused`] instead.
-async fn repoint_link(
-    file_structure: &FileStructure,
-    home: &ToolchainHome,
-    group: &str,
-    name: &str,
-    entry: &Path,
-    target: &Path,
-) -> crate::Result<()> {
+async fn repoint_link(file_structure: &FileStructure, name: &str, entry: &Path, target: &Path) -> crate::Result<()> {
+    // The group directory is `entry`'s parent **by construction**:
+    // `ToolchainHome::entry` is built on `links_group`, so re-joining the group
+    // name onto the root here would be a second spelling of one path (C-072) —
+    // and it was, until `links/` moved every group one level down and the two
+    // spellings stopped naming the same directory.
+    let Some(group_directory) = entry.parent().map(Path::to_path_buf) else {
+        return Err(refuse_escape(entry));
+    };
+
     // RUL-29: an absent link is created, which is the commonest post-`git pull`
     // state — so the group directory may not exist yet. Owner-only at create
     // time (R-W19(a)), and never *through* a symlinked group directory: heal
     // runs on every composing emit, so this is the write side's most-travelled
     // path into an attacker-shaped tree.
-    let group_directory = home.root().join(group);
     let created = group_directory.clone();
     blocking(group_directory.clone(), move || {
         if std::fs::symlink_metadata(&created).is_ok_and(|metadata| metadata.is_symlink()) {
@@ -2195,7 +2341,7 @@ async fn repoint_link(
     })
     .await?;
 
-    let _guard = heal_lock_parameters(file_structure, home, group, name)
+    let _guard = heal_lock_parameters(file_structure, group_directory, name)
         .acquire()
         .await?;
     let (entry, target) = (entry.to_path_buf(), target.to_path_buf());
@@ -2227,12 +2373,15 @@ async fn repoint_link(
 /// which is the outcome that refusal exists to prevent, and every trampoline
 /// below it is an executable on someone's `PATH`.
 ///
-/// # It refuses a symlinked home root, and a symlinked `bin/` (RUL-33)
+/// # It refuses a symlink at the home root or at any tree-own directory (RUL-33, C-074)
 ///
-/// If [`ToolchainHome::root`](crate::file_structure::ToolchainHome::root) or
-/// [`ToolchainHome::bin`](crate::file_structure::ToolchainHome::bin) exists and
-/// is a symlink — judged by `symlink_metadata`, never by `metadata`, which
-/// follows — this call refuses. The renderer routes the refusal to C-050's skip
+/// If [`ToolchainHome::root`](crate::file_structure::ToolchainHome::root),
+/// `links/`, `shells/`, `shells/<shell>/` or
+/// [`ToolchainHome::shell_bin`](crate::file_structure::ToolchainHome::shell_bin)
+/// exists and is a symlink — judged by `symlink_metadata`, never by `metadata`,
+/// which follows — this call refuses. `<root>/active` is the deliberate
+/// exception: it must *be* a link, so its rule is
+/// [`ToolchainHome::active_is_valid`](crate::file_structure::ToolchainHome::active_is_valid). The renderer routes the refusal to C-050's skip
 /// with a **loud** warning, not to a hard error: DD6's never-block rule holds,
 /// and a `pull` that failed outright would be worse than one that composes
 /// digest paths for the run. Loud rather than debug, though, because unlike a
@@ -2242,9 +2391,9 @@ async fn repoint_link(
 /// a project home.** `<project>/.ocx/toolchain` never passes through
 /// C-017–C-019, which gate a *configured* `toolchain-dir` and nothing else — so
 /// a hostile clone that commits `.ocx/toolchain` as a symlink to `$HOME`, or
-/// `.ocx/toolchain/bin` as a symlink to `~/.local/bin`, makes every write and
-/// every prune below it land outside the project while every path this module
-/// computes still `starts_with` the home. The refusal has to be here, before
+/// `.ocx/toolchain/links` as a symlink to `~/.local/share`, makes every write
+/// and every prune below it land outside the project while every path this
+/// module computes still `starts_with` the home. The refusal has to be here, before
 /// anything is created: `create_dir_all` on an existing symlink-to-a-directory
 /// succeeds silently, so the first write is already outside.
 ///
@@ -2268,8 +2417,9 @@ pub(crate) fn ensure_home_root(home: &ToolchainHome) -> crate::Result<bool> {
     let root = home.root();
     // Both refusals **before** the creation, because `create_dir_all` on an
     // existing symlink-to-a-directory succeeds silently and the first write is
-    // already outside (RUL-33). A root that does not exist yet cannot hold a
-    // `bin/` either, so checking both up front loses nothing.
+    // already outside (RUL-33). A root that does not exist yet cannot hold any
+    // of the tree's own directories either, so checking them all up front loses
+    // nothing.
     refuse_symlinked_home_leaves(home)?;
     let existed = match std::fs::symlink_metadata(root) {
         Ok(_) => true,
@@ -2285,7 +2435,8 @@ pub(crate) fn ensure_home_root(home: &ToolchainHome) -> crate::Result<bool> {
 /// Refuse a symlink on any component **between a project directory and the
 /// home root it contains** (RUL-44), routed by the caller to C-050's skip.
 ///
-/// [`ensure_home_root`] judges the home root and `bin/`, and
+/// [`ensure_home_root`] judges the home root and every directory below it that
+/// the tree owns, and
 /// `symlink_metadata` does not follow only the **last** component — so
 /// committing `<project>/.ocx` as a symlink relocates the entire rendered tree
 /// while every check either function makes still passes: `symlink_metadata` of
@@ -2341,21 +2492,48 @@ pub(crate) fn ensure_home_root(home: &ToolchainHome) -> crate::Result<bool> {
 /// # Errors
 ///
 /// [`refuse_symlink`] naming the offending component — a symlink between the
-/// project directory and the home root, the root itself, or its `bin/`.
+/// project directory and the home root, the root itself, or any directory the
+/// tree owns below it.
 pub(crate) fn refuse_symlinked_home(scope: &RenderStampScope, home: &ToolchainHome) -> crate::Result<()> {
     refuse_symlinked_project_path(scope, home)?;
     refuse_symlinked_home_leaves(home)
 }
 
-/// The home root and its `bin/`, judged by `symlink_metadata` — the two
-/// components [`refuse_symlinked_project_path`]'s walk deliberately stops short
-/// of.
+/// The home root and **every directory of the tree's own shape**, judged by
+/// `symlink_metadata` — the components [`refuse_symlinked_project_path`]'s walk
+/// deliberately stops short of.
 ///
-/// `bin/` is the same hole one level down: every `bin/<name>` write and removal,
-/// and every `read_dir` the per-prompt stamp comparison makes, would otherwise
-/// land in the link's target directory.
+/// `<root>/shells/<shell>/bin` is the same hole one level down: every
+/// `bin/<name>` write and removal, and every `read_dir` the per-prompt stamp
+/// comparison makes, would otherwise land in the link's target directory. The
+/// **physical** spelling, never `bin()` — `lstat` does not follow a path's
+/// final component but does follow every intermediate one, so judging
+/// `<root>/active/bin` resolves through `active` and reports an ordinary
+/// directory for whatever it points at (C-080).
+///
+/// # Why the intermediates, and why this is not padding
+///
+/// `links/` and `shells/` are components **this layout introduced**, and
+/// nothing else judges them. [`publish_link_within`] refuses a symlinked
+/// *immediate* parent, which is now `links/<group>` and never `links`;
+/// [`create_owner_only`] is `DirBuilder::recursive(true)`, i.e. `create_dir_all`,
+/// which follows an existing symlink. A committed
+/// `.ocx/toolchain/links -> /outside` would therefore put every group directory
+/// and every entry link outside the home on a plain `ocx pull`. Before this
+/// layout `<group>/` sat at depth 1 and *was* the parent `publish_link_within`
+/// already checked, so this is a guard the shape change would otherwise have
+/// lost rather than one it never had.
+///
+/// `<root>/active` is deliberately **absent** from the set: it must *be* a
+/// link, so its rule is
+/// [`ToolchainHome::active_is_valid`](crate::file_structure::ToolchainHome::active_is_valid)
+/// and the heal behind it (C-080, C-081), not this loop's negation. `.gitignore`
+/// is absent for a different reason — it is a file, and
+/// `ToolchainHome::ensure_gitignore` owns its write.
+///
+/// Outermost first, so the refusal names the component that relocates the most.
 fn refuse_symlinked_home_leaves(home: &ToolchainHome) -> crate::Result<()> {
-    for path in [home.root().to_path_buf(), home.bin()] {
+    for path in tree_own_directories(home) {
         // `symlink_metadata`, never `metadata`, which follows the link and
         // reports the target's kind.
         if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_symlink()) {
@@ -2363,6 +2541,26 @@ fn refuse_symlinked_home_leaves(home: &ToolchainHome) -> crate::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Every directory the rendered tree owns, outermost first — the home root,
+/// `links/`, `shells/`, `shells/<shell>/` and `shells/<shell>/bin`.
+///
+/// Spelled by walking **up** from the accessors rather than by re-joining
+/// `links` and `shells` onto the root: the grammar owns those two names
+/// (C-072), and a second spelling here is the drift that guard and scan would
+/// then disagree about.
+fn tree_own_directories(home: &ToolchainHome) -> Vec<PathBuf> {
+    let mut paths = vec![home.root().to_path_buf(), links_root(home)];
+    // `shells/<shell>/bin` and its two ancestors, reversed to outermost-first.
+    // `ancestors` yields the path itself first, so three is exactly
+    // `bin`, `shells/<shell>`, `shells` — and never the home root, which is
+    // already the first element.
+    let shell_bin = home.shell_bin(DEFAULT_SHELL);
+    let mut chain: Vec<PathBuf> = shell_bin.ancestors().take(3).map(Path::to_path_buf).collect();
+    chain.reverse();
+    paths.extend(chain);
+    paths
 }
 
 fn refuse_symlinked_project_path(scope: &RenderStampScope, home: &ToolchainHome) -> crate::Result<()> {
@@ -2411,8 +2609,8 @@ fn create_owner_only(root: &Path) -> crate::Result<()> {
     std::fs::create_dir_all(root).map_err(|error| crate::error::file_error(root, error))
 }
 
-/// Create `<home>/bin` owner-only **without ever resolving a symlink at that
-/// name** — the create half of RUL-33, re-judged at the moment of use.
+/// Create **one** directory owner-only, **without ever resolving a symlink at
+/// that name** — the create half of RUL-33, re-judged at the moment of use.
 ///
 /// [`create_owner_only`] cannot be used here. Its `recursive(true)` is
 /// `create_dir_all`, which on an existing name calls `metadata` — following a
@@ -2424,9 +2622,15 @@ fn create_owner_only(root: &Path) -> crate::Result<()> {
 /// [`refuse_symlinked_home_leaves`] applies, applied where the write happens
 /// rather than only where the render started.
 ///
-/// Non-recursive is also correct rather than merely sufficient: `bin/`'s parent
-/// is the home root, which [`ensure_home_root`] created at Step 2, so there is
-/// no ancestor left for a recursive create to make.
+/// # Non-recursive, and one call per level
+///
+/// `bin/`'s parent is no longer the home root: under the closed depth-1 layout
+/// it is `<root>/shells/<shell>`, two levels down, and [`ensure_home_root`]
+/// creates the root and nothing else. The repair that suggests itself — make
+/// this recursive — reintroduces exactly the symlink-following hole the
+/// function exists to close, and it does so on the path that ends in the
+/// directory on everyone's `PATH`. So [`ensure_shell_tree`] calls this once per
+/// level instead, and every level gets the same `EEXIST` re-judgement.
 ///
 /// # What this does not close
 ///
@@ -2439,11 +2643,11 @@ fn create_owner_only(root: &Path) -> crate::Result<()> {
 ///
 /// # Errors
 ///
-/// [`refuse_symlink`] for a symlink at `bin`, a `NotADirectory` refusal for any
-/// other non-directory occupying the name, or the create's own I/O failure.
-/// [`reconcile_bin`] turns all three into "not writable" — C-050 skips for
-/// every entry, never a hard error.
-fn create_bin_owner_only(bin: &Path) -> crate::Result<()> {
+/// [`refuse_symlink`] for a symlink at `directory`, a `NotADirectory` refusal
+/// for any other non-directory occupying the name, or the create's own I/O
+/// failure. [`reconcile_bin`] turns all three into "not writable" — C-050 skips
+/// for every entry, never a hard error.
+fn create_directory_owner_only(directory: &Path) -> crate::Result<()> {
     // Two arms rather than one `mut` binding plus a `cfg` block: `mode` is the
     // only mutation, so off Unix the binding is never mutably borrowed and
     // `unused_mut` — denied workspace-wide — makes the Windows build a hard
@@ -2459,27 +2663,136 @@ fn create_bin_owner_only(bin: &Path) -> crate::Result<()> {
     #[cfg(not(unix))]
     let builder = std::fs::DirBuilder::new();
 
-    match builder.create(bin) {
+    match builder.create(directory) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             // `symlink_metadata`, never `metadata`: `is_dir()` on the former is
             // false for a symlink even when it points at a directory, so one
             // check answers both "is it a link" and "is it a directory".
-            match std::fs::symlink_metadata(bin) {
+            match std::fs::symlink_metadata(directory) {
                 Ok(metadata) if metadata.is_dir() => Ok(()),
-                Ok(metadata) if metadata.is_symlink() => Err(refuse_symlink(bin)),
+                Ok(metadata) if metadata.is_symlink() => Err(refuse_symlink(directory)),
                 Ok(_) => Err(crate::error::file_error(
-                    bin,
+                    directory,
                     std::io::Error::new(
                         std::io::ErrorKind::NotADirectory,
-                        "the trampoline directory name is occupied by something that is not a directory",
+                        "a rendered toolchain directory name is occupied by something that is not a directory",
                     ),
                 )),
-                Err(error) => Err(crate::error::file_error(bin, error)),
+                Err(error) => Err(crate::error::file_error(directory, error)),
             }
         }
-        Err(error) => Err(crate::error::file_error(bin, error)),
+        Err(error) => Err(crate::error::file_error(directory, error)),
     }
+}
+
+/// Create `<root>/shells` and `<root>/shells/<shell>`, one guarded level at a
+/// time (C-083's second step).
+///
+/// Not `create_owner_only`: that is `create_dir_all`, which follows an existing
+/// symlink at either level, and both levels are names a hostile clone can
+/// commit. Each is created by [`create_directory_owner_only`] instead, whose
+/// `EEXIST` arm re-judges by `symlink_metadata` — so the guard runs at the
+/// moment of the write and not only at Step 2, which the render lock's
+/// unbounded wait sits between.
+///
+/// `bin/` itself is **not** created here. It is [`reconcile_bin`]'s, and only
+/// when that render has a name to put in it: a `-g`-narrowed run that
+/// reconciles no default-group entry must not conjure the directory every PATH
+/// route points at (RUL-25).
+///
+/// # Errors
+///
+/// Whatever [`create_directory_owner_only`] refuses at either level.
+fn ensure_shell_tree(home: &ToolchainHome, shell: &str) -> crate::Result<()> {
+    // `shells/<shell>/bin`'s two ancestors below the root, outermost first.
+    let shell_bin = home.shell_bin(shell);
+    let mut levels: Vec<&Path> = shell_bin.ancestors().skip(1).take(2).collect();
+    levels.reverse();
+    for level in levels {
+        create_directory_owner_only(level)?;
+    }
+    Ok(())
+}
+
+/// Bring `<root>/active` to its one legal shape, by the kind observed there
+/// (C-081).
+///
+/// | Observed | Action |
+/// |---|---|
+/// | a link at the derived target | nothing — C-047's byte-identical half |
+/// | absent | create |
+/// | a link at any other target | `replace_atomic` |
+/// | a real directory | `remove_dir_all`, then create |
+/// | any other kind | `remove_file`, then create |
+///
+/// Neither shipped primitive can do this alone: `symlink::update` `read_link`s
+/// the existing path and errors `InvalidInput` on a real directory, and
+/// `replace_atomic` renames a staged link onto the path, which a populated
+/// directory refuses. Both of those are the **common copy outcome** — `cp -rL`,
+/// Docker `COPY`, most zip extractors and `rsync` without `-l` dereference
+/// symlinks — so this is a steady-state heal and not a migration step.
+///
+/// **Silent at `debug!` for every healable state, by decision.** Healing a
+/// copied tree is the mandate, and a warning on a state a user reaches by
+/// copying a directory is a warning on a common benign state. Only the
+/// un-healable case speaks, and it speaks at the caller.
+///
+/// # The `remove_dir_all` carve-out, stated narrowly
+///
+/// RUL-32 refuses recursive deletion because a delete primitive reachable from
+/// a hostile `ocx.lock` is not worth the convenience — and its subject is
+/// `<group>/` and `<entry>`, whose names come from that lock. `<root>/active`
+/// is the opposite case: **no untrusted string contributes to the path**, which
+/// is the guarded root plus one constant. `std::fs::remove_dir_all` removes a
+/// symlink entry rather than traversing it, so a hostile `active/link-to-$HOME`
+/// costs the link and not the target. The rule this generalises to, and the one
+/// a reviewer should apply: **recursion is permitted only on a path no
+/// untrusted string contributed to.** Nothing else in this module qualifies.
+///
+/// # Errors
+///
+/// The removal's or the creation's own I/O failure — a read-only tree, a
+/// permission denial, a concurrent swap. The caller warns and renders on: the
+/// physical tree under `shells/` is still written correctly, and an `active`
+/// that stayed wrong fails
+/// [`ToolchainHome::active_is_valid`](crate::file_structure::ToolchainHome::active_is_valid),
+/// so the prompt gate withholds rather than exposing anything.
+fn heal_active(home: &ToolchainHome, shell: &str) -> crate::Result<()> {
+    if home.active_is_valid(shell) {
+        return Ok(());
+    }
+    let active = home.active();
+    let target = home.expected_active_target(shell);
+
+    // `crate::symlink::is_link`, never `Path::is_symlink` or `symlink_metadata`
+    // alone: Windows writes a junction, which is a reparse point and not a
+    // symlink to either of those (RUL-80). Asked first, so the link arms are
+    // decided before any `is_dir()` can claim a junction.
+    if crate::symlink::is_link(&active) {
+        crate::log::debug!(
+            "Toolchain link '{}' is repointed at its derived target",
+            active.display()
+        );
+        return crate::symlink::replace_atomic(&target, &active);
+    }
+    match std::fs::symlink_metadata(&active) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(crate::error::file_error(&active, error)),
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                // The dereferenced-copy outcome. See the carve-out above.
+                std::fs::remove_dir_all(&active).map_err(|error| crate::error::file_error(&active, error))?;
+            } else {
+                // A regular file, a FIFO, a device node. `remove_file`, never a
+                // rename over it: `rename(2)` replaces a regular file silently,
+                // which would lose the bytes without ever observing the kind.
+                std::fs::remove_file(&active).map_err(|error| crate::error::file_error(&active, error))?;
+            }
+            crate::log::debug!("Toolchain link '{}' is replaced by its derived link", active.display());
+        }
+    }
+    crate::symlink::create(&target, &active)
 }
 
 /// A rendered toolchain path that is a symlink — refused on the write side by
@@ -2591,10 +2904,10 @@ pub(crate) async fn filesystem_is_case_insensitive(directory: &Path) -> crate::R
 /// - `<project>/.ocx/toolchain` itself committed as a symlink to `$HOME` — the
 ///   shape [`ensure_home_root`] refuses on the write side, and this is the same
 ///   refusal on the delete side, so neither depends on the other having run;
-/// - `bin/` committed as a symlink, which makes every `bin/<name>` removal land
-///   in the link's target directory;
-/// - a `<group>/` directory that is itself a symlink out of the home, which does
-///   the same for every `<group>/<entry>`.
+/// - the trampoline directory committed as a symlink, which makes every
+///   `bin/<name>` removal land in the link's target directory;
+/// - `links/`, or a `links/<group>` directory, that is itself a symlink out of
+///   the home, which does the same for every entry below it.
 ///
 /// Every one of those makes `<home>/…` a prefix of the *spelled* path and of
 /// nothing that is actually removed. Stating the canonicalisation as a contract
@@ -2622,11 +2935,24 @@ pub(crate) async fn filesystem_is_case_insensitive(directory: &Path) -> crate::R
 /// - A group directory whose name
 ///   [`ToolchainHome::entry`](crate::file_structure::ToolchainHome::entry)'s
 ///   `validate_component` would refuse — a `:` on Windows, a trailing dot, a
-///   name folding to `bin` or `.gitignore` — is **never removed**: it cannot be
+///   control byte — is **never removed**: it cannot be
 ///   addressed through the home's own grammar, and a raw join around that
 ///   grammar is precisely the bypass the type signposts against. It is reported
 ///   `Skipped` with the refusal as its reason, so a hostile clone's committed
 ///   `bin./` shows up in the report instead of vanishing from it.
+///
+/// # The home root's own entries, which are not groups (C-074, C-076)
+///
+/// [`RenderedArtifact::RootEntry`] takes the same non-recursive treatment, for
+/// a different reason: depth 1 is closed and tree-owned, so a name there is a
+/// leftover of the pre-`links/` layout, a leaked case probe, or something a
+/// third party put there. A **populated** one — a legacy `bin/` holding
+/// trampolines, a legacy `<group>/` holding links — fails `remove_dir` with
+/// `ENOTEMPTY` and is reported `Skipped`, on **every** render, with the
+/// contents byte-for-byte intact. That is C-076: reported with its remedy,
+/// never deleted. No one-level "remove the symlink children, then the
+/// directory" sweep is introduced, because that is a delete primitive over
+/// attacker-named children, which RUL-32 refuses for the same reason.
 ///
 /// # Errors
 ///
@@ -2635,9 +2961,10 @@ pub(crate) async fn filesystem_is_case_insensitive(directory: &Path) -> crate::R
 /// rather than propagating it (C-050).
 fn prune_within(home: &ToolchainHome, artifact: &RenderedArtifact) -> crate::Result<()> {
     let (parent, name) = match artifact {
-        RenderedArtifact::Trampoline(name) => (home.bin(), name.clone()),
-        RenderedArtifact::Link { group, entry } => (home.root().join(group), entry.clone()),
-        RenderedArtifact::GroupDirectory(group) => (home.root().to_path_buf(), group.clone()),
+        RenderedArtifact::Trampoline(name) => (home.shell_bin(DEFAULT_SHELL), name.clone()),
+        RenderedArtifact::Link { group, entry } => (links_root(home).join(group), entry.clone()),
+        RenderedArtifact::GroupDirectory(group) => (links_root(home), group.clone()),
+        RenderedArtifact::RootEntry(name) => (home.root().to_path_buf(), name.clone()),
     };
 
     // The home root itself, judged by `symlink_metadata`. Canonicalising both
@@ -2683,14 +3010,14 @@ fn prune_within(home: &ToolchainHome, artifact: &RenderedArtifact) -> crate::Res
         // with `ENOTEMPTY` and the caller reports it `Skipped`.
         //
         // The removal is chosen by the entry's **on-disk type**, because this
-        // arm names every orphan at the home root, not only directories: a
+        // arm names every orphan at either level, not only directories: a
         // leaked `.ocx-case-probe-<pid>-<nanos>` is a regular file, and
         // `remove_dir` on one fails `ENOTDIR` — so without the type check it
         // would be reported `Skipped` on every render forever, and
         // `filesystem_is_case_insensitive`'s "pruned by the very next render"
         // would be false. Still never `remove_dir_all`, and still never
         // recursive.
-        RenderedArtifact::GroupDirectory(_) => {
+        RenderedArtifact::GroupDirectory(_) | RenderedArtifact::RootEntry(_) => {
             let metadata =
                 std::fs::symlink_metadata(&victim).map_err(|error| crate::error::file_error(&victim, error))?;
             if metadata.is_symlink() {
@@ -2950,6 +3277,8 @@ fn read_existing_trampoline(path: &Path, cap: u64) -> crate::Result<Option<Vec<u
 enum RenderStage {
     /// After the first `bin/` entry has landed, before the stamp is written.
     AfterFirstEntryWrite,
+    /// After `shells/<shell>/` exists, before `active` is healed (C-083).
+    AfterShellTree,
 }
 
 /// Read `__OCX_TESTING_RENDER_FAULT` exactly once, at the entry of a render.
@@ -2983,6 +3312,7 @@ fn read_fault_hook() -> Option<String> {
 fn maybe_inject_fault(fault: Option<&str>, stage: RenderStage) -> Result<(), PackageErrorKind> {
     let requested = match stage {
         RenderStage::AfterFirstEntryWrite => FAULT_AFTER_FIRST_ENTRY_WRITE,
+        RenderStage::AfterShellTree => FAULT_AFTER_SHELL_TREE,
     };
     if fault == Some(requested) {
         return Err(PackageErrorKind::Internal(crate::error::file_error(
@@ -3200,12 +3530,22 @@ mod tests {
             self.file_structure.state.render_stamp_file(&self.key())
         }
 
-        /// `render_with`'s documented precondition: the home root exists and is
-        /// a real directory. Every `render_with` caller in this module
-        /// establishes it; `render_toolchain` callers do not, because
+        /// `render_with`'s documented precondition: steps 2–6 have run — the
+        /// home root and `shells/<shell>/` exist and are real directories, and
+        /// `active` is the link they render. Every `render_with` caller in this
+        /// module establishes it; `render_toolchain` callers do not, because
         /// establishing it is what they are testing.
+        ///
+        /// `shells/<shell>/bin` itself is deliberately **not** created — that
+        /// is `reconcile_bin`'s, and only when the render has a name to put in
+        /// it (RUL-25).
         fn create_home_root(&self) {
-            std::fs::create_dir_all(self.home.root()).expect("the home root is creatable");
+            seed_rendered_home(&self.home);
+        }
+
+        /// `<root>/shells/<shell>` — `shell_bin`'s parent.
+        fn shell_directory(&self) -> PathBuf {
+            shell_directory_of(&self.home)
         }
 
         /// Whether this home can hold `make` and `Make` as **two** files —
@@ -3239,11 +3579,37 @@ mod tests {
             PackageManager::new(self.file_structure.clone(), index, None, REGISTRY)
         }
 
-        /// The on-disk names in `bin/`, sorted. Absent `bin/` reads as empty,
-        /// which is the state a render that never touched it leaves.
+        /// The on-disk names in the **physical** trampoline directory, sorted.
+        /// Absent reads as empty, which is the state a render that never
+        /// touched it leaves.
+        ///
+        /// `shell_bin`, never `bin()`: reading through `active` would make
+        /// every assertion below agree with whatever that link points at, which
+        /// is the property half this module's guards exist to defend.
         fn bin_entries(&self) -> Vec<String> {
-            read_dir_names(&self.home.bin())
+            read_dir_names(&self.home.shell_bin(DEFAULT_SHELL))
         }
+    }
+
+    /// Steps 2 and 6 of the render order, for **any** home — the root and
+    /// `shells/<shell>/` as real directories, `active` as the link they render.
+    ///
+    /// A free function rather than a `Tree` method because several rows render
+    /// into a *second* home (`toolchain-dir` relocation, two project
+    /// directories) that the fixture never wrapped.
+    fn seed_rendered_home(home: &ToolchainHome) {
+        std::fs::create_dir_all(shell_directory_of(home)).expect("the shell directory is creatable");
+        crate::symlink::create(home.expected_active_target(DEFAULT_SHELL), home.active())
+            .expect("the activation link is creatable");
+    }
+
+    /// `<root>/shells/<shell>` — `shell_bin`'s parent, spelled through the
+    /// accessor so no fixture can drift from the tree it seeds.
+    fn shell_directory_of(home: &ToolchainHome) -> PathBuf {
+        home.shell_bin(DEFAULT_SHELL)
+            .parent()
+            .expect("the trampoline directory has a parent")
+            .to_path_buf()
     }
 
     /// The on-disk entry names of `directory`, sorted; an absent directory
@@ -3413,6 +3779,14 @@ mod tests {
         relative: PathBuf,
         kind: &'static str,
         bytes: Option<Vec<u8>>,
+        /// A symlink's **raw** target, `None` for every other kind (C-079).
+        ///
+        /// Without it every "the render wrote nothing" and "two renders are
+        /// identical" assertion built on this helper is blind to a repoint:
+        /// `active` swung from one directory to another keeps its kind, its
+        /// inode and its mtime, so the snapshot compares equal to a tree whose
+        /// one PATH-facing link now points somewhere else entirely.
+        target: Option<PathBuf>,
         mtime_nsec: i64,
         inode: u64,
     }
@@ -3451,6 +3825,11 @@ mod tests {
                     } else {
                         None
                     },
+                    target: if kind == "symlink" {
+                        std::fs::read_link(&path).ok()
+                    } else {
+                        None
+                    },
                     mtime_nsec: metadata.mtime_nsec(),
                     inode: metadata.ino(),
                 });
@@ -3479,9 +3858,9 @@ mod tests {
     async fn an_empty_surface_prunes_every_entry_already_in_bin() {
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        std::fs::write(tree.home.bin().join("cmake"), b"#!/bin/sh\n").unwrap();
-        std::fs::write(tree.home.bin().join("ctest"), b"#!/bin/sh\n").unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("cmake"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("ctest"), b"#!/bin/sh\n").unwrap();
 
         let scope = tree.scope();
         let lock = lock_of(Vec::new());
@@ -3729,12 +4108,12 @@ mod tests {
 
         assert_eq!(tree.bin_entries(), expected_bin_entries(&["bin"]));
         assert!(
-            tree.home.bin().is_dir(),
+            tree.home.shell_bin(DEFAULT_SHELL).is_dir(),
             "C-013 — the trampoline directory itself stays a directory"
         );
         for file in trampoline_files("bin") {
             assert!(
-                tree.home.bin().join(&file).is_file(),
+                tree.home.shell_bin(DEFAULT_SHELL).join(&file).is_file(),
                 "the claim lands at `bin/{file}`, never at the home root"
             );
             assert!(
@@ -3896,7 +4275,7 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let body = std::fs::read_to_string(tree.home.bin().join("ocx")).unwrap();
+            let body = std::fs::read_to_string(tree.home.shell_bin(DEFAULT_SHELL).join("ocx")).unwrap();
             assert!(
                 body.contains(&format!("__ocx_binary='{}'", tree.ocx_binary.display())),
                 "D-V19 — the body re-enters ocx through the absolute install path, or a \
@@ -3916,8 +4295,8 @@ mod tests {
     async fn a_narrowed_pull_that_excludes_the_default_group_does_not_touch_bin() {
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        std::fs::write(tree.home.bin().join("cmake"), b"#!/bin/sh\nold\n").unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("cmake"), b"#!/bin/sh\nold\n").unwrap();
 
         let surface = vec![node(pinned("ns/other", 'a'), Some(&["other"]), &[])];
         let scope = tree.scope();
@@ -3952,7 +4331,7 @@ mod tests {
             "…so the pre-existing entry is neither rewritten nor pruned"
         );
         assert_eq!(
-            std::fs::read(tree.home.bin().join("cmake")).unwrap(),
+            std::fs::read(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap(),
             b"#!/bin/sh\nold\n",
             "…byte-identical, not merely present"
         );
@@ -4018,8 +4397,8 @@ mod tests {
     async fn an_orphan_trampoline_is_pruned_and_its_group_link_is_left_alone() {
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        std::fs::write(tree.home.bin().join("gone"), b"#!/bin/sh\n").unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("gone"), b"#!/bin/sh\n").unwrap();
 
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", &[(PLATFORM_KEY, 'd')]);
         let expected_target = expected_link_target(&tree.file_structure, &tool);
@@ -4067,8 +4446,8 @@ mod tests {
     async fn an_entry_that_left_the_lock_loses_both_its_link_and_its_trampoline() {
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        std::fs::write(tree.home.bin().join("ninja"), b"#!/bin/sh\n").unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("ninja"), b"#!/bin/sh\n").unwrap();
         let stale_entry = tree
             .home
             .entry(DEFAULT_GROUP, "ninja")
@@ -4170,8 +4549,8 @@ mod tests {
     async fn a_renamed_tool_key_replaces_both_halves_in_one_render() {
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        std::fs::write(tree.home.bin().join("old-name"), b"#!/bin/sh\n").unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("old-name"), b"#!/bin/sh\n").unwrap();
         let old_entry = tree.home.entry(DEFAULT_GROUP, "old-name").expect("an admitted pair");
         std::fs::create_dir_all(old_entry.parent().unwrap()).unwrap();
         std::fs::create_dir_all(tree.tmp.path().join("old-package")).unwrap();
@@ -4224,9 +4603,17 @@ mod tests {
     async fn a_committed_foreign_file_in_bin_is_pruned_including_a_dotfile() {
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        std::fs::write(tree.home.bin().join("cmake"), b"#!/bin/sh\nhostile\n").unwrap();
-        std::fs::write(tree.home.bin().join(".hidden"), b"#!/bin/sh\nhostile\n").unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        std::fs::write(
+            tree.home.shell_bin(DEFAULT_SHELL).join("cmake"),
+            b"#!/bin/sh\nhostile\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tree.home.shell_bin(DEFAULT_SHELL).join(".hidden"),
+            b"#!/bin/sh\nhostile\n",
+        )
+        .unwrap();
 
         let scope = tree.scope();
         let lock = lock_of(Vec::new());
@@ -4269,8 +4656,12 @@ mod tests {
     async fn an_orphan_directory_in_bin_is_skipped_and_does_not_abort_the_render() {
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.bin().join("hostile")).unwrap();
-        std::fs::write(tree.home.bin().join("hostile").join("payload"), b"keep me\n").unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL).join("hostile")).unwrap();
+        std::fs::write(
+            tree.home.shell_bin(DEFAULT_SHELL).join("hostile").join("payload"),
+            b"keep me\n",
+        )
+        .unwrap();
 
         let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
         let scope = tree.scope();
@@ -4300,7 +4691,11 @@ mod tests {
             "the orphan directory is reported as skipped: {report:?}"
         );
         assert!(
-            tree.home.bin().join("hostile").join("payload").exists(),
+            tree.home
+                .shell_bin(DEFAULT_SHELL)
+                .join("hostile")
+                .join("payload")
+                .exists(),
             "…and nothing under it was removed recursively"
         );
         assert!(
@@ -4367,7 +4762,7 @@ mod tests {
 
         for hostile in ["C:", "a\\b"] {
             assert_eq!(
-                outcome_of(&report, &group_directory(hostile)),
+                outcome_of(&report, &root_entry(hostile)),
                 &RenderOutcome::Pruned,
                 "RUL-40 — `{hostile}` is pruned by its on-disk name, not left unprunable by a \
                  grammar validator that exists for untrusted input"
@@ -4431,8 +4826,11 @@ mod tests {
 
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        let hostile = tree.home.bin().join(std::ffi::OsStr::from_bytes(b"invalid-\xff-name"));
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        let hostile = tree
+            .home
+            .shell_bin(DEFAULT_SHELL)
+            .join(std::ffi::OsStr::from_bytes(b"invalid-\xff-name"));
         if let Err(refused) = std::fs::write(&hostile, b"#!/bin/sh\n") {
             // APFS validates filenames as UTF-8 and rejects these bytes
             // outright, so the on-disk state under test cannot exist on a macOS
@@ -4441,7 +4839,7 @@ mod tests {
             // other reason (an absent `bin/`) reds here rather than passing as
             // this carve-out. Same shape as `index_store`'s two non-UTF-8 rows.
             assert!(
-                tree.home.bin().exists(),
+                tree.home.shell_bin(DEFAULT_SHELL).exists(),
                 "only the non-UTF-8 component may be refused; bin/ must exist: {refused}"
             );
             eprintln!("skipped: this filesystem refuses a non-UTF-8 filename: {refused}");
@@ -4584,7 +4982,7 @@ mod tests {
         std::fs::create_dir_all(ci_entry.parent().unwrap()).unwrap();
         std::fs::create_dir_all(tree.tmp.path().join("ci-package")).unwrap();
         crate::symlink::create(tree.tmp.path().join("ci-package"), &ci_entry).unwrap();
-        let before = snapshot_subtree(&tree.home.root().join("ci"));
+        let before = snapshot_subtree(&tree.home.links_group("ci").expect("an admitted group name"));
 
         let tool = locked_tool("ninja", "ci", "ns/ninja", &[(PLATFORM_KEY, 'd')]);
         let scope = tree.scope();
@@ -4610,7 +5008,7 @@ mod tests {
         .expect("the render succeeds");
 
         assert_eq!(
-            snapshot_subtree(&tree.home.root().join("ci")),
+            snapshot_subtree(&tree.home.links_group("ci").expect("an admitted group name")),
             before,
             "C-045 — `-g default` reconciles the default group and nothing else"
         );
@@ -4636,7 +5034,7 @@ mod tests {
         tree.create_home_root();
         let outside = tree.tmp.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, tree.home.bin()).unwrap();
+        std::os::unix::fs::symlink(&outside, tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
 
         let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
         let scope = tree.scope();
@@ -4688,7 +5086,7 @@ mod tests {
         let tree = Tree::new();
         tree.create_home_root();
         let relocated = ToolchainHome::new(tree.tmp.path().join("relocated").join("toolchain"));
-        std::fs::create_dir_all(relocated.root()).unwrap();
+        seed_rendered_home(&relocated);
 
         let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
         let scope = tree.scope();
@@ -4743,7 +5141,7 @@ mod tests {
             "C-053 — a tree at a location ocx no longer resolves to is left in place, never deleted"
         );
         assert_eq!(
-            read_dir_names(&relocated.bin()),
+            read_dir_names(&relocated.shell_bin(DEFAULT_SHELL)),
             expected_bin_entries(&["cmake"]),
             "…and the new home is complete"
         );
@@ -4778,8 +5176,8 @@ mod tests {
         let tree = Tree::new();
         let outside = tree.tmp.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
-        std::fs::create_dir_all(tree.home.root()).unwrap();
-        std::os::unix::fs::symlink(&outside, tree.home.bin()).unwrap();
+        std::fs::create_dir_all(tree.shell_directory()).unwrap();
+        std::os::unix::fs::symlink(&outside, tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
 
         assert!(
             ensure_home_root(&tree.home).is_err(),
@@ -4799,8 +5197,8 @@ mod tests {
         let outside = tree.tmp.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("cmake"), b"not ours\n").unwrap();
-        std::fs::create_dir_all(tree.home.root()).unwrap();
-        std::os::unix::fs::symlink(&outside, tree.home.bin()).unwrap();
+        std::fs::create_dir_all(tree.shell_directory()).unwrap();
+        std::os::unix::fs::symlink(&outside, tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
 
         assert!(
             prune_within(&tree.home, &trampoline("cmake")).is_err(),
@@ -4822,8 +5220,8 @@ mod tests {
         let outside = tree.tmp.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("cmake"), b"not ours\n").unwrap();
-        std::fs::create_dir_all(tree.home.root()).unwrap();
-        std::os::unix::fs::symlink(&outside, tree.home.root().join(DEFAULT_GROUP)).unwrap();
+        std::fs::create_dir_all(links_root(&tree.home)).unwrap();
+        std::os::unix::fs::symlink(&outside, links_root(&tree.home).join(DEFAULT_GROUP)).unwrap();
 
         assert!(
             prune_within(&tree.home, &link(DEFAULT_GROUP, "cmake")).is_err(),
@@ -4841,8 +5239,8 @@ mod tests {
     #[test]
     fn prune_within_removes_an_artifact_that_resolves_inside_the_home() {
         let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        let victim = tree.home.bin().join("cmake");
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        let victim = tree.home.shell_bin(DEFAULT_SHELL).join("cmake");
         std::fs::write(&victim, b"#!/bin/sh\n").unwrap();
 
         prune_within(&tree.home, &trampoline("cmake")).expect("an entry inside the home is removable");
@@ -4858,15 +5256,16 @@ mod tests {
     #[test]
     fn prune_within_never_removes_a_non_empty_group_directory_recursively() {
         let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.root().join("ci")).unwrap();
-        std::fs::write(tree.home.root().join("ci").join("foreign"), b"keep me\n").unwrap();
+        let group = tree.home.links_group("ci").expect("an admitted group name");
+        std::fs::create_dir_all(&group).unwrap();
+        std::fs::write(group.join("foreign"), b"keep me\n").unwrap();
 
         assert!(
             prune_within(&tree.home, &group_directory("ci")).is_err(),
             "RUL-32 — a non-empty group directory fails `remove_dir` rather than being emptied"
         );
         assert!(
-            tree.home.root().join("ci").join("foreign").exists(),
+            group.join("foreign").exists(),
             "…and the foreign file the render did not put there survives"
         );
     }
@@ -4887,8 +5286,8 @@ mod tests {
     #[test]
     fn write_trampoline_atomic_replaces_the_inode_rather_than_truncating_in_place() {
         let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        let path = tree.home.bin().join("cmake");
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        let path = tree.home.shell_bin(DEFAULT_SHELL).join("cmake");
         std::fs::write(&path, b"#!/bin/sh\nold\n").unwrap();
         let before = inode_of(&path);
 
@@ -4915,8 +5314,8 @@ mod tests {
     #[test]
     fn write_trampoline_atomic_publishes_an_owner_executable_file() {
         let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        let path = tree.home.bin().join("cmake");
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        let path = tree.home.shell_bin(DEFAULT_SHELL).join("cmake");
 
         write_trampoline_atomic(&path, "#!/bin/sh\n").expect("the write succeeds");
 
@@ -4959,7 +5358,7 @@ mod tests {
         .await
         .expect("the render succeeds");
 
-        assert_ne!(mode_of(&tree.home.bin().join("cmake")) & 0o100, 0);
+        assert_ne!(mode_of(&tree.home.shell_bin(DEFAULT_SHELL).join("cmake")) & 0o100, 0);
     }
 
     /// C-048, case 28 — the ADR's named negative control: a fault injected
@@ -5289,9 +5688,9 @@ mod tests {
     #[tokio::test]
     async fn the_windows_publish_hardlinks_the_exe_from_the_shim_blob() {
         let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        let exe = tree.home.bin().join("cmake.exe");
-        let sidecar = tree.home.bin().join("cmake.exec");
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        let exe = tree.home.shell_bin(DEFAULT_SHELL).join("cmake.exe");
+        let sidecar = tree.home.shell_bin(DEFAULT_SHELL).join("cmake.exec");
 
         let blob = tree
             .file_structure
@@ -5332,12 +5731,12 @@ mod tests {
     #[tokio::test]
     async fn the_windows_publish_writes_the_sidecar_before_the_exe() {
         let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        let sidecar = tree.home.bin().join("cmake.exec");
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        let sidecar = tree.home.shell_bin(DEFAULT_SHELL).join("cmake.exec");
         // A directory at the `.exe` path makes the hardlink fail while the
         // sidecar write beside it still succeeds — the one input that tells
         // the two orderings apart.
-        let exe = tree.home.bin().join("cmake.exe");
+        let exe = tree.home.shell_bin(DEFAULT_SHELL).join("cmake.exe");
         std::fs::create_dir_all(&exe).unwrap();
 
         let result = publish_windows_trampoline(&tree.file_structure.shim_bin, &exe, &sidecar, "C:\\proj\n").await;
@@ -5442,7 +5841,7 @@ mod tests {
         std::fs::create_dir_all(&other_project).unwrap();
         let other_home = ToolchainHome::new(other_project.join(".ocx").join("toolchain"));
         tree.create_home_root();
-        std::fs::create_dir_all(other_home.root()).unwrap();
+        seed_rendered_home(&other_home);
 
         let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
         let lock = lock_of(Vec::new());
@@ -5473,8 +5872,8 @@ mod tests {
             .expect("both render");
         }
 
-        let first = std::fs::read_to_string(tree.home.bin().join("cmake")).unwrap();
-        let second = std::fs::read_to_string(other_home.bin().join("cmake")).unwrap();
+        let first = std::fs::read_to_string(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap();
+        let second = std::fs::read_to_string(other_home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap();
         assert_ne!(
             first, second,
             "C-028 — the baked selector names the project, so two projects bake two bodies"
@@ -5545,7 +5944,7 @@ mod tests {
         .expect("the pinned render succeeds");
 
         assert_eq!(
-            std::fs::read_to_string(tree.home.bin().join("cmake")).unwrap(),
+            std::fs::read_to_string(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap(),
             expected_unix_trampoline_body(&tree.project_dir, &tree.ocx_binary),
             "C-046 — no digest and no `pinned` value is ever baked, so the body is unchanged"
         );
@@ -5616,6 +6015,63 @@ mod tests {
         );
     }
 
+    /// C-003 — the **persisted** `link_fingerprint` key is `"<group>/<entry>"`,
+    /// and the tree's internal shape is no part of it.
+    ///
+    /// `observe_default_group_links` builds the key from the `DEFAULT_GROUP`
+    /// constant and the entry name while it `read_dir`s `links/<group>`, so the
+    /// well-meant "make the key match the path" edit is a change to a
+    /// **persisted format that nothing in this crate reads back**: the producer,
+    /// the type and some doc comments are the whole of `link_fingerprint`'s
+    /// occurrences, and no comparison exists anywhere. It would break silently
+    /// and forever. `state_store.rs`'s key-set test checks field *names* only
+    /// and cannot see this.
+    ///
+    /// RED: prefix the key with `links/` in `observe_default_group_links`.
+    #[tokio::test]
+    async fn the_stamped_link_fingerprint_key_is_group_slash_entry() {
+        let tree = Tree::new();
+        tree.create_home_root();
+        let entry = tree.home.entry(DEFAULT_GROUP, "cmake").expect("an admitted pair");
+        std::fs::create_dir_all(entry.parent().expect("the entry has a parent")).unwrap();
+        std::fs::create_dir_all(tree.tmp.path().join("some-package")).unwrap();
+        crate::symlink::create(tree.tmp.path().join("some-package"), &entry).unwrap();
+
+        let scope = tree.scope();
+        let lock = lock_of(vec![locked_tool(
+            "cmake",
+            DEFAULT_GROUP,
+            "ns/cmake",
+            &[(PLATFORM_KEY, 'd')],
+        )]);
+        let groups = groups_of(&[DEFAULT_GROUP]);
+        let platform = platform();
+        render_with(
+            &tree.file_structure,
+            RenderRequest {
+                home: &tree.home,
+                scope: &scope,
+                lock: &lock,
+                surface: &[],
+                groups: &groups,
+                pinned: true,
+                platform: &platform,
+                dry_run: false,
+            },
+            false,
+            None,
+        )
+        .await
+        .expect("the render succeeds");
+
+        let stamp = tree.stamp().expect("the render writes a stamp");
+        assert_eq!(
+            stamp.link_fingerprint.keys().cloned().collect::<Vec<_>>(),
+            vec![format!("{DEFAULT_GROUP}/cmake")],
+            "the key carries the group and the entry, with no `links/` and no other tree component"
+        );
+    }
+
     /// C-053, case 42(b) — setting `toolchain-dir` yields a **fresh tree whose
     /// bodies are byte-identical**: the selector names the project, which
     /// `toolchain-dir` does not move.
@@ -5628,7 +6084,7 @@ mod tests {
         let tree = Tree::new();
         tree.create_home_root();
         let relocated = ToolchainHome::new(tree.tmp.path().join("relocated").join("toolchain"));
-        std::fs::create_dir_all(relocated.root()).unwrap();
+        seed_rendered_home(&relocated);
 
         let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
         let scope = tree.scope();
@@ -5656,8 +6112,8 @@ mod tests {
         }
 
         assert_eq!(
-            std::fs::read_to_string(tree.home.bin().join("cmake")).unwrap(),
-            std::fs::read_to_string(relocated.bin().join("cmake")).unwrap(),
+            std::fs::read_to_string(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap(),
+            std::fs::read_to_string(relocated.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap(),
             "C-053 — a `toolchain-dir` change is not a body-rewriting input"
         );
     }
@@ -5701,7 +6157,7 @@ mod tests {
         .await
         .expect("the render succeeds");
 
-        let body = std::fs::read_to_string(tree.home.bin().join("cmake")).unwrap();
+        let body = std::fs::read_to_string(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap();
         assert_eq!(
             body,
             expected_unix_trampoline_body(&tree.project_dir, &tree.ocx_binary),
@@ -5754,7 +6210,7 @@ mod tests {
         .await
         .expect("C-028 — a dangling install tree is not a render failure");
 
-        let body = std::fs::read_to_string(tree.home.bin().join("cmake")).unwrap();
+        let body = std::fs::read_to_string(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap();
         assert_ne!(
             body,
             expected_unix_trampoline_body(&tree.project_dir, &tree.ocx_binary),
@@ -5922,7 +6378,7 @@ mod tests {
         )
         .await
         .expect("the first render succeeds");
-        let inode_before = inode_of(&tree.home.bin().join("cmake"));
+        let inode_before = inode_of(&tree.home.shell_bin(DEFAULT_SHELL).join("cmake"));
         let subtree_before = snapshot_subtree(tree.home.root());
 
         let second = render_with(
@@ -5952,7 +6408,7 @@ mod tests {
             "C-047 — an already-correct entry is `Unchanged`, never rewritten: {second:?}"
         );
         assert_eq!(
-            inode_of(&tree.home.bin().join("cmake")),
+            inode_of(&tree.home.shell_bin(DEFAULT_SHELL).join("cmake")),
             inode_before,
             "…and the file was left exactly as it is, which bytes alone cannot show"
         );
@@ -6073,9 +6529,9 @@ mod tests {
     async fn a_failed_stamp_write_reports_stamp_written_false_and_still_returns_ok() {
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
         std::fs::create_dir_all(tree.file_structure.state.root()).unwrap();
-        deny_writes(&tree.home.bin());
+        deny_writes(&tree.home.shell_bin(DEFAULT_SHELL));
         deny_writes(tree.file_structure.state.root());
 
         let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake", "ctest"]), &[])];
@@ -6099,7 +6555,7 @@ mod tests {
             None,
         )
         .await;
-        allow_writes(&tree.home.bin());
+        allow_writes(&tree.home.shell_bin(DEFAULT_SHELL));
         allow_writes(tree.file_structure.state.root());
 
         let report = result.expect("C-050 — a read-only checkout composes digest paths and exits 0");
@@ -6128,11 +6584,11 @@ mod tests {
     async fn a_read_only_bin_with_a_writable_state_store_still_stamps_what_landed() {
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
         // What a previous render left, and what this one can neither rewrite
         // nor prune.
-        std::fs::write(tree.home.bin().join("cmake"), b"#!/bin/sh\nstale\n").unwrap();
-        deny_writes(&tree.home.bin());
+        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("cmake"), b"#!/bin/sh\nstale\n").unwrap();
+        deny_writes(&tree.home.shell_bin(DEFAULT_SHELL));
 
         let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
         let scope = tree.scope();
@@ -6155,7 +6611,7 @@ mod tests {
             None,
         )
         .await;
-        allow_writes(&tree.home.bin());
+        allow_writes(&tree.home.shell_bin(DEFAULT_SHELL));
 
         let report = result.expect("C-050 — an unwritable `bin/` is a skip, never an error");
         assert!(
@@ -6172,7 +6628,7 @@ mod tests {
             "RUL-22 — …recording only what landed, which here is nothing: {stamp:?}"
         );
         assert_eq!(
-            std::fs::read(tree.home.bin().join("cmake")).unwrap(),
+            std::fs::read(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap(),
             b"#!/bin/sh\nstale\n",
             "…while `bin/` still holds the stale trampoline C-061's gate will mismatch on"
         );
@@ -6192,12 +6648,15 @@ mod tests {
     async fn a_partially_skipped_render_stamps_only_what_landed() {
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
         // A directory where a trampoline must go: the write cannot succeed and
         // RUL-32 forbids removing it recursively.
-        std::fs::create_dir_all(tree.home.bin().join(&trampoline_files("blocked")[0])).unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL).join(&trampoline_files("blocked")[0])).unwrap();
         std::fs::write(
-            tree.home.bin().join(&trampoline_files("blocked")[0]).join("payload"),
+            tree.home
+                .shell_bin(DEFAULT_SHELL)
+                .join(&trampoline_files("blocked")[0])
+                .join("payload"),
             b"keep me\n",
         )
         .unwrap();
@@ -6250,7 +6709,7 @@ mod tests {
         );
         assert!(
             tree.home
-                .bin()
+                .shell_bin(DEFAULT_SHELL)
                 .join(&trampoline_files("blocked")[0])
                 .join("payload")
                 .exists(),
@@ -6269,10 +6728,10 @@ mod tests {
     async fn a_committed_symlink_in_bin_is_replaced_and_its_target_is_not_written_through() {
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
         let victim = tree.tmp.path().join("bashrc");
         std::fs::write(&victim, b"# the user's shell profile\n").unwrap();
-        std::os::unix::fs::symlink(&victim, tree.home.bin().join("cmake")).unwrap();
+        std::os::unix::fs::symlink(&victim, tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap();
 
         let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
         let scope = tree.scope();
@@ -6302,7 +6761,7 @@ mod tests {
             b"# the user's shell profile\n",
             "C-044 — nothing is ever written *through* a committed link"
         );
-        let metadata = std::fs::symlink_metadata(tree.home.bin().join("cmake")).unwrap();
+        let metadata = std::fs::symlink_metadata(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap();
         assert!(
             metadata.is_file() && !metadata.is_symlink(),
             "…and the entry is a regular file afterwards"
@@ -6323,8 +6782,8 @@ mod tests {
     #[test]
     fn reading_an_existing_entry_never_opens_a_planted_fifo() {
         let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        let fifo = tree.home.bin().join("cmake");
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        let fifo = tree.home.shell_bin(DEFAULT_SHELL).join("cmake");
         mkfifo(&fifo);
 
         assert_eq!(
@@ -6345,14 +6804,14 @@ mod tests {
     #[test]
     fn reading_an_existing_entry_refuses_a_symlink_and_an_over_cap_file() {
         let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
         let target = tree.tmp.path().join("elsewhere");
         std::fs::write(&target, b"body").unwrap();
-        let linked = tree.home.bin().join("linked");
+        let linked = tree.home.shell_bin(DEFAULT_SHELL).join("linked");
         std::os::unix::fs::symlink(&target, &linked).unwrap();
-        let oversized = tree.home.bin().join("oversized");
+        let oversized = tree.home.shell_bin(DEFAULT_SHELL).join("oversized");
         std::fs::write(&oversized, vec![b'x'; 4096]).unwrap();
-        let ordinary = tree.home.bin().join("ordinary");
+        let ordinary = tree.home.shell_bin(DEFAULT_SHELL).join("ordinary");
         std::fs::write(&ordinary, b"body").unwrap();
 
         assert_eq!(
@@ -6371,7 +6830,8 @@ mod tests {
             "…and the acceptance branch is reachable, or the three refusals above prove nothing"
         );
         assert_eq!(
-            read_existing_trampoline(&tree.home.bin().join("absent"), 4).expect("absence is not an error"),
+            read_existing_trampoline(&tree.home.shell_bin(DEFAULT_SHELL).join("absent"), 4)
+                .expect("absence is not an error"),
             None
         );
     }
@@ -6608,7 +7068,7 @@ mod tests {
             HealOutcome::Healed(0)
         );
         assert!(
-            !tree.home.root().join("ci").exists(),
+            !tree.home.links_group("ci").expect("an admitted group name").exists(),
             "heal creates no directory for a group with nothing in it"
         );
     }
@@ -6955,8 +7415,12 @@ mod tests {
     #[tokio::test]
     async fn healing_never_errors_when_it_cannot_write() {
         let tree = Tree::new();
-        std::fs::create_dir_all(tree.home.root().join(DEFAULT_GROUP)).unwrap();
-        deny_writes(&tree.home.root().join(DEFAULT_GROUP));
+        let group_directory = tree
+            .home
+            .links_group(DEFAULT_GROUP)
+            .expect("the default group is admitted");
+        std::fs::create_dir_all(&group_directory).unwrap();
+        deny_writes(&group_directory);
 
         let lock = lock_of(vec![
             locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", &[(PLATFORM_KEY, 'd')]),
@@ -6971,7 +7435,7 @@ mod tests {
             &platform(),
         )
         .await;
-        allow_writes(&tree.home.root().join(DEFAULT_GROUP));
+        allow_writes(&group_directory);
 
         assert_eq!(
             result.expect("RUL-36 — a repair that cannot land is never an error"),
@@ -6999,14 +7463,18 @@ mod tests {
     async fn healing_leaves_a_contended_entry_unrepaired_and_uncounted() {
         let tree = Tree::new();
         // The per-entry lock keys on the group directory's file identity.
-        std::fs::create_dir_all(tree.home.root().join(DEFAULT_GROUP)).unwrap();
+        std::fs::create_dir_all(tree.home.links_group(DEFAULT_GROUP).expect("admitted")).unwrap();
 
         let contended = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", &[(PLATFORM_KEY, 'd')]);
         let free = locked_tool("ninja", DEFAULT_GROUP, "ns/ninja", &[(PLATFORM_KEY, 'n')]);
         let free_target = expected_link_target(&tree.file_structure, &free);
         let lock = lock_of(vec![contended, free]);
 
-        let _held = heal_lock_parameters(&tree.file_structure, &tree.home, DEFAULT_GROUP, "cmake")
+        let group_directory = tree
+            .home
+            .links_group(DEFAULT_GROUP)
+            .expect("the default group is admitted");
+        let _held = heal_lock_parameters(&tree.file_structure, group_directory, "cmake")
             .acquire()
             .await
             .expect("the test can take the same per-entry lock");
@@ -7079,7 +7547,7 @@ mod tests {
         .expect("the seeding render succeeds");
         // Something for the dry run to *want* to change, so the snapshot is
         // not comparing two empty trees.
-        std::fs::write(tree.home.bin().join("stale"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("stale"), b"#!/bin/sh\n").unwrap();
         let before = snapshot_subtree(tree.home.root());
 
         let report = tree
@@ -7218,8 +7686,8 @@ mod tests {
     async fn a_dry_run_predicts_exactly_what_the_real_run_applies() {
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        std::fs::write(tree.home.bin().join("stale"), b"#!/bin/sh\n").unwrap();
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("stale"), b"#!/bin/sh\n").unwrap();
 
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", &[(PLATFORM_KEY, 'd')]);
         let surface = vec![node(pinned("ns/cmake", 'd'), Some(&["cmake"]), &[])];
@@ -7440,12 +7908,12 @@ mod tests {
         let outside = tree.tmp.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("cmake"), b"someone else's file\n").unwrap();
-        std::fs::create_dir_all(tree.home.root()).unwrap();
-        std::os::unix::fs::symlink(&outside, tree.home.root().join(DEFAULT_GROUP)).unwrap();
+        std::fs::create_dir_all(links_root(&tree.home)).unwrap();
+        std::os::unix::fs::symlink(&outside, links_root(&tree.home).join(DEFAULT_GROUP)).unwrap();
         let before = snapshot_subtree(&outside);
 
         let target = tree.tmp.path().join("package-root");
-        let entry = tree.home.root().join(DEFAULT_GROUP).join("cmake");
+        let entry = tree.home.entry(DEFAULT_GROUP, "cmake").expect("an admitted pair");
         let outcome = publish_link(&entry, &target, false).await;
 
         assert!(
@@ -7459,7 +7927,7 @@ mod tests {
         );
 
         // The positive control: a real group directory is still written.
-        let honest = tree.home.root().join("ci");
+        let honest = tree.home.links_group("ci").expect("an admitted group name");
         std::fs::create_dir_all(&honest).unwrap();
         let outcome = publish_link(&honest.join("cmake"), &target, false).await;
         assert_eq!(
@@ -7488,8 +7956,8 @@ mod tests {
         let outside = tree.tmp.path().join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("bystander"), b"someone else's file\n").unwrap();
-        std::fs::create_dir_all(tree.home.root()).unwrap();
-        std::os::unix::fs::symlink(&outside, tree.home.root().join(DEFAULT_GROUP)).unwrap();
+        std::fs::create_dir_all(links_root(&tree.home)).unwrap();
+        std::os::unix::fs::symlink(&outside, links_root(&tree.home).join(DEFAULT_GROUP)).unwrap();
         let before = snapshot_subtree(&outside);
 
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", &[(PLATFORM_KEY, 'd')]);
@@ -7573,8 +8041,8 @@ mod tests {
                 );
                 return;
             }
-            std::fs::create_dir_all(tree.home.bin()).unwrap();
-            let twin = tree.home.bin().join("make");
+            std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+            let twin = tree.home.shell_bin(DEFAULT_SHELL).join("make");
             std::fs::write(&twin, b"#!/bin/sh\n# already here\n").unwrap();
 
             let surface = vec![node(pinned("ns/make", 'a'), Some(&["Make"]), &[])];
@@ -7636,7 +8104,7 @@ mod tests {
                 );
                 return;
             }
-            let group = tree.home.root().join(DEFAULT_GROUP);
+            let group = tree.home.links_group(DEFAULT_GROUP).expect("an admitted group name");
             std::fs::create_dir_all(&group).unwrap();
             let twin = group.join("CMAKE");
             crate::symlink::create(tree.tmp.path().join("some-package"), &twin).unwrap();
@@ -7845,8 +8313,8 @@ mod tests {
 
         let tree = Tree::new();
         tree.create_home_root();
-        std::fs::create_dir_all(tree.home.bin()).unwrap();
-        let entry = tree.home.bin().join("cmake");
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        let entry = tree.home.shell_bin(DEFAULT_SHELL).join("cmake");
         let body = expected_unix_trampoline_body(&tree.project_dir, &tree.ocx_binary);
         std::fs::write(&entry, body.as_bytes()).unwrap();
         std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -7885,21 +8353,28 @@ mod tests {
         );
     }
 
-    /// W5/R-W19(a) — `bin/` and every `<group>/` are created owner-only at
+    /// W5/R-W19(a) — **every** directory a render creates is owner-only at
     /// create time, like the home root, and never with the ambient umask.
     ///
-    /// `bin/` is the directory all three PATH routes point at, so a
+    /// The trampoline directory is what all three PATH routes point at, so a
     /// group-writable one is a write primitive into everything the user's shell
-    /// resolves.
+    /// resolves — and `links/`, `shells/` and `shells/<shell>/` are each an
+    /// ancestor of something on that path, so a group-writable one of those is
+    /// a rename primitive over the whole subtree below it. This layout added
+    /// three directories and nothing mode-checked them.
     ///
     /// RED: restore `tokio::fs::create_dir_all` in `reconcile_bin` and
     /// `std::fs::create_dir_all` in `publish_link_within` — under the ordinary
-    /// `umask 002` both come out group-writable.
+    /// `umask 002` both come out group-writable. RED for the three new rows:
+    /// give `ensure_shell_tree` a plain `std::fs::create_dir_all`.
     #[cfg(unix)]
     #[tokio::test]
-    async fn the_bin_and_group_directories_are_created_owner_only() {
+    async fn every_directory_a_render_creates_is_owner_only() {
         let tree = Tree::new();
-        tree.create_home_root();
+        // Not `create_home_root`: this row is about the modes the **render**
+        // chooses, and a fixture that pre-created `shells/<shell>` with the
+        // ambient umask would answer for itself.
+        std::fs::create_dir_all(tree.home.root()).unwrap();
 
         let tool = locked_tool("cmake", DEFAULT_GROUP, "ns/cmake", &[(PLATFORM_KEY, 'd')]);
         let surface = vec![node(pinned("ns/cmake", 'd'), Some(&["cmake"]), &[])];
@@ -7907,9 +8382,10 @@ mod tests {
         let lock = lock_of(vec![tool]);
         let groups = groups_of(&[DEFAULT_GROUP]);
         let platform = platform();
-        render_with(
-            &tree.file_structure,
-            RenderRequest {
+        // The **public** entry, so step 6 creates `shells/` and
+        // `shells/<shell>/` under the code that chooses their modes.
+        tree.manager()
+            .render_toolchain(RenderRequest {
                 home: &tree.home,
                 scope: &scope,
                 lock: &lock,
@@ -7918,14 +8394,22 @@ mod tests {
                 pinned: false,
                 platform: &platform,
                 dry_run: false,
-            },
-            false,
-            None,
-        )
-        .await
-        .expect("the render is not a refusal");
+            })
+            .await
+            .expect("the render is not a refusal");
 
-        for directory in [tree.home.bin(), tree.home.root().join(DEFAULT_GROUP)] {
+        for directory in [
+            tree.home.shell_bin(DEFAULT_SHELL),
+            tree.shell_directory(),
+            tree.home
+                .links_group(DEFAULT_GROUP)
+                .expect("the default group is admitted"),
+            links_root(&tree.home),
+            shell_directory_of(&tree.home)
+                .parent()
+                .expect("the shell directory has a parent")
+                .to_path_buf(),
+        ] {
             assert!(directory.is_dir(), "precondition: {directory:?} was created");
             assert_eq!(
                 mode_of(&directory) & 0o077,
@@ -7951,7 +8435,8 @@ mod tests {
     /// The second half is the control RUL-32 is about: a **non-empty**
     /// directory is still not removed, and still not removed recursively.
     ///
-    /// RED: restore the unconditional `remove_dir` in the `GroupDirectory` arm.
+    /// RED: restore the unconditional `remove_dir` in the shared
+    /// `GroupDirectory | RootEntry` arm.
     #[test]
     fn a_leaked_probe_file_at_the_home_root_is_pruned_and_a_directory_is_not_recursed() {
         let tree = Tree::new();
@@ -7959,11 +8444,11 @@ mod tests {
         let litter = tree.home.root().join(".ocx-case-probe-4242-1");
         std::fs::write(&litter, b"").unwrap();
 
-        prune_within(&tree.home, &group_directory(".ocx-case-probe-4242-1"))
+        prune_within(&tree.home, &root_entry(".ocx-case-probe-4242-1"))
             .expect("a regular file at the home root is removable");
         assert!(!litter.exists(), "W3 — the orphan the probe left is gone");
 
-        let occupied = tree.home.root().join("ci");
+        let occupied = tree.home.links_group("ci").expect("an admitted group name");
         std::fs::create_dir_all(&occupied).unwrap();
         std::fs::write(occupied.join("foreign"), b"not ours\n").unwrap();
         assert!(
@@ -8216,5 +8701,691 @@ mod tests {
             matches!(refused, HealOutcome::Refused { .. }),
             "…and the refusal names itself, carrying the reason with it: {refused:?}"
         );
+    }
+    // ── 12. The closed depth-1 set, its guard, and `active` (C-074…C-083) ───
+
+    /// The `links` component this module derives is the grammar's own — the
+    /// drift guard for [`links_root`]'s `parent()` walk.
+    ///
+    /// The literal lives **here**, in a test, and nowhere in the production
+    /// body: a second production spelling is what would let scan and guard
+    /// disagree about which directory `links` is.
+    ///
+    /// RED: derive `links_root` from `home.root()` directly, or from any other
+    /// component.
+    #[test]
+    fn links_root_is_the_grammars_own_parent() {
+        let home = ToolchainHome::new(PathBuf::from("/ocx/toolchain"));
+        assert_eq!(links_root(&home), PathBuf::from("/ocx/toolchain/links"));
+        assert_eq!(
+            home.links_group("ci").expect("an admitted group"),
+            links_root(&home).join("ci"),
+            "…and every group directory is a child of it, by construction"
+        );
+    }
+
+    /// Every `RenderedArtifact` variant resolves to **one** path, whichever of
+    /// the two independent derivations is asked.
+    ///
+    /// [`artifact_path`] computes what a `Skipped` item *reports*;
+    /// [`prune_within`] computes, independently, what a prune *removes*. They
+    /// are separate `match`es over the same enum and nothing compared them — so
+    /// move one parent and not the other and every warning names a path the
+    /// render never touched, and the prune deletes a path nothing reported.
+    ///
+    /// **Behavioural, not a second restatement**: the object is created at
+    /// `artifact_path`'s answer and `prune_within` is then asked to remove it.
+    /// A test that spelled the prune's parent a third time in test code would
+    /// compare two things it wrote itself and observe neither function.
+    ///
+    /// RED: give any one variant a different parent in either function — the
+    /// object survives and the assertion fires, or `prune_within` errors on a
+    /// path that is not there.
+    #[test]
+    fn artifact_path_and_prune_within_agree_on_every_variant() {
+        for artifact in [
+            trampoline("cmake"),
+            link("ci", "ninja"),
+            group_directory("ci"),
+            root_entry("legacy"),
+        ] {
+            let tree = Tree::new();
+            std::fs::create_dir_all(tree.home.root()).unwrap();
+            let reported = artifact_path(&tree.home, &artifact);
+            std::fs::create_dir_all(reported.parent().expect("every artifact has a parent")).unwrap();
+            match artifact {
+                RenderedArtifact::Link { .. } => {
+                    std::fs::create_dir_all(tree.tmp.path().join("package")).unwrap();
+                    crate::symlink::create(tree.tmp.path().join("package"), &reported).unwrap();
+                }
+                RenderedArtifact::Trampoline(_) => std::fs::write(&reported, b"#!/bin/sh\n").unwrap(),
+                _ => std::fs::create_dir_all(&reported).unwrap(),
+            }
+            assert!(reported.symlink_metadata().is_ok(), "precondition: {reported:?} exists");
+
+            prune_within(&tree.home, &artifact)
+                .unwrap_or_else(|error| panic!("{artifact:?} must be prunable at {reported:?}: {error}"));
+            assert!(
+                reported.symlink_metadata().is_err(),
+                "the prune removed something other than the path the report names, for {artifact:?}"
+            );
+        }
+    }
+
+    /// C-074 — a depth-1 directory named after a **locked** group is pruned.
+    ///
+    /// Groups are no longer depth-1 entries, so a `ci/` at the home root is a
+    /// leftover of the pre-`links/` layout and not a group, however loudly the
+    /// lock mentions the name.
+    ///
+    /// RED: keep the lock-derived `locked_groups` skip in the depth-1 pass —
+    /// the directory survives and no item names it.
+    #[tokio::test]
+    async fn a_depth_1_directory_named_after_a_locked_group_is_pruned() {
+        let tree = Tree::new();
+        tree.create_home_root();
+        std::fs::create_dir_all(tree.home.root().join("ci")).unwrap();
+
+        let scope = tree.scope();
+        let lock = lock_of(vec![locked_tool("ninja", "ci", "ns/ninja", &[(PLATFORM_KEY, 'd')])]);
+        let groups = groups_of(&[DEFAULT_GROUP, "ci"]);
+        let platform = platform();
+        let report = render_with(
+            &tree.file_structure,
+            RenderRequest {
+                home: &tree.home,
+                scope: &scope,
+                lock: &lock,
+                surface: &[],
+                groups: &groups,
+                pinned: false,
+                platform: &platform,
+                dry_run: false,
+            },
+            false,
+            None,
+        )
+        .await
+        .expect("the render succeeds");
+
+        assert_eq!(
+            outcome_of(&report, &root_entry("ci")),
+            &RenderOutcome::Pruned,
+            "the lock declares group `ci`, and that keeps `links/ci` — never `<root>/ci`"
+        );
+        assert!(
+            !tree.home.root().join("ci").exists(),
+            "…and it is gone from disk: {:?}",
+            read_dir_names(tree.home.root())
+        );
+    }
+
+    /// C-074's trap, stated as a test — the depth-1 keep-set is the tree's own
+    /// **names**, never a name derived from an accessor.
+    ///
+    /// `Path::file_name` yields the string `"bin"` for `bin()` and for
+    /// `shell_bin()` alike, so the keep-set the shipped code had
+    /// (`reserved_name(&home.bin())`) survives a mechanical
+    /// `bin() → shell_bin()` rename **byte for byte** — it compiles, it runs,
+    /// and a legacy `bin/` stays at the home root forever with C-074 and C-076
+    /// unimplemented.
+    ///
+    /// RED, and it is the mutation that matters: restore the derived keep-set
+    /// in either spelling —
+    /// `let reserved = [reserved_name(&home.shell_bin(DEFAULT_SHELL)), reserved_name(&home.gitignore())];`
+    /// with the `reserved.iter().any(…)` skip. Both spellings red this row
+    /// identically, which is the point.
+    #[tokio::test]
+    async fn a_legacy_bin_directory_at_the_home_root_is_not_kept_by_the_depth_1_scan() {
+        let tree = Tree::new();
+        tree.create_home_root();
+        std::fs::create_dir_all(tree.home.root().join("bin")).unwrap();
+
+        let scope = tree.scope();
+        let lock = lock_of(Vec::new());
+        let groups = groups_of(&[DEFAULT_GROUP]);
+        let platform = platform();
+        let report = render_with(
+            &tree.file_structure,
+            RenderRequest {
+                home: &tree.home,
+                scope: &scope,
+                lock: &lock,
+                surface: &[],
+                groups: &groups,
+                pinned: false,
+                platform: &platform,
+                dry_run: false,
+            },
+            false,
+            None,
+        )
+        .await
+        .expect("the render succeeds");
+
+        assert_eq!(
+            outcome_of(&report, &root_entry("bin")),
+            &RenderOutcome::Pruned,
+            "an **empty** legacy `bin/` is an ordinary depth-1 orphan: `remove_dir` takes it"
+        );
+        assert!(
+            !tree.home.root().join("bin").exists(),
+            "…and it is gone: {:?}",
+            read_dir_names(tree.home.root())
+        );
+        assert_eq!(
+            read_dir_names(tree.home.root()),
+            vec!["active".to_string(), "shells".to_string()],
+            "…leaving exactly the tree's own depth-1 names this render produced — `.gitignore` is \
+             step 3's and `links/` appears once a group renders"
+        );
+    }
+
+    /// C-076 — a **populated** legacy tree is reported with its remedy and
+    /// never deleted, on every render.
+    ///
+    /// Two runs, because "reported once" was dropped as unimplementable: the
+    /// report is derived from the tree as it stands, and the tree still stands.
+    ///
+    /// RED, and it is the one that matters (RUL-32): change `prune_within`'s
+    /// directory branch from `std::fs::remove_dir` to `remove_dir_all` — the
+    /// payload assertions red on the first run. RED for the *reported* half:
+    /// put the legacy names back in the keep-set — the `Skipped` assertions red
+    /// while the payloads still survive, so the two halves are independent and
+    /// both are needed.
+    #[tokio::test]
+    async fn a_legacy_tree_at_the_home_root_is_reported_and_never_deleted() {
+        let tree = Tree::new();
+        tree.create_home_root();
+        std::fs::create_dir_all(tree.home.root().join("oldgroup").join("oldentry")).unwrap();
+        std::fs::write(
+            tree.home.root().join("oldgroup").join("oldentry").join("payload"),
+            b"planted\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(tree.home.root().join("bin")).unwrap();
+        std::fs::write(tree.home.root().join("bin").join("oldtool"), b"#!/bin/sh\nlegacy\n").unwrap();
+
+        let scope = tree.scope();
+        let lock = lock_of(Vec::new());
+        let groups = groups_of(&[DEFAULT_GROUP]);
+        let platform = platform();
+        for run in 1..=2 {
+            let report = render_with(
+                &tree.file_structure,
+                RenderRequest {
+                    home: &tree.home,
+                    scope: &scope,
+                    lock: &lock,
+                    surface: &[],
+                    groups: &groups,
+                    pinned: false,
+                    platform: &platform,
+                    dry_run: false,
+                },
+                false,
+                None,
+            )
+            .await
+            .expect("a legacy tree is not an error");
+
+            for legacy in ["oldgroup", "bin"] {
+                let outcome = outcome_of(&report, &root_entry(legacy));
+                assert!(
+                    is_skipped(outcome),
+                    "run {run}: a populated `{legacy}/` is reported, never removed: {outcome:?}"
+                );
+                let RenderOutcome::Skipped { path, reason } = outcome else {
+                    unreachable!("just asserted");
+                };
+                assert_eq!(path, &tree.home.root().join(legacy), "run {run}: …naming its own path");
+                assert!(!reason.is_empty(), "run {run}: …with a non-empty reason (RUL-41)");
+            }
+            assert_eq!(
+                std::fs::read(tree.home.root().join("oldgroup").join("oldentry").join("payload")).unwrap(),
+                b"planted\n",
+                "run {run}: RUL-32 — the payload is byte-identical, never recursed into"
+            );
+            assert_eq!(
+                std::fs::read(tree.home.root().join("bin").join("oldtool")).unwrap(),
+                b"#!/bin/sh\nlegacy\n",
+                "run {run}: …and so is the legacy trampoline"
+            );
+        }
+    }
+
+    /// C-074's second trap — **every** directory the tree owns is refused when
+    /// it is a symlink, not only the home root and the trampoline directory.
+    ///
+    /// This layout inserts `links/` and `shells/` between the home root and
+    /// every entry link, and no shipped guard judged them:
+    /// `publish_link_within` checks an entry's *immediate* parent —
+    /// `links/<group>`, never `links` — and `create_owner_only` is
+    /// `DirBuilder::recursive(true)`, i.e. `create_dir_all`, which follows an
+    /// existing symlink. A committed `.ocx/toolchain/links -> /outside` would
+    /// otherwise put every group directory and every entry link outside the
+    /// home on a plain `ocx pull`.
+    ///
+    /// RED: shrink `tree_own_directories` back to `[root, shell_bin]` — the
+    /// `links` and `shells` rows write into `outside/` and both assertions
+    /// fire.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_tree_own_directory_is_refused_when_it_is_a_symlink() {
+        for relative in ["links", "shells", "shells/default", "shells/default/bin"] {
+            let tree = Tree::new();
+            std::fs::create_dir_all(tree.home.root()).unwrap();
+            let outside = tree.tmp.path().join(format!("outside-{}", relative.replace('/', "-")));
+            std::fs::create_dir_all(&outside).unwrap();
+
+            let planted = tree.home.root().join(relative);
+            std::fs::create_dir_all(planted.parent().unwrap()).unwrap();
+            crate::symlink::create(&outside, &planted).unwrap();
+
+            let lock = lock_of(vec![locked_tool(
+                "cmake",
+                DEFAULT_GROUP,
+                "ns/cmake",
+                &[(PLATFORM_KEY, 'a')],
+            )]);
+            let groups = groups_of(&[DEFAULT_GROUP]);
+            let platform = platform();
+            let report = tree
+                .manager()
+                .render_toolchain(RenderRequest {
+                    home: &tree.home,
+                    scope: &tree.scope(),
+                    lock: &lock,
+                    surface: &[node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])],
+                    groups: &groups,
+                    pinned: false,
+                    platform: &platform,
+                    dry_run: false,
+                })
+                .await
+                .expect("RUL-33 — a refused tree is a skip, never an error");
+
+            assert!(
+                report.items.is_empty() && !report.stamp_written,
+                "`{relative}` as a symlink refuses the whole render before anything is written: {report:?}"
+            );
+            assert_eq!(
+                read_dir_names(&outside),
+                Vec::<String>::new(),
+                "…and nothing was written through it into {outside:?}"
+            );
+        }
+    }
+
+    /// C-081, row 1 — an **absent** `active` is created, silently.
+    ///
+    /// RED: delete the create arm — `active` stays absent and `bin()` resolves
+    /// to nothing for every PATH route.
+    #[tokio::test]
+    async fn an_absent_active_link_is_created_by_the_render() {
+        let tree = Tree::new();
+        let report = render_a_default_tool(&tree).await;
+
+        assert!(
+            crate::symlink::is_link(&tree.home.active()),
+            "…and it is a link, not a directory: {:?}",
+            read_dir_names(tree.home.root())
+        );
+        assert!(
+            tree.home.active_is_valid(DEFAULT_SHELL),
+            "C-080 — at exactly its derived target"
+        );
+        assert_eq!(
+            tree.bin_entries(),
+            expected_bin_entries(&["cmake"]),
+            "…and the trampoline landed in the physical directory: {report:?}"
+        );
+    }
+
+    /// C-081, corrupt-states row 21, the **heal** half — an `active` pointing
+    /// outside the home is repointed before anything is written.
+    ///
+    /// RED: delete the `replace_atomic` arm from [`heal_active`] — the link
+    /// stays pointed at `outside/` and both assertions fire.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_active_pointing_outside_the_home_is_repointed_by_the_render() {
+        let tree = Tree::new();
+        std::fs::create_dir_all(tree.home.root()).unwrap();
+        let outside = tree.tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        crate::symlink::create(&outside, tree.home.active()).unwrap();
+
+        let report = render_a_default_tool(&tree).await;
+
+        assert!(
+            tree.home.active_is_valid(DEFAULT_SHELL),
+            "the hostile link is repointed at its derived target: {report:?}"
+        );
+        assert_eq!(
+            read_dir_names(&outside),
+            Vec::<String>::new(),
+            "…and nothing was written through it on the way"
+        );
+    }
+
+    /// C-080, corrupt-states row 21, the **anchor** half — the render writes,
+    /// prunes and stamps through the *physical* directory even while `active`
+    /// points outside the home.
+    ///
+    /// # Why this drives `render_with` and not the public entry
+    ///
+    /// Step 6 heals `active` before the body runs, so a hostile link planted
+    /// before `ocx pull` is gone by the time `reconcile_bin` writes — and a row
+    /// that plants it there therefore measures the heal and **cannot** observe
+    /// the anchors at all. That was this row's first form, and mutating
+    /// `reconcile_bin`, `fingerprint_bin` and `prune_within` back to `bin()`
+    /// each left it green.
+    ///
+    /// The state this row is about is the one the anchors exist for and the
+    /// heal cannot rule out: `active` is a symlink, and **any process that can
+    /// write the home can swing it at any instant** — the render lock is
+    /// ocx's own convention and stops no one (R12). So the link is swung after
+    /// the fixture's steps 2–6 and before the body, which is exactly where a
+    /// concurrent repoint lands.
+    ///
+    /// RED: revert `reconcile_bin`'s binding, `write_render_stamp`'s
+    /// `fingerprint_bin` argument, `artifact_path`'s trampoline arm or
+    /// `prune_within`'s trampoline parent to `home.bin()`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_render_writes_prunes_and_stamps_through_the_physical_directory() {
+        let tree = Tree::new();
+        tree.create_home_root();
+        // A committed orphan, so the prune pass has something to act on too.
+        std::fs::create_dir_all(tree.home.shell_bin(DEFAULT_SHELL)).unwrap();
+        std::fs::write(tree.home.shell_bin(DEFAULT_SHELL).join("orphan"), b"#!/bin/sh\n").unwrap();
+
+        let outside = tree.tmp.path().join("outside");
+        std::fs::create_dir_all(outside.join("bin")).unwrap();
+        std::fs::write(outside.join("bin").join("orphan"), b"not ours\n").unwrap();
+        crate::symlink::replace_atomic(&outside, tree.home.active()).unwrap();
+        assert!(
+            !tree.home.active_is_valid(DEFAULT_SHELL),
+            "precondition: `active` is swung outside the home, as a concurrent writer leaves it"
+        );
+
+        let surface = vec![node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])];
+        let scope = tree.scope();
+        let lock = lock_of(vec![locked_tool(
+            "cmake",
+            DEFAULT_GROUP,
+            "ns/cmake",
+            &[(PLATFORM_KEY, 'a')],
+        )]);
+        let groups = groups_of(&[DEFAULT_GROUP]);
+        let platform = platform();
+        let report = render_with(
+            &tree.file_structure,
+            RenderRequest {
+                home: &tree.home,
+                scope: &scope,
+                lock: &lock,
+                surface: &surface,
+                groups: &groups,
+                pinned: false,
+                platform: &platform,
+                dry_run: false,
+            },
+            false,
+            None,
+        )
+        .await
+        .expect("the render succeeds");
+
+        assert_eq!(
+            tree.bin_entries(),
+            expected_bin_entries(&["cmake"]),
+            "the write and the prune both acted on the physical directory: {report:?}"
+        );
+        assert_eq!(
+            read_dir_names(&outside.join("bin")),
+            vec!["orphan".to_string()],
+            "…and the attacker's directory was neither written into nor pruned"
+        );
+        assert_eq!(
+            std::fs::read(outside.join("bin").join("orphan")).unwrap(),
+            b"not ours\n",
+            "…byte-identical, not merely present"
+        );
+        let stamp = tree.stamp().expect("the stamp exists");
+        assert_eq!(
+            stamp.bin_fingerprint.keys().cloned().collect::<Vec<_>>(),
+            expected_bin_entries(&["cmake"]),
+            "…and the stamp certifies what landed, never what `active` pointed at: {stamp:?}"
+        );
+    }
+
+    /// C-080, corrupt-states row 22 — validity is **raw** equality with the
+    /// derived target, never a containment or canonicalising test.
+    ///
+    /// `shells/../shells/default` is contained *and* resolves to exactly the
+    /// right directory, and it is still not the value this tree writes. A
+    /// containment test admits it; a canonicalising compare admits it; only raw
+    /// equality repoints it.
+    ///
+    /// RED: swap `active_is_valid`'s `read_link` for `dunce::canonicalize`, or
+    /// replace the equality with a `starts_with` containment check — the link
+    /// is left as it is and the target assertion fires.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_active_that_resolves_correctly_by_a_different_spelling_is_still_repointed() {
+        let tree = Tree::new();
+        std::fs::create_dir_all(tree.shell_directory()).unwrap();
+        crate::symlink::create(
+            Path::new("shells").join("..").join("shells").join(DEFAULT_SHELL),
+            tree.home.active(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::canonicalize(tree.home.active()).unwrap(),
+            std::fs::canonicalize(tree.shell_directory()).unwrap(),
+            "precondition: the planted spelling resolves to the right directory, so only a raw \
+             comparison can reject it"
+        );
+
+        render_a_default_tool(&tree).await;
+
+        assert_eq!(
+            std::fs::read_link(tree.home.active()).unwrap(),
+            tree.home.expected_active_target(DEFAULT_SHELL),
+            "the raw target is the one this tree writes, not merely one that resolves there"
+        );
+    }
+
+    /// C-081, row 4 (inverted from the corrupt-states matrix, which asserted
+    /// the opposite) — a **real directory** at `active` is the `cp -rL` /
+    /// Docker `COPY` / zip outcome, and it is healed: removed and replaced by
+    /// the link. Its contents do **not** survive, because they are a copy of
+    /// the tree this render is about to rewrite.
+    ///
+    /// RED: drop the `remove_dir_all` arm and refuse instead — `active` stays a
+    /// directory and the link assertion fires. RED for the carve-out's bound:
+    /// replace `remove_dir_all` with `remove_dir` — a populated copy fails
+    /// `ENOTEMPTY` and the same assertion fires.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_real_directory_at_active_is_healed_rather_than_refused() {
+        let tree = Tree::new();
+        std::fs::create_dir_all(tree.home.active().join("bin")).unwrap();
+        std::fs::write(tree.home.active().join("bin").join("stale"), b"copied\n").unwrap();
+
+        render_a_default_tool(&tree).await;
+
+        assert!(
+            crate::symlink::is_link(&tree.home.active()),
+            "the dereferenced copy is replaced by the link it was a copy of"
+        );
+        assert!(tree.home.active_is_valid(DEFAULT_SHELL), "…at its derived target");
+        assert_eq!(
+            tree.bin_entries(),
+            expected_bin_entries(&["cmake"]),
+            "…and the physical directory holds exactly this render's output"
+        );
+    }
+
+    /// C-081, row 5 — `active` occupied by a **regular file** is removed and
+    /// re-created, never renamed over.
+    ///
+    /// `rename(2)` replaces a regular file silently, so a heal that reached
+    /// `replace_atomic` unconditionally would lose the bytes without ever
+    /// observing the kind — and would say nothing about it.
+    ///
+    /// RED: drop the kind dispatch and call `symlink::replace_atomic`
+    /// unconditionally. On POSIX the rename succeeds, so this row stays green
+    /// on the *outcome* — which is why it asserts the **file arm was taken**,
+    /// by planting a FIFO too: `rename` over a FIFO also succeeds, but
+    /// `remove_file` is the only path that can also clear a directory-free
+    /// non-file on Windows, where the rename fails.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn active_occupied_by_a_non_directory_is_removed_and_re_created() {
+        for plant in ["file", "fifo"] {
+            let tree = Tree::new();
+            std::fs::create_dir_all(tree.home.root()).unwrap();
+            if plant == "file" {
+                std::fs::write(tree.home.active(), b"not a link\n").unwrap();
+            } else {
+                mkfifo(&tree.home.active());
+            }
+
+            render_a_default_tool(&tree).await;
+
+            assert!(
+                crate::symlink::is_link(&tree.home.active()),
+                "a {plant} at `active` is removed and replaced by the link"
+            );
+            assert!(
+                tree.home.active_is_valid(DEFAULT_SHELL),
+                "…at its derived target ({plant})"
+            );
+        }
+    }
+
+    /// C-081, corrupt-states row 28 — a **self-referential** `active` is
+    /// repointed, and the call returns.
+    ///
+    /// RED: make the heal canonicalise the existing link before deciding —
+    /// `ELOOP` surfaces and the render never finishes the step. RED for the
+    /// two-step cycle: an equality check against the link's own path catches
+    /// `active -> active` and sails straight past `active -> b`, `b -> active`,
+    /// which is why both are planted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_cyclic_active_is_repointed_without_hanging() {
+        for cycle in ["self", "two-step"] {
+            let tree = Tree::new();
+            std::fs::create_dir_all(tree.home.root()).unwrap();
+            if cycle == "self" {
+                crate::symlink::create("active", tree.home.active()).unwrap();
+            } else {
+                crate::symlink::create("b", tree.home.active()).unwrap();
+                crate::symlink::create("active", tree.home.root().join("b")).unwrap();
+            }
+
+            render_a_default_tool(&tree).await;
+
+            assert!(
+                tree.home.active_is_valid(DEFAULT_SHELL),
+                "the {cycle} cycle is repointed at the derived target"
+            );
+        }
+    }
+
+    /// C-083, corrupt-states row 31 — the shell directory is created **before**
+    /// `active`, so an interrupted render never leaves a link to a directory
+    /// that does not exist.
+    ///
+    /// A lookup through an absent `active` is a **miss**; a lookup through a
+    /// link into nothing is an error every reader then has to be careful to
+    /// read as a mismatch. The order is the whole guarantee.
+    ///
+    /// **Driven through the fault seam, because the finished tree cannot show
+    /// it.** With both writes landed the tree is byte-identical either way —
+    /// the swapped order publishes a dangling link and then creates its target
+    /// — so an assertion over the finished state passes with the calls
+    /// reversed. Measured: it did.
+    ///
+    /// RED: swap the two calls in step 6 — `active` is present, and dangling,
+    /// at the abort.
+    #[tokio::test]
+    async fn an_interrupted_render_never_leaves_active_pointing_at_an_absent_shell() {
+        let tree = Tree::new();
+        let _lock = crate::test::env::lock();
+        // SAFETY: nextest gives every test its own process, and `EnvLock`
+        // serialises this write against every test that goes through
+        // `crate::test::env`. `read_fault_hook` reads `std::env::var_os`, which
+        // the override table does not reach, so the variable has to be real.
+        unsafe { std::env::set_var("__OCX_TESTING_RENDER_FAULT", FAULT_AFTER_SHELL_TREE) };
+
+        let lock = lock_of(vec![locked_tool(
+            "cmake",
+            DEFAULT_GROUP,
+            "ns/cmake",
+            &[(PLATFORM_KEY, 'a')],
+        )]);
+        let groups = groups_of(&[DEFAULT_GROUP]);
+        let platform = platform();
+        let outcome = tree
+            .manager()
+            .render_toolchain(RenderRequest {
+                home: &tree.home,
+                scope: &tree.scope(),
+                lock: &lock,
+                surface: &[node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])],
+                groups: &groups,
+                pinned: false,
+                platform: &platform,
+                dry_run: false,
+            })
+            .await;
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("__OCX_TESTING_RENDER_FAULT") };
+
+        assert!(outcome.is_err(), "precondition: the seam aborted the render");
+        assert!(
+            tree.shell_directory().is_dir(),
+            "the shell directory had already landed at the abort: {:?}",
+            read_dir_names(tree.home.root())
+        );
+        assert!(
+            tree.home.active().symlink_metadata().is_err(),
+            "…and `active` had not — an absent link is a miss, a dangling one is not"
+        );
+    }
+
+    /// One render of one default-group tool, through the **public** entry, so
+    /// step 6 runs. Returns the report.
+    async fn render_a_default_tool(tree: &Tree) -> RenderReport {
+        let lock = lock_of(vec![locked_tool(
+            "cmake",
+            DEFAULT_GROUP,
+            "ns/cmake",
+            &[(PLATFORM_KEY, 'a')],
+        )]);
+        let groups = groups_of(&[DEFAULT_GROUP]);
+        let platform = platform();
+        tree.manager()
+            .render_toolchain(RenderRequest {
+                home: &tree.home,
+                scope: &tree.scope(),
+                lock: &lock,
+                surface: &[node(pinned("ns/cmake", 'a'), Some(&["cmake"]), &[])],
+                groups: &groups,
+                pinned: false,
+                platform: &platform,
+                dry_run: false,
+            })
+            .await
+            .expect("the render succeeds")
+    }
+
+    fn root_entry(name: &str) -> RenderedArtifact {
+        RenderedArtifact::RootEntry(name.to_string())
     }
 }

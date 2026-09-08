@@ -436,6 +436,17 @@ impl ToolchainHome {
         self.root.join(SHELLS_DIR).join(shell).join(TOOLCHAIN_BIN_DIR)
     }
 
+    /// `active`'s one legal target (C-079) — the value the renderer writes
+    /// and [`Self::active_is_valid`] compares against.
+    ///
+    /// Exposed because the heal and the predicate must not derive it twice:
+    /// C-081 writes the link, C-080 validates it, and a second derivation in
+    /// the renderer would be exactly the drift a *derived* target exists to
+    /// rule out.
+    pub fn expected_active_target(&self, shell: &str) -> PathBuf {
+        expected_active_target(&self.root, shell)
+    }
+
     /// Whether `<root>/active` is a link at exactly its derived target
     /// (C-080).
     ///

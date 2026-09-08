@@ -133,6 +133,11 @@ fn describe_artifact(artifact: &RenderedArtifact) -> String {
         RenderedArtifact::Trampoline(name) => format!("trampoline {name:?}"),
         RenderedArtifact::Link { group, entry } => format!("link {entry:?} in group {group:?}"),
         RenderedArtifact::GroupDirectory(group) => format!("group directory {group:?}"),
+        // Never "group directory": depth 1 is closed and tree-owned (C-071), so
+        // a name found there is a leftover of the pre-`links/` layout or a
+        // foreign file, and calling it a group would tell the user to look for
+        // an `ocx.toml` table that does not exist.
+        RenderedArtifact::RootEntry(name) => format!("home-root entry {name:?}"),
     }
 }
 
@@ -620,11 +625,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn commit_and_render_reconciles_bin_after_the_commit_lands() {
         let tree = Tree::new();
-        let stale = tree
-            .project_dir
-            .join(".ocx")
-            .join("toolchain")
-            .join("bin")
+        // Through the accessor, never a literal join: the trampoline directory
+        // the renderer writes is `shells/<shell>/bin`, and a hand-built
+        // `<root>/bin` here would seed a directory the render never reads.
+        let stale = crate::file_structure::ToolchainHome::new(tree.project_dir.join(".ocx").join("toolchain"))
+            .shell_bin(crate::file_structure::DEFAULT_SHELL)
             .join("stale");
         std::fs::create_dir_all(stale.parent().expect("bin has a parent")).expect("bin/ is creatable");
         std::fs::write(&stale, b"#!/bin/sh\n").expect("the stale trampoline is writable");
@@ -678,11 +683,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn commit_and_render_covers_bin_even_when_the_lock_declares_no_default_group() {
         let tree = Tree::new();
-        let stale = tree
-            .project_dir
-            .join(".ocx")
-            .join("toolchain")
-            .join("bin")
+        // Through the accessor, never a literal join: the trampoline directory
+        // the renderer writes is `shells/<shell>/bin`, and a hand-built
+        // `<root>/bin` here would seed a directory the render never reads.
+        let stale = crate::file_structure::ToolchainHome::new(tree.project_dir.join(".ocx").join("toolchain"))
+            .shell_bin(crate::file_structure::DEFAULT_SHELL)
             .join("stale");
         std::fs::create_dir_all(stale.parent().expect("bin has a parent")).expect("bin/ is creatable");
         std::fs::write(&stale, b"#!/bin/sh\n").expect("the stale trampoline is writable");
