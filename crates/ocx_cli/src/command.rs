@@ -127,8 +127,9 @@ pub enum Command {
     /// Resolve tool tags to digests and write ocx.lock.
     ///
     /// Re-renders the project toolchain into `<project>/.ocx/toolchain/` - or
-    /// under the `toolchain-dir` root, when one is configured - so the link
-    /// tree and its `bin/` launchers match the lock just written. That
+    /// under the `toolchain-dir` root, when one is configured - so the
+    /// `links/<group>/<entry>` tree and the `shells/default/bin` launchers
+    /// reached through the `active` link match the lock just written. That
     /// directory carries its own `.gitignore`, so `git status` stays clean.
     Lock(lock::Lock),
     /// Authenticate to a registry and persist credentials.
@@ -150,9 +151,10 @@ pub enum Command {
     /// and rejects an unknown group or name (exit 64).
     ///
     /// Re-renders the project toolchain into `<project>/.ocx/toolchain/` - or
-    /// under the `toolchain-dir` root, when one is configured - so the link
-    /// tree and its `bin/` launchers follow the advanced lock. That directory
-    /// carries its own `.gitignore`, so `git status` stays clean.
+    /// under the `toolchain-dir` root, when one is configured - so the
+    /// `links/<group>/<entry>` tree and the `shells/default/bin` launchers
+    /// reached through the `active` link follow the advanced lock. That
+    /// directory carries its own `.gitignore`, so `git status` stays clean.
     Update(update::Update),
     /// Internal subcommands used by generated entry-point launchers (hidden).
     #[command(subcommand)]
@@ -183,7 +185,8 @@ pub enum Command {
     /// Drops each binding from `ocx.lock` as well, then re-renders the project
     /// toolchain into `<project>/.ocx/toolchain/` - or under the
     /// `toolchain-dir` root, when one is configured - so the removed tools
-    /// leave the link tree and its `bin/` launchers. That directory carries
+    /// leave the `links/<group>/<entry>` tree and the `shells/default/bin`
+    /// launchers reached through the `active` link. That directory carries
     /// its own `.gitignore`, so `git status` stays clean.
     #[command(visible_alias = "rm")]
     Remove(remove::Remove),
