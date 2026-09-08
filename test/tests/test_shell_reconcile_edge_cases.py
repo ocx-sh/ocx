@@ -3781,7 +3781,15 @@ def test_ec_ident_013_read_only_commands_never_create_a_project_state_dir(arena:
     stamp = matrix.stamp_dir(arena.ocx_home, key)
     assert not stamp.exists(), "fixture sanity: must start with no project state dir at all"
 
-    for command in (["env"], ["inspect"], ["shell", "state"], ["self", "activate"]):
+    # `self activate` carries `--shell=bash` for the reason `_path_segments` in
+    # test_toolchain_render.py pins the same flag: without it the arm is chosen
+    # by `Shell::detect`, which walks the process tree and then falls back to
+    # `$SHELL` — which `Arena.env` does not set. A suite run detached from its
+    # launching shell finds no shell at all, and this command then exits 64
+    # before it does any of the work this row is about, so the "no state dir"
+    # assertion below would hold because nothing ran. Measured: rc 64, empty
+    # output, from an orphaned process group.
+    for command in (["env"], ["inspect"], ["shell", "state"], ["self", "activate", "--shell=bash"]):
         result = subprocess.run(
             [str(arena.ocx), "--offline", "--format", "json", *command],
             cwd=str(project), capture_output=True, check=False, text=True, env=arena.env(),
