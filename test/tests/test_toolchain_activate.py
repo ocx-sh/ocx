@@ -1059,8 +1059,18 @@ def test_owned_prefixes_exclude_a_sibling_project_and_the_toolchain_dir_root(
     # the arena's home. `$OCX_HOME` is not an option — it is already an owned
     # prefix, so every planted segment below would be owned for the wrong reason
     # and the row would pass while proving nothing.
+    #
+    # The runner has to be moved onto that home as well, and this is the whole
+    # reason the line exists: C-017 is evaluated against the **process** `$HOME`,
+    # and `OcxRunner.env` carries the real host one. Every `ocx` this row runs
+    # outside a shell — `package create`, `lock`, `pull`, `shell state` — is
+    # therefore judged against `/home/<user>`, so the row passed only while
+    # pytest's basetemp happened to sit under it. Measured: with
+    # `--basetemp=/tmp/…` the first `ocx package create` exits 78 naming this
+    # very root, and with the assignment below it passes from either basetemp.
     root = arena.home / "toolchain-root"
     root.mkdir()
+    ocx.env["HOME"] = str(arena.home)
     write_toolchain_dir_config(ocx, root)
 
     project = locked_project(ocx, tmp_path, label="d8a")
