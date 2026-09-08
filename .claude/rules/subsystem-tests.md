@@ -110,6 +110,43 @@ task test:parallel     # pytest-xdist (-n auto)
 cd test && uv run pytest tests/test_install.py::test_name -v
 ```
 
+## Observing a Running Suite
+
+An acceptance run that has gone quiet is either **slow** or **hung**, and the two
+need opposite actions. Never guess — poll four fields and let the discriminator
+decide. Contention with another checkout's gate over the shared registry is the
+usual cause of slow, and it is indistinguishable from hung until measured.
+
+Three checks lie here. Each has produced a wrong verdict in this repo:
+
+- **Never pipe a gate through `tail` / `head`.** The status you get back is the
+  *pipeline's* — the pager's — and is always 0. `task claude:tests | tail -15`
+  reported success over `29 failed`; `task website:build | tail` reported success
+  over a hard failure. Redirect to a file, then read the file.
+- **Never use `find -newermt` to test for recent activity.** It returns silent
+  false negatives under this host's command proxy, so "nothing was touched" is
+  evidence of nothing at all. Use `ls -lt` or `stat`.
+- **Never read the parent's CPU time.** `uv run` and `pytest` both `wait()` on
+  children, so both sit at `00:00:00` CPU straight through a healthy run. The
+  work is always in a leaf `ocx` descendant.
+
+| Field | Read it with | Means |
+|---|---|---|
+| Leaf process | `pgrep -a -P <pytest-pid>` | the `ocx` subprocess actually working. Legitimately absent *between* tests |
+| Leaf age | `ps -o etime,time -p <leaf-pid>` | a package push older than ~5 min is wedged, not slow |
+| Progress | `ls -1 <basetemp>/pytest-of-*/pytest-0/ \| wc -l` | test directories created; monotonic while progressing |
+| Contention | `pgrep -c -f 'pytest tests/'` | `>1` means another checkout's gate is sharing the registry on `:5000` |
+
+Verdict, across two polls 60-120s apart:
+
+- Test-dir count rose → **slow**, not hung. Measure contention before killing anything.
+- Count static, same leaf PID, leaf CPU static → **hung** in that subprocess.
+- pytest alive, no leaf, count static → **hung inside pytest** — collection, a fixture, or a lock.
+
+Killing a wedged run is scoped to your own checkout or basetemp
+(`pkill -f 'basetemp=<yours>'`). Never `pkill -f 'pytest tests/'` — it matches an
+identical run in every sibling worktree on this host.
+
 ## Adding a New Test
 
 1. Create function in appropriate `test/tests/test_*.py` (or new file)
@@ -223,3 +260,10 @@ failed assert on a missing prerequisite over `pytest.skip`.
 ## Quality Gate
 
 During review-fix loops, run `task test:parallel` — not full `task verify`. Direct `uv run pytest` never builds: it runs the existing `test/bin/ocx` (stale after Rust changes — refresh via `task test` / `task test:parallel`, which rebuild with `--features ocx/__testing` and copy the binary there).
+
+**Never run `task website:build` while an acceptance suite is running.** Its
+`website:recordings:ensure-binary` step rebuilds `-p ocx` in *release* — without
+`--features ocx/__testing` — and copies the result over `test/bin/ocx`. A suite
+that survives the swap runs its remaining rows against a binary with no test
+seams and reports a meaningless green. The only thing that reliably prevents it
+is the `Text file busy` you get from overwriting a binary that is executing.
