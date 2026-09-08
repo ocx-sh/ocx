@@ -86,6 +86,16 @@
       "tag": "sha384.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       "reserved": false,
       "why": "prefix matches sha384, but hex length is sha256's -- catches a prefix-only check"
+    },
+    {
+      "tag": "__ocx.keep.sha256-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "reserved": true,
+      "why": "GC-safety keep tag, the form ocx writes since ocx-sh/ocx 00bb8343 -- note the `-` separator, deliberately unlike the legacy `sha256.<hex>` alias, whose `.` was one character off the OCI dist-spec's reserved `sha256-<hex>` referrers-fallback tag"
+    },
+    {
+      "tag": "__ocx.keep.sha256-zzz",
+      "reserved": true,
+      "why": "reservation is by the __ocx prefix, not by a well-formed keep body -- an implementation that only reserves a parseable `<algorithm>-<hex>` leaks a malformed keep tag through as a version"
     }
   ]
 }
