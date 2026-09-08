@@ -579,6 +579,19 @@ def assert_key_and_binary_namespaces_stay_disjoint(project: ToolchainProject) ->
     names = bin_entries(project.home)
     links = link_entries(project.home)
 
+    # Both helpers answer empty on a missing tree, so without these two lines
+    # the whole negative is satisfied by a home that was never rendered — and
+    # every consumer inherits that, which is the opposite of what the docstring
+    # promises.
+    assert names, (
+        f"the negative is vacuous on an unrendered tree: no launchers under "
+        f"{project.home}"
+    )
+    assert links, (
+        f"the negative is vacuous on an unrendered tree: no links under "
+        f"{project.home}"
+    )
+
     for key in (project.default_key, project.group_key):
         assert key not in names, (
             f"a `[tools]` key must never appear as a `bin/` entry; {key!r} did, "

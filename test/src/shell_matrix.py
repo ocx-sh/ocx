@@ -80,7 +80,12 @@ BASE_PATH = os.pathsep.join(["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "
 # Both strings are pinned against the binary, one layer out:
 # `test_self_activate.py` asserts the install-bin half appears in the emitted
 # startup stream, and `test_toolchain_activate._session_dirs` asserts the
-# toolchain half equals the `toolchain_bin` field `ocx shell state` reports.
+# toolchain half equals the `toolchain_bin` field `ocx shell state` reports —
+# but that comparison realpaths both sides through `active`, so it pins the
+# *identity*, not the spelling. A producer that regressed to registering
+# `shells/default/bin` would still satisfy it. The `active/bin` **spelling** is
+# pinned by `test_shell_reconcile_edge_cases.py` and `test_session_path.py`,
+# which compare raw strings.
 # `test_ec_path_005` and `test_ec_rec_001` then compare a live shell's PATH
 # against `session_path_dirs()` element for element, and fail the moment either
 # string below stops naming what the reconciler contributes.

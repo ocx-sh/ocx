@@ -3794,6 +3794,15 @@ def test_ec_ident_013_read_only_commands_never_create_a_project_state_dir(arena:
             [str(arena.ocx), "--offline", "--format", "json", *command],
             cwd=str(project), capture_output=True, check=False, text=True, env=arena.env(),
         )
+        # The witness the absence needs: without it this row cannot tell a
+        # command that ran and wrote nothing from one that exited before doing
+        # any work. Pinning `--shell=bash` closed the one cause that was
+        # measured (exit 64 on an undetectable shell, #434); this closes the
+        # class, so a future early exit in any of the four reds the row.
+        assert result.returncode == 0, (
+            f"`ocx {' '.join(command)}` must run before its non-effect means anything; "
+            f"rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
         assert not stamp.exists(), (
             f"`ocx {' '.join(command)}` must never create {stamp} — a read-only command must not silently consent "
             f"to the project it is diagnosing:\nrc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -4529,6 +4538,9 @@ def test_traceability_every_pytest_and_manual_row_names_a_real_covering_test() -
     # never-matching-entry diagnostic)
     # + EC-GRANT-025 and EC-GRANT-026 (round 3: the per-platform ASCII-case
     # fold, and the single-wildcard rule)
+    # + EC-SCOPE-010 and EC-HOOK-018 (the closed depth-1 toolchain tree: the
+    # `active/bin` spelling on the session PATH, and the withhold on a
+    # dangling `active`) — both rows, so the count below is fully accounted for
     # + EC-HOOK-018 (ocx#397: a project created under an unchanged `$PWD`).
     assert len(register) == 236, f"the register must still parse to exactly 236 rows; got {len(register)}"
     test_to_ids = _this_modules_test_to_ids()
