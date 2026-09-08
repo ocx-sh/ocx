@@ -215,10 +215,10 @@ pub mod keys {
     /// the environment tier of `config.toml`'s `toolchain-dir`
     /// (`plan_toolchain_activation.md` C-008 / C-016).
     ///
-    /// **Resolution-affecting**: it moves where `<group>/<entry>` links and
-    /// `bin/` trampolines live, so every composed path a child ocx emits
-    /// changes with it. Carried on [`OcxConfigView`] and forwarded by
-    /// [`Env::apply_ocx_config`], which **removes** any inherited value when
+    /// **Resolution-affecting**: it moves where the `links/<group>/<entry>`
+    /// links and the `shells/default/bin` trampolines live, so every composed
+    /// path a child ocx emits changes with it. Carried on [`OcxConfigView`] and
+    /// forwarded by [`Env::apply_ocx_config`], which **removes** any inherited value when
     /// the parent resolved none — otherwise a stale parent-shell export beats
     /// the outer ocx's parsed state in every child.
     ///
@@ -456,7 +456,7 @@ pub struct OcxConfigView {
     /// in-project `<project>/.ocx/toolchain` default.
     ///
     /// Resolution-affecting, and that is the whole reason it travels: it moves
-    /// `<home>/toolchain/<group>/<entry>`, so a child ocx that resolved a
+    /// `<home>/toolchain/links/<group>/<entry>`, so a child ocx that resolved a
     /// different root would emit composed paths pointing at another tree.
     /// Forwarded as [`keys::OCX_TOOLCHAIN_DIR`], set-or-**remove** like
     /// [`keys::OCX_CONFIG`] and [`keys::OCX_INDEX`].
@@ -5342,7 +5342,7 @@ mod tests {
     // ── C-008: `OCX_TOOLCHAIN_DIR` on the child env ────────────────────────
 
     /// C-008: a resolved `toolchain-dir` travels to a child ocx, because it
-    /// moves `<home>/toolchain/<group>/<entry>` and is therefore
+    /// moves `<home>/toolchain/links/<group>/<entry>` and is therefore
     /// resolution-affecting.
     #[test]
     fn apply_ocx_config_sets_ocx_toolchain_dir_when_some() {

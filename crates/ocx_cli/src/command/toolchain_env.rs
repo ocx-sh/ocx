@@ -670,8 +670,9 @@ pub(crate) async fn resolve_global_pinned_env(
     let mut toolchain = None;
     if let Some(lock) = &lock {
         let selected_groups = selected_groups_global(groups, lock);
-        // RUL-104 — `ocx --global pull` renders `$OCX_HOME/toolchain/<group>/
-        // <entry>`, so this emitter follows that tree like the other three
+        // RUL-104 — `ocx --global pull` renders
+        // `$OCX_HOME/toolchain/links/<group>/<entry>`, so this emitter follows
+        // that tree like the other three
         // (C-065). The group set is the **lock-derived** one computed here, not
         // the config-expanded env-group set above: a group declaring only
         // `[group.<g>.env]` and no tools has no links, and C-070 is precisely

@@ -179,7 +179,7 @@ pub struct ProjectConfig {
     /// Toolchain-tier `activate` mode (`plan_toolchain_activation.md`
     /// C-006 / C-012) — whether a project's rendered toolchain reaches a
     /// shell via per-prompt environment composition (`env`, the ladder's
-    /// floor), a `PATH` entry for `<home>/toolchain/bin` (`bin`), or
+    /// floor), a `PATH` entry for `<home>/toolchain/active/bin` (`bin`), or
     /// neither (`none`). `None` means fall through to
     /// `OCX_TOOLCHAIN_ACTIVATE`, never [`crate::activate::ACTIVATE_FLOOR`]
     /// directly — only the ladder's own floor applies that default.
@@ -195,7 +195,7 @@ pub struct ProjectConfig {
 
     /// Toolchain-tier `pinned` setting (`plan_toolchain_activation.md`
     /// C-007 / C-012) — whether composed paths follow the rendered
-    /// `<group>/<entry>` links (`false`, the ladder's floor) or pin to
+    /// `links/<group>/<entry>` links (`false`, the ladder's floor) or pin to
     /// digest roots (`true`). `None` means fall through to
     /// `OCX_TOOLCHAIN_PINNED`; "unset" and "explicitly false" stay
     /// distinguishable all the way down the ladder, which is why this is

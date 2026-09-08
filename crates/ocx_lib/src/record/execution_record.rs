@@ -1025,7 +1025,7 @@ fn executable_block(inputs: &RecordInputs<'_>) -> BTreeMap<String, String> {
 /// # Why the canonical retry exists (RUL-82, RUL-97)
 ///
 /// C-065 makes a following-lane composition emit
-/// `<home>/toolchain/<group>/<entry>/…` on `PATH`, and `which::which_in` keeps
+/// `<home>/toolchain/links/<group>/<entry>/…` on `PATH`, and `which::which_in` keeps
 /// whichever spelling it resolved through — so from this function's side every
 /// project-tier `ocx exec` arrives holding a link path. A raw containment test
 /// answers "not in the store" for all of them, which would record
@@ -1093,7 +1093,8 @@ fn executable_kind(store_relative: &Path) -> Option<&'static str> {
 ///
 /// Both arms go through [`relative_to`], for the same reason the store
 /// containment test does: on the following lane the executable arrives spelled
-/// as a `<home>/toolchain/<group>/<entry>` link, and a raw `starts_with` against
+/// as a `<home>/toolchain/links/<group>/<entry>` link, and a raw `starts_with`
+/// against
 /// the digest root would drop `sh.ocx.package` from every project-tier frame.
 fn owning_root<'a>(inputs: &'a RecordInputs<'_>) -> Option<&'a Arc<InstallInfo>> {
     inputs.packages.iter().find(|info| {
@@ -1885,7 +1886,7 @@ mod tests {
     }
 
     /// RUL-82 / RUL-97 — a following-lane executable, spelled as the
-    /// `<home>/toolchain/<group>/<entry>` link C-065 puts on `PATH`, still
+    /// `<home>/toolchain/links/<group>/<entry>` link C-065 puts on `PATH`, still
     /// records as an ocx package.
     ///
     /// `which::which_in` keeps whichever spelling it resolved through, so from

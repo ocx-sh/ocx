@@ -621,7 +621,7 @@ mod tests {
     ///
     /// Nothing upstream refuses one: `default_ocx_root` takes `$OCX_HOME`
     /// verbatim, so `OCX_HOME=ocxhome ocx self setup` would otherwise put the
-    /// relative `ocxhome/toolchain/bin` into the registry value, the
+    /// relative `ocxhome/toolchain/active/bin` into the registry value, the
     /// `environment.d` line and the LaunchAgent alike — a lookup directory
     /// every later process resolves against *its own* working directory.
     ///

@@ -168,8 +168,9 @@ pub enum Command {
     /// Fetches every digest-pinned entry the project `ocx.lock` declares into
     /// the local object store, then renders the project toolchain into
     /// `<project>/.ocx/toolchain/` - or under the `toolchain-dir` root, when
-    /// one is configured: one link per `<group>/<entry>`, plus the `bin/`
-    /// launchers for the default group. That directory carries its own
+    /// one is configured: one link per `links/<group>/<entry>`, plus the
+    /// `shells/default/bin` launchers for the default group, reached through the
+    /// `active` link. That directory carries its own
     /// `.gitignore`, so `git status` stays clean. This is the primary way a
     /// project toolchain is rendered; `--dry-run` reports the delta and writes
     /// nothing.

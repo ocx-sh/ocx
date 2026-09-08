@@ -1093,7 +1093,7 @@ fn synth_entrypoints_path_for(pkg: &PackageDir) -> Entry {
 //
 // Two spellings name one directory: the digest root
 // `<packages>/<registry>/<shard>/<digest>`, and the rendered link
-// `<home>/toolchain/<group>/<entry>` that points at it. The digest root
+// `<home>/toolchain/links/<group>/<entry>` that points at it. The digest root
 // **pins** — an `ocx update` that repoints the link leaves an already-composed
 // digest path running the previous package. The link **follows**.
 //
@@ -1156,7 +1156,7 @@ pub(crate) enum PathLane {
 /// (`ocx package env` / `ocx package exec`, which have no toolchain tree),
 /// a project that has never been pulled, and a render C-050 skipped.
 pub(crate) struct ComposePaths {
-    /// Digest root → the `<home>/toolchain/<group>/<entry>` link naming it.
+    /// Digest root → the `<home>/toolchain/links/<group>/<entry>` link naming it.
     ///
     /// Keyed by the digest root because that is what the composer holds: an
     /// [`InstallInfo`] carries a pinned identifier, never a group and a name.
@@ -7853,7 +7853,7 @@ mod wp15_following_lane_spec_tests {
     // ── C-065 / C-067 / C-070: the following lane ───────────────────────────
 
     /// C-065 — a selected group's entry composes through
-    /// `<home>/<group>/<entry>`, not through its digest root. The link is
+    /// `<home>/links/<group>/<entry>`, not through its digest root. The link is
     /// absent to begin with, which is the ordinary post-`git pull` state, and
     /// C-070's heal creates it (RUL-29) before the probe runs.
     ///
@@ -7878,7 +7878,7 @@ mod wp15_following_lane_spec_tests {
         assert_eq!(
             tree.following(&paths, &digest_root),
             tree.entry(DEFAULT_GROUP, "cmake"),
-            "C-065 — the following lane emits `<home>/<group>/<entry>`"
+            "C-065 — the following lane emits `<home>/links/<group>/<entry>`"
         );
     }
 
@@ -7946,7 +7946,7 @@ mod wp15_following_lane_spec_tests {
     /// `heal_links` leaves exactly as it found it, because it has no delete
     /// authority inside a repository-controlled tree.
     ///
-    /// RED: emitting the `<home>/<group>/<entry>` spelling for every lock entry
+    /// RED: emitting the `<home>/links/<group>/<entry>` spelling for every lock entry
     /// of a selected group regardless of what the probe answered — the emitted
     /// path would then name a regular file and every consumer would break.
     #[tokio::test]
@@ -8348,7 +8348,7 @@ mod wp15_following_lane_spec_tests {
     /// C-065 — "a package's real bin directory **and every dereference value**"
     /// composed through the link: the root's declared `${installPath}/bin`
     /// carrier and its synthetic `entrypoints/` entry both name
-    /// `<home>/<group>/<entry>/…` rather than the digest root.
+    /// `<home>/links/<group>/<entry>/…` rather than the digest root.
     ///
     /// This is the case that proves the seam is wired into the emitters rather
     /// than merely computed: `ComposePaths` could resolve a perfect map and
