@@ -453,10 +453,10 @@ def admit_publishing_project(fake_forge: FakeForge) -> None:
     reading as a success row.
 
     A bare `job_token_env()` row must NOT call it, and that is the opposite
-    error rather than a harmless one. Both lists answer 403 to a job token, so
-    the seeding is never read and the row succeeds through `unknown` — but a
-    reader takes the call as the reason it succeeds, and the row then stops
-    depending on the refusal it is actually resting on.
+    error rather than a harmless one. Both lists refuse a job token outright (a
+    401, per #432), so the seeding is never read and the row succeeds through
+    `unknown` — but a reader takes the call as the reason it succeeds, and the
+    row then stops depending on the refusal it is actually resting on.
     """
     fake_forge.gitlab_job_token_allowlist[INDEX_FULL] = [PUBLISHING_PROJECT]
 
@@ -1474,9 +1474,9 @@ def test_allowlist_miss_86_names_both_projects(
     the index measures the same-project fast path instead.
 
     The **split pair**, for the reason the group row below gives: both admission
-    lists want Maintainer or Owner, so a bare job token is answered 403 on each
-    and the row is permanently `unknown` — a posture in which this refusal
-    cannot happen at all. A miss is only reachable by a credential that can read
+    lists refuse a bare job token outright (401, #432), so the row is
+    permanently `unknown` — a posture in which this refusal cannot happen at
+    all. A miss is only reachable by a credential that can read
     the lists and finds the publisher in neither.
 
     Mutation: return `Admits` on an empty list — the run pushes and this reds.
@@ -1513,8 +1513,8 @@ def test_allowlist_admits_by_group_and_the_run_pushes(
 
     The **split pair**, for the same reason
     `::test_job_token_push_disabled_86_before_any_push` uses it: both allowlist
-    endpoints want Maintainer or Owner, so under a bare job token they answer 403
-    and the row is permanently `unknown` — the posture in which the defect is
+    endpoints refuse a bare job token outright (401, #432), so the row is
+    permanently `unknown` — the posture in which the defect is
     unreachable. The Maintainer token is the one an operator reaches for first,
     and reading the list is what turned a masked miss into a refusal.
 
@@ -1722,7 +1722,7 @@ def test_unknown_preflight_with_successful_push_exits_0(
     invocation log.
 
     No `admit_publishing_project`: under a bare job token both admission lists
-    answer 403, so `job-token-allowlist` is `unknown` here too and a seeded list
+    answer 401, so `job-token-allowlist` is `unknown` here too and a seeded list
     would never be read. Leaving it out is what makes this row depend on that
     refusal — with the fake serving the lists instead, the empty one is a miss
     and this reds at 86.
@@ -1849,9 +1849,9 @@ def test_job_token_run_reads_only_endpoints_a_job_token_may_call(
     leave the allowlist row unreadable. Either route quietly starting to answer
     turns its `unknown` into a verdict and reds here.
 
-    No `admit_publishing_project` either, for the same reason: a list that is
-    403 is never read, so seeding it would only disguise where the `unknown`
-    comes from.
+    No `admit_publishing_project` either, for the same reason: a list that
+    refuses a job token outright (401, #432) is never read, so seeding it would
+    only disguise where the `unknown` comes from.
 
     Mutation: restore `branch_sha`'s single-branch URL — the run exits 1 with
     `MissingBaseRef`, and the branch assertions red.
@@ -2913,9 +2913,10 @@ def test_claim_inside_a_gitlab_job_authors_with_the_job_token(
     No `admit_publishing_project`, and its absence is load-bearing rather than
     an omission: `CI_PROJECT_PATH` is a different project from the index, so the
     push is cross-project and the admission lists are read — and a bare job
-    token is answered 403 on both, which is `unknown` and proceeds. Seeding the
-    list would make the run pass without ever depending on that refusal; with
-    the lists served instead, the unseeded one is a miss and this reds at 86.
+    token is refused outright on both (401, #432), which is `unknown` and
+    proceeds. Seeding the list would make the run pass without ever depending on
+    that refusal; with the lists served instead, the unseeded one is a miss and
+    this reds at 86.
 
     S-014's remaining clause — "the push authors as the invoking human" — is
     GitLab-side attribution the fixture cannot model; the half ocx controls is

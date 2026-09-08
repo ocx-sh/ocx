@@ -205,9 +205,12 @@ class GitLabRoutes:
         branch answer **404** — what a self-hosted 19.3 was observed to answer,
         and the status the client cannot tell apart from "no such project",
         which is the whole reason #429's failure named the wrong thing. Both
-        `job_token_scope` lists answer **403**: they are on the endpoint list,
-        and what refuses them is the Maintainer-or-Owner bar the credential does
-        not clear.
+        `job_token_scope` lists answer **401**, which is what the same 19.3 was
+        observed to answer a `JOB-TOKEN` header there (#432) — the same status
+        the users API gives a job token, and NOT the 403 the Maintainer-or-Owner
+        bar suggests. That reasoning is why this file served 403 and why the
+        suite was green while the real instance exited 80: a status nobody
+        measured, chosen because it read plausibly.
 
         https://docs.gitlab.com/ci/jobs/ci_job_token/#job-token-access
         """
@@ -348,6 +351,25 @@ class GitLabRoutes:
             matched = [name for name in refs if name.startswith(search[1:])]
         else:
             matched = [name for name in refs if search in name]
+        # #436's premise, armed per read and charged only against a name this
+        # listing would otherwise have returned. A denied name is withheld from
+        # the LISTING only — the bare repository keeps its ref and a raw read at a
+        # sha still answers — which is the disagreement the report describes and
+        # the only one that produces the defect.
+        #
+        # After the search filter, not before: the announce path lists `^main`
+        # too, and charging every armed name on every listing would spend the
+        # count on a read that never asked about that branch. Here rather than in
+        # `gl_get_branch` because the client resolves a branch through the list
+        # (#429), and that single-branch route already 404s a job token.
+        with self.lock:
+            for name in list(matched):
+                key = f"{full_path}/{name}"
+                remaining = self.gitlab_branch_reads_denied.get(key, 0)
+                if remaining > 0:
+                    self.gitlab_branch_reads_denied[key] = remaining - 1
+                    matched.remove(name)
+                    del refs[name]
         # Reverse order, deliberately. GitLab orders by name, under which the
         # exact match sorts FIRST among its own prefixes (`main` before
         # `main-old` before `maintenance`) — and a fixture that hands the wanted
@@ -460,7 +482,7 @@ class GitLabRoutes:
 
         Three outcomes (C-029): a list CONTAINING the publishing project passes;
         a list without it is a miss and refuses at 86 naming both project paths;
-        a 403 is `unreadable`, which proceeds. An absent key is an EMPTY list —
+        a refusal is `unreadable`, which proceeds. An absent key is an EMPTY list —
         a miss — and never an unreadable one: a single "absent means unreadable"
         rule would make the miss unreachable, and the two produce different exit
         codes.
@@ -472,19 +494,20 @@ class GitLabRoutes:
         project on page two into a false 86 before any push. Serving the
         requested window is what makes the walk observable at all.
 
-        403 is the **production-common** answer, not an edge case: the endpoint
-        requires Maintainer or Owner on the index project while the preflight's
-        own bar is Developer, so the publisher this check exists for reads
-        `unknown` rather than a verdict. That makes the 86-miss path reachable
-        only under a credential that clears the bar — the split pair — which the
-        consuming rows say in their own doc comments.
+        Refusal is the **production-common** answer, not an edge case: the
+        endpoint requires Maintainer or Owner on the index project while the
+        preflight's own bar is Developer, so the publisher this check exists for
+        reads `unknown` rather than a verdict. That makes the 86-miss path
+        reachable only under a credential that clears the bar — the split pair —
+        which the consuming rows say in their own doc comments.
         """
-        # 403, not the 404 the project and branch routes answer: this endpoint
-        # IS on the job-token list and is still refused, by the Maintainer bar.
-        # Serving it would hand a client an admission no real instance would —
-        # which is exactly how #429 shipped out of this file.
+        # 401, not the 404 the project and branch routes answer, and not the 403
+        # the Maintainer bar suggests: a self-hosted 19.3 answers a `JOB-TOKEN`
+        # header here with `401 Unauthorized` (#432). Serving anything else hands
+        # the client a refusal shape no real instance sends — which is how both
+        # #429 and #432 shipped out of this file.
         if self.gl_job_token_refuses(handler):
-            handler._reply_json(403, {"message": "403 Forbidden"})
+            handler._reply_json(401, {"message": "401 Unauthorized"})
             return
         per_page = int((query.get("per_page") or ["20"])[0])
         page = int((query.get("page") or ["1"])[0])
@@ -509,8 +532,7 @@ class GitLabRoutes:
 
         Same three outcomes and the same offset pagination as the projects list
         above, deliberately — GitLab documents both endpoints identically, down
-        to the Maintainer-or-Owner bar that makes 403 the production-common
-        answer.
+        to the 401 a job token is refused with (#432).
 
         The pagination is walked by
         `test_transport_git.py::test_allowlist_group_admission_is_walked_past_the_first_page`,
@@ -526,12 +548,11 @@ class GitLabRoutes:
 
         https://docs.gitlab.com/api/project_job_token_scopes/
         """
-        # 403, not the 404 the project and branch routes answer: this endpoint
-        # IS on the job-token list and is still refused, by the Maintainer bar.
-        # Serving it would hand a client an admission no real instance would —
-        # which is exactly how #429 shipped out of this file.
+        # 401, for the same reason and from the same observation as the projects
+        # list above (#432): GitLab documents both endpoints identically and a
+        # 19.3 refuses both the same way.
         if self.gl_job_token_refuses(handler):
-            handler._reply_json(403, {"message": "403 Forbidden"})
+            handler._reply_json(401, {"message": "401 Unauthorized"})
             return
         per_page = int((query.get("per_page") or ["20"])[0])
         page = int((query.get("page") or ["1"])[0])
