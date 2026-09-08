@@ -543,11 +543,10 @@ pub(crate) fn deregister(
 
     if dry_run {
         // Both pieces of evidence the real run acts on, so the prediction
-        // cannot disagree with it: the plist, and the live session value.
-        // `symlink_metadata`, not `Path::exists` — a dangling symlink at the
-        // store is present, it just does not resolve, and reporting it absent
-        // would claim there was nothing to remove.
-        let present = std::fs::symlink_metadata(&path).is_ok() || session_carries_any(&encoded);
+        // cannot disagree with it: the plist, and the live session value. The
+        // plist is judged by what it *carries*, never by its mere presence —
+        // see [`remove_agent`], whose real run is gated the same way.
+        let present = plist_carries_any(&path, &encoded) || session_carries_any(&encoded);
         let outcome = if present {
             SessionPathOutcome::Removed
         } else {
@@ -585,15 +584,25 @@ pub(crate) fn deregister(
 /// `ocx self setup` — a **registration** — as the remedy for a deregistration.
 #[cfg(target_os = "macos")]
 fn remove_agent(path: &Path, directories: &[&str]) -> std::io::Result<bool> {
-    let uid = gui_domain_uid();
-    // Deliberately ignored: an agent that is not loaded is the ordinary state
-    // after a manual removal, and `bootout` reports that as a non-zero exit.
-    let _ = boot_agent_out(uid);
-
-    let changed = match std::fs::remove_file(path) {
-        Ok(()) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error),
+    // Gated on what the plist carries, not on whether one exists. `ocx self
+    // setup` calls the deregistration on every run with C-084's retired
+    // `<root>/bin` and then registers the current directories: booting the
+    // agent out and deleting a plist that names only the *current* ones would
+    // reload the agent on every re-run and report `written` where C-036
+    // promises `unchanged`.
+    let changed = if plist_carries_any(path, directories) {
+        let uid = gui_domain_uid();
+        // Deliberately ignored: an agent that is not loaded is the ordinary
+        // state after a manual removal, and `bootout` reports that as a
+        // non-zero exit.
+        let _ = boot_agent_out(uid);
+        match std::fs::remove_file(path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error),
+        }
+    } else {
+        false
     };
 
     let session_changed = match subtract_from_session(directories) {
@@ -624,6 +633,34 @@ fn subtract_from_session(directories: &[&str]) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Whether the plist at `path` carries any of `directories`.
+///
+/// An unreadable or absent plist carries nothing, which is the honest answer
+/// for a store this writer cannot name a segment in — [`register`] republishes
+/// it wholesale on the same run either way.
+#[cfg(target_os = "macos")]
+fn plist_carries_any(path: &Path, directories: &[&str]) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|contents| carries_any(&contents, directories))
+}
+
+/// Whether a rendered plist's text carries any of `directories`.
+///
+/// Matched on the whole `dN='<dir>'` assignment [`merge_script`] writes, never
+/// as a bare substring of the plist: the document also carries the *script*
+/// that reads those directories, so `contains` answers yes for any text that
+/// appears in it — a directory one of the assignments merely begins with
+/// (`<root>/toolchain/active`) included. The delimiters are exact because
+/// [`encode`] refuses both `'` and a newline in a directory, so the assignment
+/// line cannot be forged from a directory's own text.
+///
+/// Pure and host independent, like [`merge_script`] itself, so the rule it
+/// encodes has a reachable red state on every CI leg rather than only on macOS.
+pub fn carries_any(contents: &str, directories: &[&str]) -> bool {
+    directories
+        .iter()
+        .any(|directory| contents.contains(&format!("='{directory}'\n")))
+}
+
 /// Whether the live session value still carries any of `directories`.
 ///
 /// The half of the removal a `--dry-run` can observe without writing, so the
@@ -642,6 +679,37 @@ fn session_carries_any(directories: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **C-036 / C-084, on every host.** The retirement `ocx self setup`
+    /// performs on every run names a directory the published plist does not
+    /// carry, and a plist that carries nothing named must be left where it is:
+    /// deleting it boots the login agent out and makes the registration that
+    /// follows a write, so every re-run reports `written` where C-036 promises
+    /// `unchanged`.
+    ///
+    /// "Carries" is the whole assignment line, not any text in the document —
+    /// which is what a bare `contains` would answer, for a prefix of an
+    /// assignment as readily as for the assignment itself.
+    #[test]
+    fn a_plist_carries_a_directory_only_as_a_whole_assignment() {
+        let current = PathBuf::from("/home/u/.ocx/toolchain/active/bin");
+        let plist = render_plist(std::slice::from_ref(&current)).expect("no refusal");
+
+        assert!(
+            carries_any(&plist, &[current.to_str().expect("utf-8")]),
+            "the directory the plist prepends is one it carries"
+        );
+        for absent in ["/home/u/.ocx/toolchain/bin", "/home/u/.ocx/toolchain/active"] {
+            assert!(
+                !carries_any(&plist, &[absent]),
+                "`{absent}` is not a directory this plist prepends"
+            );
+        }
+        assert!(
+            !carries_any("", &["/home/u/.ocx/toolchain/bin"]),
+            "an empty store carries nothing"
+        );
+    }
 
     /// C-040: the location and the label are the contract, and the plist stem
     /// is the label — so a reader who knows one knows the other.

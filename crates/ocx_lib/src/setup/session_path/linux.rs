@@ -172,15 +172,68 @@ pub fn encode(directory: &Path) -> Result<&str, SessionPathError> {
 /// [`SessionPathError`] from [`encode`], for the first directory that cannot
 /// be encoded.
 pub fn render_conf(directories: &[PathBuf]) -> Result<String, SessionPathError> {
-    let mut segments = Vec::with_capacity(directories.len() + 1);
+    let mut segments = Vec::with_capacity(directories.len());
     for directory in directories {
         segments.push(encode(directory)?);
     }
-    // `$PATH` last, and appended rather than interpolated into a `:`-prefixed
-    // literal: with no directories the line is `PATH=$PATH`, never a leading
-    // `:` — which every reader takes as the working directory.
-    segments.push("$PATH");
-    Ok(format!("PATH={}\n", segments.join(":")))
+    Ok(prepend_line(&segments))
+}
+
+/// The `PATH=` line carrying `segments`, in order, ahead of the inherited
+/// value.
+///
+/// The one place the file's shape is spelled, so [`render_conf`] and the
+/// subtractive rewrite in [`deregister`] cannot drift into two spellings of
+/// one line.
+///
+/// `$PATH` is appended as a segment rather than interpolated into a
+/// `:`-prefixed literal: with no directories the line is `PATH=$PATH`, never a
+/// leading `:` — which every reader takes as the working directory.
+fn prepend_line(segments: &[&str]) -> String {
+    let mut all = Vec::with_capacity(segments.len() + 1);
+    all.extend_from_slice(segments);
+    all.push(INHERITED);
+    format!("{PREPEND_PREFIX}{}\n", all.join(":"))
+}
+
+/// The assignment every line this writer emits begins with.
+const PREPEND_PREFIX: &str = "PATH=";
+
+/// The tail every line this writer emits ends with — the session manager's own
+/// value, which the prepend composes onto rather than replaces.
+const INHERITED: &str = "$PATH";
+
+/// The directories `content` would still prepend once `removed` are taken out,
+/// or `None` when it prepends none of them — nothing to subtract, and the
+/// caller must leave the store alone.
+///
+/// An empty `Some` is not the same answer: it means the store carried our
+/// segments and nothing survives them, which is [`deregister`]'s cue to delete
+/// the file rather than publish `PATH=$PATH`.
+///
+/// Pure and host independent, like [`render_conf`] — the `environment.d`
+/// delimiter is `:` on every host that reads the format, so this is not
+/// [`crate::utility::path::remove_segment`], whose separator is the *running*
+/// host's.
+///
+/// Comparison is **segment-exact**, which is the property C-084 needs and not
+/// a stylistic one: the retirement names one directory under the same root as
+/// the two that stay, so a prefix- or substring-shaped match would take
+/// `<root>/toolchain/active/bin` out with `<root>/toolchain` and leave the
+/// machine with no toolchain on PATH at all. `content` that is not this
+/// writer's shape is `None`.
+pub fn subtract<'a>(content: &'a str, removed: &[&str]) -> Option<Vec<&'a str>> {
+    let value = content.strip_prefix(PREPEND_PREFIX)?.trim_end_matches('\n');
+    let carried: Vec<&str> = value
+        .split(':')
+        .filter(|segment| !segment.is_empty() && *segment != INHERITED)
+        .collect();
+    let survivors: Vec<&str> = carried
+        .iter()
+        .copied()
+        .filter(|segment| !removed.contains(segment))
+        .collect();
+    (survivors.len() != carried.len()).then_some(survivors)
 }
 
 /// Write `ocx.conf`, creating `environment.d/` when absent.
@@ -264,13 +317,28 @@ fn write_conf(path: &Path, content: &str) -> std::io::Result<()> {
     crate::utility::fs::write_bytes_atomic(path, content.as_bytes())
 }
 
-/// Delete `ocx.conf`.
+/// Subtract `directories` from `ocx.conf`, and delete the file when nothing of
+/// ours survives them.
 ///
-/// The file carries nothing but our own prepend, so deleting it subtracts
-/// exactly the two segments and touches no other variable and no other file —
-/// in particular not `~/.profile`, whose managed block belongs to
-/// [`crate::setup::rc_block`]. An absent file is
-/// [`SessionPathOutcome::Unchanged`], not an error.
+/// **Subtractive, not a deletion** — contract (3) of
+/// [`super`], and the reason is a caller rather than a principle: `ocx self
+/// setup` calls this on *every* run with C-084's retired `<root>/bin` and then
+/// registers the current directories. A writer that deleted the store because
+/// it existed would take the current entries with it, make the following
+/// registration a write on a machine that was already correct, and report
+/// `written` where C-036 promises `unchanged` — and would predict `unchanged`
+/// under `--dry-run` for the same tree, because the file the prediction reads
+/// is still there.
+///
+/// So the store is read, the named segments are taken out of it, and it is
+/// touched at all only when it carried one. Removing the last of them removes
+/// the file: the conf exists to prepend, and `PATH=$PATH` is a drop-in that
+/// does nothing. A store that cannot be read carries no segment this function
+/// can name, so it is [`SessionPathOutcome::Unchanged`] and left where it is —
+/// the register path replaces it wholesale on the same run.
+///
+/// Nothing else is touched: not a sibling drop-in, and not `~/.profile`, whose
+/// managed block belongs to [`crate::setup::rc_block`].
 ///
 /// # Errors
 ///
@@ -283,22 +351,28 @@ pub(crate) fn deregister(
     directories: &[PathBuf],
     dry_run: bool,
 ) -> Result<(PathBuf, SessionPathOutcome), SessionPathError> {
-    // The one `?` on this path, and it runs before the store is touched.
+    // The one `?` on this path, and it runs before the store is read.
+    let mut removed = Vec::with_capacity(directories.len());
     for directory in directories {
-        encode(directory)?;
+        removed.push(encode(directory)?);
     }
     let path = conf_path(home);
 
-    // `symlink_metadata`, not `Path::exists`: a dangling symlink at the store
-    // is present — it just does not resolve — and reporting it absent would
-    // leave it in place while claiming there was nothing to remove.
-    if std::fs::symlink_metadata(&path).is_err() {
+    let Ok(content) = std::fs::read_to_string(&path) else {
         return Ok((path, SessionPathOutcome::Unchanged));
-    }
+    };
+    let Some(survivors) = subtract(&content, &removed) else {
+        return Ok((path, SessionPathOutcome::Unchanged));
+    };
     if dry_run {
         return Ok((path, SessionPathOutcome::Removed));
     }
-    let outcome = match std::fs::remove_file(&path) {
+    let written = if survivors.is_empty() {
+        std::fs::remove_file(&path)
+    } else {
+        write_conf(&path, &prepend_line(&survivors))
+    };
+    let outcome = match written {
         Ok(()) => SessionPathOutcome::Removed,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => SessionPathOutcome::Unchanged,
         Err(error) => {
@@ -810,6 +884,108 @@ mod tests {
         let (_, outcome) = deregister(&home, &directories(), false).expect("an absent store is not an error");
 
         assert_eq!(outcome, SessionPathOutcome::Unchanged);
+    }
+
+    /// **C-036 / C-084, and the defect this pair was written for.** The
+    /// retirement `ocx self setup` performs on every run names a directory the
+    /// store does not carry, so it must not touch the store at all.
+    ///
+    /// A `deregister` that deleted `ocx.conf` because it *existed* passes every
+    /// other test in this file and still breaks the command: the registration
+    /// that follows re-creates the file, so a second `ocx self setup` reports
+    /// `written` on a machine that was already correct — and `--dry-run`, which
+    /// deletes nothing, predicts `unchanged` for the same tree.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deregistering_a_directory_the_store_does_not_carry_leaves_it_untouched() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = tmp_home(root.path());
+        register(&home, &directories(), false).expect("no refusal");
+        let before = std::fs::read(conf_path(&home)).expect("the conf exists");
+
+        let (_, outcome) =
+            deregister(&home, &[PathBuf::from("/home/u/.ocx/toolchain/retired")], false).expect("no refusal");
+
+        assert_eq!(
+            outcome,
+            SessionPathOutcome::Unchanged,
+            "a store carrying none of the named directories is Unchanged, not Removed"
+        );
+        assert_eq!(
+            std::fs::read(conf_path(&home)).expect("the conf still exists"),
+            before,
+            "nothing was subtracted, so not one byte may move"
+        );
+    }
+
+    /// Contract (3) of [`super`]: the segments named go, the rest stay — the
+    /// store is rewritten, not deleted, while anything of ours survives.
+    ///
+    /// The fixture is C-084's migration run on the one machine that has
+    /// something to migrate: a store carrying the retired `<root>/bin` beside
+    /// the two directories that stay. The retired one goes, and what survives
+    /// keeps both its order and this writer's shape.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deregistration_subtracts_only_the_named_directories() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let home = tmp_home(root.path());
+        let retired = PathBuf::from("/home/u/.ocx/toolchain/bin");
+        let current = PathBuf::from("/home/u/.ocx/toolchain/active/bin");
+        let install = PathBuf::from("/home/u/.ocx/symlinks/abc/current/content/bin");
+        register(&home, &[retired.clone(), current.clone(), install.clone()], false).expect("no refusal");
+
+        let (_, outcome) = deregister(&home, &[retired], false).expect("no refusal");
+
+        assert_eq!(outcome, SessionPathOutcome::Removed);
+        assert_eq!(
+            std::fs::read_to_string(conf_path(&home)).expect("the conf survives its own subtraction"),
+            render_conf(&[current, install]).expect("no refusal"),
+            "the survivors keep their order and the file keeps this writer's shape"
+        );
+    }
+
+    /// The parser half of [`subtract`], on every host: what it answers `None`
+    /// for is what [`deregister`] must leave alone.
+    #[test]
+    fn subtraction_is_segment_exact_and_none_when_nothing_matches() {
+        let content = "PATH=/o/toolchain/active/bin:/o/install/bin:$PATH\n";
+
+        assert_eq!(
+            subtract(content, &["/o/toolchain"]),
+            None,
+            "a directory a carried segment merely begins with is not a carried segment"
+        );
+        assert_eq!(
+            subtract(content, &["/o/toolchain/active/bin/deeper"]),
+            None,
+            "nor is one that merely begins with a carried segment"
+        );
+        assert_eq!(
+            subtract(content, &["/o/toolchain/bin"]),
+            None,
+            "and the retired C-084 directory is not the current one"
+        );
+        assert_eq!(
+            subtract(content, &["/o/toolchain/active/bin"]),
+            Some(vec!["/o/install/bin"]),
+            "the named segment goes and `$PATH` is not a survivor — it is re-emitted by `prepend_line`"
+        );
+        assert_eq!(
+            subtract(content, &["/o/toolchain/active/bin", "/o/install/bin"]),
+            Some(Vec::new()),
+            "an empty `Some` is the delete-the-file answer, not the leave-it-alone one"
+        );
+        assert_eq!(
+            subtract("PATH=/o/install/bin\n", &["/o/install/bin"]),
+            Some(Vec::new()),
+            "a conf written without the `$PATH` tail still parses as its own segments"
+        );
+        assert_eq!(
+            subtract("# not this writer's file\n", &["/o/install/bin"]),
+            None,
+            "content that is not a `PATH=` line is left alone"
+        );
     }
 
     /// C-036: a dry-run deregistration reports without deleting.
