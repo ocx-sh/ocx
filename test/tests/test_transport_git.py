@@ -1321,12 +1321,13 @@ def test_merge_request_unconfirmed_exits_75_and_rerun_converges(
     """S-022: the push lands but no merge request appears within the poll bound →
     **75**; the rerun takes the refresh-commit direction and converges.
 
-    **This row costs ≥30 s of wall clock, and that is accepted rather than
-    worked around.** `CONFIRMATION_SCHEDULE` is a `const` (1 s / 30 s / 30 s
-    deadline) with no `__OCX_TESTING_*` seam, and adding one is an edit to a file
-    outside this package's set. Do not read the duration as a hang, and do not
-    shorten it by weakening the deadline assertion — the deadline IS the
-    contract.
+    **The poll is driven to exhaustion under :data:`CONFIRMATION_SEAM`**, which
+    scales `CONFIRMATION_SCHEDULE` to a 3 s deadline for this process. This row
+    used to cost ≥30 s of real time to state a claim that is a ratio and not a
+    duration; the ladder's shipped shape stays asserted, without sleeping, at
+    `git_workspace::tests::poll_uses_forge_poll_backoff_delays`. Do not weaken
+    the deadline assertion to shorten it further — the deadline IS the contract,
+    and the seam scales both sides of it.
 
     "The rerun exited 0" alone passes for a rerun that opened a **second** merge
     request, which is the duplicate S-003 forbids. The convergence triple is:
@@ -1349,15 +1350,31 @@ def test_merge_request_unconfirmed_exits_75_and_rerun_converges(
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
     fake_forge.git_http_merge_request_delay = None
 
-    first = announce_over_git(ocx, fake_forge, package, shim, home)
+    began = time.monotonic()
+    first = announce_over_git(
+        ocx, fake_forge, package, shim, home, extra_env=CONFIRMATION_SEAM
+    )
+    exhausted_in = time.monotonic() - began
     assert first.returncode == 75, f"an unconfirmed request is retryable: {first.stderr}"
+    # The seam's own red state. Nothing else here observes whether it applied:
+    # a shipped 30 s ladder exhausts too, just slower, so without this bound a
+    # typo in the variable name would leave the row green and thirty seconds
+    # slower — a seam that never applied, indistinguishable from one that did.
+    assert exhausted_in < 15.0, (
+        f"the poll ran the shipped 30 s ladder, not the 3 s seam ({exhausted_in:.1f}s) — "
+        f"`{next(iter(CONFIRMATION_SEAM))}` did not reach the binary"
+    )
     assert "again" in first.stderr.lower() or "rerun" in first.stderr.lower(), (
         f"the message names the rerun as the remedy: {first.stderr!r}"
     )
 
     fake_forge.git_http_merge_request_delay = 0.0
     second_shim = install_git_shim(tmp_path, subdirectory="git_shim_bin_2")
-    second = report(announce_over_git(ocx, fake_forge, package, second_shim, home))
+    second = report(
+        announce_over_git(
+            ocx, fake_forge, package, second_shim, home, extra_env=CONFIRMATION_SEAM
+        )
+    )
 
     pushes = fake_forge.git_pushes(INDEX_FULL)
     assert len(pushes) == 2, f"the rerun pushed: {pushes}"
@@ -2541,6 +2558,25 @@ def test_child_locale_is_pinned_to_c(
 #: spawn no `git` at all, so `::test_tempdir_removed_on_every_failure_path` would
 #: pass trivially for them. They are covered by their own rows above, which
 #: assert the empty logs as the contract rather than as a side effect.
+#: Scales `forge::git_workspace::CONFIRMATION_SCHEDULE` by 1/10 for one ocx
+#: process: `initial, max, deadline` in milliseconds, so the ladder becomes
+#: 100, 200, 400, 800, 1500 ms and gives up at 3 s instead of 30 s.
+#:
+#: Handed only to the rows that drive the poll to **exhaustion**. Those four --
+#: `::test_merge_request_unconfirmed_exits_75_and_rerun_converges` and the
+#: `merge-request-unconfirmed` arm of the three parametrised failure rows -- cost
+#: ~124 s of the acceptance suite's wall clock between them, all of it spent
+#: waiting out a bound whose claim is a ratio.
+#: `::test_merge_request_confirmed_within_bound` deliberately does **not** get
+#: it: that row's fixture delay is a real wall-clock race against the pre-loop
+#: probe, and scaling the schedule under it would mean scaling the delay too,
+#: ten times closer to the contention that makes such a race flaky. It already
+#: costs ~2 s.
+#:
+#: The shipped ladder stays asserted, without sleeping, at
+#: `git_workspace::tests::poll_uses_forge_poll_backoff_delays`.
+CONFIRMATION_SEAM: Mapping[str, str] = {"__OCX_TESTING_FORGE_CONFIRM_MS": "100,3000,3000"}
+
 FAILURE_ARMS: Mapping[str, Any] = {
     "info-refs-403": lambda forge, branch: setattr(forge, "git_http_forbid_info_refs", True),
     "receive-pack-403": lambda forge, branch: setattr(forge, "git_http_forbid_receive_pack", True),
@@ -2602,7 +2638,9 @@ def test_secret_absent_from_every_surface_on_every_failure_path(
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
     arm_failure(fake_forge, arm, branch_name(package))
 
-    result = announce_over_git(ocx, fake_forge, package, shim, home)
+    result = announce_over_git(
+        ocx, fake_forge, package, shim, home, extra_env=CONFIRMATION_SEAM
+    )
     assert result.returncode != 0, f"{arm} must fail, or this row measures the happy path: {result.stdout}"
 
     invocations = shim.invocations()
@@ -2709,7 +2747,9 @@ def test_git_failure_records_zero_rest_writes(
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
     arm_failure(fake_forge, arm, branch_name(package))
 
-    result = announce_over_git(ocx, fake_forge, package, shim, home)
+    result = announce_over_git(
+        ocx, fake_forge, package, shim, home, extra_env=CONFIRMATION_SEAM
+    )
     assert result.returncode != 0, f"{arm} must fail: {result.stdout}"
 
     assert fake_forge.requests, f"{arm}: the REST reads must have happened, or the negative is vacuous"
@@ -2735,7 +2775,9 @@ def test_tempdir_removed_on_every_failure_path(
     package, shim, home = prepare(ocx, fake_forge, git_package, tmp_path)
     arm_failure(fake_forge, arm, branch_name(package))
 
-    result = announce_over_git(ocx, fake_forge, package, shim, home)
+    result = announce_over_git(
+        ocx, fake_forge, package, shim, home, extra_env=CONFIRMATION_SEAM
+    )
     assert result.returncode != 0, f"{arm} must fail: {result.stdout}"
 
     invocations = shim.invocations()

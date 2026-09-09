@@ -80,6 +80,59 @@ pub const CONFIRMATION_SCHEDULE: PollSchedule = PollSchedule {
     request_timeout: super::poll::DEFAULT_REQUEST_TIMEOUT,
 };
 
+/// The `__testing`-gated seam that replaces [`CONFIRMATION_SCHEDULE`]'s three
+/// intervals, as `initial,max,deadline` **milliseconds**.
+///
+/// Why it exists: the schedule gives up at ~30 s of wall clock, and four
+/// acceptance rows drive it to exhaustion on purpose —
+/// `test_transport_git.py::test_merge_request_unconfirmed_exits_75_and_rerun_converges`
+/// plus the `merge-request-unconfirmed` arm of three parametrized rows — so the
+/// suite paid ~124 s of wall clock to observe a bound that is a *ratio*, not a
+/// duration. Scaling the ladder states the same claim in seconds. The ladder's
+/// shipped shape (`1, 2, 4, 8, 15`, deadline 30 s) stays asserted without
+/// sleeping, at `tests::poll_uses_forge_poll_backoff_delays`.
+///
+/// Compile-gated and `__OCX_TESTING_*`-named for the reasons the prefix exists:
+/// absent from release builds, reserved out of `Env::apply_ocx_config`, and
+/// undocumented in `website/src/docs/reference/environment.md`. Same shape as
+/// [`super::github`]'s `__OCX_TESTING_FORGE_BASE_URL`.
+#[cfg(any(test, feature = "__testing"))]
+const TESTING_CONFIRMATION_ENV: &str = "__OCX_TESTING_FORGE_CONFIRM_MS";
+
+/// [`CONFIRMATION_SCHEDULE`], or the [`TESTING_CONFIRMATION_ENV`] override.
+///
+/// **Panics** on a malformed value rather than falling back to the shipped
+/// schedule: a seam that silently ignores what it was handed turns a typo into
+/// a row that quietly out-waits the real deadline and still passes.
+#[cfg(any(test, feature = "__testing"))]
+fn confirmation_schedule() -> PollSchedule {
+    let Ok(raw) = std::env::var(TESTING_CONFIRMATION_ENV) else {
+        return CONFIRMATION_SCHEDULE;
+    };
+    let millis: Vec<u64> = raw
+        .split(',')
+        .map(|field| {
+            field.trim().parse().unwrap_or_else(|_| {
+                panic!("{TESTING_CONFIRMATION_ENV} must be `initial,max,deadline` milliseconds, got {raw:?}")
+            })
+        })
+        .collect();
+    let [initial, max, deadline] = millis[..] else {
+        panic!("{TESTING_CONFIRMATION_ENV} must name exactly three milliseconds values, got {raw:?}")
+    };
+    PollSchedule {
+        initial_interval: Duration::from_millis(initial),
+        max_interval: Duration::from_millis(max),
+        deadline: Duration::from_millis(deadline),
+        request_timeout: CONFIRMATION_SCHEDULE.request_timeout,
+    }
+}
+
+#[cfg(not(any(test, feature = "__testing")))]
+fn confirmation_schedule() -> PollSchedule {
+    CONFIRMATION_SCHEDULE
+}
+
 /// The `http.<prefix>` scope a credential injected for `remote` may be used
 /// under.
 ///
@@ -155,14 +208,18 @@ where
     if let Some(found) = confirmation_attempt(&probe).await? {
         return Ok(found);
     }
-    for delay in backoff_delays(&CONFIRMATION_SCHEDULE) {
+    // One read of the schedule, not one per use: the seam is an environment
+    // variable, and a ladder built from one read while the deadline reported on
+    // exhaustion came from another could disagree with itself.
+    let schedule = confirmation_schedule();
+    for delay in backoff_delays(&schedule) {
         tokio::time::sleep(delay).await;
         if let Some(found) = confirmation_attempt(&probe).await? {
             return Ok(found);
         }
     }
     Err(ForgeError::MergeRequestUnconfirmed {
-        deadline_secs: CONFIRMATION_SCHEDULE.deadline.as_secs(),
+        deadline_secs: schedule.deadline.as_secs(),
     })
 }
 

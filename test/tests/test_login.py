@@ -597,8 +597,26 @@ def test_login_json_format_emits_minimal_payload(
 # ---------------------------------------------------------------------------
 
 
+#: Replaces the credential helper's subprocess budget for one ocx process
+#: (`auth::store::helper_timeout`), in milliseconds.
+#:
+#: The budget is a `recv_timeout` argument, which cannot tell 500 ms from the
+#: shipped 30 s — so the row below observes exactly the same code path either
+#: way, and used to pay 30 s of the acceptance suite's wall clock for it. The
+#: shipped value is asserted where it lives, at
+#: `docker_credential::helper::tests::helper_timeout_is_thirty_seconds`.
+HELPER_TIMEOUT_SEAM = {"__OCX_TESTING_HELPER_TIMEOUT_MS": "500"}
+
+
 def test_login_helper_timeout_exits_75(ocx: OcxRunner, tmp_path: Path) -> None:
-    """Edge — helper hangs >30s ⇒ exit 75 (TempFail)."""
+    """Edge — a helper that hangs past the budget ⇒ exit 75 (TempFail).
+
+    The helper still sleeps for 60 s, which is what makes the pass mean the
+    budget fired rather than the child exiting on its own: the elapsed bound
+    below is an order of magnitude under that sleep, so a run where
+    :data:`HELPER_TIMEOUT_SEAM` failed to apply waits out the shipped 30 s and
+    reds here rather than passing slowly.
+    """
     docker_config_dir = tmp_path / "docker"
     docker_config_dir.mkdir()
     helper_dir = tmp_path / "helper_bin"
@@ -616,11 +634,14 @@ def test_login_helper_timeout_exits_75(ocx: OcxRunner, tmp_path: Path) -> None:
         docker_config_dir=docker_config_dir,
         helper_dir=helper_dir,
         stdin="tok\n",
+        extra_env=HELPER_TIMEOUT_SEAM,
         timeout=45.0,
     )
     elapsed = time.monotonic() - start
     assert result.returncode == 75, f"exit {result.returncode}, stderr: {result.stderr}"
-    assert elapsed < 35.0, f"timeout fired late ({elapsed:.1f}s)"
+    assert elapsed < 5.0, (
+        f"the run out-waited the shipped 30 s budget rather than the 500 ms seam ({elapsed:.1f}s)"
+    )
 
 
 def test_login_helper_failure_exits_80(ocx: OcxRunner, tmp_path: Path) -> None:

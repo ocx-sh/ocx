@@ -269,16 +269,65 @@ fn build_index_http_client(hardening: &TransportHardening) -> reqwest::Client {
     })
 }
 
+/// The `__testing`-gated seam that replaces the three shipped index timeouts,
+/// as `connect,idle,outer` **milliseconds**.
+///
+/// Why it exists: the shipped bounds are minutes, and the one acceptance row
+/// that can prove the *shipped binary* carries them
+/// (`test_index_servable_snapshot.py::test_a_slow_but_progressing_root_outlives_the_retired_total_deadline`)
+/// had no way to say anything without out-waiting the retired 60 s deadline in
+/// real time — 64.6 s of the acceptance suite's wall clock, on a fixture whose
+/// only claim is a ratio between two durations. Scaling both sides of that ratio
+/// says the same thing in seconds.
+///
+/// Compile-gated to `test` / `__testing` and named `__OCX_TESTING_*`, so it is
+/// absent from release builds, from `Env::apply_ocx_config` (the prefix is
+/// reserved, see `env::is_reserved_ocx_key`) and from
+/// `website/src/docs/reference/environment.md`. Same shape as
+/// `__OCX_TESTING_FORGE_BASE_URL` and `__OCX_SELF_IMAGE`.
+#[cfg(any(test, feature = "__testing"))]
+const TESTING_TIMEOUTS_ENV: &str = "__OCX_TESTING_INDEX_TIMEOUTS_MS";
+
+/// [`TESTING_TIMEOUTS_ENV`] parsed, or `None` when it is unset.
+///
+/// **Panics** on a malformed value rather than falling back to the shipped
+/// bounds. A seam that silently ignores what it was handed turns a typo into a
+/// test that quietly out-waits the real deadline and still passes — the exact
+/// class of green this seam is being introduced to remove.
+#[cfg(any(test, feature = "__testing"))]
+fn testing_hardening_override() -> Option<TransportHardening> {
+    let raw = std::env::var(TESTING_TIMEOUTS_ENV).ok()?;
+    let millis: Vec<u64> = raw
+        .split(',')
+        .map(|field| {
+            field.trim().parse().unwrap_or_else(|_| {
+                panic!("{TESTING_TIMEOUTS_ENV} must be `connect,idle,outer` milliseconds, got {raw:?}")
+            })
+        })
+        .collect();
+    let [connect, idle, outer] = millis[..] else {
+        panic!("{TESTING_TIMEOUTS_ENV} must name exactly three milliseconds values, got {raw:?}")
+    };
+    Some(TransportHardening {
+        connect_timeout: std::time::Duration::from_millis(connect),
+        idle_bound: std::time::Duration::from_millis(idle),
+        outer_cap: std::time::Duration::from_millis(outer),
+    })
+}
+
+#[cfg(not(any(test, feature = "__testing")))]
+fn testing_hardening_override() -> Option<TransportHardening> {
+    None
+}
+
 impl ReqwestIndexTransport {
     pub fn new() -> Self {
-        Self::with_hardening(
-            &TransportHardening {
-                connect_timeout: INDEX_CONNECT_TIMEOUT,
-                idle_bound: INDEX_IDLE_BOUND,
-                outer_cap: INDEX_OUTER_CAP,
-            },
-            RetryPolicy::default(),
-        )
+        let shipped = TransportHardening {
+            connect_timeout: INDEX_CONNECT_TIMEOUT,
+            idle_bound: INDEX_IDLE_BOUND,
+            outer_cap: INDEX_OUTER_CAP,
+        };
+        Self::with_hardening(&testing_hardening_override().unwrap_or(shipped), RetryPolicy::default())
     }
 
     /// Construction with the bounds injected — the seam D-011 keeps so a
@@ -4267,6 +4316,29 @@ mod transport_wire_tests {
             idle_bound: Duration::from_secs(5),
             outer_cap: Duration::from_secs(10),
         }
+    }
+
+    /// D-011: the bounds `ReqwestIndexTransport::new` ships are 30 s / 30 s /
+    /// 300 s, and the `__testing` seam does not move them when it is unset.
+    ///
+    /// The reason this row exists at all: every other test in this module builds
+    /// its transport through `with_hardening(&quick_bounds(), …)`, so **nothing
+    /// asserted the shipped values** — a seam introduced over that gap could
+    /// silently become the production path and no test would notice. Asserting
+    /// the constructor rather than only the three constants is what binds the
+    /// seam's default arm to them.
+    ///
+    /// The literals are spelled out, never read off the constants: reading them
+    /// would make the mutation invisible, because the expectation would move
+    /// with it.
+    ///
+    /// Mutation: change `INDEX_OUTER_CAP` to 200 s — this reds.
+    #[test]
+    fn the_shipped_index_bounds_are_thirty_thirty_and_three_hundred_seconds() {
+        let shipped = ReqwestIndexTransport::new().hardening;
+        assert_eq!(shipped.connect_timeout, Duration::from_secs(30), "connect bound");
+        assert_eq!(shipped.idle_bound, Duration::from_secs(30), "idle bound");
+        assert_eq!(shipped.outer_cap, Duration::from_secs(300), "per-attempt outer cap");
     }
 
     /// A ladder whose backoff is negligible, so a request-count assertion does
