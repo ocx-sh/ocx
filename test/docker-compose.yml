@@ -44,6 +44,23 @@ services:
       - "${OCX_TEST_REGISTRY_PORT:-5000}:5000"
     volumes:
       - ./zot-config.json:/etc/zot/config.json:ro
+    # The store is throwaway: every fixture repo is minted as `t_<uuid4>_...`
+    # per invocation (`src/state_providers.py`), so no run ever reads another
+    # run's data.  On the container's writable layer it survived `docker
+    # compose restart` and grew without bound -- 14187 repos -- which zot's
+    # dedupe scheduler then walked on every start, pegging a core with no
+    # client connected and failing pushes with `connection closed before
+    # message completed`.  A tmpfs is re-created empty by each container
+    # start, so a restart clears the store while the container stays warm.
+    #
+    # The cap is mandatory, not decorative: an uncapped tmpfs on a host whose
+    # tmpfs default exceeds RAM+swap turns an overrun into an OOM instead of
+    # an ENOSPC.  2g against a measured ~400 MB for a full suite run (166
+    # repos = 8.3 MB, ~50 KB/repo, 3490 collected tests at ~2.3 repos/test).
+    # tmpfs allocates lazily, so this is a ceiling and not a reservation --
+    # a CI runner pays only the bytes a run actually writes.
+    tmpfs:
+      - /var/lib/registry:size=2g
 
   # Legacy registry — registry:2 (distribution v2).  The SINGLE registry:2
   # instance in this file; it serves two roles:
