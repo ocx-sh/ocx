@@ -156,9 +156,10 @@ impl ocx_lib::cli::ClassifyExitCode for ProjectContextError {
 ///
 /// Mirrors what project `add` would do on a fresh project, except project
 /// `add` deliberately refuses to scaffold (exit 64) — the global tier is
-/// the one place auto-init is sanctioned, because there is no
-/// `ocx init`-equivalent for `$OCX_HOME` and the user explicitly opted
-/// into the global file with `--global`. Reuses
+/// the one place auto-init is sanctioned, because the user explicitly opted
+/// into the global file with `--global`. (`ocx --global init` scaffolds the
+/// same file explicitly since ocx-sh/ocx#443; this auto-init stays so the
+/// first `ocx --global add` on a fresh machine needs no prior gesture.) Reuses
 /// [`ocx_lib::project::init_project`] rather than re-implementing the
 /// scaffold (feedback_extend_dont_duplicate).
 ///

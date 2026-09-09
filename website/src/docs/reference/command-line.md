@@ -255,7 +255,7 @@ ocx add --global ripgrep/ripgrep:14      # error: unknown flag
 
 The short form is position-sensitive, and deliberately so: `-g` before the subcommand is `--global`, while `-g` after it is the `--group` selector of the toolchain-tier commands. `ocx -g update -g ci` updates the `ci` group of the global toolchain.
 
-When `--global` is set, the following toolchain-tier commands target `$OCX_HOME/ocx.toml` instead of a discovered project file: `add`, `remove`, `lock`, `update`, `pull`, `exec`, and `env`. `shell allow` and `shell revoke` honour the same selector, and `shell allow` then refuses: the ocx home toolchain is always consented and never carries a consent stamp.
+When `--global` is set, the following toolchain-tier commands target `$OCX_HOME/ocx.toml` instead of a discovered project file: `init`, `add`, `remove`, `lock`, `update`, `pull`, `exec`, and `env`. `shell allow` and `shell revoke` honour the same selector, and `shell allow` then refuses: the ocx home toolchain is always consented and never carries a consent stamp.
 
 `--global` is mutually exclusive with `--project`. Passing both — whether as flags or via the `OCX_GLOBAL` / `OCX_PROJECT` environment variables — exits with code 64 (`UsageError`). The global toolchain never composes into project resolution; see [strict isolation][env-composition-strict-isolation] for the full hermetic contract.
 
@@ -1600,13 +1600,15 @@ ocx --format json inspect -g all --closure | jq '.packages[] | select(.closure.c
 
 ### `init` {#init}
 
-Creates a minimal `ocx.toml` in the current directory.
+Creates a minimal `ocx.toml` in the current directory, or in `$OCX_HOME` under `--global`.
 
 The generated file contains a [`#:schema` directive][config-schemas] and an empty `[tools]` table — a non-interactive skeleton following the "backend-first, minimal output" design. Once the file exists, use [`ocx add`](#add) to append tool bindings or edit it directly; comments and declaration order in the file survive every mutation.
 
 The command is an idempotent failure: if `ocx.toml` already exists (or a symlink at that path exists), it exits with code 64 without overwriting the existing file.
 
-It also records a [consent stamp][shell-consent] for the project it creates, so the next shell prompt in that directory applies it — creating an `ocx.toml` is at least as deliberate a gesture as the `ocx add` that already writes one. The stamp records an empty source set, because the project has no lock yet; the first `ocx add` re-records it. Pass `--no-consent` to skip it and consent later with [`ocx shell allow`](#shell-allow), or set [`OCX_NO_CONSENT`][env-ocx-no-consent] to make that the default for every command in a pipeline. The flag outranks the variable, so `--consent` stamps even where the variable is set.
+Pass `--global` **before** the subcommand to scaffold `$OCX_HOME/ocx.toml`: `ocx --global init`. See [`--global`][global-flag] for the full root-flag reference. That file is also auto-created by the global mutators (`ocx --global add` and its siblings), so `ocx --global init` is for scaffolding the global toolchain ahead of the first tool.
+
+It also records a [consent stamp][shell-consent] for the project it creates, so the next shell prompt in that directory applies it — creating an `ocx.toml` is at least as deliberate a gesture as the `ocx add` that already writes one. The stamp records an empty source set, because the project has no lock yet; the first `ocx add` re-records it. Pass `--no-consent` to skip it and consent later with [`ocx shell allow`](#shell-allow), or set [`OCX_NO_CONSENT`][env-ocx-no-consent] to make that the default for every command in a pipeline. The flag outranks the variable, so `--consent` stamps even where the variable is set. Under `--global` no stamp is written in any case — the ocx home toolchain is always consented.
 
 **Usage**
 
@@ -1625,7 +1627,7 @@ ocx init [OPTIONS]
 | Code | Meaning |
 |------|---------|
 | 0 | `ocx.toml` created successfully. |
-| 64 | `ocx.toml` already exists at the target path. |
+| 64 | `ocx.toml` already exists at the target path, or `--global` was combined with `--project`. |
 | 74 | I/O error writing the new file. |
 
 ### `install` {#install}

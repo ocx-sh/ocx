@@ -26,9 +26,10 @@ def _run_init(
     ocx: OcxRunner,
     cwd: Path,
     *extra: str,
+    root: tuple[str, ...] = (),
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    cmd = [str(ocx.binary), "init", *extra]
+    cmd = [str(ocx.binary), *root, "init", *extra]
     env = dict(ocx.env)
     if extra_env:
         env.update(extra_env)
@@ -268,4 +269,70 @@ def test_init_consent_flag_outranks_the_env_var(
     stamps = _consent_stamps(ocx.ocx_home)
     assert len(stamps) == 1, (
         f"--consent must outrank OCX_NO_CONSENT and stamp; got {stamps}"
+    )
+
+
+def test_init_global_writes_the_ocx_home_manifest(ocx: OcxRunner, tmp_path: Path) -> None:
+    """``ocx --global init`` scaffolds ``$OCX_HOME/ocx.toml`` (ocx-sh/ocx#443).
+
+    ``--global`` is a root flag that parses on every subcommand, so an ``init``
+    that ignored it wrote ``<cwd>/ocx.toml`` while ``--global add`` and
+    ``--global status`` operated on ``$OCX_HOME/ocx.toml`` — the reported
+    inconsistency. The CWD assertion is the half that reds on a regression: a
+    resolver that walks or falls back to the process directory satisfies the
+    first assertion by accident only if ``$OCX_HOME`` happens to be the CWD,
+    which it is not here.
+    """
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+
+    global_manifest = ocx.ocx_home / "ocx.toml"
+    assert not global_manifest.exists(), "the isolated $OCX_HOME must start without a manifest"
+
+    result = _run_init(ocx, project_dir, root=("--global",))
+
+    assert result.returncode == EXIT_SUCCESS, (
+        f"ocx --global init should exit 0; rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert global_manifest.exists(), (
+        "ocx --global init must create $OCX_HOME/ocx.toml"
+    )
+    assert "[tools]" in global_manifest.read_text(), (
+        "the global manifest must carry the same [tools] scaffold as a project one"
+    )
+    assert not (project_dir / "ocx.toml").exists(), (
+        "ocx --global init must not scaffold the current directory"
+    )
+    # `ui().success` writes to stderr — stdout stays free for machine output.
+    assert str(global_manifest) in result.stderr, (
+        f"the success line must name the global manifest; got {result.stderr!r}"
+    )
+    # A-44: a project that *is* $OCX_HOME needs no activation stamp.
+    assert _consent_stamps(ocx.ocx_home) == [], (
+        "an $OCX_HOME project takes no consent stamp (A-44)"
+    )
+
+
+def test_init_global_refuses_an_existing_global_manifest(ocx: OcxRunner, tmp_path: Path) -> None:
+    """A second ``ocx --global init`` exits 64 and leaves the manifest intact.
+
+    Same ``ConfigAlreadyExists`` contract as the project tier — the global
+    branch must not become a silent overwrite of a populated toolchain.
+    """
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+
+    global_manifest = ocx.ocx_home / "ocx.toml"
+    global_manifest.parent.mkdir(parents=True, exist_ok=True)
+    original_content = "# sentinel — must not be overwritten\n[tools]\n"
+    global_manifest.write_text(original_content)
+
+    result = _run_init(ocx, project_dir, root=("--global",))
+
+    assert result.returncode == EXIT_USAGE_ERROR, (
+        f"ocx --global init on an existing manifest must exit {EXIT_USAGE_ERROR}; "
+        f"rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert global_manifest.read_text() == original_content, (
+        "ocx --global init must not overwrite an existing $OCX_HOME/ocx.toml"
     )

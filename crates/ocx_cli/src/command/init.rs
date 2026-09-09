@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx init` — create a minimal `ocx.toml` in the current directory.
+//! `ocx init` — create a minimal `ocx.toml` in the current directory, or in
+//! `$OCX_HOME` under the root `--global` selector.
 
 use std::process::ExitCode;
 
@@ -14,6 +15,9 @@ use crate::app::project_context::record_activation_consent_over;
 /// Writes a skeleton config with a default registry comment and an empty
 /// `[tools]` table. Non-interactive by design — add tools with `ocx add`
 /// after initialisation.
+///
+/// `ocx --global init` writes `$OCX_HOME/ocx.toml` instead — the same file
+/// every other `--global` command resolves.
 ///
 /// Records a shell-activation consent stamp for the new project, so the next
 /// shell prompt in this directory applies it. Pass `--no-consent` to create the
@@ -31,13 +35,25 @@ pub struct Init {
 impl Init {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // `ocx init` bootstraps the project, so it must NOT use the context's
-        // project-discovery path (which errors when ocx.toml is absent). Use
-        // the raw process cwd instead. The directory variant of the lib API
-        // (`init_project_at_default`) creates `<cwd>/ocx.toml` — `ocx init`
-        // does not yet expose a `--project=<custom>.toml` ingress.
-        let cwd = ocx_lib::env::current_dir()?;
-
-        let toml_path = ocx_lib::project::init_project_at_default(&cwd)?;
+        // project-discovery path (which errors when ocx.toml is absent, and
+        // whose CWD walk would resolve a *parent* project). The two tiers are
+        // selected directly instead:
+        //
+        // - `--global` / `OCX_GLOBAL` → `$OCX_HOME/ocx.toml`, via the one
+        //   spelling every other global-tier site uses
+        //   (`ProjectConfig::global_manifest_path`). Dropping the selector here
+        //   made `ocx --global init` scaffold the CWD while `ocx --global add`
+        //   and `ocx --global status` read `$OCX_HOME` (ocx-sh/ocx#443).
+        // - otherwise → `<cwd>/ocx.toml`, via the directory variant of the lib
+        //   API. `ocx init` does not yet expose a `--project=<custom>.toml`
+        //   ingress, and `--project` is exclusive with `--global` anyway.
+        let toml_path = if context.global() {
+            let home = context.file_structure().root();
+            ocx_lib::project::init_project(&ocx_lib::project::ProjectConfig::global_manifest_path(home))?
+        } else {
+            let cwd = ocx_lib::env::current_dir()?;
+            ocx_lib::project::init_project_at_default(&cwd)?
+        };
 
         // Creating an `ocx.toml` in a directory is at least as deliberate a
         // gesture as the `ocx add` that already stamps consent, so the default
