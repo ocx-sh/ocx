@@ -84,6 +84,14 @@ def run(
         env=environment,
         capture_output=True,
         text=True,
+        # `docker run` without `-i` gave the container no stdin; a bare
+        # `subprocess.run` inherits the caller's. cosign prompts on a terminal
+        # (an encrypted key with no `COSIGN_PASSWORD`, most obviously), and a
+        # prompt read from a background process group is SIGTTIN, not an error
+        # message -- the run stops with `suspended (tty input)` and no test
+        # names itself. /dev/null turns that back into the loud EOF failure the
+        # container produced.
+        stdin=subprocess.DEVNULL,
         check=check,
     )
 
@@ -192,7 +200,7 @@ def _ocx() -> str:
 def _ocx_json(*args: str) -> dict:
     result = subprocess.run(
         [_ocx(), "--format", "json", *args],
-        capture_output=True, text=True, check=False,
+        capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False,
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -238,7 +246,9 @@ def _reports_pinned_version(binary: Path) -> bool:
     """
     if not os.access(binary, os.X_OK):
         return False
-    probe = subprocess.run([str(binary), "version"], capture_output=True, text=True, check=False)
+    probe = subprocess.run(
+        [str(binary), "version"], capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False
+    )
     return probe.returncode == 0 and any(
         line.split(":", 1)[1].strip() == pinned_cosign_version()
         for line in probe.stdout.splitlines()

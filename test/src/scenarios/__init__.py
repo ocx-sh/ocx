@@ -151,6 +151,11 @@ class Scenario:
             env=full_env,
             cwd=str(cwd) if cwd else str(self.tmp_path),
             capture_output=True,
+        # Detached, never inherited: `capture_output` covers fd 1 and 2 only, so
+        # without this the child gets the developer's terminal on fd 0 and a read
+        # from a background process group is SIGTTIN -- the run stops with
+        # `suspended (tty input)` and no test names itself.
+            stdin=subprocess.DEVNULL,
             text=True, check=False,
         )
         if check and result.returncode != 0:

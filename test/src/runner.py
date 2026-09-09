@@ -115,12 +115,23 @@ class OcxRunner:
             cmd += ["--log-level", log_level]
         cmd += list(args)
         env = {**self.env, **(env_overrides or {}), **(env_overlay or {})}
+        # `input=None` INHERITS fd 0 — it does not close it. A test that passes
+        # no `stdin` therefore handed every ocx subprocess the developer's
+        # terminal, and any command that reads it from a background process
+        # group takes SIGTTIN: the whole run stops with `suspended (tty input)`
+        # and no test names itself. `capture_output` covers only fd 1 and 2, so
+        # nothing above closed this. Tests that genuinely drive stdin pass
+        # `stdin=` and get `input=` as before; everything else gets /dev/null,
+        # which is what a CI runner already provides and what makes a local run
+        # behave the same way.
+        streams: dict[str, Any] = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             env=env,
-            input=stdin, check=False,
+            check=False,
+            **streams,
         )
         if check and result.returncode != 0:
             raise AssertionError(
