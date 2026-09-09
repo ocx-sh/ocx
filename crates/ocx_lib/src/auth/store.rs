@@ -25,6 +25,46 @@ use crate::auth::registry_url::canonicalize_registry;
 
 use crate::utility::fs::LockedFile;
 
+/// The `__testing`-gated seam that replaces the credential helper's subprocess
+/// budget, in **milliseconds**.
+///
+/// Why it exists: the budget is 30 s, and
+/// `test/tests/test_login.py::test_login_helper_timeout_exits_75` can only
+/// observe that a hung helper becomes exit 75 by waiting it out — 30 s of the
+/// acceptance suite's wall clock for a claim about a `recv_timeout` argument,
+/// which is identical at 30 s and at 200 ms. The shipped value is asserted in
+/// the fork instead, at `docker_credential::helper::tests::helper_timeout_is_thirty_seconds`.
+///
+/// Compile-gated and `__OCX_TESTING_*`-named: absent from release builds,
+/// reserved out of `Env::apply_ocx_config` (see `env::is_reserved_ocx_key`), and
+/// undocumented in `website/src/docs/reference/environment.md`.
+#[cfg(any(test, feature = "__testing"))]
+const TESTING_HELPER_TIMEOUT_ENV: &str = "__OCX_TESTING_HELPER_TIMEOUT_MS";
+
+/// The credential helper's subprocess budget: the fork's shipped
+/// [`docker_credential::HELPER_TIMEOUT`], or the [`TESTING_HELPER_TIMEOUT_ENV`]
+/// override.
+///
+/// **Panics** on a malformed value rather than falling back to the shipped
+/// budget: a seam that silently ignores what it was handed turns a typo into a
+/// row that quietly out-waits the real deadline and still passes.
+#[cfg(any(test, feature = "__testing"))]
+fn helper_timeout() -> Duration {
+    let Ok(raw) = std::env::var(TESTING_HELPER_TIMEOUT_ENV) else {
+        return docker_credential::HELPER_TIMEOUT;
+    };
+    Duration::from_millis(
+        raw.trim().parse().unwrap_or_else(|_| {
+            panic!("{TESTING_HELPER_TIMEOUT_ENV} must be a whole number of milliseconds, got {raw:?}")
+        }),
+    )
+}
+
+#[cfg(not(any(test, feature = "__testing")))]
+fn helper_timeout() -> Duration {
+    docker_credential::HELPER_TIMEOUT
+}
+
 /// Local RAII guard wrapping the locked `config.json`. Dropping the guard
 /// releases the advisory lock and closes the lock-owning handle.
 ///
@@ -211,7 +251,8 @@ impl CredentialStore for DockerCredentialStore {
             match resolution {
                 HelperResolution::Helper(helper) => {
                     // Helper lookup via the patched fork.
-                    match docker_credential::credential_from_helper(&canonical, &helper) {
+                    match docker_credential::credential_from_helper_with_timeout(&canonical, &helper, helper_timeout())
+                    {
                         Ok(docker_credential::DockerCredential::UsernamePassword(u, p)) => {
                             Ok(Some(Credential::basic(u, SecretString::from(p))))
                         }
@@ -268,8 +309,13 @@ impl CredentialStore for DockerCredentialStore {
             match tier {
                 StoreTier::Helper(helper_name) => {
                     let docker_cred = to_docker_credential(&cred_copy);
-                    docker_credential::store_credential(&canonical, &helper_name, &docker_cred)
-                        .map_err(AuthError::Helper)?;
+                    docker_credential::store_credential_with_timeout(
+                        &canonical,
+                        &helper_name,
+                        &docker_cred,
+                        helper_timeout(),
+                    )
+                    .map_err(AuthError::Helper)?;
                     if let Some(detected) = detected_helper {
                         // Sticky-detected helpers are persisted on first successful put.
                         config.creds_store = Some(detected);
@@ -313,7 +359,8 @@ impl CredentialStore for DockerCredentialStore {
                 .cloned()
                 .or_else(|| config.creds_store.clone());
             if let Some(helper_name) = helper
-                && let Err(err) = docker_credential::erase_credential(&canonical, &helper_name)
+                && let Err(err) =
+                    docker_credential::erase_credential_with_timeout(&canonical, &helper_name, helper_timeout())
                 && !matches!(err, docker_credential::CredentialRetrievalError::NotFound)
             {
                 return Err(AuthError::Helper(err));

@@ -1965,38 +1965,60 @@ def test_a_slow_but_progressing_root_outlives_the_retired_total_deadline(
 ) -> None:
     """sync-perf S-005 (A6). A root document that takes longer to arrive than
     the **retired 60 s hard total deadline**, but never stalls past the idle
-    bound, now succeeds.
+    bound, now succeeds — and a body that *does* stall past the idle bound still
+    fails.
 
-    This test costs its wall clock — a bit over a minute — and there is no way
-    around that at this tier: the two bounds are compile-time constants and the
-    only injection seam (`ReqwestIndexTransport::with_hardening`) is private to
-    the crate, so a fixture in Python has to out-wait the real deadline to say
-    anything at all. The unit tier asserts the same semantics in milliseconds;
-    what only this tier can show is that the shipped binary carries them.
+    Both halves run against the ``__OCX_TESTING_INDEX_TIMEOUTS_MS`` seam
+    (`crates/ocx_lib/src/oci/index/ocx_index.rs`), which scales the three
+    shipped bounds by 1/30 for this process only. Before the seam existed this
+    row cost **64.6 s of wall clock** — 5 chunks 16 s apart, out-waiting a
+    retired deadline in real time — for a claim that is entirely a *ratio*
+    between two durations. Scaling both sides states the same ratio in seconds.
+    The shipped values themselves are asserted at the unit tier, by
+    ``ocx_index::transport_wire_tests::the_shipped_index_bounds_are_thirty_thirty_and_three_hundred_seconds``,
+    which is what stops the seam from quietly becoming the production path.
 
-    The pacing is what makes it a *slow* link rather than a stalled one: the
-    body arrives in `SLOW_ROOT_CHUNKS` pieces with `SLOW_ROOT_GAP_SECONDS`
-    between them, every gap comfortably inside the 30 s idle bound and every
-    piece real progress. The measured elapsed time is asserted, not assumed —
-    a fixture that quietly served the body at once would otherwise make the
-    scenario pass without ever crossing the deadline it is about.
+    The pacing is what makes the first half a *slow* link rather than a stalled
+    one: the body arrives in ``SLOW_ROOT_CHUNKS`` pieces with
+    ``SLOW_ROOT_GAP_SECONDS`` between them, every gap comfortably inside the
+    scaled idle bound and every piece real progress. The measured elapsed time
+    is asserted on both sides — a fixture that quietly served the body at once
+    would otherwise make the scenario pass without crossing the deadline it is
+    about, and an upper bound is what says the scaled bounds are the ones in
+    force.
+
+    **The stall is the seam's own positive control**, and it is why this row is
+    not a green that cannot be told from never-ran. A 2 s gap is *inside* the
+    shipped 30 s idle bound and *outside* the scaled 1 s one, so a run where the
+    seam failed to apply — a typo in the variable name, a binary built without
+    `__testing` — succeeds here and reds. Nothing about the slow half can say
+    that: shipped bounds are strictly more generous than scaled ones, so the
+    slow half passes either way.
     """
+    idle_ms = 1000
+    scale = idle_ms / 30_000
+    seam = {"__OCX_TESTING_INDEX_TIMEOUTS_MS": f"{idle_ms},{idle_ms},{int(300_000 * scale)}"}
+    retired_total_deadline = 60 * scale
+
     slow_chunks = 5
-    slow_gap_seconds = 16.0
-    retired_total_deadline_seconds = 60
+    slow_gap_seconds = 0.55
+    stall_gap_seconds = 2.0
 
     configure_index_source(ocx, index_server.base_url, insecure_host=index_server.host)
     repositories = [f"{unique_repo}/slow", f"{unique_repo}/brisk"]
     publish(index_server.root, repositories, registry=ocx.registry)
-    index_server.slow_bodies[f"/p/{repositories[0]}.json"] = (slow_chunks, slow_gap_seconds)
+    slow_path = f"/p/{repositories[0]}.json"
+    index_server.slow_bodies[slow_path] = (slow_chunks, slow_gap_seconds)
 
     index_dir = tmp_path / "index_dir"
     index_dir.mkdir()
     began = time.monotonic()
-    result = ocx.plain("--index", str(index_dir), "index", "sync", NAMESPACE, check=False)
+    result = ocx.plain(
+        "--index", str(index_dir), "index", "sync", NAMESPACE, check=False, env_overrides=seam
+    )
     elapsed = time.monotonic() - began
 
-    assert elapsed > retired_total_deadline_seconds, (
+    assert elapsed > retired_total_deadline, (
         "precondition: the fixture has to hold the transfer open longer than the deadline this "
         f"scenario is about, or the success below proves nothing. Elapsed {elapsed:.1f}s"
     )
@@ -2008,9 +2030,29 @@ def test_a_slow_but_progressing_root_outlives_the_retired_total_deadline(
         assert (index_dir / NAMESPACE / "p" / f"{repository}.json").is_file(), (
             f"{repository} landed — the slow root as much as the brisk one"
         )
-    assert root_document_requests(index_server).count(f"/p/{repositories[0]}.json") == 1, (
+    assert root_document_requests(index_server).count(slow_path) == 1, (
         "the slow root arrives on its first attempt: a timeout followed by a retry would also end "
         "in success, and would be a different (and worse) behaviour than the one under test"
+    )
+
+    # The idle bound still fires, and the gap that trips it is one the shipped
+    # 30 s bound would tolerate — so this half reds when the seam does not apply.
+    index_server.slow_bodies[slow_path] = (slow_chunks, stall_gap_seconds)
+    stalled_dir = tmp_path / "stalled_dir"
+    stalled_dir.mkdir()
+    began = time.monotonic()
+    stalled = ocx.plain(
+        "--index", str(stalled_dir), "index", "sync", NAMESPACE, check=False, env_overrides=seam
+    )
+    stalled_elapsed = time.monotonic() - began
+
+    assert stalled.returncode != 0, (
+        f"a body idle for {stall_gap_seconds}s must trip the scaled {idle_ms}ms idle bound. It did "
+        f"not, after {stalled_elapsed:.1f}s — which is what a seam that never applied looks like: "
+        f"the shipped 30s bound tolerates this gap.\n{stalled.stderr}"
+    )
+    assert stalled_elapsed < 30.0, (
+        f"the run out-waited the shipped bounds rather than the scaled ones ({stalled_elapsed:.1f}s)"
     )
 
 
