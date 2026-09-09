@@ -38,6 +38,24 @@ use crate::app::Context;
 /// The release that deletes this module and every spelling in it.
 const REMOVAL_RELEASE: &str = "0.7";
 
+/// Every command spelling this window renames, as `(old, new)`.
+///
+/// The authority the sweep reads. Before this existed, each rename was three
+/// hand-written literals — the hidden `Command` / `Package` variant, its
+/// [`warn_renamed`] call, and its [`crate::app::canonical_command_name`] arm —
+/// with nothing naming the set, so a repo-wide check for stale spellings had no
+/// input it could be driven from. `test/tests/test_deprecated_spellings.py`
+/// parses this list out of this file and sweeps every old spelling in it.
+///
+/// The renamed **flag** (`ocx package announce --package`, C-062) is not here
+/// and cannot be: it renames an argument, not a command, so it has no `(old,
+/// new)` command pair. The sweep carries it as its own rendering.
+pub const RENAMED: &[(&str, &str)] = &[
+    ("run", "exec"),
+    ("package describe", "package description push"),
+    ("package info", "package description pull"),
+];
+
 /// Warn on stderr that `old` has been renamed to `new`.
 ///
 /// Fires once per invocation by construction — one process dispatches one
@@ -73,7 +91,7 @@ pub fn package_flag_notice() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::package_flag_notice;
+    use super::{RENAMED, package_flag_notice};
 
     /// C-062 / S-034: the notice names the deprecated spelling, the form that
     /// replaces it, and the release that removes it.
@@ -143,5 +161,58 @@ mod tests {
              doc block enumerates; found {}",
             announce_source.matches("0.7 removal:").count()
         );
+    }
+
+    /// The two quoted arguments of the first `warn_renamed(&context, …)` call in
+    /// `tail`.
+    fn first_pair(tail: &str) -> Option<(&str, &str)> {
+        let (_, after_open) = tail.split_once('"')?;
+        let (old, rest) = after_open.split_once('"')?;
+        let (_, after_second_open) = rest.split_once('"')?;
+        let (new, _) = after_second_open.split_once('"')?;
+        Some((old, new))
+    }
+
+    /// [`RENAMED`] is the whole set: every dispatch site that warns about a
+    /// renamed command names a pair this list carries, and carries no other.
+    ///
+    /// Scanned over `command.rs` and `command/package.rs`, never over this
+    /// module's own source — the needle `warn_renamed(&context, ` is a literal
+    /// in the scanner directly above, so a scan that included this file would
+    /// match its own invocation in every state (`quality-core.md` § Unchecked
+    /// Green), exactly as the `0.7 removal:` count below is scanned over a
+    /// different file for the same reason.
+    ///
+    /// Asserted as a **count first**, then membership. Membership alone stays
+    /// green when an entry is deleted from [`RENAMED`] *and* from its dispatch
+    /// site together, which is the shape a half-finished 0.7 removal has; the
+    /// count is what makes the sweep's input provably complete.
+    ///
+    /// Mutation: delete any one entry from [`RENAMED`] — the count reds.
+    #[test]
+    fn every_warn_renamed_dispatch_site_is_listed_in_renamed() {
+        const NEEDLE: &str = "warn_renamed(&context, ";
+        let sources = [include_str!("../command.rs"), include_str!("package.rs")];
+
+        let sites: Vec<(&str, &str)> = sources
+            .iter()
+            .flat_map(|source| source.split(NEEDLE).skip(1))
+            .map(|tail| first_pair(tail).expect("a warn_renamed call site quotes two literals"))
+            .collect();
+
+        assert_eq!(
+            sites.len(),
+            RENAMED.len(),
+            "RENAMED must list exactly the dispatch sites that warn; found {sites:?} against {RENAMED:?}"
+        );
+        for site in &sites {
+            assert!(
+                RENAMED.contains(site),
+                "`{}` -> `{}` warns at a dispatch site but is missing from RENAMED, so the \
+                 repo-wide sweep in test/tests/test_deprecated_spellings.py never looks for it",
+                site.0,
+                site.1
+            );
+        }
     }
 }

@@ -279,7 +279,7 @@ def _announce_tags_file(
 def _describe_readme(ocx: OcxRunner, repo: str, tmp_path: Path) -> tuple[list[str], str]:
     path = _missing(tmp_path)
     return (
-        ["package", "describe", "--readme", str(path), f"{repo}:1.0.0"],
+        ["package", "description", "push", "--readme", str(path), f"{repo}:1.0.0"],
         str(path),
     )
 
@@ -330,12 +330,12 @@ def _create_output(ocx: OcxRunner, repo: str, tmp_path: Path) -> tuple[list[str]
 
 
 def _info_save_readme(ocx: OcxRunner, repo: str, tmp_path: Path) -> tuple[list[str], str]:
-    """`info --save-readme` writes nothing unless the repository has a README."""
+    """`description pull --save-readme` writes nothing unless the repository has a README."""
     readme = tmp_path / "README.md"
     readme.write_text("# a description worth saving\n")
-    ocx.plain("package", "describe", "--readme", str(readme), f"{repo}:1.0.0")
+    ocx.plain("package", "description", "push", "--readme", str(readme), f"{repo}:1.0.0")
     path = _unwritable(tmp_path, "saved-readme.md")
-    return (["package", "info", "--save-readme", str(path), repo], str(path.parent))
+    return (["package", "description", "pull", "--save-readme", str(path), repo], str(path.parent))
 
 
 def _cascade_repair_announce_tags(
