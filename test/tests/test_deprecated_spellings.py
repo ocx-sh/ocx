@@ -285,6 +285,7 @@ def _scan_files() -> list[Path]:
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
         check=True,
     )
     names = [name for name in listed.stdout.split("\0") if name]

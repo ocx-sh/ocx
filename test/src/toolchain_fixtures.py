@@ -124,6 +124,9 @@ def run_in(
         capture_output=True,
         text=True,
         env=env,
+        # Detached, never inherited -- see `OcxRunner.run`, which states the
+        # SIGTTIN failure this closes.
+        stdin=subprocess.DEVNULL,
         check=False,
         timeout=_TIMEOUT,
     )
@@ -143,6 +146,9 @@ def git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         cwd=cwd,
         capture_output=True,
         text=True,
+        # Detached: git prompts for credentials on a terminal. These rows drive
+        # a purely local repository, so a prompt could only ever be a hang.
+        stdin=subprocess.DEVNULL,
         check=False,
         timeout=_TIMEOUT,
         env={

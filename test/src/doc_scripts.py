@@ -629,6 +629,11 @@ def run_doc_script(
         env=script_env,
         cwd=str(cwd),
         capture_output=True,
+        # Detached, never inherited: every doc script types a bare `ocx`, and a
+        # child that reads the developer's terminal from a background process
+        # group is SIGTTIN -- the run stops with `suspended (tty input)` and no
+        # script names itself. `capture_output` covers fd 1 and 2 only.
+        stdin=subprocess.DEVNULL,
         text=True, check=False,
     )
 
