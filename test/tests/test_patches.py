@@ -60,7 +60,7 @@ def _empty_global_descriptor_slot_afterwards(
 
     The slot outlives the test session — nothing here is UUID-scoped, and no
     other fixture cleans it. A `match: "*"` rule left behind means every LATER
-    ocx run against this registry with a `[patches]` tier (a dogfooding shell,
+    invocation of ocx against this registry with a `[patches]` tier (a dogfooding shell,
     a manual rig, another suite) installs this suite's throwaway companions and
     writes their tag pointers into whatever `OCX_INDEX` is active. Publishing a
     zero-rule descriptor is the cheapest neutraliser: no registry delete API,
