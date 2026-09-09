@@ -24,7 +24,7 @@ from src.helpers import (
 )
 from src.registry import fetch_platform_manifest_digest, push_raw_config_package
 from src.runner import OcxRunner, PackageInfo, current_platform
-from tests.fixtures.cosign import ensure_cosign_binary, signing_config
+from tests.fixtures.cosign import cosign_binary, signing_config
 
 
 def basic(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str, list[PackageInfo]]:
@@ -791,12 +791,10 @@ def cosign_parity(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str,
     `setup:signing` proves ocx signs and ocx verifies. This state exists for the
     other claim — that the two tools are interchangeable — so the cast has to
     drive the *upstream* CLI, and drive it the way a reader would: a bare
-    `cosign …`. The acceptance matrix runs cosign through
-    `docker run --network host -v … ghcr.io/sigstore/cosign/cosign:<pin>`,
-    which is the right shape for a test and unusable in a recording; nobody
-    copy-pastes that. `ensure_cosign_binary()` lifts the binary out of that same
-    pinned image instead, so there is still exactly one cosign version in the
-    repo and still no download step in CI.
+    `cosign …`. `cosign_binary()` resolves the one this repository's `ocx.toml`
+    pins out of the project toolchain — the same executable the acceptance
+    matrix invokes, so there is still exactly one cosign version in the repo and
+    still no download step in CI.
 
     Prepending to `ocx.env["PATH"]` is what carries it to both consumers: the
     drift-gate executor builds its subprocess env from `script_env()` (a copy of
@@ -833,7 +831,18 @@ def cosign_parity(ocx: OcxRunner, tmp_path: Path, prefix: str = "") -> dict[str,
     the `-p` flag on screen is the same on every machine that records the cast.
     """
     start_sigstore_stack()
-    ocx.env["PATH"] = f"{ensure_cosign_binary()}{os.pathsep}{ocx.env['PATH']}"
+    ocx.env["PATH"] = f"{cosign_binary().parent}{os.pathsep}{ocx.env['PATH']}"
+    # Both tools ask a docker credential helper before they touch a registry,
+    # and `OcxRunner.env` deliberately keeps the real `HOME` — so without this
+    # they read the *developer's* `~/.docker/config.json` and run whatever
+    # `credsStore` it names. On a host with `credsStore = "pass"` that is a gpg
+    # decrypt per push, against a registry that wants no credential at all, and
+    # it fails under load (`gpg: decrypt_message failed`) with a message about
+    # signing. An empty config directory is what the containerised cosign used
+    # to get for free from its own `HOME`.
+    docker_config = tmp_path / "docker"
+    docker_config.mkdir(exist_ok=True)
+    ocx.env["DOCKER_CONFIG"] = str(docker_config)
 
     fulcio = f"http://localhost:{os.environ.get('OCX_TEST_FULCIO_PORT', '5555')}"
     rekor = f"http://localhost:{os.environ.get('OCX_TEST_REKOR_PORT', '3000')}"

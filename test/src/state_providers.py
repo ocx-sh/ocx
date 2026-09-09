@@ -14,6 +14,7 @@ occurs only when `StateProvider.provision()` is called with live fixtures.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
@@ -169,6 +170,18 @@ def _build_script_env_from_packages(
     bin_dir = str(ocx.binary.parent)
     env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
     env["OCX"] = str(ocx.binary)
+    # Every doc script types a bare `ocx` — 280 occurrences, and not one `$OCX`.
+    # They resolve to the binary under test only because of the line above, and
+    # nothing asserted that. A fixture that built its own env, or a `PATH` entry
+    # prepended ahead of this one, would silently point all 280 at whatever ocx
+    # the developer or the runner happens to have installed: a suite testing a
+    # released binary while reporting on this branch's. `command -v`, in Python.
+    resolved = shutil.which("ocx", path=env["PATH"])
+    assert resolved is not None and Path(resolved).resolve() == ocx.binary.resolve(), (
+        f"a bare `ocx` in a doc script resolves to {resolved}, not to the binary under test at "
+        f"{ocx.binary}. Every script here types `ocx` and none types `$OCX`, so this env would "
+        "have exercised a different binary and said nothing about it."
+    )
     env["OCX_HOME"] = str(ocx.ocx_home)
     env["REGISTRY"] = ocx.registry
     env["SCENARIO_TMP"] = str(tmp_path)

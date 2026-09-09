@@ -90,7 +90,6 @@ import base64
 import hashlib
 import json
 import shutil
-import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -691,14 +690,14 @@ def regenerate(out: Path = _HERE) -> None:
             {
                 "_note": (
                     "Provenance for every fixture in this directory. One file rather than a "
-                    "sidecar each: the cosign image, the stack and the date are common to all "
+                    "sidecar each: the cosign build, the stack and the date are common to all "
                     "of them, and repeating them eleven times would be eleven things to update. "
                     "Regenerate with `uv run python3 tests/fixtures/golden/generate.py "
                     "--regenerate` from `test/`."
                 ),
                 "cosign": {
-                    "image": cosign.COSIGN_IMAGE,
-                    "resolved_digest": _cosign_image_digest(),
+                    "version": cosign.pinned_cosign_version(),
+                    "resolved_digest": cosign.resolved_cosign_digest(),
                 },
                 "stack": {
                     "referrers_registry": f"{REFERRERS_REGISTRY} (zot, OCI 1.1 Referrers API)",
@@ -730,20 +729,6 @@ def regenerate(out: Path = _HERE) -> None:
         )
         + "\n"
     )
-
-
-def _cosign_image_digest() -> str:
-    """The registry digest of the pinned cosign image, as docker resolved it."""
-    result = subprocess.run(
-        ["docker", "image", "inspect", cosign.COSIGN_IMAGE, "--format", "{{json .RepoDigests}}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        return "unresolved (image not present locally at capture time)"
-    digests = json.loads(result.stdout)
-    return next((d.split("@", 1)[1] for d in digests if "@" in d), "unresolved")
 
 
 # --------------------------------------------------------------------------
