@@ -33,22 +33,18 @@ from tests.fixtures.sigstore_stack import SigstoreStack
 #: `--trusted-root` below is cosign's own flag, not an ocx one. If these ever
 #: fail, the cause is upstream of the flag — do not rename or replace it.
 @pytest.fixture(scope="session")
-def cosign_image() -> str:
-    """Pull the pinned cosign image once.
+def pinned_cosign() -> Path:
+    """Resolve the pinned cosign out of the project toolchain, once.
 
     Raises rather than skips, matching `sigstore_stack`: a skipped interop test
     is indistinguishable from a passing one, and this is the only evidence that
-    ocx's bundles are readable by anything but ocx.
+    ocx's bundles are readable by anything but ocx. `cosign.cosign_binary`
+    raises when the package is not materialized and names `ocx pull` as the fix,
+    and it verifies the binary's own reported version against the `ocx.toml`
+    pin — the resolution this fixture used to buy with a `docker pull`, minus
+    the pull.
     """
-    import subprocess
-
-    pulled = subprocess.run(
-        ["docker", "pull", "--quiet", cosign.COSIGN_IMAGE],
-        capture_output=True,
-        text=True, check=False,
-    )
-    assert pulled.returncode == 0, f"could not pull {cosign.COSIGN_IMAGE}:\n{pulled.stderr}"
-    return cosign.COSIGN_IMAGE
+    return cosign.cosign_binary()
 
 
 def _subject(ocx: OcxRunner, pkg: PackageInfo) -> tuple[str, int, bytes]:
@@ -69,7 +65,7 @@ def test_cosign_verifies_a_bundle_ocx_produced(
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
     identity_token: Path,
-    cosign_image: str,
+    pinned_cosign: Path,
     tmp_path: Path,
 ) -> None:
     """cosign 3.x accepts an ocx signature end to end.
@@ -118,7 +114,7 @@ def test_ocx_refuses_a_cosign_blob_signature_bundle(
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
     identity_token: Path,
-    cosign_image: str,
+    pinned_cosign: Path,
     tmp_path: Path,
 ) -> None:
     """`ocx package verify` refuses a `cosign sign-blob` bundle — decision D2.
@@ -247,7 +243,7 @@ def test_cosign_verifies_an_attestation_ocx_produced(
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
     identity_token: Path,
-    cosign_image: str,
+    pinned_cosign: Path,
     tmp_path: Path,
 ) -> None:
     """S-011: `cosign verify-blob-attestation --type cyclonedx` accepts ocx's work.
@@ -316,7 +312,7 @@ def test_cosign_rejects_an_ocx_attestation_narrowed_to_the_wrong_type(
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
     identity_token: Path,
-    cosign_image: str,
+    pinned_cosign: Path,
     tmp_path: Path,
 ) -> None:
     """The negative control for the interop test above.
@@ -377,7 +373,7 @@ def test_ocx_verifies_an_attestation_cosign_produced(
     published_package: PackageInfo,
     sigstore_stack: SigstoreStack,
     identity_token: Path,
-    cosign_image: str,
+    pinned_cosign: Path,
     tmp_path: Path,
 ) -> None:
     """S-011 direction (b): `ocx package verify --attestation` accepts cosign's work.

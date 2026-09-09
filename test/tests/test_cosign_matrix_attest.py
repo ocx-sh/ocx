@@ -137,7 +137,7 @@ WRONG_PREDICATE_TYPE = "spdxjson"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # C-006 — what "refuses" asserts here. Every string below was OBSERVED against
-# `cosign.COSIGN_IMAGE` (pinned by the driver's C-004 guard) on the exact shape
+# the pinned cosign (asserted by the driver's C-004 guard) on the exact shape
 # it is named for, before it was asserted.
 # ──────────────────────────────────────────────────────────────────────────────
 

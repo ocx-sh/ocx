@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:81a0520f33437e1fa20608268c9350bc9d25363dffc1dbf1b07f1c9d55dd6f60"
-generated_by = "ocx 0.5.6"
-generated_at = "2026-08-09T08:29:09Z"
+declaration_hash = "sha256:2a1734c545974479d5cc5c4fa7f1cbf0994da779c6481d972c0939a9c4583277"
+generated_by = "ocx 0.6.1"
+generated_at = "2026-09-09T22:45:21Z"
 
 [[tool]]
 name = "actionlint"
@@ -30,6 +30,18 @@ repository = "ocx.sh/oven-sh/bun"
 "linux/arm64+libc.glibc" = "sha256:0f3c1eefbb2f855f2972af4de89b2fe9fb6ae207b9b24ae84b18c4ce27adc79a"
 "linux/arm64+libc.musl" = "sha256:f776d6b9caa9df0ea7ca109c626f2f39c63785be84b8381a2b052b1544753161"
 "windows/amd64" = "sha256:18f1cb35b22bac48184f0b4637f619c8764f4e66cfa2d4c070eb11c3a6eb1b20"
+
+[[tool]]
+name = "cosign"
+group = "default"
+repository = "ocx.sh/sigstore/cosign"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:ec417cb34aa12c7ee87458fe7ebba9111afbde80f841c49be367bf6d1cc08f10"
+"darwin/arm64" = "sha256:3758c52546f1bf3867d6080b3e0d20103ae40cdf016ae5e47592a93247f73854"
+"linux/amd64" = "sha256:10d3ef6ef2d9a37e8239db2c67576b399eb6b30d7395f5f507c0c16b5c109637"
+"linux/arm64" = "sha256:95a2764e4fe976b3f0c1a3576cd67041f35ebf4a1c0d36f21da6de27604045bc"
+"windows/amd64" = "sha256:e14e23c3c751b9cd0d45e449f4a0a99837e91e2874dba661afc2fcdaba8dda3c"
 
 [[tool]]
 name = "git-cliff"

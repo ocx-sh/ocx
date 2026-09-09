@@ -48,21 +48,30 @@ from tests.fixtures.sigstore_stack import SigstoreStack
 # ──────────────────────────────────────────────────────────────────────────────
 
 #: Every string constant below, and every behavioural claim in
-#: `analysis_cosign_interop_probes.md`, was measured against this exact image.
+#: `analysis_cosign_interop_probes.md`, was measured against this exact cosign.
 #: A bump must red here rather than silently re-test a different tool against
 #: strings nobody observed on it.
-PINNED_COSIGN_IMAGE = "ghcr.io/sigstore/cosign/cosign:v3.1.1"
+PINNED_COSIGN_VERSION = "v3.1.1"
 
 # An explicit `raise`, not an `assert`: `python -O` strips asserts, and a
 # version guard that evaporates under an interpreter flag is a guard whose
 # green is indistinguishable from never having run.
-if cosign.COSIGN_IMAGE != PINNED_COSIGN_IMAGE:
+#
+# It asks the **binary**, not a string. When cosign ran from a container this
+# compared one image tag against another — two spellings of an intention, with
+# nothing between them and the tool that would actually run. `cosign_binary()`
+# resolves the executable the matrix will invoke and refuses it unless its own
+# `GitVersion:` matches the `[tools] cosign` pin, so the chain measured here is
+# closed end to end: the version these constants were measured against, the
+# version ocx.toml declares, and the version the binary reports.
+if cosign.pinned_cosign_version() != PINNED_COSIGN_VERSION:
     raise RuntimeError(
-        f"the cosign interop matrix pins {PINNED_COSIGN_IMAGE}; `cosign.COSIGN_IMAGE` is now "
-        f"{cosign.COSIGN_IMAGE}. Re-measure the probes in "
+        f"the cosign interop matrix was measured against {PINNED_COSIGN_VERSION}; ocx.toml now "
+        f"pins {cosign.pinned_cosign_version()}. Re-measure the probes in "
         "`.claude/artifacts/analysis_cosign_interop_probes.md` and the stderr constants in "
         "this module before moving the pin — see plan_cosign_wp6_matrix.md C-004."
     )
+cosign.cosign_binary()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixed material

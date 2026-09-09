@@ -1,6 +1,7 @@
 [tools]
 actionlint = "ocx.sh/actionlint/actionlint:latest"
 bun = "ocx.sh/oven-sh/bun:1"
+cosign = "ocx.sh/sigstore/cosign:3.1.1"
 git-cliff = "ocx.sh/git-cliff/git-cliff:2"
 go-task = "ocx.sh/go-task/task:3"
 lychee = "ocx.sh/lychee/lychee:0"

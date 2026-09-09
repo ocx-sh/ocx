@@ -369,6 +369,20 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      # The cosign interop matrix drives the upstream CLI, and it resolves it out
+      # of this project's own toolchain (`[tools] cosign` in ocx.toml) rather
+      # than from a container. This action activates the project, which is what
+      # materializes that binding on the runner; without it
+      # `tests/fixtures/cosign.py` raises and names `ocx pull` as the fix.
+      - name: Setup OCX
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        with:
+          version: '0.5.8'
+          # Default-off for the reason the workflow-lint job states: the action
+          # would otherwise restore $OCX_HOME/{blobs,layers,packages,tags}
+          # across runs via @actions/cache, and a restored object store is
+          # runner-executable content.
+          cache: false
       - name: Run Acceptance Tests
         run: task test:parallel -- --junit-xml=results/junit.xml
       - name: Publish Acceptance Test Results
