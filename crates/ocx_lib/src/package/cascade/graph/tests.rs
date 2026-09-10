@@ -1395,33 +1395,6 @@ fn c25_a_healthy_registry_with_a_stale_index_still_has_findings() {
     assert!(report.has_findings(), "the index disagreement is still a finding");
 }
 
-#[test]
-fn c26_announce_tags_names_every_alias_that_needs_an_index_hop() {
-    // A graph that is both broken (`latest` was never created) and behind in
-    // the index (`1` committed at the wrong digest) — announce needs both.
-    let observation = Graph::new()
-        .index("1.0.0", vec![entry("linux/amd64", "image")])
-        .index("1.0", vec![entry("linux/amd64", "image")])
-        .index("1", vec![entry("linux/amd64", "image")])
-        .root(&[("1.0", tag_digest("1.0")), ("1", oci::Digest::Sha256("old".into()))])
-        .build();
-
-    let expected = fold_expected(&observation);
-    let report = diff(&observation, &expected, &whole(&observation));
-    let writes = plan_repairs(&report, &observation, &expected);
-
-    assert_eq!(announce_tags(&report, &writes), ["1", "latest"]);
-}
-
-#[test]
-fn c26b_announce_tags_is_empty_for_a_clean_graph() {
-    let observation = healthy_with_root();
-    let expected = fold_expected(&observation);
-    let report = diff(&observation, &expected, &whole(&observation));
-    let writes = plan_repairs(&report, &observation, &expected);
-    assert!(announce_tags(&report, &writes).is_empty());
-}
-
 // ── D. scope resolution ─────────────────────────────────────────
 
 fn scope(tags: &[&str], requests: &[Option<AliasTag>]) -> Vec<String> {

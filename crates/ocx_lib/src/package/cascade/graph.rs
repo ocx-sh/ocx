@@ -4,7 +4,7 @@
 //! The pure compute core of `ocx package cascade check|repair`.
 //!
 //! Everything here is synchronous and I/O-free: [`fold_expected`], [`diff`],
-//! [`plan_repairs`], [`scope_filter`] and [`announce_tags`] are functions of a
+//! [`plan_repairs`] and [`scope_filter`] are functions of a
 //! [`TagGraphObservation`] alone. That is the point of the split — the whole
 //! state space (dropped platforms, prereleases, variant tracks, orphans,
 //! never-created aliases) is reachable from a literal, so it can be covered by
@@ -894,33 +894,5 @@ fn path_to_root(version: &Version, universe: &BTreeSet<AliasTag>) -> BTreeSet<Al
             variant: version.variant().map(str::to_string),
         }))
         .filter(|alias| universe.contains(alias))
-        .collect()
-}
-
-/// The alias tags that need an index hop, as the lines of the file
-/// `--tags-file` writes.
-///
-/// This is the handshake with `ocx package announce`: repair fixes the
-/// registry graph, and the index hop is a separate command that needs to know
-/// exactly which tags moved. That is every tag this run re-pointed or created,
-/// plus every tag the index committed wrong or never committed at all — the
-/// one class of drift a repair cannot close itself, and the reason the report
-/// is read here and not just the writes. Announce re-observes each tag live
-/// and never removes one, so a tag listed twice over costs nothing.
-///
-/// Sorted and deduped; empty when nothing needs the hop, which announce reads
-/// as a safe no-op.
-pub fn announce_tags(report: &CascadeReport, writes: &[PlannedWrite]) -> Vec<String> {
-    writes
-        .iter()
-        .map(|write| write.tag.to_string())
-        // A tag the index committed wrong (or never committed) needs the same
-        // hop even when the registry graph was already correct, which is the
-        // only case a repair itself cannot close.
-        .chain(report.index_findings.iter().map(|finding| match finding {
-            IndexFinding::Stale { tag, .. } | IndexFinding::NotCommitted { tag } => tag.to_string(),
-        }))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
         .collect()
 }
