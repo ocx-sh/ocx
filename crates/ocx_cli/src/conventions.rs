@@ -876,7 +876,7 @@ mod tests {
             PackageCascadeRepair {
                 entries: vec![entry],
                 dry_run,
-                announce_tags_path: None,
+                tags_file: None,
                 index_layer_skipped: Vec::new(),
             }
         }

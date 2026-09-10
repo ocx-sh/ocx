@@ -271,7 +271,7 @@ def test_j8_json_key_sets_are_stable(ocx: OcxRunner, published_package: PackageI
     )
 
     repair_payload = json.loads(_repair(ocx, published_package.repo, "--dry-run").stdout)
-    assert set(repair_payload.keys()) == {"announce_tags_path", "dry_run", "entries"}
+    assert set(repair_payload.keys()) == {"dry_run", "entries", "tags_file"}
     assert set(repair_payload["entries"][0].keys()) == {"announce_tags", "outcomes", "planned", "report"}
 
 
@@ -406,10 +406,10 @@ def test_j11_physical_identifier_makes_zero_index_requests(
         assert server.requests == [], "a physical identifier must never reach the index fixture"
 
 
-def test_j12_announce_tags_file_holds_exactly_the_created_aliases(
+def test_j12_tags_file_holds_exactly_the_created_aliases(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """`--announce-tags` records exactly the aliases a repair created — the
+    """`--tags-file` records exactly the aliases a repair created — the
     ones whose write landed, since announce re-observes each tag it is given
     and would otherwise commit a digest this run never wrote. A preview
     records its whole plan instead (it wrote nothing, so "what landed" is
@@ -420,28 +420,28 @@ def test_j12_announce_tags_file_holds_exactly_the_created_aliases(
     expected = ["1", "1.0", "latest"]
 
     tags_path = tmp_path / "tags.txt"
-    preview = _repair(ocx, "--dry-run", "--announce-tags", str(tags_path), unique_repo, check=False)
+    preview = _repair(ocx, "--dry-run", "--tags-file", str(tags_path), unique_repo, check=False)
     assert preview.returncode == 65, "a preview with a remaining plan is not a clean run"
     assert sorted(line for line in tags_path.read_text().splitlines() if line) == expected, (
         "a preview records the whole plan it would have written"
     )
 
-    result = _repair(ocx, "--announce-tags", str(tags_path), unique_repo)
+    result = _repair(ocx, "--tags-file", str(tags_path), unique_repo)
     assert result.returncode == 0
 
     created = sorted(line for line in tags_path.read_text().splitlines() if line)
     assert created == expected
     assert json.loads(result.stdout)["entries"][0]["announce_tags"] == created
 
-    again = _repair(ocx, "--announce-tags", str(tags_path), unique_repo)
+    again = _repair(ocx, "--tags-file", str(tags_path), unique_repo)
     assert again.returncode == 0
     assert tags_path.read_text() == ""
 
 
-def test_j13_announce_tags_rejects_a_multi_package_run(
+def test_j13_tags_file_rejects_a_multi_package_run(
     ocx: OcxRunner, unique_repo: str, tmp_path: Path
 ) -> None:
-    """One `--announce-tags` file holds one bare list of tag names, and
+    """One `--tags-file` file holds one bare list of tag names, and
     `announce --tags-file` takes one positional package. Two packages in one
     run would hand the follow-up a list it must attribute to a single
     package, so the flag is a usage error there — and nothing is written.
@@ -451,7 +451,7 @@ def test_j13_announce_tags_rejects_a_multi_package_run(
     make_package(ocx, other_repo, "1.0.0", tmp_path / "second", cascade=False)
 
     tags_path = tmp_path / "tags.txt"
-    rejected = _repair(ocx, "--announce-tags", str(tags_path), unique_repo, other_repo, check=False)
+    rejected = _repair(ocx, "--tags-file", str(tags_path), unique_repo, other_repo, check=False)
     assert rejected.returncode == 64
     assert not tags_path.exists(), "a rejected run writes no handoff file"
     assert _check(ocx, unique_repo, check=False).returncode == 65, (
@@ -463,7 +463,7 @@ def test_j13_announce_tags_rejects_a_multi_package_run(
     # plain mode so the publish hop's hint is asserted where it does apply
     # (J2b asserts the same lines absent from a preview, which only
     # discriminates against a hint block that can actually fire).
-    accepted = ocx.plain("package", "cascade", "repair", "--announce-tags", str(tags_path), unique_repo)
+    accepted = ocx.plain("package", "cascade", "repair", "--tags-file", str(tags_path), unique_repo)
     assert accepted.returncode == 0
     assert sorted(line for line in tags_path.read_text().splitlines() if line) == ["1", "1.0", "latest"]
     assert "ocx package announce" in accepted.stdout

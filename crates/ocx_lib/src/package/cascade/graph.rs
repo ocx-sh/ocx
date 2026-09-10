@@ -898,7 +898,7 @@ fn path_to_root(version: &Version, universe: &BTreeSet<AliasTag>) -> BTreeSet<Al
 }
 
 /// The alias tags that need an index hop, as the lines of the file
-/// `--announce-tags` writes.
+/// `--tags-file` writes.
 ///
 /// This is the handshake with `ocx package announce`: repair fixes the
 /// registry graph, and the index hop is a separate command that needs to know

@@ -338,14 +338,14 @@ def _info_save_readme(ocx: OcxRunner, repo: str, tmp_path: Path) -> tuple[list[s
     return (["package", "description", "pull", "--save-readme", str(path), repo], str(path.parent))
 
 
-def _cascade_repair_announce_tags(
+def _cascade_repair_tags_file(
     ocx: OcxRunner, repo: str, tmp_path: Path
 ) -> tuple[list[str], str]:
-    """`--announce-tags` is written on a dry run too, so no repair is needed."""
+    """`--tags-file` is written on a dry run too, so no repair is needed."""
     _published(ocx, repo, tmp_path)
     path = _unwritable(tmp_path, "announce-tags.txt")
     return (
-        ["package", "cascade", "repair", "--dry-run", "--announce-tags", str(path), repo],
+        ["package", "cascade", "repair", "--dry-run", "--tags-file", str(path), repo],
         str(path),
     )
 
@@ -546,7 +546,7 @@ def _announce_tags_file_oversized(
         pytest.param(_patch_test_descriptor, 74, id="patch-test--descriptor"),
         pytest.param(_create_output, 74, id="create--output"),
         pytest.param(_info_save_readme, 74, id="info--save-readme"),
-        pytest.param(_cascade_repair_announce_tags, 74, id="cascade-repair--announce-tags"),
+        pytest.param(_cascade_repair_tags_file, 74, id="cascade-repair--tags-file"),
         pytest.param(_verify_malformed_ocx_toml, 78, id="verify-malformed-ocx-toml"),
         pytest.param(_control_config_test_missing, 79, id="control-config-test-missing"),
         pytest.param(_control_attest_predicate, 74, id="control-attest--predicate"),
