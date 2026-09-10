@@ -411,10 +411,10 @@ def test_j12_tags_file_holds_exactly_the_created_aliases(
 ) -> None:
     """`--tags-file` records exactly the aliases a repair created — the
     ones whose write landed, since announce re-observes each tag it is given
-    and would otherwise commit a digest this run never wrote. A preview
-    records its whole plan instead (it wrote nothing, so "what landed" is
-    empty and would make a useless preview), and a second repair against the
-    now-healthy graph writes an empty file.
+    and would otherwise commit a digest this run never wrote. A preview wrote
+    nothing, so it records nothing but the tags an index finding already
+    names — never its plan, which is what `planned` in the JSON report is
+    for. A second repair against the now-healthy graph writes an empty file.
     """
     make_package(ocx, unique_repo, "1.0.0", tmp_path, cascade=False)
     expected = ["1", "1.0", "latest"]
@@ -422,9 +422,11 @@ def test_j12_tags_file_holds_exactly_the_created_aliases(
     tags_path = tmp_path / "tags.txt"
     preview = _repair(ocx, "--dry-run", "--tags-file", str(tags_path), unique_repo, check=False)
     assert preview.returncode == 65, "a preview with a remaining plan is not a clean run"
-    assert sorted(line for line in tags_path.read_text().splitlines() if line) == expected, (
-        "a preview records the whole plan it would have written"
+    assert tags_path.read_text() == "", (
+        "a preview put no tag on the wire, so it has none to hand the announce hop"
     )
+    planned = sorted(write["tag"] for write in _entries(preview)[0]["planned"])
+    assert planned == expected, "the plan a preview computed is still fully in the JSON report"
 
     result = _repair(ocx, "--tags-file", str(tags_path), unique_repo)
     assert result.returncode == 0

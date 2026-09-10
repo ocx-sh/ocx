@@ -93,7 +93,7 @@ impl PackageCascadeRepair {
                 let _spinner = context.progress().spinner(format!("Repairing {package}"));
                 apply::apply(context.remote_client()?, &observation.identifier, attempted).await?
             };
-            entry.announce_tags = announce_tags(&entry.report, &planned, &entry.outcomes, self.dry_run);
+            entry.announce_tags = announce_tags(&entry.report, &entry.outcomes);
             entry.planned = planned;
         }
 
@@ -129,27 +129,22 @@ impl PackageCascadeRepair {
 
 /// The alias tags one package's run hands to `ocx package announce`.
 ///
-/// A real run lists only the aliases whose write actually landed. Announce
-/// re-observes each tag it is given and commits what the registry serves, so
-/// naming a tag whose write raced, failed or was refused would publish a
-/// digest this run did not put there - the index would then be wrong in a new
-/// way instead of the old one.
+/// The tags present in the registry as this run left them, and nothing else:
+/// the aliases whose write actually landed, plus every tag an index finding
+/// names. Announce re-observes each tag it is given and commits what the
+/// registry serves, so naming a tag whose write raced, failed, was refused -
+/// or was never attempted because the run was a preview - would publish a
+/// digest this run did not put there, leaving the index wrong in a new way
+/// instead of the old one.
 ///
-/// A preview lists its whole plan instead: it wrote nothing, so "what landed"
-/// is empty, and a file holding nothing would be a useless preview of the
-/// real run's handoff.
+/// That makes the definition mode-independent: a preview wrote nothing, so it
+/// contributes no outcomes and the file holds its index findings alone. The
+/// plan a preview computed is still fully available, as `planned` in the JSON
+/// report - which is where a machine-readable plan belongs.
 ///
-/// Index findings join either list. They are the one class of drift a repair
-/// cannot close itself, and the announce hop is what closes them.
-fn announce_tags(
-    report: &graph::CascadeReport,
-    planned: &[graph::PlannedWrite],
-    outcomes: &[apply::RepairOutcome],
-    dry_run: bool,
-) -> Vec<String> {
-    if dry_run {
-        return graph::announce_tags(report, planned);
-    }
+/// Index findings are the one class of drift a repair cannot close itself,
+/// and the announce hop is what closes them.
+fn announce_tags(report: &graph::CascadeReport, outcomes: &[apply::RepairOutcome]) -> Vec<String> {
     outcomes
         .iter()
         .filter(|outcome| matches!(outcome.outcome, apply::WriteOutcome::Written { .. }))
@@ -311,7 +306,6 @@ mod tests {
 
     #[test]
     fn a_real_run_announces_only_the_aliases_whose_write_landed() {
-        let plan = vec![planned("3.28"), planned("3"), planned("1")];
         let outcomes = vec![
             landed("3.28"),
             outcome(
@@ -330,32 +324,24 @@ mod tests {
         ];
 
         assert_eq!(
-            announce_tags(&report(), &plan, &outcomes, false),
+            announce_tags(&report(), &outcomes),
             ["3.28"],
             "announcing a failed or raced alias would commit a digest this run never wrote"
         );
     }
 
     #[test]
-    fn a_preview_announces_its_whole_plan() {
-        // The negative control for the filter above: the same plan, with the
-        // preview flag on, must hand every planned alias through - a preview
-        // has no outcomes to filter by, and its file is the documented
-        // preview of what the real run would announce.
-        let plan = vec![planned("3.28"), planned("3")];
-
-        assert_eq!(announce_tags(&report(), &plan, &[], true), ["3", "3.28"]);
-    }
-
-    #[test]
     fn an_index_finding_is_announced_even_when_nothing_was_written() {
+        // Also the whole of what a preview hands on: it attempts no write, so
+        // it contributes no outcome, and its plan is not a parameter here at
+        // all - a preview cannot announce a tag it did not put on the wire.
         let mut stale = report();
         stale.index_findings.push(graph::IndexFinding::NotCommitted {
             tag: AliasTag::Root { variant: None },
         });
 
         assert_eq!(
-            announce_tags(&stale, &[], &[], false),
+            announce_tags(&stale, &[]),
             ["latest"],
             "an alias the index never committed is the one drift a repair cannot close itself"
         );
