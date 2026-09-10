@@ -23,13 +23,13 @@ use crate::options;
 /// that cannot be completed writes nothing at all.
 ///
 /// Repairing the registry does not update the public index. Pass
-/// `--announce-tags PATH` to record the tags this run moved, then hand that
+/// `--tags-file PATH` to record the tags this run moved, then hand that
 /// file to `ocx package announce --tags-file PATH`.
 ///
 /// Exits 0 when every attempted write succeeded, 65 when a finding remains
 /// (including a tag that cannot be fixed without publishing new content), and
 /// 64 when a package names a digest or a tag that is not a version, or when
-/// `--announce-tags` is given more than one package.
+/// `--tags-file` is given more than one package.
 #[derive(Parser)]
 pub struct PackageCascadeRepair {
     /// Compute and print the same plan without writing anything.
@@ -39,10 +39,11 @@ pub struct PackageCascadeRepair {
     /// Write the rolling tags this run moved or created to this file, one per
     /// line, for `ocx package announce --tags-file`. Takes one package
     /// per run, since the file names no package and `announce` publishes it
-    /// against one. Written on a dry run too, holding the whole plan it would
-    /// have repaired; empty when nothing changed.
-    #[arg(long = "announce-tags", value_name = "PATH")]
-    announce_tags: Option<PathBuf>,
+    /// against one. Written on a dry run too - a preview moves nothing, so
+    /// the file then holds only the tags an index finding already names, and
+    /// is empty when there are none.
+    #[arg(long = "tags-file", value_name = "PATH")]
+    tags_file: Option<PathBuf>,
 
     /// Packages to repair.
     #[arg(required = true, num_args = 1..)]
@@ -57,9 +58,9 @@ impl PackageCascadeRepair {
         // reads is a bare list of tag names. Two packages' tags in one file
         // would be announced against whichever package the follow-up names,
         // moving the other's index entries to digests it never published.
-        if self.announce_tags.is_some() && audits.len() > 1 {
+        if self.tags_file.is_some() && audits.len() > 1 {
             return Err(ocx_lib::cli::UsageError::new(format!(
-                "--announce-tags holds one package's tags per file, and this run covers {}; \
+                "--tags-file holds one package's tags per file, and this run covers {}; \
                  repair each package in its own run",
                 audits.len()
             ))
@@ -79,7 +80,7 @@ impl PackageCascadeRepair {
         let mut report =
             crate::api::data::package_cascade_repair::PackageCascadeRepair::from_reports(reports, self.dry_run);
         report.index_layer_skipped = skipped;
-        report.announce_tags_path = self.announce_tags.clone();
+        report.tags_file = self.tags_file.clone();
 
         for (entry, (observation, expected)) in report.entries.iter_mut().zip(graphs) {
             let planned = graph::plan_repairs(&entry.report, &observation, &expected);
@@ -102,7 +103,7 @@ impl PackageCascadeRepair {
         // already landed (CWE-755).
         context.api().report(&report)?;
 
-        if let Some(path) = &self.announce_tags {
+        if let Some(path) = &self.tags_file {
             // Written on every run, empty included: a workflow that chains
             // into `announce --tags-file` unconditionally must find a
             // file there whether or not this run had anything to move.
@@ -161,10 +162,10 @@ fn announce_tags(
         .collect()
 }
 
-/// The `--announce-tags` file body for a whole run.
+/// The `--tags-file` file body for a whole run.
 ///
 /// One tag per line, sorted and deduped. A run reaching here covers exactly
-/// one package - `--announce-tags` rejects more, because the file names no
+/// one package - `--tags-file` rejects more, because the file names no
 /// package and `announce` publishes it against one - so the fold over
 /// `entries` is a fold over a single entry; it stays general because the sort
 /// and the dedup are what the format needs either way.
@@ -282,7 +283,7 @@ mod tests {
         );
     }
 
-    // ── --announce-tags round-trips through the announce reader ──────────
+    // ── --tags-file round-trips through the announce reader ─────────────
 
     #[test]
     fn the_tags_body_round_trips_through_the_announce_parser() {

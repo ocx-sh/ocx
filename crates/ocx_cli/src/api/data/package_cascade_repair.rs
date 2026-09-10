@@ -28,7 +28,7 @@ pub struct RepairEntry {
     /// Empty for a preview run: nothing was attempted.
     pub outcomes: Vec<RepairOutcome>,
     /// The alias tags this package's run moved or created - the same lines
-    /// written to `--announce-tags`, echoed here so a JSON consumer gets them
+    /// written to `--tags-file`, echoed here so a JSON consumer gets them
     /// without reading the file back.
     pub announce_tags: Vec<String>,
 }
@@ -39,18 +39,18 @@ pub struct RepairEntry {
 /// planned write), plus the follow-up announce command when this run moved
 /// tags or index staleness remains.
 ///
-/// JSON format: `{ "entries": [...], "dry_run", "announce_tags_path" }` — one
+/// JSON format: `{ "entries": [...], "dry_run", "tags_file" }` — one
 /// per-package entry carrying the finding report, the planned writes and
 /// their outcomes, alongside the run-wide preview flag and the
-/// `--announce-tags` destination (`null` when the flag was not passed).
+/// `--tags-file` destination (`null` when the flag was not passed).
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PackageCascadeRepair {
     pub entries: Vec<RepairEntry>,
     /// True when nothing was written because the run was a preview.
     pub dry_run: bool,
-    /// Where `--announce-tags` was written, when the flag was passed. The
+    /// Where `--tags-file` was written, when the flag was passed. The
     /// follow-up hint can only name the file the user actually asked for.
-    pub announce_tags_path: Option<PathBuf>,
+    pub tags_file: Option<PathBuf>,
     /// Packages a configured index source claims but has no root document for
     /// yet - never announced, so the staleness layer had nothing to compare
     /// against and produced no findings. Plain-mode only: an empty
@@ -80,7 +80,7 @@ impl PackageCascadeRepair {
         Self {
             entries,
             dry_run,
-            announce_tags_path: None,
+            tags_file: None,
             index_layer_skipped: Vec::new(),
         }
     }
@@ -160,7 +160,7 @@ impl PackageCascadeRepair {
             }
             let package = report.logical.as_ref().unwrap_or(&report.identifier).without_digest();
             let package = package.to_string();
-            match (wrote, &self.announce_tags_path) {
+            match (wrote, &self.tags_file) {
                 (true, Some(path)) => data.print_hint(&publish_moved_tags_hint(&package, path)),
                 (true, None) => data.print_hint(&publish_moved_tags_without_file_hint(&package)),
                 (false, _) => data.print_hint(&stale_index_hint(&package)),
@@ -209,7 +209,7 @@ impl Printable for PackageCascadeRepair {
 }
 
 /// The remediation line a run that moved tags prints, naming the file
-/// `--announce-tags` wrote.
+/// `--tags-file` wrote.
 ///
 /// One of the three pure hint builders DX-70 extracts. They exist for
 /// testability rather than reuse: [`ocx_lib::cli::DataInterface::print_hint`]
@@ -227,11 +227,11 @@ fn publish_moved_tags_hint(package: &str, tags_path: &std::path::Path) -> String
 }
 
 /// The remediation line a run that moved tags prints when it was given no
-/// `--announce-tags` destination, so the follow-up needs two commands.
+/// `--tags-file` destination, so the follow-up needs two commands.
 #[must_use]
 fn publish_moved_tags_without_file_hint(package: &str) -> String {
     format!(
-        "publish the moved tags - re-run with --announce-tags <PATH>, then: \
+        "publish the moved tags - re-run with --tags-file <PATH>, then: \
          ocx package announce {package} --tags-file <PATH>"
     )
 }
@@ -331,7 +331,7 @@ mod tests {
         PackageCascadeRepair {
             entries,
             dry_run,
-            announce_tags_path: None,
+            tags_file: None,
             index_layer_skipped: Vec::new(),
         }
     }
@@ -480,7 +480,7 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            vec!["announce_tags_path", "dry_run", "entries"],
+            vec!["dry_run", "entries", "tags_file"],
             "pin the field set a --format json consumer actually parses: {value}"
         );
 
@@ -514,18 +514,18 @@ mod tests {
     }
 
     #[test]
-    fn json_announce_tags_path_is_null_when_the_flag_was_not_passed() {
+    fn json_tags_file_is_null_when_the_flag_was_not_passed() {
         let repair = PackageCascadeRepair::from_reports(vec![report()], false);
         let value = serde_json::to_value(&repair).unwrap();
-        assert!(value["announce_tags_path"].is_null());
+        assert!(value["tags_file"].is_null());
     }
 
     #[test]
-    fn json_announce_tags_path_is_a_string_when_the_flag_was_passed() {
+    fn json_tags_file_is_a_string_when_the_flag_was_passed() {
         let mut repair = PackageCascadeRepair::from_reports(vec![report()], false);
-        repair.announce_tags_path = Some(PathBuf::from("/tmp/tags.txt"));
+        repair.tags_file = Some(PathBuf::from("/tmp/tags.txt"));
         let value = serde_json::to_value(&repair).unwrap();
-        assert_eq!(value["announce_tags_path"], "/tmp/tags.txt");
+        assert_eq!(value["tags_file"], "/tmp/tags.txt");
     }
 
     /// C-062 / DX-70: repair's own two remediation lines name the **positional**
@@ -557,7 +557,7 @@ mod tests {
         );
         assert!(
             with_file.contains("--tags-file tags.txt"),
-            "the follow-up names the file --announce-tags actually wrote: {with_file}"
+            "the follow-up names the file --tags-file actually wrote: {with_file}"
         );
 
         let without_file = publish_moved_tags_without_file_hint("acme/widget");
@@ -570,7 +570,7 @@ mod tests {
             "ocx must not tell an operator to run the spelling it deprecates: {without_file}"
         );
         assert!(
-            without_file.contains("--announce-tags"),
+            without_file.contains("re-run with --tags-file <PATH>"),
             "with no destination the follow-up is two commands, and this is the first: {without_file}"
         );
     }
