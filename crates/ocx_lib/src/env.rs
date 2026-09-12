@@ -212,7 +212,7 @@ pub mod keys {
     /// absence.
     pub const OCX_TOOLCHAIN_PINNED: &str = "OCX_TOOLCHAIN_PINNED";
     /// Path to the root under which project toolchain homes are rendered —
-    /// the environment tier of `config.toml`'s `toolchain-dir`
+    /// the environment tier of `config.toml`'s `toolchain_dir`
     /// (`plan_toolchain_activation.md` C-008 / C-016).
     ///
     /// **Resolution-affecting**: it moves where the `links/<group>/<entry>`
@@ -452,7 +452,7 @@ pub struct OcxConfigView {
     pub no_consent: bool,
     pub index: Option<PathBuf>,
     /// Root under which project toolchain homes are rendered — the resolved
-    /// `toolchain-dir` (C-008). `None` when no tier set one, which is the
+    /// `toolchain_dir` (C-008). `None` when no tier set one, which is the
     /// in-project `<project>/.ocx/toolchain` default.
     ///
     /// Resolution-affecting, and that is the whole reason it travels: it moves
@@ -462,7 +462,7 @@ pub struct OcxConfigView {
     /// [`keys::OCX_CONFIG`] and [`keys::OCX_INDEX`].
     ///
     /// Every producer in the tree writes `None` until WP-4 resolves
-    /// `toolchain-dir` (plan finding R-W7) — which is the shape D-V10 invoked
+    /// `toolchain_dir` (plan finding R-W7) — which is the shape D-V10 invoked
     /// *Unchecked Green* to reject for C-002, and is justified differently
     /// here: the field is compile-forced (a struct literal cannot omit it),
     /// and its `None` arm in [`Env::apply_ocx_config`] does real work today by
@@ -5341,7 +5341,7 @@ mod tests {
 
     // ── C-008: `OCX_TOOLCHAIN_DIR` on the child env ────────────────────────
 
-    /// C-008: a resolved `toolchain-dir` travels to a child ocx, because it
+    /// C-008: a resolved `toolchain_dir` travels to a child ocx, because it
     /// moves `<home>/toolchain/links/<group>/<entry>` and is therefore
     /// resolution-affecting.
     #[test]

@@ -226,7 +226,7 @@ Four of its fields are a contract other tools read rather than a diagnostic a pe
 
 | Field | What it carries |
 |---|---|
-| `toolchain_home` | The resolved toolchain home: `<project>/.ocx/toolchain`, or `<toolchain-dir>/<project-key>/toolchain` when [`toolchain-dir`][config-toolchain-dir] relocates it, or `$OCX_HOME/toolchain` when no project resolves. Always present, never `null` — a `toolchain-dir` the containment rules refuse is rejected at config load, so a report that exists at all has a spellable home. |
+| `toolchain_home` | The resolved toolchain home: `<project>/.ocx/toolchain`, or `<toolchain_dir>/<project-key>/toolchain` when [`toolchain_dir`][config-toolchain_dir] relocates it, or `$OCX_HOME/toolchain` when no project resolves. Always present, never `null` — a `toolchain_dir` the containment rules refuse is rejected at config load, so a report that exists at all has a spellable home. |
 | `toolchain_bin` | The directory to put on `PATH` for that same home — the trampolines [`bin` mode][config-project-activate] exposes. Present exactly when `toolchain_home` is, so no consumer has to branch, and it names a path that need not exist yet: a home that has never been pulled reports the directory it *would* hold. **Read this field rather than joining anything onto `toolchain_home`.** The two are not one path component apart, and a hand-built join produces a plausible string that names nothing — silently, because the tool that consumed it will not fail until several steps later. |
 | `activate` | The mode the project in effect resolves to — `env`, `bin` or `none` — through that project's own [`activate` key][config-project-activate] and then the environment, never one tier's raw value. With no project in effect the file tier is absent and the environment answers. |
 | `pinned` | The boolean, resolved through the same two tiers. `true` means a composing emitter yields digest paths and consults no `links/<group>/<entry>` link; `false` means it follows the rendered links, so an [`ocx update`][cmd-update] takes effect with no re-render. |
@@ -309,7 +309,7 @@ With no `[[trust.policy]]` configured, automatic verification is a no-op — som
 [config-managed]: ../reference/configuration.md#keys-managed
 [config-trust-policy]: ../reference/configuration.md#keys-trust
 [config-mirrors]: ../reference/configuration.md#keys-mirrors
-[config-toolchain-dir]: ../reference/configuration.md#keys-toolchain-dir
+[config-toolchain_dir]: ../reference/configuration.md#keys-toolchain_dir
 [config-project-activate]: ../reference/configuration.md#project-config-activate
 [arg-config]: ../reference/command-line.md#arg-config
 [env-ocx-env-state]: ../reference/environment.md#ocx-env-state

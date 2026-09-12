@@ -2950,7 +2950,7 @@ def measure_bin_arena(
     The home is **read back from the binary** (``ocx shell state``'s
     ``toolchain_home``, the field WP-9 added for exactly this) and never joined
     here from `ocx.toml` and a convention. Two reasons, and the second is the
-    load-bearing one: ``toolchain-dir`` (C-017–C-019) can move the home
+    load-bearing one: ``toolchain_dir`` (C-017–C-019) can move the home
     anywhere, and a fixture that re-derives the path agrees with itself instead
     of with the code — which is how this file's own store-layout mirrors are
     written, always fail-closed and always with the binary as the authority.

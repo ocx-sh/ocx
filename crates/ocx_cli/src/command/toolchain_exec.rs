@@ -536,7 +536,7 @@ fn reconcile_run_entries(entries: &mut [Entry], project_env: &mut [Entry]) -> Re
 /// [`ToolchainHome`](ocx_lib::file_structure::ToolchainHome) accessors for the
 /// project's, the latter through
 /// [`PackageManager::toolchain_home`](ocx_lib::package_manager::PackageManager::toolchain_home)
-/// so `toolchain-dir` is honoured. A literal `join("toolchain").join("bin")`
+/// so `toolchain_dir` is honoured. A literal `join("toolchain").join("bin")`
 /// would compile, pass every fixture, and drift silently the day the tree shape
 /// moves — which is the whole of what C-010 forbids.
 ///
@@ -810,7 +810,7 @@ mod tests {
     /// re-enters itself.
     ///
     /// The discriminating input is a project home whose root does **not** end
-    /// in `toolchain` — which is exactly what a `toolchain-dir` relocation
+    /// in `toolchain` — which is exactly what a `toolchain_dir` relocation
     /// produces at `<root>/<project-key>/toolchain`, and what a
     /// `join("toolchain").join("bin")` at the call site would answer wrongly
     /// for. Reachable only because RUL-69 took `&Context` out of the signature:

@@ -1561,7 +1561,7 @@ impl ConfigLoader {
         // activation consent whitelist are ambient host configuration, and the
         // flag prunes them with the user and `$OCX_HOME` tiers.
         *shell = None;
-        // `toolchain-dir` (C-016) is a bare root-level scalar with no lock of
+        // `toolchain_dir` (C-016) is a bare root-level scalar with no lock of
         // its own, so it is ambient configuration and prunes like `[shell]`.
         // Continuity under the flag comes from the environment instead: a parent
         // ocx forwards its resolved root as `OCX_TOOLCHAIN_DIR`, which
@@ -4474,7 +4474,7 @@ mod tests {
         );
         assert!(
             config.toolchain_dir.is_none(),
-            "`toolchain-dir` locks nothing either, so the flag prunes it like [shell] (C-016)"
+            "`toolchain_dir` locks nothing either, so the flag prunes it like [shell] (C-016)"
         );
     }
 
@@ -4504,7 +4504,7 @@ mod tests {
         assert!(config.trust.is_none(), "an emptied policy list collapses to None");
         assert!(
             config.toolchain_dir.is_none(),
-            "an unlocked `toolchain-dir` is pruned too"
+            "an unlocked `toolchain_dir` is pruned too"
         );
     }
 
@@ -5981,7 +5981,7 @@ mod tests {
         );
     }
 
-    // ── WP-4 · `toolchain-dir` across the tiers (C-016, S-004, R-W2, E-43/E-44)
+    // ── WP-4 · `toolchain_dir` across the tiers (C-016, S-004, R-W2, E-43/E-44)
     //
     // Written from `plan_toolchain_activation.md` (C-016, S-004, R-W2) and
     // RUL-3, not from an implementation. Two kinds of row: those that ask only
@@ -6012,7 +6012,7 @@ mod tests {
         Some(anchor)
     }
 
-    /// S-004 — a fleet operator's `[managed]` payload carries `toolchain-dir`
+    /// S-004 — a fleet operator's `[managed]` payload carries `toolchain_dir`
     /// into the merged config like any other tier. `fold_managed_tier` parses
     /// the payload as a whole `Config`, so the key needs no separate
     /// allow-listing; this pins that it stays that way.
@@ -6030,7 +6030,7 @@ mod tests {
         write_managed_snapshot(
             anchor.path(),
             "registry.test/managed-config:v1",
-            &toml_path_line("toolchain-dir", &fleet_root),
+            &toml_path_line("toolchain_dir", &fleet_root),
         );
 
         let config = ConfigLoader::load(ConfigInputs {
@@ -6044,7 +6044,7 @@ mod tests {
         assert_eq!(
             config.toolchain_dir.as_deref(),
             Some(fleet_root.as_path()),
-            "a [managed] payload's toolchain-dir must reach the merged config (S-004)"
+            "a [managed] payload's toolchain_dir must reach the merged config (S-004)"
         );
         let resolved = crate::config::ToolchainRoot::resolve(&config)
             .expect("a fleet root inside $OCX_HOME is admitted")
@@ -6084,7 +6084,7 @@ mod tests {
         write_managed_snapshot(
             anchor.path(),
             "registry.test/managed-config:v1",
-            &toml_path_line("toolchain-dir", &system_location),
+            &toml_path_line("toolchain_dir", &system_location),
         );
 
         let config = ConfigLoader::load(ConfigInputs {
@@ -6109,7 +6109,7 @@ mod tests {
         );
     }
 
-    /// `OCX_NO_CONFIG=1` prunes an ambient `toolchain-dir`, and the environment
+    /// `OCX_NO_CONFIG=1` prunes an ambient `toolchain_dir`, and the environment
     /// tier then becomes the effective one.
     ///
     /// Both halves matter: the prune alone would leave a hermetic child with no
@@ -6123,7 +6123,7 @@ mod tests {
         with_system_config(
             &env,
             &dir,
-            &toml_path_line("toolchain-dir", &anchor.path().join("from-system")),
+            &toml_path_line("toolchain_dir", &anchor.path().join("from-system")),
         );
         env.set("OCX_NO_CONFIG", "1");
         env.set(
@@ -6141,7 +6141,7 @@ mod tests {
 
         assert!(
             config.toolchain_dir.is_none(),
-            "toolchain-dir is ambient host configuration and OCX_NO_CONFIG=1 prunes it"
+            "toolchain_dir is ambient host configuration and OCX_NO_CONFIG=1 prunes it"
         );
         let resolved = crate::config::ToolchainRoot::resolve(&config)
             .expect("the environment root is inside $OCX_HOME")
@@ -6155,7 +6155,7 @@ mod tests {
         );
     }
 
-    /// `OCX_NO_CONFIG=1` does **not** prune a `toolchain-dir` from an explicit
+    /// `OCX_NO_CONFIG=1` does **not** prune a `toolchain_dir` from an explicit
     /// `--config` / `OCX_CONFIG` file: `retain_system_locked_sections` runs
     /// over the discovered chain only, and the explicit overlay merges
     /// afterwards. So the explicit file still beats the environment tier.
@@ -6167,7 +6167,7 @@ mod tests {
         let explicit = write_config(
             &dir,
             "explicit.toml",
-            &toml_path_line("toolchain-dir", &anchor.path().join("from-file")),
+            &toml_path_line("toolchain_dir", &anchor.path().join("from-file")),
         );
         env.set("OCX_NO_CONFIG", "1");
         env.set(

@@ -212,7 +212,7 @@ pub struct Config {
     /// Available in every configuration tier, a managed-configuration payload
     /// included, so one fleet rollout can place every host's project trees on a
     /// chosen volume.
-    #[serde(default, rename = "toolchain-dir")]
+    #[serde(default)]
     pub toolchain_dir: Option<PathBuf>,
 }
 
@@ -326,7 +326,7 @@ impl Config {
         // its `None` never clobbers a lower tier's value — the same rule
         // `RegistryDefaults::merge` applies to `[registry] default`. An **empty**
         // value is absent rather than a declaration, the rule `declared_root`
-        // applies at the tier ladder: without this filter `toolchain-dir = ""`
+        // applies at the tier ladder: without this filter `toolchain_dir = ""`
         // in a higher tier silently erases a lower tier's real value, which is
         // the one thing "a `None` never clobbers" was written to prevent.
         //
@@ -362,7 +362,7 @@ impl Config {
         self.registry.as_ref()?.default.as_deref()
     }
 
-    /// The `toolchain-dir` root **as the merged tiers declared it** (C-016), or
+    /// The `toolchain_dir` root **as the merged tiers declared it** (C-016), or
     /// `None` when no tier set one.
     ///
     /// Deliberately unvalidated: this is what a file said, and a file may say
@@ -377,7 +377,7 @@ impl Config {
     }
 }
 
-/// Which tier declared a `toolchain-dir` value (R-W2).
+/// Which tier declared a `toolchain_dir` value (R-W2).
 ///
 /// Reached only through [`ToolchainRootError`]: a refusal has to name the input
 /// whoever hit it can actually change, or a message blames a `config.toml` for a
@@ -385,7 +385,7 @@ impl Config {
 /// tests for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolchainRootTier {
-    /// The merged `config.toml` chain's root-level `toolchain-dir` key. The
+    /// The merged `config.toml` chain's root-level `toolchain_dir` key. The
     /// `[managed]` payload folds into that same chain, so a fleet-pushed value
     /// reports as this tier too — the operator's remedy is to edit the payload,
     /// which is still a `config.toml`.
@@ -400,13 +400,13 @@ impl std::fmt::Display for ToolchainRootTier {
     /// variable, never the Rust variant. Mirrors [`ConfigTier`]'s `Display`.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::ConfigFile => "config.toml `toolchain-dir`",
+            Self::ConfigFile => "config.toml `toolchain_dir`",
             Self::Environment => "OCX_TOOLCHAIN_DIR",
         })
     }
 }
 
-/// Why a declared `toolchain-dir` was refused (C-017, C-018, C-019, R-W1, R-W2,
+/// Why a declared `toolchain_dir` was refused (C-017, C-018, C-019, R-W1, R-W2,
 /// RUL-4, RUL-5).
 ///
 /// Every variant classifies as [`ExitCode::ConfigError`] (78), and every variant
@@ -415,7 +415,7 @@ impl std::fmt::Display for ToolchainRootTier {
 /// change.
 ///
 /// **A root that does not exist is not in here.** RUL-5 accepts it: the ADR's own
-/// worked example is `toolchain-dir = "~/.cache/ocx/toolchain"`, which does not
+/// worked example is `toolchain_dir = "~/.cache/ocx/toolchain"`, which does not
 /// exist on a fresh machine, and the renderer (WP-7) creates the directory. What
 /// C-019 checks in that case is the nearest existing ancestor, which is why the
 /// two ownership variants carry `checked` beside `resolved`.
@@ -441,7 +441,7 @@ pub enum ToolchainRootError {
     /// one uses the process working directory, so the same project would resolve
     /// a different home from every directory ocx is invoked from.
     #[error(
-        "{tier} is the relative path {}; a toolchain-dir root must be absolute, or one project resolves a different home from every working directory",
+        "{tier} is the relative path {}; a toolchain_dir root must be absolute, or one project resolves a different home from every working directory",
         declared.display()
     )]
     Relative { tier: ToolchainRootTier, declared: PathBuf },
@@ -483,7 +483,7 @@ pub enum ToolchainRootError {
     ///
     /// `anchor` can name a directory that is not literally `resolved`: the
     /// comparison folds ASCII case (see [`eq_ignoring_ascii_case`]), so on a
-    /// case-**sensitive** host `$HOME=/home/u` with `toolchain-dir = /home/U`
+    /// case-**sensitive** host `$HOME=/home/u` with `toolchain_dir = /home/U`
     /// reports two genuinely different directories as one. The refusal is still
     /// the right answer — `/home/U` fails C-017 anyway — but the diagnosis is
     /// the cost of folding a refusal rather than probing the filesystem for the
@@ -552,7 +552,7 @@ pub enum ToolchainRootError {
         source: std::io::Error,
     },
 
-    /// The checked path exists and is **not a directory** — a `toolchain-dir`
+    /// The checked path exists and is **not a directory** — a `toolchain_dir`
     /// naming a regular file, a socket, a FIFO or a device node.
     ///
     /// `checked` follows [`Self::NotOwnerOwned`]'s rule, so this fires both for
@@ -627,7 +627,7 @@ impl ClassifyExitCode for ToolchainRootError {
     /// Exhaustive on purpose, with no wildcard: a refusal added later cannot
     /// reach a user as an unclassified exit code without a decision here. Every
     /// variant is 78 today — the operator's remedy is always to edit a
-    /// `toolchain-dir` value — but the match, not a blanket `Some`, is what
+    /// `toolchain_dir` value — but the match, not a blanket `Some`, is what
     /// makes that a statement rather than an accident (D-V15(e)).
     ///
     /// Reachable from the CLI only through
@@ -653,7 +653,7 @@ impl ClassifyExitCode for ToolchainRootError {
     }
 }
 
-/// A `toolchain-dir` root that has passed every C-016–C-019 refusal.
+/// A `toolchain_dir` root that has passed every C-016–C-019 refusal.
 ///
 /// **The funnel, enforced by the type and not by memory (R-W2).** The inner path
 /// is private and [`Self::resolve`] is the only constructor — there is no
@@ -724,7 +724,7 @@ pub struct ToolchainRoot {
 }
 
 impl ToolchainRoot {
-    /// Resolve the effective `toolchain-dir` root, or `None` when no tier
+    /// Resolve the effective `toolchain_dir` root, or `None` when no tier
     /// declared one (the in-project `<project>/.ocx/toolchain` default).
     ///
     /// # Tiers
@@ -930,7 +930,7 @@ impl ToolchainRoot {
     }
 }
 
-/// The tier that declared a `toolchain-dir`, and what it declared.
+/// The tier that declared a `toolchain_dir`, and what it declared.
 ///
 /// `config.toml` beats `OCX_TOOLCHAIN_DIR` (RUL-3): the environment variable is
 /// the weakest tier, so a child that can read its own configuration prefers
@@ -956,7 +956,7 @@ fn declared_root(config: &Config) -> Option<(ToolchainRootTier, PathBuf)> {
         .map(|value| (ToolchainRootTier::Environment, PathBuf::from(value)))
 }
 
-/// The two directories C-017 admits a `toolchain-dir` root beneath, as the
+/// The two directories C-017 admits a `toolchain_dir` root beneath, as the
 /// environment spells them.
 ///
 /// Declared spellings, not canonical ones — [`Containment::around`] canonicalises.
@@ -1202,7 +1202,7 @@ fn eq_ignoring_ascii_case(left: &Path, right: &Path) -> bool {
 /// Fedora — Silverblue, Kinoite, CoreOS, Bazzite — puts every user's home at
 /// `/var/home/<user>`: `/home` is a symlink to `var/home` and the passwd entry
 /// canonicalises there. A bare `/var` subtree prefix therefore refuses *every*
-/// `toolchain-dir` on those hosts, `~/.cache/ocx/toolchain` included — the
+/// `toolchain_dir` on those hosts, `~/.cache/ocx/toolchain` included — the
 /// ADR's own worked example, on a shipping desktop distribution. The
 /// directories C-018 is actually defending are listed one by one below; there
 /// is no exemption mechanism and no configuration key that opts out of any of
@@ -1330,7 +1330,7 @@ fn is_system_location_among(path: &Path, windows_prefixes: &[PathBuf]) -> bool {
     })
 }
 
-/// A fresh temporary directory usable as a `toolchain-dir` containment anchor,
+/// A fresh temporary directory usable as a `toolchain_dir` containment anchor,
 /// or the reason this host cannot supply one.
 ///
 /// The temp root has to be a *usable* anchor. On macOS `std::env::temp_dir()` is
@@ -1388,7 +1388,7 @@ struct NearestExisting {
     /// or mode, and this is then the directory the renderer will create it
     /// under.
     ///
-    /// Existence, not directory-ness: a `toolchain-dir` naming an existing
+    /// Existence, not directory-ness: a `toolchain_dir` naming an existing
     /// **regular file** canonicalises here and is carried out intact.
     /// Refusing it is [`refuse_unsound_root`]'s job, at the one stat this
     /// resolution performs — [`ToolchainRootError::NotADirectory`].
@@ -2161,9 +2161,9 @@ mod tests {
     }
 }
 
-// ── WP-4 · `toolchain-dir` specification tests ──────────────────────────────
+// ── WP-4 · `toolchain_dir` specification tests ──────────────────────────────
 
-/// Specification tests for the `toolchain-dir` root.
+/// Specification tests for the `toolchain_dir` root.
 ///
 /// Written from `plan_toolchain_activation.md` (C-016–C-019, S-004, S-011,
 /// R-W1, R-W2), `adr_toolchain_activation.md` (§ *`config.toml` placement key*
@@ -2249,7 +2249,7 @@ mod toolchain_root_tests {
         ("ProgramData", r"C:\ProgramData"),
     ];
 
-    /// The environment lock with both `toolchain-dir` inputs pinned:
+    /// The environment lock with both `toolchain_dir` inputs pinned:
     /// `$OCX_HOME` at `anchor`, and no ambient `OCX_TOOLCHAIN_DIR` leaking in
     /// from the developer's shell.
     ///
@@ -2715,7 +2715,7 @@ mod toolchain_root_tests {
         assert_eq!(
             ToolchainRoot::resolve(&config_tier("")).expect("an empty config.toml value is absent, not invalid"),
             None,
-            "toolchain-dir = \"\" declares no root"
+            "toolchain_dir = \"\" declares no root"
         );
 
         env.set(OCX_TOOLCHAIN_DIR, "");
@@ -2910,7 +2910,7 @@ mod toolchain_root_tests {
     /// An ostree-composed Fedora (Silverblue, Kinoite, CoreOS, Bazzite) makes
     /// `/home` a symlink to `var/home`, so every passwd entry canonicalises
     /// under `/var`. A bare `/var` subtree prefix therefore refuses *every*
-    /// `toolchain-dir` on those hosts — `~/.cache/ocx/toolchain` included,
+    /// `toolchain_dir` on those hosts — `~/.cache/ocx/toolchain` included,
     /// which is the ADR's own worked example. The directories C-018 defends are
     /// named one by one instead.
     ///
@@ -3109,7 +3109,7 @@ mod toolchain_root_tests {
 
     // ── The checked path must be a directory ────────────────────────────────
 
-    /// A `toolchain-dir` naming an existing **regular file** is refused, and so
+    /// A `toolchain_dir` naming an existing **regular file** is refused, and so
     /// is one whose nearest existing ancestor is that file.
     ///
     /// C-019 alone admits both: `tempfile`'s file is owner-owned and its mode
@@ -3152,7 +3152,7 @@ mod toolchain_root_tests {
             assert_eq!(
                 classify_error(&routed),
                 ExitCode::ConfigError,
-                "a toolchain-dir naming a non-directory must exit 78, not 1: {rendered}"
+                "a toolchain_dir naming a non-directory must exit 78, not 1: {rendered}"
             );
         }
     }
@@ -3530,7 +3530,7 @@ mod toolchain_root_tests {
         assert_eq!(config_tier("/usr").toolchain_dir(), Some(Path::new("/usr")));
     }
 
-    /// C-016 — **the global home ignores `toolchain-dir` entirely.**
+    /// C-016 — **the global home ignores `toolchain_dir` entirely.**
     /// `$OCX_HOME/toolchain/` never moves, whatever any tier declares.
     #[test]
     fn the_global_toolchain_home_ignores_every_declared_root() {
@@ -3545,7 +3545,7 @@ mod toolchain_root_tests {
         assert_eq!(
             structure.toolchain.root(),
             sandbox.path().join("toolchain"),
-            "the global home is $OCX_HOME/toolchain and no toolchain-dir tier moves it"
+            "the global home is $OCX_HOME/toolchain and no toolchain_dir tier moves it"
         );
     }
 
@@ -3561,7 +3561,7 @@ mod toolchain_root_tests {
             assert_eq!(
                 refusal.classify(),
                 Some(ExitCode::ConfigError),
-                "every toolchain-dir refusal is a config error (78); {refusal} was not"
+                "every toolchain_dir refusal is a config error (78); {refusal} was not"
             );
         }
     }

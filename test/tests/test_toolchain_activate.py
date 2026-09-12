@@ -20,7 +20,7 @@ Every directory an assertion names is obtained **from the binary** —
 for a composed package directory — and compared through
 :func:`os.path.realpath`. A literal ``.ocx/toolchain`` join would assert the
 default *spelling* of the home while the sentence around it names the home's
-*identity*, and would red the moment ``toolchain-dir`` relocates it or a link
+*identity*, and would red the moment ``toolchain_dir`` relocates it or a link
 is repointed. :func:`locked_project` mints three disjoint spellings per tool
 (repository, ``[tools]`` key, binary name) so an assertion about one of them
 can never be satisfied by another.
@@ -1053,7 +1053,7 @@ def test_owned_prefixes_exclude_a_sibling_project_and_the_toolchain_dir_root(
 ) -> None:
     """C-063, RUL-68: the owned set is ``$OCX_HOME`` plus **this** project's home.
 
-    Under ``toolchain-dir`` every project's home is a child of one root, so
+    Under ``toolchain_dir`` every project's home is a child of one root, so
     owning the bare root would make one project's prompt a deletion authority
     over every other project's trampolines. Both a sibling's directory and the
     root itself are planted on ``PATH`` and must survive — while this project's
@@ -1083,7 +1083,7 @@ def test_owned_prefixes_exclude_a_sibling_project_and_the_toolchain_dir_root(
     home = resolved_toolchain_home(ocx, project.directory)
     sibling_home = resolved_toolchain_home(ocx, sibling.directory)
     assert _real(home).startswith(_real(root) + os.sep) and _real(sibling_home).startswith(_real(root) + os.sep), (
-        f"`toolchain-dir` must have relocated both homes under {root}: {home}, {sibling_home}"
+        f"`toolchain_dir` must have relocated both homes under {root}: {home}, {sibling_home}"
     )
     assert _real(home) != _real(sibling_home), "the two projects must not share a home"
 
@@ -1101,7 +1101,7 @@ def test_owned_prefixes_exclude_a_sibling_project_and_the_toolchain_dir_root(
     )
     segments = _segments(result)
     assert _real(root) in segments, (
-        f"the bare `toolchain-dir` root holds other projects' homes and may never be owned: {segments}"
+        f"the bare `toolchain_dir` root holds other projects' homes and may never be owned: {segments}"
     )
     assert _real(shell_bin(sibling_home)) in segments, (
         f"a sibling project's trampoline directory may never be owned: {segments}"

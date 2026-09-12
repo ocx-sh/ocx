@@ -872,9 +872,9 @@ Parsed case-insensitively (`Bin`, `BIN` and `bin` are equivalent), unlike the `o
 Like [`OCX_LAZY_MODE`](#ocx-lazy-mode), this variable changes *how* a toolchain reaches `PATH`, never *which* digest resolves, so it sits outside the forwarded set entirely. A child `ocx` reads its own environment.
 :::
 
-### `OCX_TOOLCHAIN_DIR` {#ocx-toolchain-dir}
+### `OCX_TOOLCHAIN_DIR` {#ocx-toolchain_dir}
 
-The root directory under which each project's toolchain tree is rendered — the environment spelling of [`config.toml`'s `toolchain-dir` key][config-toolchain-dir]. A project's tree lands at `<root>/<project-key>/toolchain/`, so this names one directory holding many projects, not one project's toolchain home. The global toolchain home ignores it entirely: that one is always `$OCX_HOME/toolchain`, whatever this resolves to.
+The root directory under which each project's toolchain tree is rendered — the environment spelling of [`config.toml`'s `toolchain_dir` key][config-toolchain_dir]. A project's tree lands at `<root>/<project-key>/toolchain/`, so this names one directory holding many projects, not one project's toolchain home. The global toolchain home ignores it entirely: that one is always `$OCX_HOME/toolchain`, whatever this resolves to.
 
 ```sh
 export OCX_TOOLCHAIN_DIR=~/.cache/ocx/toolchain
@@ -884,13 +884,13 @@ export OCX_TOOLCHAIN_DIR=~/.cache/ocx/toolchain
 
 Unlike the two toolchain settings on either side of it, this one **is** resolution-affecting — it moves where the `links/<group>/<entry>` links and the `shells/default/bin` trampolines live, so every composed path changes with it — and it is forwarded to child `ocx` processes. When the parent resolved no root, the forward **removes** any inherited value, so a stale export in your shell cannot outrank the outer ocx's parsed state.
 
-#### Two expansion rules, and only two {#ocx-toolchain-dir-expansion}
+#### Two expansion rules, and only two {#ocx-toolchain_dir-expansion}
 
 A **leading** `~` expands against the home directory. **Nothing else expands.**
 
 A `%VAR%` reference is taken literally on every platform, Windows included. So `OCX_TOOLCHAIN_DIR='%LOCALAPPDATA%\ocx\toolchain'` does not name a directory under `AppData` — it is a *relative* path whose first component is the literal text `%LOCALAPPDATA%`, and ocx refuses it at parse with exit [`78`][exit-codes] for being relative. Spell the directory out, or use `~`.
 
-#### Refusals {#ocx-toolchain-dir-refusals}
+#### Refusals {#ocx-toolchain_dir-refusals}
 
 The resolved root is refused with exit [`78`][exit-codes] — naming the tier that declared it, so the message points at the file or the variable you can actually edit — when it:
 
@@ -1189,7 +1189,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [config-records]: ./configuration.md#keys-records
 [config-records-dir]: ./configuration.md#keys-records-dir
 [config-records-name]: ./configuration.md#keys-records-name
-[config-toolchain-dir]: ./configuration.md#keys-toolchain-dir
+[config-toolchain_dir]: ./configuration.md#keys-toolchain_dir
 [config-project-activate]: ./configuration.md#project-config-activate
 [config-project-pinned]: ./configuration.md#project-config-pinned
 

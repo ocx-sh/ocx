@@ -63,7 +63,7 @@ pub struct Context {
     default_registry: String,
     config_trust: ocx_lib::trust::TrustConfig,
     config_view: env::OcxConfigView,
-    /// The effective `toolchain-dir` root, past every C-017–C-019 refusal, or
+    /// The effective `toolchain_dir` root, past every C-017–C-019 refusal, or
     /// `None` when no tier declared one (the in-project `.ocx/toolchain`
     /// default). Resolved once in [`Self::try_init`]; see the comment there for
     /// why the refusal belongs to config load rather than to rendering.
@@ -622,7 +622,7 @@ impl Context {
         config_view.records = forwarded_records;
         check_global_project_exclusivity(&config_view)?;
         check_frozen_remote_exclusivity(&config_view)?;
-        // The `toolchain-dir` funnel, run once per invocation at config-load
+        // The `toolchain_dir` funnel, run once per invocation at config-load
         // time (C-017–C-019, RUL-51). Resolving here — rather than at the one
         // site that builds a home — is what makes the refusal a property of the
         // *configuration* instead of a property of rendering: every command
@@ -708,7 +708,7 @@ impl Context {
         self.project_path.as_deref()
     }
 
-    /// The validated `toolchain-dir` root, or `None` for the in-project
+    /// The validated `toolchain_dir` root, or `None` for the in-project
     /// `<project>/.ocx/toolchain` default (C-002, C-016, R-W20).
     ///
     /// The only way to reach a root from a command, and it is already past the

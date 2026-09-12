@@ -379,7 +379,7 @@ impl ToolchainHome {
     /// A home rooted at `root`.
     ///
     /// Pure — touches no filesystem and validates nothing about `root` itself.
-    /// Containment of a configured `toolchain-dir` root is C-017–C-019's
+    /// Containment of a configured `toolchain_dir` root is C-017–C-019's
     /// refusal at the `config.toml` seam, deliberately upstream of this type:
     /// a home is a grammar, not a policy.
     pub fn new(root: impl Into<PathBuf>) -> Self {

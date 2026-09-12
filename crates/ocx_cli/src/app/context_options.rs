@@ -179,7 +179,7 @@ impl ContextOptions {
             no_consent: false,
             index: self.index.clone(),
             // The resolved toolchain root is not derivable from
-            // `ContextOptions`: `toolchain-dir` is a `config.toml` key with no
+            // `ContextOptions`: `toolchain_dir` is a `config.toml` key with no
             // root flag, folded with `OCX_TOOLCHAIN_DIR` and subject to the
             // containment refusals. `Context::try_init` resolves it and
             // populates this field on the returned view; the parser tier starts

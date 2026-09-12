@@ -238,8 +238,8 @@ struct ToolchainState {
 ///
 /// With a project in effect the home is
 /// [`resolve_toolchain_home`](ocx_lib::project::resolve_toolchain_home) over its
-/// canonical directory and the validated `toolchain-dir` root. With no project
-/// the home is the global `$OCX_HOME/toolchain`, which ignores `toolchain-dir`
+/// canonical directory and the validated `toolchain_dir` root. With no project
+/// the home is the global `$OCX_HOME/toolchain`, which ignores `toolchain_dir`
 /// (C-016). Either way the `file` tier is **that scope's own `ocx.toml`** —
 /// [`scope_and_config_path`] mints the two together for the reason its own doc
 /// gives.
@@ -255,7 +255,7 @@ struct ToolchainState {
 ///
 /// The home's own canonicalisation failure, with the offending path attached —
 /// the same class as [`read_ocx_home`]'s unreadable `$OCX_HOME` (exit 74). A
-/// refused `toolchain-dir` cannot surface here: it was refused at config load
+/// refused `toolchain_dir` cannot surface here: it was refused at config load
 /// (RUL-51).
 async fn toolchain_state(
     context: &crate::app::Context,

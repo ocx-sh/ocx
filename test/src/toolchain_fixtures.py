@@ -179,7 +179,7 @@ def _git_ok(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
 def toolchain_home(project: Path) -> Path:
     """The default, un-configured home (C-002): ``<project>/.ocx/toolchain``.
 
-    Only correct when no ``toolchain-dir`` is in effect — use
+    Only correct when no ``toolchain_dir`` is in effect — use
     :func:`resolved_toolchain_home` whenever the test configures one.
     """
     return project / ".ocx" / "toolchain"
@@ -191,7 +191,7 @@ def resolved_toolchain_home(
     """The home ``ocx`` itself resolves for ``cwd`` (C-056).
 
     Reads the ``toolchain_home`` contract field of ``ocx --format json shell
-    state``, which is the supported discovery path when ``toolchain-dir``
+    state``, which is the supported discovery path when ``toolchain_dir``
     relocates the tree — so a relocation case never has to re-derive a 16-hex
     project key by hand.
     """
@@ -316,15 +316,15 @@ def read_render_stamp(ocx: OcxRunner, home: Path) -> dict | None:
 
 
 def write_toolchain_dir_config(ocx: OcxRunner, value: str | Path) -> Path:
-    """Declare ``toolchain-dir = <value>`` in the home-tier ``config.toml``.
+    """Declare ``toolchain_dir = <value>`` in the home-tier ``config.toml``.
 
-    The tier a refusal names is ``config.toml `toolchain-dir```; the environment
+    The tier a refusal names is ``config.toml `toolchain_dir```; the environment
     tier is reached instead by passing ``OCX_TOOLCHAIN_DIR`` through
     ``env_extra``.
     """
     path = Path(ocx.env["OCX_HOME"]) / "config.toml"
     text = value.as_posix() if isinstance(value, Path) else str(value)
-    path.write_text(f'toolchain-dir = "{text}"\n')
+    path.write_text(f'toolchain_dir = "{text}"\n')
     return path
 
 

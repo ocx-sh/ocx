@@ -34,7 +34,7 @@ use crate::reference_manager::ReferenceManager;
 ///
 /// The global home is not resolved here: it is
 /// [`FileStructure::toolchain`](crate::file_structure::FileStructure), a field
-/// built once in `with_root`, and it ignores `toolchain-dir` entirely (C-016).
+/// built once in `with_root`, and it ignores `toolchain_dir` entirely (C-016).
 ///
 /// # Why this takes [`ToolchainRoot`] and not a path or a `&Config` (D-V10, R-W20)
 ///
@@ -108,7 +108,7 @@ mod tests {
     use crate::config::ToolchainRoot;
     use crate::reference_manager::ReferenceManager;
 
-    /// A scratch `toolchain-dir` root, taken as already validated.
+    /// A scratch `toolchain_dir` root, taken as already validated.
     ///
     /// `ToolchainRoot::resolve` refuses anything outside `$HOME`/`$OCX_HOME`, so
     /// no `tempfile` directory can travel through the real funnel, and its
@@ -126,7 +126,7 @@ mod tests {
         dunce::canonicalize(tmp.path()).expect("the scratch directory must canonicalize")
     }
 
-    /// C-002 — with no `toolchain-dir` configured, a project's home is
+    /// C-002 — with no `toolchain_dir` configured, a project's home is
     /// `.ocx/toolchain` beside its own `ocx.toml`.
     #[test]
     fn an_absent_toolchain_dir_resolves_to_dot_ocx_toolchain_inside_the_project() {
@@ -142,7 +142,7 @@ mod tests {
         );
     }
 
-    /// C-002 — with a `toolchain-dir` root configured, the home is
+    /// C-002 — with a `toolchain_dir` root configured, the home is
     /// `<root>/<project-key>/toolchain`.
     ///
     /// The component-order assertion is the discriminator: `<root>/toolchain/<key>`

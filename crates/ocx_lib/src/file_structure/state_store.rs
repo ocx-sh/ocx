@@ -312,11 +312,11 @@ pub struct RenderStamp {
     ///
     /// The identity half, beside `home`'s lookup key — the same split
     /// [`ConsentStamp`](crate::project::consent::ConsentStamp) documents,
-    /// and load-bearing for the same reason. With `toolchain-dir` configured,
+    /// and load-bearing for the same reason. With `toolchain_dir` configured,
     /// two projects colliding in the 64 bits of `name_for_path` share one home
     /// *and* one stamp, so project B's `bin` mode would pass the gate over
-    /// trampolines that bake `--project '<A>'`. Without `toolchain-dir` the
-    /// `home` field alone catches that; the defect is `toolchain-dir`-specific
+    /// trampolines that bake `--project '<A>'`. Without `toolchain_dir` the
+    /// `home` field alone catches that; the defect is `toolchain_dir`-specific
     /// and this is its fix.
     pub scope: RenderStampScope,
 

@@ -524,36 +524,36 @@ fn unknown_schema_kind_returns_none() {
     );
 }
 
-/// C-020 — the `config.toml` schema publishes `toolchain-dir` as a root-level
-/// key, spelled in **kebab-case**, as an optional string.
+/// C-020 — the `config.toml` schema publishes `toolchain_dir` as a root-level
+/// key, spelled in **snake_case**, as an optional string.
 ///
 /// The generated file is gitignored (`website/.gitignore`), regenerated on
 /// every build, so a stale committed copy cannot drift and no diff gate can
-/// catch one. This test is C-020's only durable check: drop the
+/// catch one. This test is C-020's only durable check: re-add a
 /// `#[serde(rename = "toolchain-dir")]` on `Config::toolchain_dir` and the
-/// published key silently becomes `toolchain_dir`, which every editor bound to
-/// the schema then flags on a file `ocx` itself accepts.
+/// published key silently reverts to the retired kebab-case spelling, which
+/// every editor bound to the schema then flags on a file `ocx` itself accepts.
 ///
-/// The `toolchain_dir` half is not decoration: asserting only that
-/// `toolchain-dir` is absent-or-present would pass on a schema publishing both
-/// spellings, and the snake_case one is what a dropped rename emits.
+/// The `toolchain-dir` half is not decoration: asserting only that
+/// `toolchain_dir` is absent-or-present would pass on a schema publishing both
+/// spellings, and the kebab-case one is what a re-added rename emits.
 #[test]
-fn config_schema_publishes_the_toolchain_dir_root_key_in_kebab_case() {
+fn config_schema_publishes_the_toolchain_dir_root_key_in_snake_case() {
     let schema = parse("config");
     let properties = schema
         .get("properties")
         .and_then(Value::as_object)
         .expect("config schema must have a top-level `properties` object");
 
-    let toolchain_dir = properties.get("toolchain-dir").unwrap_or_else(|| {
+    let toolchain_dir = properties.get("toolchain_dir").unwrap_or_else(|| {
         panic!(
-            "config schema must publish the root-level `toolchain-dir` key (C-016); got {:?}",
+            "config schema must publish the root-level `toolchain_dir` key (C-016); got {:?}",
             properties.keys().collect::<Vec<_>>()
         )
     });
     assert!(
-        !properties.contains_key("toolchain_dir"),
-        "the published key is kebab-case only — a snake_case twin means the `#[serde(rename)]` was dropped"
+        !properties.contains_key("toolchain-dir"),
+        "the published key is snake_case only — a kebab-case twin means a `#[serde(rename)]` crept back in"
     );
 
     let types: Vec<&str> = toolchain_dir
@@ -570,6 +570,6 @@ fn config_schema_publishes_the_toolchain_dir_root_key_in_kebab_case() {
     assert_eq!(
         types,
         vec!["string", "null"],
-        "`toolchain-dir` is an optional path scalar, so the schema admits a string or null; got {toolchain_dir}"
+        "`toolchain_dir` is an optional path scalar, so the schema admits a string or null; got {toolchain_dir}"
     );
 }

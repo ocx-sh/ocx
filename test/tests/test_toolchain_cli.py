@@ -442,7 +442,7 @@ def test_shell_state_json_always_names_the_resolved_toolchain_home(
 def test_shell_state_reports_a_relocated_home_under_toolchain_dir(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """S-004 — with ``toolchain-dir`` configured, ``shell state --format json``
+    """S-004 — with ``toolchain_dir`` configured, ``shell state --format json``
     names the **live** home, which is the whole point of publishing the field:
     a discoverer must not have to re-derive a 16-hex project key.
 
@@ -451,7 +451,7 @@ def test_shell_state_reports_a_relocated_home_under_toolchain_dir(
     home = Path(ocx.env["OCX_HOME"])
     root = home / "toolchains"
     root.mkdir(parents=True, exist_ok=True)
-    (home / "config.toml").write_text(f'toolchain-dir = "{root.as_posix()}"\n')
+    (home / "config.toml").write_text(f'toolchain_dir = "{root.as_posix()}"\n')
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -462,7 +462,7 @@ def test_shell_state_reports_a_relocated_home_under_toolchain_dir(
     reported = Path(json.loads(result.stdout)["toolchain_home"])
 
     assert root in reported.parents, (
-        f"S-004 — the reported home must live under the configured toolchain-dir "
+        f"S-004 — the reported home must live under the configured toolchain_dir "
         f"({root}); got {reported}"
     )
     assert reported.name == "toolchain", (
