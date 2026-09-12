@@ -93,7 +93,7 @@ impl PackageCascadeRepair {
                 let _spinner = context.progress().spinner(format!("Repairing {package}"));
                 apply::apply(context.remote_client()?, &observation.identifier, attempted).await?
             };
-            entry.announce_tags = announce_tags(&entry.report, &entry.outcomes);
+            entry.tags = announce_tags(&entry.report, &entry.outcomes);
             entry.planned = planned;
         }
 
@@ -167,7 +167,7 @@ fn announce_tags(report: &graph::CascadeReport, outcomes: &[apply::RepairOutcome
 fn announce_tags_body(entries: &[RepairEntry]) -> String {
     let tags: BTreeSet<&str> = entries
         .iter()
-        .flat_map(|entry| entry.announce_tags.iter().map(String::as_str))
+        .flat_map(|entry| entry.tags.iter().map(String::as_str))
         .collect();
     if tags.is_empty() {
         return String::new();
@@ -218,12 +218,12 @@ mod tests {
         }
     }
 
-    fn entry(announce_tags: &[&str]) -> RepairEntry {
+    fn entry(tags: &[&str]) -> RepairEntry {
         RepairEntry {
             report: report(),
             planned: Vec::new(),
             outcomes: Vec::new(),
-            announce_tags: announce_tags.iter().map(|tag| (*tag).to_string()).collect(),
+            tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
         }
     }
 

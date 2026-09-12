@@ -27,10 +27,10 @@ pub struct RepairEntry {
     pub planned: Vec<PlannedWrite>,
     /// Empty for a preview run: nothing was attempted.
     pub outcomes: Vec<RepairOutcome>,
-    /// The alias tags this package's run moved or created - the same lines
+    /// The alias tags this run left present in the registry - the same lines
     /// written to `--tags-file`, echoed here so a JSON consumer gets them
     /// without reading the file back.
-    pub announce_tags: Vec<String>,
+    pub tags: Vec<String>,
 }
 
 /// What `cascade repair` did, one entry per package in input order.
@@ -40,9 +40,10 @@ pub struct RepairEntry {
 /// tags or index staleness remains.
 ///
 /// JSON format: `{ "entries": [...], "dry_run", "tags_file" }` — one
-/// per-package entry carrying the finding report, the planned writes and
-/// their outcomes, alongside the run-wide preview flag and the
-/// `--tags-file` destination (`null` when the flag was not passed).
+/// per-package entry carrying the finding report, the planned writes, their
+/// outcomes and the `tags` this run left present, alongside the run-wide
+/// preview flag and the `--tags-file` destination (`null` when the flag was
+/// not passed).
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PackageCascadeRepair {
     pub entries: Vec<RepairEntry>,
@@ -73,7 +74,7 @@ impl PackageCascadeRepair {
             .map(|report| RepairEntry {
                 planned: Vec::new(),
                 outcomes: Vec::new(),
-                announce_tags: Vec::new(),
+                tags: Vec::new(),
                 report,
             })
             .collect();
@@ -304,7 +305,7 @@ mod tests {
             report: report(),
             planned: Vec::new(),
             outcomes,
-            announce_tags: Vec::new(),
+            tags: Vec::new(),
         }
     }
 
@@ -491,7 +492,12 @@ mod tests {
             .map(String::as_str)
             .collect();
         entry_keys.sort_unstable();
-        assert_eq!(entry_keys, vec!["announce_tags", "outcomes", "planned", "report"]);
+        assert_eq!(
+            entry_keys,
+            vec!["outcomes", "planned", "report", "tags"],
+            "one vocabulary per document: the entry's tag list is `tags`, and the run-wide \
+             destination beside it is `tags_file` - never `announce_tags` next to either"
+        );
     }
 
     #[test]
