@@ -51,6 +51,17 @@ pub struct ShellConfig {
     /// got. Follows `hook` a fortiori: it grants nothing and gates nothing.
     pub completions: Option<bool>,
 
+    /// Whether `ocx self setup` may write PATH surfaces — shell profiles and
+    /// the session-PATH stores alike. Absent means true.
+    pub modify_path: Option<bool>,
+
+    /// Which shell profile files receive the managed ocx block.
+    ///
+    /// Absent means auto-detect fresh on every run; an empty list means write
+    /// no profile blocks at all. The two are never the same thing, and a
+    /// detection result is never written back into this key.
+    pub profiles: Option<Vec<PathBuf>>,
+
     /// The activation whitelist (C-025 clauses 2 and 3).
     pub consent: Option<ShellConsent>,
 
@@ -68,6 +79,16 @@ pub struct ShellConfig {
     #[serde(skip)]
     #[schemars(skip)]
     pub completions_tier: Option<ConfigTier>,
+
+    /// The tier that set [`Self::modify_path`] — [`Self::hook_tier`]'s twin.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub modify_path_tier: Option<ConfigTier>,
+
+    /// The tier that set [`Self::profiles`] — [`Self::hook_tier`]'s twin.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub profiles_tier: Option<ConfigTier>,
 
     /// Why a managed payload's `[shell.consent]` was dropped, when one was
     /// (C-034).
@@ -90,6 +111,8 @@ impl ShellConfig {
     /// |---|---|
     /// | `hook` | scalar — higher tier wins if `Some`, both directions |
     /// | `completions` | scalar, identical to `hook` |
+    /// | `modify_path` | scalar, identical to `hook` |
+    /// | `profiles` | whole-list — higher tier's list **replaces** a lower tier's if `Some`, never unions; `None` never clears one |
     /// | `consent.paths` | **appends** |
     /// | `consent.namespaces` | **accumulates into one spec** — `include` ∪ `include`, `exclude` ∪ `exclude`; no tier overrides another |
     ///
@@ -108,6 +131,17 @@ impl ShellConfig {
         if other.completions.is_some() {
             self.completions = other.completions;
             self.completions_tier = other.completions_tier;
+        }
+        if other.modify_path.is_some() {
+            self.modify_path = other.modify_path;
+            self.modify_path_tier = other.modify_path_tier;
+        }
+        // Whole-list replace, never a union: someone who names explicit
+        // profiles is excluding the others, so appending a lower tier's list
+        // back in would defeat the key's purpose.
+        if other.profiles.is_some() {
+            self.profiles = other.profiles;
+            self.profiles_tier = other.profiles_tier;
         }
         if let Some(other_consent) = other.consent {
             self.consent
@@ -1786,5 +1820,95 @@ mod tests {
         assert!(namespaces.matches("ocx.sh/acme"), "the config tier's grant survives");
         assert!(namespaces.matches("ghcr.io/team"), "the env channel's grant is added");
         assert!(!namespaces.matches("ghcr.io/evil"));
+    }
+
+    // ── modify_path / profiles ───────────────────────────────────────────────
+
+    /// The fleet-wide "may setup touch PATH" toggle parses, and absent stays
+    /// absent — modelled on `rekor_upload_parses_and_absent_stays_absent`
+    /// (`trust.rs`), the canonical shape for an `Option<bool>` in this repo.
+    #[test]
+    fn modify_path_parses_and_absent_stays_absent() {
+        let configured = parse("modify_path = true\n").expect("the field parses");
+        assert_eq!(configured.modify_path, Some(true));
+
+        let absent = parse("hook = true\n").expect("[shell] parses without the field");
+        assert_eq!(absent.modify_path, None);
+    }
+
+    /// `profiles` parses to a list, and absent stays absent — same shape as
+    /// [`modify_path_parses_and_absent_stays_absent`].
+    #[test]
+    fn profiles_parses_and_absent_stays_absent() {
+        let configured = parse("profiles = [\"/a\", \"/b\"]\n").expect("the field parses");
+        assert_eq!(
+            configured.profiles,
+            Some(vec![PathBuf::from("/a"), PathBuf::from("/b")])
+        );
+
+        let absent = parse("hook = true\n").expect("[shell] parses without the field");
+        assert_eq!(absent.profiles, None);
+    }
+
+    /// Absent and empty are different answers to different questions: absent
+    /// means auto-detect fresh on every run, `profiles = []` means write no
+    /// profile blocks at all. Collapsing them into a bare `Vec<PathBuf>` would
+    /// erase that distinction.
+    ///
+    /// Red state: change `profiles` to `#[serde(default)] Vec<PathBuf>` — both
+    /// branches below then observe `vec![]` for the absent case too, and the
+    /// second assertion fails to distinguish it from the explicit empty list.
+    #[test]
+    fn profiles_distinguishes_absent_from_empty() {
+        let absent = parse("hook = true\n").expect("[shell] parses without the field");
+        assert_eq!(
+            absent.profiles, None,
+            "no key at all means auto-detect, not an empty list"
+        );
+
+        let empty = parse("profiles = []\n").expect("an empty list parses");
+        assert_eq!(
+            empty.profiles,
+            Some(Vec::new()),
+            "an explicit empty list means write no profile blocks, and must stay Some"
+        );
+    }
+
+    /// `merge` treats `profiles` the same way `hook` treats a scalar: the
+    /// higher tier wins only when it actually set something, and a whole-list
+    /// replace, never a union — a tier naming explicit profiles is excluding
+    /// every other one, so folding a lower tier's entries back in would defeat
+    /// the key's purpose.
+    ///
+    /// Two red states: (1) drop the `is_some()` guard on the `profiles` arm —
+    /// the `None`-leaves-intact case below then fails, since a higher tier's
+    /// absent value would clear the lower tier's list; (2) make the arm extend
+    /// (`self.profiles.get_or_insert_with(Vec::new).extend(...)`) instead of
+    /// replace — the `Some`-replaces case below then fails, since the lower
+    /// tier's entry would survive alongside the higher tier's.
+    #[test]
+    fn merge_is_per_key_and_replaces_never_unions() {
+        let mut lower = parse("profiles = [\"/a\"]\n").expect("parses");
+
+        // A higher tier that never mentions `profiles` leaves the lower
+        // tier's list intact.
+        let silent_higher = parse("hook = true\n").expect("parses");
+        lower.merge(silent_higher);
+        assert_eq!(
+            lower.profiles,
+            Some(vec![PathBuf::from("/a")]),
+            "an unset higher tier must not clear the lower tier's list"
+        );
+
+        // A higher tier that does set `profiles` replaces the lower tier's
+        // list wholesale — the lower tier's `/a` must not survive alongside
+        // the higher tier's `/b`.
+        let naming_higher = parse("profiles = [\"/b\"]\n").expect("parses");
+        lower.merge(naming_higher);
+        assert_eq!(
+            lower.profiles,
+            Some(vec![PathBuf::from("/b")]),
+            "a higher tier naming explicit profiles must replace, never union with, the lower tier's list"
+        );
     }
 }
