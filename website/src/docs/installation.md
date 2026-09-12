@@ -56,7 +56,7 @@ The installer takes a few knobs, passed as flags after `-s --` (POSIX `sh`) or a
 curl -fsSL https://setup.ocx.sh/sh | sh -s -- --no-modify-path
 ```
 
-You can also set [`OCX_NO_MODIFY_PATH=1`][env-no-modify-path]. Either way, add both directories the installer would have registered to your `PATH` yourself, toolchain bin first: `~/.ocx/toolchain/active/bin`, then `~/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin`.
+You can also set [`OCX_NO_MODIFY_PATH=1`][env-no-modify-path]. Either way, add both directories the installer would have registered to your `PATH` yourself, toolchain bin first: `~/.ocx/toolchain/active/bin`, then `~/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin`. The flag persists — it writes `[shell] modify_path = false` to `config.toml`, so a later `ocx self setup` run skips both surfaces too until the key is changed by hand.
 
 **Pin a version.** The `OCX_INSTALL_VERSION` env knob is the portable way to install an exact release — `<VERSION>` is the semver string with no leading `v`:
 
@@ -166,7 +166,7 @@ Use them as a `FROM` base for toolchain builds, or `COPY --from` the binary into
 
 ## Updating {#updating}
 
-Once ocx is installed, it updates itself — no index refresh, reinstall, and reselect dance. [`ocx self update`][cmd-self-update] resolves the latest release through your [local index][fs-index], installs it, and swaps the `current` symlink, then heals the `$OCX_HOME/env.*` shims and the managed profile block so the refreshed binary stays wired into your shells:
+Once ocx is installed, it updates itself — no index refresh, reinstall, and reselect dance. [`ocx self update`][cmd-self-update] queries the published index and registry live for the newest release, downloads it, and then re-executes the freshly downloaded binary as its own `ocx self setup` — the same command a bare-binary install runs by hand — so the swap, the shim refresh, and the profile healing are all one continuous step:
 
 ```sh
 ocx self update
@@ -178,7 +178,11 @@ To report whether a newer version exists without installing anything, add `--che
 ocx self update --check
 ```
 
-Version discovery honors `--offline` and `--frozen` because it runs through the [local index][fs-index] like every other command; pass [`--remote`][arg-remote] to force a live probe of the registry for the newest published release.
+Version discovery always queries live — [`--frozen`][arg-frozen] has no effect on it, and [`--offline`][arg-offline] skips the check entirely rather than falling back to the [local index][fs-index]; the freshest upstream ocx is the whole point. [`--remote`][arg-remote] is redundant (already the default) but accepted.
+
+::: tip Downloaded but not activated
+If the hand-off can't finish — most often a shell profile carrying edits it won't overwrite — the download still stands, but nothing is activated: `current` keeps pointing at the old binary, and `ocx self update` exits `75` to say so. Run [`ocx self setup`][cmd-self-setup] to finish the job. See [`ocx self update` reference][cmd-self-update] for the full outcome table and JSON shape.
+:::
 
 ::: tip `ocx self update` is not `ocx update`
 [`ocx self update`][cmd-self-update] updates the ocx binary itself. [`ocx update`][cmd-update] re-resolves your toolchain's declared tags into `ocx.lock` — different verb, different target. Don't reach for one expecting the other.
@@ -296,6 +300,8 @@ This returns `"dev"` for dev builds and `null` (field absent) for stable release
 [cmd-uninstall]: ./reference/command-line.md#package-uninstall
 [cmd-clean]: ./reference/command-line.md#clean
 [arg-remote]: ./reference/command-line.md#arg-remote
+[arg-frozen]: ./reference/command-line.md#arg-frozen
+[arg-offline]: ./reference/command-line.md#arg-offline
 
 <!-- environment -->
 [env-home]: ./reference/environment.md#ocx-home

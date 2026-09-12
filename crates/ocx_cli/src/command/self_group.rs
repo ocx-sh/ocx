@@ -48,13 +48,26 @@ pub enum SelfGroup {
     /// unchanged setup is a no-op. Pass `--dry-run` to preview,
     /// `--no-modify-path` to skip the profiles and the session PATH alike, and
     /// `--force` to overwrite a managed block you have edited by hand
-    /// (otherwise exit 82).
+    /// (otherwise exit 82). Pass `--no-profile` to skip only the profile
+    /// blocks, or `--profile PATH` to target specific files instead of the
+    /// detected ones.
+    ///
+    /// `--no-modify-path` and `--profile` / `--no-profile` persist as `[shell]
+    /// modify_path` and `[shell] profiles` in config.toml, so the choice
+    /// applies to every later run too - not only this one.
     ///
     /// https://ocx.sh/docs/user-guide#install-bare-binary
     Setup(setup::SelfSetup),
     /// Update ocx itself to the latest released version. Without `--check`,
-    /// installs the new binary if one is available. With `--check`, reports the
-    /// result without installing.
+    /// downloads the newest release and activates it. With `--check`, reports
+    /// the result without installing.
+    ///
+    /// Downloading and activating are two separate steps: the newest release
+    /// is pulled first, then the new binary activates itself by running its
+    /// own `ocx self setup`. If that inner setup cannot finish - for example a
+    /// shell profile carries edits it refuses to overwrite - the download
+    /// stands but nothing is activated: exit 75 reports this as pulled rather
+    /// than installed, and running `ocx self setup` again finishes the job.
     ///
     /// The latest version is looked up live from the published index rather
     /// than your local index, so the freshest release is always found;

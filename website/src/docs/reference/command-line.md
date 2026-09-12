@@ -2326,7 +2326,7 @@ Re-running is safe. The shims and the managed block are diff-gated: an unchanged
 **Usage**
 
 ```shell
-ocx self setup [VERSION] [--toolchain-activate MODE] [--no-modify-path] [--profile PATH]... [--dry-run] [--force] [--managed-config REF]
+ocx self setup [VERSION] [--toolchain-activate MODE] [--no-modify-path] [--profile PATH]... [--no-profile] [--dry-run] [--force] [--managed-config REF]
 ```
 
 **Arguments**
@@ -2343,9 +2343,10 @@ ocx self setup [VERSION] [--toolchain-activate MODE] [--no-modify-path] [--profi
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--no-modify-path` | — | Write the env shims but touch neither a shell profile nor the [session PATH](#self-setup-session-path). Suppresses **both** surfaces; the run reports each location it did not touch, as `skipped_opt_out`. Equivalent env var: [`OCX_NO_MODIFY_PATH`][env-ocx-no-modify-path] (truthy). The opt-out is not remembered between runs. | off |
+| `--no-modify-path` | — | Write the env shims but touch neither a shell profile nor the [session PATH](#self-setup-session-path). Suppresses **both** surfaces for this run; the run reports each location it did not touch, as `skipped_opt_out`. Equivalent env var: [`OCX_NO_MODIFY_PATH`][env-ocx-no-modify-path] (truthy). Also writes `[shell] modify_path = false` to `config.toml` (see below), so the opt-out reaches every later run too. | off |
 | `--toolchain-activate MODE` | — | Write `activate = "MODE"` into `$OCX_HOME/ocx.toml`, the tier that decides how the **global** toolchain reaches a shell. `MODE` is `env`, `bin` or `none`; the three meanings are in the [`activate` reference][config-project-activate], where `bin` and `none` compose the same `PATH` for this tier. A project's own `ocx.toml` decides for that project, and [`OCX_TOOLCHAIN_ACTIVATE`][env-ocx-toolchain-activate] is the weakest tier of both. Omit to leave `ocx.toml` untouched; the file is created carrying only this key if absent. An unknown mode exits 64. | *(untouched)* |
-| `--profile PATH` | — | Override the auto-detected profiles; repeatable. Explicit targets use POSIX-fence semantics regardless of file name. | *(autodetect)* |
+| `--profile PATH` | — | Target an explicit profile file instead of auto-detecting; repeatable. Explicit targets use POSIX-fence semantics regardless of file name. Also writes `[shell] profiles` to `config.toml` (see below). | *(autodetect)* |
+| `--no-profile` | — | Write no profile blocks at all — the env shims and, unless `--no-modify-path` is also given, the session PATH registration are still written. Last of `--profile`/`--no-profile` wins. Also writes `[shell] profiles = []` to `config.toml` (see below). | off |
 | `--dry-run` | — | Report what would change and write nothing. Resolves the version and reports `WouldPull` with the resolved digest, but writes nothing. Never returns exit 82. | off |
 | `--force` | — | Overwrite a managed block that carries user edits (the dirty state). | off |
 | `--managed-config REF` | — | Adopt (or clear) the corporate [managed-config][config-managed] tier. `REF` is resolved as an OCI reference, synchronously fetched and persisted, then the `[managed]` seed fence in `config.toml` is written only on success — a fetch failure leaves no partial state. Pass `--managed-config ""` to clear an existing seed and delete the snapshot. Omitting the flag does not skip resolution: it falls back to [`OCX_MANAGED_CONFIG`][env-ocx-managed-config], then the existing seed. Every run reconciles whichever source resolves — a wiped or mismatched snapshot self-heals (hard-fail on a fetch error, same as first adoption), and an already-adopted seed is re-synced to whatever the registry serves now, so a newer published config is picked up without a separate [`ocx config update`](#config-update). That re-sync is best-effort once a matching snapshot already exists on disk: a fetch failure warns on stderr and keeps the existing snapshot (exit 0) instead of failing the run. | *(resolved: env, then existing seed)* |
@@ -2355,7 +2356,9 @@ ocx self setup [VERSION] [--toolchain-activate MODE] [--no-modify-path] [--profi
 | `--no-completion` | — | Persist shell completions off: writes `[shell] completions = false`. | *(untouched)* |
 | `-h`, `--help` | | Print help information. | — |
 
-Omitting a flag from either pair leaves the corresponding `config.toml` key untouched — `self setup` only ever writes the keys you name. This is the persistent counterpart to [`self activate --hook`/`--no-hook`][in-depth-shell-integration-commands], which decides the same ladder rung for one session only and never touches disk.
+Omitting a flag from a pair leaves the corresponding `config.toml` key untouched — `self setup` only ever writes the keys you name. This is the persistent counterpart to [`self activate --hook`/`--no-hook`][in-depth-shell-integration-commands], which decides the same ladder rung for one session only and never touches disk.
+
+`--no-modify-path` and `--profile`/`--no-profile` follow the same rule, but with one difference from `--hook`/`--completion`: there is no positive `--modify-path` flag, so `[shell] modify_path` is only ever written `false` by this command — turning it back on is a hand edit to `config.toml`, or a run made after that edit. Both keys are covered in full, including their ladders and merge rules, in the [`[shell]` configuration reference][config-keys-shell].
 
 ##### Session PATH {#self-setup-session-path}
 
@@ -2689,7 +2692,7 @@ Completions load only for **interactive** sessions. Every shim states its own in
 
 #### `self update` {#self-update}
 
-Check for a newer version of OCX and, if found, install it.
+Check for a newer version of OCX and, if found, download and activate it.
 
 Both forms bypass the [auto-check throttle][env-ocx-update-check-interval] — explicit user intent always runs the lookup regardless of when the last automatic check ran.
 
@@ -2710,13 +2713,16 @@ ocx self update [--check]
 
 **Behavior without `--check`**
 
-Queries the registry for the latest `major.minor.patch` release tag (rolling tags like `1`, `1.2`, build-tagged versions like `1.2.3+build`, and pre-releases like `1.2.3-rc1` are filtered out). If the resolved version is greater than the running binary, installs via the same path as `ocx package install --select`. Reports one of three outcomes:
+Queries the registry for the latest `major.minor.patch` release tag (rolling tags like `1`, `1.2`, build-tagged versions like `1.2.3+build`, and pre-releases like `1.2.3-rc1` are filtered out). If the resolved version is greater than the running binary, downloading and activating it are two separate steps:
 
-- **Already up to date** — the running version is the latest.
-- **Installed** — a newer version was downloaded and selected.
-- **Skipped** — a soft failure (lookup unreachable, version unparseable) prevented the check; the running binary is unchanged.
+1. **Pull** — the new release is downloaded into the [package store](#self-setup), pinned by digest. Nothing is selected yet; `current` still names the old binary.
+2. **Hand off** — the freshly pulled binary is re-executed as its own [`ocx self setup`](#self-setup), pinned to the exact digest just pulled, with a hidden flag that heals shell profiles rather than introducing new ones and writes no `config.toml` key. That child process performs the select — swapping `current` to the new binary — as its first phase, then continues through the shim and profile phases exactly as an ordinary `ocx self setup` run would. Its output is inherited, so what it prints *is* what `ocx self update` prints for that part of the run.
 
-After a successful install, `ocx self update` also refreshes the shell integration that `ocx self setup` owns: it regenerates the `$OCX_HOME/env.*` shims and re-applies the managed activation block in your shell profiles when its body has drifted from the current form. This refresh only *heals* an existing block — it never adds one where you have none (so a `--no-modify-path` install stays untouched) and never overwrites a block you have edited (it advises `ocx self setup --force` instead). When a block or shim is updated, it prints a one-line hint to re-source your profile. The [session-PATH registration](#self-setup-session-path) is outside this refresh: `self update` never writes it, so a store that failed or was opted out of stays that way until you run `ocx self setup` again.
+Reports one of three outcomes:
+
+- **Already up to date** — the running version is the latest; nothing was pulled.
+- **Installed** — the swap landed: `current` now names the new binary. This is true even when the hand-off's own setup did not finish cleanly (for example a shell profile carried edits it would not overwrite) — the binary the user asked for is the one `current` names, and a stderr advisory says what is left to do (typically: run `ocx self setup` again, or with `--force`).
+- **Pulled** — the new release was downloaded but never activated: the hand-off never reached its select, so `current` still names the old binary and the machine is otherwise unchanged. A stderr advisory names what went wrong and advises `ocx self setup`.
 
 **Behavior with `--check`**
 
@@ -2726,10 +2732,10 @@ Same lookup, no installation. Exits 0 when the lookup completes (including "alre
 
 | Code | Meaning |
 |------|---------|
-| 0 | Check or install succeeded (including "already up to date" and "update available"). |
+| 0 | Check or install succeeded (including "already up to date", "update available", and "installed" — even when the hand-off's own setup reported a problem). |
 | 69 | Registry unreachable. |
 | 74 | I/O error writing the installed binary. |
-| 75 | Skipped — soft failure (registry probe failed, version unparseable, throttled, bootstrap, etc.); the running binary is unchanged. |
+| 75 | The release was downloaded but not activated ("pulled"), or the check itself was skipped (registry probe failed, version unparseable, throttled, bootstrap, etc.). Either way, re-running is meaningful: `ocx self setup` to finish activating a pull, or `ocx self update` again for a skipped check. |
 | 79 | No release version found in the registry. |
 | 80 | Authentication failure against the registry. |
 
@@ -2741,11 +2747,13 @@ Same lookup, no installation. Exits 0 when the lookup completes (including "alre
 {"status": "up_to_date"}
 {"status": "update_available", "identifier": "ocx.sh/ocx/cli:1.2.3"}
 {"status": "installed", "from": "0.0.1", "to": "0.0.2"}
+{"status": "installed", "from": "0.0.1", "to": "0.0.2", "handoff": {"reason": "exited", "detail": 82}}
+{"status": "pulled", "to": "0.0.2", "handoff": {"reason": "spawn_failed", "detail": "permission denied"}}
 {"status": "skipped", "skipped_reason": {"reason": "offline"}}
 {"status": "skipped", "skipped_reason": {"reason": "registry_probe_failed", "detail": "503 Service Unavailable"}}
 ```
 
-`from` is omitted on `installed` when the previous version could not be determined (subprocess version query failed — bootstrap mode). `skipped_reason.reason` is one of:
+`from` is omitted when the previous version could not be determined (subprocess version query failed — bootstrap mode). `handoff` is present only when the hand-off's own setup did not finish cleanly, on both `installed` and `pulled`; it is absent whenever that inner setup completed, so a clean `installed` payload is byte-identical to the one this command has always emitted. `handoff.reason` is one of `exited` (`detail` is the child's numeric exit code — `82` means a dirty shell profile it declined to overwrite), `spawn_failed` (`detail` is the underlying error text), or `signalled` (Unix only; `detail` is the signal number). `skipped_reason.reason` is one of:
 
 | `reason` | Meaning | Carries `detail`? |
 |------|---------|--------|
@@ -2759,7 +2767,7 @@ Same lookup, no installation. Exits 0 when the lookup completes (including "alre
 | `no_release_tag` | No clean `major.minor.patch` release tag exists in the registry tag list. | No |
 
 ::: tip Dogfood install
-`ocx self update` installs the new version into the package store and updates the `$OCX_HOME/symlinks/ocx.sh/ocx/cli/current` symlink to point at it. No candidate symlink is created — only `current` is swapped. The same `$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin` PATH entry that `ocx self activate` sets up resolves to the new binary automatically.
+`ocx self update` never installs a candidate symlink for the new version — only `current` moves, and only once the hand-off's own setup reaches its select. The same `$OCX_HOME/symlinks/ocx.sh/ocx/cli/current/content/bin` PATH entry that `ocx self activate` sets up resolves to the new binary automatically once that happens.
 :::
 
 ### `uninstall` {#uninstall}
@@ -6107,6 +6115,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [config-patches]: ./configuration.md#keys-patches
 [config-managed]: ./configuration.md#keys-managed
 [config-managed-required]: ./configuration.md#keys-managed-required
+[config-keys-shell]: ./configuration.md#keys-shell
 [config-project-env]: ./configuration.md#project-config-env
 [config-project-package]: ./configuration.md#project-config-package
 [config-project-groups]: ./configuration.md#project-config-groups

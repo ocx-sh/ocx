@@ -92,9 +92,10 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 | Flag | Effect |
 |------|--------|
-| `--no-modify-path` | Write the shims only; touch neither a shell profile nor the [session `PATH`][cmd-self-setup-session-path]. Equivalent to setting [`OCX_NO_MODIFY_PATH=1`][env-no-modify-path] for that invocation. |
+| `--no-modify-path` | Write the shims only; touch neither a shell profile nor the [session `PATH`][cmd-self-setup-session-path]. Equivalent to setting [`OCX_NO_MODIFY_PATH=1`][env-no-modify-path]. Persists as `[shell] modify_path = false` in `config.toml` (see below). |
 | `--toolchain-activate MODE` | Write `activate = "MODE"` into `$OCX_HOME/ocx.toml`, deciding how the global toolchain reaches your shell. `MODE` is `env`, `bin`, or `none` — see [Tools on PATH, nothing else composed](#global-toolchain-bin). Omit to leave `ocx.toml` untouched; the file is created carrying only this key if it does not exist yet. |
-| `--profile PATH` | Target an explicit profile file instead of auto-detecting. Repeatable. |
+| `--profile PATH` | Target an explicit profile file instead of auto-detecting. Repeatable. Persists as `[shell] profiles` in `config.toml`. |
+| `--no-profile` | Write no profile blocks at all. Persists as `[shell] profiles = []`. |
 | `--dry-run` | Show what would be written without writing anything. Useful to preview which profiles are detected. |
 | `--force` | Overwrite a fenced block whose contents have been manually edited. |
 
@@ -107,7 +108,7 @@ If you plan to manage your own PATH (CI jobs, container images, package-manager 
 #   ~/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin
 ```
 
-Note that `--no-modify-path` is **not remembered** between invocations. If you run `ocx self setup` again later without the flag, both surfaces are written. Set `OCX_NO_MODIFY_PATH=1` persistently in your environment or pass the flag each time to prevent that. Each store the run did not touch still appears in the summary, so you can see what was skipped. See the [environment reference][env-no-modify-path] for the full semantics.
+**The opt-out persists.** `--no-modify-path` writes `[shell] modify_path = false` to `config.toml`, so a later `ocx self setup` run — with or without the flag — still skips both surfaces, from whichever tier decides. There is no positive `--modify-path` flag: turning modification back on is a hand edit to `config.toml`, or a run made after that edit. `--profile` / `--no-profile` follow the identical rule for `[shell] profiles`. Each store a run does not touch still appears in the summary, so you can see what was skipped. See the [environment reference][env-no-modify-path] and the [`[shell]` configuration reference][config-keys-shell] for the full semantics.
 
 ### Install a pinned ocx version {#install-bare-binary-pin}
 
@@ -142,7 +143,8 @@ When the pinned version is older than what is already installed, a warning appea
 
 ::: tip Learn more
 [Shell Activation Files reference][env-shell-activation-files] — what the env shim files contain and how each shell sources them.
-[`OCX_NO_MODIFY_PATH` reference][env-no-modify-path] — truthy semantics, per-invocation behavior.
+[`OCX_NO_MODIFY_PATH` reference][env-no-modify-path] — truthy semantics, the four-rung ladder.
+[`[shell]` configuration reference][config-keys-shell] — `modify_path` and `profiles`, in full.
 [`OCX_HOME` reference][env-ocx-home] — choose a non-default install root before running setup.
 :::
 
@@ -1086,7 +1088,9 @@ OCX is itself an OCX-managed package. The binary lives at `$OCX_HOME/symlinks/oc
 
 Run [`ocx self update`][cmd-self-update] to update OCX to the latest released version, or [`ocx self update --check`][cmd-self-update] to query for a newer version without installing it.
 
-Both commands bypass the background update-check throttle — they always query the published index and registry live. If a new version is available, `ocx self update` installs it and updates the `current` symlink. The `$OCX_HOME/symlinks/…/current/content/bin` PATH entry that `ocx self activate` exports picks up the new binary automatically on the next shell invocation.
+Both commands bypass the background update-check throttle — they always query the published index and registry live. Downloading and activating a new release are two separate steps: `ocx self update` pulls the new binary first, then hands off to it, re-executing it as its own [`ocx self setup`][cmd-self-setup] to perform the select and rewrite every setup surface. That inner setup is what actually swaps `current` — so the `$OCX_HOME/symlinks/…/current/content/bin` PATH entry that `ocx self activate` exports picks up the new binary once that hand-off reaches its select, not before.
+
+If the hand-off cannot finish — most commonly a shell profile carrying edits it will not overwrite — the download stands but nothing is activated: `current` keeps naming the old binary, `ocx self update` exits `75`, and a stderr line says to run `ocx self setup` to finish the job. When the hand-off *does* reach the select but its later phases hit a snag, the update still counts as installed (exit `0`) because the binary you asked for is the one `current` now names; the advisory names what is left to do.
 
 When `ocx self update` runs, OCX queries for the latest `major.minor.patch` release tag. Rolling tags (`1`, `1.2`), pre-releases (`1.2.3-rc1`), and build-tagged versions (`1.2.3+build`) are filtered out — the command recommends only stable releases.
 
@@ -1497,6 +1501,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [config-mirrors]: ./reference/configuration.md#keys-mirrors
 [config-patches]: ./reference/configuration.md#keys-patches
 [config-managed]: ./reference/configuration.md#keys-managed
+[config-keys-shell]: ./reference/configuration.md#keys-shell
 [config-managed-one-hop]: ./reference/configuration.md#keys-managed-one-hop
 [config-unknown-keys]: ./reference/configuration.md#unknown-keys
 [config-trust]: ./reference/configuration.md#keys-trust
