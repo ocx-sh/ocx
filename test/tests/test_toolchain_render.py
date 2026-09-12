@@ -2231,13 +2231,21 @@ def test_a_home_restored_at_the_same_absolute_path_passes_the_gate(
     }
     assert ids_before, "the control: there are trampolines to churn"
 
-    home_backup, state_backup = tmp_path / "home.bak", tmp_path / "state.bak"
-    shutil.copytree(home, home_backup, symlinks=True)
-    shutil.copytree(state, state_backup, symlinks=True)
+    # Stage the restore *while the original is still on disk*, then swap it in.
+    # Copying back after `rmtree` lets ext4 hand the just-freed inode straight
+    # back -- measured on both a developer host and the CI runner, the single
+    # trampoline came back on the identical inode number -- which reds the
+    # control below on a restore that did happen, and leaves the row asserting
+    # nothing. Staging first cannot reuse a live inode, and `os.replace` keeps
+    # the staged ones, so the churn this row needs is deterministic.
+    home_staged = home.with_name(home.name + ".restored")
+    state_staged = state.with_name(state.name + ".restored")
+    shutil.copytree(home, home_staged, symlinks=True)
+    shutil.copytree(state, state_staged, symlinks=True)
     shutil.rmtree(home)
     shutil.rmtree(state)
-    shutil.copytree(home_backup, home, symlinks=True)
-    shutil.copytree(state_backup, state, symlinks=True)
+    os.replace(home_staged, home)
+    os.replace(state_staged, state)
 
     ids_after = {
         p.name: p.stat().st_ino for p in shell_bin(home).iterdir() if p.is_file()
