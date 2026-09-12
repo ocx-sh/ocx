@@ -311,6 +311,15 @@ services:
       - --http_endpoint=0.0.0.0:8091
       - --force_master
       - --alsologtostderr
+    # Published so `sigstore/wait-for-stack.py` can probe `/healthz` from the
+    # host.  Rekor's own readiness endpoint is a *read* of the tree and answers
+    # as soon as Rekor can dial the log **server** -- it says nothing about the
+    # sequencer, which is what a sign needs.  Measured: the signer spent
+    # 13:40:53-13:57:01 unable to resolve `sigstore-mysql` while Rekor sat at
+    # `restarts=0`, and 44 signing rows failed with exit 83 inside that window
+    # on a gate that had already gone green.
+    ports:
+      - "${OCX_TEST_TRILLIAN_SIGNER_PORT:-8091}:8091"
     depends_on:
       sigstore-mysql:
         condition: service_healthy

@@ -27,6 +27,7 @@ def endpoints() -> list[tuple[str, str, str]]:
     fulcio = os.environ.get("OCX_TEST_FULCIO_PORT", "5555")
     rekor = os.environ.get("OCX_TEST_REKOR_PORT", "3000")
     ct = os.environ.get("OCX_TEST_CT_PORT", "6962")
+    signer = os.environ.get("OCX_TEST_TRILLIAN_SIGNER_PORT", "8091")
     return [
         ("dex", f"http://localhost:{dex}/dex/healthz", "the OIDC issuer can mint tokens"),
         ("sigstore-ct", f"http://localhost:{ct}/ocx-test/ct/v1/get-roots",
@@ -35,6 +36,17 @@ def endpoints() -> list[tuple[str, str, str]]:
          "the CA is serving its root certificate"),
         ("rekor", f"http://localhost:{rekor}/api/v1/log",
          "Rekor reached Trillian and has a tree"),
+        # Rekor's endpoint above is a *read*, and it answers as soon as Rekor
+        # can dial the log **server**. A sign is a write, and a write is only
+        # integrated once the **signer** is sequencing, so without this row the
+        # gate goes green over a stack that cannot sign. Measured: the signer
+        # sat at `lookup sigstore-mysql: no such host` from 13:40:53 to
+        # 13:57:01 while Rekor held `restarts=0`, and 44 signing rows failed
+        # with exit 83 (`transparency_log_unavailable`) inside that window.
+        # `/healthz` is the honest probe because it checks database access --
+        # it answers 503 with that very string while the signer is stuck.
+        ("trillian-log-signer", f"http://localhost:{signer}/healthz",
+         "the sequencer reaches its database, so a Rekor entry gets integrated"),
     ]
 
 
@@ -53,18 +65,29 @@ def main() -> int:
     args = ap.parse_args()
 
     started = time.monotonic()
-    pending = {name: (url, why) for name, url, why in endpoints()}
+    checks = endpoints()
+    pending = {name: (url, why) for name, url, why in checks}
     ready: dict[str, float] = {}
 
-    while pending and time.monotonic() - started < args.timeout:
-        for name in list(pending):
-            if probe(pending[name][0]):
-                ready[name] = time.monotonic() - started
-                del pending[name]
-                if not args.quiet:
-                    print(f"  ready  {name:14} {ready[name]:6.1f}s", flush=True)
-        if pending:
-            time.sleep(1.0)
+    # Re-probe every endpoint on every pass, and release only when they all
+    # answer in the *same* sweep. Readiness must not latch: a service that
+    # flaps -- the log signer restarting against a database it cannot yet
+    # resolve -- answers once between restarts, and a latched pass would open
+    # the gate on that single sample and never look again.
+    while time.monotonic() - started < args.timeout:
+        pending = {}
+        for name, url, why in checks:
+            if probe(url):
+                if name not in ready:
+                    ready[name] = time.monotonic() - started
+                    if not args.quiet:
+                        print(f"  ready  {name:14} {ready[name]:6.1f}s", flush=True)
+            else:
+                ready.pop(name, None)
+                pending[name] = (url, why)
+        if not pending:
+            break
+        time.sleep(1.0)
 
     if pending:
         print(f"\nstack not ready after {args.timeout:.0f}s", file=sys.stderr)
