@@ -25,8 +25,9 @@ pub struct ModifyPath {
     /// session PATH.
     ///
     /// Suppresses both PATH surfaces: the managed activation block in your
-    /// shell profiles, and the session-level registration. Not remembered
-    /// between runs; a later `ocx self setup` without this flag resumes
+    /// shell profiles, and the session-level registration. Remembered in
+    /// `[shell] modify_path`, so later runs keep honouring it, including the
+    /// setup that `ocx self update` performs. Remove that key to resume
     /// writing both.
     ///
     /// https://ocx.sh/docs/reference/command-line#self-setup

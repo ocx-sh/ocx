@@ -470,8 +470,12 @@ def test_setup_no_modify_path_writes_shims_only(ocx: OcxRunner, tmp_path: Path) 
     """``--no-modify-path`` writes the env shims but touches no profile.
 
     Even with an explicit ``--profile`` target present on disk, ``--no-modify-path``
-    leaves it byte-identical and writes only the shims. The opt-out is not
-    remembered between runs (re-running without the flag would write the fence).
+    leaves it byte-identical and writes only the shims.
+
+    What happens on a *later* run is
+    ``test_setup_persisted_modify_path_is_honoured_on_a_later_run``'s subject:
+    the flag persists as ``[shell] modify_path``, so a bare re-run keeps
+    honouring it.
     """
     _seed_candidate(ocx)
     profile = tmp_path / "profile"
@@ -487,16 +491,6 @@ def test_setup_no_modify_path_writes_shims_only(ocx: OcxRunner, tmp_path: Path) 
     ocx_home = Path(ocx.env["OCX_HOME"])
     for shim in _ENV_SHIMS:
         assert (ocx_home / shim).is_file(), f"{shim} must still be written with --no-modify-path"
-
-    # The opt-out is stateless: a second run WITHOUT --no-modify-path must write
-    # the fence (no sentinel persisted the first run's opt-out).
-    second = _setup(ocx, profile=profile)
-    assert second.returncode == 0, f"re-run without --no-modify-path must exit 0; stderr:\n{second.stderr}"
-    content = profile.read_text()
-    marker = _canonical_hash(_FENCE_BODY)
-    assert f"# >>> ocx v1 {marker} >>>" in content, (
-        f"re-running without --no-modify-path must write the fence (opt-out is not remembered); got:\n{content}"
-    )
 
 
 @pytest.mark.parametrize("truthy", ["1", "true"])
