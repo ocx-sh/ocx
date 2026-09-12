@@ -388,8 +388,9 @@ const SHIMS: [(&str, &str); 5] = [
 /// because POSIX/fish `source` accepts a runtime path, but Nushell `source`
 /// requires a parse-time-constant path — it cannot source `$OCX_HOME/env.nu`
 /// where `OCX_HOME` is only known at runtime. Inlining the activation sidesteps
-/// that limitation. The update hook (`refresh_profiles`) re-applies this body, so
-/// it stays in sync with the binary just like the `env.*` shims.
+/// that limitation. `ocx self setup` re-applies this body, so it stays in sync
+/// with the binary just like the `env.*` shims — including the run `ocx self
+/// update` spawns from the newly pulled binary.
 #[must_use]
 pub fn nu_autoload_body() -> &'static str {
     ENV_NU
