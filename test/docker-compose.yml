@@ -59,6 +59,15 @@ services:
     # repos = 8.3 MB, ~50 KB/repo, 3490 collected tests at ~2.3 repos/test).
     # tmpfs allocates lazily, so this is a ceiling and not a reservation --
     # a CI runner pays only the bytes a run actually writes.
+    #
+    # The tmpfs is the whole fix.  `dedupe: false` was tried alongside it and
+    # must NOT come back: in zot the dedupe cache is also the blob-location
+    # index that cross-repository mount reads.  `CheckBlob(target, digest)`
+    # stats the target repo, then falls through to that cache to find any repo
+    # holding the digest; with dedupe off it returns not-found and a
+    # `?mount=&from=` request answers 202 (upload from scratch) instead of 201.
+    # Measured against this container: dedupe off -> 202, dedupe on -> 201.
+    # test_package_push_mount.py asserts the 201, so dedupe stays on.
     tmpfs:
       - /var/lib/registry:size=2g
 
