@@ -1286,20 +1286,22 @@ The loader enforces the other half on the consuming side:
 
 ### `[shell]` {#keys-shell}
 
-Governs two independent concerns: whether OCX's per-prompt shell integration is
+Governs three independent concerns: whether OCX's per-prompt shell integration is
 active at all ([`hook`](#keys-shell-hook), [`completions`](#keys-shell-completions)),
-and which projects that integration is permitted to touch at all
+how far [`ocx self setup`][cmd-self-setup] may go in wiring `PATH` for you at all
+([`modify_path`](#keys-shell-modify-path), [`profiles`](#keys-shell-profiles)), and
+which projects the per-prompt integration is permitted to touch
 ([`[shell.consent]`](#keys-shell-consent)). See [Shell Integration][in-depth-shell-integration]
-for the full mechanism — the inert-to-active lifecycle, the per-prompt reconciler, and
+for the full per-prompt mechanism — the inert-to-active lifecycle, the reconciler, and
 diagnosing a stuck shell with [`ocx shell state`][cmd-shell-state].
 
 **`[shell]` is never read from `ocx.toml`.** A `[shell]` block in the project file is a
 parse error, not a silently-dropped section — a project-writable consent grant would let
 a clone consent to itself. `[shell]` is valid in every `config.toml` tier: system, user,
 [`$OCX_HOME`](#file-locations), an explicit [`--config`][arg-config] / [`OCX_CONFIG`][env-config]
-file, and — for `hook` / `completions` — the [`[managed]`](#keys-managed) tier
-unconditionally. [`[shell.consent]`](#keys-shell-consent) arriving through `[managed]` is
-held to a narrower rule; see there.
+file, and — for `hook` / `completions` / `modify_path` / `profiles` — the
+[`[managed]`](#keys-managed) tier unconditionally. [`[shell.consent]`](#keys-shell-consent)
+arriving through `[managed]` is held to a narrower rule; see there.
 
 ```toml
 [shell]
@@ -1366,6 +1368,84 @@ reaches `hook`'s — each rung 2 reads its own environment key and nothing else.
 
 Set the same way as `hook`: [`ocx self setup`][cmd-self-setup]'s `--completion` /
 `--no-completion` pair, or a hand edit to any `config.toml` tier.
+
+#### `modify_path` {#keys-shell-modify-path}
+
+**Type**: boolean  
+**Default**: unset — falls through to the floor below (modification allowed)
+
+Whether [`ocx self setup`][cmd-self-setup] may write `PATH` surfaces at all: the
+managed activation block in your shell profiles, and the
+[session-level `PATH` registration][cmd-self-setup-session-path]. It does not gate
+the env shims (`$OCX_HOME/env.*`) — those are written regardless.
+
+Resolved by a four-rung ladder, most specific first:
+
+1. `--no-modify-path` on [`ocx self setup`][cmd-self-setup]
+2. [`OCX_NO_MODIFY_PATH`][env-no-modify-path] — a truthy value turns modification off
+3. `[shell] modify_path`
+4. the floor — modification is allowed
+
+There is deliberately no `--modify-path` flag: the opt-out fails safe toward
+touching less of the user's machine, so [`ocx self setup`][cmd-self-setup] only
+ever writes this key as `false`. Turning it back on is a hand edit to
+`config.toml`, or a run that omits `--no-modify-path` after the key has been
+edited back to `true` (or removed) by hand — the flag itself never writes `true`.
+
+```toml
+[shell]
+modify_path = false
+```
+
+**Passing `--no-modify-path` writes this key**, so the opt-out is not scoped to
+the one invocation that used it: the same run that skips the profiles and the
+session registration also persists `modify_path = false`, and every later
+[`ocx self setup`][cmd-self-setup] run — with or without the flag — inherits it
+from whichever tier decides.
+
+Merges scalar-wins-if-set across tiers, the same rule as [`hook`](#keys-shell-hook):
+the nearest tier that sets it wins, in either direction, including a
+[`[managed]`](#keys-managed) tier over your own `$OCX_HOME/config.toml`.
+
+#### `profiles` {#keys-shell-profiles}
+
+**Type**: array of strings (paths)  
+**Default**: unset — falls through to auto-detection
+
+Which shell profile files [`ocx self setup`][cmd-self-setup] adds the managed
+activation block to. **Absence and an empty list are different answers here**:
+leaving the key unset re-detects the usual profile files for the current shell
+on every run; an empty list — the shape `--no-profile` writes — means write no
+profile blocks at all. A set list *replaces* auto-detection outright; it is
+never unioned with it.
+
+Resolved by a three-rung ladder, most specific first:
+
+1. `--profile PATH` (repeatable), or `--no-profile`, on
+   [`ocx self setup`][cmd-self-setup]
+2. `[shell] profiles`
+3. the floor — auto-detect the usual profile files for the current shell
+
+```toml
+[shell]
+profiles = ["/home/alice/.bashrc", "/home/alice/.zshrc"]
+```
+
+An explicit `[shell] profiles = []` — the shape `--no-profile` writes by hand —
+means the same thing written directly: skip every profile block.
+`--no-profile` does not suppress the env shims or the session-level `PATH`
+registration; only [`modify_path`](#keys-shell-modify-path) `= false` (or
+`--no-modify-path`) does that.
+
+**Passing `--profile` or `--no-profile` writes this key**, the same way
+`--no-modify-path` writes [`modify_path`](#keys-shell-modify-path): the choice
+applies to every later [`ocx self setup`][cmd-self-setup] run, not only the one
+that typed the flag.
+
+Merges list-wins-if-set across tiers: the nearest tier that sets the key
+replaces the whole list outright, in either direction, including a
+[`[managed]`](#keys-managed) tier over your own `$OCX_HOME/config.toml`. A tier
+that leaves the key unset never clears a list a lower tier set.
 
 #### `[shell.consent]` {#keys-shell-consent}
 
@@ -1582,7 +1662,7 @@ This table shows which OCX environment variables map to config file fields. Vari
 | [`OCX_BINARY_PIN`][env-ocx-binary-pin] | None | Subprocess-only: set automatically by ocx on every spawn so child ocx invocations pin to the same binary |
 | [`OCX_INSECURE_REGISTRIES`][env-insecure-registries] | [`[registries.<name>] insecure`](#keys-registries-insecure) | **Union**, not an override: a host named in either source is plaintext-eligible, and neither can take one back out |
 | [`OCX_NO_UPDATE_CHECK`][env-no-update-check] | None | CI-only concern; env var is sufficient |
-| [`OCX_NO_MODIFY_PATH`][env-no-modify-path] | None | Install-time concern; env var is sufficient |
+| [`OCX_NO_MODIFY_PATH`][env-no-modify-path] | [`[shell] modify_path`](#keys-shell-modify-path) | Env var outranks the config key; the CLI flag `--no-modify-path` outranks both and, when passed, writes the config key too |
 
 [`OCX_OFFLINE`][env-offline] and [`OCX_REMOTE`][env-remote] are intentionally absent from the config file. Both are per-invocation modes — a persistent `offline = true` would silently break `ocx package install` on a fresh setup.
 
@@ -1927,6 +2007,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [cmd-config-setup]: ./command-line.md#config-setup
 [cmd-config-test]: ./command-line.md#config-test
 [cmd-self-setup]: ./command-line.md#self-setup
+[cmd-self-setup-session-path]: ./command-line.md#self-setup-session-path
 [cmd-self-update]: ./command-line.md#self-update
 [cmd-self-activate]: ./command-line.md#self-activate
 [cmd-shell-state]: ./command-line.md#shell-state

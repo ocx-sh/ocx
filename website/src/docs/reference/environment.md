@@ -721,18 +721,15 @@ When set to a [truthy value](#truthy-values), [`ocx self setup`][cmd-self-setup]
 
 It suppresses **both** PATH surfaces, on all three platforms: the managed activation block in your shell profiles, and the [session-level registration][cmd-self-setup-session-path] — the Windows user environment, a systemd [`environment.d`][systemd-environment-d] drop-in on Linux, a login [LaunchAgent][launchd-agents] on macOS. The writers are never called. Each location still appears in the run summary, with outcome `skipped_opt_out`, so you can see what was not touched.
 
-The equivalent CLI flag is [`--no-modify-path`][cmd-self-setup] on `ocx self setup`; the flag and this variable mean the same thing, and either one alone is enough.
+The equivalent CLI flag is [`--no-modify-path`][cmd-self-setup] on `ocx self setup`; the flag and this variable mean the same thing for the run that reads them.
+
+This variable is the second rung of a four-rung ladder, most specific first: `--no-modify-path` on `ocx self setup`, then this variable, then [`[shell] modify_path`][config-keys-shell-modify-path] in `config.toml`, then the floor (modification allowed). Rung 2 sits above the config key, so exporting this variable for a run outranks whatever `config.toml` already holds.
 
 ::: warning Truthy values only — not "any non-empty"
 `OCX_NO_MODIFY_PATH` follows the same truthy/falsy rules as [`OCX_OFFLINE`](#ocx-offline) and [`OCX_REMOTE`](#ocx-remote). Only the values in the [truthy list](#truthy-values) (`1`, `y`, `yes`, `on`, `true`, case-insensitive) enable the flag. An unrecognized non-empty value (e.g. `OCX_NO_MODIFY_PATH=skip`) logs a warning and is treated as the default (`false` — both PATH surfaces are written, the profile blocks and the session-level registration). An empty string is also treated as false.
 :::
 
-**The opt-out is not remembered between runs.** A user who ran `ocx self setup --no-modify-path` once, then runs `ocx self setup` again without the flag, gets both the profile blocks and the session-PATH registration written. To make the opt-out persistent, either:
-
-- Export `OCX_NO_MODIFY_PATH=1` in your environment before every `ocx self setup` invocation, or
-- Pass `--no-modify-path` each time.
-
-A `$OCX_HOME/state/no-modify-path` sentinel file that persists the preference automatically is planned for a future release.
+**The opt-out persists.** Passing `--no-modify-path` writes `[shell] modify_path = false` to `config.toml`, so a later `ocx self setup` run — with or without the flag — still skips both PATH surfaces, from whichever tier decides. There is no positive `--modify-path` flag: the opt-out fails safe toward touching less of the user's machine, so re-enabling it is a hand edit to `config.toml`, or a run made after that edit. See [`[shell] modify_path`][config-keys-shell-modify-path] for the full ladder and merge rule across `config.toml` tiers.
 
 **What you give up.** Shell activation through `$OCX_HOME/env.*` takes effect only inside interactive PowerShell and POSIX shell sessions that source the login profile. `cmd.exe`, desktop launchers, IDEs and background services never source one, so with this opt-out set they never see the ocx directories.
 
@@ -1182,6 +1179,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [config-patches]: ./configuration.md#keys-patches
 [config-managed]: ./configuration.md#keys-managed
 [config-managed-refresh]: ./configuration.md#keys-managed-refresh
+[config-keys-shell-modify-path]: ./configuration.md#keys-shell-modify-path
 [patches-no-patches-scope]: ./configuration.md#keys-patches-no-patches
 [patches-user-guide]: ../user-guide/patches.md
 [config-project-env]: ./configuration.md#project-config-env
