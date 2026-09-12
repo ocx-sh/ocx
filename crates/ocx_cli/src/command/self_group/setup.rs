@@ -9,14 +9,16 @@ use clap::Parser;
 use ocx_lib::activate::ActivateMode;
 use ocx_lib::cli::ExitCode as OcxExitCode;
 use ocx_lib::env;
-use ocx_lib::setup::shell_config::{self, ShellFlag};
+use ocx_lib::setup::shell_config::{self, ShellKey, ShellValue};
 use ocx_lib::setup::{self, SessionPathOutcome, SetupOptions, SetupOutcome, VersionSpec};
+use ocx_lib::utility::boolean_string::BooleanString;
 use ocx_lib::{ConfigTier, ShellConfig};
 
 // The `--managed-config` precedence seam (`resolve_managed_config_arg`) is
 // shared with `ocx config setup` and lives in `command/config_setup.rs`.
 use crate::api::data::self_setup::SelfSetupData;
 use crate::command::config_setup::resolve_managed_config_arg;
+use crate::options::{ModifyPath, Profiles};
 
 /// Arguments of `ocx self setup`.
 ///
@@ -115,33 +117,18 @@ pub struct SelfSetup {
     #[arg(value_name = "VERSION", value_parser = |s: &str| VersionSpec::from_str(s).map_err(|e| e.to_string()))]
     version: Option<VersionSpec>,
 
-    /// Write the env shims but touch neither a shell profile nor the session
-    /// PATH.
-    ///
-    /// Suppresses both PATH surfaces: the managed activation block in your
-    /// shell profiles, and the session-level registration (the Windows user
-    /// environment, an `environment.d` drop-in on Linux, a login LaunchAgent
-    /// on macOS). The run reports each location it did not touch.
-    ///
-    /// A truthy `OCX_NO_MODIFY_PATH` (`1`/`y`/`yes`/`on`/`true`) sets this too. The
-    /// opt-out is not remembered between runs - repeat the flag (or keep the env
-    /// var set) each invocation.
-    // `env::flag` treats an unrecognised value - including the empty string -
-    // as a WARN plus the default, so `OCX_NO_MODIFY_PATH=""` runs the arm. That
-    // is deliberately NOT the "an empty string is absent" rule the toolchain
-    // tiers follow (RUL-24): this is a pre-existing boolean with its own
-    // semantics, and unifying the two would change a shipped answer for no
-    // gain. Stated here because a reader who knows the toolchain rule would
-    // otherwise assume one rule covers both.
-    #[arg(long, default_value_t = env::flag(env::keys::OCX_NO_MODIFY_PATH, false))]
-    no_modify_path: bool,
+    /// The `--no-modify-path` tier of the `modify_path` ladder (Task 1):
+    /// `--no-modify-path` -> `OCX_NO_MODIFY_PATH` -> `[shell] modify_path` ->
+    /// default (modify). Resolved by [`resolve_modify_path`], never read
+    /// directly.
+    #[clap(flatten)]
+    modify_path: ModifyPath,
 
-    /// Target an explicit profile file. Repeatable. Default: auto-detect.
-    ///
-    /// Explicit targets are written with POSIX-fence semantics regardless of
-    /// the file name.
-    #[arg(long, value_name = "PATH")]
-    profile: Vec<PathBuf>,
+    /// The `--profile`/`--no-profile` tier of the profile-target ladder:
+    /// those two flags -> `[shell] profiles` -> auto-detect. Resolved via
+    /// [`Profiles::explicit`], never read directly.
+    #[clap(flatten)]
+    profiles: Profiles,
 
     /// Report the intended actions without writing anything.
     #[arg(long)]
@@ -170,6 +157,15 @@ pub struct SelfSetup {
     /// succeeds.
     #[arg(long, value_name = "REF")]
     managed_config: Option<String>,
+
+    /// Spawned by `ocx self update`'s post-swap refresh: heal profiles,
+    /// introduce none, and write no `config.toml` key.
+    ///
+    /// Hidden: it is machine surface, not something to type.
+    // The `hide = true` precedent is flag-level, as on `self activate
+    // --reconcile` (`command/self_group/activate.rs`).
+    #[clap(long = "handoff", hide = true)]
+    handoff: bool,
 }
 
 impl SelfSetup {
@@ -186,11 +182,16 @@ impl SelfSetup {
             context.config(),
             context.managed_config_env_override(),
         )?;
+        let shell = context.config().shell.as_ref();
         let options = SetupOptions {
-            no_modify_path: self.no_modify_path,
-            profiles: self.profile.clone(),
+            no_modify_path: resolve_modify_path(self.modify_path.explicit(), shell.and_then(|shell| shell.modify_path)),
+            profiles: self
+                .profiles
+                .explicit()
+                .or_else(|| shell.and_then(|shell| shell.profiles.clone())),
             dry_run: self.dry_run,
             force: self.force,
+            handoff: self.handoff,
             version: self.version.clone(),
             managed_config,
         };
@@ -223,18 +224,19 @@ impl SelfSetup {
         }
         let config_path = context.file_structure().root().join("config.toml");
 
-        for (flag, value) in writes {
+        for (key, value) in writes {
             if self.dry_run {
                 context.ui().status(
                     "Setup",
                     format!(
                         "would set [shell] {key} = {value} in {path}",
-                        key = flag.key(),
+                        key = key.key(),
+                        value = describe_shell_write_value(&value),
                         path = config_path.display()
                     ),
                 );
             } else {
-                shell_config::set_flag(&config_path, flag, value)?;
+                shell_config::set(&config_path, key, value.as_shell_value())?;
             }
 
             // Above the dry-run guard on purpose: which tier decides is a
@@ -244,10 +246,10 @@ impl SelfSetup {
             // this write, so it still names whichever tier set the key going
             // in — exactly the tier that keeps deciding once the home tier
             // says otherwise.
-            if let Some(tier) = overriding_tier(context.config().shell.as_ref(), flag) {
+            if let Some(tier) = overriding_tier(context.config().shell.as_ref(), key) {
                 context.ui().warn(format!(
                     "[shell] {key} is also set by {tier}, which wins over {path} - the value {written} will not take effect",
-                    key = flag.key(),
+                    key = key.key(),
                     path = config_path.display(),
                     written = if self.dry_run { "this would write" } else { "just written" },
                 ));
@@ -287,18 +289,66 @@ impl SelfSetup {
     }
 }
 
-/// The `[shell]` writes this invocation asked for, in `hook`-then-`completions`
-/// order (C-040).
+/// The value one [`ShellKey`] write carries, owned so a `Paths` write survives
+/// past [`shell_writes`]'s return — [`ShellValue::Paths`] only borrows a
+/// slice, and the `Vec<PathBuf>` [`Profiles::explicit`] hands back has nowhere
+/// else to live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ShellWriteValue {
+    Bool(bool),
+    Paths(Vec<PathBuf>),
+}
+
+impl ShellWriteValue {
+    /// Borrow this value as the [`ShellValue`] [`shell_config::set`] takes.
+    fn as_shell_value(&self) -> ShellValue<'_> {
+        match self {
+            Self::Bool(value) => ShellValue::Bool(*value),
+            Self::Paths(paths) => ShellValue::Paths(paths),
+        }
+    }
+}
+
+/// Render a [`ShellWriteValue`] for the `--dry-run` status line.
+fn describe_shell_write_value(value: &ShellWriteValue) -> String {
+    match value {
+        ShellWriteValue::Bool(value) => value.to_string(),
+        ShellWriteValue::Paths(paths) => format!("{paths:?}"),
+    }
+}
+
+/// The `[shell]` writes this invocation asked for, in
+/// `hook`-then-`completions`-then-`modify_path`-then-`profiles` order
+/// (C-040).
 ///
-/// **A pair with neither flag contributes nothing** — that is what makes
-/// `ocx self setup` with no new flag leave `config.toml` byte-identical.
-fn shell_writes(setup: &SelfSetup) -> Vec<(ShellFlag, bool)> {
+/// **A key contributes nothing unless it was typed explicitly** — that is
+/// what makes `ocx self setup` with no new flag leave `config.toml`
+/// byte-identical.
+///
+/// **The hand-off guard lives here, not in [`SelfSetup::execute`].** A
+/// `--handoff` run must persist nothing at all: write computation stays in
+/// one place, and a future flag added to the parent cannot silently start
+/// persisting by skipping this function the way a guard in `execute` alone
+/// could be bypassed.
+fn shell_writes(setup: &SelfSetup) -> Vec<(ShellKey, ShellWriteValue)> {
+    if setup.handoff {
+        return Vec::new();
+    }
     [
-        (ShellFlag::Hook, requested(setup.hook, setup.no_hook)),
-        (ShellFlag::Completions, requested(setup.completion, setup.no_completion)),
+        requested(setup.hook, setup.no_hook).map(|value| (ShellKey::Hook, ShellWriteValue::Bool(value))),
+        requested(setup.completion, setup.no_completion)
+            .map(|value| (ShellKey::Completions, ShellWriteValue::Bool(value))),
+        setup
+            .modify_path
+            .explicit()
+            .map(|value| (ShellKey::ModifyPath, ShellWriteValue::Bool(value))),
+        setup
+            .profiles
+            .explicit()
+            .map(|value| (ShellKey::Profiles, ShellWriteValue::Paths(value))),
     ]
     .into_iter()
-    .filter_map(|(flag, value)| Some((flag, value?)))
+    .flatten()
     .collect()
 }
 
@@ -316,13 +366,54 @@ fn requested(on: bool, off: bool) -> Option<bool> {
     }
 }
 
-/// The tier that will still decide `flag` after the home-tier write lands, or
+/// Read `OCX_NO_MODIFY_PATH` as an explicit tri-state, in `modify_path`'s own
+/// positive sense: `Some(false)` when the variable is truthy (`1`/`y`/`yes`/
+/// `on`/`true`), `Some(true)` when it is falsy, `None` when absent or
+/// unrecognised (a WARN is logged for the latter).
+///
+/// **Not [`env::flag`]**: that helper folds "absent" and "unrecognised" into
+/// its own default and can never report `None` for a lower rung to answer
+/// instead — exactly the distinction this rung exists to preserve now that
+/// the env var no longer supplies clap's `default_value_t`.
+fn env_modify_path() -> Option<bool> {
+    let raw = env::var(env::keys::OCX_NO_MODIFY_PATH)?;
+    match BooleanString::try_from(raw.as_str()) {
+        Ok(boolean) => Some(!bool::from(boolean)),
+        Err(error) => {
+            ocx_lib::log::warn!(
+                "environment variable '{}' has invalid boolean value: {error}",
+                env::keys::OCX_NO_MODIFY_PATH
+            );
+            None
+        }
+    }
+}
+
+/// Resolve the `modify_path` ladder (Task 1), most specific first:
+/// `--no-modify-path` -> `OCX_NO_MODIFY_PATH` -> `[shell] modify_path` ->
+/// default (modify).
+///
+/// `explicit` and `configured` are both already in `modify_path`'s positive
+/// sense (`true` = may modify) — `explicit` is [`ModifyPath::explicit`]'s
+/// answer, `configured` is `[shell] modify_path` off `context.config()`. The
+/// env var is read here rather than inside [`ModifyPath`] itself, because
+/// that type "answers only about the command line" by design (see its doc
+/// comment) — reading the environment there would make it outrank a config
+/// value nobody has looked up yet. Returns the negation, since
+/// [`SetupOptions::no_modify_path`] is spelled the other way around.
+fn resolve_modify_path(explicit: Option<bool>, configured: Option<bool>) -> bool {
+    !explicit.or_else(env_modify_path).or(configured).unwrap_or(true)
+}
+
+/// The tier that will still decide `key` after the home-tier write lands, or
 /// `None` when the write itself decides (C-034 / A-32).
-fn overriding_tier(shell: Option<&ShellConfig>, flag: ShellFlag) -> Option<ConfigTier> {
+fn overriding_tier(shell: Option<&ShellConfig>, key: ShellKey) -> Option<ConfigTier> {
     let shell = shell?;
-    let tier = match flag {
-        ShellFlag::Hook => shell.hook_tier,
-        ShellFlag::Completions => shell.completions_tier,
+    let tier = match key {
+        ShellKey::Hook => shell.hook_tier,
+        ShellKey::Completions => shell.completions_tier,
+        ShellKey::ModifyPath => shell.modify_path_tier,
+        ShellKey::Profiles => shell.profiles_tier,
     }?;
     // `ConfigTier` is ordered System < User < Home < Managed < Explicit, which
     // is also the fold order, so "still decides after a home-tier write" is
@@ -437,19 +528,37 @@ mod tests {
         SelfSetup::try_parse_from(std::iter::once("setup").chain(args.iter().copied())).expect("valid grammar")
     }
 
-    fn stamped(flag: ShellFlag, tier: ConfigTier) -> ShellConfig {
+    fn stamped(key: ShellKey, tier: ConfigTier) -> ShellConfig {
         let mut shell = ShellConfig::default();
-        match flag {
-            ShellFlag::Hook => {
+        match key {
+            ShellKey::Hook => {
                 shell.hook = Some(true);
                 shell.hook_tier = Some(tier);
             }
-            ShellFlag::Completions => {
+            ShellKey::Completions => {
                 shell.completions = Some(true);
                 shell.completions_tier = Some(tier);
             }
+            ShellKey::ModifyPath => {
+                shell.modify_path = Some(true);
+                shell.modify_path_tier = Some(tier);
+            }
+            ShellKey::Profiles => {
+                shell.profiles = Some(Vec::new());
+                shell.profiles_tier = Some(tier);
+            }
         }
         shell
+    }
+
+    /// Extract the bool out of a [`ShellWriteValue`] that is known to be one —
+    /// every write `shell_writes` produces from a `--hook`/`--completion`
+    /// flag is a `Bool`, never a `Paths`.
+    fn as_bool(value: &ShellWriteValue) -> bool {
+        match value {
+            ShellWriteValue::Bool(value) => *value,
+            ShellWriteValue::Paths(paths) => panic!("expected a bool write, got Paths({paths:?})"),
+        }
     }
 
     /// C-040 / S-016 — the load-bearing negative: `ocx self setup` with neither
@@ -468,13 +577,22 @@ mod tests {
     #[test]
     fn each_pair_writes_its_own_key_in_both_directions() {
         for (args, expected) in [
-            (vec!["--hook"], vec![(ShellFlag::Hook, true)]),
-            (vec!["--no-hook"], vec![(ShellFlag::Hook, false)]),
-            (vec!["--completion"], vec![(ShellFlag::Completions, true)]),
-            (vec!["--no-completion"], vec![(ShellFlag::Completions, false)]),
+            (vec!["--hook"], vec![(ShellKey::Hook, ShellWriteValue::Bool(true))]),
+            (vec!["--no-hook"], vec![(ShellKey::Hook, ShellWriteValue::Bool(false))]),
+            (
+                vec!["--completion"],
+                vec![(ShellKey::Completions, ShellWriteValue::Bool(true))],
+            ),
+            (
+                vec!["--no-completion"],
+                vec![(ShellKey::Completions, ShellWriteValue::Bool(false))],
+            ),
             (
                 vec!["--no-hook", "--completion"],
-                vec![(ShellFlag::Hook, false), (ShellFlag::Completions, true)],
+                vec![
+                    (ShellKey::Hook, ShellWriteValue::Bool(false)),
+                    (ShellKey::Completions, ShellWriteValue::Bool(true)),
+                ],
             ),
         ] {
             assert_eq!(shell_writes(&parse(&args)), expected, "for {args:?}");
@@ -487,19 +605,19 @@ mod tests {
     fn a_repeated_pair_is_last_wins_not_an_error() {
         assert_eq!(
             shell_writes(&parse(&["--hook", "--no-hook"])),
-            vec![(ShellFlag::Hook, false)]
+            vec![(ShellKey::Hook, ShellWriteValue::Bool(false))]
         );
         assert_eq!(
             shell_writes(&parse(&["--no-hook", "--hook"])),
-            vec![(ShellFlag::Hook, true)]
+            vec![(ShellKey::Hook, ShellWriteValue::Bool(true))]
         );
         assert_eq!(
             shell_writes(&parse(&["--completion", "--no-completion"])),
-            vec![(ShellFlag::Completions, false)]
+            vec![(ShellKey::Completions, ShellWriteValue::Bool(false))]
         );
         assert_eq!(
             shell_writes(&parse(&["--no-completion", "--completion"])),
-            vec![(ShellFlag::Completions, true)]
+            vec![(ShellKey::Completions, ShellWriteValue::Bool(true))]
         );
     }
 
@@ -512,7 +630,10 @@ mod tests {
             parsed.version.as_ref().map(ToString::to_string),
             Some("1.2.3".to_owned())
         );
-        assert_eq!(shell_writes(&parsed), vec![(ShellFlag::Hook, true)]);
+        assert_eq!(
+            shell_writes(&parsed),
+            vec![(ShellKey::Hook, ShellWriteValue::Bool(true))]
+        );
     }
 
     /// C-034 / S-016(b): a tier above home still decides after the write, and
@@ -521,14 +642,18 @@ mod tests {
     #[test]
     fn a_higher_tier_is_reported_by_name() {
         for tier in [ConfigTier::Managed, ConfigTier::Explicit] {
-            assert_eq!(
-                overriding_tier(Some(&stamped(ShellFlag::Hook, tier)), ShellFlag::Hook),
-                Some(tier)
-            );
-            assert_eq!(
-                overriding_tier(Some(&stamped(ShellFlag::Completions, tier)), ShellFlag::Completions),
-                Some(tier)
-            );
+            for key in [
+                ShellKey::Hook,
+                ShellKey::Completions,
+                ShellKey::ModifyPath,
+                ShellKey::Profiles,
+            ] {
+                assert_eq!(
+                    overriding_tier(Some(&stamped(key, tier)), key),
+                    Some(tier),
+                    "for {key:?}"
+                );
+            }
         }
     }
 
@@ -538,15 +663,56 @@ mod tests {
     fn home_and_below_are_not_reported() {
         for tier in [ConfigTier::System, ConfigTier::User, ConfigTier::Home] {
             assert_eq!(
-                overriding_tier(Some(&stamped(ShellFlag::Hook, tier)), ShellFlag::Hook),
+                overriding_tier(Some(&stamped(ShellKey::Hook, tier)), ShellKey::Hook),
                 None
             );
         }
-        assert_eq!(overriding_tier(None, ShellFlag::Hook), None);
+        assert_eq!(overriding_tier(None, ShellKey::Hook), None);
         assert_eq!(
-            overriding_tier(Some(&ShellConfig::default()), ShellFlag::Hook),
+            overriding_tier(Some(&ShellConfig::default()), ShellKey::Hook),
             None,
             "an unset key has no deciding tier"
+        );
+    }
+
+    /// C-034 drift guard / Task 3: `overriding_tier` answers **per key**, not
+    /// per shared `_tier` field. Four differently-set tiers on one
+    /// `ShellConfig`, each reported only for its own key.
+    ///
+    /// Red-state: point `ShellKey::ModifyPath` at `shell.profiles_tier` (or
+    /// any other cross-wiring of two `_tier` fields) and the `ModifyPath` /
+    /// `Profiles` assertions swap answers.
+    #[test]
+    fn overriding_tier_answers_per_key() {
+        let shell = ShellConfig {
+            hook: Some(true),
+            hook_tier: Some(ConfigTier::Home),
+            completions: Some(true),
+            completions_tier: None,
+            modify_path: Some(true),
+            modify_path_tier: Some(ConfigTier::Managed),
+            profiles: Some(Vec::new()),
+            profiles_tier: Some(ConfigTier::Explicit),
+            ..ShellConfig::default()
+        };
+
+        assert_eq!(
+            overriding_tier(Some(&shell), ShellKey::Hook),
+            None,
+            "Home is not above Home"
+        );
+        assert_eq!(
+            overriding_tier(Some(&shell), ShellKey::Completions),
+            None,
+            "no tier set this key at all"
+        );
+        assert_eq!(
+            overriding_tier(Some(&shell), ShellKey::ModifyPath),
+            Some(ConfigTier::Managed)
+        );
+        assert_eq!(
+            overriding_tier(Some(&shell), ShellKey::Profiles),
+            Some(ConfigTier::Explicit)
         );
     }
 
@@ -616,7 +782,7 @@ mod tests {
                 _ => None,
             };
             assert_eq!(
-                shell_writes(&parse(&args)).first().map(|(_, value)| *value),
+                shell_writes(&parse(&args)).first().map(|(_, value)| as_bool(value)),
                 shared_flag,
                 "for {args:?}"
             );
@@ -627,12 +793,102 @@ mod tests {
     /// who decides `completions`.
     #[test]
     fn the_report_is_per_key() {
-        let shell = stamped(ShellFlag::Hook, ConfigTier::Managed);
+        let shell = stamped(ShellKey::Hook, ConfigTier::Managed);
+        assert_eq!(overriding_tier(Some(&shell), ShellKey::Hook), Some(ConfigTier::Managed));
+        assert_eq!(overriding_tier(Some(&shell), ShellKey::Completions), None);
+    }
+
+    // ── Task 3: persisting `modify_path` / `profiles`, and the hand-off guard ──
+
+    /// Task 3: an explicit `--no-modify-path` persists the key; a bare run
+    /// does not create or touch the file at all — same load-bearing shape as
+    /// `neither_flag_requests_no_write`, pinned separately for the two new
+    /// keys.
+    ///
+    /// Red-state: make the `modify_path` write unconditional (drop the
+    /// `explicit()` check in `shell_writes`) and the second assertion fails —
+    /// a bare run would then write `modify_path = true`.
+    #[test]
+    fn explicit_flag_persists_but_silence_does_not() {
         assert_eq!(
-            overriding_tier(Some(&shell), ShellFlag::Hook),
-            Some(ConfigTier::Managed)
+            shell_writes(&parse(&["--no-modify-path"])),
+            vec![(ShellKey::ModifyPath, ShellWriteValue::Bool(false))]
         );
-        assert_eq!(overriding_tier(Some(&shell), ShellFlag::Completions), None);
+        assert!(
+            shell_writes(&parse(&[])).is_empty(),
+            "a bare run must not conjure a modify_path or profiles write"
+        );
+    }
+
+    /// Task 3: `--handoff` persists nothing, however many opt-outs the same
+    /// invocation carries.
+    ///
+    /// Red-state: remove the `if setup.handoff { return Vec::new(); }` guard
+    /// from `shell_writes` and this test fails — `modify_path` and `profiles`
+    /// both appear in the write set.
+    #[test]
+    fn handoff_writes_no_config() {
+        assert!(
+            shell_writes(&parse(&["--handoff", "--no-modify-path", "--profile", "x", "--hook"])).is_empty(),
+            "a --handoff run must persist nothing, however many opt-outs or toggles it carries"
+        );
+    }
+
+    /// Task 1 ladder-order coverage: flag beats env, env beats config, config
+    /// beats default, most specific first — the same shape
+    /// `options::hook::resolve_ladder`'s rung tests pin for `[shell] hook` /
+    /// `[shell] completions`.
+    ///
+    /// The only test in this file touching `OCX_NO_MODIFY_PATH`'s real
+    /// process environment; same single-`#[test]` precedent as
+    /// `options::hook::tests::each_ladder_reads_its_own_environment_key`.
+    ///
+    /// Red-state: swap two arms of the `.or_else(...).or(...)` chain in
+    /// `resolve_modify_path` and the assertion for the swapped pair
+    /// disagrees.
+    #[test]
+    fn modify_path_ladder_order() {
+        // SAFETY: see the doc comment above — this is the one test that
+        // touches this key.
+        unsafe { std::env::remove_var(env::keys::OCX_NO_MODIFY_PATH) };
+
+        // Rung 4 (the floor): nothing set anywhere -> modify allowed.
+        assert!(!resolve_modify_path(None, None), "the default is to modify the PATH");
+
+        // Rung 3: `[shell] modify_path` decides once the flag and env are
+        // silent, in both directions.
+        assert!(
+            resolve_modify_path(None, Some(false)),
+            "`[shell] modify_path = false` must turn on no_modify_path over the default"
+        );
+        assert!(
+            !resolve_modify_path(None, Some(true)),
+            "`[shell] modify_path = true` must keep no_modify_path off"
+        );
+
+        // Rung 2: the environment outranks the config file, in both
+        // directions.
+        // SAFETY: see above.
+        unsafe { std::env::set_var(env::keys::OCX_NO_MODIFY_PATH, "1") };
+        assert!(
+            resolve_modify_path(None, Some(true)),
+            "OCX_NO_MODIFY_PATH=1 must outrank `[shell] modify_path = true`"
+        );
+        // SAFETY: see above.
+        unsafe { std::env::set_var(env::keys::OCX_NO_MODIFY_PATH, "0") };
+        assert!(
+            !resolve_modify_path(None, Some(false)),
+            "OCX_NO_MODIFY_PATH=0 must outrank `[shell] modify_path = false`"
+        );
+
+        // Rung 1: the CLI flag outranks the environment.
+        assert!(
+            resolve_modify_path(Some(false), Some(true)),
+            "the explicit flag must outrank both an env override and the config"
+        );
+
+        // SAFETY: see above.
+        unsafe { std::env::remove_var(env::keys::OCX_NO_MODIFY_PATH) };
     }
 
     // The `resolve_managed_config_arg` precedence tests live with the shared

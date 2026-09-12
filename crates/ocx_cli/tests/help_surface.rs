@@ -115,3 +115,16 @@ fn the_root_listing_does_not_claim_pull_creates_no_symlinks() {
         "`pull` renders a link tree, so the root listing must not claim otherwise; got:\n{rendered}"
     );
 }
+
+/// `--handoff` is `hide = true`: machine surface `ocx self update`'s post-swap
+/// hand-off spawns, never something a user should be offered. `hide = true`
+/// is a claim nothing checks unless something greps the rendered surface for
+/// it — this is that check.
+#[test]
+fn self_setup_help_never_renders_the_hidden_handoff_flag() {
+    let rendered = long_help(&["self", "setup"]);
+    assert!(
+        !rendered.contains("--handoff"),
+        "`--handoff` must stay hidden from `ocx self setup --help`; got:\n{rendered}"
+    );
+}

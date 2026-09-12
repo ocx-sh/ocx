@@ -6,8 +6,10 @@
 //! This module is the single source of truth for OCX shell integration:
 //! per-shell env shims, the versioned RC-block state machine, profile-target
 //! detection, and the self-install bootstrap. The install scripts shrink to
-//! bootstrap-only and hand off to [`run`]; `ocx self update` refreshes only
-//! the ocx-owned shims through `refresh_shims`.
+//! bootstrap-only and hand off to [`run`]; `ocx self update` hands off to it
+//! too, re-executing the newly pulled binary as `ocx self setup … --handoff`
+//! ([`SetupOptions::handoff`]) so every surface is written by the new version's
+//! own code instead of a subset of these phases run from the old binary.
 //!
 //! See `.claude/artifacts/adr_self_setup.md` (decisions 1B + 2A + 3D + 4C) for
 //! the design record and `.claude/state/plans/plan_self_setup.md` for the
@@ -76,23 +78,36 @@ const POWERSHELL_BODY: &str = r#"$_ocxHome = if ($env:OCX_HOME) { $env:OCX_HOME 
 $_ocxEnv = Join-Path $_ocxHome 'env.ps1'
 if (Test-Path $_ocxEnv) { . $_ocxEnv }"#;
 
-// Version of the env shim contract this binary writes.
-// Reserved for Decision 4C (shim-contract compare in `ocx self update`);
-// not yet consumed at runtime.
-#[allow(dead_code)]
-const SHIM_CONTRACT_VERSION: u32 = 1;
-
 /// Options controlling a single `ocx self setup` run.
 #[derive(Debug, Clone, Default)]
 pub struct SetupOptions {
-    /// Write the env shims but do not modify any shell profile.
+    /// Write the env shims but do not modify any shell profile, **and** leave
+    /// the session PATH alone. The wider of the two refusals — see `profiles`.
     pub no_modify_path: bool,
-    /// Explicit profile-file overrides; empty means auto-detect.
-    pub profiles: Vec<PathBuf>,
+    /// Which shell profiles this run writes:
+    ///
+    /// - `None` — auto-detect the target set from the environment.
+    /// - `Some(&[])` — write **no** profile block at all (`--no-profile`).
+    /// - `Some(paths)` — write exactly those files.
+    ///
+    /// `Some(&[])` is deliberately *not* `no_modify_path`: it suppresses only
+    /// the profile blocks, leaving the env shims and the session-PATH arm
+    /// running. Collapsing the two is the bug this tri-state exists to prevent.
+    pub profiles: Option<Vec<PathBuf>>,
     /// Report intended actions without writing any byte.
     pub dry_run: bool,
     /// Overwrite a managed RC block that carries user edits (dirty state).
     pub force: bool,
+    /// This run is the child half of an `ocx self update` hand-off, so it may
+    /// **heal** a managed block but must never *introduce* one (Decision 4C).
+    ///
+    /// A genuinely first-time `ocx self setup` is indistinguishable from an
+    /// update-triggered one from inside [`run`] — no config, no block, no shims
+    /// either way — so the parent states which it is instead of this layer
+    /// guessing. On a machine that is already set up the flag costs nothing: a
+    /// drifted block still heals and a legacy footprint still migrates; only a
+    /// profile with no ocx footprint at all is left alone.
+    pub handoff: bool,
     /// Optional version spec — when `Some`, pins the bootstrap to a specific
     /// tag, digest, or `tag@digest` combination (plan D1–D4).
     pub version: Option<VersionSpec>,
@@ -102,6 +117,19 @@ pub struct SetupOptions {
     /// flag → `OCX_MANAGED_CONFIG` → `[managed].source` seed precedence before
     /// building these options; this layer just consumes the result.
     pub managed_config: Option<String>,
+}
+
+impl SetupOptions {
+    /// Whether the session-PATH arm runs — the encoding preflight (phase 0) and
+    /// the registration (phase 3.5) alike.
+    ///
+    /// Only `--no-modify-path` suppresses it. An empty `profiles` list does not:
+    /// a session PATH is not a profile block, and the two opt-outs are separate
+    /// promises. This is the single site that decides it, so the preflight and
+    /// the writer can never disagree about which run touches a PATH store.
+    fn touches_session_path(&self) -> bool {
+        !self.no_modify_path
+    }
 }
 
 /// Per-profile result of applying the RC-block state machine.
@@ -121,8 +149,10 @@ pub enum ProfileOutcome {
 /// upgraded block was written ([`ProfileOutcome::Completed`]) or a legacy
 /// footprint was migrated ([`ProfileOutcome::Migrated`]).
 ///
-/// Single source for the "re-source your profile" reload hint — consumed by the
-/// `self setup` run summary and the `self update` post-swap heal alike.
+/// Single source for the "re-source your profile" reload hint, in every mode:
+/// a hand-off run ([`SetupOptions::handoff`]) reports the same outcomes, so a
+/// healed block counts as changed and a profile left alone
+/// ([`ProfileOutcome::NoOp`]) does not.
 pub fn profiles_changed(profiles: &[(PathBuf, ProfileOutcome)]) -> bool {
     profiles
         .iter()
@@ -292,7 +322,7 @@ pub async fn run(
     // is nothing this check needs that a later phase produces. Suppressed under
     // `--no-modify-path` for the same reason phase 3.5 is (C-043): the arm never
     // runs, so an `$OCX_HOME` it could not spell is not this run's problem.
-    if !options.no_modify_path {
+    if options.touches_session_path() {
         session_path::refuse_unencodable(&session_path_directories(file_structure))?;
     }
 
@@ -328,17 +358,7 @@ pub async fn run(
     })??;
 
     // ── Phase 3: profile RC blocks (unless --no-modify-path) ──────────────────
-    let targets = if options.no_modify_path {
-        Vec::new()
-    } else {
-        resolve_targets(ocx_home, &options.profiles).await
-    };
-
-    let mut profiles = Vec::with_capacity(targets.len());
-    for target in targets {
-        let outcome = apply_target(&target, options.force, false, options.dry_run).await?;
-        profiles.push((target.path, outcome));
-    }
+    let profiles = apply_profile_phase(ocx_home, options).await?;
 
     // ── Phase 3.5: session PATH (unless --no-modify-path) ─────────────────────
     // Co-primary with the profile blocks rather than a fallback for them: a
@@ -350,7 +370,7 @@ pub async fn run(
     // same refusal to the same directories, so reaching it here means a caller
     // bypassed `run`; the check stays because the writers own it, not because
     // this path is expected to fire.
-    let session_path = if options.no_modify_path {
+    let session_path = if !options.touches_session_path() {
         // C-043 suppresses the whole arm, so the writers are never called and
         // cannot name their own stores; the caller enumerates them instead.
         session_path::session_path_stores(ocx_home)
@@ -789,12 +809,13 @@ const EXEC_POLICY_ADVISORY: &str =
 
 /// Resolve the profile files this run should target, in write order.
 ///
-/// Explicit `--profile` overrides skip auto-detection entirely and are treated
-/// as POSIX-fence targets (contract 1 edge). Otherwise the POSIX/dedicated-file
-/// set is auto-detected from the real environment and the PowerShell `$PROFILE`
-/// is probed via a subprocess.
-async fn resolve_targets(ocx_home: &Path, overrides: &[PathBuf]) -> Vec<ProfileTarget> {
-    if !overrides.is_empty() {
+/// `Some(overrides)` skips auto-detection entirely — including `Some(&[])`,
+/// which resolves to **no targets at all** (`--no-profile`). Explicit overrides
+/// are treated as POSIX-fence targets (contract 1 edge). `None` auto-detects the
+/// POSIX/dedicated-file set from the real environment and probes the PowerShell
+/// `$PROFILE` via a subprocess.
+async fn resolve_targets(ocx_home: &Path, overrides: Option<&[PathBuf]>) -> Vec<ProfileTarget> {
+    if let Some(overrides) = overrides {
         return overrides
             .iter()
             .map(|path| ProfileTarget {
@@ -844,6 +865,40 @@ async fn apply_target(
     }
 }
 
+/// Phase 3 of [`run`]: resolve the profile targets and apply the managed block
+/// to each, in write order.
+///
+/// The two profile opt-outs stay separate here. `--no-modify-path` skips the
+/// phase outright (and, via [`SetupOptions::touches_session_path`], the
+/// session-PATH arm with it); an empty `profiles` list resolves to zero targets
+/// and stops there, leaving every other phase running.
+///
+/// `handoff` is passed straight through as `apply_target`'s `heal_only`: under
+/// a hand-off no profile gains a block it did not already have, while a drifted
+/// block still heals and a dirty one still reports
+/// [`ProfileOutcome::SkippedDirty`] (exit 82, which the parent translates).
+///
+/// # Errors
+///
+/// Returns [`error::Error`] if a profile read or write fails.
+async fn apply_profile_phase(
+    ocx_home: &Path,
+    options: &SetupOptions,
+) -> Result<Vec<(PathBuf, ProfileOutcome)>, error::Error> {
+    let targets = if options.no_modify_path {
+        Vec::new()
+    } else {
+        resolve_targets(ocx_home, options.profiles.as_deref()).await
+    };
+
+    let mut profiles = Vec::with_capacity(targets.len());
+    for target in targets {
+        let outcome = apply_target(&target, options.force, options.handoff, options.dry_run).await?;
+        profiles.push((target.path, outcome));
+    }
+    Ok(profiles)
+}
+
 /// Re-apply the managed activation block to every detected profile in
 /// **heal-only** mode, for the `ocx self update` post-swap hook (Decision 4C).
 ///
@@ -862,7 +917,7 @@ async fn apply_target(
 ///
 /// Returns [`error::Error`] if a profile read or write fails.
 pub async fn refresh_profiles(ocx_home: &Path) -> Result<Vec<(PathBuf, ProfileOutcome)>, error::Error> {
-    let targets = resolve_targets(ocx_home, &[]).await;
+    let targets = resolve_targets(ocx_home, None).await;
     let mut profiles = Vec::with_capacity(targets.len());
     for target in targets {
         let outcome = apply_target(&target, false, true, false).await?;
@@ -2192,6 +2247,143 @@ mod tests {
             shims::fish_conf_body(),
             "heal-only refreshes a present, ocx-owned dedicated file"
         );
+    }
+
+    // ── phase 3: the profile tri-state and the hand-off guard ────────────────
+
+    #[tokio::test]
+    async fn empty_profile_list_writes_no_block_but_still_writes_shims() {
+        // `--no-profile` is the narrow opt-out: no profile block anywhere, but
+        // the env shims (phase 2) and the session PATH (phases 0 + 3.5) still
+        // run. Routing it through the `--no-modify-path` arm would silently
+        // widen it into "touch no PATH surface at all".
+        let dir = tempfile::tempdir().unwrap();
+        let options = SetupOptions {
+            profiles: Some(Vec::new()),
+            ..SetupOptions::default()
+        };
+
+        let outcomes = apply_profile_phase(dir.path(), &options).await.unwrap();
+        assert!(
+            outcomes.is_empty(),
+            "an empty profile list resolves zero targets: {outcomes:?}"
+        );
+
+        assert!(
+            options.touches_session_path(),
+            "an empty profile list must not suppress the session-PATH arm — that is --no-modify-path's job"
+        );
+        let opted_out = SetupOptions {
+            no_modify_path: true,
+            ..SetupOptions::default()
+        };
+        assert!(
+            !opted_out.touches_session_path(),
+            "--no-modify-path does suppress it, or the assertion above is vacuous"
+        );
+
+        // Phase 2 reads no option at all, so the same home still gets its shims.
+        let shims_written = shims::write_shims(dir.path(), false).unwrap();
+        assert!(
+            !shims_written.is_empty(),
+            "the env shims are written whatever the profile list says"
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_profile_list_auto_detects() {
+        // `None` is the third state: no overrides at all, so detection runs —
+        // exactly what an empty `Vec` used to mean before the list could say
+        // "none".
+        let dir = tempfile::tempdir().unwrap();
+
+        let detected = resolve_targets(dir.path(), None).await;
+        let expected = profiles::detect_targets(&home_env_from_environment(dir.path()));
+        assert!(
+            !expected.is_empty(),
+            "detection always yields at least one target, or the comparison below is vacuous"
+        );
+        assert_eq!(
+            detected.get(..expected.len()),
+            Some(&expected[..]),
+            "`None` must take the auto-detection path (the PowerShell probe may append to it)"
+        );
+
+        let none: Vec<PathBuf> = Vec::new();
+        assert!(
+            resolve_targets(dir.path(), Some(none.as_slice())).await.is_empty(),
+            "…and `Some(&[])` must not, or the two states are indistinguishable"
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_heals_but_never_introduces() {
+        // The Decision 4C guard, wired end-to-end through phase 3: an update
+        // may repair the shell integration a user already opted into, and may
+        // not hand shell integration to a machine that never asked (a CI runner
+        // where ocx came from a package manager and was never set up).
+        let dir = tempfile::tempdir().unwrap();
+
+        let drifted = dir.path().join("drifted.sh");
+        let old_body = ". \"$OCX_HOME/env.sh\"";
+        let marker = rc_block::canonical_hash(old_body);
+        std::fs::write(
+            &drifted,
+            format!("# >>> ocx v1 {marker} >>>\n{old_body}\n# <<< ocx <<<\n"),
+        )
+        .unwrap();
+
+        let untouched = dir.path().join("untouched.sh");
+        std::fs::write(&untouched, "export PATH=/bin\n").unwrap();
+
+        let options = SetupOptions {
+            profiles: Some(vec![drifted.clone(), untouched.clone()]),
+            handoff: true,
+            ..SetupOptions::default()
+        };
+        let outcomes = apply_profile_phase(dir.path(), &options).await.unwrap();
+
+        assert_eq!(
+            outcomes,
+            vec![
+                (drifted.clone(), ProfileOutcome::Completed),
+                (untouched.clone(), ProfileOutcome::NoOp),
+            ]
+        );
+        assert!(
+            read(&drifted).contains(POSIX_BODY),
+            "a present-but-drifted block still heals under --handoff"
+        );
+        assert_eq!(
+            read(&untouched),
+            "export PATH=/bin\n",
+            "--handoff must leave a profile with no ocx footprint byte-identical"
+        );
+    }
+
+    #[tokio::test]
+    async fn handoff_false_still_introduces() {
+        // The other half of the guard: an ordinary first-time `ocx self setup`
+        // is what actually introduces the block, and the flag did not break it.
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("first-time.sh");
+        std::fs::write(&profile, "export PATH=/bin\n").unwrap();
+
+        let options = SetupOptions {
+            profiles: Some(vec![profile.clone()]),
+            handoff: false,
+            ..SetupOptions::default()
+        };
+        let outcomes = apply_profile_phase(dir.path(), &options).await.unwrap();
+
+        assert_eq!(outcomes, vec![(profile.clone(), ProfileOutcome::Completed)]);
+        let written = read(&profile);
+        assert!(
+            written.starts_with("export PATH=/bin\n"),
+            "the user's existing content is preserved"
+        );
+        assert!(written.contains("# >>> ocx v1"), "a first-time setup writes the fence");
+        assert!(written.contains(POSIX_BODY), "…carrying the canonical body");
     }
 
     // ── rewrite_dedicated (fish/nushell full-rewrite) ────────────────────────

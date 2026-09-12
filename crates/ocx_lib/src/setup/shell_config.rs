@@ -18,28 +18,48 @@
 //! hand-written `[shell] hook = false` is simply overwritten by an explicit
 //! `--hook`, which is what the flag means. A write failure is 74 `IoError`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use toml_edit::{DocumentMut, Item, Table};
+use toml_edit::{Array, DocumentMut, Item, Table};
 
 /// Which `[shell]` key a write targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShellFlag {
+pub enum ShellKey {
     /// `[shell] hook`.
     Hook,
     /// `[shell] completions`.
     Completions,
+    /// `[shell] modify_path`.
+    ModifyPath,
+    /// `[shell] profiles`.
+    Profiles,
 }
 
-impl ShellFlag {
-    /// The `[shell]` key this flag writes, spelled exactly as
+impl ShellKey {
+    /// The `[shell]` key this variant writes, spelled exactly as
     /// [`crate::config::ShellConfig`] deserializes it.
     pub const fn key(self) -> &'static str {
         match self {
             Self::Hook => "hook",
             Self::Completions => "completions",
+            Self::ModifyPath => "modify_path",
+            Self::Profiles => "profiles",
         }
     }
+}
+
+/// The value written under a [`ShellKey`].
+///
+/// `Bool` covers the boolean rungs (`hook`, `completions`, `modify_path`).
+/// `Paths` covers `profiles`, where an **empty slice is a real, distinct
+/// value** from the key being absent: absent means auto-detect, empty means
+/// write no profile blocks.
+#[derive(Debug, Clone, Copy)]
+pub enum ShellValue<'a> {
+    /// A boolean rung.
+    Bool(bool),
+    /// An explicit path list.
+    Paths(&'a [PathBuf]),
 }
 
 /// Set exactly one `[shell]` key in the home-tier `config.toml` (C-040).
@@ -60,14 +80,19 @@ impl ShellFlag {
 /// the intent for a user-facing toggle. Create the table if absent and
 /// preserve every other byte of the file.
 ///
-/// Callers pass the flag only when it was given: **flag absent writes
-/// nothing**, and the default applies. When a higher tier already sets the key,
-/// the write still lands and the CLI reports which tier will win (C-034).
+/// A [`ShellValue::Paths`] renders as a TOML array of strings via
+/// `Path::to_string_lossy()` — a path is not guaranteed UTF-8 on Windows, and
+/// a lossy render of the rare non-UTF-8 byte beats refusing the whole write.
+///
+/// Callers pass the key only when a write was requested: **no call, no
+/// change**, and the default applies. When a higher tier already sets the
+/// key, the write still lands and the CLI reports which tier will win
+/// (C-034).
 ///
 /// # Errors
 ///
 /// Propagates the read/parse/atomic-write failure — classified 74 `IoError`.
-pub fn set_flag(config_path: &Path, flag: ShellFlag, value: bool) -> crate::Result<()> {
+pub fn set(config_path: &Path, key: ShellKey, value: ShellValue<'_>) -> crate::Result<()> {
     let original = match std::fs::read_to_string(config_path) {
         Ok(text) => text,
         // A missing file is the create case, not a failure. Every other read
@@ -87,7 +112,16 @@ pub fn set_flag(config_path: &Path, flag: ShellFlag, value: bool) -> crate::Resu
         .or_insert_with(|| Item::Table(Table::new()))
         .as_table_like_mut()
         .ok_or_else(|| malformed(config_path, "`shell` is present but is not a table"))?;
-    table.insert(flag.key(), toml_edit::value(value));
+
+    match value {
+        ShellValue::Bool(flag) => {
+            table.insert(key.key(), toml_edit::value(flag));
+        }
+        ShellValue::Paths(paths) => {
+            let array: Array = paths.iter().map(|path| path.to_string_lossy().into_owned()).collect();
+            table.insert(key.key(), toml_edit::value(array));
+        }
+    }
 
     if created {
         hoist_above_every_table(&mut document);
@@ -172,7 +206,7 @@ completions = true
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("config.toml");
 
-        set_flag(&path, ShellFlag::Hook, false).unwrap();
+        set(&path, ShellKey::Hook, ShellValue::Bool(false)).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -190,7 +224,7 @@ completions = true
         let home = tempfile::tempdir().unwrap();
         let path = write(home.path(), HAND_WRITTEN);
 
-        set_flag(&path, ShellFlag::Hook, true).unwrap();
+        set(&path, ShellKey::Hook, ShellValue::Bool(true)).unwrap();
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -204,6 +238,35 @@ completions = true
         );
     }
 
+    /// C-040: two successive writes on the two new keys compose the same way
+    /// the two original boolean keys always did, and the surrounding comment
+    /// plus the unrecognised key survive both writes byte-for-byte.
+    ///
+    /// **Red-state**: replace the surgical `table.insert` in [`set`] with a
+    /// whole-file rewrite (rebuild `document` from scratch instead of editing
+    /// the parsed one in place) and this test fails — the comment and
+    /// `future_key` are gone. Demonstrated by hand for this work package: see
+    /// the builder's report for the red output.
+    #[test]
+    fn writes_compose_and_preserve_bytes() {
+        let home = tempfile::tempdir().unwrap();
+        let path = write(home.path(), HAND_WRITTEN);
+
+        set(&path, ShellKey::ModifyPath, ShellValue::Bool(false)).unwrap();
+        set(&path, ShellKey::Profiles, ShellValue::Paths(&[])).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.starts_with(HAND_WRITTEN),
+            "every byte the user wrote must survive both writes verbatim; got:\n{after}"
+        );
+        assert_eq!(
+            after,
+            format!("{HAND_WRITTEN}modify_path = false\nprofiles = []\n"),
+            "both keys land, in write order, without disturbing the table's existing keys"
+        );
+    }
+
     /// C-040: an existing key is set in place — the surrounding decor, and any
     /// key declared after it, keep their position.
     #[test]
@@ -214,7 +277,7 @@ completions = true
             "[shell]\nhook = false\n# tail comment\ncompletions = true\n",
         );
 
-        set_flag(&path, ShellFlag::Hook, true).unwrap();
+        set(&path, ShellKey::Hook, ShellValue::Bool(true)).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -230,8 +293,8 @@ completions = true
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("config.toml");
 
-        set_flag(&path, ShellFlag::Hook, false).unwrap();
-        set_flag(&path, ShellFlag::Completions, true).unwrap();
+        set(&path, ShellKey::Hook, ShellValue::Bool(false)).unwrap();
+        set(&path, ShellKey::Completions, ShellValue::Bool(true)).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -270,7 +333,7 @@ completions = true
             return;
         }
 
-        let error = set_flag(&directory.join("config.toml"), ShellFlag::Hook, true)
+        let error = set(&directory.join("config.toml"), ShellKey::Hook, ShellValue::Bool(true))
             .expect_err("publishing into a directory this process cannot write must fail");
         std::fs::set_permissions(&directory, writable).unwrap();
 
@@ -292,7 +355,7 @@ completions = true
         std::fs::write(home.path().join("not-a-dir"), b"").unwrap();
         let path = home.path().join("not-a-dir").join("config.toml");
 
-        let error = set_flag(&path, ShellFlag::Hook, true).expect_err("the read cannot succeed");
+        let error = set(&path, ShellKey::Hook, ShellValue::Bool(true)).expect_err("the read cannot succeed");
         assert_eq!(crate::cli::classify_error(&error), crate::cli::ExitCode::IoError);
     }
 
@@ -318,7 +381,7 @@ completions = true
             .expect("a file with no fence gets a fresh one");
         let path = write(home.path(), &fenced);
 
-        set_flag(&path, ShellFlag::Hook, true).unwrap();
+        set(&path, ShellKey::Hook, ShellValue::Bool(true)).unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
 
         assert_eq!(
@@ -343,6 +406,78 @@ completions = true
         );
     }
 
+    /// C-051: the fence-avoidance guard generalizes to the new `Paths` value —
+    /// a freshly created `[shell]` table carrying `profiles` must land above
+    /// the `[managed]` fence exactly like a freshly created `hook` does.
+    ///
+    /// **Red-state**: comment out the `hoist_above_every_table` call in
+    /// [`set`] and this test fails — the new table renders after the fence
+    /// body, inside the fence, and `[shell]` and `[managed]` swap places in
+    /// the byte comparison below. Demonstrated by hand for this work package:
+    /// see the builder's report for the red output.
+    #[test]
+    fn new_table_lands_outside_the_managed_fence() {
+        use crate::setup::rc_block::{self, MANAGED_LABEL};
+
+        const BODY: &str = "[managed]\nsource = \"ghcr.io/acme/cfg:1\"\nrequired = false";
+
+        let home = tempfile::tempdir().unwrap();
+        let fenced = rc_block::apply("", BODY, false, MANAGED_LABEL)
+            .unwrap()
+            .expect("a file with no fence gets a fresh one");
+        let path = write(home.path(), &fenced);
+
+        set(&path, ShellKey::Profiles, ShellValue::Paths(&[])).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(
+            after,
+            format!("[shell]\nprofiles = []\n{fenced}"),
+            "a created [shell] table goes above the fence even when the write is a Paths value"
+        );
+    }
+
+    /// C-040: `profiles` renders as a TOML array of strings, and an explicitly
+    /// empty slice renders as an explicitly empty array — not an absent key.
+    /// That distinction is the whole point of the key: absent means
+    /// auto-detect, empty means write no profile blocks.
+    #[test]
+    fn profiles_renders_as_an_array_of_strings() {
+        let home = tempfile::tempdir().unwrap();
+        let path_a = home.path().join("config.toml");
+        let a = home.path().join("a").join(".bashrc");
+        let b = home.path().join("b").join(".zshrc");
+
+        set(&path_a, ShellKey::Profiles, ShellValue::Paths(&[a.clone(), b.clone()])).unwrap();
+
+        // Parse, do not grep: `toml_edit` picks a literal string (`'…'`) when
+        // the value carries backslashes and a basic string (`"…"`) otherwise,
+        // so a byte-exact assertion encodes the host's path separator. The
+        // contract is the parsed value, and only that.
+        let written = std::fs::read_to_string(&path_a).unwrap();
+        let document: toml_edit::DocumentMut = written.parse().unwrap();
+        let profiles: Vec<String> = document["shell"]["profiles"]
+            .as_array()
+            .expect("profiles is a TOML array")
+            .iter()
+            .map(|item| item.as_str().expect("each profile is a string").to_owned())
+            .collect();
+        assert_eq!(
+            profiles,
+            vec![a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned()],
+            "profiles parses back as the array of path strings that was written"
+        );
+
+        let path_b = home.path().join("empty.toml");
+        set(&path_b, ShellKey::Profiles, ShellValue::Paths(&[])).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path_b).unwrap(),
+            "[shell]\nprofiles = []\n",
+            "an explicitly empty list renders as an explicitly empty array, not an absent key"
+        );
+    }
+
     /// C-051: a `config.toml` that does not parse is reported, not silently
     /// replaced — the file on disk is left exactly as it was.
     #[test]
@@ -351,7 +486,7 @@ completions = true
         let broken = "[shell\nhook = ";
         let path = write(home.path(), broken);
 
-        let error = set_flag(&path, ShellFlag::Hook, true).expect_err("broken TOML cannot be edited");
+        let error = set(&path, ShellKey::Hook, ShellValue::Bool(true)).expect_err("broken TOML cannot be edited");
         assert_eq!(crate::cli::classify_error(&error), crate::cli::ExitCode::IoError);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
