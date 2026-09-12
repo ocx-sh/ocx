@@ -272,7 +272,9 @@ def test_j8_json_key_sets_are_stable(ocx: OcxRunner, published_package: PackageI
 
     repair_payload = json.loads(_repair(ocx, published_package.repo, "--dry-run").stdout)
     assert set(repair_payload.keys()) == {"dry_run", "entries", "tags_file"}
-    assert set(repair_payload["entries"][0].keys()) == {"announce_tags", "outcomes", "planned", "report"}
+    assert set(repair_payload["entries"][0].keys()) == {"outcomes", "planned", "report", "tags"}, (
+        "one vocabulary per document: the per-entry tag list is `tags`, beside the run-wide `tags_file`"
+    )
 
 
 def test_j9_keep_tag_is_ignored_not_a_finding(ocx: OcxRunner, published_package: PackageInfo) -> None:
@@ -433,7 +435,7 @@ def test_j12_tags_file_holds_exactly_the_created_aliases(
 
     created = sorted(line for line in tags_path.read_text().splitlines() if line)
     assert created == expected
-    assert json.loads(result.stdout)["entries"][0]["announce_tags"] == created
+    assert json.loads(result.stdout)["entries"][0]["tags"] == created
 
     again = _repair(ocx, "--tags-file", str(tags_path), unique_repo)
     assert again.returncode == 0
@@ -475,3 +477,35 @@ def test_j13_tags_file_rejects_a_multi_package_run(
     both = _repair(ocx, unique_repo, other_repo)
     assert both.returncode == 0
     assert len(_entries(both)) == 2
+
+
+def test_j14_the_removed_announce_tags_flag_is_a_usage_error(
+    ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
+) -> None:
+    """`--announce-tags` was renamed to `--tags-file`, with no alias: the file
+    records the tags this run left present in the registry, never a plan for
+    `announce`, and the old spelling named the wrong thing.
+
+    The package is healthy, so a build that still parsed the old spelling
+    would repair nothing, exit 0 and leave an empty handoff file behind —
+    which is why both the exit code and the file's absence are asserted. A
+    run that exits 64 for some unrelated reason would not name the argument
+    in stderr, so that is pinned too.
+    """
+    tags_path = tmp_path / "handoff.txt"
+    rejected = _repair(ocx, "--announce-tags", str(tags_path), published_package.repo, check=False)
+
+    assert rejected.returncode == 64, (
+        f"the old spelling must not parse; got {rejected.returncode}\nstderr:\n{rejected.stderr}"
+    )
+    assert "--announce-tags" in rejected.stderr, (
+        f"clap must reject this argument by name, not exit 64 for something else:\n{rejected.stderr}"
+    )
+    assert not tags_path.exists(), "a rejected run writes no handoff file"
+
+    # The negative control: the same file, the current spelling, the same
+    # healthy package — proving the rejection is about the flag name and not
+    # about the invocation around it.
+    accepted = _repair(ocx, "--tags-file", str(tags_path), published_package.repo)
+    assert accepted.returncode == 0
+    assert tags_path.read_text() == "", "a healthy package has no tag to hand the announce hop"

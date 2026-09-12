@@ -886,7 +886,7 @@ mod tests {
                 report,
                 planned: Vec::new(),
                 outcomes: Vec::new(),
-                announce_tags: Vec::new(),
+                tags: Vec::new(),
             }
         }
 
