@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -525,6 +526,204 @@ def test_setup_no_modify_path_via_env_var(ocx: OcxRunner, tmp_path: Path, truthy
     ocx_home = Path(ocx.env["OCX_HOME"])
     for shim in _ENV_SHIMS:
         assert (ocx_home / shim).is_file(), f"{shim} must be written with OCX_NO_MODIFY_PATH={truthy}"
+
+
+# ---------------------------------------------------------------------------
+# `[shell]` persistence: a flag writes its key, silence writes nothing
+# ---------------------------------------------------------------------------
+
+# One row per `[shell]` key `ocx self setup` can write: the key, the flags that
+# request it, and the TOML value `shell_config::set` must land.
+#
+# `hook` and `completions` shipped with no acceptance coverage at all, so this
+# table backfills them alongside the two keys setup newly persists.
+_SHELL_KEY_TABLE = (
+    ("hook", ("--hook",), True),
+    ("completions", ("--completion",), True),
+    ("modify_path", ("--no-modify-path",), False),
+    ("profiles", ("--no-profile",), []),
+)
+
+
+@pytest.mark.parametrize(
+    ("key", "flags", "expected"),
+    _SHELL_KEY_TABLE,
+    ids=[row[0] for row in _SHELL_KEY_TABLE],
+)
+def test_setup_shell_flag_writes_its_key_and_silence_writes_nothing(
+    ocx: OcxRunner,
+    tmp_path: Path,
+    key: str,
+    flags: tuple[str, ...],
+    expected: object,
+) -> None:
+    """A `[shell]` flag writes exactly its own key; typing none writes nothing.
+
+    Both halves matter and neither follows from the other:
+
+    * writing the key is what makes the toggle outlive the invocation;
+    * leaving ``config.toml`` **byte-identical** when the flag is absent is
+      what stops a routine ``ocx self setup`` from adopting a value nobody
+      asked for — and it is the property that lets the lower rungs of each
+      ladder (``OCX_NO_MODIFY_PATH``, a config tier above ``$OCX_HOME``) still
+      get a turn for a user who typed nothing.
+
+    ``--dry-run`` is deliberately not used: what is under test is the byte on
+    disk, so the run has to be the real one. ``$HOME`` is redirected because a
+    real run auto-detects its profile targets there.
+    """
+    _seed_candidate(ocx)
+    home = tmp_path / "home"
+    home.mkdir()
+    config = Path(ocx.env["OCX_HOME"]) / "config.toml"
+
+    # 1. A run that types no `[shell]` flag creates no config.toml at all.
+    first = _setup(ocx, home=home)
+    assert first.returncode == 0, f"a plain setup must exit 0; stderr:\n{first.stderr}"
+    assert not config.exists(), (
+        f"a setup told nothing about [shell] must not write {config}; it holds:\n"
+        f"{config.read_text() if config.exists() else ''}"
+    )
+
+    # 2. The flag writes its key, and only its key.
+    result = _setup(ocx, *flags, home=home)
+    assert result.returncode == 0, f"`self setup {' '.join(flags)}` must exit 0; stderr:\n{result.stderr}"
+    document = tomllib.loads(config.read_text())
+    assert document == {"shell": {key: expected}}, (
+        f"`self setup {' '.join(flags)}` must write [shell] {key} = {expected!r} and nothing else; "
+        f"got: {document!r}"
+    )
+
+    # 3. A later run that does not type it leaves the file byte-identical.
+    persisted = config.read_bytes()
+    third = _setup(ocx, home=home)
+    assert third.returncode == 0, f"the follow-up setup must exit 0; stderr:\n{third.stderr}"
+    assert config.read_bytes() == persisted, (
+        "a run that types no [shell] flag must leave config.toml byte-identical; it now holds:\n"
+        f"{config.read_text()}"
+    )
+
+
+def test_setup_persisted_modify_path_is_honoured_on_a_later_run(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``[shell] modify_path = false``, once written, decides for a bare re-run.
+
+    ``--no-modify-path`` persists, so the machine remembers the opt-out: a
+    later ``ocx self setup`` with no flag at all must still write no profile
+    block and register no session PATH. Without this the opt-out would last
+    exactly one invocation, and the next routine setup would quietly put ocx
+    back on the user's PATH.
+    """
+    _seed_candidate(ocx)
+    home = tmp_path / "home"
+    home.mkdir()
+    profile = home / ".profile"
+    profile.write_text("# pristine\n")
+
+    first = _setup(ocx, "--no-modify-path", home=home)
+    assert first.returncode == 0, f"the opting-out setup must exit 0; stderr:\n{first.stderr}"
+    assert profile.read_text() == "# pristine\n", "--no-modify-path must not touch the profile"
+
+    second = _setup(ocx, home=home)
+    assert second.returncode == 0, f"the bare re-run must exit 0; stderr:\n{second.stderr}"
+    payload = json.loads(second.stdout)
+    assert payload["profiles"] == [], (
+        f"a bare re-run must honour the persisted opt-out and touch no profile; got: {payload!r}"
+    )
+    assert profile.read_text() == "# pristine\n", (
+        f"the persisted opt-out must leave the profile byte-identical; got:\n{profile.read_text()}"
+    )
+    outcomes = [entry["outcome"] for entry in payload["session_path"]]
+    assert outcomes and set(outcomes) == {"skipped_opt_out"}, (
+        f"the same rung suppresses the session-PATH arm; got: {payload['session_path']!r}"
+    )
+
+
+def test_setup_no_profile_writes_no_block_but_registers_session_path(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``--no-profile`` suppresses the profile blocks only — the session PATH
+    is still registered.
+
+    ``profiles = []`` and ``modify_path = false`` are different refusals, and
+    this is the test that keeps them apart. ``--no-profile`` says "write no
+    managed block"; ``--no-modify-path`` says "touch no PATH surface at all".
+    Collapsing the first into the second would silently take the session-PATH
+    registration away from a user who only declined the RC edit.
+    """
+    _seed_candidate(ocx)
+    home = tmp_path / "home"
+    home.mkdir()
+    profile = home / ".profile"
+    profile.write_text("# pristine\n")
+
+    result = _setup(ocx, "--no-profile", home=home)
+    assert result.returncode == 0, f"--no-profile must exit 0; stderr:\n{result.stderr}"
+
+    payload = json.loads(result.stdout)
+    assert payload["profiles"] == [], f"--no-profile must target no profile; got: {payload!r}"
+    assert profile.read_text() == "# pristine\n", (
+        f"--no-profile must leave the profile byte-identical; got:\n{profile.read_text()}"
+    )
+
+    entries = payload["session_path"]
+    assert entries, "this host reported no session-PATH store at all"
+    assert [entry["outcome"] for entry in entries] == ["written"] * len(entries), (
+        f"--no-profile must still register the session PATH; got: {entries!r}"
+    )
+    for entry in entries:
+        assert Path(entry["location"]).is_file(), (
+            f"the session-PATH store reported written must exist on disk: {entry['location']}"
+        )
+
+    # The shims are the third surface and are unaffected by either opt-out.
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    for shim in _ENV_SHIMS:
+        assert (ocx_home / shim).is_file(), f"{shim} must still be written with --no-profile"
+
+
+def test_setup_absent_profiles_key_redetects(ocx: OcxRunner, tmp_path: Path) -> None:
+    """With no ``[shell] profiles`` key, every run re-detects its targets.
+
+    ``~/.bash_profile`` is a *conditional* target: ``detect_targets`` wires it
+    only when the file exists, because bash reads it in preference to
+    ``~/.profile``. Creating it between two setups is therefore the sharp case
+    — a run that had snapshotted its first detection result (into
+    ``config.toml`` or anywhere else) would keep writing the old target set and
+    silently skip the new file.
+    """
+    _seed_candidate(ocx)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".profile").write_text("# login\n")
+
+    first = _setup(ocx, home=home)
+    assert first.returncode == 0, f"the first setup must exit 0; stderr:\n{first.stderr}"
+
+    marker = _canonical_hash(_FENCE_BODY)
+    assert f"# >>> ocx v1 {marker} >>>" in (home / ".profile").read_text(), (
+        f"the first setup must fence ~/.profile; got:\n{(home / '.profile').read_text()}"
+    )
+    assert not (home / ".bash_profile").exists(), (
+        "~/.bash_profile is a conditional target: setup must not create one that did not exist"
+    )
+    config = Path(ocx.env["OCX_HOME"]) / "config.toml"
+    assert not config.exists(), (
+        f"no [shell] flag was typed, so no detection result may be persisted; {config} holds:\n"
+        f"{config.read_text() if config.exists() else ''}"
+    )
+
+    (home / ".bash_profile").write_text("# bash login\n")
+    second = _setup(ocx, home=home)
+    assert second.returncode == 0, f"the second setup must exit 0; stderr:\n{second.stderr}"
+
+    content = (home / ".bash_profile").read_text()
+    assert f"# >>> ocx v1 {marker} >>>" in content, (
+        "a profile created after the first setup must be picked up by the second — detection is "
+        f"not a snapshot; ~/.bash_profile holds:\n{content}"
+    )
+    assert "# bash login" in content, f"the user's own content must survive; got:\n{content}"
 
 
 # ---------------------------------------------------------------------------
