@@ -103,7 +103,7 @@ pub enum Command {
     ///
     /// Resolves each new binding, records it in `ocx.lock`, and re-renders the
     /// project toolchain into `<project>/.ocx/toolchain/` - or under the
-    /// `toolchain-dir` root, when one is configured. That directory carries
+    /// `toolchain_dir` root, when one is configured. That directory carries
     /// its own `.gitignore`, so `git status` stays clean.
     Add(add::Add),
     /// Remove unreferenced objects from the local object store.
@@ -127,7 +127,7 @@ pub enum Command {
     /// Resolve tool tags to digests and write ocx.lock.
     ///
     /// Re-renders the project toolchain into `<project>/.ocx/toolchain/` - or
-    /// under the `toolchain-dir` root, when one is configured - so the
+    /// under the `toolchain_dir` root, when one is configured - so the
     /// `links/<group>/<entry>` tree and the `shells/default/bin` launchers
     /// reached through the `active` link match the lock just written. That
     /// directory carries its own `.gitignore`, so `git status` stays clean.
@@ -151,7 +151,7 @@ pub enum Command {
     /// and rejects an unknown group or name (exit 64).
     ///
     /// Re-renders the project toolchain into `<project>/.ocx/toolchain/` - or
-    /// under the `toolchain-dir` root, when one is configured - so the
+    /// under the `toolchain_dir` root, when one is configured - so the
     /// `links/<group>/<entry>` tree and the `shells/default/bin` launchers
     /// reached through the `active` link follow the advanced lock. That
     /// directory carries its own `.gitignore`, so `git status` stays clean.
@@ -169,7 +169,7 @@ pub enum Command {
     ///
     /// Fetches every digest-pinned entry the project `ocx.lock` declares into
     /// the local object store, then renders the project toolchain into
-    /// `<project>/.ocx/toolchain/` - or under the `toolchain-dir` root, when
+    /// `<project>/.ocx/toolchain/` - or under the `toolchain_dir` root, when
     /// one is configured: one link per `links/<group>/<entry>`, plus the
     /// `shells/default/bin` launchers for the default group, reached through the
     /// `active` link. That directory carries its own
@@ -184,7 +184,7 @@ pub enum Command {
     ///
     /// Drops each binding from `ocx.lock` as well, then re-renders the project
     /// toolchain into `<project>/.ocx/toolchain/` - or under the
-    /// `toolchain-dir` root, when one is configured - so the removed tools
+    /// `toolchain_dir` root, when one is configured - so the removed tools
     /// leave the `links/<group>/<entry>` tree and the `shells/default/bin`
     /// launchers reached through the `active` link. That directory carries
     /// its own `.gitignore`, so `git status` stays clean.

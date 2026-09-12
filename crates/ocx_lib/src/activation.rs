@@ -397,14 +397,14 @@ pub struct Outcome {
     /// `owned_prefixes` is a **deletion authority over a live shell's `PATH`** —
     /// `repair_owned_segments` removes every segment under an owned prefix the
     /// desired set does not contribute — so what may be listed is exactly
-    /// `$OCX_HOME` plus this. Never the bare `toolchain-dir` root (it holds
+    /// `$OCX_HOME` plus this. Never the bare `toolchain_dir` root (it holds
     /// *other projects'* homes), never a consent-refused project, never a
     /// project the walk found but did not put in scope.
     ///
     /// Carried on the outcome rather than re-derived at the call site because
     /// the call site cannot: `plan_for`'s caller has a `FileStructure` and a
     /// `Ledger`, and the home depends on the project directory *and* on the
-    /// merged `toolchain-dir` tier. Minted only after [`ConsentProof`] is in
+    /// merged `toolchain_dir` tier. Minted only after [`ConsentProof`] is in
     /// hand, which is what keeps "strictly after consent" a property of where
     /// the field is assigned.
     pub owned_home: Option<PathBuf>,
@@ -741,11 +741,11 @@ async fn project_entries(
     // The **already ownership-vetted** home from `owned_project_home`, never a
     // second `project_home` call: that helper's own doc records why resolving it
     // twice is a regression, and its `Err` travels to `session`, whose contract
-    // is "emit nothing at all" — so one refused `toolchain-dir` would silently
+    // is "emit nothing at all" — so one refused `toolchain_dir` would silently
     // no-op the hook in every project, C-059's two global directories included.
     //
     // `None` is C-067's digest lane, and it is the correct answer for exactly
-    // the states that produced it: a refused `toolchain-dir`, and a home ocx may
+    // the states that produced it: a refused `toolchain_dir`, and a home ocx may
     // not own.
     home: Option<file_structure::ToolchainHome>,
 ) -> Result<(Vec<Entry>, bool), SessionError> {
@@ -933,7 +933,7 @@ pub async fn session(input: SessionInput<'_>) -> Result<Outcome, SessionError> {
 ///
 /// # Errors
 ///
-/// The `ocx.toml` parse; the home resolution (C-017–C-019's `toolchain-dir`
+/// The `ocx.toml` parse; the home resolution (C-017–C-019's `toolchain_dir`
 /// funnel, or the canonicalisation's own I/O failure);
 /// [`LockCurrency`] for the two modes that read the lock; and whatever the
 /// composition or the heal raised.
@@ -1041,7 +1041,7 @@ async fn project_contribution(
 ///
 /// # The other refusing state
 ///
-/// A `toolchain-dir` the config tier declares and C-017–C-019 refuse (exit 78)
+/// A `toolchain_dir` the config tier declares and C-017–C-019 refuse (exit 78)
 /// used to travel out of here as an error, and `session`'s `Err` contract is
 /// "emit nothing" — so one bad `[managed]` push turned every prompt in every
 /// project into a silent no-op, C-059's directories included. It degrades here
@@ -1090,7 +1090,7 @@ async fn owned_project_home(
 
 /// The project's resolved toolchain home (C-002, C-063).
 ///
-/// The `toolchain-dir` funnel is re-run here rather than taken as a parameter:
+/// The `toolchain_dir` funnel is re-run here rather than taken as a parameter:
 /// [`SessionInput`] is a plain-value contract, and a bare `Option<&Path>`
 /// parameter is the compile-legal bypass R-W20 closed —
 /// [`ToolchainRoot`](crate::config::ToolchainRoot) is constructible only by its
@@ -1258,7 +1258,7 @@ pub fn activate_mode(config: &crate::project::ProjectConfig) -> crate::activate:
 /// The **identity** check — that the stamp's [`RenderStamp::scope`](crate::file_structure::RenderStamp::scope) names this
 /// project and its `home` names this home — belongs to the caller
 /// ([`bin_mode_entry`]), which is the level that holds both. Two projects
-/// colliding in the 64 bits of `name_for_path` under one `toolchain-dir` share a
+/// colliding in the 64 bits of `name_for_path` under one `toolchain_dir` share a
 /// stamp, and this function compares a directory against a stamp it is handed;
 /// it cannot know whose.
 ///
@@ -1378,7 +1378,7 @@ fn bin_matches_recorded(bin_dir: &Path, recorded: &BTreeMap<String, file_structu
 ///    that accessor already reports as absent — yields `Ok(None)`.
 /// 2. Check identity before content: the stamp's `home` must be this home and
 ///    its [`RenderStampScope`](crate::file_structure::RenderStampScope) must
-///    name this canonical project directory (D-V13). Under `toolchain-dir`, two
+///    name this canonical project directory (D-V13). Under `toolchain_dir`, two
 ///    projects colliding in `name_for_path`'s 64 bits share one home *and* one
 ///    stamp, and the project half is what tells them apart — without it project
 ///    B's prompt passes over trampolines that bake `--project '<A>'`.
@@ -1444,7 +1444,7 @@ pub(crate) async fn bin_mode_entry(
     };
 
     // 2. Identity before content, both halves (D-V13). `home` alone is not
-    //    enough: under `toolchain-dir`, two projects colliding in the 64 bits
+    //    enough: under `toolchain_dir`, two projects colliding in the 64 bits
     //    of `name_for_path` share one home *and* one stamp, and the scope's
     //    canonical project directory is what tells them apart — without it
     //    project B's prompt passes over trampolines that bake `--project '<A>'`.
@@ -2772,7 +2772,7 @@ mod session_path_tests {
     }
 
     /// C-063 — the negative half, and the security-relevant one:
-    /// `owned_prefixes` may never carry the bare `toolchain-dir` root. That
+    /// `owned_prefixes` may never carry the bare `toolchain_dir` root. That
     /// root holds **other projects'** homes, so owning it makes this prompt a
     /// deletion authority over a sibling project's `PATH` segments — a project
     /// this shell never consented to and may never have entered.
@@ -2825,7 +2825,7 @@ mod session_path_tests {
         );
         assert!(
             !removed.contains(&sibling.to_string_lossy().as_ref()),
-            "C-063: `<toolchain-dir>/<other project>/toolchain/bin` is not this prompt's to delete; \
+            "C-063: `<toolchain_dir>/<other project>/toolchain/bin` is not this prompt's to delete; \
              got removes {removed:#?}"
         );
     }
@@ -3854,7 +3854,7 @@ mod bin_mode_entry_tests {
         );
     }
 
-    /// C-061, D-V13 — identity before content. Under `toolchain-dir` two
+    /// C-061, D-V13 — identity before content. Under `toolchain_dir` two
     /// projects colliding in `name_for_path`'s 64 bits share one home *and* one
     /// stamp; the scope's project directory is what tells them apart. Without
     /// it, project B's prompt passes over trampolines that bake

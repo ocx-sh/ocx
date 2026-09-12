@@ -57,7 +57,7 @@ pub struct ToolchainRender<'a> {
     /// [`RenderStampScope`] makes it unspellable in the stamp.
     pub scope: &'a RenderStampScope,
 
-    /// The validated `toolchain-dir` root, or `None` for the in-project
+    /// The validated `toolchain_dir` root, or `None` for the in-project
     /// `<project>/.ocx/toolchain` default (C-002, R-W20).
     ///
     /// Ignored for [`RenderStampScope::Global`]: the global home is
@@ -802,7 +802,7 @@ mod tests {
     // ── C-054 — the home derivation ──────────────────────────────────────────
 
     /// C-016 — the **global** home is `$OCX_HOME/toolchain` and ignores
-    /// `toolchain-dir` entirely.
+    /// `toolchain_dir` entirely.
     ///
     /// The discriminating input: a `toolchain_root` is supplied and must make no
     /// difference. An implementation that honoured it for both tiers passes
@@ -825,7 +825,7 @@ mod tests {
         assert_eq!(
             with_root.root(),
             tree.file_structure.toolchain.root(),
-            "C-016 — the global home is `$OCX_HOME/toolchain`, whatever `toolchain-dir` says"
+            "C-016 — the global home is `$OCX_HOME/toolchain`, whatever `toolchain_dir` says"
         );
         assert_eq!(
             with_root, without_root,
@@ -833,7 +833,7 @@ mod tests {
         );
     }
 
-    /// C-002 — with no `toolchain-dir`, a project's home is the in-project
+    /// C-002 — with no `toolchain_dir`, a project's home is the in-project
     /// `<project>/.ocx/toolchain`.
     #[test]
     fn a_project_home_defaults_to_the_in_project_tree() {
@@ -849,7 +849,7 @@ mod tests {
         );
     }
 
-    /// C-002 / R-W20 — a configured `toolchain-dir` relocates a project's home
+    /// C-002 / R-W20 — a configured `toolchain_dir` relocates a project's home
     /// to `<root>/<project-key>/toolchain`, keyed by the same 16-hex derivation
     /// the consent stamp uses (D-V13).
     ///

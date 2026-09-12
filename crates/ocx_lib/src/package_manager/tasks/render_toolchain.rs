@@ -45,7 +45,7 @@
 //!    The ordering is not cosmetic either — it does its own `create_dir_all`
 //!    with the **ambient umask**, so reaching it with the root still absent
 //!    would create that root with whatever the umask allows and silently defeat
-//!    R-W19(a)'s owner-only-write on a fresh `toolchain-dir` root.
+//!    R-W19(a)'s owner-only-write on a fresh `toolchain_dir` root.
 //! 4. **One [`lock_scoped`](crate::utility::fs::lock_scoped) over the home, for
 //!    the whole body** (RUL-30). Two `ocx pull` runs against one home is an
 //!    ordinary state — two terminals — and unlocked they interleave writes and
@@ -113,7 +113,7 @@
 //! # Everything this module writes stays inside the resolved home
 //!
 //! Render and prune act only inside [`RenderRequest::home`] (C-053). A tree at
-//! a location `ocx` no longer resolves to — after a `toolchain-dir` change, or
+//! a location `ocx` no longer resolves to — after a `toolchain_dir` change, or
 //! after `[managed]` pushed one across a fleet — is **left in place, never
 //! deleted**: this module has no delete path that can reach outside the home
 //! it was handed. That property has one named seam, [`prune_within`], rather
@@ -374,7 +374,7 @@ pub struct RenderRequest<'a> {
     /// the directory it judges**. Probing the nearest existing *ancestor* — the
     /// shape that shipped — put a `.ocx-case-probe-<pid>-<nanos>` file in the
     /// project checkout on every `ocx pull --dry-run` of a never-rendered home,
-    /// and in `$HOME` when a configured `toolchain-dir`'s parents did not exist
+    /// and in `$HOME` when a configured `toolchain_dir`'s parents did not exist
     /// either. Narrowing it to "only an already-existing home root" left it
     /// creating and unlinking a file inside that root, which moves the root's
     /// own `mtime` on every dry run — still a write, and one an acceptance test
@@ -810,7 +810,7 @@ impl PackageManager {
     /// creation failure. Such a call warns, returns empty
     /// [`items`](RenderReport::items) and `stamp_written: false`, and is
     /// `Ok`. The boundary is with **resolution**, not with I/O: an unsound
-    /// `toolchain-dir` is already refused at resolve time with exit 78
+    /// `toolchain_dir` is already refused at resolve time with exit 78
     /// (C-017–C-019), so a creation failure *after* a passing resolve carries
     /// no policy content — it is an I/O condition, and therefore a skip.
     ///
@@ -2205,7 +2205,7 @@ pub(crate) enum HealOutcome {
 /// arithmetic one (RUL-47): it is what lets this function run
 /// [`refuse_symlinked_project_path`], and a [`ToolchainHome`] alone cannot
 /// answer the question that guard asks — whether the home is a project's own
-/// `<project>/.ocx/toolchain` or a configured `toolchain-dir` / global home,
+/// `<project>/.ocx/toolchain` or a configured `toolchain_dir` / global home,
 /// which is the difference between a symlinked parent being an attack and
 /// being an ordinary user setup. Heal is the *more* frequently reached of the
 /// two writers, since C-070 puts it on every composing emit rather than on
@@ -2409,16 +2409,16 @@ async fn repoint_link(file_structure: &FileStructure, name: &str, entry: &Path, 
 ///
 /// [`ToolchainRoot::resolve`](crate::config::ToolchainRoot::resolve)
 /// deliberately performs no filesystem side effect, so the configured
-/// `toolchain-dir` root does not exist until a render creates it — which makes
+/// `toolchain_dir` root does not exist until a render creates it — which makes
 /// this the one place its permissions are chosen.
 ///
 /// **Owner-only write, on every directory this call creates, set at create
 /// time.** Not just the leaf, and not a post-hoc `chmod`, which leaves a window
 /// in which the directory exists group-writable. C-019 refuses a
-/// group-or-world-writable `toolchain-dir`, but it can only check a directory
+/// group-or-world-writable `toolchain_dir`, but it can only check a directory
 /// that exists: for an absent root it examines the *nearest existing ancestor*
-/// instead. With `toolchain-dir` set, the missing ancestors are
-/// `<toolchain-dir>` and `<toolchain-dir>/<project-key>` — so **every**
+/// instead. With `toolchain_dir` set, the missing ancestors are
+/// `<toolchain_dir>` and `<toolchain_dir>/<project-key>` — so **every**
 /// directory this call creates is one C-019 never examined. A group-writable
 /// intermediate lets an attacker rename the leaf out from under the tree,
 /// which is the outcome that refusal exists to prevent, and every trampoline
@@ -2440,7 +2440,7 @@ async fn repoint_link(file_structure: &FileStructure, name: &str, entry: &Path, 
 ///
 /// **This is the only thing standing between C-053 and lexical containment for
 /// a project home.** `<project>/.ocx/toolchain` never passes through
-/// C-017–C-019, which gate a *configured* `toolchain-dir` and nothing else — so
+/// C-017–C-019, which gate a *configured* `toolchain_dir` and nothing else — so
 /// a hostile clone that commits `.ocx/toolchain` as a symlink to `$HOME`, or
 /// `.ocx/toolchain/links` as a symlink to `~/.local/share`, makes every write
 /// and every prune below it land outside the project while every path this
@@ -2500,14 +2500,14 @@ pub(crate) fn ensure_home_root(home: &ToolchainHome) -> crate::Result<bool> {
 ///
 /// Applied only when [`RenderStampScope::Project`]'s directory is a lexical
 /// prefix of the home root — which is exactly the un-configured
-/// `<project>/.ocx/toolchain` shape, the one no `toolchain-dir` key and
+/// `<project>/.ocx/toolchain` shape, the one no `toolchain_dir` key and
 /// therefore none of C-017…C-019 ever gated. It is **not** applied to:
 ///
 /// - the **global** home, whose parent is `$OCX_HOME` — a directory a user may
 ///   entirely legitimately symlink onto another volume, and refusing it would
 ///   skip every global render on a common benign setup (DD6's never-block rule,
 ///   and the no-warn-on-common-benign convention);
-/// - a configured **`toolchain-dir`** home, which is outside the project
+/// - a configured **`toolchain_dir`** home, which is outside the project
 ///   directory by construction and already passes through C-017…C-019.
 ///
 /// The components checked are those strictly between the project directory and
@@ -2644,8 +2644,8 @@ fn refuse_symlinked_project_path(scope: &RenderStampScope, home: &ToolchainHome)
 fn create_owner_only(root: &Path) -> crate::Result<()> {
     use std::os::unix::fs::DirBuilderExt as _;
     // `DirBuilder::mode` applies to *every* level a recursive create makes,
-    // which is the point: with `toolchain-dir` set, `<toolchain-dir>` and
-    // `<toolchain-dir>/<project-key>` are both directories C-019 never examined.
+    // which is the point: with `toolchain_dir` set, `<toolchain_dir>` and
+    // `<toolchain_dir>/<project-key>` are both directories C-019 never examined.
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -3231,7 +3231,7 @@ fn is_single_component(name: &str) -> bool {
 /// (C-028).
 ///
 /// Derived from [`RenderRequest::scope`] and never from
-/// [`RenderRequest::home`]: `toolchain-dir` moves the home and leaves the
+/// [`RenderRequest::home`]: `toolchain_dir` moves the home and leaves the
 /// project root — and therefore the baked `--project '<abs root>'` — exactly
 /// where it was. Deriving it from the home would make two projects sharing one
 /// relocated root bake the same selector.
@@ -3779,7 +3779,7 @@ mod tests {
     /// `shells/<shell>/` as real directories, `active` as the link they render.
     ///
     /// A free function rather than a `Tree` method because several rows render
-    /// into a *second* home (`toolchain-dir` relocation, two project
+    /// into a *second* home (`toolchain_dir` relocation, two project
     /// directories) that the fixture never wrapped.
     fn seed_rendered_home(home: &ToolchainHome) {
         std::fs::create_dir_all(shell_directory_of(home)).expect("the shell directory is creatable");
@@ -5259,7 +5259,7 @@ mod tests {
         );
     }
 
-    /// C-053, case 24 — setting and then unsetting `toolchain-dir` leaves the
+    /// C-053, case 24 — setting and then unsetting `toolchain_dir` leaves the
     /// **abandoned** tree byte-identical and renders a complete new one.
     ///
     /// RED: pass a "previous home" to the prune pass — a mistaken `[managed]`
@@ -5278,7 +5278,7 @@ mod tests {
         let groups = groups_of(&[DEFAULT_GROUP]);
         let platform = platform();
 
-        // `toolchain-dir` unset: the project's own home renders.
+        // `toolchain_dir` unset: the project's own home renders.
         render_with(
             &tree.file_structure,
             RenderRequest {
@@ -5299,7 +5299,7 @@ mod tests {
         let abandoned = snapshot_subtree(tree.home.root());
         assert!(!abandoned.is_empty(), "precondition: there is a tree to abandon");
 
-        // `toolchain-dir` set: the home re-resolves, and every later render
+        // `toolchain_dir` set: the home re-resolves, and every later render
         // goes there. The tree at the old location is now unreachable to ocx.
         render_with(
             &tree.file_structure,
@@ -6256,9 +6256,9 @@ mod tests {
         );
     }
 
-    /// C-053, case 42(b) — setting `toolchain-dir` yields a **fresh tree whose
+    /// C-053, case 42(b) — setting `toolchain_dir` yields a **fresh tree whose
     /// bodies are byte-identical**: the selector names the project, which
-    /// `toolchain-dir` does not move.
+    /// `toolchain_dir` does not move.
     ///
     /// Stated as a negative control precisely because it looks like a second
     /// item-12 control and is not one.
@@ -6298,7 +6298,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(tree.home.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap(),
             std::fs::read_to_string(relocated.shell_bin(DEFAULT_SHELL).join("cmake")).unwrap(),
-            "C-053 — a `toolchain-dir` change is not a body-rewriting input"
+            "C-053 — a `toolchain_dir` change is not a body-rewriting input"
         );
     }
 
@@ -7062,7 +7062,7 @@ mod tests {
     /// R-W19(a)/C-4, case 54 — `ensure_home_root` runs **before**
     /// `ensure_gitignore`, and every directory it creates is owner-only-write.
     ///
-    /// C-019 refuses a group-or-world-writable `toolchain-dir`, but it can
+    /// C-019 refuses a group-or-world-writable `toolchain_dir`, but it can
     /// only check a directory that exists — for an absent root it examines the
     /// nearest existing *ancestor*, so every directory this call creates is
     /// one C-019 never examined. `ensure_gitignore` does its own
@@ -8392,7 +8392,7 @@ mod tests {
     ///
     /// The shipped shape handed the probe `nearest_existing_directory(root)`,
     /// which for a never-rendered project home is the checkout itself — and
-    /// `$HOME` when a configured `toolchain-dir`'s parents are absent — so
+    /// `$HOME` when a configured `toolchain_dir`'s parents are absent — so
     /// every `ocx pull --dry-run` created and unlinked a
     /// `.ocx-case-probe-<pid>-<nanos>` there. Narrowing it to "probe only an
     /// existing home root" fixed the litter and kept the write: the probe still

@@ -1980,7 +1980,7 @@ Four things are written under `<home>/toolchain/`, and those four names are the 
 | `links/<group>/<entry>/` | A directory link to a package root, one per selected group. Every name you declared is a component here, one level below the four tree-owned names. |
 | `.gitignore` | A single `*` line, written on every render so the tree lands in a directory git already ignores — see [Storage][in-depth-storage-toolchain]. |
 
-The render stamp that records this run's entry set — written last, after the final entry and the final prune — is **not** part of this tree: it lives under `$OCX_HOME/state/` — per-project at `state/projects/<key>/render_stamp.json`, or directly at `state/render_stamp.json` for the global toolchain — precisely so it survives a `toolchain-dir` relocation and a checkout wipe of `<home>/toolchain/` alike.
+The render stamp that records this run's entry set — written last, after the final entry and the final prune — is **not** part of this tree: it lives under `$OCX_HOME/state/` — per-project at `state/projects/<key>/render_stamp.json`, or directly at `state/render_stamp.json` for the global toolchain — precisely so it survives a `toolchain_dir` relocation and a checkout wipe of `<home>/toolchain/` alike.
 
 The render is a **reconcile**, not an append: the computed name set is written and every name no longer in it is pruned. A group that leaves the lock is pruned at `links/<group>`, not at the tree root — so a depth-1 directory named after a locked group is an orphan of the tree's own namespace and is pruned as one.
 
@@ -2442,7 +2442,7 @@ rm ~/Library/LaunchAgents/sh.ocx.path.plist
 ocx's own writer does not treat the two directions the same way, and the difference matters for anyone editing this by hand. **Registering** ocx's entries (`ocx self setup`) always writes `REG_EXPAND_SZ`, even over an existing `REG_SZ` value — deliberately, because [rustup once shipped `REG_SZ` here and broke `%VAR%` expansion for every other entry already on `Path`][rustup-261]. **Deregistering** them (the reversal above) preserves whatever type it read instead: removal never promises to upgrade or downgrade a value it is not otherwise touching. Both directions read the value unexpanded, so a foreign `%…%` reference already on `Path` is never flattened into whatever it resolves to at that moment. Prefer the built-in editor above when hand-editing: it is the one form here that both preserves the type and broadcasts the change for you.
 
 ::: warning This section only covers the session PATH
-Reversing the session-PATH registration above does not remove ocx. Also still in place: the managed shell-profile block (the `# >>> ocx v1 … >>>` fence, or the dedicated fish/Nushell file), the `$OCX_HOME/env.*` shims, and `$OCX_HOME` itself — see [Uninstalling][uninstalling] for that recipe. Neither recipe touches a project's own rendered toolchain, either: delete `.ocx/toolchain/` (or the [`toolchain-dir`][config-toolchain-dir] root, if configured) in every project you have run [`ocx pull`](#pull) or another render-performing command in. There is no `ocx self uninstall` to do any of this in one step yet ([#413][issue-413]).
+Reversing the session-PATH registration above does not remove ocx. Also still in place: the managed shell-profile block (the `# >>> ocx v1 … >>>` fence, or the dedicated fish/Nushell file), the `$OCX_HOME/env.*` shims, and `$OCX_HOME` itself — see [Uninstalling][uninstalling] for that recipe. Neither recipe touches a project's own rendered toolchain, either: delete `.ocx/toolchain/` (or the [`toolchain_dir`][config-toolchain_dir] root, if configured) in every project you have run [`ocx pull`](#pull) or another render-performing command in. There is no `ocx self uninstall` to do any of this in one step yet ([#413][issue-413]).
 :::
 
 **Version grammar**
@@ -6102,7 +6102,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 
 <!-- reference -->
 [config-ref]: ./configuration.md
-[config-toolchain-dir]: ./configuration.md#keys-toolchain-dir
+[config-toolchain_dir]: ./configuration.md#keys-toolchain_dir
 [config-mirrors]: ./configuration.md#keys-mirrors
 [config-patches]: ./configuration.md#keys-patches
 [config-managed]: ./configuration.md#keys-managed

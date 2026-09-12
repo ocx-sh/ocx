@@ -42,7 +42,7 @@
 ///
 /// `Copy` would bind `T: Copy` at every use and quietly forbid a future
 /// `Ladder<PathBuf>` or `Ladder<String>` — a resolution ladder over a path is
-/// exactly the shape `toolchain-dir` will want. `Clone` costs a call and
+/// exactly the shape `toolchain_dir` will want. `Clone` costs a call and
 /// forbids nothing.
 ///
 /// # Tier population is a fact about callers, not a dead field

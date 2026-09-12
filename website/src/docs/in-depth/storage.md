@@ -301,7 +301,7 @@ A toolchain link takes **no** `refs/symlinks/` back-reference. That is the delib
 
 By default a project renders into its own checkout, at `<project>/.ocx/toolchain/`. The renderer keeps a `.gitignore` containing `*` in every home it writes, so the default lands in a directory git already ignores.
 
-[`toolchain-dir`][config-toolchain-dir] moves them all out. With it set, a project's tree lands at `<root>/<project-key>/toolchain/`, where `<project-key>` is the same 16-hex key the `projects/` GC ledger and `state/projects/<key>/` derive from the canonical project directory. The **global** home ignores the key entirely and stays at `$OCX_HOME/toolchain`.
+[`toolchain_dir`][config-toolchain_dir] moves them all out. With it set, a project's tree lands at `<root>/<project-key>/toolchain/`, where `<project-key>` is the same 16-hex key the `projects/` GC ledger and `state/projects/<key>/` derive from the canonical project directory. The **global** home ignores the key entirely and stays at `$OCX_HOME/toolchain`.
 
 ### The render stamp {#toolchain-stamp}
 
@@ -359,7 +359,7 @@ Deleting it is safe. The next [`ocx pull`][cmd-pull] rebuilds it from `ocx.toml`
 [metadata-ref]: ../reference/metadata.md
 [metadata-entry-points]: ../reference/metadata.md#entry-points
 [config-mirrors]: ../reference/configuration.md#keys-mirrors
-[config-toolchain-dir]: ../reference/configuration.md#keys-toolchain-dir
+[config-toolchain_dir]: ../reference/configuration.md#keys-toolchain_dir
 [config-activate]: ../reference/configuration.md#project-config-activate
 [config-pinned]: ../reference/configuration.md#project-config-pinned
 [env-composition-activation]: ../reference/env-composition.md#toolchain-activation

@@ -46,7 +46,7 @@ Settings are resolved lowest-to-highest. Higher-precedence sources override lowe
 | 8 | Environment variables (`OCX_*`) | Win over any config file — except the five ladder variables below, which sit *under* the file that declares their key |
 | 9 (highest) | CLI flags | Per-invocation; always win |
 
-Five variables invert row 8 and are the only ones that do: [`OCX_TOOLCHAIN_ACTIVATE`][env-ocx-toolchain-activate], [`OCX_TOOLCHAIN_PINNED`][env-ocx-toolchain-pinned], [`OCX_TOOLCHAIN_DIR`][env-ocx-toolchain-dir], [`OCX_LAZY_MODE`][env-ocx-lazy-mode] and [`OCX_LAZY_REPORT`][env-ocx-lazy-report]. Each is the **weakest** tier of its own resolution ladder, so a file that states the key wins over an exported value and the variable decides only where no file speaks. The [Environment Variable Override Table](#env-overrides) marks each one.
+Five variables invert row 8 and are the only ones that do: [`OCX_TOOLCHAIN_ACTIVATE`][env-ocx-toolchain-activate], [`OCX_TOOLCHAIN_PINNED`][env-ocx-toolchain-pinned], [`OCX_TOOLCHAIN_DIR`][env-ocx-toolchain_dir], [`OCX_LAZY_MODE`][env-ocx-lazy-mode] and [`OCX_LAZY_REPORT`][env-ocx-lazy-report]. Each is the **weakest** tier of its own resolution ladder, so a file that states the key wins over an exported value and the variable decides only where no file speaks. The [Environment Variable Override Table](#env-overrides) marks each one.
 
 ### Merge rules {#precedence-merge}
 
@@ -82,50 +82,50 @@ For a managed payload, [`ocx config update --check`][cmd-config-update] shows wh
 
 **When ignoring is not enough.** Tolerance covers *added* keys. It cannot cover a change in what an existing key means or what shape its value takes — an older binary would read the new value with the old meaning. Those changes travel by tag instead: the tier's `source` is an ordinary OCI reference, so publish the incompatible payload under a new tag (`:user-2`) and leave `:user` serving the old one. Fleets move over as they upgrade; nothing has to happen in lockstep. See [Rolling out an incompatible change][user-guide-managed-config-incompatible].
 
-### `toolchain-dir` {#keys-toolchain-dir}
+### `toolchain_dir` {#keys-toolchain_dir}
 
 **Type**: string (path)  
 **Default**: *(unset — each project renders its toolchain at `<project>/.ocx/toolchain`)*  
-**Related**: [`OCX_TOOLCHAIN_DIR`][env-ocx-toolchain-dir] — the **weaker** tier, consulted only when no config file sets the key
+**Related**: [`OCX_TOOLCHAIN_DIR`][env-ocx-toolchain_dir] — the **weaker** tier, consulted only when no config file sets the key
 
-Plenty of sites run a rule that tools never write inside a checkout: the working tree carries source and nothing else, and a rendered toolchain sitting at `<project>/.ocx/toolchain` breaks it on every machine at once. `toolchain-dir` relocates every project's tree under one root you choose.
+Plenty of sites run a rule that tools never write inside a checkout: the working tree carries source and nothing else, and a rendered toolchain sitting at `<project>/.ocx/toolchain` breaks it on every machine at once. `toolchain_dir` relocates every project's tree under one root you choose.
 
 A project's tree then lands at `<root>/<project-key>/toolchain/`. `<project-key>` is the same 16-hex key the `projects/` GC ledger and `state/projects/<key>/` already derive from the canonical project directory, so one root holds many projects without their trees ever colliding.
 
-The **global** toolchain home ignores this key entirely. It is always `$OCX_HOME/toolchain`, whatever `toolchain-dir` resolves to.
+The **global** toolchain home ignores this key entirely. It is always `$OCX_HOME/toolchain`, whatever `toolchain_dir` resolves to.
 
-`toolchain-dir` sits at the root of `config.toml`, outside every section. It is **not** an `ocx.toml` key — `ocx.toml` rejects every key it does not recognize, so writing it there is a parse error, exit 78.
+`toolchain_dir` sits at the root of `config.toml`, outside every section. It is **not** an `ocx.toml` key — `ocx.toml` rejects every key it does not recognize, so writing it there is a parse error, exit 78.
 
 ```toml
-toolchain-dir = "~/.cache/ocx/toolchains"
+toolchain_dir = "~/.cache/ocx/toolchains"
 ```
 
 The directory does not have to exist yet: OCX creates it the first time it renders a toolchain into it. Resolving the key itself writes nothing — no directory, no probe file.
 
-#### Expansion: `~`, and nothing else {#keys-toolchain-dir-expansion}
+#### Expansion: `~`, and nothing else {#keys-toolchain_dir-expansion}
 
 Two rules, both absolute:
 
 - A **leading `~`** expands against the home directory — `%USERPROFILE%` on Windows. A `~user` form is not supported, and a `~` in any component but the first is a literal directory name.
 - **Nothing else expands.** `%VAR%` is taken literally on every platform, Windows included, and so is `$VAR`.
 
-The consequence bites on Windows. `toolchain-dir = '%LOCALAPPDATA%\ocx\toolchain'` names a directory whose first component is the literal text `%LOCALAPPDATA%` — a relative path, refused with exit 78. Spell it out instead:
+The consequence bites on Windows. `toolchain_dir = '%LOCALAPPDATA%\ocx\toolchain'` names a directory whose first component is the literal text `%LOCALAPPDATA%` — a relative path, refused with exit 78. Spell it out instead:
 
 ```toml
 # Windows
-toolchain-dir = '~\AppData\Local\ocx\toolchains'
+toolchain_dir = '~\AppData\Local\ocx\toolchains'
 ```
 
 A [TOML][toml] literal string (single quotes) keeps the backslashes as written; in a basic string each one has to be doubled.
 
-#### Refusals {#keys-toolchain-dir-refusals}
+#### Refusals {#keys-toolchain_dir-refusals}
 
-The resolved root must be a directory beneath your home directory or beneath [`$OCX_HOME`][env-ocx-home], and must not be either of those anchors itself, a system location, or inside the global toolchain home. **Every refusal below exits 78** ([`ConfigError`][exit-codes]), applied in this order — each message names the tier that declared the value (`` config.toml `toolchain-dir` `` or `OCX_TOOLCHAIN_DIR`) so an exported variable is never blamed on a file:
+The resolved root must be a directory beneath your home directory or beneath [`$OCX_HOME`][env-ocx-home], and must not be either of those anchors itself, a system location, or inside the global toolchain home. **Every refusal below exits 78** ([`ConfigError`][exit-codes]), applied in this order — each message names the tier that declared the value (`` config.toml `toolchain_dir` `` or `OCX_TOOLCHAIN_DIR`) so an exported variable is never blamed on a file:
 
 | Refused when | The message reads |
 |---|---|
 | A leading `~` cannot be expanded — `~user`, or no resolvable home directory | `… declares <path>, whose leading '~' cannot be expanded: …` |
-| The value is relative, tested after `~` expansion | `… is the relative path <path>; a toolchain-dir root must be absolute, or one project resolves a different home from every working directory` |
+| The value is relative, tested after `~` expansion | `… is the relative path <path>; a toolchain_dir root must be absolute, or one project resolves a different home from every working directory` |
 | Any component is `..` | `… declares <path>, which contains a '..' component; write the directory the root actually names` |
 | The root is a filesystem root, or sits inside one of 23 system locations — `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`, `/opt`, `/boot`, `/dev`, `/proc`, `/sys`, the `/var` subtrees, and the macOS `/System`, `/Library`, `/Applications`, `/private`; on Windows `%SystemRoot%`, `%ProgramFiles%`, `%ProgramFiles(x86)%` and `%ProgramData%`. There is no opt-out | `… resolves to the system location <path>` |
 | The root **is** a containment anchor rather than a directory beneath one | `… resolves to <path>, which is the containment anchor <anchor> itself; name a directory beneath it` |
@@ -145,15 +145,15 @@ The last two rows are Unix-only. A Windows directory's permissions are an ACL ra
 
 When the root does not exist yet, the last four rows are checked against its **nearest existing ancestor** — the directory OCX will create under, and therefore the one whose permissions decide whether another account could plant a launcher in a tree that lands on `PATH`.
 
-#### Rolling it out to a fleet {#keys-toolchain-dir-managed}
+#### Rolling it out to a fleet {#keys-toolchain_dir-managed}
 
-`toolchain-dir` is available in every tier, a [`[managed]`](#keys-managed) payload included, so one publish moves every host's project trees onto a chosen volume. Both files below are `config.toml`; only their lifecycle differs.
+`toolchain_dir` is available in every tier, a [`[managed]`](#keys-managed) payload included, so one publish moves every host's project trees onto a chosen volume. Both files below are `config.toml`; only their lifecycle differs.
 
 ::: code-group
 
 ```toml [payload — published with ocx config push]
 # Every project tree renders under this root instead of inside the checkout.
-toolchain-dir = "~/.cache/ocx/toolchains"
+toolchain_dir = "~/.cache/ocx/toolchains"
 
 [mirrors]
 "ghcr.io" = "https://artifactory.corp/ghcr-remote"
@@ -169,7 +169,7 @@ interval = "1d"
 
 :::
 
-A refused value in a managed payload is still exit 78, and the message still reports it as `` config.toml `toolchain-dir` `` — the operator's remedy is to edit the payload, which is a `config.toml` like any other.
+A refused value in a managed payload is still exit 78, and the message still reports it as `` config.toml `toolchain_dir` `` — the operator's remedy is to edit the payload, which is a `config.toml` like any other.
 
 ### `[registry]` {#keys-registry}
 
@@ -1570,7 +1570,7 @@ This table shows which OCX environment variables map to config file fields. Vari
 | [`OCX_LAZY_REPORT`][env-ocx-lazy-report] | toolchain-level `lazy-report` in [`ocx.toml`](#project-config-toolchain-lazy) | Lowest tier of the four-level ladder; not forwarded to child processes |
 | [`OCX_TOOLCHAIN_ACTIVATE`][env-ocx-toolchain-activate] | toolchain-level `activate` in [`ocx.toml`](#project-config-activate) | **Weakest tier, not an override** — a project that states `activate` wins over an exported value. An unrecognized value warns on stderr and falls through to the next tier rather than failing; not forwarded to child processes |
 | [`OCX_TOOLCHAIN_PINNED`][env-ocx-toolchain-pinned] | toolchain-level `pinned` in [`ocx.toml`](#project-config-pinned) | **Weakest tier, not an override** — below both [`--pinned` / `--no-pinned`][arg-pinned] and the `ocx.toml` key. `=""` reads as unset, and an explicit `false` stays distinguishable from absence |
-| [`OCX_TOOLCHAIN_DIR`][env-ocx-toolchain-dir] | [`toolchain-dir`](#keys-toolchain-dir) | **Weakest tier, not an override** — the config-file value wins when both are set; `=""` reads as unset. Every [refusal](#keys-toolchain-dir-refusals) applies identically to a value exported here, exit 78. Forwarded to child ocx processes so a resolved root survives a re-entry |
+| [`OCX_TOOLCHAIN_DIR`][env-ocx-toolchain_dir] | [`toolchain_dir`](#keys-toolchain_dir) | **Weakest tier, not an override** — the config-file value wins when both are set; `=""` reads as unset. Every [refusal](#keys-toolchain_dir-refusals) applies identically to a value exported here, exit 78. Forwarded to child ocx processes so a resolved root survives a re-entry |
 | [`OCX_RECORDS_DIR`][env-ocx-records-dir] | `[records] dir` | Env var wins when both are set; a SYSTEM-scope [`[records]`][config-records] declaration locks the whole section and this variable has no effect once locked |
 | [`OCX_RECORDS_NAME`][env-ocx-records-name] | `[records] name` | Same SYSTEM-scope lock as `dir` |
 | [`OCX_HOME`][env-ocx-home] | None | Determines where config is loaded from; cannot be in a config file |
@@ -1602,7 +1602,7 @@ Literal sizes in the examples below reflect the current 64 KiB safety cap (`MAX_
 
 The tiers above configure ocx itself. `ocx.toml` is a different file with a different lifecycle — see the [Project Toolchain guide][user-project] for discovery and locking. This section is the schema reference for the `ocx.toml` tables and keys that carry environment and resolve-time declarations: [`[group.<name>]`](#project-config-groups), [`[env]`](#project-config-env), [`[package."<id>"]`](#project-config-package), and the toolchain-level `lazy-mode` / `lazy-report` / [`activate`](#project-config-activate) / [`pinned`](#project-config-pinned) keys.
 
-One key that looks like it belongs here does not: [`toolchain-dir`](#keys-toolchain-dir) is a `config.toml` key, above.
+One key that looks like it belongs here does not: [`toolchain_dir`](#keys-toolchain_dir) is a `config.toml` key, above.
 
 ### `[group.<name>]` — `tools` and `env` {#project-config-groups}
 
@@ -1961,7 +1961,7 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-ocx-lazy-report]: ./environment.md#ocx-lazy-report
 [env-ocx-toolchain-activate]: ./environment.md#ocx-toolchain-activate
 [env-ocx-toolchain-pinned]: ./environment.md#ocx-toolchain-pinned
-[env-ocx-toolchain-dir]: ./environment.md#ocx-toolchain-dir
+[env-ocx-toolchain_dir]: ./environment.md#ocx-toolchain_dir
 [env-ocx-project]: ./environment.md#ocx-project
 [env-external-proxies]: ./environment.md#external-proxies
 [env-ocx-records-dir]: ./environment.md#ocx-records-dir

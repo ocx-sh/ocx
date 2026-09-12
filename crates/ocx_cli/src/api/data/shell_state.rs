@@ -309,16 +309,16 @@ pub struct ShellStateReport {
     ///
     /// The supported way for an IDE, a devcontainer feature or a CI step to
     /// discover where a project's tree lives when `config.toml` relocates it
-    /// with `toolchain-dir`; without it the only route is re-deriving a 16-hex
+    /// with `toolchain_dir`; without it the only route is re-deriving a 16-hex
     /// project key from a path the discoverer would also have to canonicalize
     /// the same way ocx does.
     ///
-    /// `<project>/.ocx/toolchain` or `<toolchain-dir>/<project-key>/toolchain`
+    /// `<project>/.ocx/toolchain` or `<toolchain_dir>/<project-key>/toolchain`
     /// for the project in effect, and `$OCX_HOME/toolchain` when no project
     /// resolves — the tier that is always in effect, so the field never has to
     /// say "none".
     ///
-    /// **Always present, never `null`** (RUL-51): a `toolchain-dir` that fails
+    /// **Always present, never `null`** (RUL-51): a `toolchain_dir` that fails
     /// C-017–C-019 is refused at *config load*, so every command — this one
     /// included — has already exited 78 before the report is built, and
     /// `ToolchainRoot::resolve` performs no filesystem write and accepts a root
@@ -565,10 +565,10 @@ impl ShellStateReport {
         // C-056 — the resolved home and the two **effective** settings, at both
         // detail tiers. A user who has to pass `--verbose` to learn where their
         // toolchain lives has been told the answer is a diagnostic; and the
-        // relocated case (`toolchain-dir`) is precisely the one where nothing
+        // relocated case (`toolchain_dir`) is precisely the one where nothing
         // else in this report names the directory.
         //
-        // `quoted_path`, like every other path here: a `toolchain-dir` is a
+        // `quoted_path`, like every other path here: a `toolchain_dir` is a
         // user-supplied path and on POSIX may carry a newline (CWE-117).
         out.push(format!(
             "{} {}",
@@ -2460,7 +2460,7 @@ mod tests {
         }
         // Twelve before C-056, fifteen after, sixteen after G-1: the resolved
         // toolchain home, the launcher directory and the two effective settings
-        // are four lines the *answer* owes a user (a home a `toolchain-dir`
+        // are four lines the *answer* owes a user (a home a `toolchain_dir`
         // relocated is named nowhere else in the report, and the directory to
         // export is not one join from it), so the budget moves by exactly what
         // each contract added and by nothing else.
@@ -2673,7 +2673,7 @@ mod tests {
         // are genuinely gone from the human default.
         let default = answer(&base(Some(Reason::LockUnavailable)));
         // `key: <hex>`, not the bare hex: C-056 puts the resolved toolchain
-        // home in the default rendering, and a `toolchain-dir`-relocated home
+        // home in the default rendering, and a `toolchain_dir`-relocated home
         // is keyed by that same 16 hex characters (`<root>/<key>/toolchain`).
         // The row this assertion is about is the verbose `key:` field, and
         // anchoring on the label is what keeps it about that row.
@@ -2807,7 +2807,7 @@ mod tests {
     //    settings ──────────────────────────────────────────────────────────
 
     /// The fixture's relocated home, spelled once. Deliberately a
-    /// `toolchain-dir`-style path rather than `<project>/.ocx/toolchain`, so a
+    /// `toolchain_dir`-style path rather than `<project>/.ocx/toolchain`, so a
     /// renderer that printed `project_dir` and called it a home would not
     /// accidentally satisfy the assertions below.
     fn fixture_toolchain_home() -> String {
@@ -2829,7 +2829,7 @@ mod tests {
     ///
     /// Asserted over the whole arm corpus, because "always present" is a claim
     /// about every state the command can report, not about the happy one. A
-    /// refused `toolchain-dir` cannot appear here at all — it exits 78 at config
+    /// refused `toolchain_dir` cannot appear here at all — it exits 78 at config
     /// load — which is exactly why the field can be unconditional.
     ///
     /// Mutation that reds it: making the field `Option<PathBuf>`, the shape a
@@ -3022,7 +3022,7 @@ mod tests {
 
     /// C-056 — the resolved home never turns the report into shell source.
     ///
-    /// A `toolchain-dir` is a user-supplied path, and on POSIX a path may carry
+    /// A `toolchain_dir` is a user-supplied path, and on POSIX a path may carry
     /// a newline. Interpolated bare, `<root>` = `"/h/t\nexport OCX_HOME=/tmp/x"`
     /// would put a line into `ocx shell state`'s output that a careless
     /// `eval "$(ocx shell state)"` executes — the injection the whole

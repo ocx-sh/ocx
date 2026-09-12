@@ -437,7 +437,7 @@ Both directories are session-level facts rather than activation decisions, so th
 | macOS | A GUI application that was already running when the launch agent loaded keeps the environment it started with. | Quit and relaunch it. |
 | macOS | Another tool that calls `launchctl setenv PATH` later in the same session wins by running last. | Order the two, or stop the other tool from setting `PATH` wholesale. |
 
-**Point the IDE at the resolved home.** A workspace setting reads a directory, not a mechanism — and when [`toolchain-dir`][config-toolchain-dir] relocates project homes, that directory is not under the repository at all. [`ocx shell state`][cmd-shell-state] answers where it is, and its JSON form is the supported query contract for editors, devcontainer features and CI steps:
+**Point the IDE at the resolved home.** A workspace setting reads a directory, not a mechanism — and when [`toolchain_dir`][config-toolchain_dir] relocates project homes, that directory is not under the repository at all. [`ocx shell state`][cmd-shell-state] answers where it is, and its JSON form is the supported query contract for editors, devcontainer features and CI steps:
 
 <<< @/_scripts/user-guide/toolchain-home-query.sh{sh}
 
@@ -552,25 +552,25 @@ Just checked out a repo that already has an `ocx.toml` and `ocx.lock`? Warm the 
 
 Then run [`direnv allow`][direnv] once to re-evaluate `.envrc`. `ocx direnv export` then puts the locked tools on `PATH`. No re-resolution, no registry writes — the lock is the only input.
 
-### Keep rendered toolchains out of the checkout {#project-toolchain-dir}
+### Keep rendered toolchains out of the checkout {#project-toolchain_dir}
 
 By default, that `ocx pull` renders directly into the project: `<project>/.ocx/toolchain/` fills up with launcher trampolines and directory links to package roots, right beside your source.
 
 Plenty of sites run a rule that no tool may write inside a checkout — the working tree carries source and nothing else, so a build can run against a read-only mount, an immutable CI workspace, or a bind-mount shared across containers. `ocx` [gitignoring][in-depth-storage-toolchain] its own rendered tree keeps `git status` clean, but the directory still physically exists inside the checkout, which is exactly what that rule forbids.
 
-[`toolchain-dir`][config-toolchain-dir] relocates every project's rendered tree under one root you choose, so nothing lands under the checkout at all:
+[`toolchain_dir`][config-toolchain_dir] relocates every project's rendered tree under one root you choose, so nothing lands under the checkout at all:
 
 ```toml
 # $OCX_HOME/config.toml — not ocx.toml; the project file rejects this key (exit 78)
-toolchain-dir = "~/.cache/ocx/toolchains"
+toolchain_dir = "~/.cache/ocx/toolchains"
 ```
 
 A project's tree then lands at `<root>/<project-key>/toolchain/` instead — `<project-key>` is a stable 16-hex key derived from the project's canonical directory, so one root holds every project you work in without their trees ever colliding. The global toolchain ignores this key entirely; it is always `$OCX_HOME/toolchain`.
 
-Because `toolchain-dir` lives in `config.toml`, it also travels through the [`[managed]`][config-managed] tier — one [centrally published config](#managed-config) update moves every host's project trees onto a chosen volume in one push, with no per-machine edit.
+Because `toolchain_dir` lives in `config.toml`, it also travels through the [`[managed]`][config-managed] tier — one [centrally published config](#managed-config) update moves every host's project trees onto a chosen volume in one push, with no per-machine edit.
 
 ::: tip Learn more
-[`toolchain-dir` reference][config-toolchain-dir] — expansion rules, the full refusal table (relative paths, `..` components, system locations, ownership checks), and the fleet rollout example.
+[`toolchain_dir` reference][config-toolchain_dir] — expansion rules, the full refusal table (relative paths, `..` components, system locations, ownership checks), and the fleet rollout example.
 :::
 
 ### Groups
@@ -1513,7 +1513,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [authentication-storing]: #authentication-storing
 [managed-config-rollout]: #managed-config-rollout
 [config-registries-index]: ./reference/configuration.md#keys-registries-index
-[config-toolchain-dir]: ./reference/configuration.md#keys-toolchain-dir
+[config-toolchain_dir]: ./reference/configuration.md#keys-toolchain_dir
 [config-project-activate]: ./reference/configuration.md#project-config-activate
 [config-schema]: https://ocx.sh/schemas/config/v1.json
 

@@ -86,7 +86,7 @@ from src.toolchain_fixtures import (
 )
 
 EXIT_SUCCESS = 0
-EXIT_CONFIG = 78  # every `toolchain-dir` refusal, and every name refusal
+EXIT_CONFIG = 78  # every `toolchain_dir` refusal, and every name refusal
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +331,7 @@ def test_rendering_the_same_project_from_a_different_directory_rewrites_every_bo
     rewrites a body.
 
     Explicitly *not* a ``pinned`` flip (C-046 asserts bodies stay identical on
-    purpose) and *not* setting ``toolchain-dir`` (that moves the home, not the
+    purpose) and *not* setting ``toolchain_dir`` (that moves the home, not the
     project, so the bodies come out identical). Without a control that can move
     the bytes, the byte-identity assertion above is indistinguishable from a
     snapshot function that always returns the same thing.
@@ -785,7 +785,7 @@ def test_a_valid_name_still_parses(ocx: OcxRunner, tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Item 18 — `toolchain-dir` refusals (C-017 … C-019, S-011)
+# Item 18 — `toolchain_dir` refusals (C-017 … C-019, S-011)
 # ---------------------------------------------------------------------------
 
 
@@ -806,7 +806,7 @@ def _outside_both_anchors(ocx: OcxRunner) -> Path:
 def test_a_containment_refusal_fires_even_for_an_owner_owned_private_directory(
     ocx: OcxRunner, tmp_path: Path
 ) -> None:
-    """Item 18 / S-011 / C-017 — ``toolchain-dir = "/tmp/ocx-tc"`` exits 78 even
+    """Item 18 / S-011 / C-017 — ``toolchain_dir = "/tmp/ocx-tc"`` exits 78 even
     when the directory is owner-owned and mode 0700.
 
     **Containment, not permissions, is what refuses it.** A test that used a
@@ -902,7 +902,7 @@ def test_each_toolchain_dir_refusal_exits_78_and_names_its_failing_property(
         f"item 18 — {case} must name its failing property ({needle!r}); "
         f"stderr:\n{result.stderr}"
     )
-    assert "toolchain-dir" in result.stderr, (
+    assert "toolchain_dir" in result.stderr, (
         f"item 18 — …and the tier that declared it; stderr:\n{result.stderr}"
     )
 
@@ -926,7 +926,7 @@ def test_a_refused_toolchain_dir_also_stops_a_pull_and_names_the_environment_tie
         f"item 18 — a refused root must stop the writer too; rc={blocked.returncode}\n"
         f"{blocked.stderr}"
     )
-    assert "config.toml `toolchain-dir`" in blocked.stderr, (
+    assert "config.toml `toolchain_dir`" in blocked.stderr, (
         f"item 18 — the config tier must be named; stderr:\n{blocked.stderr}"
     )
 
@@ -1504,7 +1504,7 @@ def test_pinned_suppresses_the_whole_link_pass_and_leaves_bin_byte_identical(
 
 
 # ---------------------------------------------------------------------------
-# Item 34 — an abandoned tree on a `toolchain-dir` change (C-053)
+# Item 34 — an abandoned tree on a `toolchain_dir` change (C-053)
 # ---------------------------------------------------------------------------
 
 
@@ -1560,11 +1560,11 @@ def test_clean_prunes_a_departed_projects_ledger_entry_and_stamp_only(
 
     The keyed **tree** is not swept, which is C-053's rule holding in the one
     place it is easiest to violate: ``ocx clean`` knows the ledger, not the
-    ``toolchain-dir`` root, so a sweep that reached the tree would be reaching
+    ``toolchain_dir`` root, so a sweep that reached the tree would be reaching
     outside the home it was handed. (The exit-64 half of item 36 — a trampoline
     whose baked root no longer exists — is WP-12d's.)
 
-    RED: sweep by ``toolchain-dir`` key instead of by ledger entry — the sibling
+    RED: sweep by ``toolchain_dir`` key instead of by ledger entry — the sibling
     goes with the departed project.
     """
     root = Path(ocx.env["OCX_HOME"]) / "fleet"
@@ -1630,13 +1630,13 @@ def test_a_managed_config_tier_relocates_every_project_tree_under_the_fleet_root
 ) -> None:
     """S-004 — the only user-facing path by which a fleet reaches this feature.
 
-    A ``[managed]`` payload carrying ``toolchain-dir`` folds into the same
+    A ``[managed]`` payload carrying ``toolchain_dir`` folds into the same
     ``config.toml`` chain, so project trees render under
     ``<root>/<project-key>/toolchain`` and ``ocx shell state --format json``
     names the live home — the supported way for a devcontainer feature or a CI
     step to discover it without re-deriving a 16-hex key.
 
-    RED: read ``toolchain-dir`` from the home tier only — the managed payload is
+    RED: read ``toolchain_dir`` from the home tier only — the managed payload is
     then ignored and the tree renders in-project.
     """
     label = uuid4().hex[:8]
@@ -1644,7 +1644,7 @@ def test_a_managed_config_tier_relocates_every_project_tree_under_the_fleet_root
     root.mkdir()
     repo = f"t_{label}_fleetcfg"
     push_managed_config(
-        ocx, repo, "1.0.0", f'toolchain-dir = "{root.as_posix()}"\n', tmp_path
+        ocx, repo, "1.0.0", f'toolchain_dir = "{root.as_posix()}"\n', tmp_path
     )
     managed = {"OCX_MANAGED_CONFIG": f"{ocx.registry}/{repo}:1.0.0"}
 

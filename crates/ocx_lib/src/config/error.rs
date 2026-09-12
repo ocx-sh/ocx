@@ -93,7 +93,7 @@ pub enum Error {
     )]
     FileTooLarge { path: PathBuf, size: u64, limit: u64 },
 
-    /// A `toolchain-dir` value was refused (C-017, C-018, C-019, R-W1, R-W2).
+    /// A `toolchain_dir` value was refused (C-017, C-018, C-019, R-W1, R-W2).
     ///
     /// Transparent, because [`ToolchainRootError`](crate::config::ToolchainRootError)
     /// already names the tier, the path and the failing property — there is
@@ -120,7 +120,7 @@ impl ClassifyExitCode for Error {
             Self::FileTooLarge { .. } | Self::Parse { .. } | Self::SystemConfig { .. } => ExitCode::ConfigError,
             Self::Io { .. } => ExitCode::IoError,
             Self::InvalidBooleanString { .. } => ExitCode::DataError,
-            // Delegated, not restated: every `toolchain-dir` refusal is 78
+            // Delegated, not restated: every `toolchain_dir` refusal is 78
             // today, but duplicating that mapping here is how the two would
             // silently disagree once one of them changes.
             Self::Toolchain(refusal) => return refusal.classify(),
