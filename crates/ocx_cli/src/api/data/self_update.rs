@@ -2,7 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use ocx_lib::cli::Cell;
-use ocx_lib::package_manager::{SelfUpdateResult, SkippedReason, UpdateCheckResult};
+use ocx_lib::package_manager::{HandoffFailure, SelfUpdateResult, SkippedReason, UpdateCheckResult};
 use serde::Serialize;
 
 use crate::api::Printable;
@@ -21,6 +21,9 @@ enum StatusKind {
     Skipped,
     UpdateAvailable,
     Installed,
+    /// The release was downloaded but nothing was activated — `current` still
+    /// names the previously installed binary.
+    Pulled,
 }
 
 impl std::fmt::Display for StatusKind {
@@ -31,6 +34,7 @@ impl std::fmt::Display for StatusKind {
             Self::Skipped => f.write_str("skipped"),
             Self::UpdateAvailable => f.write_str("update_available"),
             Self::Installed => f.write_str("installed"),
+            Self::Pulled => f.write_str("pulled"),
         }
     }
 }
@@ -113,10 +117,18 @@ impl Printable for UpdateCheckData {
 /// - `{"status": "up_to_date"}` — no payload
 /// - `{"status": "installed", "from": "0.0.1", "to": "0.0.2"}` (`from` omitted
 ///   when subprocess version query failed — bootstrap mode)
+/// - `{"status": "installed", …, "handoff": {"reason": "exited", "detail": 82}}`
+///   — the swap landed, but the new binary's own setup did not finish
+/// - `{"status": "pulled", "to": "0.0.2", "handoff": {…}}` — downloaded, but
+///   `current` still names the old binary, so nothing was activated
 /// - `{"status": "skipped", "skipped_reason": {"reason": "<variant>"[, "detail": "…"]}}`
 ///
+/// `handoff` is absent whenever the hand-off completed cleanly, so a clean
+/// `installed` payload is byte-identical to the one this command has always
+/// emitted.
+///
 /// Plain format: key/value table with conditional rows; `Status` always
-/// present, `From`/`To`/`Skipped reason` appear only when applicable.
+/// present, `From`/`To`/`Handoff`/`Skipped reason` appear only when applicable.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct SelfUpdateData {
     status: StatusKind,
@@ -137,6 +149,13 @@ pub struct SelfUpdateData {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     skipped_reason: Option<SkippedReason>,
+    /// How the hand-off to the new binary's own `ocx self setup` ended, when it
+    /// did not end cleanly. Present on `installed` (the swap landed, some setup
+    /// surface may not have been written) and on `pulled` (nothing was
+    /// activated); absent whenever the child completed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
+    handoff: Option<HandoffFailure>,
 }
 
 impl SelfUpdateData {
@@ -147,18 +166,28 @@ impl SelfUpdateData {
                 from: None,
                 to: None,
                 skipped_reason: None,
+                handoff: None,
             },
-            SelfUpdateResult::Installed { from, to } => Self {
+            SelfUpdateResult::Installed { from, to, handoff } => Self {
                 status: StatusKind::Installed,
                 from: from.clone(),
                 to: Some(to.clone()),
                 skipped_reason: None,
+                handoff: handoff.clone(),
+            },
+            SelfUpdateResult::Pulled { from, to, handoff } => Self {
+                status: StatusKind::Pulled,
+                from: from.clone(),
+                to: Some(to.clone()),
+                skipped_reason: None,
+                handoff: handoff.clone(),
             },
             SelfUpdateResult::Skipped(reason) => Self {
                 status: StatusKind::Skipped,
                 from: None,
                 to: None,
                 skipped_reason: Some(reason.clone()),
+                handoff: None,
             },
         }
     }
@@ -183,6 +212,10 @@ impl Printable for SelfUpdateData {
             fields.push("Skipped reason".into());
             values.push(Cell::from(reason.to_string()));
         }
+        if let Some(handoff) = &self.handoff {
+            fields.push("Handoff".into());
+            values.push(Cell::from(handoff.to_string()));
+        }
 
         printer.print_table(&["Field".into(), "Value".into()], &[fields, values]);
     }
@@ -192,7 +225,7 @@ impl Printable for SelfUpdateData {
 mod tests {
     use ocx_lib::{
         oci,
-        package_manager::{SelfUpdateResult, SkippedReason, UpdateCheckResult},
+        package_manager::{HandoffFailure, SelfUpdateResult, SkippedReason, UpdateCheckResult},
     };
     use serde_json::json;
 
@@ -314,12 +347,15 @@ mod tests {
         assert_eq!(value, json!({"status": "up_to_date"}));
     }
 
-    /// `Installed { from: Some, to }` carries both `from` and `to`.
+    /// `Installed { from: Some, to }` carries both `from` and `to` — and, when
+    /// the hand-off completed, exactly the payload this command has always
+    /// emitted, with no `handoff` key.
     #[test]
     fn self_update_data_installed_with_known_from() {
         let data = SelfUpdateData::from_result(&SelfUpdateResult::Installed {
             from: Some("0.2.9".to_string()),
             to: "0.3.0".to_string(),
+            handoff: None,
         });
         let value = serde_json::to_value(&data).unwrap();
         assert_eq!(value, json!({"status": "installed", "from": "0.2.9", "to": "0.3.0"}));
@@ -332,10 +368,65 @@ mod tests {
         let data = SelfUpdateData::from_result(&SelfUpdateResult::Installed {
             from: None,
             to: "0.3.0".to_string(),
+            handoff: None,
         });
         let value = serde_json::to_value(&data).unwrap();
         assert_eq!(value, json!({"status": "installed", "to": "0.3.0"}));
         assert!(value.get("from").is_none(), "absent from must be omitted");
+    }
+
+    /// A swap that landed with an unfinished setup stays `installed` and adds
+    /// the structured `handoff` — the status must not become a failure.
+    #[test]
+    fn self_update_data_installed_carries_a_handoff_failure() {
+        let data = SelfUpdateData::from_result(&SelfUpdateResult::Installed {
+            from: Some("0.6.0".to_string()),
+            to: "0.6.1".to_string(),
+            handoff: Some(HandoffFailure::Exited(82)),
+        });
+        let value = serde_json::to_value(&data).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "status": "installed",
+                "from": "0.6.0",
+                "to": "0.6.1",
+                "handoff": {"reason": "exited", "detail": 82},
+            })
+        );
+    }
+
+    /// `Pulled` is its own status, carrying what was downloaded and why it was
+    /// not activated.
+    #[test]
+    fn self_update_data_pulled_reports_its_own_status() {
+        let data = SelfUpdateData::from_result(&SelfUpdateResult::Pulled {
+            from: Some("0.6.0".to_string()),
+            to: "0.6.1".to_string(),
+            handoff: Some(HandoffFailure::SpawnFailed("permission denied".to_string())),
+        });
+        let value = serde_json::to_value(&data).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "status": "pulled",
+                "from": "0.6.0",
+                "to": "0.6.1",
+                "handoff": {"reason": "spawn_failed", "detail": "permission denied"},
+            })
+        );
+    }
+
+    /// A signalled child serializes under its own reason.
+    #[test]
+    fn self_update_data_pulled_reports_a_signalled_child() {
+        let data = SelfUpdateData::from_result(&SelfUpdateResult::Pulled {
+            from: None,
+            to: "0.6.1".to_string(),
+            handoff: Some(HandoffFailure::Signalled(9)),
+        });
+        let value = serde_json::to_value(&data).unwrap();
+        assert_eq!(value["handoff"], json!({"reason": "signalled", "detail": 9}));
     }
 
     /// `Skipped(Bootstrap)` serializes the structured `SkippedReason`.

@@ -899,33 +899,6 @@ async fn apply_profile_phase(
     Ok(profiles)
 }
 
-/// Re-apply the managed activation block to every detected profile in
-/// **heal-only** mode, for the `ocx self update` post-swap hook (Decision 4C).
-///
-/// `ocx self setup` owns the managed RC block, so `ocx self update` must heal it
-/// after a binary swap — not only refresh the `env.*` shims. Heal-only means an
-/// already-present block whose body drifted (e.g. an old, pre-fix fence) is
-/// rewritten to canonical ([`ProfileOutcome::Completed`] / `Migrated`), a
-/// user-edited block is left untouched ([`ProfileOutcome::SkippedDirty`]), and a
-/// profile that never carried an ocx block is left exactly as-is
-/// ([`ProfileOutcome::NoOp`]) — so a `--no-modify-path` install stays untouched.
-///
-/// Auto-detects targets from the real environment (no `--profile` overrides),
-/// never forces over a dirty block, and never runs as a dry run.
-///
-/// # Errors
-///
-/// Returns [`error::Error`] if a profile read or write fails.
-pub async fn refresh_profiles(ocx_home: &Path) -> Result<Vec<(PathBuf, ProfileOutcome)>, error::Error> {
-    let targets = resolve_targets(ocx_home, None).await;
-    let mut profiles = Vec::with_capacity(targets.len());
-    for target in targets {
-        let outcome = apply_target(&target, false, true, false).await?;
-        profiles.push((target.path, outcome));
-    }
-    Ok(profiles)
-}
-
 /// Run the fence state machine against one profile file.
 ///
 /// Reads the file (absent → empty), classifies it, and either appends a fresh

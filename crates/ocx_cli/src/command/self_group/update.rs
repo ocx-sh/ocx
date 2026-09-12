@@ -6,8 +6,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use ocx_lib::cli::ExitCode as OcxExitCode;
-use ocx_lib::package_manager::{SelfUpdateResult, TagProbe, UpdateCheckResult};
-use ocx_lib::setup;
+use ocx_lib::package_manager::{HandoffFailure, SelfUpdateResult, TagProbe, UpdateCheckResult};
 
 use crate::api::data::self_update::{SelfUpdateData, UpdateCheckData};
 
@@ -35,7 +34,12 @@ use crate::api::data::self_update::{SelfUpdateData, UpdateCheckData};
 /// | Outcome | Exit |
 /// |---|---|
 /// | `up_to_date` / `update_available` / `installed` | 0 |
+/// | `pulled` (downloaded, nothing activated) | 75 (sysexits `EX_TEMPFAIL`) |
 /// | `skipped` (any [`SkippedReason`](ocx_lib::package_manager::SkippedReason)) | 75 (sysexits `EX_TEMPFAIL`) |
+///
+/// `installed` stays 0 even when the hand-off reported a failure: the binary
+/// the user asked for is the one `current` now names, and the advisory says
+/// what is left to do.
 ///
 /// Scripts can `case $?` on these without parsing JSON — `--check` returning
 /// `update_available` deliberately stays 0 so a "found update" outcome can be
@@ -78,12 +82,11 @@ impl SelfUpdate {
             Ok(exit)
         } else {
             let result = context.manager().self_update().await?;
-            // After a successful binary swap, refresh the ocx-owned env.* shims
-            // AND heal the managed RC block in the user's shell profiles
-            // (Decision 4C). `ocx self setup` writes that block, so `ocx self
-            // update` must keep it current — not only the diff-gated env.* files.
-            if let SelfUpdateResult::Installed { .. } = result {
-                refresh_shell_integration_after_swap(&context).await;
+            // The new binary already ran its own `ocx self setup` (and printed
+            // whatever that had to say). All that is left here is the one line
+            // about what the user should do next.
+            if let Some(advisory) = advisory_for(&result) {
+                emit_advisory(&context, &advisory);
             }
             let exit = exit_code_for_update(&result);
             context.api().report(&SelfUpdateData::from_result(&result))?;
@@ -92,117 +95,70 @@ impl SelfUpdate {
     }
 }
 
-/// Refresh ocx's shell integration after `self update` swapped the binary
-/// (Decision 4C): the ocx-owned `env.*` shims AND the managed RC block in the
-/// user's shell profiles.
+/// What `ocx self update` says on stderr once the hand-off has finished.
 ///
-/// **Shims** (`$OCX_HOME/env.*`) are diff-gated and destructive-by-design — they
-/// are overwritten to the current canonical bytes without warning. **Profiles**
-/// are healed in heal-only mode ([`setup::refresh_profiles`]): a drifted
-/// ocx-authored block is rewritten, a user-edited block is left alone, and a
-/// profile with no ocx block is never given one (so a `--no-modify-path` install
-/// stays untouched).
-///
-/// Both steps are best-effort: a failure warns and advises re-running setup but
-/// never fails the update itself.
-///
-/// **Timing caveat:** this runs in the *old* binary still in memory, so the hop
-/// that swaps in a binary carrying a new block body does not heal via this path;
-/// the heal lands on the *next* `self update` (or a `self setup` re-run).
-async fn refresh_shell_integration_after_swap(context: &crate::app::Context) {
-    let ocx_home = context.file_structure().root().to_path_buf();
-
-    // 1) env.* shims — `refresh_shims` is blocking I/O, offload it off the async
-    //    executor as `setup::run` does for `write_shims`.
-    let shim_result = tokio::task::spawn_blocking({
-        let ocx_home = ocx_home.clone();
-        move || setup::shims::refresh_shims(&ocx_home)
-    })
-    .await;
-
-    match classify_refresh(&shim_result) {
-        RefreshAdvisory::None => {
-            // Shims already current — nothing changed, no advisory.
-        }
-        RefreshAdvisory::Drift => {
-            // The shims drifted (a contract change reached this user) — advise.
-            advise_run_setup(context);
-        }
-        RefreshAdvisory::WriteFailed => {
-            if let Ok(Err(error)) = &shim_result {
-                context.ui().warn(format!("failed to refresh ocx shims: {error}"));
-            }
-            advise_run_setup(context);
-        }
-        RefreshAdvisory::TaskPanicked => {
-            if let Err(join) = &shim_result {
-                // The blocking task panicked; the swap still succeeded.
-                context.ui().warn(format!("ocx shim refresh task failed: {join}"));
-            }
-            advise_run_setup(context);
-        }
-    }
-
-    // 2) Managed RC block — heal-only, never introduces a block (Decision 4C).
-    // The two outcome predicates are the lib's single source (shared with
-    // `self setup`); a healed block and a dirty block can both occur in one run,
-    // so the advisories are independent, not mutually exclusive.
-    match setup::refresh_profiles(&ocx_home).await {
-        Ok(profiles) => {
-            if setup::profiles_changed(&profiles) {
-                context.ui().status(
-                    "Setup",
-                    "shell integration updated; re-source your profile or restart your shell",
-                );
-            }
-            if setup::profiles_dirty(&profiles) {
-                context.ui().status(
-                    "Setup",
-                    "a shell profile has local edits in the ocx block; run 'ocx self setup --force' to update it",
-                );
-            }
-        }
-        Err(error) => {
-            context
-                .ui()
-                .warn(format!("failed to refresh ocx shell profiles: {error}"));
-            advise_run_setup(context);
-        }
-    }
-}
-
-/// Emit the "run `ocx self setup`" advisory once on stderr.
-fn advise_run_setup(context: &crate::app::Context) {
-    context
-        .ui()
-        .status("Setup", "run 'ocx self setup' to refresh shell integration");
-}
-
-/// What the post-swap shim refresh should tell the user (Decision 4C, D.1.1
-/// item 10b: the advisory fires on drift AND on either failure arm).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RefreshAdvisory {
-    /// Shims already current — nothing changed, stay silent.
-    None,
-    /// One or more shims drifted and were rewritten — advise.
-    Drift,
-    /// A shim could not be written — warn + advise.
-    WriteFailed,
-    /// The blocking refresh task panicked — warn + advise.
-    TaskPanicked,
-}
-
-/// Decide the advisory from the joined refresh result. Pure so the
-/// advisory-on-refresh-error policy (item 10b) is unit-testable without a live
+/// A separate type from the result so the policy — which outcome earns which
+/// line — is decided by a pure function and unit-tested without a live
 /// `Context`.
-fn classify_refresh(
-    result: &Result<Result<Vec<std::path::PathBuf>, setup::error::Error>, tokio::task::JoinError>,
-) -> RefreshAdvisory {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HandoffAdvisory {
+    /// The update landed and its setup completed: one hint that the new
+    /// environment needs a fresh shell.
+    Reload,
+    /// The update landed, but a managed block in a shell profile carries local
+    /// edits and was left alone (the child's exit 82).
+    DirtyProfile,
+    /// The update landed, but the new binary's setup did not finish. Carries
+    /// the rendered failure so the user can see how the child ended.
+    SetupIncomplete(String),
+    /// The release was downloaded but nothing was activated — `current` still
+    /// names the old binary, so the machine is unchanged.
+    NotActivated(String),
+}
+
+/// Decides the advisory for a finished `self update`.
+///
+/// The verdict already distinguishes swapped from not-swapped; this only
+/// chooses the wording, and the one case it must get right is the swap that
+/// carries a failure: that is a *successful* update with unfinished setup, not
+/// a failed one.
+fn advisory_for(result: &SelfUpdateResult) -> Option<HandoffAdvisory> {
     match result {
-        Ok(Ok(rewritten)) if rewritten.is_empty() => RefreshAdvisory::None,
-        Ok(Ok(_)) => RefreshAdvisory::Drift,
-        Ok(Err(_)) => RefreshAdvisory::WriteFailed,
-        Err(_) => RefreshAdvisory::TaskPanicked,
+        SelfUpdateResult::Installed { handoff: None, .. } => Some(HandoffAdvisory::Reload),
+        SelfUpdateResult::Installed {
+            handoff: Some(failure), ..
+        } => Some(match failure {
+            // The child got past its select and refused to overwrite a profile
+            // the user had edited. Name the flag that overrides it rather than
+            // the generic re-run.
+            HandoffFailure::Exited(code) if *code == OcxExitCode::DirtyRcBlock as i32 => HandoffAdvisory::DirtyProfile,
+            failure => HandoffAdvisory::SetupIncomplete(failure.to_string()),
+        }),
+        SelfUpdateResult::Pulled { handoff, .. } => Some(HandoffAdvisory::NotActivated(
+            handoff
+                .as_ref()
+                .map_or_else(|| "its setup reported success".to_owned(), HandoffFailure::to_string),
+        )),
+        SelfUpdateResult::AlreadyUpToDate | SelfUpdateResult::Skipped(_) => None,
+    }
+}
+
+/// Writes the advisory to stderr. Diagnostics never touch the data stream.
+fn emit_advisory(context: &crate::app::Context, advisory: &HandoffAdvisory) {
+    match advisory {
+        HandoffAdvisory::Reload => context.ui().status(
+            "Setup",
+            "shell integration refreshed; re-source your profile or restart your shell",
+        ),
+        HandoffAdvisory::DirtyProfile => context.ui().warn(
+            "a shell profile has local edits in the ocx block; run 'ocx self setup --force' to update it".to_owned(),
+        ),
+        HandoffAdvisory::SetupIncomplete(detail) => context.ui().warn(format!(
+            "ocx was updated but its setup did not finish ({detail}); run 'ocx self setup'"
+        )),
+        HandoffAdvisory::NotActivated(detail) => context.ui().warn(format!(
+            "the new ocx was downloaded but not activated ({detail}); run 'ocx self setup'"
+        )),
     }
 }
 
@@ -217,8 +173,12 @@ fn exit_code_for_check(result: &UpdateCheckResult) -> ExitCode {
 
 fn exit_code_for_update(result: &SelfUpdateResult) -> ExitCode {
     match result {
+        // `Installed` is SUCCESS even with a hand-off failure attached: the
+        // binary the user asked for is the one `current` now names.
         SelfUpdateResult::AlreadyUpToDate | SelfUpdateResult::Installed { .. } => ExitCode::SUCCESS,
-        SelfUpdateResult::Skipped(_) => OcxExitCode::TempFail.into(),
+        // `Pulled` joins `Skipped` at EX_TEMPFAIL — the operation could not be
+        // completed and re-running it is meaningful.
+        SelfUpdateResult::Pulled { .. } | SelfUpdateResult::Skipped(_) => OcxExitCode::TempFail.into(),
     }
 }
 
@@ -227,50 +187,87 @@ mod tests {
     use ocx_lib::cli::ExitCode as OcxExitCode;
     use ocx_lib::package_manager::{SelfUpdateResult, SkippedReason, UpdateCheckResult};
 
-    use super::{RefreshAdvisory, classify_refresh, exit_code_for_check, exit_code_for_update};
-    use std::path::PathBuf;
+    use super::{HandoffAdvisory, advisory_for, exit_code_for_check, exit_code_for_update};
+    use ocx_lib::package_manager::HandoffFailure;
     use std::process::ExitCode;
 
-    // ── 4C shim-refresh advisory classification (D.1.1 item 10b) ────────────
+    // ── The hand-off advisory ────────────────────────────────────────────────
+    //
+    // `self update` no longer refreshes anything itself: it re-executes the
+    // newly pulled binary as `ocx self setup … --handoff`, which writes every
+    // surface with its own code. What is left here is the wording, and the one
+    // thing it must not do is call a completed update a failure.
 
+    /// A swap that landed and whose setup finished gets the reload hint and
+    /// nothing else.
     #[test]
-    fn classify_refresh_no_advisory_when_nothing_drifted() {
-        let result = Ok(Ok(Vec::<PathBuf>::new()));
-        assert_eq!(classify_refresh(&result), RefreshAdvisory::None);
+    fn a_clean_update_only_hints_at_a_reload() {
+        let result = SelfUpdateResult::Installed {
+            from: Some("0.6.0".to_string()),
+            to: "0.6.1".to_string(),
+            handoff: None,
+        };
+        assert_eq!(advisory_for(&result), Some(HandoffAdvisory::Reload));
     }
 
+    /// Exit 82 is the child refusing to overwrite a user-edited profile — it
+    /// happens *after* the select, so the update stands and the advice names
+    /// `--force` rather than a bare re-run.
     #[test]
-    fn classify_refresh_drift_advises() {
-        let result = Ok(Ok(vec![PathBuf::from("/ocx/env.sh")]));
-        assert_eq!(classify_refresh(&result), RefreshAdvisory::Drift);
+    fn a_dirty_profile_advises_the_force_flag() {
+        let result = SelfUpdateResult::Installed {
+            from: None,
+            to: "0.6.1".to_string(),
+            handoff: Some(HandoffFailure::Exited(OcxExitCode::DirtyRcBlock as i32)),
+        };
+        assert_eq!(advisory_for(&result), Some(HandoffAdvisory::DirtyProfile));
     }
 
+    /// Any other non-zero child on a completed swap names how it ended and
+    /// advises a plain setup re-run.
     #[test]
-    fn classify_refresh_write_failure_advises() {
-        // A write-permission failure (Ok(Err)) must still surface the advisory.
-        let result = Ok(Err(ocx_lib::setup::error::Error::Io {
-            path: PathBuf::from("/ocx/env.sh"),
-            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-        }));
-        assert_eq!(classify_refresh(&result), RefreshAdvisory::WriteFailed);
+    fn an_unfinished_setup_on_a_completed_swap_names_the_exit() {
+        let result = SelfUpdateResult::Installed {
+            from: None,
+            to: "0.6.1".to_string(),
+            handoff: Some(HandoffFailure::Exited(74)),
+        };
+        match advisory_for(&result) {
+            Some(HandoffAdvisory::SetupIncomplete(detail)) => {
+                assert!(
+                    detail.contains("74"),
+                    "the advisory must name the child's exit; got {detail:?}"
+                );
+            }
+            other => panic!("expected SetupIncomplete; got {other:?}"),
+        }
     }
 
-    #[tokio::test]
-    async fn classify_refresh_task_panic_advises() {
-        // A blocking-task panic (Err(join)) must still surface the advisory.
-        let join_error = tokio::task::spawn_blocking(|| -> Result<Vec<PathBuf>, ocx_lib::setup::error::Error> {
-            panic!("simulated refresh panic")
-        })
-        .await
-        .expect_err("the spawned task panics, so the join must fail");
-        let result: Result<Result<Vec<PathBuf>, ocx_lib::setup::error::Error>, tokio::task::JoinError> =
-            Err(join_error);
-        assert_eq!(classify_refresh(&result), RefreshAdvisory::TaskPanicked);
+    /// Nothing activated: the wording says so, and says what to run.
+    #[test]
+    fn a_pulled_outcome_says_nothing_was_activated() {
+        let result = SelfUpdateResult::Pulled {
+            from: Some("0.6.0".to_string()),
+            to: "0.6.1".to_string(),
+            handoff: Some(HandoffFailure::SpawnFailed("permission denied".to_string())),
+        };
+        match advisory_for(&result) {
+            Some(HandoffAdvisory::NotActivated(detail)) => {
+                assert!(
+                    detail.contains("permission denied"),
+                    "the advisory must carry the failure; got {detail:?}"
+                );
+            }
+            other => panic!("expected NotActivated; got {other:?}"),
+        }
     }
 
-    // The profile-heal advisory is no longer a bespoke enum: `self update`
-    // calls the shared `setup::profiles_changed` / `setup::profiles_dirty`
-    // predicates directly. Those predicates are unit-tested in `ocx_lib::setup`.
+    /// The two outcomes that changed nothing say nothing.
+    #[test]
+    fn outcomes_that_changed_nothing_advise_nothing() {
+        assert_eq!(advisory_for(&SelfUpdateResult::AlreadyUpToDate), None);
+        assert_eq!(advisory_for(&SelfUpdateResult::Skipped(SkippedReason::Offline)), None);
+    }
 
     /// `EX_TEMPFAIL` (sysexits 75) — the canonical numeric value reused across
     /// `Skipped` outcome tests.
@@ -323,14 +320,35 @@ mod tests {
         }
     }
 
+    /// A completed swap is SUCCESS whether or not the hand-off finished — the
+    /// binary the user asked for is the one `current` names.
     #[test]
     fn update_installed_is_success() {
+        for handoff in [None, Some(HandoffFailure::Exited(OcxExitCode::DirtyRcBlock as i32))] {
+            assert!(
+                exit_code_equals(
+                    exit_code_for_update(&SelfUpdateResult::Installed {
+                        from: Some("0.0.1".to_string()),
+                        to: "0.0.2".to_string(),
+                        handoff: handoff.clone(),
+                    }),
+                    0
+                ),
+                "Installed must exit 0; handoff = {handoff:?}"
+            );
+        }
+    }
+
+    /// Pulled-but-not-activated is `EX_TEMPFAIL`: re-running is meaningful.
+    #[test]
+    fn update_pulled_is_tempfail() {
         assert!(exit_code_equals(
-            exit_code_for_update(&SelfUpdateResult::Installed {
-                from: Some("0.0.1".to_string()),
+            exit_code_for_update(&SelfUpdateResult::Pulled {
+                from: None,
                 to: "0.0.2".to_string(),
+                handoff: Some(HandoffFailure::Exited(64)),
             }),
-            0
+            EX_TEMPFAIL
         ));
     }
 
