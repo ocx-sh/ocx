@@ -31,8 +31,15 @@ mod interactive;
 pub mod key;
 mod lazy_mode;
 mod lazy_report;
+// `pub mod` rather than the sibling `mod` + `pub use` idiom, same reasoning as
+// `hook` above: `ModifyPath` and `Profiles` have no consumer until the
+// `ocx self setup` wiring work lands, and a `pub use` with no consumer is an
+// `unused_imports` failure under `warnings = "deny"`. That work adds the
+// re-export alongside the first call site.
+pub mod modify_path;
 mod pinned;
 mod platform;
+pub mod profiles;
 mod pull;
 mod records;
 mod referrers;
