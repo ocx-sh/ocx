@@ -110,12 +110,51 @@ pub enum UpdateCheckResult {
     UpdateAvailable(oci::Identifier),
 }
 
+/// Why the hand-off to the newly pulled binary's own `ocx self setup` did not
+/// complete cleanly.
+///
+/// Never the verdict on its own: the child performs the select in its first
+/// phase and writes the remaining setup surfaces after it, so a child that
+/// failed late has already swapped the binary. Which of
+/// [`SelfUpdateResult::Installed`] / [`SelfUpdateResult::Pulled`] carries this
+/// value is decided by the `current` symlink; the value itself only decides
+/// what the command advises.
+///
+/// JSON serialization mirrors [`SkippedReason`]'s discriminated object:
+/// `{"reason": "exited", "detail": 82}`.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+#[serde(tag = "reason", content = "detail", rename_all = "snake_case")]
+pub enum HandoffFailure {
+    /// The new binary could not be started at all — it could not be resolved
+    /// out of the package just pulled, or the spawn itself failed. The inner
+    /// string carries the underlying error context.
+    SpawnFailed(String),
+    /// The child ran and exited non-zero, carrying its exit code. `82`
+    /// (`DirtyRcBlock`) is the expected one: the setup completed the swap but
+    /// left a user-edited shell profile alone.
+    Exited(i32),
+    /// The child was killed by a signal (Unix only), carrying the signal
+    /// number.
+    Signalled(i32),
+}
+
+impl std::fmt::Display for HandoffFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SpawnFailed(detail) => write!(f, "could not run the new binary: {detail}"),
+            Self::Exited(code) => write!(f, "setup exited {code}"),
+            Self::Signalled(signal) => write!(f, "setup was killed by signal {signal}"),
+        }
+    }
+}
+
 /// Result of an `ocx self update` invocation.
 #[derive(Debug)]
 pub enum SelfUpdateResult {
     /// The installed version is already the latest; nothing was changed.
     AlreadyUpToDate,
-    /// A newer version was found and installed.
+    /// A newer version was found, pulled, and is now the one `current` names —
+    /// the update succeeded.
     Installed {
         /// Version string of the previously installed binary, if it could be
         /// determined by subprocess query.  `None` indicates the subprocess
@@ -124,6 +163,25 @@ pub enum SelfUpdateResult {
         from: Option<String>,
         /// Version string of the newly installed binary.
         to: String,
+        /// `Some` when the new binary's own `ocx self setup` did not complete
+        /// cleanly even though it had already swapped `current`. The update
+        /// stands; some setup surface may not have been written, so the caller
+        /// advises a `ocx self setup` re-run.
+        handoff: Option<HandoffFailure>,
+    },
+    /// A newer version was pulled but `current` still names the old install —
+    /// the hand-off never reached its select, so nothing was activated and the
+    /// machine is byte-identical to before the update.
+    Pulled {
+        /// Version string of the still-installed binary; see
+        /// [`Self::Installed::from`].
+        from: Option<String>,
+        /// Version string of the release that was pulled but not activated.
+        to: String,
+        /// How the hand-off ended. `None` means the child reported success and
+        /// yet `current` did not move — an anomaly reported rather than
+        /// assumed away.
+        handoff: Option<HandoffFailure>,
     },
     /// The update was skipped. The inner [`SkippedReason`] identifies why.
     Skipped(SkippedReason),
@@ -367,13 +425,35 @@ impl PackageManager {
     /// via OCX itself.
     ///
     /// Routes the actual install through [`install_all`](PackageManager::install_all)
-    /// with `candidate=false, select=true` — self-update does not create a
-    /// candidate symlink; only the `current` symlink is updated.
+    /// with `candidate=false, select=false` — self-update creates no candidate
+    /// symlink, and the `current` symlink is moved by the *new* binary, not
+    /// this one (see below).
+    ///
+    /// # The hand-off
+    ///
+    /// After the pull, this method re-executes the freshly pulled binary as
+    /// `ocx self setup <tag>@<digest> --handoff` and lets it write every setup
+    /// surface with its own code. It does not enumerate the surfaces itself.
+    ///
+    /// A setup obligation introduced by version N is unreachable from a process
+    /// that predates N, so any list of phases maintained on this side applies
+    /// version N−1's contract to an install of N — silently, whenever the
+    /// phases it does know about happen to be unchanged.
+    ///
+    /// The select is the child's first phase, which makes it the commit point:
+    /// the new version's setup runs while `current` still names the old binary,
+    /// so a hand-off that never gets there leaves the machine byte-identical.
+    /// That is also why the child's exit status is not the verdict — phases
+    /// after the select can fail on an update that already succeeded. The
+    /// `current` symlink is observed instead; see [`SelfUpdateResult::Pulled`].
     ///
     /// # Errors
     ///
     /// Returns `package_manager::error::Error` on install failure (aligned
-    /// with `install_all`'s error type).
+    /// with `install_all`'s error type). A failed hand-off is not an error: it
+    /// is reported as [`SelfUpdateResult::Pulled`] or as an
+    /// [`Installed`](SelfUpdateResult::Installed) carrying a
+    /// [`HandoffFailure`].
     pub async fn self_update(&self) -> Result<SelfUpdateResult, package_manager::error::Error> {
         use package_manager::concurrency::Concurrency;
 
@@ -411,27 +491,41 @@ impl PackageManager {
                 // Bind the two adjacent bool positionals to named locals at the
                 // call site so the intent reads at a glance — Q-W6 in R3.
                 // candidate=false: self-update does not create a candidate symlink.
-                // select=true:    updates the `current` symlink to the new version.
+                // select=false:   the select is the commit point and belongs to the
+                //                 new binary's own setup, which runs it first. Doing
+                //                 it here would swap `current` before the new version
+                //                 had written a single setup surface, so a failed
+                //                 setup would strand a half-migrated machine.
                 let candidate = false;
-                let select = true;
+                let select = false;
                 // skip_discovery=true: self-update installs ocx itself, not a
                 // user-requested tool. Looking up a patch descriptor for ocx.sh/ocx/cli
                 // at the patch registry is nonsensical and could abort the update with
                 // a spurious required-companion error.
                 let skip_discovery = true;
-                self.install_all(
-                    vec![latest_id],
-                    platform,
-                    candidate,
-                    select,
-                    Concurrency::default(),
-                    skip_discovery,
-                )
-                .await?;
-                Ok(SelfUpdateResult::Installed {
-                    from: current_version,
-                    to: to_tag,
-                })
+                let infos = self
+                    .install_all(
+                        vec![latest_id],
+                        platform,
+                        candidate,
+                        select,
+                        Concurrency::default(),
+                        skip_discovery,
+                    )
+                    .await?;
+                // One identifier in, one `InstallInfo` out — `install_all`
+                // preserves input order and length. Asserting the invariant
+                // beats inventing a "nothing was installed" outcome that
+                // cannot occur.
+                let info = infos
+                    .into_iter()
+                    .next()
+                    .expect("install_all returns one InstallInfo per requested package");
+
+                let handoff = hand_off_setup(self, &info, &to_tag).await;
+                let moved = current_names(self.file_structure(), &ocx_id, info.dir().root()).await;
+
+                Ok(self_update_verdict(moved, handoff, current_version, to_tag))
             }
         }
     }
@@ -492,22 +586,10 @@ async fn query_installed_version(manager: &PackageManager, identifier: &oci::Ide
         .await
         .ok()?;
 
-    // 2. Resolve the composed env (interface view — matches default exec semantics).
-    let infos = vec![Arc::new(info)];
-    let entries = manager
-        .resolve_env(
-            &infos,
-            false,
-            crate::package_manager::EnvScope::package_tier(),
-            &oci::Platform::current().unwrap_or_else(oci::Platform::any),
-        )
-        .await
-        .ok()?;
-
-    // 3. Build env, apply package entries. Resolve `ocx` to its absolute path via
-    //    the env PATH. No apply_ocx_config: version query reads no OCX_* config.
-    let mut env = crate::env::Env::new();
-    env.apply_entries(&entries);
+    // 2. Compose the env for that install and resolve `ocx` to its absolute
+    //    path via the env PATH. No apply_ocx_config: version query reads no
+    //    OCX_* config.
+    let env = compose_env_for(manager, info).await.ok()?;
     // C-011: `resolve_command` is fallible since C-009, and the fallback to the
     // literal `ocx` is now *this* caller's stated choice rather than an ambient
     // default — a name the composed environment does not provide is exactly the
@@ -550,6 +632,212 @@ async fn query_installed_version(manager: &PackageManager, identifier: &oci::Ide
     }
     let payload: VersionPayload = serde_json::from_slice(&output.stdout).ok()?;
     Some(payload.version)
+}
+
+/// Composes the interface-surface environment of one installed package.
+///
+/// The shared half of the two sites that need to run a binary out of a package
+/// this crate just resolved: [`query_installed_version`] (the `current` install)
+/// and [`hand_off_setup`] (the install the pull just staged). Both then locate
+/// the binary with [`crate::env::Env::resolve_command`] over the composed PATH
+/// — they differ only in what they do when that lookup fails, which is why the
+/// lookup itself stays at the call sites.
+///
+/// `self_view = false`: the interface surface, matching default exec semantics.
+async fn compose_env_for(manager: &PackageManager, info: package::InstallInfo) -> crate::Result<crate::env::Env> {
+    let infos = vec![Arc::new(info)];
+    let entries = manager
+        .resolve_env(
+            &infos,
+            false,
+            crate::package_manager::EnvScope::package_tier(),
+            &oci::Platform::current().unwrap_or_else(oci::Platform::any),
+        )
+        .await?;
+
+    let mut env = crate::env::Env::new();
+    env.apply_entries(&entries);
+    Ok(env)
+}
+
+/// The argv the hand-off spawns, built from the digest the pull already
+/// resolved.
+///
+/// `tag@digest` rather than a bare tag: the child must land on the exact
+/// artifact this pull staged. The form is an immutability assertion — the child
+/// resolves the tag and refuses (exit 65) if it no longer names this digest —
+/// and it costs no second index round-trip, since the digest is already pinned.
+fn handoff_argv(tag: &str, digest: &oci::Digest) -> [String; 4] {
+    [
+        "self".to_owned(),
+        "setup".to_owned(),
+        format!("{tag}@{digest}"),
+        // Hidden flag: heal profiles, introduce none, write no config. An
+        // update is not the moment to adopt a surface the user opted out of.
+        "--handoff".to_owned(),
+    ]
+}
+
+/// Re-executes the freshly pulled binary as its own `ocx self setup`, returning
+/// `None` when the child completed cleanly.
+///
+/// The whole point of the hand-off is that the code applying the setup contract
+/// is the code that knows it, so every failure to *reach* that code is a
+/// [`HandoffFailure`] rather than a fallback: there is deliberately no retreat
+/// to a bare `ocx` on `PATH`, because that name resolves to the binary being
+/// replaced and would run the very contract this exists to stop running.
+async fn hand_off_setup(manager: &PackageManager, info: &package::InstallInfo, tag: &str) -> Option<HandoffFailure> {
+    let env = match compose_env_for(manager, info.clone()).await {
+        Ok(env) => env,
+        Err(error) => return Some(HandoffFailure::SpawnFailed(error.to_string())),
+    };
+    let binary = match env.resolve_command("ocx") {
+        Ok(binary) => binary,
+        Err(error) => return Some(HandoffFailure::SpawnFailed(error.to_string())),
+    };
+    run_handoff(&binary, tag, &info.identifier().digest()).await
+}
+
+/// Spawns `binary` with the hand-off argv and classifies how it ended.
+///
+/// Standard I/O is inherited: the child's setup output *is* this command's
+/// output, and its prompts reach the user's terminal.
+///
+/// No deadline, deliberately. The child is the foreground continuation of the
+/// user's own `ocx self update`, the way a launched tool is of `ocx exec`, and
+/// a timeout could only be honoured by killing a setup mid-write — producing
+/// exactly the half-migrated machine the select-last ordering exists to
+/// prevent. A hung child is interruptible from the terminal it inherited.
+async fn run_handoff(binary: &std::path::Path, tag: &str, digest: &oci::Digest) -> Option<HandoffFailure> {
+    let argv = handoff_argv(tag, digest);
+    log::debug!("Handing setup to '{}' as {:?}.", binary.display(), argv);
+
+    let mut command = tokio::process::Command::new(binary);
+    command.args(argv);
+
+    // The child reports through `DataInterface`, i.e. on *stdout*. Inheriting
+    // it would put the child's table in front of the parent's payload, so
+    // `ocx --format json self update | jq` would parse the child instead of
+    // the update. Send it to our stderr: the user still sees the setup
+    // progress, streamed, and the data stream carries one document.
+    match stderr_as_stdio() {
+        Ok(stdio) => {
+            command.stdout(stdio);
+        }
+        // Falling back to an inherited stdout risks a mixed stream, so prefer
+        // losing the child's chatter over corrupting the parent's payload.
+        Err(error) => {
+            log::debug!("Cannot redirect the hand-off's stdout ({error}); discarding it.");
+            command.stdout(std::process::Stdio::null());
+        }
+    }
+
+    match command.status().await {
+        Ok(status) => classify_handoff_status(status),
+        Err(error) => Some(HandoffFailure::SpawnFailed(error.to_string())),
+    }
+}
+
+/// A `Stdio` writing to this process's stderr, for a child whose human-readable
+/// output must stay off the parent's data stream.
+fn stderr_as_stdio() -> std::io::Result<std::process::Stdio> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd;
+        Ok(std::process::Stdio::from(
+            std::io::stderr().as_fd().try_clone_to_owned()?,
+        ))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsHandle;
+        Ok(std::process::Stdio::from(
+            std::io::stderr().as_handle().try_clone_to_owned()?,
+        ))
+    }
+}
+
+/// Maps a finished child's status onto `None` (clean) or a [`HandoffFailure`].
+fn classify_handoff_status(status: std::process::ExitStatus) -> Option<HandoffFailure> {
+    if status.success() {
+        return None;
+    }
+
+    #[cfg(unix)]
+    let signal = {
+        use std::os::unix::process::ExitStatusExt;
+        status.signal()
+    };
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+
+    match (status.code(), signal) {
+        (Some(code), _) => Some(HandoffFailure::Exited(code)),
+        (None, Some(signal)) => Some(HandoffFailure::Signalled(signal)),
+        // Unreachable on every supported platform (a status carries one or the
+        // other), but a total match beats a panic on a state we cannot name.
+        (None, None) => Some(HandoffFailure::SpawnFailed(
+            "the child ended with neither an exit code nor a signal".to_owned(),
+        )),
+    }
+}
+
+/// Whether `identifier`'s `current` install symlink now names `root`.
+///
+/// This is the observation the whole hand-off verdict rests on, so it is a
+/// *state* question, asked of the filesystem, and never inferred from the
+/// child's exit status.
+///
+/// Both sides are canonicalized: `current` is a symlink into the package store,
+/// and on macOS a store under `/tmp` reaches it through another one. An
+/// unreadable path — including an absent or dangling `current` — is `false`,
+/// the direction that advises re-running setup rather than claiming an update
+/// that may not have happened.
+async fn current_names(
+    file_structure: &crate::file_structure::FileStructure,
+    identifier: &oci::Identifier,
+    root: &std::path::Path,
+) -> bool {
+    let current = file_structure.symlinks.current(identifier);
+    let root = root.to_path_buf();
+
+    // Blocking fs I/O off the async executor; a panicking blocking thread
+    // collapses to `false` for the same reason an unreadable path does.
+    tokio::task::spawn_blocking(
+        move || match (dunce::canonicalize(&current), dunce::canonicalize(&root)) {
+            (Ok(current), Ok(root)) => current == root,
+            _ => false,
+        },
+    )
+    .await
+    .unwrap_or_else(|error| {
+        // Not reachable in practice: the closure cannot panic (two
+        // `io::Result` calls and a `PathBuf` compare) and nothing aborts it,
+        // so this arm is a totality requirement rather than a live branch.
+        // It still leaves a trace, or a real occurrence would be invisible.
+        tracing::debug!(%error, "observing `current` failed; reporting the update as not activated");
+        false
+    })
+}
+
+/// Turns the observed state plus the hand-off outcome into the reported result.
+///
+/// **The child's exit status is not the verdict.** Its phase 1 performs the
+/// select and phases 2-5 follow it, so a child that failed late — a dirty RC
+/// block exits 82 — has already repointed `current`, and that update succeeded.
+/// Keying on the status would report a completed update as a failure. The
+/// status only decides what the caller advises.
+fn self_update_verdict(
+    current_moved: bool,
+    handoff: Option<HandoffFailure>,
+    from: Option<String>,
+    to: String,
+) -> SelfUpdateResult {
+    if current_moved {
+        SelfUpdateResult::Installed { from, to, handoff }
+    } else {
+        SelfUpdateResult::Pulled { from, to, handoff }
+    }
 }
 
 /// Returns the highest `major.minor.patch` release version among `tags`.
@@ -1059,6 +1347,235 @@ mod tests {
         assert_eq!(
             result, None,
             "bootstrap mode (package absent from local store) must return None, never Some(\"\")"
+        );
+    }
+
+    // ── The hand-off to the new binary's own setup ───────────────────────────
+    //
+    // `self_update` stops enumerating setup phases: it pulls WITHOUT selecting,
+    // then re-executes the pulled binary as `ocx self setup <tag>@<digest>
+    // --handoff`. Three properties carry that design, and each is tested where
+    // it can actually be observed:
+    //
+    //   1. the argv reaches the child verbatim, carrying the resolved digest;
+    //   2. the verdict comes from the `current` symlink, never the exit status;
+    //   3. `current_names` answers about the filesystem, not about intent.
+
+    /// A digest fixture with a distinctive hex so an assertion failure names it.
+    fn fixture_digest() -> oci::Digest {
+        oci::Digest::try_from(format!("sha256:{}", "ab".repeat(32)).as_str()).expect("a well-formed digest")
+    }
+
+    /// The hand-off spec is `<tag>@sha256:<hex>`, never a bare tag.
+    ///
+    /// A bare tag would let the child re-resolve to a different artifact than
+    /// the one this pull just staged; the `tag@digest` form asserts
+    /// immutability instead (the child exits 65 on a mismatch) and needs no
+    /// second index round-trip. `--handoff` is last, and the whole vector is
+    /// asserted rather than a `contains`, so an extra argument fails too.
+    #[test]
+    fn handoff_argv_carries_tag_at_digest() {
+        let digest = fixture_digest();
+        assert_eq!(
+            super::handoff_argv("0.6.1", &digest),
+            [
+                "self".to_owned(),
+                "setup".to_owned(),
+                format!("0.6.1@sha256:{}", "ab".repeat(32)),
+                "--handoff".to_owned(),
+            ]
+        );
+    }
+
+    /// …and that argv is what actually reaches the child.
+    ///
+    /// The sibling above pins the vector `handoff_argv` builds; on its own that
+    /// proves nothing about the spawn, which could pass anything. This runs a
+    /// recorder in the binary's place and reads back the arguments it was
+    /// handed — and, from the same spawn, that a non-zero exit is classified by
+    /// its code.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handoff_spawns_the_argv_it_builds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let recorded = tmp.path().join("argv");
+        // 82 = DirtyRcBlock, the failure the design specifically must not read
+        // as "the update failed".
+        let recorder = write_argv_recorder(tmp.path(), &recorded, 82);
+
+        let outcome = super::run_handoff(&recorder, "0.6.1", &fixture_digest()).await;
+
+        let argv: Vec<String> = std::fs::read_to_string(&recorded)
+            .expect("the recorder must have run")
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            argv,
+            vec![
+                "self".to_owned(),
+                "setup".to_owned(),
+                format!("0.6.1@sha256:{}", "ab".repeat(32)),
+                "--handoff".to_owned(),
+            ],
+            "the child must receive exactly the hand-off argv"
+        );
+        assert!(
+            matches!(outcome, Some(super::HandoffFailure::Exited(82))),
+            "a non-zero child must be classified by its exit code; got: {outcome:?}"
+        );
+    }
+
+    /// A child that exits 0 is no failure at all.
+    ///
+    /// The green half of the classification: without it, a `run_handoff` that
+    /// reported a failure unconditionally would still satisfy the test above.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handoff_reports_a_clean_child_as_no_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let recorded = tmp.path().join("argv");
+        let recorder = write_argv_recorder(tmp.path(), &recorded, 0);
+
+        let outcome = super::run_handoff(&recorder, "0.6.1", &fixture_digest()).await;
+
+        assert!(outcome.is_none(), "a clean child carries no failure; got: {outcome:?}");
+    }
+
+    /// A binary that cannot be spawned is `SpawnFailed`, never a silent pass.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handoff_reports_a_missing_binary_as_spawn_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let absent = tmp.path().join("no-such-binary");
+
+        let outcome = super::run_handoff(&absent, "0.6.1", &fixture_digest()).await;
+
+        assert!(
+            matches!(outcome, Some(super::HandoffFailure::SpawnFailed(_))),
+            "an unspawnable binary must surface as SpawnFailed; got: {outcome:?}"
+        );
+    }
+
+    /// Writes a `sh` script that records its arguments one per line and exits
+    /// with `exit_code`.
+    #[cfg(unix)]
+    fn write_argv_recorder(dir: &Path, recorded: &Path, exit_code: i32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = dir.join("fake-ocx");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > '{}'\nexit {exit_code}\n",
+                recorded.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    // ── The verdict is the symlink, not the exit status ──────────────────────
+
+    /// The select is the child's FIRST phase, so a child that failed in a later
+    /// one — exit 82, a shell profile with local edits — has already repointed
+    /// `current`. That update succeeded.
+    ///
+    /// Keying the verdict on the exit status would report a completed update as
+    /// a failure, and send the user chasing an update they already have.
+    #[test]
+    fn installed_when_current_moved_even_though_child_failed() {
+        let result = super::self_update_verdict(
+            true,
+            Some(super::HandoffFailure::Exited(82)),
+            Some("0.6.0".to_owned()),
+            "0.6.1".to_owned(),
+        );
+
+        match result {
+            super::SelfUpdateResult::Installed { from, to, handoff } => {
+                assert_eq!(from.as_deref(), Some("0.6.0"));
+                assert_eq!(to, "0.6.1");
+                assert!(
+                    matches!(handoff, Some(super::HandoffFailure::Exited(82))),
+                    "the failure must survive onto the result so the caller can advise"
+                );
+            }
+            other => panic!("a moved `current` is an Installed update; got: {other:?}"),
+        }
+    }
+
+    /// A clean child that moved `current` is a plain `Installed` with nothing
+    /// to advise.
+    #[test]
+    fn installed_carries_no_advisory_when_the_child_was_clean() {
+        let result = super::self_update_verdict(true, None, None, "0.6.1".to_owned());
+        assert!(
+            matches!(result, super::SelfUpdateResult::Installed { handoff: None, .. }),
+            "got: {result:?}"
+        );
+    }
+
+    /// `current` unmoved means nothing was activated: the machine is
+    /// byte-identical to before the update, so the outcome is `Pulled` — the
+    /// caller's exit 75 and "run `ocx self setup`" advice.
+    #[test]
+    fn pulled_when_current_did_not_move() {
+        let result = super::self_update_verdict(
+            false,
+            Some(super::HandoffFailure::SpawnFailed("permission denied".to_owned())),
+            Some("0.6.0".to_owned()),
+            "0.6.1".to_owned(),
+        );
+
+        match result {
+            super::SelfUpdateResult::Pulled { from, to, handoff } => {
+                assert_eq!(from.as_deref(), Some("0.6.0"));
+                assert_eq!(to, "0.6.1");
+                assert!(matches!(handoff, Some(super::HandoffFailure::SpawnFailed(_))));
+            }
+            other => panic!("an unmoved `current` is a Pulled, not an Installed; got: {other:?}"),
+        }
+    }
+
+    // ── current_names: the observation itself ────────────────────────────────
+
+    /// `current_names` answers about the filesystem — true only when the
+    /// symlink resolves to the very package root the pull produced.
+    ///
+    /// Both arms in one test on purpose: the false arm alone is satisfied by a
+    /// function that always returns false, which would turn every successful
+    /// update into a `Pulled`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn current_names_answers_from_the_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = FileStructure::with_root(tmp.path().to_path_buf());
+        let identifier = oci::Identifier::new_registry("ocx/cli", oci::OCX_SH_REGISTRY);
+
+        let new_root = tmp.path().join("packages/new");
+        let old_root = tmp.path().join("packages/old");
+        std::fs::create_dir_all(&new_root).unwrap();
+        std::fs::create_dir_all(&old_root).unwrap();
+
+        // Absent `current` — nothing was activated.
+        assert!(
+            !super::current_names(&fs, &identifier, &new_root).await,
+            "an absent `current` cannot name the new root"
+        );
+
+        // Still pointing at the old install — the hand-off never selected.
+        let current = fs.symlinks.current(&identifier);
+        crate::symlink::create(&old_root, &current).unwrap();
+        assert!(
+            !super::current_names(&fs, &identifier, &new_root).await,
+            "a `current` naming the old root is not a completed update"
+        );
+
+        // Repointed at the new install — the child's select landed.
+        crate::symlink::update(&new_root, &current).unwrap();
+        assert!(
+            super::current_names(&fs, &identifier, &new_root).await,
+            "a `current` naming the new root is a completed update"
         );
     }
 

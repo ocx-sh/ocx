@@ -960,7 +960,15 @@ mod firewall_tests {
         ),
         (
             "ocx_lib/src/package_manager/tasks/update_check.rs",
-            "hermetic self re-entry (`ocx --format json version`) to read the installed version",
+            "self re-entry, twice over, and ocx is the program in both: the hermetic `ocx --format \
+             json version` that reads the installed version, and `ocx self update`'s hand-off — it \
+             pulls the new release without selecting, then runs THAT binary as `ocx self setup \
+             <tag>@<digest> --handoff` so the version being installed is the one that applies its \
+             own setup contract, which the process it replaces predates and cannot know. Neither is \
+             a tool launch: no package was resolved for a user and no environment was composed for \
+             a tool. `Launch::exempt` cannot serve the hand-off either — it returns \
+             `ExemptionRefused` under a fail-closed `[records]` posture, which would make `ocx self \
+             update` fail outright for a child with nothing to record",
         ),
         (
             "ocx_lib/src/script/ocx_module.rs",
