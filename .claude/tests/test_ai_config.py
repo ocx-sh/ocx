@@ -1898,6 +1898,7 @@ class TestSubsystemCliCommandsTableCoverage:
         "package_inspect": "package inspect",
         "package_attest": "package attest",
         "package_pull": "package pull",
+        "package_receipt": "package receipt",
         "package_push": "package push",
         "package_sbom": "package sbom",
         "package_announce": "package announce",
