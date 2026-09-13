@@ -55,6 +55,8 @@ OCX is a **backend tool** (`product-context.md`: automation-first). Output is sp
 
 **Known exception:** `export_ci` in `conventions.rs` (the `--ci[=PROVIDER]` flag on `ocx env` / `ocx package env`) writes outside the `Api` entirely — through `ocx_lib::ci::CiFlavor::export`, which appends to the CI runner's files (`$GITHUB_ENV`/`$GITHUB_PATH`) or writes JSON-lines to `--export-file` / stdout. Sibling to the `emit_lines` exception: the destination is a CI persistence channel with a provider-defined wire format, not a `DataInterface` table/JSON document. The library half already does file I/O (the GitHub flavor); the GitLab writer is injectable so tests never touch real stdout/disk. ADR `adr_ci_env_export_flag.md`.
 
+**Known exception:** `api/junit.rs` (`ocx package test --junit`) writes outside the `Api` entirely, in addition to the ordinary JSON envelope on stdout — never through `Api::report`. Sibling to the `export_ci` exception: the destination is a CI persistence channel with a provider-defined wire format (GitLab `artifacts:reports:junit`, the GitHub test-reporter actions), not a `DataInterface` table or JSON document. Built from `command/package_test.rs`.
+
 ## `emit_lines` helper
 
 `conventions.rs` contains the shared `emit_lines(shell: Shell, entries: &[Entry])` helper consumed by:

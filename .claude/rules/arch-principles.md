@@ -99,6 +99,7 @@ CLI command (clap parse)
 | `adr_sbom_attestations.md` | DSSE in-toto attestations as cosign v3 bundles over OCI referrers; `attest`/`sbom` commands, `verify --attestation` mode; CycloneDX SBOM read + `--summary` |
 | `adr_sbom_strategy.md` | SBOM gen approach |
 | `adr_version_build_separator.md` | Underscore as build separator in version tags |
+| `adr_variants.md` | Variant-prefix tag format (`debug-3.12.5`), variant-scoped cascade, default-variant aliasing onto the bare track via `ocx package push --default` and `Client::merge_platform_into_index` (amended 2026-09-12) |
 | `adr_three_tier_cas_storage.md` | Three-tier content-addressed storage (blobs + layers + packages) |
 | `adr_index_routing_semantics.md` | `IndexOperation::{Query, Resolve}` enum; pinned-id pulls skip tag commit |
 | `adr_cli_high_low_layering.md` | Formalize high-level (project-tier) vs OCI-tier CLI split; add `ocx run`; reserve `all` keyword |
@@ -159,6 +160,7 @@ Project-wide conventions enforced by reviewer:
 | Per-prompt shell-env reconciliation — the **pure** pieces | `crates/ocx_lib/src/shell/reconcile.rs` (+ `reconcile/{ledger,plan,fingerprint}.rs`) | Typed, provenance-tagged three-way planner (desired D / current C / private `__OCX_ENV_STATE` ledger L), the carrier codec and the fingerprint fold. Each is pure and testable alone (`adr_shell_env_overhaul.md`) |
 | Per-prompt shell-env reconciliation — the **sequencing** | `crates/ocx_lib/src/activation.rs` (`crate::activation`) | The order that binds the pure pieces into one answer — resolve the global tier, evaluate consent over the walk's project, compose only what consent authorized, diff, record. Driven by `ocx self activate --reconcile` (applies) and `ocx shell state` (reports), so both share one derivation. `Context`-free: every input is a plain field on `SessionInput`. **At the crate root, never under `shell/`** — `project::consent` reads `shell`, so sequencing under `shell/` closes a `use` cycle that does not compile across a crate boundary and blocks the `ocx_lib` split (addendum A-45) |
 | Project activation consent | `crates/ocx_lib/src/project/consent.rs` | `evaluate()` — the stamp/paths/namespaces predicate gating whether a project's `ocx.toml` may compose at all; stamp lives at `state/projects/<key>/consent.json` |
+| JUnit XML report writer | `crates/ocx_cli/src/api/junit.rs` | `ocx package test --junit` sidecar; depends on `quick-junit`, kept off `ocx_lib` (the crate slated to split — see Core vs Plugin Boundary above); output-channel exception documented in `subsystem-cli-api.md`'s Output architecture section |
 
 ## Cross-Cutting Modules
 
