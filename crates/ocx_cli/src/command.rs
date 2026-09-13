@@ -51,6 +51,7 @@ pub mod package_description_push;
 pub mod package_inspect;
 pub mod package_pull;
 pub mod package_push;
+pub mod package_receipt;
 pub mod package_sbom;
 pub mod package_sign;
 pub mod package_sign_common;

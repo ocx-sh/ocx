@@ -105,7 +105,9 @@ pub async fn read_beside_bundle(layers: &[LayerRef]) -> anyhow::Result<Option<Bu
     }
 }
 
-async fn read(path: &Path) -> anyhow::Result<Option<BuildReceipt>> {
+/// Reads the receipt at `path`: `Ok(None)` when absent, a `DataError`
+/// (65) when the file is not a receipt this build can read.
+pub async fn read(path: &Path) -> anyhow::Result<Option<BuildReceipt>> {
     let bytes = match tokio::fs::read(path).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),

@@ -73,6 +73,16 @@ pub enum Package {
     Pull(super::package_pull::PackagePull),
     /// Publish a package's layers and metadata to a registry.
     Push(super::package_push::PackagePush),
+    /// Print the build receipt `ocx package create` wrote beside a bundle
+    ///
+    /// The receipt records the `--platform` and `--identifier` a build was
+    /// given; `ocx package push` and `ocx package test` fall back to it when
+    /// the flag is omitted. JSON output is `{"platform": ..., "identifier":
+    /// ...}`, each key present only when the build recorded it.
+    ///
+    /// Exits 79 when no receipt sits beside the bundle and 65 when the file
+    /// exists but is not a receipt this ocx can read.
+    Receipt(super::package_receipt::PackageReceiptCommand),
     /// List or extract the SBOM attestations a published package carries.
     Sbom(super::package_sbom::PackageSbom),
     /// Set the current version of one or more packages.
@@ -119,6 +129,7 @@ impl Package {
             Package::Install(install) => install.execute(context).await,
             Package::Pull(pull) => pull.execute(context).await,
             Package::Push(deploy) => deploy.execute(context).await,
+            Package::Receipt(receipt) => receipt.execute(context).await,
             Package::Sbom(sbom) => sbom.execute(context).await,
             Package::Select(select) => select.execute(context).await,
             Package::Deselect(deselect) => deselect.execute(context).await,

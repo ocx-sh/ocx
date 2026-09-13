@@ -3482,7 +3482,9 @@ one place this same exclusion does surface a diagnostic.
 `{"version": 1, "platform": "...", "identifier": "..."}` — both fields optional, each present only
 if you gave `create` the matching flag. It is a build artifact, not package metadata: it has no
 JSON Schema, is never uploaded to a registry, and exists only to carry what one local build was
-told to the two commands that consume its output.
+told to the commands that consume its output. Read it back with
+[`ocx package receipt`][cmd-package-receipt] rather than parsing the file — the printed report is
+the published contract, the file is not.
 
 `create` writes it whenever it has something to record — with or without `--metadata`. Give
 neither `--platform` nor `--identifier` and no receipt is written, because there is nothing to put
@@ -3569,6 +3571,43 @@ ocx package create [OPTIONS] <PATH>
 - `--bin-scan`, `--no-bin-scan`: Scan the content tree for executables the package puts on `PATH` to fill or verify the [`binaries`][reference-binaries] metadata claim — see the mode table above. Paired, last-wins flags; neither given (the default) fills an absent claim and passes a declared one through untouched.
 - `--no-libc-lint`: Skip the libc check on the packaged binaries — see [Checking the declared libc](#package-create-libc-check). The escape hatch for a false refusal: the declared `os.features` then go unverified and a warning naming the platform is printed wherever the check would have run, but nothing about what gets written changes.
 - `-h`, `--help`: Print help information.
+
+#### `receipt` {#package-receipt}
+
+Prints the [build receipt](#package-create-receipt) `create` wrote beside a bundle — the
+`--platform` and `--identifier` the build was given, which [`push`][cmd-package-push] and
+[`test`][cmd-package-test] fall back to when the flag is omitted. The file is a build artifact;
+this report is the contract an SDK reads instead.
+
+**Usage**
+
+```shell
+ocx package receipt <BUNDLE>
+```
+
+**Arguments**
+
+- `<BUNDLE>`: Path to the bundle `create -o` wrote. The receipt is resolved beside it by the same
+  stem rule `push` uses (`hello-1.0.0.tar.xz` → `hello-1.0.0-receipt.json`).
+
+**JSON report**
+
+```json
+{
+  "platform": "linux/amd64",
+  "identifier": "ghcr.io/acme/widget:1.0.0"
+}
+```
+
+Each key is present only when the build recorded it — absent, never `null`, the same contract as
+the file. Plain output prints one `label: value` line per recorded field.
+
+**Exit codes**
+
+| Condition | Exit code |
+|---|---|
+| No receipt beside the bundle — `create` was given neither `--platform` nor `--identifier`, or the bundle was not made by `create`; the message names the path looked for | 79 |
+| A file is there but is not a receipt this `ocx` can read — malformed JSON, or a `version` it does not know | 65 |
 
 #### `pull` {#package-pull}
 
@@ -6203,6 +6242,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 <!-- commands (package group) -->
 [cmd-package-install]: #package-install
 [cmd-package-pull]: #package-pull
+[cmd-package-receipt]: #package-receipt
 [cmd-package-sign]: #package-sign
 [cmd-package-verify]: #package-verify
 [cmd-package-verify-attestations]: #package-verify-attestations

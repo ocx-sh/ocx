@@ -422,7 +422,8 @@ point at.
 The platform a bundle targets is not part of this file. On the wire it lives in the [OCI Image
 Index][oci-image-index] the registry serves; between [`ocx package create`][cmd-package-create] and
 [`ocx package push`][cmd-package-push] or [`ocx package test`][cmd-package-test] it lives in a build
-receipt written beside the bundle — a build artifact with no schema, never pushed to a registry.
+receipt written beside the bundle — a build artifact with no schema, never pushed to a registry,
+readable back with [`ocx package receipt`][cmd-package-receipt].
 
 ### Authoring vs Published {#dependencies-authoring-vs-published}
 
@@ -1126,6 +1127,7 @@ If you published packages before the visibility-default flip, their untagged env
 [cmd-package-test]: ./command-line.md#package-test
 [cmd-run]: ./command-line.md#exec
 [cmd-package-pull]: ./command-line.md#package-pull
+[cmd-package-receipt]: ./command-line.md#package-receipt
 [cmd-package-inspect]: ./command-line.md#package-inspect
 [cmd-package-info]: ./command-line.md#package-description-pull
 [cmd-package-which]: ./command-line.md#which
