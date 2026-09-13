@@ -601,6 +601,7 @@ async fn observe_and_rebuild(
     // the observe loop would guard the wrong thing.
     let physical = pipeline::guarded_physical(
         base_root,
+        request.package.registry(),
         &request.trusted_hosts,
         &request.insecure_hosts,
         &crate::oci::ssrf::proxy_rules(),
@@ -1222,7 +1223,7 @@ mod tests {
         .await;
 
         assert!(
-            matches!(result, Err(AnnounceError::Ssrf(_))),
+            matches!(result, Err(AnnounceError::Ssrf { .. })),
             "a forbidden physical host must be refused"
         );
         let inner = data.read();

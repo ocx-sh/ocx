@@ -228,8 +228,19 @@ pub enum Error {
     /// arrives in remote-controlled index data, so it is validated before the
     /// first physical registry request. The fix path is configuration
     /// (`[registries."<ns>"].trusted_hosts`), hence `ConfigError`.
-    #[error(transparent)]
-    Ssrf(#[from] crate::oci::ssrf::SsrfError),
+    ///
+    /// `namespace` is the logical registry the entry is keyed on — the one the
+    /// package identifier carries, not the physical host that was refused. An
+    /// operator who keys the entry on the host instead sees only the inner
+    /// refusal and cannot tell which entry it is reading (ocx#455).
+    #[error(
+        "the physical host of {namespace}/… was refused; list it (bare host, no port) under [registries.\"{namespace}\"].trusted_hosts"
+    )]
+    Ssrf {
+        namespace: String,
+        #[source]
+        source: crate::oci::ssrf::SsrfError,
+    },
 
     /// An existing OCX-authored derived root document names a different physical
     /// `repository` than the identifier being committed implies. Overwriting it
@@ -423,7 +434,7 @@ impl ClassifyExitCode for Error {
             // unreachable" class (69) every other transport failure already
             // reports. `SsrfError::classify` already carries the right verdict
             // for both — delegate instead of flattening to one code.
-            Self::Ssrf(inner) => return inner.classify(),
+            Self::Ssrf { source, .. } => return source.classify(),
         })
     }
 }
@@ -436,11 +447,21 @@ mod tests {
     /// the host to `[registries."<ns>"].trusted_hosts`.
     #[test]
     fn ssrf_refusal_classifies_as_config_error() {
-        let error = Error::Ssrf(crate::oci::ssrf::SsrfError::ForbiddenTarget {
-            host: "127.0.0.1".to_string(),
-            ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        });
+        let error = Error::Ssrf {
+            namespace: "ocx.sh".to_string(),
+            source: crate::oci::ssrf::SsrfError::ForbiddenTarget {
+                host: "127.0.0.1".to_string(),
+                ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            },
+        };
         assert_eq!(error.classify(), Some(ExitCode::ConfigError));
+        // ocx#455: the message names the exact entry, keyed on the logical
+        // namespace, so an operator who keyed it on the physical host learns
+        // which key to use.
+        assert!(
+            error.to_string().contains("[registries.\"ocx.sh\"].trusted_hosts"),
+            "got: {error}"
+        );
     }
 
     /// Plan row 12: an SSRF *resolution* failure classifies to `Unavailable`
@@ -457,10 +478,13 @@ mod tests {
     /// on a fix that merely swaps one blanket code for another.
     #[test]
     fn ssrf_resolution_classifies_as_unavailable() {
-        let error = Error::Ssrf(crate::oci::ssrf::SsrfError::Resolution {
-            host: "no-such-registry.invalid".to_string(),
-            source: std::io::Error::new(std::io::ErrorKind::NotFound, "name or service not known"),
-        });
+        let error = Error::Ssrf {
+            namespace: "ocx.sh".to_string(),
+            source: crate::oci::ssrf::SsrfError::Resolution {
+                host: "no-such-registry.invalid".to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "name or service not known"),
+            },
+        };
         assert_eq!(error.classify(), Some(ExitCode::Unavailable));
     }
 

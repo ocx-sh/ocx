@@ -498,7 +498,12 @@ impl Index {
             &self.rules,
         )
         .await
-        .map_err(|error| crate::Error::from(error::Error::from(error)))?;
+        .map_err(|source| {
+            crate::Error::from(error::Error::Ssrf {
+                namespace: logical.registry().to_string(),
+                source,
+            })
+        })?;
         Ok(())
     }
 
@@ -1690,7 +1695,10 @@ mod tests {
     fn is_forbidden_refusal(error: &crate::Error) -> bool {
         matches!(
             error,
-            crate::Error::OciIndex(error::Error::Ssrf(oci::ssrf::SsrfError::ForbiddenTarget { .. }))
+            crate::Error::OciIndex(error::Error::Ssrf {
+                source: oci::ssrf::SsrfError::ForbiddenTarget { .. },
+                ..
+            })
         )
     }
 
@@ -1748,7 +1756,10 @@ mod tests {
         assert!(
             matches!(
                 error,
-                crate::Error::OciIndex(error::Error::Ssrf(oci::ssrf::SsrfError::Resolution { .. }))
+                crate::Error::OciIndex(error::Error::Ssrf {
+                    source: oci::ssrf::SsrfError::Resolution { .. },
+                    ..
+                })
             ),
             "expected the lookup failure to refuse, got: {error:?}"
         );
@@ -1836,7 +1847,10 @@ mod tests {
     fn is_resolution_refusal(error: &crate::Error) -> bool {
         matches!(
             error,
-            crate::Error::OciIndex(error::Error::Ssrf(oci::ssrf::SsrfError::Resolution { .. }))
+            crate::Error::OciIndex(error::Error::Ssrf {
+                source: oci::ssrf::SsrfError::Resolution { .. },
+                ..
+            })
         )
     }
 

@@ -303,10 +303,11 @@ pub fn extract_physical(root: &Value) -> Result<Physical, AnnounceError> {
 ///
 /// [`AnnounceError::RootMissingField`] / [`AnnounceError::MalformedPhysicalRepository`]
 /// if the root's `repository` pointer is absent or unparseable;
-/// [`AnnounceError::Ssrf`] if the host is forbidden or unresolvable.
-///
+/// [`AnnounceError::Ssrf`] if the host is forbidden or unresolvable — naming
+/// `namespace`, the `[registries."<ns>"]` key the `trusted_hosts` fix goes into.
 pub async fn guarded_physical(
     root: &Value,
+    namespace: &str,
     trusted_hosts: &[String],
     insecure_hosts: &[String],
     rules: &oci::ssrf::ProxyRules,
@@ -319,7 +320,11 @@ pub async fn guarded_physical(
         trusted_hosts,
         rules,
     )
-    .await?;
+    .await
+    .map_err(|source| AnnounceError::Ssrf {
+        namespace: namespace.to_string(),
+        source,
+    })?;
     Ok(physical)
 }
 
@@ -1856,8 +1861,8 @@ mod tests {
         let root = committed_root("oci://127.0.0.1/x");
         assert!(
             matches!(
-                guarded_physical(&root, &[], &[], &oci::ssrf::ProxyRules::direct()).await,
-                Err(AnnounceError::Ssrf(_))
+                guarded_physical(&root, "ocx.sh", &[], &[], &oci::ssrf::ProxyRules::direct()).await,
+                Err(AnnounceError::Ssrf { .. })
             ),
             "forbidden host must be refused"
         );
@@ -1871,9 +1876,15 @@ mod tests {
         let data = StubTransportData::new();
         let publisher = stub_publisher(&data);
         let root = committed_root("oci://127.0.0.1/x");
-        let physical = guarded_physical(&root, &["127.0.0.1".to_string()], &[], &oci::ssrf::ProxyRules::direct())
-            .await
-            .expect("a trusted loopback host passes the pre-flight");
+        let physical = guarded_physical(
+            &root,
+            "ocx.sh",
+            &["127.0.0.1".to_string()],
+            &[],
+            &oci::ssrf::ProxyRules::direct(),
+        )
+        .await
+        .expect("a trusted loopback host passes the pre-flight");
         let result = observe_curated(&publisher, &physical, &["1.0.0".to_string()]).await;
         assert!(
             matches!(result, Err(AnnounceError::UnresolvedTag { .. })),
@@ -1902,6 +1913,7 @@ mod tests {
 
         let physical = guarded_physical(
             &root,
+            "ocx.sh",
             &[],
             &[],
             &oci::ssrf::ProxyRules::proxied_everywhere("http://proxy.corp:3128"),
@@ -1923,6 +1935,7 @@ mod tests {
 
         let result = guarded_physical(
             &root,
+            "ocx.sh",
             &[],
             &[],
             &oci::ssrf::ProxyRules::proxied_everywhere("http://proxy.corp:3128"),
@@ -1932,7 +1945,10 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(AnnounceError::Ssrf(oci::ssrf::SsrfError::ForbiddenTarget { .. }))
+                Err(AnnounceError::Ssrf {
+                    source: oci::ssrf::SsrfError::ForbiddenTarget { .. },
+                    ..
+                })
             ),
             "a forbidden IP literal stays refused on a proxied route, got {result:?}"
         );
@@ -1953,16 +1969,19 @@ mod tests {
                 .build(),
         );
 
-        let physical = guarded_physical(&root, &[], &[UNRESOLVABLE_REGISTRY.to_string()], &rules)
+        let physical = guarded_physical(&root, "ocx.sh", &[], &[UNRESOLVABLE_REGISTRY.to_string()], &rules)
             .await
             .expect("an insecure registry dials http, which this proxy intercepts");
         assert_eq!(physical.identifier.registry(), UNRESOLVABLE_REGISTRY);
 
-        let refused = guarded_physical(&root, &[], &[], &rules).await;
+        let refused = guarded_physical(&root, "ocx.sh", &[], &[], &rules).await;
         assert!(
             matches!(
                 refused,
-                Err(AnnounceError::Ssrf(oci::ssrf::SsrfError::Resolution { .. }))
+                Err(AnnounceError::Ssrf {
+                    source: oci::ssrf::SsrfError::Resolution { .. },
+                    ..
+                })
             ),
             "without the plain-HTTP allowance the dial is https, which this proxy does not \
              intercept: the route is direct and the name does not resolve, got {refused:?}"

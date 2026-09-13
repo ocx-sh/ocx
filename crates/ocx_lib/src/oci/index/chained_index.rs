@@ -440,8 +440,16 @@ impl ChainedIndex {
         .await
         {
             Ok(_) => Ok(()),
-            Err(error @ oci::ssrf::SsrfError::ForbiddenTarget { .. }) => Err(super::error::Error::from(error).into()),
-            Err(error) if !is_plain_dns_name(host) => Err(super::error::Error::from(error).into()),
+            Err(source @ oci::ssrf::SsrfError::ForbiddenTarget { .. }) => Err(super::error::Error::Ssrf {
+                namespace: logical.registry().to_string(),
+                source,
+            }
+            .into()),
+            Err(source) if !is_plain_dns_name(host) => Err(super::error::Error::Ssrf {
+                namespace: logical.registry().to_string(),
+                source,
+            }
+            .into()),
             Err(error) => {
                 log::debug!(
                     "Physical host '{host}' for '{logical}' did not resolve, so the SSRF pre-flight could not \
@@ -4633,13 +4641,14 @@ mod chain_refs_tests {
             Ok(None)
         }
         async fn physical_reference(&self, _: &Identifier) -> Result<Option<Identifier>> {
-            Err(
-                super::super::error::Error::Ssrf(crate::oci::ssrf::SsrfError::ForbiddenTarget {
+            Err(super::super::error::Error::Ssrf {
+                namespace: "ocx.sh".to_string(),
+                source: crate::oci::ssrf::SsrfError::ForbiddenTarget {
                     host: "127.0.0.1".to_string(),
                     ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                })
-                .into(),
-            )
+                },
+            }
+            .into())
         }
         fn box_clone(&self) -> Box<dyn index_impl::IndexImpl> {
             Box::new(self.clone())
@@ -4847,7 +4856,7 @@ mod chain_refs_tests {
             .await
             .expect_err("an SSRF refusal must not degrade to a clean no-rewrite");
         assert!(
-            matches!(error, crate::Error::OciIndex(super::super::error::Error::Ssrf(_))),
+            matches!(error, crate::Error::OciIndex(super::super::error::Error::Ssrf { .. })),
             "expected the source's own SSRF refusal, got: {error:?}"
         );
     }
@@ -4925,9 +4934,10 @@ mod chain_refs_tests {
         let chained = Index::from_chained(cache, vec![Index::from_impl(UnreachableSource)], ChainMode::Default)
             .with_proxy_rules(crate::oci::ssrf::ProxyRules::direct());
         match chained.physical_reference(&digest_only_id()).await {
-            Err(crate::Error::OciIndex(super::super::error::Error::Ssrf(
-                crate::oci::ssrf::SsrfError::ForbiddenTarget { .. },
-            ))) => {}
+            Err(crate::Error::OciIndex(super::super::error::Error::Ssrf {
+                source: crate::oci::ssrf::SsrfError::ForbiddenTarget { .. },
+                ..
+            })) => {}
             Err(other) => panic!("expected an SSRF refusal of the loopback target, got: {other:?}"),
             Ok(None) => panic!("the local root answers; `Ok(None)` would mean the read itself regressed"),
             Ok(Some(physical)) => {
@@ -4973,9 +4983,10 @@ mod chain_refs_tests {
         assert!(
             matches!(
                 error,
-                crate::Error::OciIndex(super::super::error::Error::Ssrf(
-                    crate::oci::ssrf::SsrfError::ForbiddenTarget { .. }
-                ))
+                crate::Error::OciIndex(super::super::error::Error::Ssrf {
+                    source: crate::oci::ssrf::SsrfError::ForbiddenTarget { .. },
+                    ..
+                })
             ),
             "expected the local root's own SSRF refusal, got: {error:?}"
         );
@@ -5045,9 +5056,10 @@ mod chain_refs_tests {
         let chained = Index::from_chained(cache, vec![], ChainMode::Offline)
             .with_proxy_rules(crate::oci::ssrf::ProxyRules::direct());
         match chained.physical_reference(&digest_only_id()).await {
-            Err(crate::Error::OciIndex(super::super::error::Error::Ssrf(
-                crate::oci::ssrf::SsrfError::ForbiddenTarget { .. },
-            ))) => {}
+            Err(crate::Error::OciIndex(super::super::error::Error::Ssrf {
+                source: crate::oci::ssrf::SsrfError::ForbiddenTarget { .. },
+                ..
+            })) => {}
             Err(other) => panic!("expected an SSRF refusal of the loopback target, got: {other:?}"),
             Ok(None) => panic!("the local root answers; `Ok(None)` would mean the read itself regressed"),
             Ok(Some(physical)) => {
@@ -5105,9 +5117,10 @@ mod chain_refs_tests {
         assert!(
             matches!(
                 error,
-                crate::Error::OciIndex(super::super::error::Error::Ssrf(
-                    crate::oci::ssrf::SsrfError::ForbiddenTarget { .. }
-                ))
+                crate::Error::OciIndex(super::super::error::Error::Ssrf {
+                    source: crate::oci::ssrf::SsrfError::ForbiddenTarget { .. },
+                    ..
+                })
             ),
             "expected a ForbiddenTarget refusal, got: {error:?}"
         );
@@ -5217,9 +5230,10 @@ mod chain_refs_tests {
         assert!(
             matches!(
                 error,
-                crate::Error::OciIndex(super::super::error::Error::Ssrf(
-                    crate::oci::ssrf::SsrfError::Resolution { .. }
-                ))
+                crate::Error::OciIndex(super::super::error::Error::Ssrf {
+                    source: crate::oci::ssrf::SsrfError::Resolution { .. },
+                    ..
+                })
             ),
             "expected the guard's fail-closed resolution refusal, got: {error:?}"
         );
@@ -5251,9 +5265,10 @@ mod chain_refs_tests {
         assert!(
             matches!(
                 error,
-                crate::Error::OciIndex(super::super::error::Error::Ssrf(
-                    crate::oci::ssrf::SsrfError::Resolution { .. }
-                ))
+                crate::Error::OciIndex(super::super::error::Error::Ssrf {
+                    source: crate::oci::ssrf::SsrfError::Resolution { .. },
+                    ..
+                })
             ),
             "expected the direct route's fail-closed resolution refusal, got: {error:?}"
         );
@@ -5281,7 +5296,7 @@ mod chain_refs_tests {
             .await
             .expect_err("an SSRF refusal must not be overridden by the local root");
         assert!(
-            matches!(error, crate::Error::OciIndex(super::super::error::Error::Ssrf(_))),
+            matches!(error, crate::Error::OciIndex(super::super::error::Error::Ssrf { .. })),
             "expected the source's own SSRF refusal, got: {error:?}"
         );
     }

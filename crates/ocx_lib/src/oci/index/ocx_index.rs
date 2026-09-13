@@ -1342,7 +1342,10 @@ impl OcxIndex {
             &self.proxy_rules,
         )
         .await
-        .map_err(super::error::Error::from)?;
+        .map_err(|source| super::error::Error::Ssrf {
+            namespace: self.namespace.clone(),
+            source,
+        })?;
         let mut physical = oci::Identifier::new_registry(repository, registry);
         if let Some(digest) = identifier.digest() {
             physical = physical.clone_with_digest(digest);
@@ -2085,9 +2088,10 @@ mod tests {
         assert!(
             matches!(
                 error,
-                crate::Error::OciIndex(super::super::error::Error::Ssrf(
-                    crate::oci::ssrf::SsrfError::ForbiddenTarget { .. }
-                ))
+                crate::Error::OciIndex(super::super::error::Error::Ssrf {
+                    source: crate::oci::ssrf::SsrfError::ForbiddenTarget { .. },
+                    ..
+                })
             ),
             "expected an SSRF ForbiddenTarget refusal, got {error:?}"
         );
@@ -2111,7 +2115,7 @@ mod tests {
         assert!(
             matches!(
                 refused.fetch_manifest(&digest_id(), IndexOperation::Resolve).await,
-                Err(crate::Error::OciIndex(super::super::error::Error::Ssrf(_)))
+                Err(crate::Error::OciIndex(super::super::error::Error::Ssrf { .. }))
             ),
             "the metadata endpoint must be refused by default"
         );
@@ -2125,7 +2129,7 @@ mod tests {
             .await
             .expect_err("no manifest is seeded, so the physical fetch itself fails");
         assert!(
-            !matches!(error, crate::Error::OciIndex(super::super::error::Error::Ssrf(_))),
+            !matches!(error, crate::Error::OciIndex(super::super::error::Error::Ssrf { .. })),
             "a trusted host must pass the SSRF guard (failure must come from the fetch, not the guard); got {error:?}"
         );
     }
