@@ -292,9 +292,44 @@ impl PackagePush {
     /// clap-parsed `PackagePush`: the absorption is the parser's doing, and a
     /// test that hand-built the fields would prove nothing about it.
     fn refuse_spaced_ci_annotations(&self) -> Result<(), ocx_lib::cli::UsageError> {
-        conventions::refuse_spaced_ci_value(
+        // `Some(None)` is the bare flag: the `Option<Option<_>>` grammar keeps
+        // bare and `--ci-annotations=gitlab` apart, so only the former can
+        // have lost a value to `layers`.
+        conventions::refuse_spaced_enum_value::<ocx_lib::ci::CiFlavor>(
             "--ci-annotations",
-            self.ci_annotations,
+            matches!(self.ci_annotations, Some(None)),
+            self.layers.iter().map(ToString::to_string),
+        )
+    }
+
+    /// Refuses `--build-timestamp none` — the space form, which
+    /// `require_equals` reads as a bare `--build-timestamp` plus a layer named
+    /// `none`.
+    ///
+    /// The worst of the three guarded flags, because `default_missing_value`
+    /// turns the absorbed value into its **opposite**: the bare flag resolves
+    /// to `Datetime`, so an operator who asked for *no* build metadata gets a
+    /// `_YYYYMMDDhhmmss` suffix published. If no file named `none` exists the
+    /// push then fails on a phantom layer — loud, but blaming a layer for an
+    /// argument mistake. If one *does* exist (a directory named `date`, a stray
+    /// `none`), the push succeeds: an extra bogus layer, and `pkg:1.0+…`
+    /// published where `pkg:1.0` was asked for. A wrong published artifact,
+    /// against `--ci-annotations`' worst case of a missing annotation.
+    ///
+    /// A method rather than an inline call so a test can drive it on a
+    /// clap-parsed `PackagePush`: the absorption is the parser's doing, and a
+    /// test that hand-built the fields would prove nothing about it.
+    fn refuse_spaced_build_timestamp(&self) -> Result<(), ocx_lib::cli::UsageError> {
+        // `default_missing_value = "datetime"` erases the bare/`=` distinction
+        // for `Datetime` alone — every other variant proves the value attached
+        // and so cannot have been lost. Coupled to that clap attribute by
+        // construction; `a_bare_build_timestamp_still_resolves_to_datetime`
+        // fails if the default is ever repointed, which would leave this
+        // precondition silently narrower than the grammar.
+        let could_be_bare = matches!(self.build_timestamp, Some(BuildTimestampFormat::Datetime));
+        conventions::refuse_spaced_enum_value::<BuildTimestampFormat>(
+            "--build-timestamp",
+            could_be_bare,
             self.layers.iter().map(ToString::to_string),
         )
     }
@@ -305,6 +340,10 @@ impl PackagePush {
         // autodetect guesses inside CI (the value silently ignored) and the
         // error it raises outside (which blames the environment instead).
         self.refuse_spaced_ci_annotations()?;
+        // Beside it, and for the same reason: before any auth, upload or
+        // receipt read, because the value never reached the flag and no amount
+        // of registry work can change that answer.
+        self.refuse_spaced_build_timestamp()?;
         // First, because it depends on nothing: a bare `--ci-annotations`
         // outside a detectable CI is a usage error, and a usage error must
         // cost no upload.
@@ -1172,7 +1211,7 @@ mod ci_annotations_flag_tests {
     /// the canonical two would pass `--ci-annotations gitlab-ci` silently.
     #[test]
     fn a_spaced_value_is_refused_with_exit_64() {
-        for value in ["github", "gitlab", "github-actions", "gitlab-ci"] {
+        for value in ["github", "gitlab", "github-actions", "gitlab-ci", "GitLab", "GITHUB"] {
             let error = anyhow::Error::new(
                 parse(&["--ci-annotations", value])
                     .refuse_spaced_ci_annotations()
@@ -1181,9 +1220,12 @@ mod ci_annotations_flag_tests {
 
             assert_eq!(exit_code(&error), 64, "a usage fault is exit 64: {error:#}");
             let message = error.to_string();
+            // `contains(value)` alone would pass on the advice clause below
+            // ("pass --ci-annotations=github or ...") without the message ever
+            // having echoed the token. Anchor it to the phrase that quotes it.
             assert!(
-                message.contains("--ci-annotations") && message.contains(value),
-                "the refusal must name the flag and the token: {message}"
+                message.contains("--ci-annotations") && message.contains(&format!("was given `{value}`")),
+                "the refusal must name the flag and echo the token: {message}"
             );
             assert!(
                 message.contains("--ci-annotations=gitlab") && message.contains("attached with `=`"),
@@ -1197,10 +1239,17 @@ mod ci_annotations_flag_tests {
     /// no flag at all. The `--ci-annotations=gitlab gitlab` row is the one that
     /// pins the bare-flag gate: with the value attached, a layer named `gitlab`
     /// is what the publisher meant, so the heuristic must not reach it.
+    ///
+    /// The bare `./gitlab` row is the escape the guard's own comment promises an
+    /// operator who really has a layer by that name — the promise is worth
+    /// nothing if the only thing tested is a longer path that happens to
+    /// contain the word.
     #[test]
     fn ordinary_invocations_are_not_refused() {
         for argv in [
             vec!["--ci-annotations", "./layer.tar.gz"],
+            vec!["--ci-annotations", "./gitlab"],
+            vec!["--ci-annotations", "./GitLab"],
             vec!["--ci-annotations", "./gitlab/layer.tar.gz"],
             vec!["--ci-annotations=gitlab", "./layer.tar.gz"],
             vec!["--ci-annotations=gitlab", "gitlab"],
@@ -1210,6 +1259,133 @@ mod ci_annotations_flag_tests {
         ] {
             parse(&argv)
                 .refuse_spaced_ci_annotations()
+                .unwrap_or_else(|error| panic!("{argv:?} must not be refused: {error}"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod build_timestamp_flag_tests {
+    //! The space form of `--build-timestamp`, the sibling of the
+    //! `--ci-annotations` module above on the same command and the same
+    //! `layers` positional — and the worse of the two.
+    //!
+    //! `--ci-annotations` loses an annotation. This flag carries
+    //! `default_missing_value = "datetime"`, so the absorbed value is replaced
+    //! by its **opposite**: `--build-timestamp none` publishes a timestamped
+    //! version. Every test parses real argv, because the absorption under test
+    //! is the parser's doing.
+
+    use clap::Parser as _;
+    use ocx_lib::package::version::BuildTimestampFormat;
+
+    use super::PackagePush;
+
+    fn parse(extra: &[&str]) -> PackagePush {
+        let mut argv = vec!["push"];
+        argv.extend_from_slice(extra);
+        argv.extend_from_slice(&["--identifier", "registry.example/pkg:1.0"]);
+        PackagePush::try_parse_from(argv).expect("every argv here is grammatical")
+    }
+
+    fn exit_code(error: &anyhow::Error) -> u8 {
+        crate::app::classify_error(error.as_ref()) as u8
+    }
+
+    /// The premise, and the whole reason this flag outranks `--ci-annotations`:
+    /// the value does not merely fail to attach, it is replaced by the
+    /// `default_missing_value` — so `--build-timestamp none` asks for no build
+    /// metadata and resolves to `Datetime`.
+    ///
+    /// This also pins the guard's precondition. `refuse_spaced_build_timestamp`
+    /// tests for `Some(Datetime)` specifically, which is only sound while
+    /// `Datetime` is what a bare flag resolves to; repointing
+    /// `default_missing_value` without this test would leave the guard
+    /// silently narrower than the grammar.
+    #[test]
+    fn a_bare_build_timestamp_still_resolves_to_datetime() {
+        for (argv, why) in [
+            (vec!["--build-timestamp"], "the bare flag takes the default"),
+            (
+                vec!["--build-timestamp", "none"],
+                "the spaced value is replaced by the default - the inversion",
+            ),
+        ] {
+            let push = parse(&argv);
+            assert_eq!(
+                push.build_timestamp,
+                Some(BuildTimestampFormat::Datetime),
+                "{why}: {argv:?}"
+            );
+        }
+
+        // ...and the value really did land on the layer positional, which is
+        // what makes the wrong-artifact case reachable rather than theoretical.
+        assert_eq!(
+            parse(&["--build-timestamp", "none"])
+                .layers
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["none"],
+            "the value must have fallen through to the layer positional"
+        );
+    }
+
+    /// Exit 64 for all three spellings, plus the mis-cased forms the `=` form
+    /// would itself reject. `none` is the row that matters most: it is the one
+    /// whose silent absorption publishes the opposite of what was asked.
+    #[test]
+    fn a_spaced_value_is_refused_with_exit_64() {
+        for value in ["datetime", "date", "none", "None", "DATE", "DateTime"] {
+            let error = anyhow::Error::new(
+                parse(&["--build-timestamp", value])
+                    .refuse_spaced_build_timestamp()
+                    .expect_err("a spaced value must be refused"),
+            );
+
+            assert_eq!(exit_code(&error), 64, "a usage fault is exit 64: {error:#}");
+            let message = error.to_string();
+            // Anchored to the phrase that quotes the token: `contains(value)`
+            // alone would pass on the advice clause, which lists every
+            // spelling without the message having echoed what was typed.
+            assert!(
+                message.contains("--build-timestamp") && message.contains(&format!("was given `{value}`")),
+                "the refusal must name the flag and echo the token: {message}"
+            );
+            assert!(
+                message.contains("--build-timestamp=none") && message.contains("attached with `=`"),
+                "the refusal must list the value vocabulary and the `=` requirement: {message}"
+            );
+        }
+    }
+
+    /// The negative controls. Two rows carry the weight:
+    ///
+    /// - `--build-timestamp=date none` proves the guard reads the *variant*,
+    ///   not merely "the flag is present": `Date` cannot have come from the
+    ///   default, so a layer named `none` beside it is what the publisher
+    ///   meant. Without that narrowing this row would be refused.
+    /// - `--build-timestamp ./none` is the escape the guard's comment promises
+    ///   an operator who really has such a layer, and `LayerRef`'s own doc
+    ///   already documents `./` as the disambiguator.
+    #[test]
+    fn ordinary_invocations_are_not_refused() {
+        for argv in [
+            vec!["--build-timestamp", "./layer.tar.gz"],
+            vec!["--build-timestamp", "./none"],
+            vec!["--build-timestamp", "./date"],
+            vec!["--build-timestamp", "none.tar.gz"],
+            vec!["--build-timestamp=date", "none"],
+            vec!["--build-timestamp=none", "datetime"],
+            vec!["--build-timestamp=none", "./layer.tar.gz"],
+            vec!["--build-timestamp=datetime"],
+            vec!["none"],
+            vec!["datetime", "./layer.tar.gz"],
+            vec![],
+        ] {
+            parse(&argv)
+                .refuse_spaced_build_timestamp()
                 .unwrap_or_else(|error| panic!("{argv:?} must not be refused: {error}"));
         }
     }

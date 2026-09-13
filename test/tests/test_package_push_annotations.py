@@ -191,8 +191,91 @@ def test_a_spaced_ci_annotations_value_is_a_usage_error(
 
     assert result.returncode == 64, result.stderr
     assert "--ci-annotations" in result.stderr, result.stderr
-    assert "gitlab" in result.stderr, result.stderr
+    # Not a bare `"gitlab" in stderr`: the advice clause below already names
+    # both providers, so that would pass without the message ever echoing the
+    # token. Anchor on the phrase that quotes what was actually given.
+    assert "was given `gitlab`" in result.stderr, result.stderr
     assert "attached with `=`" in result.stderr, result.stderr
+
+
+def test_a_spaced_build_timestamp_value_is_a_usage_error(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """`--build-timestamp none` (space, no `=`) is refused, naming the `=`.
+
+    The sibling of the `--ci-annotations` row above, on the same command and
+    the same layer positional, and the worse of the two: this flag carries
+    `default_missing_value = "datetime"`, so the space form does not merely
+    drop the value -- it substitutes the **opposite** of what was typed. Bare
+    resolves to `datetime`, `none` falls through to the layer positional, and
+    an operator who asked for no build metadata would publish
+    `1.0.0+<timestamp>` plus a bogus layer.
+
+    `none` rather than `date` or `datetime` on purpose: it is the spelling
+    whose silent absorption inverts the request rather than merely restating
+    it. Exit 64 before any upload, which is why the bundle argument names a
+    file that does not exist.
+    """
+    result = ocx.plain(
+        "package",
+        "push",
+        "--build-timestamp",
+        "none",
+        "-p",
+        current_platform(),
+        "-i",
+        f"{ocx.registry}/{unique_repo}:1.0.0",
+        str(tmp_path / "never-read.tar.xz"),
+        check=False,
+    )
+
+    assert result.returncode == 64, result.stderr
+    assert "--build-timestamp" in result.stderr, result.stderr
+    # Anchored on the phrase that quotes the token: the advice clause lists
+    # every spelling, so a bare `"none" in stderr` would pass on that alone.
+    assert "was given `none`" in result.stderr, result.stderr
+    assert "attached with `=`" in result.stderr, result.stderr
+
+
+def test_an_attached_build_timestamp_beside_a_same_named_layer_is_accepted(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+) -> None:
+    """The control for the row above: `--build-timestamp=date none` is NOT refused.
+
+    With the value attached, a layer literally named `none` is what the
+    publisher meant, so the guard must not reach it -- and `Date` could not
+    have come from `default_missing_value`, which is what lets the guard tell
+    the two apart. Without that narrowing this invocation would exit 64.
+
+    It still fails, on the missing layer file, which is the point: the run got
+    past argv validation and into the push. The assertion is therefore that the
+    refusal is NOT the guard's, checked on the guard's own phrase rather than
+    on an exit code the push shares with it.
+    """
+    result = ocx.plain(
+        "package",
+        "push",
+        "--build-timestamp=date",
+        "-p",
+        current_platform(),
+        "-i",
+        f"{ocx.registry}/{unique_repo}:1.0.0",
+        "none",
+        check=False,
+    )
+
+    assert "was given `none`" not in result.stderr, (
+        f"the guard must not fire on an attached value: {result.stderr}"
+    )
+    assert "attached with `=`" not in result.stderr, (
+        f"the guard must not fire on an attached value: {result.stderr}"
+    )
+    # The positive half: the run reached the layer read, which only happens
+    # after argv validation passed. Without this a guard that refused with a
+    # different message would still satisfy the two negatives above.
+    assert "none" in result.stderr, (
+        f"the push must have reached the layer named `none`: {result.stderr}"
+    )
 
 
 def test_the_report_lists_the_annotations_written(

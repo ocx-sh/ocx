@@ -247,6 +247,35 @@ def test_ci_bare_autodetect_no_ci_env_is_usage_error(
     )
 
 
+def test_a_spaced_ci_value_is_a_usage_error(
+    ocx: OcxRunner, published_package: PackageInfo
+) -> None:
+    """``--ci gitlab <pkg>`` (space, no ``=``) is refused, naming the ``=``.
+
+    Run under a faked GitLab runner, which is the point: ``require_equals``
+    leaves the flag bare, so ``gitlab`` falls through to the package positional
+    and autodetection then SUCCEEDS -- without the guard the run resolves a
+    package nobody named and blames the registry for an argument mistake.
+
+    This is the only test that exercises the guard's call site in
+    ``Env::execute``; the Rust unit tests call the guard method directly, so
+    deleting the call would leave them green.
+    """
+    env = {**ocx.env, "GITLAB_CI": "true"}
+
+    result = _run_env(ocx, "--ci", "gitlab", published_package.short, env=env)
+
+    assert result.returncode == EXIT_USAGE, (
+        f"a spaced --ci value must exit {EXIT_USAGE}; got {result.returncode}\n"
+        f"stderr:\n{result.stderr}"
+    )
+    assert "--ci" in result.stderr, result.stderr
+    # Not a bare `"gitlab" in stderr`: the advice clause already names both
+    # providers, so that would pass without the message ever echoing the token.
+    assert "was given `gitlab`" in result.stderr, result.stderr
+    assert "attached with `=`" in result.stderr, result.stderr
+
+
 def test_ci_command_still_removed(
     ocx: OcxRunner, published_package: PackageInfo, tmp_path: Path
 ) -> None:

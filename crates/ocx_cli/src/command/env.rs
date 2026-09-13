@@ -139,7 +139,35 @@ impl Env {
         }
     }
 
+    /// Refuses `--ci github` — the space form, which `require_equals` reads as
+    /// a bare `--ci` plus a package named `github`.
+    ///
+    /// The same refusal `ocx package push` applies to `--ci-annotations`: both
+    /// sit beside a positional that absorbs the detached value. Here the
+    /// absorbed token becomes a package reference that then fails to resolve,
+    /// so the space form was never silent — it just blamed the registry for a
+    /// mistake in the argument. The third declaration site, root `ocx env`
+    /// (`toolchain_env.rs`), needs no guard at all: it declares no positional,
+    /// so clap refuses the detached value itself as an unexpected argument.
+    ///
+    /// A method rather than an inline call so a test can drive it on a
+    /// clap-parsed `Env`: the absorption is the parser's doing, and a test
+    /// that hand-built the fields would prove nothing about it.
+    fn refuse_spaced_ci(&self) -> Result<(), ocx_lib::cli::UsageError> {
+        // `Some(None)` is the bare flag: the `Option<Option<_>>` grammar keeps
+        // bare and `--ci=gitlab` apart, so only the former can have lost a value.
+        refuse_spaced_enum_value::<ocx_lib::ci::CiFlavor>(
+            "--ci",
+            matches!(self.ci, Some(None)),
+            self.packages.iter().map(ToString::to_string),
+        )
+    }
+
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        // Before the autodetect below, not after: a value written with a space
+        // never reached the flag at all, and saying so beats both what
+        // autodetect guesses inside CI and the error it raises outside.
+        self.refuse_spaced_ci()?;
         // Resolve `--ci` early so a bare-`--ci` autodetect failure surfaces as a
         // usage error before the (potentially slow) find-or-install resolution.
         // `--ci` is mutually exclusive with `--shell` (clap `conflicts_with`).
@@ -273,5 +301,122 @@ impl Env {
         )?;
 
         Ok(ExitCode::SUCCESS)
+    }
+}
+
+#[cfg(test)]
+mod ci_flag_tests {
+    //! The space form of `--ci`, which the grammar cannot take as a value.
+    //!
+    //! `require_equals` stays: it is a shipped contract on both `--ci`
+    //! declarations, so the fix is a refusal rather than a looser grammar.
+    //! Every test parses real argv, because the absorption under test is the
+    //! parser's doing — this command's positional is `required = true,
+    //! num_args = 1..`, so the detached value lands in `packages`.
+
+    use clap::Parser as _;
+
+    use super::Env;
+
+    fn parse(argv: &[&str]) -> Env {
+        let mut full = vec!["env"];
+        full.extend_from_slice(argv);
+        Env::try_parse_from(full).expect("every argv here is grammatical")
+    }
+
+    /// The code the process would exit with, through the same authority
+    /// `main.rs` uses.
+    fn exit_code(error: &anyhow::Error) -> u8 {
+        crate::app::classify_error(error.as_ref()) as u8
+    }
+
+    /// The premise the guard rests on: clap leaves the flag bare and hands the
+    /// value to the package positional. If a clap upgrade ever attached it,
+    /// the guard would become dead code — and this is what would say so.
+    #[test]
+    fn a_spaced_value_never_reaches_the_flag() {
+        let env = parse(&["--ci", "github", "ripgrep"]);
+
+        assert_eq!(env.ci, Some(None), "the flag must be left bare");
+        assert_eq!(
+            env.packages.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["github", "ripgrep"],
+            "the value must have fallen through to the package positional"
+        );
+    }
+
+    /// Exit 64, naming the token and the `=` requirement — for every spelling
+    /// the `=` form would have accepted, aliases included. A mis-cased
+    /// spelling cannot reach the guard on this tier at all; see
+    /// [`a_mis_cased_provider_is_refused_before_the_guard`].
+    #[test]
+    fn a_spaced_value_is_refused_with_exit_64() {
+        for value in ["github", "gitlab", "github-actions", "gitlab-ci"] {
+            let error = anyhow::Error::new(
+                parse(&["--ci", value, "ripgrep"])
+                    .refuse_spaced_ci()
+                    .expect_err("a spaced value must be refused"),
+            );
+
+            assert_eq!(exit_code(&error), 64, "a usage fault is exit 64: {error:#}");
+            let message = error.to_string();
+            // `contains(value)` alone would pass on the advice clause below
+            // ("pass --ci=github or ...") without the message ever having
+            // echoed the token. Anchor it to the phrase that quotes it.
+            assert!(
+                message.contains("--ci") && message.contains(&format!("was given `{value}`")),
+                "the refusal must name the flag and echo the token: {message}"
+            );
+            assert!(
+                message.contains("--ci=gitlab") && message.contains("attached with `=`"),
+                "the refusal must name the `=` requirement: {message}"
+            );
+        }
+    }
+
+    /// Why the guard's case-insensitive match is unreachable here, and must not
+    /// be "fixed" to compensate: an OCI repository name is lowercase, so
+    /// `--ci GitLab <pkg>` fails in the positional's own value parser before
+    /// `execute` runs. The push tier has no such parser — a layer path may be
+    /// `GitLab` — which is why the shared guard matches case-insensitively and
+    /// why this tier still gets exit 64, just from clap and with clap's message.
+    #[test]
+    fn a_mis_cased_provider_is_refused_before_the_guard() {
+        for value in ["GitLab", "GITHUB"] {
+            let Err(error) = Env::try_parse_from(["env", "--ci", value, "ripgrep"]) else {
+                panic!("`{value}` is not a legal package reference and must not parse");
+            };
+
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{value} must fail the package positional's value parser, got: {error}"
+            );
+        }
+    }
+
+    /// The negative controls. The `--ci=github github` row is the one that
+    /// pins the bare-flag gate: with the value attached, a package named
+    /// `github` is what the caller meant, so the heuristic must not reach it.
+    ///
+    /// The last two rows are this tier's escape, the counterpart of the layer
+    /// path's `./gitlab`: a package genuinely called `github` is reachable by
+    /// qualifying the reference, since neither a tag nor a registry prefix
+    /// names a `CiFlavor`.
+    #[test]
+    fn ordinary_invocations_are_not_refused() {
+        for argv in [
+            vec!["--ci", "ripgrep"],
+            vec!["--ci", "acme/github-cli"],
+            vec!["--ci=github", "ripgrep"],
+            vec!["--ci=github", "github"],
+            vec!["ripgrep"],
+            vec!["--ci", "github:latest"],
+            vec!["--ci", "ocx.sh/github"],
+        ] {
+            parse(&argv)
+                .refuse_spaced_ci()
+                .unwrap_or_else(|error| panic!("{argv:?} must not be refused: {error}"));
+        }
     }
 }
