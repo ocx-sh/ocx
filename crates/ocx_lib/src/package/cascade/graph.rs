@@ -226,6 +226,7 @@ pub enum SlotStatus {
 #[derive(Clone, Debug, Serialize, schemars::JsonSchema)]
 pub struct SlotRow {
     pub tag: AliasTag,
+    /// OCI platform object: `{os, architecture, variant?}`.
     // `oci_client::manifest::Platform` is registry-defined and cannot carry our
     // derive; it is published as free-form JSON rather than mirrored here.
     #[schemars(with = "serde_json::Value")]

@@ -416,4 +416,58 @@ mod tests {
     fn the_marker_never_reaches_the_published_document() {
         assert!(!reports_schema().contains(ABSENT_WHEN_NONE));
     }
+
+    /// Every `.rs` under `crates/`, with its `#[cfg(test)]` half removed.
+    fn crate_sources() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).expect("a readable directory under crates/") {
+                let path = entry.expect("a readable directory entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let body = std::fs::read_to_string(&path).expect("a readable source file");
+                    let body = body.split("#[cfg(test)]").next().unwrap_or_default().to_owned();
+                    out.push((path.to_string_lossy().into_owned(), body));
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".."), &mut files);
+        files.sort();
+        files
+    }
+
+    /// schemars keys `$defs` by `schema_id`, which a hand-written impl leaves
+    /// at its `schema_name` — so two manual impls returning the same name
+    /// silently overwrite each other in the published document, while derives
+    /// self-disambiguate. `package::version::Version` and
+    /// `metadata::bundle::Version` shipped that way once: `SlotRow.source`
+    /// published as the bundle format's `integer enum [1]`.
+    #[test]
+    fn manual_schema_names_are_unique_across_the_workspace() {
+        let mut owners: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+        for (file, body) in crate_sources() {
+            for (at, _) in body.match_indices("fn schema_name()") {
+                let tail = &body[at..];
+                let Some(start) = tail.find('"') else { continue };
+                let literal = &tail[start + 1..];
+                let Some(end) = literal.find('"') else { continue };
+                owners.entry(literal[..end].to_owned()).or_default().push(file.clone());
+            }
+        }
+        assert!(
+            !owners.is_empty(),
+            "the walk found no manual `schema_name` impls — wrong root?"
+        );
+        let collisions: Vec<String> = owners
+            .iter()
+            .filter(|(_, files)| files.len() > 1)
+            .map(|(name, files)| format!("{name}: {}", files.join(", ")))
+            .collect();
+        assert!(
+            collisions.is_empty(),
+            "manual JsonSchema impls share a schema_name — the later one overwrites the earlier in `$defs`:\n{}",
+            collisions.join("\n")
+        );
+    }
 }
