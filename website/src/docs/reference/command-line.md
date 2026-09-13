@@ -3091,6 +3091,22 @@ ocx package claim --repository oci://<HOST>/<PATH> [OPTIONS] <NAMESPACE>/<PACKAG
 | Any mode other than `--out` run with no forge credential, the credential was rejected (401/403), or — without `--fork` — it cannot push to `--index-repo`. The last is checked before anything is written and names the repository and the missing permission | 80 |
 | `--transport git` was selected and the forge answered, but the instance or the target project lacks a capability that transport needs — job-token pushes disabled on the index project, or neither of its allowlists (the publishing project by name, or one of its groups) admits it. A [split credential pair][authoring-announcing-split] names the missing one; a bare job token cannot read either setting, so the message is generic instead. An administrator of the index project has to act either way | 86 |
 
+**`detail` discriminants for `package claim`** (frozen contract C-S1-1):
+
+| `detail` value | Exit | Meaning |
+|----------------|------|---------|
+| `package_already_claimed` | 65 | An entry is already committed on the index's base branch — the idempotent steady state; run [`ocx package announce`](#package-announce) |
+| `malformed_repository` | 64 | `--repository` is not `oci://host/path` |
+| `no_acting_identity` | 64 | The credential has no account and the CI environment named none |
+| `invalid_owner_login` | 64 | `--owner` is neither a `LOGIN` nor a `LOGIN:ID` pair |
+| `duplicate_owner` | 64 | An owner was named twice |
+| `owner_id_mismatch` | 64 | The supplied id disagrees with the forge's |
+| `bot_identity` | 64 | The owner login is a bot account, or has a documented bot shape |
+| `owner_unknown` | 79 | The forge has no account for the owner login |
+| `output_write` | 74 | Writing under `--out` failed |
+| `forge` | inherited | The forge call itself failed; the exit code is the forge error's own (69, 75, 77, 80, 86 above) |
+| `forge_required`, `missing_base_ref`, `missing_head_root` | 1 | A broken internal invariant, not an operator error |
+
 **JSON report**
 
 ```json

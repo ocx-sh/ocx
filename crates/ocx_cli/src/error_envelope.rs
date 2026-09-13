@@ -229,11 +229,15 @@ fn collect_context(err: &(dyn std::error::Error + 'static)) -> BTreeMap<&'static
 /// errors. Returning `None` (no match) leaves `detail` absent in the JSON
 /// envelope via `skip_serializing_if`.
 fn collect_detail(err: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
+    use ocx_lib::claim::ClaimError;
     use ocx_lib::oci::sign::SignErrorKind;
     use ocx_lib::oci::verify::VerifyErrorKind;
     use ocx_lib::publisher::CopyErrorKind;
 
     for cause in std::iter::successors(Some(err), |e| e.source()) {
+        if let Some(error) = cause.downcast_ref::<ClaimError>() {
+            return Some(error.kind_detail());
+        }
         if let Some(kind) = cause.downcast_ref::<SignErrorKind>() {
             return Some(kind.kind_detail());
         }
@@ -588,6 +592,24 @@ mod tests {
         assert_eq!(parsed["exit_code"], 77);
         assert_eq!(parsed["error"]["kind"], "permission_denied");
         assert_eq!(parsed["error"]["detail"], "identity_mismatch");
+    }
+
+    #[test]
+    fn envelope_detail_populated_for_package_already_claimed() {
+        // #458: the idempotent-CI steady state ("already claimed, go announce")
+        // exited 65 with no `detail`, so an SDK could not tell it from any
+        // other DataError without matching on the message text.
+        let inner = ocx_lib::claim::ClaimError::PackageAlreadyClaimed {
+            package: "acme/widget".into(),
+            path: "p/acme/widget.json".into(),
+            base_ref: "main".into(),
+        };
+        let err = anyhow::Error::from(inner);
+        let json = render_error_envelope("package claim", &err).expect("render ok");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed["exit_code"], 65);
+        assert_eq!(parsed["error"]["kind"], "data_error");
+        assert_eq!(parsed["error"]["detail"], "package_already_claimed");
     }
 
     #[test]
