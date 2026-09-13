@@ -285,7 +285,7 @@ The envelope has three top-level keys — all stable v1 contract:
 
 ### JUnit reports for CI {#scripted-tests-junit}
 
-`--junit PATH` writes a JUnit XML report beside the JSON envelope, so a CI system can
+`--junit PATH` writes a [JUnit XML][junit-xml-format] report beside the JSON envelope, so a CI system can
 surface the run as a test result instead of a bare exit code:
 
 ```sh
@@ -298,20 +298,23 @@ Parent directories are created, so the pipeline needs no `mkdir` step.
 The file holds one `<testsuite name="ocx package test <identifier>">` with one
 `<testcase classname="<identifier>" name="<platform>">` — one invocation tests one
 identifier on one platform. A failing assertion becomes a `<failure>` carrying the
-failing `expect.*` kind as `type=`, its first diagnostic line as `message=`, the full
-multi-line diagnostic as the element body, and `file`/`line` pointing at the failing
-statement in the script. A script that never delivered a verdict at all — unreadable,
-syntactically broken, or timed out — becomes an `<error>` instead. Captured stdout and
-stderr are attached as `system-out`/`system-err` on every run, passing or failing.
+failing `expect.*` kind as `type=`, its first diagnostic line as `message=`, and the full
+multi-line diagnostic as the element body. It also carries `file`/`line` pointing at the
+failing statement in the script — unless the script came from `--script -` (stdin), in
+which case there is no source file to point at and both attributes are omitted. A script
+that never delivered a verdict at all — unreadable, syntactically broken, or timed out —
+becomes an `<error>` instead. Captured stdout and stderr are attached as
+`system-out`/`system-err` on every run that produced captured output.
 
-The report is written on every exit path, including a red run and an unreadable
-`--script` path. Neither the JSON envelope on stdout nor the exit code changes.
+The report is written whenever the scripted run is reached, including a red run and an
+unreadable `--script` path; a failure resolving the package beforehand writes none. The
+JSON envelope on stdout and the exit code are unchanged either way.
 
 #### One path per platform {#scripted-tests-junit-per-platform}
 
 An existing file is **truncated**, never merged: ocx writes the one testcase it just
-produced and nothing else. Give every matrix leg its own path and let the CI system
-merge them — that is what both GitLab and the GitHub test-report actions do:
+produced and nothing else. Give every matrix leg its own path, or point every leg at
+one path and keep only the last leg's result:
 
 ```yaml
 test:
@@ -326,9 +329,9 @@ test:
       junit: build/junit/*.xml
 ```
 
-Because the suite name is identical across legs and the case name is the platform, the
-glob merges into one suite with one case per platform. Point every leg at one path and
-you keep only the last leg's result.
+What the `artifacts:reports:junit` glob buys you differs by CI system. [GitLab][gitlab-unit-test-reports] parses the `<testsuite name=>` attribute for internal grouping only — it is never displayed — and its test report UI labels each suite by `testcase classname` instead, which ocx sets to the same identifier as `<testsuite name>`, so a GitLab reader still sees the package identifier as the suite label. Each `parallel: matrix` leg is its own job with its own report, and the glob only collects the three files as job artifacts; it does not merge their contents into one suite, so the three platforms above show up as three separate entries in GitLab's test report UI, one per leg.
+
+The shared suite name and per-platform case name are for the other consumer: a [GitHub test-reporter action][github-test-reporter] that downloads the JUnit artifacts from every matrix leg's job and parses them together sees one suite (`ocx package test <identifier>`) with one `<testcase>` per platform, because nothing about the file distinguishes which leg produced it except the `name=` this scheme deliberately keeps platform-specific. That is the shape to design for on GitHub; on GitLab, plan for one suite per leg instead.
 
 `--junit` requires `--script`; it is not available for the trailing `-- CMD` form.
 
@@ -361,6 +364,9 @@ For `.star` syntax highlighting in VS Code, add the [vscode-bazel][vscode-bazel]
 [buck2]: https://buck2.build/
 [rust-regex]: https://docs.rs/regex/latest/regex/#syntax
 [vscode-bazel]: https://marketplace.visualstudio.com/items?itemName=BazelBuild.vscode-bazel
+[junit-xml-format]: https://llg.cubic.org/docs/junit/
+[gitlab-unit-test-reports]: https://docs.gitlab.com/ci/testing/unit_test_reports/
+[github-test-reporter]: https://github.com/dorny/test-reporter
 
 <!-- commands -->
 [cmd-package-push]: ../reference/command-line.md#package-push
