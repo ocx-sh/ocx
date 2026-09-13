@@ -239,8 +239,16 @@ beside `--shell` and the structured report. It writes the composed env into a
 CI system's persistence channel so tool dirs/vars reach **later** pipeline
 steps (`--shell` only affects the current step). Realizes handshake §6; ADR
 `adr_ci_env_export_flag.md`. Library half lives in `ocx_lib::ci` (`CiFlavor`,
-`Flavor`, `github_flavor.rs`, `gitlab_flavor.rs`); the CLI wiring is two shared
-helpers in `conventions.rs` (`resolve_ci_arg`, `export_ci`).
+`Flavor`, `github_flavor.rs`, `gitlab_flavor.rs`); the CLI wiring is three shared
+helpers in `conventions.rs` (`resolve_ci_arg`, `export_ci`,
+`refuse_spaced_enum_value`).
+
+**A `require_equals` flag declared beside a positional calls
+`refuse_spaced_enum_value` when the positional's value space does not plausibly
+collide with the flag's value vocabulary** — three do (`package env --ci`,
+`package push --ci-annotations`, `package push --build-timestamp`), `--shell`
+deliberately does not, and each call site states its own precondition; the
+discriminator and the `--shell` trade are in that helper's `ponytail:` comment.
 
 - Declared `Option<Option<CiFlavor>>` with `num_args=0..=1, require_equals=true,
   conflicts_with = "shell"` (same grammar as `--shell`). Bare `--ci` autodetects

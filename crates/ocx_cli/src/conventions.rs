@@ -381,20 +381,30 @@ fn resolve_ci_flavor_with(
 fn undetectable_ci_provider(flag: &str) -> UsageError {
     UsageError::new(format!(
         "could not autodetect CI provider; {}",
-        ci_value_needs_equals(flag)
+        value_needs_equals::<CiFlavor>(flag)
     ))
 }
 
-/// The `=`-requirement clause, in one spelling. Both refusals a `--ci`-shaped
-/// flag can raise — the undetectable provider above and the spaced value below
-/// — state the same rule, and two phrasings of one rule is one phrasing too
-/// many.
-fn ci_value_needs_equals(flag: &str) -> String {
-    format!("pass {flag}=github or {flag}=gitlab; the value must be attached with `=`")
+/// The `=`-requirement clause, in one spelling, listing `V`'s whole value
+/// vocabulary. Every refusal a `require_equals` flag can raise — the
+/// undetectable CI provider above and the spaced value below — states the same
+/// rule, and two phrasings of one rule is one phrasing too many.
+///
+/// Derived from `V::value_variants()` rather than written out per flag, so a
+/// new variant cannot leave a suggestion listing the old set. An alias
+/// (`github-actions`) is not offered: `get_name` gives the canonical spelling,
+/// which is the one to teach.
+fn value_needs_equals<V: clap::ValueEnum>(flag: &str) -> String {
+    let spellings: Vec<String> = V::value_variants()
+        .iter()
+        .filter_map(clap::ValueEnum::to_possible_value)
+        .map(|value| format!("{flag}={}", value.get_name()))
+        .collect();
+    format!("pass {}; the value must be attached with `=`", spellings.join(" or "))
 }
 
-/// Refuses a `--ci`-shaped flag whose value was written with a space instead of
-/// `=`, which the grammar silently reads as a bare flag plus a positional.
+/// Refuses a `require_equals` flag whose value was written with a space instead
+/// of `=`, which the grammar silently reads as a bare flag plus a positional.
 ///
 /// `require_equals` means `--ci-annotations gitlab` never attaches `gitlab` to
 /// the flag: the flag stays bare and `gitlab` falls through to the command's
@@ -404,36 +414,65 @@ fn ci_value_needs_equals(flag: &str) -> String {
 /// consumed as a layer path with nothing said at all. `positionals` carries the
 /// command's positional arguments as argv saw them.
 ///
-/// ponytail: a heuristic, deliberately. It fires on any positional that the
-/// `CiFlavor` grammar would have accepted as a value, so a layer path literally
-/// named `github` or `gitlab` is refused too — such a path is implausible, and
-/// an operator who has one writes `./gitlab`. Do not "fix" this by deleting the
-/// guard: the alternative is the silent misparse above, on a real runner, where
-/// nobody is reading stderr.
-pub fn refuse_spaced_ci_value(
+/// `flag_could_have_lost_its_value` is the caller's grammar test, because the
+/// two shipped grammars answer it differently and neither can be derived here:
+///
+/// - `Option<Option<V>>` (`--ci`, `--ci-annotations`): `Some(None)` *is* the
+///   bare flag. An absent flag had no value to lose; `--ci=gitlab` attached.
+/// - `Option<V>` **with `default_missing_value`** (`--build-timestamp`): the
+///   bare form is resolved to the default before anyone sees it, so bare and
+///   `=<default>` are indistinguishable. The test is therefore "did it resolve
+///   to the `default_missing_value` variant" — any *other* variant proves the
+///   `=` form was used and nothing can have been lost.
+///
+/// ponytail: a heuristic, deliberately. It fires on any positional that names a
+/// `V` **case-insensitively**, so a layer path literally named `github`,
+/// `gitlab` or `GitLab` is refused too. Such a path is implausible, and an
+/// operator who has one escapes it — `./gitlab` for a layer path, a qualified
+/// reference (`gitlab:latest`, `ocx.sh/gitlab`) for a package. Do not "fix" this
+/// by deleting the guard: the alternative is the silent misparse above, on a
+/// real runner, where nobody is reading stderr.
+///
+/// Case-insensitive even though `--ci=GitLab` is a clap parse error, so the
+/// guard refuses a spelling the `=` form would reject. That asymmetry is the
+/// point: the `=` form fails loudly on its own, while the space form absorbs
+/// the token in silence, and a mis-cased value is the likeliest way to mistype
+/// one.
+///
+/// ponytail: the discriminator for *whether a flag gets this guard at all* is
+/// **whether the positional's value space plausibly collides with the flag's
+/// value vocabulary** — not whether the grammar matches. Three flags qualify
+/// (`env --ci`, `push --ci-annotations`, `push --build-timestamp`), because no
+/// plausible layer path or package reference is named `github`, `gitlab`,
+/// `datetime`, `date` or `none`. `--shell` carries the identical grammar beside
+/// the same positional and is deliberately **left unguarded**, because `bash`,
+/// `zsh` and `fish` are all plausible *package* names: `ocx package env --shell
+/// bash` is a legitimate request for the `bash` package's environment. That is
+/// not hypothetical — this repository's own CI already passes shell packages to
+/// `package env` positionally (`.github/workflows/shell-activation-deep.yml`
+/// runs it against `nushell/nushell`, `elvish/elvish` and
+/// `powershell/powershell`). Those particular invocations would survive a guard
+/// twice over, by naming two segments and by attaching `--shell=bash` with `=`
+/// — but they are the shape a one-segment name would arrive in, and a guard
+/// would refuse it. Same grammar, opposite trade.
+pub fn refuse_spaced_enum_value<V: clap::ValueEnum>(
     flag: &str,
-    ci: Option<Option<CiFlavor>>,
+    flag_could_have_lost_its_value: bool,
     positionals: impl IntoIterator<Item = String>,
 ) -> Result<(), UsageError> {
-    use clap::ValueEnum as _;
-
-    // Only a *bare* flag can have lost its value to the positional parser: an
-    // absent flag has no value to lose, and `--ci-annotations=gitlab` attached.
-    if !matches!(ci, Some(None)) {
+    if !flag_could_have_lost_its_value {
         return Ok(());
     }
-    // Case-sensitively, exactly as clap would have parsed the value, so the
-    // guard refuses only what the `=` form would have accepted.
-    let Some(token) = positionals
-        .into_iter()
-        .find(|token| CiFlavor::from_str(token, false).is_ok())
-    else {
+    // Case-insensitively (`ignore_case = true`): a mis-cased `GitLab` is the
+    // likeliest mistype, and here it is absorbed silently rather than refused
+    // by clap as the `=` form would be.
+    let Some(token) = positionals.into_iter().find(|token| V::from_str(token, true).is_ok()) else {
         return Ok(());
     };
     Err(UsageError::new(format!(
         "{flag} was given `{token}` as a separate argument, so `{token}` parsed as a positional \
          argument and not as the flag's value; {}",
-        ci_value_needs_equals(flag)
+        value_needs_equals::<V>(flag)
     )))
 }
 
