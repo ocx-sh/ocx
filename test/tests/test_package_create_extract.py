@@ -59,12 +59,13 @@ ARCHIVE_SUFFIXES = [".tar.gz", ".tar.zst", ".zip"]
 
 
 def _archive(tmp_path: Path, suffix: str, files: dict[str, tuple[str, int]], **kwargs) -> Path:
-    """Build `hello<suffix>` under `tmp_path`, skipping if the format is unavailable."""
-    if suffix == ".tar.zst":
-        pytest.importorskip(
-            "compression.zstd",
-            reason="stdlib zstd arrived in Python 3.14; no other zstd writer is a test dependency",
-        )
+    """Build `hello<suffix>` under `tmp_path`.
+
+    Every suffix here is buildable unconditionally: `compression.zstd` is stdlib
+    from 3.14, which `pyproject.toml` declares as the floor. The
+    `pytest.importorskip` that used to guard `.tar.zst` never observed its own
+    cause (W23) — it could only fire below the declared floor, so a green row
+    and a silently skipped one were indistinguishable."""
     return build_archive(tmp_path / f"hello{suffix}", files, **kwargs)
 
 
