@@ -97,9 +97,29 @@ ocx package push -c -p linux/amd64 -i ghcr.io/acme/tools/widget:1.2.3 \
   widget-1.2.3-linux-amd64.tar.xz
 ```
 
-In CI the value is already in the environment — on [GitHub Actions][github-actions-docs] it is `$GITHUB_SERVER_URL/$GITHUB_REPOSITORY`. OCX deliberately does not read that variable itself: a package built anywhere other than the forge you assumed would then silently claim provenance it does not have, and OCX publishes to any registry from any forge.
-
 The annotation lands on the [image index][oci-image-index] of every tag the push writes, cascade tags included, so a rolling alias never advertises weaker provenance than the version tag it points at. Repeat the flag for other keys — `org.opencontainers.image.revision` for the commit, `org.opencontainers.image.licenses` for the SPDX expression. Leaving the flag off writes nothing and leaves any annotation an earlier push set in place.
+
+### Stamping From CI {#source-annotation-ci}
+
+In CI the values are already in the environment, and `--ci-annotations` reads them:
+
+```shell
+ocx package push -c --ci-annotations=gitlab -i $CI_REGISTRY_IMAGE/widget:1.2.3 \
+  widget-1.2.3-linux-amd64.tar.xz
+```
+
+| Annotation | [GitHub Actions][github-actions-docs] | [GitLab CI/CD][gitlab-ci-variables] |
+| --- | --- | --- |
+| `org.opencontainers.image.source` | `$GITHUB_SERVER_URL/$GITHUB_REPOSITORY` | `$CI_PROJECT_URL` |
+| `org.opencontainers.image.revision` | `$GITHUB_SHA` | `$CI_COMMIT_SHA` |
+| `org.opencontainers.image.created` | the push clock | `$CI_PIPELINE_CREATED_AT` |
+| `org.opencontainers.image.version` | the version the push resolved | same |
+
+`$SOURCE_DATE_EPOCH`, when set, decides `created` on either — a [reproducible build][reproducible-builds-sde] stamps one instant, not two. A variable that is unset or blank writes no annotation rather than an empty one, and an explicit `--annotation` on the same key wins.
+
+The flag is opt-in, and stays opt-in: a package built somewhere other than the forge you assumed would otherwise silently claim provenance it does not have, and OCX publishes to any registry from any forge.
+
+`version` is the row that earns the flag. The other three are three lines of `--annotation` in any pipeline. That one is not: omit `--identifier` and the tag comes from the [build receipt][cmd-package-create-receipt] beside the bundle, so a pipeline computing annotations up front does not yet know what it is about to publish — while the push, which resolved it, does. Bare `--ci-annotations` autodetects the provider from the environment and exits 64 when there is none to detect.
 
 ## Reusing Layers Across Packages {#layer-reuse}
 
@@ -161,6 +181,8 @@ For command flags, token-source precedence, and exit codes see the
 
 <!-- external -->
 [oci-image-index]: https://github.com/opencontainers/image-spec/blob/main/image-index.md
+[gitlab-ci-variables]: https://docs.gitlab.com/ci/variables/predefined_variables/
+[reproducible-builds-sde]: https://reproducible-builds.org/docs/source-date-epoch/
 [oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
 [oci-dist-spec]: https://github.com/opencontainers/distribution-spec/blob/main/spec.md
 [ghcr-repo-link]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
@@ -174,6 +196,7 @@ For command flags, token-source precedence, and exit codes see the
 
 <!-- commands -->
 [cmd-package-create]: ../reference/command-line.md#package-create
+[cmd-package-create-receipt]: ../reference/command-line.md#package-create-receipt
 [cmd-package-push]: ../reference/command-line.md#package-push
 [cmd-package-push-annotations]: ../reference/command-line.md#package-push-annotations
 [cmd-package-describe]: ../reference/command-line.md#package-description-push

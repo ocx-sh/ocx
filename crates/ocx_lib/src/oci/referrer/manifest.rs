@@ -135,22 +135,34 @@ pub(crate) fn bundle_annotations(created: &str, content: &str, predicate_type: &
 /// wrapper. Two independent clock reads would let one of them stop honouring
 /// `SOURCE_DATE_EPOCH` without anything noticing.
 pub(crate) fn bundle_now() -> chrono::DateTime<chrono::Utc> {
-    // var_os, not var: `var` folds a non-UTF-8 value into an Err that an
-    // `.ok()` would drop silently, and a value we cannot read is exactly the
-    // malformed case the branch below exists to report.
-    let raw = std::env::var_os("SOURCE_DATE_EPOCH");
-    let fixed = raw.as_deref().and_then(|raw| {
-        let parsed = raw.to_str().and_then(created_from_epoch);
-        if parsed.is_none() {
-            // Reproducible-builds says a builder SHOULD reject a malformed
-            // value. Refusing here would need a new error variant on the sign
-            // path for a field with no security role, so we fall back to the
-            // clock and make the lost determinism visible instead of silent.
-            crate::log::warn!("ignoring malformed SOURCE_DATE_EPOCH {raw:?}; using the current time");
-        }
-        parsed
-    });
-    fixed.unwrap_or_else(chrono::Utc::now)
+    pinned_instant().unwrap_or_else(chrono::Utc::now)
+}
+
+/// The instant `SOURCE_DATE_EPOCH` pins, or `None` when it is unset, blank, or
+/// malformed.
+///
+/// The single reader of `SOURCE_DATE_EPOCH` across every instant OCX stamps —
+/// the sign/attest bundle ([`bundle_now`]) and the CI push annotations
+/// ([`crate::ci::annotations`]) both call it, so a blank or malformed value
+/// warns and falls back to the clock identically on both paths rather than
+/// warning on one and staying silent on the other. Read through
+/// [`crate::env::var`] (the one runtime reader, which already warns on a
+/// non-UTF-8 value) rather than `std::env::var_os`, so both callers observe the
+/// same value and the same test seam.
+pub(crate) fn pinned_instant() -> Option<chrono::DateTime<chrono::Utc>> {
+    let raw = crate::env::var("SOURCE_DATE_EPOCH")?;
+    let parsed = created_from_epoch(&raw);
+    if parsed.is_none() {
+        // Reproducible-builds says a builder SHOULD reject a malformed value.
+        // Refusing here would need a new error variant on the sign path for a
+        // field with no security role, so we fall back to the clock and make
+        // the lost determinism visible instead of silent. An empty value is
+        // set-but-unusable and takes the same branch. The key alone, never the
+        // value: a CI job log is durable and read by more parties than the
+        // process environment.
+        crate::log::warn!("ignoring malformed SOURCE_DATE_EPOCH; using the current time");
+    }
+    parsed
 }
 
 /// Formats [`bundle_now`]'s instant for [`CREATED`].
@@ -163,13 +175,15 @@ pub(crate) fn bundle_created(now: chrono::DateTime<chrono::Utc>) -> String {
 }
 
 /// Parses a `SOURCE_DATE_EPOCH` value: decimal seconds since the Unix epoch,
-/// surrounding whitespace tolerated. Split out from [`bundle_created`] so the
+/// surrounding whitespace tolerated. Split out from [`pinned_instant`] so the
 /// epoch path is reachable from a test without mutating the process
-/// environment (TEST-05).
+/// environment (TEST-05). [`pinned_instant`] is the single reader of the
+/// variable, so one function decides what it means across every instant OCX
+/// stamps.
 ///
 /// `None` for anything else, an out-of-range timestamp included — the caller
 /// reports it and falls back to the clock.
-fn created_from_epoch(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+pub(crate) fn created_from_epoch(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     // .ok(): a parse failure and an out-of-range timestamp are one outcome
     // here, and the caller reports it.
     raw.trim()
@@ -334,5 +348,31 @@ mod tests {
     #[test]
     fn empty_source_date_epoch_is_rejected() {
         assert_eq!(created_from_epoch(""), None);
+    }
+
+    /// [`pinned_instant`] is the one reader of `SOURCE_DATE_EPOCH`, so a blank
+    /// or malformed value must return `None` (warn-and-fall-back) on every
+    /// path that stamps an instant — the sign bundle and the CI annotations
+    /// alike. The empty case is the W21 divergence: it used to warn on the sign
+    /// path and stay silent on the annotate path.
+    #[test]
+    fn pinned_instant_rejects_a_blank_or_malformed_source_date_epoch() {
+        let lock = crate::test::env::lock();
+
+        lock.remove("SOURCE_DATE_EPOCH");
+        assert_eq!(pinned_instant(), None, "an unset variable pins no instant");
+
+        lock.set("SOURCE_DATE_EPOCH", "1700000000");
+        assert_eq!(
+            pinned_instant().map(bundle_created).as_deref(),
+            Some("2023-11-14T22:13:20Z"),
+            "a valid epoch pins that instant"
+        );
+
+        lock.set("SOURCE_DATE_EPOCH", "");
+        assert_eq!(pinned_instant(), None, "an empty value pins no instant (W21)");
+
+        lock.set("SOURCE_DATE_EPOCH", "yesterday");
+        assert_eq!(pinned_instant(), None, "a malformed value pins no instant");
     }
 }

@@ -8,7 +8,7 @@ use anyhow::Context as _;
 use clap::Parser;
 use ocx_lib::{
     log, oci, package,
-    package::version::{BuildTimestampFormat, build_timestamp},
+    package::version::{BuildTimestampFormat, Version, build_timestamp},
     publisher::{self, LayerRef, Publisher},
 };
 
@@ -98,6 +98,36 @@ pub struct PackagePush {
     ///   --annotation org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY
     #[clap(long = "annotation", value_name = "KEY=VALUE", value_parser = parse_annotation)]
     annotation: Vec<(String, String)>,
+
+    /// Stamp OCI annotations from the CI environment
+    ///
+    /// Records `org.opencontainers.image.source`, `.revision`, `.created` and
+    /// `.version` on every index this push writes, cascade tags included.
+    /// `--ci-annotations=github` reads `$GITHUB_SERVER_URL`,
+    /// `$GITHUB_REPOSITORY` and `$GITHUB_SHA`; `--ci-annotations=gitlab` reads
+    /// `$CI_PROJECT_URL`, `$CI_COMMIT_SHA` and `$CI_PIPELINE_CREATED_AT`.
+    /// `$SOURCE_DATE_EPOCH`, when set, decides `.created` on either.
+    ///
+    /// Bare `--ci-annotations` autodetects the provider from the environment;
+    /// a usage error (exit 64) when none is detected. Must be supplied with
+    /// `=` (`--ci-annotations=gitlab`).
+    ///
+    /// `.version` is the value a pipeline cannot assemble for itself: with
+    /// `--identifier` omitted the tag comes from the build receipt, and this
+    /// push is what resolves it. The variant prefix is stripped, so pushing
+    /// `full-1.2.3` annotates `1.2.3`; a tag that is not a version annotates
+    /// no version.
+    ///
+    /// A variable that is unset or blank writes no annotation rather than an
+    /// empty one, and an explicit `--annotation` on the same key wins.
+    #[clap(
+        long = "ci-annotations",
+        value_enum,
+        value_name = "PROVIDER",
+        num_args = 0..=1,
+        require_equals = true,
+    )]
+    ci_annotations: Option<Option<ocx_lib::ci::CiFlavor>>,
 
     /// After a successful push, append the pushed tag and any cascade tags
     /// to this file (creating it if absent), so `ocx package announce
@@ -235,7 +265,32 @@ pub struct PackagePush {
 }
 
 impl PackagePush {
+    /// Refuses `--ci-annotations gitlab` — the space form, which
+    /// `require_equals` reads as a bare `--ci-annotations` plus a layer named
+    /// `gitlab`.
+    ///
+    /// A method rather than an inline call so a test can drive it on a
+    /// clap-parsed `PackagePush`: the absorption is the parser's doing, and a
+    /// test that hand-built the fields would prove nothing about it.
+    fn refuse_spaced_ci_annotations(&self) -> Result<(), ocx_lib::cli::UsageError> {
+        conventions::refuse_spaced_ci_value(
+            "--ci-annotations",
+            self.ci_annotations,
+            self.layers.iter().map(ToString::to_string),
+        )
+    }
+
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        // Before the autodetect below, not after: a value written with a space
+        // never reached the flag at all, and saying so beats both what
+        // autodetect guesses inside CI (the value silently ignored) and the
+        // error it raises outside (which blames the environment instead).
+        self.refuse_spaced_ci_annotations()?;
+        // First, because it depends on nothing: a bare `--ci-annotations`
+        // outside a detectable CI is a usage error, and a usage error must
+        // cost no upload.
+        let ci_annotations = conventions::resolve_ci_annotations_arg(self.ci_annotations)?;
+
         // Read the build receipt only for what the command line left open: a
         // fully explicit push must not be able to fail on a file it never
         // needed. Resolved before `Publisher::new` and auth, so a push missing
@@ -334,9 +389,18 @@ impl PackagePush {
 
         let build_meta: Option<String> = self.build_timestamp.as_ref().and_then(build_timestamp);
         let keep_tag = self.keep_tag.enabled();
-        // Last-wins on a repeated key, matching the POSIX convention for
-        // repeated flags.
-        let annotations: BTreeMap<String, String> = self.annotation.iter().cloned().collect();
+        let generated = match ci_annotations {
+            None => BTreeMap::new(),
+            Some(flavor) => ocx_lib::ci::annotations::for_flavor(
+                flavor,
+                // The tag this push resolved, whatever answered for it. A
+                // pipeline that omits `--identifier` learns the tag only from
+                // the report, which is after the index is written -- so the
+                // version annotation is the one it cannot stamp itself.
+                identifier.tag().and_then(Version::parse).as_ref(),
+            ),
+        };
+        let annotations = merge_annotations(generated, &self.annotation);
 
         let outcome = if self.cascade {
             let existing_tags = publisher
@@ -381,7 +445,8 @@ impl PackagePush {
         // signing input, and it names the platform manifests -- never the
         // index, whose digest the next platform merge rewrites.
         let platform_digests = outcome.platform_digests.clone();
-        let mut report = crate::api::data::push::PushReport::from_outcome(identifier.to_string(), outcome);
+        let mut report = crate::api::data::push::PushReport::from_outcome(identifier.to_string(), outcome)
+            .with_annotations(annotations);
 
         // Post-push work is never rolled back -- a pushed manifest is
         // immutable and OCI offers no un-push -- so every failure below is a
@@ -619,6 +684,20 @@ pub(crate) fn parse_annotation(argument: &str) -> anyhow::Result<(String, String
     Ok((key.to_string(), value.to_string()))
 }
 
+/// Lays the explicit `--annotation` pairs over the generated `--ci-annotations`
+/// set.
+///
+/// Order is the contract: `extend` is last-value-wins, so generated first
+/// means an explicit pair overrides its generated namesake, and the explicit
+/// pairs keep today's last-wins among themselves (the POSIX convention for a
+/// repeated flag). Reversing the two arguments silently demotes every
+/// `--annotation` a user typed to a value the environment can overwrite.
+fn merge_annotations(generated: BTreeMap<String, String>, explicit: &[(String, String)]) -> BTreeMap<String, String> {
+    let mut merged = generated;
+    merged.extend(explicit.iter().cloned());
+    merged
+}
+
 /// Appends `tags` onto the tags-file at `path` (created if absent),
 /// deduping against whatever is already there (design register C2).
 async fn append_to_tags_file(path: &std::path::Path, tags: &[String]) -> anyhow::Result<()> {
@@ -681,7 +760,11 @@ mod stderr_neutralization_tests {
 mod annotation_tests {
     use std::collections::BTreeMap;
 
-    use super::parse_annotation;
+    use super::{merge_annotations, parse_annotation};
+
+    fn pair(key: &str, value: &str) -> (String, String) {
+        (key.to_string(), value.to_string())
+    }
 
     #[test]
     fn splits_at_the_first_equals_sign() {
@@ -716,6 +799,45 @@ mod annotation_tests {
         let collected: BTreeMap<String, String> = parsed.into_iter().collect();
         assert_eq!(collected.get("a").map(String::as_str), Some("second"));
         assert_eq!(collected.get("b").map(String::as_str), Some("x"));
+    }
+
+    /// The precedence `--ci-annotations` promises: what the publisher typed
+    /// beats what the environment happened to hold. A wrapper that already
+    /// knows the right source URL must be able to state it and be obeyed.
+    #[test]
+    fn an_explicit_annotation_overrides_the_generated_one() {
+        let generated = BTreeMap::from([
+            pair("org.opencontainers.image.source", "https://gitlab.example/ci/job"),
+            pair("org.opencontainers.image.revision", "cafebabe"),
+        ]);
+
+        let merged = merge_annotations(
+            generated,
+            &[pair(
+                "org.opencontainers.image.source",
+                "https://github.com/acme/widget",
+            )],
+        );
+
+        assert_eq!(
+            merged.get("org.opencontainers.image.source").map(String::as_str),
+            Some("https://github.com/acme/widget"),
+            "the explicit --annotation lost to the generated value: {merged:?}"
+        );
+        assert_eq!(
+            merged.get("org.opencontainers.image.revision").map(String::as_str),
+            Some("cafebabe"),
+            "a generated key nothing overrode must survive: {merged:?}"
+        );
+    }
+
+    /// Last-wins among the explicit pairs themselves is unchanged by the
+    /// merge, generated set or not.
+    #[test]
+    fn repeated_explicit_keys_still_keep_the_last_value() {
+        let merged = merge_annotations(BTreeMap::new(), &[pair("a", "first"), pair("a", "second")]);
+
+        assert_eq!(merged.get("a").map(String::as_str), Some("second"));
     }
 }
 
@@ -956,5 +1078,96 @@ mod signing_flag_tests {
 
         assert_eq!(fulcio.as_str().trim_end_matches('/'), "https://flag-fulcio.example");
         assert_eq!(rekor.as_str().trim_end_matches('/'), "https://flag-rekor.example");
+    }
+}
+
+#[cfg(test)]
+mod ci_annotations_flag_tests {
+    //! The space form of `--ci-annotations`, which the grammar cannot take as
+    //! a value.
+    //!
+    //! `require_equals` is a shipped contract on `--ci` too, so it stays: the
+    //! fix is a refusal, not a looser grammar. Every test here parses real
+    //! argv, because the absorption under test is the parser's doing — a test
+    //! that hand-built `ci_annotations` and `layers` would assert only that the
+    //! guard reads its own arguments.
+
+    use clap::Parser as _;
+
+    use super::PackagePush;
+
+    fn parse(extra: &[&str]) -> PackagePush {
+        let mut argv = vec!["push"];
+        argv.extend_from_slice(extra);
+        argv.extend_from_slice(&["--identifier", "registry.example/pkg:1.0"]);
+        PackagePush::try_parse_from(argv).expect("every argv here is grammatical")
+    }
+
+    /// The code the process would exit with, through the same authority
+    /// `main.rs` uses.
+    fn exit_code(error: &anyhow::Error) -> u8 {
+        crate::app::classify_error(error.as_ref()) as u8
+    }
+
+    /// The premise the guard rests on: clap leaves the flag bare and hands the
+    /// value to the layer positional. If a clap upgrade ever attached it, the
+    /// guard would become dead code — and this is what would say so.
+    #[test]
+    fn a_spaced_value_never_reaches_the_flag() {
+        let push = parse(&["--ci-annotations", "gitlab"]);
+
+        assert_eq!(push.ci_annotations, Some(None), "the flag must be left bare");
+        assert_eq!(
+            push.layers.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["gitlab"],
+            "the value must have fallen through to the layer positional"
+        );
+    }
+
+    /// Exit 64, naming the token and the `=` requirement. Every spelling the
+    /// `=` form would have accepted, aliases included: a guard that caught only
+    /// the canonical two would pass `--ci-annotations gitlab-ci` silently.
+    #[test]
+    fn a_spaced_value_is_refused_with_exit_64() {
+        for value in ["github", "gitlab", "github-actions", "gitlab-ci"] {
+            let error = anyhow::Error::new(
+                parse(&["--ci-annotations", value])
+                    .refuse_spaced_ci_annotations()
+                    .expect_err("a spaced value must be refused"),
+            );
+
+            assert_eq!(exit_code(&error), 64, "a usage fault is exit 64: {error:#}");
+            let message = error.to_string();
+            assert!(
+                message.contains("--ci-annotations") && message.contains(value),
+                "the refusal must name the flag and the token: {message}"
+            );
+            assert!(
+                message.contains("--ci-annotations=gitlab") && message.contains("attached with `=`"),
+                "the refusal must name the `=` requirement: {message}"
+            );
+        }
+    }
+
+    /// The negative controls, every shape that must still pass: a bare flag
+    /// with ordinary layers (autodetect is legitimate), the attached form, and
+    /// no flag at all. The `--ci-annotations=gitlab gitlab` row is the one that
+    /// pins the bare-flag gate: with the value attached, a layer named `gitlab`
+    /// is what the publisher meant, so the heuristic must not reach it.
+    #[test]
+    fn ordinary_invocations_are_not_refused() {
+        for argv in [
+            vec!["--ci-annotations", "./layer.tar.gz"],
+            vec!["--ci-annotations", "./gitlab/layer.tar.gz"],
+            vec!["--ci-annotations=gitlab", "./layer.tar.gz"],
+            vec!["--ci-annotations=gitlab", "gitlab"],
+            vec!["--ci-annotations=gitlab"],
+            vec!["./layer.tar.gz"],
+            vec![],
+        ] {
+            parse(&argv)
+                .refuse_spaced_ci_annotations()
+                .unwrap_or_else(|error| panic!("{argv:?} must not be refused: {error}"));
+        }
     }
 }

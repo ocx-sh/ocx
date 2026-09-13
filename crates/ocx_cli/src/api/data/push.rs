@@ -23,11 +23,12 @@ use crate::api::data::sweep::SweptStatus;
 /// JSON format:
 /// `{ "identifier", "status", "manifest_digest", "cascade_tags_written",
 /// "keep_tags_written", "layers": { "mounted", "uploaded", "verified" },
-/// "platform_digests": { "<platform>": "sha256:…" } }`.
+/// "platform_digests": { "<platform>": "sha256:…" },
+/// "annotations_written": { "<key>": "<value>" } }`.
 /// The first five keys are the machine-readable contract consumed by
 /// `ocx-mirror pipeline push`, which keys its go/no-go bookkeeping off `status`
-/// and records `cascade_tags_written` in the run summary; `layers` and
-/// `platform_digests` are additive.
+/// and records `cascade_tags_written` in the run summary; `layers`,
+/// `platform_digests` and `annotations_written` are additive.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PushReport {
     /// The pushed package identifier (`registry/repository:tag`).
@@ -69,6 +70,18 @@ pub struct PushReport {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub platform_digests: BTreeMap<String, String>,
+    /// Every OCI annotation this push wrote onto the index of each tag it
+    /// touched — the `--ci-annotations` set with the explicit `--annotation`
+    /// pairs laid over it. Empty (and omitted) for a push that annotates
+    /// nothing.
+    ///
+    /// What landed, not what was asked for: a `--ci-annotations` key whose
+    /// variable was unset is absent here, which is how a pipeline finds out
+    /// that its runner did not export what it assumed. JSON only, exactly like
+    /// `platform_digests` — the plain table is at its five-column budget.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
+    pub annotations_written: BTreeMap<String, String>,
     /// One row per platform manifest `--sign` signed inline, in push order.
     ///
     /// Empty (and omitted) without `--sign`, so the key set a consumer of an
@@ -228,9 +241,21 @@ impl PushReport {
                 .into_iter()
                 .map(|(platform, digest)| (platform.to_string(), digest.to_string()))
                 .collect(),
+            annotations_written: BTreeMap::new(),
             signatures: Vec::new(),
             attestation: None,
         }
+    }
+
+    /// Attach the annotations the push wrote to a report already built from it.
+    ///
+    /// Separate from [`Self::from_outcome`] for the same reason
+    /// [`Self::with_signatures`] is: the annotations are a command-line
+    /// concern the push outcome does not carry back.
+    #[must_use]
+    pub fn with_annotations(mut self, annotations: BTreeMap<String, String>) -> Self {
+        self.annotations_written = annotations;
+        self
     }
 
     /// Attach the inline-signing rows to a report already built from the push.
@@ -525,6 +550,7 @@ mod attestation_tests {
             keep_tags_written: Vec::new(),
             layers: ocx_lib::oci::LayerCounts::default(),
             platform_digests: std::collections::BTreeMap::new(),
+            annotations_written: std::collections::BTreeMap::new(),
             signatures: Vec::new(),
             attestation: None,
         }
@@ -541,6 +567,27 @@ mod attestation_tests {
             "attestation must be omitted, not null: {json}"
         );
         assert_eq!(json["status"], "pushed");
+    }
+
+    /// The same additive-optional contract for the annotation set: a push that
+    /// annotates nothing must leave the parsed key set exactly as it was.
+    #[test]
+    fn a_push_that_annotates_nothing_omits_the_annotations_key() {
+        let json = serde_json::to_value(report()).expect("serialize");
+        assert!(
+            json.get("annotations_written").is_none(),
+            "annotations_written must be omitted, not an empty object: {json}"
+        );
+    }
+
+    #[test]
+    fn the_annotations_a_push_wrote_are_reported_verbatim() {
+        let written =
+            std::collections::BTreeMap::from([("org.opencontainers.image.version".to_string(), "1.2.3".to_string())]);
+
+        let json = serde_json::to_value(report().with_annotations(written)).expect("serialize");
+
+        assert_eq!(json["annotations_written"]["org.opencontainers.image.version"], "1.2.3");
     }
 
     /// `status` still reports the push alone: a landed push with a failed
@@ -654,6 +701,7 @@ mod signature_row_tests {
             keep_tags_written: Vec::new(),
             layers: ocx_lib::oci::LayerCounts::default(),
             platform_digests: std::collections::BTreeMap::new(),
+            annotations_written: std::collections::BTreeMap::new(),
             signatures: Vec::new(),
             attestation: None,
         }
