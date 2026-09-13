@@ -34,6 +34,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 
@@ -65,6 +66,8 @@ _SHTOOL_SCRIPT = (
     '  --badflag) echo "unknown flag" 1>&2 ; exit 3 ;;\n'
     # ~11 MiB of 'x' to exceed the 10 MiB capture cap.
     '  --spew) yes x | head -c 11534336 ;;\n'
+    # A NUL and a backspace (illegal in XML 1.0 outright) plus raw markup.
+    "  --nasty) printf 'pre\\000mid\\010post<&>\\n' ;;\n"
     '  mklink) ln -s / "$2" ;;\n'
     '  --echo-env) eval "echo \\$$2" ;;\n'
     '  *) : ;;\n'
@@ -76,6 +79,7 @@ Modes:
   ``--version``        → prints ``v3.7.0`` to stdout, exit 0
   ``--badflag``        → prints to stderr, exit 3 (non-zero)
   ``--spew``           → emits > 10 MiB to stdout (truncation cap test)
+  ``--nasty``          → emits NUL + backspace + ``<&>`` on stdout (XML escaping)
   ``mklink DST``       → ``ln -s / DST`` inside CWD (symlink-escape setup)
   ``--echo-env VAR``   → prints the child env value of VAR
   (no args)            → exit 0
@@ -1257,3 +1261,440 @@ def test_script_host_cannot_run_unrecorded_under_a_required_policy(
         )
     finally:
         config.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# #452 — `--junit PATH` writes a JUnit XML report for the scripted run
+# ---------------------------------------------------------------------------
+#
+# The file is uploaded to GitLab as `artifacts:reports:junit`. The shape
+# asserted here is the one GitLab's own parser reads
+# (`lib/gitlab/ci/parsers/test/junit.rb`): a `testsuites`/`testsuite` wrapper,
+# then per `testcase` the `classname`, `name`, `file` and `time` attributes and
+# the `failure`/`error`/`system-out`/`system-err` children.
+#
+# NOT asserted: conformance to the 2007 Ant-era `JUnit.xsd`. Measured against
+# it, the emitted sample (and every modern emitter's, pytest and cargo-nextest
+# included) fails 11 ways -- that schema forbids `testsuites/@name`,
+# `testcase/@file` and `system-out` inside a `testcase`, all three of which
+# this issue explicitly asks for. Validating against it would mean deleting the
+# feature.
+#
+# One case is covered by Rust unit tests instead of here: a `Timeout` status
+# rendering as `<error>`. The engine's wall-clock budget is 300 s, so no
+# acceptance test can reach it cheaply; `api::junit::tests::
+# every_non_verdict_status_is_an_error_not_a_failure` pins the whole status
+# table (usage / script_error / io / timeout) on the same builder this
+# exercises end to end.
+
+
+def _junit_case(path: Path) -> tuple[ElementTree.Element, ElementTree.Element]:
+    """Parse a JUnit report and return its single ``(testsuite, testcase)``.
+
+    Asserts the wrapper shape GitLab's parser requires on the way through: one
+    ``testsuites`` root, one ``testsuite``, one ``testcase``.
+    """
+    root = ElementTree.parse(path).getroot()
+    assert root.tag == "testsuites", f"root must be <testsuites>, got <{root.tag}>"
+    suites = root.findall("testsuite")
+    assert len(suites) == 1, f"one invocation writes one suite, got {len(suites)}"
+    cases = suites[0].findall("testcase")
+    assert len(cases) == 1, f"one invocation writes one case, got {len(cases)}"
+    return suites[0], cases[0]
+
+
+def test_junit_pass_writes_one_case_with_captured_output(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """#452: a passing run writes a green testcase carrying system-out."""
+    bundle, meta, pkg = script_test_package
+    smoke = _write_script(
+        tmp_path,
+        "smoke.star",
+        'r = ocx.run("shtool", "--version")\nexpect.ok(r)\n',
+    )
+    report = tmp_path / "junit.xml"
+
+    result = _run_script(
+        ocx, bundle, meta, pkg, script=smoke, extra_args=("--junit", str(report))
+    )
+
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    suite, case = _junit_case(report)
+    assert suite.get("name") == f"ocx package test {case.get('classname')}", (
+        "the suite name embeds the identifier so a per-platform glob merges into "
+        f"ONE suite; suite={suite.get('name')!r} classname={case.get('classname')!r}"
+    )
+    assert pkg.repo in (case.get("classname") or ""), (
+        f"classname must name the package, got {case.get('classname')!r}"
+    )
+    assert case.get("name") == _PLATFORM, (
+        "the case name is the PLATFORM, so six per-platform files merge into six "
+        f"distinct cases; got {case.get('name')!r}"
+    )
+    assert float(case.get("time") or -1) >= 0.0, f"time= must parse as seconds: {case.get('time')!r}"
+    assert case.find("failure") is None and case.find("error") is None
+    system_out = case.find("system-out")
+    assert system_out is not None and _TOOL_VERSION in (system_out.text or ""), (
+        "the issue asks for system-out on success too; "
+        f"got {None if system_out is None else system_out.text!r}"
+    )
+
+
+def test_junit_assertion_failure_carries_the_failing_source_location(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """#452: a red run writes <failure> with file/line and a one-line message."""
+    bundle, meta, pkg = script_test_package
+    # `expect.eq` sits on line 3; the report must say so, and must say it
+    # structurally rather than by leaving the reader to read the prose.
+    smoke = _write_script(
+        tmp_path,
+        "failing.star",
+        'r = ocx.run("shtool", "--version")\n'
+        "expect.ok(r)\n"
+        'expect.eq(r.stdout, "nope")\n',
+    )
+    report = tmp_path / "junit.xml"
+
+    result = _run_script(
+        ocx, bundle, meta, pkg, script=smoke, extra_args=("--junit", str(report))
+    )
+
+    assert result.returncode == 1, f"stderr: {result.stderr}"
+    _suite, case = _junit_case(report)
+    assert case.get("file") == str(smoke), (
+        "GitLab links a failure to its source through file=; it must be the "
+        f"verbatim --script argument, got {case.get('file')!r}"
+    )
+    assert case.get("line") == "3", (
+        f"the failing expect.eq is on line 3, got line={case.get('line')!r}"
+    )
+    failure = case.find("failure")
+    assert failure is not None, "an assertion failure is a <failure>, not an <error>"
+    assert failure.get("type") == "eq", (
+        f"type= is the failing assertion kind, got {failure.get('type')!r}"
+    )
+    message = failure.get("message") or ""
+    assert message and "\n" not in message, (
+        f"message= is a single line for the MR annotation, got {message!r}"
+    )
+    assert "\n" in (failure.text or ""), (
+        "the body holds the full multi-line diagnostic the attribute cannot; "
+        f"got {failure.text!r}"
+    )
+
+
+def test_junit_unusable_script_is_an_error_element(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """#452: a broken script never delivered a verdict -> <error>, not <failure>."""
+    bundle, meta, pkg = script_test_package
+    smoke = _write_script(tmp_path, "broken.star", "def (:\n")
+    report = tmp_path / "junit.xml"
+
+    result = _run_script(
+        ocx, bundle, meta, pkg, script=smoke, extra_args=("--junit", str(report))
+    )
+
+    assert result.returncode == 65, f"stderr: {result.stderr}"
+    _suite, case = _junit_case(report)
+    assert case.find("failure") is None, "a syntax error is not a test verdict"
+    error = case.find("error")
+    assert error is not None and error.get("type") == "script_error", (
+        f"got type={None if error is None else error.get('type')!r}"
+    )
+
+
+def test_junit_survives_illegal_xml_characters_in_captured_output(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """#452: script stdout is arbitrary bytes; the report still parses."""
+    bundle, meta, pkg = script_test_package
+    # NUL and backspace are illegal in XML 1.0 outright -- escaping them still
+    # yields a document no parser accepts, so they must be REMOVED. `<&>` must
+    # be escaped rather than removed.
+    smoke = _write_script(
+        tmp_path,
+        "nasty.star",
+        'r = ocx.run("shtool", "--nasty")\nexpect.ok(r)\n',
+    )
+    report = tmp_path / "junit.xml"
+
+    # `--format json` so the envelope on stdout carries the RAW, un-sanitized
+    # capture -- the precondition is then observable in the same run.
+    result = _run_script(
+        ocx, bundle, meta, pkg, script=smoke, fmt="json", extra_args=("--junit", str(report))
+    )
+
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    # Precondition, observed not assumed: the fixture actually emitted the
+    # illegal bytes. The JSON envelope holds the raw capture BEFORE XmlString
+    # sanitizes it, so if the fixture stopped producing them (or the capture
+    # dropped them) this reds -- the test cannot pass vacuously.
+    envelope = json.loads(result.stdout)
+    raw_stdout = envelope["run"]["stdout"]
+    assert "\x00" in raw_stdout and "\x08" in raw_stdout, (
+        f"the fixture must emit the illegal bytes for this test to mean anything, got {raw_stdout!r}"
+    )
+
+    raw = report.read_bytes()
+    assert b"\x00" not in raw and b"\x08" not in raw, (
+        "characters illegal in XML 1.0 must be stripped from the file"
+    )
+    # Parsing is the real assertion: a document carrying them does not parse.
+    _suite, case = _junit_case(report)
+    system_out = case.find("system-out")
+    assert system_out is not None
+    text = system_out.text or ""
+    # Strip-vs-substitute: XmlString REMOVES the illegal bytes rather than
+    # replacing them with a placeholder, so the surrounding words are
+    # contiguous (`premidpost`). `<&>` proves markup round-trips through
+    # escaping rather than being removed.
+    assert "premidpost<&>" in text, (
+        f"illegal bytes must be removed (not substituted) and `<&>` must round-trip, got {text!r}"
+    )
+
+
+def test_junit_stdin_source_io_fault_writes_error_element(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """#452 (W4): `--script -` whose stdin delivers no source is a pre-engine
+    I/O fault -- the report is still written, as `<error type="io">`, exit 74.
+
+    A CI job that passed `--junit` and found no file cannot tell "ocx never
+    ran" from "the tests all passed", so the argv-fault arm writes one too.
+    """
+    bundle, meta, pkg = script_test_package
+    report = tmp_path / "junit.xml"
+
+    # Empty stdin (immediate EOF) is the broken / never-delivered stdin-source
+    # case (LDR-8): a zero-byte `--script -` stream is IoError (74), distinct
+    # from an explicitly empty script *file* (Passed).
+    result = _run_script(
+        ocx,
+        bundle,
+        meta,
+        pkg,
+        script="-",
+        stdin="",
+        extra_args=("--junit", str(report)),
+    )
+
+    assert result.returncode == 74, f"stderr: {result.stderr}"
+    assert report.exists(), "the report is written even for a pre-engine I/O fault"
+    _suite, case = _junit_case(report)
+    assert case.find("failure") is None, "an I/O fault is not a test verdict"
+    error = case.find("error")
+    assert error is not None and error.get("type") == "io", (
+        f"got type={None if error is None else error.get('type')!r}"
+    )
+
+
+def test_junit_creates_missing_parent_directories(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """#452: `--junit build/junit/<platform>.xml` needs no mkdir step in CI."""
+    bundle, meta, pkg = script_test_package
+    smoke = _write_script(tmp_path, "smoke.star", "x = 1\n")
+    report = tmp_path / "build" / "junit" / "linux-amd64.xml"
+    assert not report.parent.exists()
+
+    result = _run_script(
+        ocx, bundle, meta, pkg, script=smoke, extra_args=("--junit", str(report))
+    )
+
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert report.is_file(), "the parent directories must be created"
+    _junit_case(report)
+
+
+def test_junit_truncates_rather_than_appending(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """#452: a second run over the same path replaces the file, never merges."""
+    bundle, meta, pkg = script_test_package
+    failing = _write_script(tmp_path, "failing.star", 'expect.fail("boom")\n')
+    passing = _write_script(tmp_path, "passing.star", "x = 1\n")
+    report = tmp_path / "junit.xml"
+
+    first = _run_script(
+        ocx, bundle, meta, pkg, script=failing, extra_args=("--junit", str(report))
+    )
+    assert first.returncode == 1, f"stderr: {first.stderr}"
+    _suite, case = _junit_case(report)
+    assert case.find("failure") is not None, "precondition: the first run is red"
+
+    second = _run_script(
+        ocx, bundle, meta, pkg, script=passing, extra_args=("--junit", str(report))
+    )
+
+    assert second.returncode == 0, f"stderr: {second.stderr}"
+    # `_junit_case` already asserts exactly one suite and one case -- an
+    # appended or merged file would carry two of each.
+    _suite, case = _junit_case(report)
+    assert case.find("failure") is None, "the red result from the first run must be gone"
+
+
+def test_junit_is_written_for_an_unreadable_script_path(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """#452: every exit path writes a file -- including the pre-engine argv faults.
+
+    A CI job that passed `--junit` and found no artifact cannot tell "ocx never
+    ran" from "the tests all passed", so the two faults that report nothing on
+    stdout (an unreadable `--script` path, exit 64; a `--script -` stream that
+    delivers nothing, exit 74) still produce one. They carry no file/line: no
+    Starlark error stands behind either.
+    """
+    bundle, meta, pkg = script_test_package
+    missing = tmp_path / "no" / "such.star"
+    report = tmp_path / "junit.xml"
+
+    result = _run_script(
+        ocx, bundle, meta, pkg, script=missing, extra_args=("--junit", str(report))
+    )
+
+    assert result.returncode == 64, f"stderr: {result.stderr}"
+    assert report.is_file(), "an argv fault still owes the pipeline a report"
+    _suite, case = _junit_case(report)
+    error = case.find("error")
+    assert error is not None and error.get("type") == "usage", (
+        f"got type={None if error is None else error.get('type')!r}"
+    )
+    assert "such.star" in (error.get("message") or ""), (
+        f"the message must name the path, got {error.get('message')!r}"
+    )
+    assert case.get("file") is None and case.get("line") is None, (
+        "no Starlark error stands behind an argv fault, so there is no location "
+        f"to report; got file={case.get('file')!r} line={case.get('line')!r}"
+    )
+
+
+def test_junit_write_failure_does_not_displace_an_unreadable_script(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """Both paths are broken at once: the argv fault is the one reported.
+
+    The operator typed an unreadable `--script` path AND a `--junit` path that
+    cannot be written. Answering with the junit write failure would exit 74 and
+    name the wrong file -- the message that names `such.star` is the only one
+    that tells them what to fix. So the report write is best effort here and the
+    usage error (64) still decides the exit code.
+
+    The unwritable destination is a path *through a regular file* (ENOTDIR),
+    not a `chmod 000` directory: the report writer calls `create_dir_all` on
+    the parent first, so an absent parent would simply be created and this test
+    would prove nothing -- and a mode-000 directory means nothing to root,
+    which is how CI runs.
+    """
+    bundle, meta, pkg = script_test_package
+    missing = tmp_path / "no" / "such.star"
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("a regular file standing where a directory would be\n")
+    report = blocker / "sub" / "junit.xml"
+
+    result = _run_script(
+        ocx, bundle, meta, pkg, script=missing, extra_args=("--junit", str(report))
+    )
+
+    assert not report.exists(), (
+        "the precondition is a report that could NOT be written; if it exists "
+        "this row proves nothing about precedence"
+    )
+    assert result.returncode == 64, (
+        f"the argv fault owns the exit code, not the failed report write "
+        f"(74 here means the junit error displaced it)\nstderr: {result.stderr}"
+    )
+    assert "such.star" in result.stderr, (
+        f"stderr must name the unreadable script, which is the only actionable "
+        f"part of this failure; got: {result.stderr}"
+    )
+
+
+def test_junit_stdin_script_reports_no_file_attribute(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """#452: `<stdin>` names nothing a reporter can open, so no file= is emitted."""
+    bundle, meta, pkg = script_test_package
+    report = tmp_path / "junit.xml"
+
+    result = _run_script(
+        ocx,
+        bundle,
+        meta,
+        pkg,
+        script="-",
+        stdin='expect.fail("boom")\n',
+        extra_args=("--junit", str(report)),
+    )
+
+    assert result.returncode == 1, f"stderr: {result.stderr}"
+    _suite, case = _junit_case(report)
+    assert case.find("failure") is not None
+    assert case.get("file") is None, (
+        f"`<stdin>` must not be emitted as file=, got {case.get('file')!r}"
+    )
+    assert case.get("line") is None, (
+        f"a line without a file is not actionable, got {case.get('line')!r}"
+    )
+
+
+def test_junit_requires_script(
+    script_test_package: tuple[Path, Path, PackageInfo],
+    ocx: OcxRunner,
+    unique_repo: str,
+    tmp_path: Path,
+) -> None:
+    """#452: `--junit` on the trailing-command form is a usage error (exit 64)."""
+    bundle, meta, pkg = script_test_package
+    report = tmp_path / "junit.xml"
+
+    result = subprocess.run(
+        [
+            str(ocx.binary), "package", "test",
+            "-p", _PLATFORM,
+            "-m", str(meta),
+            "-i", pkg.short,
+            str(bundle),
+            "--junit", str(report),
+            "--", "shtool", "--version",
+        ],
+        capture_output=True, text=True, env=ocx.env, timeout=120.0, check=False,
+    )
+
+    assert result.returncode == 64, (
+        f"--junit without --script must exit 64, got {result.returncode}\n"
+        f"stderr: {result.stderr}"
+    )
+    assert not report.exists(), "a refused invocation writes nothing"

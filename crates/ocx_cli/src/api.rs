@@ -6,6 +6,7 @@ use ocx_lib::cli::DataInterface;
 use crate::options;
 
 pub mod data;
+pub mod junit;
 
 /// Implemented by API data types that know how to render themselves in either output format.
 ///

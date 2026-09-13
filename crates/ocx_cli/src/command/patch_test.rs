@@ -266,6 +266,8 @@ async fn run_patch_test(args: &PatchTestArgs, context: crate::app::Context) -> a
             &engine_scratch,
             &platform,
             process_env,
+            // `--junit` sits on `package test` alone (issue #452).
+            None,
         )
         .await
     } else if !args.command.is_empty() {

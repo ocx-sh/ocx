@@ -14,7 +14,7 @@ use starlark::syntax::{AstModule, Dialect};
 use starlark::{Error as StarlarkError, ErrorKind};
 
 use super::host::{self, HostState};
-use super::{ScriptError, ScriptLimits, ScriptOutcome, ScriptOutcomeKind};
+use super::{ScriptError, ScriptLimits, ScriptLocation, ScriptOutcome, ScriptOutcomeKind};
 
 /// Deterministic stdlib extensions enabled for OCX test scripts.
 ///
@@ -117,6 +117,11 @@ pub(super) fn evaluate(
 fn classify(error: &StarlarkError) -> ScriptOutcomeKind {
     use super::AssertionKind;
     let message = error.to_string();
+    // `Display` already renders the location, but as multi-line diagnostic
+    // prose with a call-stack trace — right for a failure BODY, useless as a
+    // structured `file`/`line`. Read the span instead; regexing the location
+    // back out of non-stable prose is exactly what this avoids.
+    let location = source_location(error);
     // Codex C4: a child killed on the per-`ocx.run` wall-clock deadline raises
     // a host (`fail()`) error that would otherwise collapse into `Failed`,
     // leaving the documented `Timeout` outcome unreachable. The kill branch
@@ -137,29 +142,56 @@ fn classify(error: &StarlarkError) -> ScriptOutcomeKind {
         ErrorKind::Fail(_) => ScriptOutcomeKind::Failed {
             kind: Some(recorded.unwrap_or(AssertionKind::Fail)),
             message,
+            location,
         },
         // Recursion past `max_callstack_size` → failure (exit 1). Not
         // attributable to a single assertion.
-        ErrorKind::StackOverflow(_) => ScriptOutcomeKind::Failed { kind: None, message },
+        ErrorKind::StackOverflow(_) => ScriptOutcomeKind::Failed {
+            kind: None,
+            message,
+            location,
+        },
         // Syntax / arity / type errors → script error (exit 65).
         ErrorKind::Parser(_) | ErrorKind::Function(_) | ErrorKind::Value(_) | ErrorKind::Scope(_) => {
-            ScriptOutcomeKind::ScriptError { message }
+            ScriptOutcomeKind::ScriptError { message, location }
         }
         // Host-fn failures → failure (exit 1). `expect.*` records its kind; a
         // non-assertion host failure (sandbox rejection) records nothing → `Other`.
         ErrorKind::Native(_) => ScriptOutcomeKind::Failed {
             kind: Some(recorded.unwrap_or(AssertionKind::Other)),
             message,
+            location,
         },
         // Engine internals / freeze / fallback → failure (exit 1; no code 2).
         // Not attributable to a single assertion.
-        ErrorKind::Internal(_) | ErrorKind::Freeze(_) | ErrorKind::Other(_) => {
-            ScriptOutcomeKind::Failed { kind: None, message }
-        }
+        ErrorKind::Internal(_) | ErrorKind::Freeze(_) | ErrorKind::Other(_) => ScriptOutcomeKind::Failed {
+            kind: None,
+            message,
+            location,
+        },
         // `ErrorKind` is `#[non_exhaustive]` upstream — unclassified variants
         // map to `Failed` (locked here, never silently to a new code).
-        _ => ScriptOutcomeKind::Failed { kind: None, message },
+        _ => ScriptOutcomeKind::Failed {
+            kind: None,
+            message,
+            location,
+        },
     }
+}
+
+/// Lifts the terminal error's source span into the engine-neutral
+/// [`ScriptLocation`].
+///
+/// `FileSpan::resolve()` reports 0-indexed line/column (starlark's `Display`
+/// adds one before printing); this returns the 1-indexed form every editor and
+/// CI annotator expects, so the conversion lives here and not at each consumer.
+fn source_location(error: &StarlarkError) -> Option<ScriptLocation> {
+    let resolved = error.span()?.resolve();
+    Some(ScriptLocation {
+        file: resolved.file,
+        line: resolved.span.begin.line + 1,
+        column: resolved.span.begin.column + 1,
+    })
 }
 
 #[cfg(test)]
@@ -325,5 +357,78 @@ mod tests {
             matches!(outcome.kind, ScriptOutcomeKind::Timeout),
             "a child exceeding the per-call wall-clock must yield Timeout, got a different outcome kind"
         );
+    }
+
+    // ── source location: captured from the span, never parsed from prose ─────
+    //
+    // The location is what makes a JUnit `<testcase file= line=>` (and hence a
+    // GitLab MR annotation) point at the failing line. It is read from
+    // `Error::span()`; asserting the numbers here is what stops a regression
+    // to "scrape `file:line` out of `Display`".
+
+    /// Runs `source` under `label` through the real engine.
+    fn outcome_of(source: &str, label: &str) -> ScriptOutcomeKind {
+        let scratch = tempfile::tempdir().unwrap();
+        let package = tempfile::tempdir().unwrap();
+        let limits = super::super::ScriptLimits {
+            max_callstack_size: 50,
+            wall_clock: std::time::Duration::from_secs(30),
+        };
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            tokio::task::block_in_place(|| {
+                super::super::run_script(
+                    source,
+                    label,
+                    package.path(),
+                    scratch.path(),
+                    &crate::oci::Platform::any(),
+                    crate::env::Env::clean(),
+                    limits,
+                )
+            })
+        })
+        .expect("host setup must not fail")
+        .kind
+    }
+
+    #[test]
+    fn failure_carries_the_1_indexed_line_of_the_failing_statement() {
+        // `fail()` sits on the third line; starlark resolves spans 0-indexed,
+        // so the contract is "3", not "2".
+        let kind = outcome_of("x = 1\ny = 2\nfail(\"boom\")\n", "tests/smoke.star");
+        let ScriptOutcomeKind::Failed { location, .. } = kind else {
+            panic!("fail() must classify as Failed");
+        };
+        let location = location.expect("a `fail()` carries a source span");
+        assert_eq!(location.file, "tests/smoke.star", "file is the source label verbatim");
+        assert_eq!(location.line, 3, "line is 1-indexed");
+        assert_eq!(location.column, 1, "column is 1-indexed");
+    }
+
+    #[test]
+    fn script_error_carries_the_location_of_the_bad_syntax() {
+        let kind = outcome_of("x = 1\ny = = 2\nz = 3\n", "<stdin>");
+        let ScriptOutcomeKind::ScriptError { location, .. } = kind else {
+            panic!("a syntax error must classify as ScriptError");
+        };
+        let location = location.expect("a parse error carries a source span");
+        assert_eq!(location.file, "<stdin>");
+        assert_eq!(location.line, 2, "the stray `=` is on line 2");
+    }
+
+    #[test]
+    fn a_span_less_error_reports_no_location() {
+        // An error synthesized without a diagnostic has no span; inventing a
+        // location for it would put a JUnit reporter on a line that never ran.
+        let e = err(ErrorKind::Fail(anyhow::anyhow!("boom")));
+        let ScriptOutcomeKind::Failed { location, .. } = classify(&e) else {
+            panic!("Fail must classify as Failed");
+        };
+        assert_eq!(location, None);
     }
 }

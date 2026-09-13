@@ -21,7 +21,7 @@ use crate::api::Printable;
 
 /// Overall outcome of a scripted test run. Mirrors
 /// `ocx_lib::script::ScriptOutcomeKind` at the OCX-facing level.
-#[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
+#[derive(Serialize, schemars::JsonSchema, Clone, Copy, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ScriptStatus {
     /// Script ran to completion; all assertions passed.
@@ -47,6 +47,38 @@ pub struct AssertionRecord {
     pub kind: String,
     /// Failure detail. For `expect.ok`, auto-embeds the child stderr.
     pub message: String,
+    /// Where in the script the failure happened. Additive-optional: absent for
+    /// an outcome the engine could not locate (a timeout, a pre-engine host
+    /// fault), never emitted as `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
+    pub location: Option<SourceLocation>,
+}
+
+/// Source position of a script failure.
+///
+/// JSON format: `{"file": "tests/smoke.star", "line": 12, "column": 5}`. Line
+/// and column are 1-indexed. `file` is the label the source was parsed under —
+/// the verbatim `--script` path, or `<stdin>` for the `--script -` form, which
+/// names no file a reporter can open.
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct SourceLocation {
+    /// The label the script source was parsed under.
+    pub file: String,
+    /// 1-indexed line.
+    pub line: usize,
+    /// 1-indexed column.
+    pub column: usize,
+}
+
+impl From<&ocx_lib::script::ScriptLocation> for SourceLocation {
+    fn from(location: &ocx_lib::script::ScriptLocation) -> Self {
+        Self {
+            file: location.file.clone(),
+            line: location.line,
+            column: location.column,
+        }
+    }
 }
 
 /// Surfaced `RunResult` fields for the script's terminal/top-level `ocx.run`.
@@ -92,7 +124,11 @@ impl ScriptRunReport {
         use ocx_lib::script::ScriptOutcomeKind as K;
         let (status, assertion) = match &outcome.kind {
             K::Passed => (ScriptStatus::Passed, None),
-            K::Failed { kind, message } => (
+            K::Failed {
+                kind,
+                message,
+                location,
+            } => (
                 ScriptStatus::Failed,
                 Some(AssertionRecord {
                     // Plan C5 stable contract: the failing `expect.*` (or
@@ -102,6 +138,7 @@ impl ScriptRunReport {
                     // terminal error such as a stack overflow) → `unknown`.
                     kind: kind.map_or("unknown", |k| k.as_str()).to_string(),
                     message: message.clone(),
+                    location: location.as_ref().map(SourceLocation::from),
                 }),
             ),
             K::Usage { message } => (
@@ -109,13 +146,15 @@ impl ScriptRunReport {
                 Some(AssertionRecord {
                     kind: "usage".to_string(),
                     message: message.clone(),
+                    location: None,
                 }),
             ),
-            K::ScriptError { message } => (
+            K::ScriptError { message, location } => (
                 ScriptStatus::ScriptError,
                 Some(AssertionRecord {
                     kind: "script_error".to_string(),
                     message: message.clone(),
+                    location: location.as_ref().map(SourceLocation::from),
                 }),
             ),
             K::Io { message } => (
@@ -123,6 +162,7 @@ impl ScriptRunReport {
                 Some(AssertionRecord {
                     kind: "io".to_string(),
                     message: message.clone(),
+                    location: None,
                 }),
             ),
             K::Timeout => (ScriptStatus::Timeout, None),
@@ -224,6 +264,7 @@ mod tests {
             assertion: Some(AssertionRecord {
                 kind: "ok".into(),
                 message: "<non-stable prose>".into(),
+                location: None,
             }),
             run: None,
         };
@@ -253,6 +294,7 @@ mod tests {
                 kind: ScriptOutcomeKind::Failed {
                     kind: Some(kind),
                     message: "<non-stable prose>".into(),
+                    location: None,
                 },
             };
             let report = ScriptRunReport::from_outcome(&outcome, None);
@@ -276,6 +318,7 @@ mod tests {
             kind: ScriptOutcomeKind::Failed {
                 kind: None,
                 message: "stack overflow".into(),
+                location: None,
             },
         };
         let report = ScriptRunReport::from_outcome(&outcome, None);
@@ -318,6 +361,7 @@ mod tests {
             Some(AssertionRecord {
                 kind: "failed".into(),
                 message: "boom".into(),
+                location: None,
             }),
             Some(RunSummary {
                 exit_code: 2,

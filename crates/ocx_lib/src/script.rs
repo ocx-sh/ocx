@@ -136,6 +136,9 @@ pub enum ScriptOutcomeKind {
         /// Human-readable failure detail. The prose is non-stable; only its
         /// presence (and the JSON field shape, when rendered) is contractual.
         message: String,
+        /// Where the failure occurred, when the engine attached a source span.
+        /// `None` for a failure the engine could not locate.
+        location: Option<ScriptLocation>,
     },
     /// The script could not be used as given (e.g. unreadable script file).
     Usage {
@@ -146,6 +149,9 @@ pub enum ScriptOutcomeKind {
     ScriptError {
         /// Human-readable script-error detail.
         message: String,
+        /// Where the error occurred, when the engine attached a source span.
+        /// `None` for an error the engine could not locate.
+        location: Option<ScriptLocation>,
     },
     /// A sandboxed filesystem operation failed for I/O reasons.
     Io {
@@ -154,6 +160,23 @@ pub enum ScriptOutcomeKind {
     },
     /// The wall-clock budget elapsed before the script finished.
     Timeout,
+}
+
+/// Where in the script a failure happened, as the engine reported it.
+///
+/// Captured from the terminal error's source span, NOT parsed back out of the
+/// rendered diagnostic prose (which is non-stable by contract). `file` is the
+/// `source_label` the run was parsed under — `<stdin>` for `--script -`,
+/// otherwise the verbatim `--script` path. Line and column are 1-indexed, the
+/// numbering an editor and a CI annotation use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScriptLocation {
+    /// The label the script source was parsed under.
+    pub file: String,
+    /// 1-indexed line of the span start.
+    pub line: usize,
+    /// 1-indexed column of the span start.
+    pub column: usize,
 }
 
 /// Library error for unrecoverable HOST setup/abort failures only.
