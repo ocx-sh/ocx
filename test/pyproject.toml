@@ -1,11 +1,16 @@
 [project]
 name = "ocx-tests"
 version = "0.0.0"
-# The project floor is 3.13+ (`.claude/rules/product-tech-strategy.md`). The
-# declaration used to say 3.10, which is also what ruff derives `target-version`
-# from: three f-strings reusing the outer quote character read as SYNTAX ERRORS
-# against that floor, and a file ruff cannot parse is a file ruff does not lint.
-requires-python = ">=3.13"
+# 3.14 is this suite's own floor, above the project's: the `.tar.zst` rows of
+# test_package_create_extract.py need `compression.zstd`, stdlib only from 3.14,
+# and no other zstd writer is a test dependency. Declared as the floor rather
+# than guarded with `pytest.importorskip`, because uv resolves the interpreter
+# itself and no workflow pins a version — a skip there is invisible, and a green
+# suite that silently never built a .tar.zst is worse than a refusal to run.
+# ruff derives `target-version` from this line too (the earlier 3.10 declaration
+# made three f-strings read as syntax errors, and a file ruff cannot parse is a
+# file ruff does not lint), so the linter cannot disagree with the interpreter.
+requires-python = ">=3.14"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

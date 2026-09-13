@@ -430,7 +430,9 @@ def _build_tar(
 
     name = target.name
     if name.endswith(".tar.zst"):
-        # Requires Python 3.14; the caller guards with `pytest.importorskip`.
+        # Stdlib from Python 3.14, which `pyproject.toml` declares as the
+        # `requires-python` floor — so this import cannot fail on a supported
+        # interpreter, and needs no caller-side guard.
         from compression import zstd
 
         with zstd.ZstdFile(target, "wb") as raw, tarfile.open(fileobj=raw, mode="w|") as archive:
