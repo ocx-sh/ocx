@@ -243,6 +243,7 @@ def test_unsupported_suffix_under_extract_is_refused(ocx: OcxRunner, tmp_path: P
     result = _create(ocx, thing, out, "--extract", check=False)
 
     assert result.returncode == EXIT_DATA_ERR, result.stdout + result.stderr
+    assert "unsupported archive format" in result.stderr, result.stderr
     assert not out.exists(), "a refused invocation must leave no bundle behind"
 
 

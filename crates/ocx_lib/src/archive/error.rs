@@ -35,6 +35,16 @@ pub enum Error {
     /// The archive format is not supported.
     #[error("unsupported archive format: {0}")]
     UnsupportedFormat(String),
+    /// A GNU sparse entry was encountered. Refused because its apparent size is
+    /// materialized without consuming tar-stream bytes, bypassing the
+    /// decompressed-stream cap (CWE-400); OCX never emits sparse entries.
+    #[error("archive entry '{}' uses the unsupported GNU sparse format", .0.display())]
+    GnuSparseUnsupported(PathBuf),
+    /// Extraction produced more decompressed bytes than the cap allows
+    /// (CWE-400). The cap is derived from the compressed input size, mirroring
+    /// the registry pull path's decompression-bomb guard.
+    #[error("archive extraction exceeded the {cap}-byte decompression cap")]
+    ExtractionCapExceeded { cap: u64 },
     /// An unexpected internal error (e.g. task join failure).
     #[error("internal archive error: {0}")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -56,7 +66,9 @@ impl ClassifyExitCode for Error {
             | Self::EntryEscape(_)
             | Self::SymlinkEscape { .. }
             | Self::HardLinkEscape { .. }
-            | Self::UnsupportedFormat(_) => ExitCode::DataError,
+            | Self::UnsupportedFormat(_)
+            | Self::GnuSparseUnsupported(_)
+            | Self::ExtractionCapExceeded { .. } => ExitCode::DataError,
             Self::Internal(_) => ExitCode::Failure,
         })
     }

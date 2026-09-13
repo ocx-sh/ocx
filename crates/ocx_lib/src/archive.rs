@@ -23,6 +23,130 @@ fn is_zip(path: &Path) -> bool {
     path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
 }
 
+/// Multiplier applied to a compressed archive's byte size to bound its
+/// decompressed output (CWE-400). Matches the registry pull path's policy in
+/// `oci::client`: 100x covers realistic compression ratios for tool binaries
+/// with headroom.
+const EXTRACTION_CAP_MULTIPLIER: u64 = 100;
+/// Floor for the decompression cap, so a tiny compressed input still permits a
+/// reasonable extraction. Matches the registry pull path's 256 MiB floor.
+const EXTRACTION_CAP_MINIMUM: u64 = 256 << 20;
+
+/// Decompressed-output ceiling for extracting a `compressed_size`-byte archive.
+fn extraction_cap(compressed_size: u64) -> u64 {
+    compressed_size
+        .saturating_mul(EXTRACTION_CAP_MULTIPLIER)
+        .max(EXTRACTION_CAP_MINIMUM)
+}
+
+/// Strips setuid/setgid/sticky (`0o7000`) and group/other write (`0o022`) from a
+/// directory this extractor created. No-op off Unix, where there is no such mode.
+#[cfg(unix)]
+fn cap_directory_mode(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::symlink_metadata(path)?.permissions().mode();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & !(0o7000 | 0o022)))
+}
+
+/// Creates `dir` and every missing ancestor, then caps the mode of each
+/// component strictly below `root` (see [`cap_directory_mode`]).
+///
+/// `create_dir_all` opens implicit parent directories with `0o777 & ~umask`, and
+/// zip directory entries the same way — never chmodded afterwards. Under a
+/// permissive umask (`000`/`002`, routine in containers and CI) an archive of
+/// `a/b/file` would otherwise leave `a` and `b` group/other-writable, retaining
+/// exactly the bits the entry-driven `0o022` cap promises to strip (Codex
+/// Finding 4). `root` is the extraction root — a scratch/layer dir owned by the
+/// caller — so it is left untouched; every component below it was created by this
+/// extraction. The mode cap is idempotent, so re-capping a component an earlier
+/// entry already created is harmless.
+#[cfg_attr(not(unix), allow(unused_variables))] // the cap loop below is unix-only
+fn create_dir_all_capped(root: &Path, dir: &Path) -> std::result::Result<(), Error> {
+    std::fs::create_dir_all(dir).map_err(|e| Error::Io {
+        path: dir.to_path_buf(),
+        source: e,
+    })?;
+    #[cfg(unix)]
+    {
+        for ancestor in dir.ancestors() {
+            if ancestor == root || !ancestor.starts_with(root) {
+                break;
+            }
+            cap_directory_mode(ancestor).map_err(|e| Error::Io {
+                path: ancestor.to_path_buf(),
+                source: e,
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Sweeps every link under `root` once the entry loop has finished and refuses
+/// the extraction if any resolves outside `root` *as the finished tree stands*.
+///
+/// The per-entry predicate judges each link against the disk as it is when the
+/// entry arrives, so it cannot see a hop a LATER entry plants: `e1 -> a/..` with
+/// `a` still absent folds to the root and is accepted, then `a -> .` lands and
+/// `e1` physically resolves to `root/..`. Nothing is written through it — the
+/// ancestor guard refuses that — but the tree now carries an escaping link, and
+/// the layer routes have no re-pack to catch it.
+///
+/// This is a *physical* post-condition, not a second run of the entry-time
+/// predicate: an existing link is judged by where it actually lands, so a
+/// Windows junction — which the extractor necessarily creates with an absolute
+/// substitute name — is judged by its resolution rather than refused for being
+/// spelled absolutely. A link that resolves nowhere (dangling) can be walked by
+/// nothing and is left alone.
+///
+/// A refused link is removed before the error is returned, and the sweep
+/// repeats until the tree holds none: a per-entry refusal leaves a partial tree
+/// the caller discards, but an escaping symlink is not a partial file — it is
+/// the published artifact itself, and it must not survive in the scratch root
+/// for anything that walks it later. The first refusal is the one reported.
+pub(super) fn sweep_symlinks(canonical_root: &Path) -> std::result::Result<(), Error> {
+    let mut first: Option<Error> = None;
+    while let Some((link, target)) = first_escaping_link(canonical_root, canonical_root)? {
+        // `symlink::remove` knows how to take a junction down; `remove_file`
+        // does not.
+        crate::symlink::remove(&link).map_err(|e| Error::Io {
+            path: link.clone(),
+            source: std::io::Error::other(e),
+        })?;
+        first.get_or_insert(Error::SymlinkEscape { link, target });
+    }
+    first.map_or(Ok(()), Err)
+}
+
+/// Depth-first, returns the first link under `dir` that physically resolves
+/// outside `canonical_root`, as `(link, target as written)`. Recurses into real
+/// directories only — a link to a directory is judged, never entered.
+fn first_escaping_link(
+    canonical_root: &Path,
+    dir: &Path,
+) -> std::result::Result<Option<(std::path::PathBuf, std::path::PathBuf)>, Error> {
+    let io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |e: std::io::Error| Error::Io { path, source: e }
+    };
+    for entry in std::fs::read_dir(dir).map_err(io(dir))? {
+        let entry = entry.map_err(io(dir))?;
+        let path = entry.path();
+        if crate::symlink::is_link(&path) {
+            if let Ok(resolved) = dunce::canonicalize(&path)
+                && !resolved.starts_with(canonical_root)
+            {
+                let target = std::fs::read_link(&path).unwrap_or(resolved);
+                return Ok(Some((path, target)));
+            }
+        } else if entry.file_type().map_err(io(&path))?.is_dir()
+            && let Some(hit) = first_escaping_link(canonical_root, &path)?
+        {
+            return Ok(Some(hit));
+        }
+    }
+    Ok(None)
+}
+
 impl Archive {
     /// Creates a new archive at the given path.
     /// Any existing file at the path will be overwritten.
@@ -104,10 +228,26 @@ impl Archive {
         let archive = archive.as_ref().to_path_buf();
         let output = output.as_ref().to_path_buf();
 
+        // Decompression-bomb cap (CWE-400): a file-path extraction (`ocx package
+        // create --extract`, or a locally materialized blob) carries no
+        // registry-declared size, so derive the ceiling from the compressed
+        // input. The registry pull path caps its decompressor directly
+        // (`oci::client`); this is the equivalent guard for the file-path callers.
+        let compressed_size = tokio::fs::metadata(&archive)
+            .await
+            .map(|metadata| metadata.len())
+            .map_err(|e| error::Error::Io {
+                path: archive.clone(),
+                source: e,
+            })?;
+        let decompressed_cap = extraction_cap(compressed_size);
+
         if is_zip(&archive) {
-            return tokio::task::spawn_blocking(move || zip::extract(&archive, &output, options.strip_components))
-                .await
-                .map_err(error::Error::internal)?;
+            return tokio::task::spawn_blocking(move || {
+                zip::extract(&archive, &output, options.strip_components, decompressed_cap)
+            })
+            .await
+            .map_err(error::Error::internal)?;
         }
 
         let algorithm = options
@@ -123,9 +263,21 @@ impl Archive {
             })?)
         };
 
-        tokio::task::spawn_blocking(move || tar::extract(reader, &output, options.strip_components))
-            .await
-            .map_err(error::Error::internal)?
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read as _;
+            // take(cap + 1): a well-formed archive stops before the probe byte; a
+            // stream that yields cap + 1 decompressed bytes drives `limit()` to 0,
+            // which is the bomb signal — reported ahead of any truncation error
+            // the capped read would otherwise surface (mirrors `oci::client`).
+            let capped = reader.take(decompressed_cap.saturating_add(1));
+            let (result, capped) = tar::extract_returning_reader(capped, &output, options.strip_components);
+            if capped.limit() == 0 {
+                return Err(error::Error::ExtractionCapExceeded { cap: decompressed_cap }.into());
+            }
+            result
+        })
+        .await
+        .map_err(error::Error::internal)?
     }
 
     pub async fn add_file(&mut self, archive_path: impl AsRef<Path>, file: impl AsRef<Path>) -> Result<()> {

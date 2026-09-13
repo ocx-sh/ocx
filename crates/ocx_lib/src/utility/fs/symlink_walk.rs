@@ -108,6 +108,44 @@ pub async fn refuse_if_symlink_in_path(path: &Path, boundary: Option<&Path>) -> 
     Ok(())
 }
 
+/// Synchronous sibling of [`refuse_if_symlink_in_path`] for blocking contexts.
+///
+/// The archive extractor runs inside `spawn_blocking` and cannot `.await`, so it
+/// uses this variant to refuse — *before* it creates anything — any entry whose
+/// destination resolves through a symlink an earlier entry planted. Identical
+/// policy and error type to the async version; walks with
+/// [`std::fs::symlink_metadata`]. `boundary` scopes the walk to the untrusted
+/// portion strictly below a trusted root (pass `Some(canonical_root)` so a
+/// symlinked `$OCX_HOME` above the extraction root is not itself refused).
+pub fn refuse_if_symlink_in_path_sync(path: &Path, boundary: Option<&Path>) -> Result<(), SymlinkWalkError> {
+    let mut current: Option<&Path> = Some(path);
+    while let Some(p) = current {
+        if boundary == Some(p) {
+            break;
+        }
+        match std::fs::symlink_metadata(p) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(SymlinkWalkError::Ancestor {
+                    path: path.to_path_buf(),
+                    ancestor: p.to_path_buf(),
+                });
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Not yet created — keep walking.
+            }
+            Err(e) => {
+                return Err(SymlinkWalkError::Io {
+                    path: p.to_path_buf(),
+                    source: e,
+                });
+            }
+        }
+        current = p.parent();
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
