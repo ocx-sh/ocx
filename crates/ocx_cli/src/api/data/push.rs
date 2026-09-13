@@ -20,15 +20,22 @@ use crate::api::data::sweep::SweptStatus;
 /// counted rather than listed — each is an 82-column
 /// `__ocx.keep.sha256-<hex>` and there is one per distinct platform manifest.
 ///
-/// JSON format:
+/// JSON format — eleven keys:
 /// `{ "identifier", "status", "manifest_digest", "cascade_tags_written",
 /// "keep_tags_written", "layers": { "mounted", "uploaded", "verified" },
 /// "platform_digests": { "<platform>": "sha256:…" },
-/// "annotations_written": { "<key>": "<value>" } }`.
-/// The first five keys are the machine-readable contract consumed by
-/// `ocx-mirror pipeline push`, which keys its go/no-go bookkeeping off `status`
-/// and records `cascade_tags_written` in the run summary; `layers`,
-/// `platform_digests` and `annotations_written` are additive.
+/// "annotations_written": { "<key>": "<value>" },
+/// "aliases_written": ["1.2.3", …],
+/// "signatures": [{ "platform", "status", "report", "kind", "message" }],
+/// "attestation": { "status", … } }`.
+///
+/// The first five are the machine-readable contract consumed by `ocx-mirror
+/// pipeline push`, which keys its go/no-go bookkeeping off `status` and records
+/// `cascade_tags_written` in the run summary. Everything after them is
+/// additive, and the last five — `platform_digests`, `annotations_written`,
+/// `aliases_written`, `signatures` and `attestation` — are additionally
+/// **omitted when empty**, so an unsigned push that annotates nothing emits
+/// the first six keys alone.
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct PushReport {
     /// The pushed package identifier (`registry/repository:tag`).
@@ -82,6 +89,20 @@ pub struct PushReport {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     #[schemars(extend("x-ocx-absent-when-none" = true))]
     pub annotations_written: BTreeMap<String, String>,
+    /// The un-prefixed track tags `--default` aliased onto this push, bare
+    /// version first (`1.2.3`, then `1.2`, `1`, `latest` under `--cascade`).
+    /// Empty (and omitted) without the flag, and for a push whose tag carries
+    /// no variant.
+    ///
+    /// Additive and JSON-only, like `platform_digests` and
+    /// `annotations_written` — `cascade_tags_written` and `keep_tags_written`
+    /// are unconditional only because `ocx-mirror pipeline push` parses them.
+    ///
+    /// These tags name the manifests this push already uploaded: each alias is
+    /// an index write, never a second upload.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
+    pub aliases_written: Vec<String>,
     /// One row per platform manifest `--sign` signed inline, in push order.
     ///
     /// Empty (and omitted) without `--sign`, so the key set a consumer of an
@@ -242,6 +263,7 @@ impl PushReport {
                 .map(|(platform, digest)| (platform.to_string(), digest.to_string()))
                 .collect(),
             annotations_written: BTreeMap::new(),
+            aliases_written: outcome.aliases_written,
             signatures: Vec::new(),
             attestation: None,
         }
@@ -342,7 +364,14 @@ mod tests {
         keep_tags: Vec<String>,
         layer_counts: LayerCounts,
     ) -> PushOutcome {
-        PushOutcome::new(digest(digest_hex), cascade_tags, keep_tags, Vec::new(), layer_counts)
+        PushOutcome::new(
+            digest(digest_hex),
+            cascade_tags,
+            keep_tags,
+            Vec::new(),
+            Vec::new(),
+            layer_counts,
+        )
     }
 
     /// A two-platform push: the index digest and each platform's manifest
@@ -357,6 +386,7 @@ mod tests {
                 ("linux/amd64".parse().expect("platform parses"), digest("1")),
                 ("linux/arm64/v8".parse().expect("platform parses"), digest("2")),
             ],
+            Vec::new(),
             LayerCounts::default(),
         )
     }
@@ -539,6 +569,8 @@ mod tests {
 
 #[cfg(test)]
 mod attestation_tests {
+    use ocx_lib::{oci, publisher::PushOutcome};
+
     use super::{AttestationOutcome, PushReport};
 
     fn report() -> PushReport {
@@ -551,6 +583,7 @@ mod attestation_tests {
             layers: ocx_lib::oci::LayerCounts::default(),
             platform_digests: std::collections::BTreeMap::new(),
             annotations_written: std::collections::BTreeMap::new(),
+            aliases_written: Vec::new(),
             signatures: Vec::new(),
             attestation: None,
         }
@@ -577,6 +610,48 @@ mod attestation_tests {
         assert!(
             json.get("annotations_written").is_none(),
             "annotations_written must be omitted, not an empty object: {json}"
+        );
+    }
+
+    /// And for the alias set: a push without `--default`, or one whose tag
+    /// carries no variant, must leave the parsed key set exactly as it was.
+    #[test]
+    fn a_push_that_aliases_nothing_omits_the_aliases_key() {
+        let json = serde_json::to_value(report()).expect("serialize");
+        assert!(
+            json.get("aliases_written").is_none(),
+            "aliases_written must be omitted, not an empty array: {json}"
+        );
+    }
+
+    /// The bare track, in write order — a consumer feeding these to
+    /// `ocx package announce` gets the version before the rolling tags.
+    #[test]
+    fn the_bare_track_a_push_aliased_is_reported_in_write_order() {
+        let outcome = PushOutcome::new(
+            oci::Digest::try_from(format!("sha256:{}", "b".repeat(64)).as_str()).expect("digest parses"),
+            vec!["full-1.2".to_string(), "full-1".to_string()],
+            Vec::new(),
+            Vec::new(),
+            vec!["1.2.3".to_string(), "1.2".to_string(), "1".to_string()],
+            ocx_lib::oci::LayerCounts::default(),
+        );
+
+        let json = serde_json::to_value(PushReport::from_outcome(
+            "registry.example/pkg:full-1.2.3".into(),
+            outcome,
+        ))
+        .expect("serialize");
+
+        assert_eq!(
+            json["aliases_written"].as_array(),
+            Some(&vec!["1.2.3".into(), "1.2".into(), "1".into()])
+        );
+        // Two tag sets, kept apart: the variant's own rolling tags stay where
+        // `ocx-mirror pipeline push` already reads them.
+        assert_eq!(
+            json["cascade_tags_written"].as_array(),
+            Some(&vec!["full-1.2".into(), "full-1".into()])
         );
     }
 
@@ -702,6 +777,7 @@ mod signature_row_tests {
             layers: ocx_lib::oci::LayerCounts::default(),
             platform_digests: std::collections::BTreeMap::new(),
             annotations_written: std::collections::BTreeMap::new(),
+            aliases_written: Vec::new(),
             signatures: Vec::new(),
             attestation: None,
         }

@@ -477,16 +477,25 @@ pub async fn publish_managed_config(
         // `--[no-]keep-tag` surface of its own, so it opts out to keep
         // today's tag set unchanged. Index annotations are likewise a
         // `ocx package push --annotation` contract with no `ocx config push`
-        // surface, so none are written.
+        // surface, so none are written. `--default` is a third such
+        // contract: a managed config publishes no variants.
         publisher
-            .push_cascade(vec![info], &layers, existing_versions, None, false, &BTreeMap::new())
+            .push_cascade(
+                vec![info],
+                &layers,
+                existing_versions,
+                None,
+                false,
+                false,
+                &BTreeMap::new(),
+            )
             .await
             .map_err(|source| ManagedConfigPublishError::PushFailed {
                 source: Box::new(source),
             })?
     } else {
         publisher
-            .push(vec![info], &layers, None, false, &BTreeMap::new())
+            .push(vec![info], &layers, None, false, false, &BTreeMap::new())
             .await
             .map_err(|source| ManagedConfigPublishError::PushFailed {
                 source: Box::new(source),

@@ -230,8 +230,11 @@ def test_variant_cascade_full_chain(
             f"Expected 1 entry in {tag}, got {len(manifest['manifests'])}"
         )
 
-    # The variant cascade must NOT create default rolling tags.
-    for tag in ["1.2", "1", "latest"]:
+    # The variant cascade must NOT create default rolling tags. The bare
+    # VERSION is in the list too: `--default` writes it first, so a negative
+    # control that omitted it would pass even for an alias write that leaked
+    # into every push.
+    for tag in ["1.2.3", "1.2", "1", "latest"]:
         try:
             fetch_manifest_from_registry(ocx.registry, unique_repo, tag)
             raise AssertionError(f"Tag '{tag}' should not exist after variant-only push")
@@ -624,3 +627,90 @@ def test_cascade_libc_variants_preserved(
     assert ("libc.musl",) in features_sets, (
         f"musl entry must survive cascade; got features_sets={features_sets}"
     )
+
+
+# ── --default (bare-track aliasing) ──────────────────────────────────────────
+
+
+def test_default_variant_owns_the_bare_track(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """`--default` re-tags the pushed variant onto the un-prefixed track.
+
+    Two variants, one push each. The `full` push carries the flag, so the bare
+    `1.2.3`/`1.2`/`1`/`latest` tags must resolve to the *same* platform manifest
+    `full-1.2.3` does — a re-tag, not a second publish — while every `slim-*`
+    tag keeps its own.
+    """
+    tags_file = tmp_path / "tags"
+
+    make_package(
+        ocx, unique_repo, "slim-1.2.3", tmp_path / "slim",
+        platform="linux/amd64",
+    )
+    make_package(
+        ocx, unique_repo, "full-1.2.3", tmp_path / "full",
+        platform="linux/amd64",
+        extra_push_args=["--default", "--tags-file", str(tags_file)],
+    )
+
+    def digest(tag: str) -> str | None:
+        return _platform_digest(
+            fetch_manifest_from_registry(ocx.registry, unique_repo, tag), "linux/amd64"
+        )
+
+    full_digest = digest("full-1.2.3")
+    slim_digest = digest("slim-1.2.3")
+    # Every `make_package` call mints its own content marker, so the two
+    # variants genuinely differ — without this the assertions below would hold
+    # for any pair of tags.
+    assert full_digest != slim_digest, "the two variants must be distinguishable"
+
+    for tag in ["1.2.3", "1.2", "1", "latest"]:
+        assert digest(tag) == full_digest, (
+            f"bare tag '{tag}' must resolve to the full-1.2.3 manifest"
+        )
+        manifest = fetch_manifest_from_registry(ocx.registry, unique_repo, tag)
+        assert len(manifest["manifests"]) == 1, (
+            f"Expected 1 entry in {tag}, got {len(manifest['manifests'])}"
+        )
+
+    for tag in ["slim-1.2.3", "slim-1.2", "slim-1", "slim"]:
+        assert digest(tag) == slim_digest, f"slim tag '{tag}' was overwritten"
+
+    # The variant's own track is unchanged by the aliasing.
+    for tag in ["full-1.2", "full-1", "full"]:
+        assert digest(tag) == full_digest, f"full tag '{tag}' missing the pushed manifest"
+
+    # `--tags-file` receives both sets, so a later `ocx package announce
+    # --tags-file` announces the bare track too.
+    written = set(tags_file.read_text().replace(",", " ").split())
+    assert written == {
+        "full-1.2.3", "full-1.2", "full-1", "full",
+        "1.2.3", "1.2", "1", "latest",
+    }, f"tags file must list both tag sets: {sorted(written)}"
+
+
+def test_default_on_a_variant_less_tag_is_a_usage_error(
+    ocx: OcxRunner, unique_repo: str, tmp_path: Path
+):
+    """`--default` requires the pushed tag to carry a variant.
+
+    The pushed tag's own variant becomes the default track, so a variant-less
+    tag has no default to declare - a usage error (exit 64), resolved before any
+    upload. The bundle argument below names a file that does not exist, proving
+    the refusal costs no registry round-trip and reads no bundle.
+    """
+    result = ocx.plain(
+        "package", "push",
+        "-p", "linux/amd64",
+        "--default",
+        "-i", f"{ocx.registry}/{unique_repo}:1.2.3",
+        str(tmp_path / "never-read.tar.xz"),
+        check=False,
+    )
+
+    assert result.returncode == 64, result.stderr
+    assert "--default" in result.stderr, result.stderr
+    # The refusal names the reason, not just the flag.
+    assert "variant" in result.stderr, result.stderr

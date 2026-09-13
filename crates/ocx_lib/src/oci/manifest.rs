@@ -7,7 +7,7 @@
 //! bytes from a `package::info::Info` + layer descriptors, with no I/O),
 //! see [`crate::oci::manifest_builder`].
 
-use super::{Digest, ImageIndex, Manifest, Platform};
+use super::{Digest, ImageIndex, ImageIndexEntry, Manifest, Platform};
 
 /// An OCI image index that deserialised structurally but violates an invariant
 /// of the image spec that OCX relies on.
@@ -98,15 +98,21 @@ pub fn has_platform(manifest: &Manifest, platform: &Platform) -> bool {
 /// `adr_index_indirection.md` Decision E) can address that exact platform
 /// manifest without re-deriving it from the layers/metadata that produced it.
 pub fn platform_manifest_digest(manifest: &Manifest, platform: &Platform) -> Option<Digest> {
+    platform_manifest_entry(manifest, platform).and_then(|entry| Digest::try_from(&entry.digest).ok())
+}
+
+/// Returns the whole index entry for the given platform, if present.
+///
+/// The descriptor form of [`platform_manifest_digest`], for the caller that
+/// needs the `size` alongside the digest — re-tagging an already-pushed
+/// platform manifest under a second tag requires both, and reading them from
+/// the same entry is what keeps the two from being paired wrongly.
+pub fn platform_manifest_entry<'a>(manifest: &'a Manifest, platform: &Platform) -> Option<&'a ImageIndexEntry> {
     let Manifest::ImageIndex(index) = manifest else {
         return None;
     };
     let target = Some(super::native::Platform::from(platform));
-    index
-        .manifests
-        .iter()
-        .find(|entry| entry.platform == target)
-        .and_then(|entry| Digest::try_from(&entry.digest).ok())
+    index.manifests.iter().find(|entry| entry.platform == target)
 }
 
 #[cfg(test)]
