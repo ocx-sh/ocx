@@ -87,10 +87,10 @@ Cascade is a publisher convention, not a registry-enforced rule. The registry se
 
 ### Naming a Default Variant {#default-variant}
 
-A [variant][in-depth-versioning-variants] is a tag prefix — `full-1.2.3`, `slim-1.2.3` — and each variant cascades in its own track. A package whose every build is a named variant therefore publishes no bare `1.2.3` at all, and `ocx package install acme/mytool` with no variant resolves nothing. `--default-variant` names the one variant that also owns the un-prefixed track:
+A [variant][in-depth-versioning-variants] is a tag prefix — `full-1.2.3`, `slim-1.2.3` — and each variant cascades in its own track. A package whose every build is a named variant therefore publishes no bare `1.2.3` at all, and `ocx package install acme/mytool` with no variant resolves nothing. `--default` lets the pushed tag's own variant also own the un-prefixed track:
 
 ```shell
-ocx package push -c -p linux/amd64 --default-variant full \
+ocx package push -c -p linux/amd64 --default \
   -i ghcr.io/acme/tools/mytool:full-1.2.3 mytool-full-1.2.3-linux-amd64.tar.xz
 ```
 
@@ -98,7 +98,7 @@ That push writes `full-1.2.3`, `full-1.2`, `full-1`, `full` as any variant push 
 
 The bare track is a track like any other: a published bare `2.0.0` keeps this push off `latest` exactly as it would keep `full-1.2.3` off `full`, while a newer `slim-2.0.0` has no say over it. Without `--cascade` only the bare version is written, since there are no rolling tags to mirror.
 
-A pipeline that pushes every variant passes the same flag to each: a push whose version carries a different variant, or none, writes no alias and says so on stderr. `--tags-file` receives both tag sets, and `--format json` reports the bare track under `aliases_written`.
+The pushed tag must carry a variant — `--default` on a tag with no variant is a usage error (exit 64), rather than a silent no-op, because there is no variant for it to declare as the default. In a pipeline that pushes every variant, pass `--default` only on the build whose variant should own the bare track. `--tags-file` receives both tag sets, and `--format json` reports the bare track under `aliases_written`.
 
 ## Linking the Source Repository {#source-annotation}
 
@@ -130,7 +130,7 @@ ocx package push -c --ci-annotations=gitlab -i $CI_REGISTRY_IMAGE/widget:1.2.3 \
 | `org.opencontainers.image.created` | the push clock | `$CI_PIPELINE_CREATED_AT` |
 | `org.opencontainers.image.version` | the version the push resolved | same |
 
-`$SOURCE_DATE_EPOCH`, when set, decides `created` on either — a [reproducible build][reproducible-builds-sde] stamps one instant, not two. A variable that is unset or blank writes no annotation rather than an empty one, and an explicit `--annotation` on the same key wins.
+`$SOURCE_DATE_EPOCH`, when set, decides `created` on either — a [reproducible build][reproducible-builds-sde] stamps one instant, not two. `created` is always stamped, since its source can never be missing; a `source` or `revision` variable that is unset or blank writes no annotation rather than an empty one, and an explicit `--annotation` on the same key wins. `version` strips the variant prefix — a `full-1.2.3` push annotates `1.2.3` — and a tag that is not a version writes no `.version` key, which is not an error.
 
 The flag is opt-in, and stays opt-in: a package built somewhere other than the forge you assumed would otherwise silently claim provenance it does not have, and OCX publishes to any registry from any forge.
 

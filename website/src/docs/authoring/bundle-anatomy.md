@@ -93,6 +93,10 @@ When repackaging upstream archives, [`strip_components`][strip-components] mirro
 }
 ```
 
+::: info Two `strip_components`, two different moments
+This metadata field and [`ocx package create --strip-components`][cmd-package-create] share a name and a purpose — dropping leading path segments — but apply at different points in the pipeline. The metadata field is baked into the published sidecar and re-applies **every time a consumer installs the package**, stripping the layer as it extracts into that consumer's object store. `--strip-components` runs once, at authoring time, only under [`--extract`][cmd-package-create]: it strips the *input* archive named by `<PATH>` while unpacking it into the tree `create` bundles from, before that content is ever compressed into the archive OCX publishes. Reach for the metadata field to describe how every install should unwrap your layers; reach for `--extract`/`--strip-components` to turn an upstream release archive into your bundle's content tree without a manual unpack-repack step.
+:::
+
 ## See Also {#see-also}
 
 - [`ocx package create` reference][cmd-package-create]

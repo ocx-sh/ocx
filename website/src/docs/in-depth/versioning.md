@@ -66,7 +66,7 @@ OCX uses a <Tooltip term="variant-prefix format">The variant name comes before t
 
 Rolling tags cascade within their variant track: `debug-3.12.5` cascades to `debug-3.12` → `debug-3` → `debug`. Variants never cross — publishing a new `debug` build never updates `pgo.lto` or the default variant's tags. See [Cascades](#cascades) for the full cascade model.
 
-For the default variant, cascading also produces unadorned alias tags: publishing a new default-variant build cascades both the prefixed track (if any) and the bare `3.12.5` → `3.12` → `3` → `latest` track.
+Aliasing onto the bare track is opt-in, not automatic: [`ocx package push --default`][cmd-package-push] lets the pushed tag's own variant also own the un-prefixed track, producing unadorned alias tags alongside its own prefixed ones — with `--cascade`, the bare `3.12.5` → `3.12` → `3` → `latest` track cascades too. Without `--default` a variant-prefixed push never touches the bare track.
 
 ::: warning Platform vs. variant
 [OCI `platform.variant`][oci-image-index] is a CPU sub-architecture field (ARM `v6`, `v7`, `v8`) — it determines *where* a binary can run and is selected automatically. OCX software variants determine *how* a binary was built and are selected by the user. The two concepts are orthogonal.
@@ -92,7 +92,7 @@ Publishing `kitware/cmake:3.27.5_20260217` would update `kitware/cmake:3.27` but
 
 This is a publishing convention, not a guarantee enforced by the registry. Publishers must maintain the cascade manually — or have OCX do it for them.
 
-Cascades operate within a single variant track. Publishing `debug-3.28.1` updates `debug-3.28`, `debug-3`, and `debug` — but never touches the default variant's tags (`3.28`, `3`, `latest`) or any other variant's tags. For the default variant, cascading also produces unadorned alias tags that mirror the variant-prefixed chain. See [Variants](#variants) for details.
+Cascades operate within a single variant track. Publishing `debug-3.28.1` updates `debug-3.28`, `debug-3`, and `debug` — but never touches the default variant's tags (`3.28`, `3`, `latest`) or any other variant's tags. `--default` opts a variant-prefixed push into also aliasing the bare track, mirroring the variant-prefixed chain under `--cascade`. See [Variants](#variants) for details.
 
 ::: tip Cascading a new release
 [`ocx package push --cascade`][cmd-package-push] handles the full cascade automatically: publish one build and let OCX re-point all rolling ancestors in a single command.

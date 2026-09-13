@@ -99,6 +99,23 @@ linux/amd64:
 
 The pipeline applies every regex and requires the union of matches to resolve to exactly one asset filename per release; ambiguous matches abort with `Ambiguous`. Two regexes that match the same upstream filename are fine; two regexes that match different filenames are an error. See the CMake worked example [above](#mirror) for the full matrix.
 
+### Repackaging a release asset by hand {#github-releases-extract}
+
+A hand-driven publisher who downloads one release asset directly, without going through `ocx_mirror`, still has to solve the same problem `ocx_mirror` solves internally: a GitHub Release tarball almost always wraps its content in a version-named directory (`mytool-1.2.3-linux-x86_64/bin/mytool`), and OCX bundles need a flat surface at their root. Unpacking that archive by hand, stripping the wrapper, and re-tarring it just to feed [`ocx package create`][cmd-package-create] is exactly the manual step [`--extract`][cmd-package-create] exists to remove.
+
+```sh
+curl -LO https://github.com/example-org/mytool/releases/download/v1.2.3/mytool-1.2.3-linux-x86_64.tar.gz
+
+# Treat the downloaded release asset itself as the archive to bundle, stripping
+# its single wrapper directory on the way in.
+ocx package create mytool-1.2.3-linux-x86_64.tar.gz \
+  --extract --strip-components 1 \
+  -i mytool:1.2.3 -p linux/amd64 \
+  -o mytool-1.2.3-linux-amd64.tar.xz
+```
+
+`--extract` unpacks the downloaded asset into a temporary directory and bundles that tree instead of the archive file — the metadata sidecar, the [`binaries`][reference-binaries] scan, and the libc check all run against the extracted content exactly as they would against a directory you unpacked yourself. `--strip-components` runs once here, against the upstream asset at authoring time; it is a different mechanism from the metadata [`strip_components`][strip-components] field a mirror spec declares, which instead re-applies on every consumer's install — see [Two `strip_components`, two different moments][bundle-anatomy-strip-components] for how the two relate.
+
 ## Repackaging Homebrew Formulae {#homebrew}
 
 [Homebrew][homebrew] formulae are [Ruby][ruby] DSL programs, not declarative manifests — every formula encodes its own download URL, build steps, and install hook. There is no general-purpose "import a Homebrew formula" path. The migration pattern is to read the formula's `bottle do … root_url … sha256 …` block (for binary bottles) or the formula's `url` + `sha256` (for source releases), mirror those bytes into a `github_release`-shaped pipeline (or fetch directly), and write OCX `metadata.json` covering the env entries Homebrew would have set in its post-install script.
@@ -146,7 +163,13 @@ The `ocx_mirror` pipeline pushes packages, not descriptions — `ocx package des
 <!-- commands -->
 [cmd-package-describe]: ../reference/command-line.md#package-description-push
 [cmd-package-info]: ../reference/command-line.md#package-description-pull
+[cmd-package-create]: ../reference/command-line.md#package-create
+
+<!-- reference -->
+[strip-components]: ../reference/metadata.md#extraction-strip-components
+[reference-binaries]: ../reference/metadata.md#executables
 
 <!-- authoring -->
 [authoring-building-pushing]: ./building-pushing.md
 [authoring-layer-reuse]: ./building-pushing.md#layer-reuse
+[bundle-anatomy-strip-components]: ./bundle-anatomy.md#strip-components

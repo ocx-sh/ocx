@@ -959,14 +959,21 @@ Most CI systems (GitHub Actions, GitLab CI, Travis, etc.) set this automatically
 
 ### CI Integration Variables {#external-ci-integration}
 
-`ocx env --ci` and `ocx package env --ci` read a small set of runner-provided variables to locate the CI system's persistence channel. These variables are **read by OCX from the runner environment** — they are not OCX configuration and carry no `OCX_` prefix.
+`ocx env --ci`, `ocx package env --ci`, and `ocx package push --ci-annotations` each read a small set of runner-provided variables — the first two to locate the CI system's persistence channel, the third to derive OCI annotations from the pipeline that produced the push. These variables are **read by OCX from the runner environment** — they are not OCX configuration and carry no `OCX_` prefix.
 
 | Variable | Provider | Purpose |
 |----------|----------|---------|
 | [`GITHUB_ACTIONS`](#external-github-actions) | [GitHub Actions][github-actions-docs] | Provider auto-detection |
 | [`GITHUB_ENV`](#external-github-env) | [GitHub Actions][github-actions-docs] | Sink for non-`PATH` entries |
 | [`GITHUB_PATH`](#external-github-path) | [GitHub Actions][github-actions-docs] | Sink for `PATH`-type entries |
+| [`GITHUB_SERVER_URL`](#external-github-server-url) | [GitHub Actions][github-actions-docs] | `--ci-annotations=github`'s `org.opencontainers.image.source` (joined with `GITHUB_REPOSITORY`) |
+| [`GITHUB_REPOSITORY`](#external-github-repository) | [GitHub Actions][github-actions-docs] | `--ci-annotations=github`'s `org.opencontainers.image.source` (joined with `GITHUB_SERVER_URL`) |
+| [`GITHUB_SHA`](#external-github-sha) | [GitHub Actions][github-actions-docs] | `--ci-annotations=github`'s `org.opencontainers.image.revision` |
 | [`GITLAB_CI`](#external-gitlab-ci) | [GitLab CI/CD][gitlab-ci-docs] | Provider auto-detection |
+| [`CI_PROJECT_URL`](#external-ci-project-url) | [GitLab CI/CD][gitlab-ci-docs] | `--ci-annotations=gitlab`'s `org.opencontainers.image.source` |
+| [`CI_COMMIT_SHA`](#external-ci-commit-sha) | [GitLab CI/CD][gitlab-ci-docs] | `--ci-annotations=gitlab`'s `org.opencontainers.image.revision` |
+| [`CI_PIPELINE_CREATED_AT`](#external-ci-pipeline-created-at) | [GitLab CI/CD][gitlab-ci-docs] | `--ci-annotations=gitlab`'s `org.opencontainers.image.created`, unless `SOURCE_DATE_EPOCH` is set |
+| [`SOURCE_DATE_EPOCH`](#external-source-date-epoch) | [Reproducible Builds][reproducible-builds-sde] | `--ci-annotations`'s `org.opencontainers.image.created` on either provider, taking precedence over `CI_PIPELINE_CREATED_AT` |
 
 ::: warning These variables are not forwarded to child `ocx` processes
 OCX's config-forwarding set propagates only `OCX_*` resolution-affecting variables to subprocesses (launchers, nested `ocx exec`). The runner variables above are **not** in that set — a child `ocx` invocation will not inherit them. This is intentional: the CI sink files are runner-managed paths and must not propagate through forked environments.
@@ -974,7 +981,7 @@ OCX's config-forwarding set propagates only `OCX_*` resolution-affecting variabl
 
 ### `GITHUB_ACTIONS` {#external-github-actions}
 
-Set to `true` by [GitHub Actions][github-actions-docs] runners. OCX reads this variable to auto-detect the CI provider when `--ci` is passed without an explicit provider value, and to suppress the update check on startup.
+Set to `true` by [GitHub Actions][github-actions-docs] runners. OCX reads this variable to auto-detect the CI provider when `--ci` (on `ocx env` / `ocx package env`) or `--ci-annotations` (on `ocx package push`) is passed without an explicit provider value, and to suppress the update check on startup.
 
 ### `GITHUB_PATH` {#external-github-path}
 
@@ -986,9 +993,37 @@ All other path-type variables (such as `LD_LIBRARY_PATH`, `MANPATH`, `PKG_CONFIG
 
 Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps append environment variables to this file using `KEY=VALUE` syntax (or [heredoc delimiters][github-multiline-env] for multiline values); the runner exports each entry to all later steps. `ocx env --ci=github` and `ocx package env --ci=github` write all non-`PATH` entries here: constant-type variables as `KEY=VALUE`, path-type variables other than `PATH` (such as `LD_LIBRARY_PATH`) as `KEY=<prepended-value>` with OCX-provided directories prepended to the existing value, and [`list`][reference-env-list]-type variables (such as `JDK_JAVA_OPTIONS`) as `KEY=<appended-value>` with OCX-provided contributions appended to the existing value, joined by the key's separator.
 
+### `GITHUB_SERVER_URL` {#external-github-server-url}
+
+Set by [GitHub Actions][github-actions-docs] to the forge's base URL (`https://github.com`, or a GitHub Enterprise Server host). [`ocx package push --ci-annotations=github`][cmd-package-push-annotations] joins it with `GITHUB_REPOSITORY` (trailing slash trimmed) to stamp `org.opencontainers.image.source`. Absent or blank means no `.source` annotation is written — never a truncated one.
+
+### `GITHUB_REPOSITORY` {#external-github-repository}
+
+Set by [GitHub Actions][github-actions-docs] to `<owner>/<repo>`. Joined with `GITHUB_SERVER_URL` for [`--ci-annotations=github`][cmd-package-push-annotations]'s `org.opencontainers.image.source`; contributes nothing on its own without `GITHUB_SERVER_URL` also being set.
+
+### `GITHUB_SHA` {#external-github-sha}
+
+Set by [GitHub Actions][github-actions-docs] to the commit SHA that triggered the run. [`ocx package push --ci-annotations=github`][cmd-package-push-annotations] stamps it verbatim as `org.opencontainers.image.revision`.
+
 ### `GITLAB_CI` {#external-gitlab-ci}
 
-Set to `true` by [GitLab CI/CD][gitlab-ci-docs] runners. OCX reads this variable to auto-detect the CI provider when `--ci` is passed without an explicit provider value.
+Set to `true` by [GitLab CI/CD][gitlab-ci-docs] runners. OCX reads this variable to auto-detect the CI provider when `--ci` (on `ocx env` / `ocx package env`) or `--ci-annotations` (on `ocx package push`) is passed without an explicit provider value.
+
+### `CI_PROJECT_URL` {#external-ci-project-url}
+
+Set by [GitLab CI/CD][gitlab-ci-docs] to the project's URL on the GitLab instance. [`ocx package push --ci-annotations=gitlab`][cmd-package-push-annotations] stamps it verbatim as `org.opencontainers.image.source`. Absent or blank writes no `.source` annotation.
+
+### `CI_COMMIT_SHA` {#external-ci-commit-sha}
+
+Set by [GitLab CI/CD][gitlab-ci-docs] to the commit SHA being built. [`ocx package push --ci-annotations=gitlab`][cmd-package-push-annotations] stamps it verbatim as `org.opencontainers.image.revision`.
+
+### `CI_PIPELINE_CREATED_AT` {#external-ci-pipeline-created-at}
+
+Set by [GitLab CI/CD][gitlab-ci-docs] to the pipeline's creation timestamp. [`ocx package push --ci-annotations=gitlab`][cmd-package-push-annotations] parses it as [RFC 3339][rfc-3339] and re-emits it as `org.opencontainers.image.created` in UTC seconds with a literal `Z`, the same canonical spelling every other `created` value OCX writes uses — a sub-second-precision or non-UTC-offset input is normalized, not passed through verbatim. A value that fails to parse is not stamped: OCX warns on stderr and falls back to the wall clock instead. [`SOURCE_DATE_EPOCH`](#external-source-date-epoch), when set, takes precedence over this variable. GitHub Actions exposes no equivalent — `--ci-annotations=github` always uses the wall clock (or `SOURCE_DATE_EPOCH`).
+
+### `SOURCE_DATE_EPOCH` {#external-source-date-epoch}
+
+The [Reproducible Builds][reproducible-builds-sde] convention for pinning a build's timestamp to a Unix epoch value. [`ocx package push --ci-annotations`][cmd-package-push-annotations] reads it on either provider and, when set, uses it to stamp `org.opencontainers.image.created` — outranking [`CI_PIPELINE_CREATED_AT`](#external-ci-pipeline-created-at) on GitLab — so a reproducible pipeline's push and its attestations agree on one instant rather than two.
 
 ### `DOCKER_CONFIG` {#external-docker-config}
 
@@ -1099,9 +1134,12 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [direnv]: https://direnv.net/
 [systemd-environment-d]: https://www.freedesktop.org/software/systemd/man/latest/environment.d.html
 [launchd-agents]: https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html
+[reproducible-builds-sde]: https://reproducible-builds.org/docs/source-date-epoch/
+[rfc-3339]: https://www.rfc-editor.org/rfc/rfc3339
 
 <!-- commands -->
 [cmd-ref]: command-line.md
+[cmd-package-push-annotations]: command-line.md#package-push-annotations
 [cmd-direnv]: command-line.md#direnv
 [cmd-direnv-export]: command-line.md#direnv-export
 [cmd-add]: command-line.md#add
