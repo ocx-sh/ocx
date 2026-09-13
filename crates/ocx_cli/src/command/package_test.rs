@@ -12,6 +12,7 @@ use ocx_lib::utility::child_process;
 use ocx_lib::utility::fs as ocx_fs;
 use ocx_lib::{cli::UsageError, env, oci, package, publisher::LayerRef};
 
+use crate::api::data::script_run::{AssertionRecord, ScriptRunReport, ScriptStatus};
 use crate::{conventions, options};
 
 /// Materialize a package locally (no registry round-trip) and run a command in its env.
@@ -98,6 +99,34 @@ pub struct PackageTest {
     #[clap(long, conflicts_with = "command")]
     script: Option<PathBuf>,
 
+    /// Write a JUnit XML report for the scripted run to PATH.
+    ///
+    /// Requires `--script`; cannot be combined with a trailing command. Parent
+    /// directories are created; an existing file is truncated, never merged -
+    /// give each platform its own path and let CI collect them. The GitHub
+    /// test-report actions merge the files they are handed into one report.
+    /// GitLab's `artifacts:reports:junit` keeps results from different jobs in
+    /// separate suites; a glob gathers only what one job wrote. Every per-leg
+    /// entry carries the same package identifier as its label, so see the
+    /// [one path per platform](https://ocx.sh/docs/authoring/testing#scripted-tests-junit-per-platform)
+    /// documentation for the shape to design for.
+    ///
+    /// Written whenever the scripted run is reached, including a red run and an
+    /// unreadable `--script` path; a failure resolving the package writes none.
+    /// The JSON envelope on stdout is unchanged. The exit code is not: a report
+    /// that cannot be written exits 74 after an otherwise green run, like every
+    /// other operator-supplied output path.
+    // The "requires --script" rule is enforced in `validate_junit`, not as a
+    // clap `requires = "script"`. A clap `requires` demands both `--script`
+    // AND the trailing `<COMMAND>` at once — an unsatisfiable pair, since the
+    // two are mutually exclusive. Instead `command` lists `junit` in its
+    // `required_unless_present_any`, so a bare `--junit` (no `--script`, no
+    // command) parses through to `validate_junit`, which gives the clean
+    // "--junit requires --script" message. `conflicts_with = "command"` still
+    // catches `--junit` beside a command at parse time.
+    #[clap(long, conflicts_with = "command", value_name = "PATH")]
+    junit: Option<PathBuf>,
+
     /// Command to execute inside the composed env, with arguments. Required
     /// unless `--script` is given (exactly one of the two forms must be supplied).
     ///
@@ -108,12 +137,34 @@ pub struct PackageTest {
     /// "non-required positional with a lower index than a required positional" -
     /// fatal in debug builds when the command tree is built (e.g. completion
     /// generation). Requires clap >= 4.5.57 (see `toolchain_exec.rs` NOTE).
-    #[clap(allow_hyphen_values = true, last = true, required_unless_present = "script", num_args = 1..)]
+    #[clap(allow_hyphen_values = true, last = true, required_unless_present_any = ["script", "junit"], num_args = 1..)]
     command: Vec<String>,
 }
 
 impl PackageTest {
+    /// Rejects `--junit` given without `--script`.
+    ///
+    /// `--junit` reports a *scripted* run; without `--script` there is no
+    /// scripted run to report. A bare `--junit` (no `--script`, no command)
+    /// reaches here only because `command` lists `junit` in its
+    /// `required_unless_present_any` — a `required_unless_present*` positional
+    /// is NOT waived by a conflict with a present arg, so `conflicts_with`
+    /// alone would leave clap demanding `<COMMAND>`. The
+    /// `--junit`-beside-a-command shape is caught earlier by
+    /// `conflicts_with = "command"`. See the field comment on `junit` for why
+    /// this is not a clap `requires = "script"`.
+    fn validate_junit(&self) -> anyhow::Result<()> {
+        if self.junit.is_some() && self.script.is_none() {
+            return Err(anyhow::Error::from(UsageError::new(
+                "--junit requires --script; it reports a scripted run and has no report to write without one",
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
+        self.validate_junit()?;
+
         // Step 1: Resolve identifier. Reject @digest — the digest is computed locally.
         let identifier = self.identifier.with_domain(context.default_registry())?;
         if identifier.digest().is_some() {
@@ -281,6 +332,16 @@ impl PackageTest {
         // Ok(ExitCode) so main.rs::classify_error is bypassed (ADR Exit Code
         // Scheme). The non-script path below is byte-identical to before.
         if let Some(script_path) = &self.script {
+            // Identity of the single `<testcase>` this invocation produces:
+            // one identifier, one platform, one script (no fan-out).
+            let junit_identifier = identifier.to_string();
+            let junit_platform = platform.to_string();
+            let junit = self.junit.as_ref().map(|path| crate::api::junit::Target {
+                path,
+                identifier: &junit_identifier,
+                platform: &junit_platform,
+            });
+
             // The script host spawns its own children through `ocx.run`, never
             // through `Launch`, so the exemption bound that `Launch::exempt`
             // applies to the trailing-command branch would not reach them.
@@ -317,21 +378,26 @@ impl PackageTest {
                     // stream case is detected here, not via `Err`.
                     Ok(0) => {
                         drop(td_guard);
-                        return Err(anyhow::Error::from(ocx_lib::Error::InternalFile(
+                        let message = "no script source provided on stdin (--script -)";
+                        let fault = anyhow::Error::from(ocx_lib::Error::InternalFile(
                             std::path::PathBuf::from("<stdin>"),
-                            std::io::Error::new(
-                                std::io::ErrorKind::UnexpectedEof,
-                                "no script source provided on stdin (--script -)",
-                            ),
-                        )));
+                            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, message),
+                        ));
+                        return Err(
+                            argv_fault_with_report(junit.as_ref(), ScriptStatus::Io, "io", message, fault).await,
+                        );
                     }
                     Ok(_) => (buf, "<stdin>".to_string()),
                     Err(e) => {
                         drop(td_guard);
-                        return Err(anyhow::Error::from(ocx_lib::Error::InternalFile(
+                        let message = format!("failed reading script source from stdin: {e}");
+                        let fault = anyhow::Error::from(ocx_lib::Error::InternalFile(
                             std::path::PathBuf::from("<stdin>"),
-                            std::io::Error::new(e.kind(), format!("failed reading script source from stdin: {e}")),
-                        )));
+                            std::io::Error::new(e.kind(), message.clone()),
+                        ));
+                        return Err(
+                            argv_fault_with_report(junit.as_ref(), ScriptStatus::Io, "io", &message, fault).await,
+                        );
                     }
                 }
             } else {
@@ -339,10 +405,16 @@ impl PackageTest {
                     Ok(s) => (s, script_path.display().to_string()),
                     Err(e) => {
                         drop(td_guard);
-                        return Err(anyhow::Error::from(UsageError::new(format!(
-                            "cannot read script '{}': {e}",
-                            script_path.display()
-                        ))));
+                        let message = format!("cannot read script '{}': {e}", script_path.display());
+                        let fault = anyhow::Error::from(UsageError::new(message.clone()));
+                        return Err(argv_fault_with_report(
+                            junit.as_ref(),
+                            ScriptStatus::Usage,
+                            "usage",
+                            &message,
+                            fault,
+                        )
+                        .await);
                     }
                 }
             };
@@ -369,6 +441,7 @@ impl PackageTest {
                 &scratch_root,
                 &platform,
                 process_env,
+                junit.as_ref(),
             )
             .await;
 
@@ -386,10 +459,18 @@ impl PackageTest {
         }
 
         // Step 7: Resolve command and exec.
-        let (command, args) = self
-            .command
-            .split_first()
-            .expect("clap required_unless_present=script guarantees a command in the non-script branch");
+        //
+        // The non-script branch needs a command. `required_unless_present_any =
+        // ["script", "junit"]` plus the `validate_junit` guard at the top of
+        // `execute` make an empty `command` here unreachable today — but a
+        // `UsageError` rather than `.expect()` removes the dependency on that
+        // ordering: a refactor that relaxes or reorders either guard yields a
+        // clean exit 64, not a panic (exit 101).
+        let Some((command, args)) = self.command.split_first() else {
+            return Err(anyhow::Error::from(UsageError::new(
+                "a command is required unless --script is given",
+            )));
+        };
 
         let resolved = process_env.resolve_test_command(command)?;
 
@@ -439,6 +520,49 @@ impl PackageTest {
     }
 }
 
+/// Writes a JUnit report for a fault that happened BEFORE the engine ran, and
+/// returns `fault` — the error the process must exit on — unchanged.
+///
+/// The two argv faults (`--script` names an unreadable path; `--script -` gets
+/// no source) return a typed error and emit no JSON envelope, but the issue
+/// asks for a report file on *every* exit path — a CI job that saw the flag and
+/// found no artifact cannot tell "ocx never ran" from "the tests all passed".
+/// Both faults render as `<error>`, typed by the status they map to
+/// (`usage` → 64, `io` → 74) rather than a single made-up token, and carry no
+/// location: no Starlark error stands behind them.
+///
+/// Writing the report is **best effort**: the sidecar is a reporting channel,
+/// not the diagnosis. An operator who typed an unreadable `--script` path needs
+/// to be told *that*; answering with the *junit* path's write failure instead
+/// (exit 74, and a message naming the wrong file) is a strictly worse
+/// diagnosis. So a write failure is logged and `fault` still decides the exit
+/// code. Returning the fault, rather than a `Result<()>` the caller would `?`,
+/// is what makes the inverted precedence unexpressible at the call site.
+///
+/// No-op when `--junit` is absent.
+async fn argv_fault_with_report(
+    junit: Option<&crate::api::junit::Target<'_>>,
+    status: ScriptStatus,
+    kind: &str,
+    message: &str,
+    fault: anyhow::Error,
+) -> anyhow::Error {
+    let Some(junit) = junit else { return fault };
+    let report = ScriptRunReport::new(
+        status,
+        Some(AssertionRecord {
+            kind: kind.to_string(),
+            message: message.to_string(),
+            location: None,
+        }),
+        None,
+    );
+    if let Err(error) = crate::api::junit::write(junit, &report).await {
+        ocx_lib::log::warn!("could not write the JUnit report to {}: {error}", junit.path.display());
+    }
+    fault
+}
+
 /// Creates the script scratch directory as a sibling of the package root
 /// inside the same temp/output root, following the same lifecycle as the
 /// package root (kept when the package root is kept; deleted with the bare
@@ -461,4 +585,140 @@ async fn provision_scratch_dir(package_root: &std::path::Path) -> anyhow::Result
         anyhow::Error::from(ocx_lib::error::file_error(&scratch, e))
     })?;
     Ok(scratch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// `--junit` with neither `--script` nor a trailing command parses (clap
+    /// waives the command positional because `--junit` conflicts with it), then
+    /// `validate_junit` refuses it with a usage error naming both flags. The
+    /// old `requires = "script"` produced an unsatisfiable "provide both
+    /// --script and <COMMAND>" instead (H6).
+    #[test]
+    fn junit_without_script_is_a_usage_error_naming_both_flags() {
+        let cmd = PackageTest::try_parse_from(["package-test", "-i", "example:1", "--junit", "out.xml"])
+            .expect("`--junit` alone must parse — the command positional is waived by the conflict");
+        let err = cmd
+            .validate_junit()
+            .expect_err("`--junit` without `--script` must be a usage error");
+        let message = err.to_string();
+        assert!(
+            message.contains("--junit") && message.contains("--script"),
+            "the usage error must name both flags: {message}"
+        );
+    }
+
+    /// `--junit` beside a trailing command is caught by clap's `conflicts_with`
+    /// at parse time — the check `validate_junit` cannot see it because the
+    /// parse never succeeds.
+    #[test]
+    fn junit_with_a_trailing_command_is_a_clap_conflict() {
+        // `PackageTest` has no `Debug`, so match rather than `expect_err`.
+        let err = match PackageTest::try_parse_from([
+            "package-test",
+            "-i",
+            "example:1",
+            "--junit",
+            "out.xml",
+            "--",
+            "echo",
+        ]) {
+            Ok(_) => panic!("`--junit` with a trailing command must fail to parse"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "must be the conflict specifically, not an unrelated parse error: {err}"
+        );
+    }
+
+    /// `--junit` with `--script` is the supported form: it parses and passes
+    /// validation.
+    #[test]
+    fn junit_with_script_is_accepted() {
+        let cmd = PackageTest::try_parse_from([
+            "package-test",
+            "-i",
+            "example:1",
+            "--script",
+            "s.star",
+            "--junit",
+            "out.xml",
+        ])
+        .expect("`--junit --script` must parse");
+        assert!(cmd.validate_junit().is_ok(), "`--junit --script` must validate");
+    }
+
+    /// An unwritable `--junit` path must not displace the argv fault that got
+    /// us here. The operator typed a bad `--script` path; answering with the
+    /// *junit* path's write failure hides the only message that names the
+    /// script, and turns a usage error (64) into an I/O error (74).
+    ///
+    /// The unwritable target is a path *under a regular file*, so
+    /// `create_dir_all` on the report's parent fails with ENOTDIR — the same
+    /// failure `test_exit_codes.py::_package_test_junit` provokes, and the one
+    /// that used to reach the caller through `?`.
+    ///
+    /// Mutation: make [`argv_fault_with_report`] return the write error when
+    /// one occurs instead of `fault`. This reds — the returned message then
+    /// names the junit path, not `smoke.star`.
+    #[tokio::test]
+    async fn a_junit_write_failure_does_not_displace_the_argv_fault() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").expect("write blocker file");
+        let unwritable = blocker.join("junit.xml");
+
+        let target = crate::api::junit::Target {
+            path: &unwritable,
+            identifier: "example:1",
+            platform: "linux/amd64",
+        };
+        let fault = anyhow::Error::from(UsageError::new("cannot read script 'smoke.star'".to_string()));
+
+        let returned = argv_fault_with_report(
+            Some(&target),
+            ScriptStatus::Usage,
+            "usage",
+            "cannot read script 'smoke.star'",
+            fault,
+        )
+        .await;
+
+        assert!(
+            !unwritable.exists(),
+            "the precondition is a report that could NOT be written; if it exists this test proves nothing"
+        );
+        assert!(
+            returned.to_string().contains("smoke.star"),
+            "the argv fault must survive the failed report write, got: {returned}"
+        );
+        assert!(
+            returned.downcast_ref::<UsageError>().is_some(),
+            "the fault must stay a UsageError (exit 64), not become the report's I/O error (74), got: {returned}"
+        );
+    }
+
+    /// The same helper with no `--junit` is a pure pass-through — the fault is
+    /// returned untouched and nothing is written.
+    #[tokio::test]
+    async fn without_junit_the_fault_passes_through_untouched() {
+        let fault = anyhow::Error::from(UsageError::new("cannot read script 'smoke.star'".to_string()));
+        let returned = argv_fault_with_report(
+            None,
+            ScriptStatus::Usage,
+            "usage",
+            "cannot read script 'smoke.star'",
+            fault,
+        )
+        .await;
+        assert!(
+            returned.downcast_ref::<UsageError>().is_some() && returned.to_string().contains("smoke.star"),
+            "got: {returned}"
+        );
+    }
 }

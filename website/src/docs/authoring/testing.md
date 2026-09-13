@@ -265,12 +265,13 @@ The envelope has three top-level keys — all stable v1 contract:
 ```json
 {
   "status": "passed|failed|usage|script_error|io|timeout",
-  "assertion": { "kind": "ok|eq|ne|true|false|contains|matches|fail|other|unknown", "message": "…" },
+  "assertion": { "kind": "ok|eq|ne|true|false|contains|matches|fail|other|unknown", "message": "…",
+                 "location": { "file": "smoke.star", "line": 12, "column": 5 } },
   "run":       { "exit_code": 0, "stdout": "…", "stderr": "…", "duration_ms": 12, "truncated": false }
 }
 ```
 
-`assertion` and `run` are `null` when not applicable (for example, `assertion` is `null` on a passing run). `assertion.kind` reflects which `expect.*` function triggered the failure and is the stable machine field for tooling. `assertion.message` prose is not stable. Exit code remains the primary machine signal.
+`assertion` and `run` are `null` when not applicable (for example, `assertion` is `null` on a passing run). `assertion.kind` reflects which `expect.*` function triggered the failure and is the stable machine field for tooling. `assertion.message` prose is not stable. `assertion.location` points at the failing statement — 1-indexed, `file` being the `--script` argument verbatim (or `<stdin>`); it is omitted entirely when the failure has no source position, such as a timeout. Exit code remains the primary machine signal.
 
 ### Exit codes {#scripted-tests-exit-codes}
 
@@ -281,6 +282,55 @@ The envelope has three top-level keys — all stable v1 contract:
 | 64 | Usage error — both `--script` and `-- CMD` supplied; neither supplied; script file not found |
 | 65 | Script syntax, type, or arity error |
 | 74 | I/O error — stdin read failure (`--script -`), scratch directory creation failure |
+
+### JUnit reports for CI {#scripted-tests-junit}
+
+`--junit PATH` writes a JUnit XML report beside the JSON envelope, so a CI system can
+surface the run as a test result instead of a bare exit code:
+
+```sh
+ocx package test -p linux/amd64 -i shfmt/shfmt:3.8.0 shfmt.tar.xz \
+  --script smoke.star --junit build/junit/linux-amd64.xml
+```
+
+Parent directories are created, so the pipeline needs no `mkdir` step.
+
+The file holds one `<testsuite name="ocx package test <identifier>">` with one
+`<testcase classname="<identifier>" name="<platform>">` — one invocation tests one
+identifier on one platform. A failing assertion becomes a `<failure>` carrying the
+failing `expect.*` kind as `type=`, its first diagnostic line as `message=`, the full
+multi-line diagnostic as the element body, and `file`/`line` pointing at the failing
+statement in the script. A script that never delivered a verdict at all — unreadable,
+syntactically broken, or timed out — becomes an `<error>` instead. Captured stdout and
+stderr are attached as `system-out`/`system-err` on every run, passing or failing.
+
+The report is written on every exit path, including a red run and an unreadable
+`--script` path. Neither the JSON envelope on stdout nor the exit code changes.
+
+#### One path per platform {#scripted-tests-junit-per-platform}
+
+An existing file is **truncated**, never merged: ocx writes the one testcase it just
+produced and nothing else. Give every matrix leg its own path and let the CI system
+merge them — that is what both GitLab and the GitHub test-report actions do:
+
+```yaml
+test:
+  parallel:
+    matrix:
+      - PLATFORM: [linux/amd64, linux/arm64, darwin/arm64]
+  script:
+    - ocx package test -p "$PLATFORM" -i shfmt/shfmt:3.8.0 shfmt.tar.xz
+        --script smoke.star --junit "build/junit/${PLATFORM//\//-}.xml"
+  artifacts:
+    reports:
+      junit: build/junit/*.xml
+```
+
+Because the suite name is identical across legs and the case name is the platform, the
+glob merges into one suite with one case per platform. Point every leg at one path and
+you keep only the last leg's result.
+
+`--junit` requires `--script`; it is not available for the trailing `-- CMD` form.
 
 ### Editor integration {#scripted-tests-ide}
 

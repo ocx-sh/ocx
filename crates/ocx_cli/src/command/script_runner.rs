@@ -28,9 +28,19 @@ use ocx_lib::{cli, env, oci};
 /// outcome and mapped to `Failure` (1). The structured `ScriptRunReport` is
 /// emitted through the context `Api` in every non-host-failure case.
 ///
+/// `junit` requests a JUnit XML sidecar beside the JSON envelope — written on
+/// every outcome, including the host-setup failure. `ocx patch test` passes
+/// `None`.
+///
 /// # Errors
 ///
-/// Returns an error only if emitting the structured report fails.
+/// Returns an error if emitting the structured report fails, or if a requested
+/// JUnit report cannot be written.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "eight parameters, one optional: bundling package_root/scratch_root into a struct \
+              would name the same two paths twice for one call site each"
+)]
 pub async fn run_script_in_env(
     context: &crate::app::Context,
     source: &str,
@@ -39,6 +49,7 @@ pub async fn run_script_in_env(
     scratch_root: &std::path::Path,
     platform: &oci::Platform,
     process_env: env::Env,
+    junit: Option<&crate::api::junit::Target<'_>>,
 ) -> anyhow::Result<ExitCode> {
     // PRECONDITION: run_script is sync and the ocx.run host fn uses
     // Handle::block_on inside block_in_place — correct ONLY on Tokio's
@@ -75,10 +86,15 @@ pub async fn run_script_in_env(
                     // categorize as the non-assertion kind.
                     kind: "other".to_string(),
                     message: format!("script host failure: {error}"),
+                    // No Starlark error stands behind a host setup failure.
+                    location: None,
                 }),
                 None,
             );
             context.api().report(&report)?;
+            if let Some(junit) = junit {
+                crate::api::junit::write(junit, &report).await?;
+            }
             return Ok(cli::ExitCode::Failure.into());
         }
     };
@@ -88,6 +104,9 @@ pub async fn run_script_in_env(
     let run_summary = ocx_lib::script::last_run_summary();
     let report = crate::api::data::script_run::ScriptRunReport::from_outcome(&outcome, run_summary);
     context.api().report(&report)?;
+    if let Some(junit) = junit {
+        crate::api::junit::write(junit, &report).await?;
+    }
 
     Ok(map_script_outcome_to_exit_code(outcome).into())
 }
@@ -140,6 +159,7 @@ mod tests {
         let o = outcome(ScriptOutcomeKind::Failed {
             kind: Some(ocx_lib::script::AssertionKind::Ok),
             message: "assertion failed".into(),
+            location: None,
         });
         assert_eq!(map_script_outcome_to_exit_code(o) as u8, 1);
     }
@@ -156,6 +176,7 @@ mod tests {
     fn script_error_maps_to_data_error_65() {
         let o = outcome(ScriptOutcomeKind::ScriptError {
             message: "syntax error".into(),
+            location: None,
         });
         assert_eq!(map_script_outcome_to_exit_code(o) as u8, 65);
     }

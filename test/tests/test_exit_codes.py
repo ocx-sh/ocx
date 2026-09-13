@@ -44,6 +44,7 @@ from pathlib import Path
 
 import pytest
 
+from src import current_platform
 from src.helpers import make_package, resolved_metadata_path
 from src.runner import OcxRunner
 
@@ -338,6 +339,32 @@ def _info_save_readme(ocx: OcxRunner, repo: str, tmp_path: Path) -> tuple[list[s
     return (["package", "description", "pull", "--save-readme", str(path), repo], str(path.parent))
 
 
+def _package_test_junit(ocx: OcxRunner, repo: str, tmp_path: Path) -> tuple[list[str], str]:
+    """`package test --junit <unwritable>` — the report write is I/O (74), not
+    `internal` (1). The package is materialized locally from its bundle; the
+    script passes, so the only failure is writing the report through a regular
+    file.
+    """
+    bundle, meta = _published(ocx, repo, tmp_path)
+    script = tmp_path / "smoke.star"
+    script.write_text("x = 1\n")
+    path = _unwritable(tmp_path, "junit.xml")
+    # The report writer calls `create_dir_all` on the report's parent first, so
+    # the ENOTDIR names the parent — `str(path.parent)`, not the file.
+    return (
+        [
+            "package", "test",
+            "-p", current_platform(),
+            "-m", str(meta),
+            "-i", f"{repo}:1.0.0",
+            str(bundle),
+            "--script", str(script),
+            "--junit", str(path),
+        ],
+        str(path.parent),
+    )
+
+
 def _cascade_repair_tags_file(
     ocx: OcxRunner, repo: str, tmp_path: Path
 ) -> tuple[list[str], str]:
@@ -547,6 +574,7 @@ def _announce_tags_file_oversized(
         pytest.param(_create_output, 74, id="create--output"),
         pytest.param(_info_save_readme, 74, id="info--save-readme"),
         pytest.param(_cascade_repair_tags_file, 74, id="cascade-repair--tags-file"),
+        pytest.param(_package_test_junit, 74, id="package-test--junit"),
         pytest.param(_verify_malformed_ocx_toml, 78, id="verify-malformed-ocx-toml"),
         pytest.param(_control_config_test_missing, 79, id="control-config-test-missing"),
         pytest.param(_control_attest_predicate, 74, id="control-attest--predicate"),

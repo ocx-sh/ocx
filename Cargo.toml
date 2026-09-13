@@ -215,6 +215,13 @@ schemars = "1.2.1"
 # version round-trips unencoded, and every transitive dep already resolves to a
 # version in Cargo.lock (zero new crate versions, all MIT/Apache-2.0).
 packageurl = "0.7.0"
+# JUnit XML data model + serializer for `ocx package test --junit` — the
+# cargo-nextest crate. Owning this format would mean hand-rolling attribute
+# escaping AND the XML-1.0 illegal-character filter over arbitrary script
+# stdout, which `quality-core.md` puts at Block tier. Its whole tree
+# (quick-xml, indexmap, thiserror, uuid) already resolves in Cargo.lock except
+# `newtype-uuid`; all MIT/Apache-2.0.
+quick-junit = { version = "0.7.0", default-features = false }
 
 # Terminal / UI
 console = "0.16.3"
