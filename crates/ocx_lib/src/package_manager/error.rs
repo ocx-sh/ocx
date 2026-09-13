@@ -609,4 +609,33 @@ mod tests {
             "the message must name the companion; got: {rendered}"
         );
     }
+
+    /// The install/`pull_layer` route's exit-code contract, end to end. A
+    /// registry-served hostile layer refuses inside `pull_layer`; the archive
+    /// traversal error surfaces wrapped as `ClientError::internal(...)`, is folded
+    /// into a `PackageErrorKind` at the `?` site, then batched into `InstallFailed`.
+    /// The batch must classify to `DataError` (65) — the same code the
+    /// operator-chosen `--extract` route already returns. A hardcoded `Failure`
+    /// in `ClientError::Internal`'s `classify` made `ocx package install` exit 1
+    /// on this security refusal, which is what
+    /// `test_a_registry_served_hostile_layer_is_refused_on_install` observed
+    /// before the delegation fix. `classify_error` on the `anyhow`-boxed batch
+    /// mirrors what `main.rs` runs.
+    #[test]
+    fn install_batch_with_a_client_wrapped_traversal_refusal_classifies_as_data_error() {
+        let traversal = crate::Error::Archive(crate::archive::Error::SymlinkEscape {
+            link: std::path::PathBuf::from("escape"),
+            target: std::path::PathBuf::from("../../../../etc"),
+        });
+        // The exact wrap the registry layer-pull route produces: the archive
+        // refusal boxed under `ClientError::internal`, folded into a
+        // `PackageErrorKind` the way `From<ClientError>` does at the `?` site.
+        let kind = PackageErrorKind::from(ClientError::internal(traversal));
+        let entry = PackageError::new(
+            oci::Identifier::new_registry("cmake", "example.com").clone_with_tag("1.1.0"),
+            kind,
+        );
+        let boxed = anyhow::Error::from(Error::InstallFailed(vec![entry]));
+        assert_eq!(crate::cli::classify_error(boxed.as_ref()), ExitCode::DataError);
+    }
 }

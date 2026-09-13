@@ -372,7 +372,12 @@ impl ClassifyExitCode for ClientError {
             | Self::TraversalLimitExceeded { .. }
             | Self::Serialization(_)
             | Self::InvalidEncoding(_) => ExitCode::DataError,
-            Self::Internal(_) => ExitCode::Failure,
+            // Adds provenance, never a verdict — same doctrine as `Mirrored`.
+            // The wrapped error is a `#[source]`, so returning `None` lets the
+            // chain walker downcast it and recover its own code (an archive
+            // `SymlinkEscape` from a hostile layer must still exit 65, not 1);
+            // nothing classifiable in the chain still falls back to `Failure`.
+            Self::Internal(_) => return None,
         })
     }
 }
@@ -458,6 +463,43 @@ mod tests {
             }
             .classify(),
             Some(ExitCode::DataError)
+        );
+    }
+
+    /// The generic `Internal` carrier must delegate to its boxed `#[source]`,
+    /// not collapse to `Failure`. This is the install/`pull_layer` route's
+    /// exit-code contract: a registry-served hostile layer's traversal refusal
+    /// reaches the classifier wrapped as
+    /// `ClientError::internal(archive::Error::SymlinkEscape)` (see
+    /// `client.rs::pull_layer_with_caps`), so a hardcoded `Failure` here made
+    /// `ocx package install` exit 1 where the `--extract` route (which never
+    /// crosses `ClientError`) exited 65. Asserting BOTH a classifiable inner
+    /// (`DataError`) AND an opaque inner (`Failure`) pins the delegation — a
+    /// hardcoded constant fails one arm or the other.
+    #[test]
+    fn internal_delegates_its_exit_code_to_the_wrapped_source() {
+        let traversal = crate::Error::Archive(crate::archive::Error::SymlinkEscape {
+            link: std::path::PathBuf::from("escape"),
+            target: std::path::PathBuf::from("../../../../etc"),
+        });
+        let wrapped = ClientError::internal(traversal);
+        // The arm renders no verdict of its own — it defers to the source chain,
+        // so `classify` alone is `None` (the `Mirrored` doctrine). A future change
+        // back to a terminal `Some(Failure)` reddens both asserts below.
+        assert_eq!(wrapped.classify(), None, "Internal must defer, not render a verdict");
+        // ...and the chain walker recovers the inner archive refusal's own code:
+        // a hostile layer wrapped as `ClientError::internal(SymlinkEscape)` must
+        // still exit 65 — the bug that made `ocx package install` exit 1.
+        assert_eq!(
+            crate::cli::classify_error(&wrapped),
+            ExitCode::DataError,
+            "a traversal refusal wrapped as Internal must still exit 65"
+        );
+        // An unclassifiable inner still falls through to Failure.
+        assert_eq!(
+            crate::cli::classify_error(&ClientError::internal(std::io::Error::other("opaque cause"))),
+            ExitCode::Failure,
+            "an unclassifiable inner still falls through to Failure"
         );
     }
 }
