@@ -55,7 +55,7 @@ RELEASE_TREE = {
     "hello-1.2.3/README.md": (README_BODY, 0o644),
 }
 
-ARCHIVE_SUFFIXES = [".tar.gz", ".tar.zst", ".zip"]
+ARCHIVE_SUFFIXES = [".tar.gz", ".tar.bz2", ".tar.zst", ".zip"]
 
 
 def _archive(tmp_path: Path, suffix: str, files: dict[str, tuple[str, int]], **kwargs) -> Path:
@@ -80,7 +80,7 @@ def _mode(bundle: Path, name: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# The three archive formats, with and without a strip
+# The four archive formats, with and without a strip
 # ---------------------------------------------------------------------------
 
 
@@ -245,6 +245,27 @@ def test_unsupported_suffix_under_extract_is_refused(ocx: OcxRunner, tmp_path: P
 
     assert result.returncode == EXIT_DATA_ERR, result.stdout + result.stderr
     assert "unsupported archive format" in result.stderr, result.stderr
+    assert not out.exists(), "a refused invocation must leave no bundle behind"
+
+
+def test_bzip2_output_is_refused(ocx: OcxRunner, tmp_path: Path):
+    """bzip2 goes one way: `--extract` reads `.tar.bz2`, but `-o *.tar.bz2`
+    is refused (exit 65) rather than writing a bundle no `ocx package push`
+    could publish — no OCI layer media type spells bzip2.
+
+    The refusal names bzip2 and the direction. Asserting only the exit code
+    would not discriminate: before bzip2 was recognised at all, this same
+    invocation already exited 65, with `unsupported archive format` naming the
+    internal `._tmp_` path instead of the operator's format."""
+    tree = tmp_path / "tree"
+    (tree / "bin").mkdir(parents=True)
+    (tree / "bin" / "hello").write_text(HELLO_BODY)
+    out = tmp_path / "bundle.tar.bz2"
+
+    result = _create(ocx, tree, out, check=False)
+
+    assert result.returncode == EXIT_DATA_ERR, result.stdout + result.stderr
+    assert "bzip2 archives can be extracted but not written" in result.stderr, result.stderr
     assert not out.exists(), "a refused invocation must leave no bundle behind"
 
 

@@ -37,12 +37,16 @@ pub enum Error {
     /// An I/O error during compression/decompression.
     #[error("compression I/O error")]
     Io(#[source] std::io::Error),
+
+    /// A decode-only algorithm was named on the compression path.
+    #[error("{0} archives can be extracted but not written")]
+    DecodeOnly(super::CompressionAlgorithm),
 }
 
 impl ClassifyExitCode for Error {
     fn classify(&self) -> Option<ExitCode> {
         Some(match self {
-            Self::UnknownFormat(_) => ExitCode::DataError,
+            Self::UnknownFormat(_) | Self::DecodeOnly(_) => ExitCode::DataError,
             Self::Open { .. } | Self::Create { .. } | Self::Io(_) => ExitCode::IoError,
             Self::EngineInit(_) => ExitCode::Failure,
         })
