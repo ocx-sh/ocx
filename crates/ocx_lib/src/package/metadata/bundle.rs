@@ -18,9 +18,11 @@ pub enum Version {
     V1 = 1,
 }
 
+// Qualified for the same reason as `package::version::Version`'s schema name:
+// both land in one `$defs` map, and the unqualified name collided there.
 impl schemars::JsonSchema for Version {
     fn schema_name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("Version")
+        std::borrow::Cow::Borrowed("BundleMetadataVersion")
     }
 
     fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {

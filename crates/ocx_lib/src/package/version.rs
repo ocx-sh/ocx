@@ -483,9 +483,13 @@ impl Serialize for Version {
 
 // `Serialize` renders a `Version` as its `Display` string, so the published
 // schema says `string` rather than exposing the parsed field layout.
+//
+// The name is qualified because schemars keys `$defs` by it: a hand-written
+// impl gets no module prefix, and `metadata::bundle::Version` (the integer
+// format version) shares the same document through `package inspect`.
 impl schemars::JsonSchema for Version {
     fn schema_name() -> std::borrow::Cow<'static, str> {
-        "Version".into()
+        "PackageVersion".into()
     }
 
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
