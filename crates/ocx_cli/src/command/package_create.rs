@@ -152,9 +152,20 @@ impl PackageCreate {
         // `$OCX_HOME/temp/create/`, beside the digest-keyed `TempStore`, not in
         // the system temp dir — one owned, GC-visible root for OCX scratch.
         let create_root = context.file_structure().temp.root().join("create");
-        let extracted = match self.extract || self.strip_components.is_some() {
-            true => Some(self.extract_archive(&create_root).await?),
-            false => None,
+        // Hold the scratch lock (`temp/create.lock`) for the rest of `execute` so
+        // a concurrent `ocx clean` treats `temp/create` as busy — its stale scan
+        // acquires this sibling lock, which fails while it is held — rather than
+        // sweeping it as an orphan while the extracted tree beneath it is still
+        // being read. `_create_lock` is held for its `Drop`; only the extract
+        // path writes scratch, so the directory-input path takes no lock.
+        let (extracted, _create_lock) = if self.extract || self.strip_components.is_some() {
+            let lock = ocx_lib::utility::fs::LockedFile::open_exclusive(
+                ocx_lib::file_structure::TempStore::lock_path_for(&create_root),
+            )
+            .await?;
+            (Some(self.extract_archive(&create_root).await?), Some(lock))
+        } else {
+            (None, None)
         };
         let content_root = extracted.as_ref().map_or(self.path.as_path(), tempfile::TempDir::path);
 
@@ -608,6 +619,43 @@ mod tests {
         assert!(
             create.declared_platform().expect("no sidecar is ok").is_none(),
             "without --metadata there is nothing to record a platform on"
+        );
+    }
+
+    /// W5: the scratch lock `execute` holds must make a concurrent `ocx clean`
+    /// skip `temp/create`. `clean`'s stale scan calls `TempStore::try_acquire`,
+    /// which returns `None` while the lock is held (the `.lock` sibling is busy),
+    /// so the directory is not swept out from under an in-flight build. Held ⇒
+    /// `None`; released ⇒ `Some`, which is what distinguishes the guard from a
+    /// no-op.
+    #[tokio::test]
+    async fn a_held_scratch_lock_makes_clean_skip_the_create_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ocx_lib::file_structure::TempStore::new(temp.path());
+        let create_root = store.root().join("create");
+        let lock_path = ocx_lib::file_structure::TempStore::lock_path_for(&create_root);
+
+        // With the lock released, `clean` would acquire it and sweep the dir.
+        assert!(
+            store.try_acquire(&create_root).unwrap().is_some(),
+            "an unheld scratch dir must be acquirable by clean"
+        );
+
+        // Hold it exactly as `execute` does; `clean` must now be turned away.
+        let held = ocx_lib::utility::fs::LockedFile::open_exclusive(&lock_path)
+            .await
+            .unwrap();
+        assert!(
+            store.try_acquire(&create_root).unwrap().is_none(),
+            "clean must skip temp/create while the scratch lock is held"
+        );
+        drop(held);
+
+        // Once released, `clean` can acquire it again — proving the None above
+        // was the held lock, not a permanently unacquirable path.
+        assert!(
+            store.try_acquire(&create_root).unwrap().is_some(),
+            "clean must be able to acquire the scratch dir once the lock is released"
         );
     }
 }

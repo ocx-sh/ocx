@@ -476,6 +476,33 @@ mod tests {
         }
     }
 
+    /// Codex Finding 6 (temp): a lock held by a live `create --extract` must
+    /// SURVIVE a concurrent stale scan — both skipped from the sweep AND its
+    /// lock file left on disk, so no later scan re-classes the scratch dir as an
+    /// unlocked orphan and removes it out from under the running extraction.
+    #[test]
+    fn stale_scan_leaves_a_held_lock_file_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let held_dir = dir.path().join("create");
+        std::fs::create_dir_all(&held_dir).unwrap();
+        let lock_path = TempStore::lock_path_for(&held_dir);
+
+        let store = TempStore::new(dir.path());
+        // Hold the scratch lock exactly as `package_create` does.
+        let _held = LockedFile::try_exclusive_blocking(&lock_path)
+            .unwrap()
+            .expect("hold the scratch lock");
+
+        let stale = store.stale_entries().unwrap();
+        assert!(
+            stale.is_empty(),
+            "a held scratch entry must not be reported stale (got {} entries)",
+            stale.len()
+        );
+        assert!(lock_path.exists(), "the held lock file must survive the stale scan");
+        assert!(held_dir.exists(), "the held scratch dir must survive the stale scan");
+    }
+
     #[test]
     fn stale_entries_returns_orphan_directories() {
         let dir = tempfile::tempdir().unwrap();

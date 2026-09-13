@@ -31,6 +31,32 @@ pub struct LockedFile {
     path: PathBuf,
 }
 
+/// Returns `true` when the locked handle still refers to the file currently at
+/// `path` — i.e. the file was not unlinked or replaced while we waited to lock.
+///
+/// This closes the flock+unlink-by-path race: advisory locks live on the inode,
+/// but a lock *file* is addressed by path, so a holder that removes it by path
+/// (then releases) can let an opener that was blocked on the same inode acquire
+/// a lock on a now-dangling inode while the path no longer exists. Comparing the
+/// held handle's `(dev, ino)` against the path's detects exactly that. Always
+/// `true` on Windows, where an open file cannot be unlinked, so the race cannot
+/// arise.
+#[cfg(unix)]
+fn lock_matches_path(lock: &mut FileLock, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (lock.file_mut().metadata(), std::fs::metadata(path)) {
+        (Ok(held), Ok(current)) => held.dev() == current.dev() && held.ino() == current.ino(),
+        // Path gone (unlinked mid-acquire) or unreadable: treat as a mismatch so
+        // the caller reopens and re-materializes the lock file.
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_matches_path(_lock: &mut FileLock, _path: &Path) -> bool {
+    true
+}
+
 impl LockedFile {
     /// Acquire an exclusive lock on `path`. Creates the file (and parents)
     /// if absent. Blocks until acquired or [`DEFAULT_LOCK_TIMEOUT`] elapses.
@@ -42,32 +68,18 @@ impl LockedFile {
     ///
     /// Creates the file (and all parent directories) if absent. Blocks until
     /// the lock is acquired or `timeout` elapses.
+    ///
+    /// Runs the whole open→lock→inode-verify dance on a blocking thread via the
+    /// synchronous [`Self::open_exclusive_blocking_with_timeout`], so both the
+    /// async and sync exclusive-acquire paths share one flock+unlink-safe
+    /// implementation (see that method for the verify rationale).
     pub async fn open_exclusive_with_timeout(path: impl Into<PathBuf>, timeout: Duration) -> crate::Result<Self> {
         let path = path.into();
-        // Create parent directory tree if absent.
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| crate::error::file_error(parent, e))?;
+        let error_path = path.clone();
+        match tokio::task::spawn_blocking(move || Self::open_exclusive_blocking_with_timeout(path, timeout)).await {
+            Ok(result) => result,
+            Err(join_error) => Err(crate::error::file_error(&error_path, std::io::Error::other(join_error))),
         }
-        let open_path = path.clone();
-        let file = tokio::task::spawn_blocking(move || {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&open_path)
-        })
-        .await
-        .map_err(std::io::Error::other)
-        .and_then(std::convert::identity)
-        .map_err(|e| crate::error::file_error(&path, e))?;
-
-        let lock = FileLock::lock_exclusive_with_timeout(file, timeout)
-            .await
-            .map_err(|e| crate::error::file_error(&path, e))?;
-        Ok(Self { lock, path })
     }
 
     /// Acquire a shared lock on `path`. Returns `Ok(None)` if the file does
@@ -103,34 +115,18 @@ impl LockedFile {
     ///
     /// Returns `Ok(None)` on contention (another process holds the lock).
     /// Creates the file (and parents) if absent.
+    ///
+    /// Runs the synchronous [`Self::try_exclusive_blocking`] on a blocking
+    /// thread, so the async and sync non-blocking paths share the one
+    /// flock+unlink-safe implementation — the `(dev, ino)` re-verify lived only
+    /// on the sync side until a cross-model gate noticed this one lacked it.
     pub async fn try_exclusive(path: impl Into<PathBuf>) -> crate::Result<Option<Self>> {
         let path = path.into();
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| crate::error::file_error(parent, e))?;
+        let error_path = path.clone();
+        match tokio::task::spawn_blocking(move || Self::try_exclusive_blocking(path)).await {
+            Ok(result) => result,
+            Err(join_error) => Err(crate::error::file_error(&error_path, std::io::Error::other(join_error))),
         }
-        let open_path = path.clone();
-        let file = tokio::task::spawn_blocking(move || {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&open_path)
-        })
-        .await
-        .map_err(std::io::Error::other)
-        .and_then(std::convert::identity)
-        .map_err(|e| crate::error::file_error(&path, e))?;
-
-        let lock = tokio::task::spawn_blocking(move || FileLock::try_exclusive(file))
-            .await
-            .map_err(std::io::Error::other)
-            .and_then(std::convert::identity)
-            .map_err(|e| crate::error::file_error(&path, e))?;
-
-        Ok(lock.map(|lock| Self { lock, path }))
     }
 
     /// Read the full file contents under the lock, through the lock-owning
@@ -191,6 +187,15 @@ impl LockedFile {
         &self.path
     }
 
+    /// Test-only: does the held handle still name the file at `self.path`?
+    /// Exposes [`lock_matches_path`] so a test can drive both outcomes of the
+    /// flock+unlink verify predicate directly.
+    #[cfg(all(test, unix))] // its only callers are the unix-gated predicate tests
+    fn handle_matches_path(&mut self) -> bool {
+        let path = self.path.clone();
+        lock_matches_path(&mut self.lock, &path)
+    }
+
     // ── Synchronous API ───────────────────────────────────────────────────
     //
     // The async constructors and `read_bytes` / `replace_bytes` route through
@@ -214,16 +219,40 @@ impl LockedFile {
         {
             std::fs::create_dir_all(parent).map_err(|e| crate::error::file_error(parent, e))?;
         }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .map_err(|e| crate::error::file_error(&path, e))?;
-        let lock = FileLock::lock_exclusive_blocking_with_timeout(file, timeout)
-            .map_err(|e| crate::error::file_error(&path, e))?;
-        Ok(Self { lock, path })
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|e| crate::error::file_error(&path, e))?;
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let mut lock = FileLock::lock_exclusive_blocking_with_timeout(file, remaining)
+                .map_err(|e| crate::error::file_error(&path, e))?;
+            // The flock+unlink race (a concurrent holder that removes the lock
+            // file by path while we waited — e.g. `ocx clean`'s temp sweep) would
+            // otherwise leave us holding a lock on a dangling inode with no file
+            // at `path`, so a *later* scan sees the guarded directory as an
+            // unlocked orphan and removes it out from under us. Confirm the handle
+            // still names the file at `path`; on mismatch drop it and reopen so we
+            // lock the live inode. `create(true)` on reopen re-materializes the
+            // lock file when it was unlinked, so the guard is present again.
+            if lock_matches_path(&mut lock, &path) {
+                return Ok(Self { lock, path });
+            }
+            drop(lock);
+            if std::time::Instant::now() >= deadline {
+                return Err(crate::error::file_error(
+                    &path,
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "lock file was unlinked during acquisition",
+                    ),
+                ));
+            }
+        }
     }
 
     /// Synchronous, non-blocking sibling of [`Self::try_exclusive`].
@@ -237,15 +266,30 @@ impl LockedFile {
         {
             std::fs::create_dir_all(parent).map_err(|e| crate::error::file_error(parent, e))?;
         }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .map_err(|e| crate::error::file_error(&path, e))?;
-        let lock = FileLock::try_exclusive(file).map_err(|e| crate::error::file_error(&path, e))?;
-        Ok(lock.map(|lock| Self { lock, path }))
+        // Bounded verify-and-retry: a genuine contention returns `None`
+        // immediately, but an inode mismatch means the file was unlinked while we
+        // held the lock (the flock+unlink race — see
+        // `open_exclusive_blocking_with_timeout`). Reopening re-creates a fresh
+        // inode we can lock at once, so a few iterations always suffice; the
+        // bound stops a pathological churn from spinning. Falling back to `None`
+        // on exhaustion is safe — the caller (`clean`) treats it as "busy, skip".
+        for _ in 0..8 {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|e| crate::error::file_error(&path, e))?;
+            let Some(mut lock) = FileLock::try_exclusive(file).map_err(|e| crate::error::file_error(&path, e))? else {
+                return Ok(None);
+            };
+            if lock_matches_path(&mut lock, &path) {
+                return Ok(Some(Self { lock, path }));
+            }
+            drop(lock);
+        }
+        Ok(None)
     }
 
     /// Synchronous sibling of [`Self::read_bytes`]. Same semantics, no
@@ -487,6 +531,71 @@ mod tests {
         let path = dir.path().join("nonexistent.lock");
         let result = LockedFile::open_shared(&path).await.unwrap();
         assert!(result.is_none(), "open_shared on absent file must return None");
+    }
+
+    // ── flock+unlink verify predicate (Codex Finding 6) ───────────────────────
+    //
+    // The lock guards against a concurrent holder (e.g. `ocx clean`'s temp
+    // sweep) removing the lock file by path while another opener holds it,
+    // leaving that opener on a dangling inode and the guarded directory exposed
+    // as an orphan. `lock_matches_path` is the predicate that detects the
+    // dangling/replaced case; these drive both of its outcomes directly.
+
+    /// GREEN side: a freshly acquired lock's handle names the file at its path.
+    #[cfg(unix)]
+    #[test]
+    fn handle_matches_path_is_true_for_a_live_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("live.lock");
+        let mut lock = LockedFile::try_exclusive_blocking(&path).unwrap().expect("acquire");
+        assert!(lock.handle_matches_path(), "a live lock handle must match its own path");
+    }
+
+    /// RED side: once the lock file is unlinked (what a racing sweep does), the
+    /// held handle points at a dangling inode and no longer matches the path.
+    #[cfg(unix)]
+    #[test]
+    fn handle_matches_path_is_false_after_unlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gone.lock");
+        let mut lock = LockedFile::try_exclusive_blocking(&path).unwrap().expect("acquire");
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            !lock.handle_matches_path(),
+            "an unlinked lock file must not match — the handle is now dangling"
+        );
+    }
+
+    /// RED side: if the lock file is replaced by a different inode at the same
+    /// path (unlink + recreate, the two-step a racer performs), the old handle
+    /// must not match the new file.
+    #[cfg(unix)]
+    #[test]
+    fn handle_matches_path_is_false_after_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replaced.lock");
+        let mut old = LockedFile::try_exclusive_blocking(&path).unwrap().expect("acquire");
+        std::fs::remove_file(&path).unwrap();
+        // A fresh file at the same path — a different inode.
+        std::fs::write(&path, b"").unwrap();
+        assert!(
+            !old.handle_matches_path(),
+            "a replaced lock file (new inode) must not match the stale handle"
+        );
+    }
+
+    /// The verify-and-retry loop must still return `None` on genuine contention
+    /// (a live holder in the same process), not spin or falsely re-acquire.
+    #[cfg(unix)]
+    #[test]
+    fn try_exclusive_blocking_returns_none_under_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("busy.lock");
+        let _held = LockedFile::try_exclusive_blocking(&path)
+            .unwrap()
+            .expect("first holder");
+        let second = LockedFile::try_exclusive_blocking(&path).unwrap();
+        assert!(second.is_none(), "a contended try-lock must return None");
     }
 
     #[tokio::test(flavor = "multi_thread")]
