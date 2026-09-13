@@ -32,6 +32,19 @@ pub const OCX_CONSENT_PATHS: &str = "OCX_CONSENT_PATHS";
 /// (`localhost:5000/acme/*`), so `:` is unusable on Unix.
 pub const OCX_CONSENT_NAMESPACES: &str = "OCX_CONSENT_NAMESPACES";
 
+/// The environment channel of the consent grant, as one list: every variable
+/// whose value can turn an inert project into an activating one without a file
+/// on disk moving ([ocx-sh/ocx#442](https://github.com/ocx-sh/ocx/issues/442)).
+///
+/// Two consumers, and the list exists so they cannot drift apart: the watch-set
+/// fingerprint (`shell::reconcile::current_fingerprint`) folds these values so
+/// the cached inert verdict expires when a grant appears (A-13), and the
+/// per-prompt hook guard (`shell::hook`) compares a recorded snapshot of the
+/// same values against the live ones so the binary is invoked at all. The
+/// fingerprint alone was the shipped defect: a guard that cannot see a grant
+/// never runs the fold that would have noticed it.
+pub const GRANT_SIGNALS: [&str; 2] = [OCX_CONSENT_PATHS, OCX_CONSENT_NAMESPACES];
+
 /// The `[shell]` section (C-029).
 ///
 /// **No `deny_unknown_fields`**, like every other `Config` sub-struct: one

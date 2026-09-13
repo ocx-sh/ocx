@@ -1772,6 +1772,84 @@ def test_ec_hook_018_a_project_created_in_place_activates_at_the_next_prompt(are
     )
 
 
+def test_ec_hook_019_a_grant_exported_mid_session_fires_the_real_guard(arena: Arena) -> None:
+    """EC-HOOK-019 (ocx-sh/ocx#442) — ``export OCX_CONSENT_PATHS`` reaches the next prompt through the emitted guard.
+
+    The fingerprint folded the grant variables all along (A-13), so
+    ``test_a_grant_arriving_mid_session_activates_at_the_next_prompt`` was green
+    — but that row drives ``--reconcile`` unconditionally through
+    :func:`shell_matrix.prompt`. The real guard decides whether ocx is invoked at
+    all, and it had no term for the grant: an ``export`` in a still prompt moved
+    nothing it could see, so the fold that would have noticed never ran. The
+    A-36 defect exactly, replayed on the consent channel.
+
+    Driven on a pty with the real registration and a counting wrapper on the
+    candidate binary, so two things are pinned at once:
+
+    * the grant fires the next prompt (``granted`` reads the project's value);
+    * and the checkpoint re-records it, so the three prompts that follow, with
+      the grant still held, exec ocx **zero** times. A guard term whose
+      checkpoint does not record it is not quiet — it execs on every prompt for
+      the rest of the session, and the activation probe alone cannot tell the
+      two apart.
+
+    Red state: drop ``|| [ "${__ocx_grant-}" != … ]`` from ``posix_reconcile``
+    and ``granted`` reads absent; drop ``__ocx_grant=…`` from the checkpoint and
+    the counter reads three execs.
+    """
+    shell_abs = _require("bash")
+    source = _locked_project(arena, "alpha", _ENV_BLOCK_A)
+    (source / "binA").mkdir()
+    clone = _clone_of(source, arena.projects / "clone")
+    candidate = arena.ocx_home / _CANDIDATE_REL
+    real_binary = arena.scripts / "hook019-real-ocx"
+    shutil.copy2(candidate, real_binary)
+    real_binary.chmod(0o755)
+    counter = arena.scripts / "hook019-execs"
+    counter.write_text("", encoding="utf-8")
+    candidate.write_text(
+        f"#!/bin/sh\nprintf 'x' >> {matrix.quote('bash', str(counter))}\nexec {matrix.quote('bash', str(real_binary))} \"$@\"\n",
+        encoding="utf-8",
+    )
+    candidate.chmod(0o755)
+
+    env = arena.env(shell_abs)
+    env["TERM"] = "dumb"
+    env["PS1"] = ""
+    output = matrix.pty_session(
+        [shell_abs, "--norc", "-i"],
+        [
+            f'eval "$("{arena.ocx}" --offline self activate --shell=bash --hook --no-completion)"',
+            f"cd '{clone}'",
+            'printf "%s\n" "@@inert@@${WP15_CONST-__OCX_ABSENT__}"',
+            f"export OCX_CONSENT_PATHS='{clone.resolve()}'",
+            'printf "%s\n" "@@granted@@${WP15_CONST-__OCX_ABSENT__}"',
+            f"printf '' > {matrix.quote('bash', str(counter))}",  # clear: the grant's own reconcile is counted above
+            "true",
+            "true",
+            "true",
+            'printf "%s\n" "@@done@@yes"',
+        ],
+        cwd=arena.projects,
+        env=env,
+    )
+    found = matrix.probes(output)
+    assert found.get("inert") == matrix.ABSENT, (
+        f"the unconsented clone must start inert, or the grant probe proves nothing\npty transcript:\n{output}"
+    )
+    assert found.get("granted") == "alpha", (
+        "exporting OCX_CONSENT_PATHS must activate at the very next prompt of the SAME shell, through "
+        f"the emitted guard (#442)\npty transcript:\n{output}"
+    )
+    assert found.get("done") == "yes", f"pty transcript:\n{output}"
+    execs = counter.read_text(encoding="utf-8")
+    assert execs == "", (
+        f"three no-op prompts under a held grant must exec ocx ZERO times: got {len(execs)} — the guard's "
+        f"grant term and the checkpoint that records it disagree, so every prompt re-execs for the life "
+        f"of the session\npty transcript:\n{output}"
+    )
+
+
 def _custom_named_project(arena: Arena, name: str, value: str) -> Path:
     """A project whose file is ``custom.toml``, locked through ``OCX_PROJECT``.
 
@@ -4556,7 +4634,7 @@ def test_traceability_every_pytest_and_manual_row_names_a_real_covering_test() -
     # `active/bin` spelling on the session PATH, and the withhold on a
     # dangling `active`) — both rows, so the count below is fully accounted for
     # + EC-HOOK-018 (ocx#397: a project created under an unchanged `$PWD`).
-    assert len(register) == 236, f"the register must still parse to exactly 236 rows; got {len(register)}"
+    assert len(register) == 237, f"the register must still parse to exactly 237 rows; got {len(register)}"
     test_to_ids = _this_modules_test_to_ids()
     known_test_names = set(test_to_ids.keys()) | _shell_module_test_names()
     known_manual_procedures = {

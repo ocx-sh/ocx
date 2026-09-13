@@ -1859,14 +1859,17 @@ no design anchor to add it against.
 **Question.** The reconcile is skipped whenever the guard finds nothing moved. Which
 facts is the guard obliged to watch, and what is the rule for admitting a new one?
 
-**Decision.** The guard's term set is **normative and enumerated here**, five terms on
-the POSIX arms:
+**Decision.** The guard's term set is **normative and enumerated here**, six terms on
+the POSIX arms (the sixth added 2026-09-13 by
+[#442](https://github.com/ocx-sh/ocx/issues/442), the A-36 shape replayed on the
+consent channel):
 
 | Term | Spelling | What it catches |
 |---|---|---|
 | Empty carrier | `[ -z "${__OCX_ENV_STATE-}" ]` | the first prompt of every shell (no record counts as changed), and `unset __OCX_ENV_STATE` as the user's escape hatch (C-012, C-046) |
 | Directory | `[ "${__ocx_pwd-}" != "$PWD" ]` | `cd` — without it the guard is blind to a directory change, because the watch paths were baked into the body at shell start and are still the *previous* project's (C-019 member 7) |
 | **Yield sentinel** | `[ "${__ocx_yield-}" != "${DIRENV_DIR-}\|${MISE_SHELL-}\|${__MISE_ORIG_PATH-}" ]` | a direnv or mise session appearing **or leaving** mid-shell |
+| **Grant signal** | `[ "${__ocx_grant-}" != "${OCX_CONSENT_PATHS-}\|${OCX_CONSENT_NAMESPACES-}" ]` | a consent grant exported **or withdrawn** mid-shell (#442). The fingerprint already folded these (A-13) — but a guard that cannot see them never invokes the fold. The list is `config::shell::GRANT_SIGNALS`, shared with `current_fingerprint`, and `shell::hook::tests` pins both that every name is a guard term and that the fold reads no name outside the list |
 | Stamp presence | `[ -z "${__ocx_stamp-}" ] \|\| [ ! -f "${__ocx_stamp-}" ]` | a `mktemp` that failed, or a reaped `/tmp` |
 | Watch mtime | `[ '<path>' -nt "${__ocx_stamp-}" ]` per member | Decision 3's fingerprint fold moving on disk |
 
@@ -1875,10 +1878,11 @@ carrier is unset on the first prompt by construction, and every sentinel is unse
 shells — which is the common case here, not the edge.
 
 fish and PowerShell carry the same set in their own dialects (`__ocx_pwd` /
-`__ocx_yield`; `$global:__ocxPwd` / `$global:__ocxYield`, whose stamp is an in-process
-`[datetime]` and therefore needs no presence term). Elvish carries terms 1-3 only, folded
-into the single `__OCX_ENV_PWD` composite `<pid> <pwd> <DIRENV_DIR> <MISE_SHELL>
-<__MISE_ORIG_PATH>`, because it has no clock to compare a stamp against (ADR Decision 5's
+`__ocx_yield` / `__ocx_grant`; `$global:__ocxPwd` / `$global:__ocxYield` /
+`$global:__ocxGrant`, whose stamp is an in-process `[datetime]` and therefore needs no
+presence term). Elvish carries terms 1-4 only, folded into the single `__OCX_ENV_PWD`
+composite `<pid> <pwd> <DIRENV_DIR> <MISE_SHELL> <__MISE_ORIG_PATH> <OCX_CONSENT_PATHS>
+<OCX_CONSENT_NAMESPACES>`, because it has no clock to compare a stamp against (ADR Decision 5's
 elvish bullet) and no shell-local an `eval` unit can both write and read.
 
 **Three rules the yield term makes explicit, and which govern any future term.**
@@ -1897,7 +1901,7 @@ elvish bullet) and no shell-local an `eval` unit can both write and read.
    reconcile that changes nothing, the same price the `$PWD` term already pays for a `cd`
    outside any project.
 
-Admission rule for a fourth: a term is admitted only if it is a **parameter expansion or
+Admission rule for a further term: it is admitted only if it is a **parameter expansion or
 builtin comparison in every arm**, so the quiet path stays at zero execs (C-044). That is
 why elvish buys no `test -nt` term and drops the stamp instead of paying one exec per
 quiet prompt.

@@ -56,6 +56,7 @@ use std::path::{Path, PathBuf};
 
 use super::Shell;
 use super::escape::{fish_single_quoted, posix_single_quoted, single_quoted_doubled};
+use crate::config::shell::GRANT_SIGNALS;
 
 /// The temp-file template the emitted body hands `mktemp` for its stamp.
 ///
@@ -160,13 +161,28 @@ const OFFLINE: &str = "--offline";
 /// to the quiet path (C-044).
 const YIELD_SIGNALS: [&str; 3] = ["DIRENV_DIR", "MISE_SHELL", "__MISE_ORIG_PATH"];
 
-/// [`YIELD_SIGNALS`] as one bash/zsh word, `set -u`-safe throughout: every
-/// sentinel is unset in most shells, which is the common case, not the edge.
-fn posix_yield_signal() -> String {
-    YIELD_SIGNALS.map(|key| format!("${{{key}-}}")).join("|")
+// `GRANT_SIGNALS` (imported above) is the second such list, and the guard
+// treats it identically — a recorded snapshot compared against the live values
+// — only the *reason* differs: a yield sentinel says another tool went live, a
+// grant signal says the user consented mid-session
+// ([ocx-sh/ocx#442](https://github.com/ocx-sh/ocx/issues/442)). The shipped
+// defect was the A-36 shape exactly: the fingerprint folded `OCX_CONSENT_PATHS`
+// (A-13), but nothing the guard read moved when it was exported, so the binary
+// that would have noticed was never invoked. It stays a separate list rather
+// than folding into `YIELD_SIGNALS` because that one is pinned, by test, to
+// mirror `coexistence::detect` exactly (A-43 rule 1), and it lives in
+// `config::shell` because the fingerprint fold reads it too.
+
+/// `keys` as one bash/zsh word, `set -u`-safe throughout: every sentinel is
+/// unset in most shells, which is the common case, not the edge.
+fn posix_signal(keys: &[&str]) -> String {
+    keys.iter()
+        .map(|key| format!("${{{key}-}}"))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
-/// The fish form of [`posix_yield_signal`].
+/// The fish form of [`posix_signal`].
 ///
 /// fish auto-splits any variable whose name ends in `PATH` into a genuine list
 /// — but it also *re-joins a path variable with `:`* in a quoted expansion, and
@@ -178,24 +194,27 @@ fn posix_yield_signal() -> String {
 /// earlier revision of this comment claimed the space-join and waved it through
 /// as "stable, not faithful" — the stability argument holds regardless (one
 /// spelling produces both sides of the comparison), but the premise was wrong.
-fn fish_yield_signal() -> String {
-    YIELD_SIGNALS.map(|key| format!("${key}")).join("|")
+fn fish_signal(keys: &[&str]) -> String {
+    keys.iter().map(|key| format!("${key}")).collect::<Vec<_>>().join("|")
 }
 
-/// The PowerShell form of [`posix_yield_signal`]. `$env:X` is `$null` when
+/// The PowerShell form of [`posix_signal`]. `$env:X` is `$null` when
 /// unset and interpolates to the empty string, which is the same shape the other
 /// arms get from their default expansion.
-fn power_shell_yield_signal() -> String {
-    YIELD_SIGNALS.map(|key| format!("$($env:{key})")).join("|")
+fn power_shell_signal(keys: &[&str]) -> String {
+    keys.iter()
+        .map(|key| format!("$($env:{key})"))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
-/// The elvish form of [`posix_yield_signal`], as the tail of
+/// The elvish form of [`posix_signal`], as the tail of
 /// [`elvish_pwd_value`]: a leading `' '` separator per sentinel, compounded onto
 /// the value the checkpoint records. `$E:X` on an unset variable is the empty
 /// string, never an exception — the same property the guard's carrier read
 /// already relies on.
-fn elvish_yield_signal() -> String {
-    YIELD_SIGNALS.map(|key| format!("' '$E:{key}")).join("")
+fn elvish_signal(keys: &[&str]) -> String {
+    keys.iter().map(|key| format!("' '$E:{key}")).collect()
 }
 
 /// How every wrapper hands its post-command reconcile to the prompt hook.
@@ -432,21 +451,27 @@ pub fn checkpoint(shell: Shell) -> Option<String> {
         Shell::Bash | Shell::Zsh => format!(
             "if [ -n \"${{__ocx_stamp-}}\" ]; then : >| \"${{__ocx_stamp-}}\" 2>/dev/null || true; fi\n\
              __ocx_pwd=$PWD\n\
-             __ocx_yield=\"{signal}\"",
-            signal = posix_yield_signal()
+             __ocx_yield=\"{yielded}\"\n\
+             __ocx_grant=\"{granted}\"",
+            yielded = posix_signal(&YIELD_SIGNALS),
+            granted = posix_signal(&GRANT_SIGNALS)
         ),
         // `true` is a fish builtin, so the refresh costs no exec.
         Shell::Fish => format!(
             "if test -n \"$__ocx_stamp\"; true >\"$__ocx_stamp\" 2>/dev/null; end\n\
              set -g __ocx_pwd $PWD\n\
-             set -g __ocx_yield \"{signal}\"",
-            signal = fish_yield_signal()
+             set -g __ocx_yield \"{yielded}\"\n\
+             set -g __ocx_grant \"{granted}\"",
+            yielded = fish_signal(&YIELD_SIGNALS),
+            granted = fish_signal(&GRANT_SIGNALS)
         ),
         Shell::PowerShell => format!(
             "$global:__ocxStamp = [datetime]::UtcNow\n\
              $global:__ocxPwd = $PWD.Path\n\
-             $global:__ocxYield = \"{signal}\"",
-            signal = power_shell_yield_signal()
+             $global:__ocxYield = \"{yielded}\"\n\
+             $global:__ocxGrant = \"{granted}\"",
+            yielded = power_shell_signal(&YIELD_SIGNALS),
+            granted = power_shell_signal(&GRANT_SIGNALS)
         ),
         // Elvish keeps its whole checkpoint in the process environment rather
         // than in a shell variable: the emitted stream reaches the shell through
@@ -635,10 +660,11 @@ fn posix_reconcile(quoted_binary: &str, shell_name: &str, watch_paths: &[PathBuf
         })
         .collect();
     format!(
-        "if [ -x '{quoted_binary}' ] && {{ [ -z \"${{__OCX_ENV_STATE-}}\" ] || [ \"${{__ocx_pwd-}}\" != \"$PWD\" ] || [ \"${{__ocx_yield-}}\" != \"{yielded}\" ] || [ -z \"${{__ocx_stamp-}}\" ] || [ ! -f \"${{__ocx_stamp-}}\" ]{newer} || [ \"$PWD/{PROJECT_FILE}\" -nt \"${{__ocx_stamp-}}\" ]; }}; then\n\
+        "if [ -x '{quoted_binary}' ] && {{ [ -z \"${{__OCX_ENV_STATE-}}\" ] || [ \"${{__ocx_pwd-}}\" != \"$PWD\" ] || [ \"${{__ocx_yield-}}\" != \"{yielded}\" ] || [ \"${{__ocx_grant-}}\" != \"{granted}\" ] || [ -z \"${{__ocx_stamp-}}\" ] || [ ! -f \"${{__ocx_stamp-}}\" ]{newer} || [ \"$PWD/{PROJECT_FILE}\" -nt \"${{__ocx_stamp-}}\" ]; }}; then\n\
          {apply}\n\
          fi",
-        yielded = posix_yield_signal(),
+        yielded = posix_signal(&YIELD_SIGNALS),
+        granted = posix_signal(&GRANT_SIGNALS),
         apply = posix_apply(quoted_binary, shell_name)
     )
 }
@@ -722,10 +748,11 @@ fn fish_reconcile(quoted_binary: &str, watch_paths: &[PathBuf]) -> String {
         })
         .collect();
     format!(
-        "if test -x '{quoted_binary}'; and begin; test -z \"$__OCX_ENV_STATE\"; or test \"$__ocx_pwd\" != \"$PWD\"; or test \"$__ocx_yield\" != \"{yielded}\"; or test -z \"$__ocx_stamp\"; or not test -f \"$__ocx_stamp\"{newer}; or test \"$PWD/{PROJECT_FILE}\" -nt \"$__ocx_stamp\"; end\n\
+        "if test -x '{quoted_binary}'; and begin; test -z \"$__OCX_ENV_STATE\"; or test \"$__ocx_pwd\" != \"$PWD\"; or test \"$__ocx_yield\" != \"{yielded}\"; or test \"$__ocx_grant\" != \"{granted}\"; or test -z \"$__ocx_stamp\"; or not test -f \"$__ocx_stamp\"{newer}; or test \"$PWD/{PROJECT_FILE}\" -nt \"$__ocx_stamp\"; end\n\
          {apply}\n\
          end",
-        yielded = fish_yield_signal(),
+        yielded = fish_signal(&YIELD_SIGNALS),
+        granted = fish_signal(&GRANT_SIGNALS),
         apply = fish_apply(quoted_binary)
     )
 }
@@ -789,6 +816,7 @@ fn power_shell_registration(binary: &str, watch_paths: &[PathBuf]) -> String {
          $global:__ocxStamp = [datetime]::MinValue\n\
          $global:__ocxPwd = ''\n\
          $global:__ocxYield = ''\n\
+         $global:__ocxGrant = ''\n\
          {function}\n\
          function global:prompt {{\n\
          $__ocxOk = $?\n\
@@ -852,11 +880,12 @@ fn power_shell_reconcile(quoted_binary: &str, watch_paths: &[PathBuf]) -> String
     // .NET call is not a name a user function could own.
     format!(
         "if (Test-Path -LiteralPath '{quoted_binary}' -PathType Leaf) {{\n\
-         if ([string]::IsNullOrEmpty($env:__OCX_ENV_STATE) -or $global:__ocxPwd -ne $PWD.Path -or $global:__ocxYield -ne \"{yielded}\"{newer} -or [System.IO.File]::GetLastWriteTimeUtc([System.IO.Path]::Combine($ExecutionContext.SessionState.Path.CurrentFileSystemLocation.Path, '{PROJECT_FILE}')) -gt $global:__ocxStamp) {{\n\
+         if ([string]::IsNullOrEmpty($env:__OCX_ENV_STATE) -or $global:__ocxPwd -ne $PWD.Path -or $global:__ocxYield -ne \"{yielded}\" -or $global:__ocxGrant -ne \"{granted}\"{newer} -or [System.IO.File]::GetLastWriteTimeUtc([System.IO.Path]::Combine($ExecutionContext.SessionState.Path.CurrentFileSystemLocation.Path, '{PROJECT_FILE}')) -gt $global:__ocxStamp) {{\n\
          {apply}\n\
          }}\n\
          }}",
-        yielded = power_shell_yield_signal(),
+        yielded = power_shell_signal(&YIELD_SIGNALS),
+        granted = power_shell_signal(&GRANT_SIGNALS),
         apply = power_shell_apply(quoted_binary)
     )
 }
@@ -951,7 +980,11 @@ const ELVISH_PWD_KEY: &str = "__OCX_ENV_PWD";
 /// evaluated by the shell, and the guard and the checkpoint have to agree
 /// byte for byte — one spelling is what makes that true by construction.
 fn elvish_pwd_value() -> String {
-    format!("(to-string $pid)' '$pwd{yielded}", yielded = elvish_yield_signal())
+    format!(
+        "(to-string $pid)' '$pwd{yielded}{granted}",
+        yielded = elvish_signal(&YIELD_SIGNALS),
+        granted = elvish_signal(&GRANT_SIGNALS)
+    )
 }
 
 /// The marker that says "this shell already registered", carried as the
@@ -1212,7 +1245,7 @@ mod tests {
                  if [ -n \"${__ocx_stamp-}\" ] && [ -z \"$(trap -p EXIT 2>/dev/null)\" ]; then trap 'command rm -f \"${__ocx_stamp-}\" 2>/dev/null' EXIT; fi\n\
                  __ocx_prompt_hook() {\n\
                  local __ocx_status=$?\n\
-                 if [ -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' ] && { [ -z \"${__OCX_ENV_STATE-}\" ] || [ \"${__ocx_pwd-}\" != \"$PWD\" ] || [ \"${__ocx_yield-}\" != \"${DIRENV_DIR-}|${MISE_SHELL-}|${__MISE_ORIG_PATH-}\" ] || [ -z \"${__ocx_stamp-}\" ] || [ ! -f \"${__ocx_stamp-}\" ] || [ '/w/ocx.toml' -nt \"${__ocx_stamp-}\" ] || [ '/w/ocx.lock' -nt \"${__ocx_stamp-}\" ] || [ \"$PWD/ocx.toml\" -nt \"${__ocx_stamp-}\" ]; }; then\n\
+                 if [ -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' ] && { [ -z \"${__OCX_ENV_STATE-}\" ] || [ \"${__ocx_pwd-}\" != \"$PWD\" ] || [ \"${__ocx_yield-}\" != \"${DIRENV_DIR-}|${MISE_SHELL-}|${__MISE_ORIG_PATH-}\" ] || [ \"${__ocx_grant-}\" != \"${OCX_CONSENT_PATHS-}|${OCX_CONSENT_NAMESPACES-}\" ] || [ -z \"${__ocx_stamp-}\" ] || [ ! -f \"${__ocx_stamp-}\" ] || [ '/w/ocx.toml' -nt \"${__ocx_stamp-}\" ] || [ '/w/ocx.lock' -nt \"${__ocx_stamp-}\" ] || [ \"$PWD/ocx.toml\" -nt \"${__ocx_stamp-}\" ]; }; then\n\
                  eval \"$('/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=bash 2>/dev/null)\" || true\n\
                  fi\n\
                  return $__ocx_status\n\
@@ -1246,7 +1279,7 @@ mod tests {
                  __ocx_stamp=\"$(command mktemp -t ocx-env-stamp.XXXXXXXX 2>/dev/null)\" || __ocx_stamp=''\n\
                  __ocx_prompt_hook() {\n\
                  local __ocx_status=$?\n\
-                 if [ -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' ] && { [ -z \"${__OCX_ENV_STATE-}\" ] || [ \"${__ocx_pwd-}\" != \"$PWD\" ] || [ \"${__ocx_yield-}\" != \"${DIRENV_DIR-}|${MISE_SHELL-}|${__MISE_ORIG_PATH-}\" ] || [ -z \"${__ocx_stamp-}\" ] || [ ! -f \"${__ocx_stamp-}\" ] || [ '/w/ocx.toml' -nt \"${__ocx_stamp-}\" ] || [ '/w/ocx.lock' -nt \"${__ocx_stamp-}\" ] || [ \"$PWD/ocx.toml\" -nt \"${__ocx_stamp-}\" ]; }; then\n\
+                 if [ -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' ] && { [ -z \"${__OCX_ENV_STATE-}\" ] || [ \"${__ocx_pwd-}\" != \"$PWD\" ] || [ \"${__ocx_yield-}\" != \"${DIRENV_DIR-}|${MISE_SHELL-}|${__MISE_ORIG_PATH-}\" ] || [ \"${__ocx_grant-}\" != \"${OCX_CONSENT_PATHS-}|${OCX_CONSENT_NAMESPACES-}\" ] || [ -z \"${__ocx_stamp-}\" ] || [ ! -f \"${__ocx_stamp-}\" ] || [ '/w/ocx.toml' -nt \"${__ocx_stamp-}\" ] || [ '/w/ocx.lock' -nt \"${__ocx_stamp-}\" ] || [ \"$PWD/ocx.toml\" -nt \"${__ocx_stamp-}\" ]; }; then\n\
                  eval \"$('/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=zsh 2>/dev/null)\" || true\n\
                  fi\n\
                  return $__ocx_status\n\
@@ -1273,7 +1306,7 @@ mod tests {
                  end\n\
                  function __ocx_prompt_hook --on-event fish_prompt\n\
                  set -l __ocx_status $status\n\
-                 if test -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx'; and begin; test -z \"$__OCX_ENV_STATE\"; or test \"$__ocx_pwd\" != \"$PWD\"; or test \"$__ocx_yield\" != \"$DIRENV_DIR|$MISE_SHELL|$__MISE_ORIG_PATH\"; or test -z \"$__ocx_stamp\"; or not test -f \"$__ocx_stamp\"; or test '/w/ocx.toml' -nt \"$__ocx_stamp\"; or test '/w/ocx.lock' -nt \"$__ocx_stamp\"; or test \"$PWD/ocx.toml\" -nt \"$__ocx_stamp\"; end\n\
+                 if test -x '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx'; and begin; test -z \"$__OCX_ENV_STATE\"; or test \"$__ocx_pwd\" != \"$PWD\"; or test \"$__ocx_yield\" != \"$DIRENV_DIR|$MISE_SHELL|$__MISE_ORIG_PATH\"; or test \"$__ocx_grant\" != \"$OCX_CONSENT_PATHS|$OCX_CONSENT_NAMESPACES\"; or test -z \"$__ocx_stamp\"; or not test -f \"$__ocx_stamp\"; or test '/w/ocx.toml' -nt \"$__ocx_stamp\"; or test '/w/ocx.lock' -nt \"$__ocx_stamp\"; or test \"$PWD/ocx.toml\" -nt \"$__ocx_stamp\"; end\n\
                  '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=fish 2>/dev/null | source\n\
                  end\n\
                  return $__ocx_status\n\
@@ -1293,9 +1326,10 @@ mod tests {
                  $global:__ocxStamp = [datetime]::MinValue\n\
                  $global:__ocxPwd = ''\n\
                  $global:__ocxYield = ''\n\
+                 $global:__ocxGrant = ''\n\
                  function global:__ocxReconcile {\n\
                  if (Test-Path -LiteralPath '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' -PathType Leaf) {\n\
-                 if ([string]::IsNullOrEmpty($env:__OCX_ENV_STATE) -or $global:__ocxPwd -ne $PWD.Path -or $global:__ocxYield -ne \"$($env:DIRENV_DIR)|$($env:MISE_SHELL)|$($env:__MISE_ORIG_PATH)\" -or [System.IO.File]::GetLastWriteTimeUtc('/w/ocx.toml') -gt $global:__ocxStamp -or [System.IO.File]::GetLastWriteTimeUtc('/w/ocx.lock') -gt $global:__ocxStamp -or [System.IO.File]::GetLastWriteTimeUtc([System.IO.Path]::Combine($ExecutionContext.SessionState.Path.CurrentFileSystemLocation.Path, 'ocx.toml')) -gt $global:__ocxStamp) {\n\
+                 if ([string]::IsNullOrEmpty($env:__OCX_ENV_STATE) -or $global:__ocxPwd -ne $PWD.Path -or $global:__ocxYield -ne \"$($env:DIRENV_DIR)|$($env:MISE_SHELL)|$($env:__MISE_ORIG_PATH)\" -or $global:__ocxGrant -ne \"$($env:OCX_CONSENT_PATHS)|$($env:OCX_CONSENT_NAMESPACES)\" -or [System.IO.File]::GetLastWriteTimeUtc('/w/ocx.toml') -gt $global:__ocxStamp -or [System.IO.File]::GetLastWriteTimeUtc('/w/ocx.lock') -gt $global:__ocxStamp -or [System.IO.File]::GetLastWriteTimeUtc([System.IO.Path]::Combine($ExecutionContext.SessionState.Path.CurrentFileSystemLocation.Path, 'ocx.toml')) -gt $global:__ocxStamp) {\n\
                  & '/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx' --offline self activate --reconcile --shell=powershell 2>$null | Out-String | Invoke-Expression\n\
                  }\n\
                  }\n\
@@ -1421,7 +1455,7 @@ mod tests {
                  if (==s (kind-of $__ocx_candidate) fn) { all $__ocx_candidate[arg-names] } })] \
                  ''__ocx-prompt-hook'')) {\n\
                  set edit:before-readline = [$@edit:before-readline {|@__ocx-prompt-hook|\n\
-                 if (or (==s $E:__OCX_ENV_STATE '''') (!=s $E:__OCX_ENV_PWD (to-string $pid)'' ''$pwd'' ''$E:DIRENV_DIR'' ''$E:MISE_SHELL'' ''$E:__MISE_ORIG_PATH)) {\n\
+                 if (or (==s $E:__OCX_ENV_STATE '''') (!=s $E:__OCX_ENV_PWD (to-string $pid)'' ''$pwd'' ''$E:DIRENV_DIR'' ''$E:MISE_SHELL'' ''$E:__MISE_ORIG_PATH'' ''$E:OCX_CONSENT_PATHS'' ''$E:OCX_CONSENT_NAMESPACES)) {\n\
                  try { eval (''/home/u/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin/ocx'' --offline self activate --reconcile --shell=elvish 2>/dev/null | slurp) } catch e { }\n\
                  }\n\
                  }]\n\
@@ -1478,7 +1512,9 @@ mod tests {
     fn elvish_checkpoint_emits_exactly() {
         assert_eq!(
             checkpoint(Shell::Elvish).as_deref(),
-            Some("set-env __OCX_ENV_PWD (to-string $pid)' '$pwd' '$E:DIRENV_DIR' '$E:MISE_SHELL' '$E:__MISE_ORIG_PATH")
+            Some(
+                "set-env __OCX_ENV_PWD (to-string $pid)' '$pwd' '$E:DIRENV_DIR' '$E:MISE_SHELL' '$E:__MISE_ORIG_PATH' '$E:OCX_CONSENT_PATHS' '$E:OCX_CONSENT_NAMESPACES"
+            )
         );
     }
 
@@ -1546,16 +1582,21 @@ mod tests {
     /// an arm that compares them against something it never records reconciles on
     /// every single prompt — C-044's exec storm. Their agreement is what makes
     /// the term fire exactly on a change, in either direction.
+    ///
+    /// [`GRANT_SIGNALS`] rides the same assertion: the fingerprint fold reads
+    /// exactly that list ([`the_fingerprint_fold_reads_exactly_the_grant_signals`]),
+    /// so a name in it the guard cannot see is a grant the fold never gets to
+    /// notice — the binary is not invoked (EC-HOOK-019, ocx-sh/ocx#442).
     #[test]
-    fn every_guard_reads_the_yield_sentinels_its_checkpoint_records() {
+    fn every_guard_reads_the_sentinels_its_checkpoint_records() {
         for shell in hooked() {
             let guard = registration(shell, &binary(), &watch()).unwrap_or_default();
             let checkpoint = checkpoint(shell).unwrap_or_default();
-            for key in YIELD_SIGNALS {
+            for key in YIELD_SIGNALS.iter().chain(&GRANT_SIGNALS) {
                 assert!(
                     guard.contains(key),
-                    "{shell}'s guard cannot see {key}, so a live direnv/mise never reaches the \
-                     reconciler (A-36): {guard}"
+                    "{shell}'s guard cannot see {key}, so a value exported mid-session never reaches \
+                     the reconciler (A-36, #442): {guard}"
                 );
                 assert!(
                     checkpoint.contains(key),
@@ -1564,6 +1605,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The EC-HOOK-019 (#442) tripwire, fold side: `current_fingerprint` reads
+    /// its environment through [`GRANT_SIGNALS`] and nowhere else.
+    ///
+    /// The guard test above proves every name in the list is a guard term; this
+    /// proves the list is the fold's whole env read set, so the two layers of
+    /// the staleness check cannot come apart the way they did when the fold
+    /// spelled `OCX_CONSENT_PATHS` by hand and the guard never heard of it. Same
+    /// source-scan shape as [`the_yield_sentinels_are_exactly_what_the_detector_reads`].
+    ///
+    /// Scoped to the two fold functions: `watch_paths` in the same file reads
+    /// `OCX_CONFIG` to *name a member*, which is a different question (the
+    /// path list is recorded in the ledger and re-derived from it).
+    #[test]
+    fn the_fingerprint_fold_reads_exactly_the_grant_signals() {
+        let source = include_str!("reconcile/fingerprint.rs");
+        let body = |name: &str| {
+            let start = source
+                .find(&format!("pub fn {name}("))
+                .expect("the fold function exists");
+            let end = source[start..].find("\n}\n").expect("the fold function ends") + start;
+            &source[start..end]
+        };
+        // `env::var` and not `env::var(`: the read is passed as a function
+        // value, so a needle with the call paren would match nothing and this
+        // guard would be green for the wrong reason.
+        assert_eq!(
+            body("fingerprint").matches("env::var").count(),
+            0,
+            "the pure fold read the environment; its inputs are parameters (A-13)"
+        );
+        let current = body("current_fingerprint");
+        assert_eq!(
+            current.matches("env::var").count(),
+            1,
+            "current_fingerprint reads the environment somewhere other than the GRANT_SIGNALS map; a \
+             variable folded there that the guard does not watch is #442 again"
+        );
+        assert!(
+            current.contains("GRANT_SIGNALS.map(crate::env::var)"),
+            "current_fingerprint must read its names through GRANT_SIGNALS so the guard and the \
+             fold share one list"
+        );
     }
 
     // ── #397: a project that appears under an unchanged $PWD ─────────────
@@ -1751,7 +1836,7 @@ mod tests {
                     "elvish must invalidate the recorded directory on the way out: {text}"
                 );
                 assert!(
-                    registration.contains("(!=s $E:__OCX_ENV_PWD (to-string $pid)'' ''$pwd'' ''$E:DIRENV_DIR'' ''$E:MISE_SHELL'' ''$E:__MISE_ORIG_PATH)"),
+                    registration.contains("(!=s $E:__OCX_ENV_PWD (to-string $pid)'' ''$pwd'' ''$E:DIRENV_DIR'' ''$E:MISE_SHELL'' ''$E:__MISE_ORIG_PATH'' ''$E:OCX_CONSENT_PATHS'' ''$E:OCX_CONSENT_NAMESPACES)"),
                     "elvish's guard must read the variable its wrapper clears: {registration}"
                 );
                 continue;
@@ -2035,7 +2120,7 @@ mod tests {
             "elvish must still reconcile on an empty carrier (C-012's repair gesture): {text}"
         );
         assert!(
-            text.contains("(!=s $E:__OCX_ENV_PWD (to-string $pid)'' ''$pwd'' ''$E:DIRENV_DIR'' ''$E:MISE_SHELL'' ''$E:__MISE_ORIG_PATH)"),
+            text.contains("(!=s $E:__OCX_ENV_PWD (to-string $pid)'' ''$pwd'' ''$E:DIRENV_DIR'' ''$E:MISE_SHELL'' ''$E:__MISE_ORIG_PATH'' ''$E:OCX_CONSENT_PATHS'' ''$E:OCX_CONSENT_NAMESPACES)"),
             "elvish must still reconcile on a directory change (C-019 member 7): {text}"
         );
         // The pid half is what a child elvish's first prompt depends on: the key
@@ -2534,6 +2619,45 @@ mod live_shell_tests {
         }
     }
 
+    /// EC-HOOK-019 (ocx-sh/ocx#442) — a consent grant exported mid-session fires
+    /// the next prompt, with nothing else moved (bash, zsh).
+    ///
+    /// The exact shipped defect, replayed against the real emitted guard: the
+    /// fingerprint folded `OCX_CONSENT_PATHS` (A-13), but the guard that decides
+    /// whether the binary runs at all had no term for it, so an `export` in a
+    /// still prompt moved nothing the shell could see. The acceptance row
+    /// `test_a_grant_arriving_mid_session_activates_at_the_next_prompt` drives
+    /// `--reconcile` unconditionally and therefore never reached this guard.
+    ///
+    /// Red state: drop ` || [ "${__ocx_grant-}" != … ]` from the guard and the
+    /// counts go `1 1 1` instead of `1 1 2`.
+    #[test]
+    fn a_grant_exported_mid_session_fires_the_posix_hook() {
+        for argv in [["bash", "-c"], ["zsh", "-c"]] {
+            let shell = Shell::from_live_argv(&argv);
+            let rig = rig(shell, "__OCX_ENV_STATE=seeded");
+            let registration = registration(shell, &rig.binary, &rig.watch).expect("a hook arm");
+            let script = format!(
+                "{registration}\n\
+                 count() {{ grep -c fired '{counter}'; }}\n\
+                 cd '{alpha}'; __ocx_prompt_hook >/dev/null 2>&1; first=$(count)\n\
+                 __ocx_prompt_hook >/dev/null 2>&1; still=$(count)\n\
+                 export OCX_CONSENT_PATHS='{alpha}'; __ocx_prompt_hook >/dev/null 2>&1; granted=$(count)\n\
+                 printf '%s %s %s' \"$first\" \"$still\" \"$granted\"",
+                counter = rig.counter.display(),
+                alpha = rig.alpha.display(),
+            );
+            let Some(observed) = run(&argv, &script) else {
+                continue;
+            };
+            assert_eq!(
+                observed, "1 1 2",
+                "{argv:?}: prompt 1 fires on the empty carrier, prompt 2 must be quiet, and an \
+                 exported OCX_CONSENT_PATHS must fire prompt 3 (#442)"
+            );
+        }
+    }
+
     /// The fish arm of the same contract. Its guard is a separate emission, and
     /// a `; or` term added to the wrong `begin` block is silently inert.
     ///
@@ -2561,6 +2685,32 @@ mod live_shell_tests {
             observed, "1 1 2",
             "fish: prompt 1 fires on the empty carrier, prompt 2 must be quiet, and `cd` must \
              fire prompt 3 (C-019 member 7)"
+        );
+    }
+
+    /// The fish arm of EC-HOOK-019 (#442) — the `; or` grant term sits in the
+    /// guard's `begin` block, where a term in the wrong block is silently inert.
+    #[test]
+    fn a_grant_exported_mid_session_fires_the_fish_hook() {
+        let rig = rig(Shell::Fish, "set -gx __OCX_ENV_STATE seeded");
+        let registration = registration(Shell::Fish, &rig.binary, &rig.watch).expect("fish hosts a hook");
+        let script = format!(
+            "{registration}\n\
+             function count; grep -c fired '{counter}'; end\n\
+             cd '{alpha}'; __ocx_prompt_hook >/dev/null 2>&1; set first (count)\n\
+             __ocx_prompt_hook >/dev/null 2>&1; set still (count)\n\
+             set -gx OCX_CONSENT_PATHS '{alpha}'; __ocx_prompt_hook >/dev/null 2>&1; set granted (count)\n\
+             printf '%s %s %s' $first $still $granted",
+            counter = rig.counter.display(),
+            alpha = rig.alpha.display(),
+        );
+        let Some(observed) = run(&["fish", "-c"], &script) else {
+            return;
+        };
+        assert_eq!(
+            observed, "1 1 2",
+            "fish: prompt 1 fires on the empty carrier, prompt 2 must be quiet, and an exported \
+             OCX_CONSENT_PATHS must fire prompt 3 (#442)"
         );
     }
 
