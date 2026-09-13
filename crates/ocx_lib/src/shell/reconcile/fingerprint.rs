@@ -89,15 +89,26 @@ pub fn fingerprint(
 /// other: the reporter would then print a fingerprint the reconciler never
 /// computes.
 ///
+/// The names are read **through [`GRANT_SIGNALS`]**, never spelled here: the
+/// per-prompt guard in `shell::hook` records and compares the same list, and a
+/// variable folded here that the guard cannot see is a grant that never reaches
+/// this fold at all — the shell never invokes the binary
+/// ([ocx-sh/ocx#442](https://github.com/ocx-sh/ocx/issues/442)). The array
+/// destructure is the tie: a third name added to the list fails to compile
+/// until this fold learns to carry it.
+///
 /// Blocking: [`fingerprint`]'s one `stat` per member. Call it from a blocking
 /// context.
+///
+/// [`GRANT_SIGNALS`]: crate::config::shell::GRANT_SIGNALS
 #[must_use]
 pub fn current_fingerprint(watch_paths: &[PathBuf], project_dir: Option<&Path>) -> String {
+    let [consent_paths, consent_namespaces] = crate::config::shell::GRANT_SIGNALS.map(crate::env::var);
     fingerprint(
         watch_paths,
         project_dir,
-        crate::env::var(crate::config::shell::OCX_CONSENT_PATHS).as_deref(),
-        crate::env::var(crate::config::shell::OCX_CONSENT_NAMESPACES).as_deref(),
+        consent_paths.as_deref(),
+        consent_namespaces.as_deref(),
     )
 }
 
