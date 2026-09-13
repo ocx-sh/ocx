@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import stat
 import subprocess
 import sys
+import tarfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 from uuid import uuid4
 
@@ -331,6 +334,118 @@ def write_ocx_toml(project_dir: Path, body: str) -> Path:
     path = project_dir / "ocx.toml"
     path.write_text(body)
     return path
+
+
+# ---------------------------------------------------------------------------
+# Archive fixtures
+# ---------------------------------------------------------------------------
+
+#: Suffix -> ``tarfile`` write mode. ``.tar.zst`` is absent on purpose: no
+#: ``tarfile`` mode compresses with zstd, so it goes through ``compression.zstd``
+#: (stdlib from Python 3.14) wrapped around an uncompressed stream instead.
+_TAR_WRITE_MODES = {
+    ".tar": "w",
+    ".tar.gz": "w:gz",
+    ".tgz": "w:gz",
+    ".tar.xz": "w:xz",
+    ".tar.bz2": "w:bz2",
+}
+
+
+def build_archive(
+    target: Path,
+    files: dict[str, tuple[str, int]],
+    *,
+    hard_links: dict[str, str] | None = None,
+) -> Path:
+    """Write an archive at ``target`` holding exactly the entries described.
+
+    ``files`` maps an archive entry name — slash-separated, so
+    ``"hello-1.2.3/bin/hello"`` is what ``--strip-components 1`` turns into
+    ``bin/hello`` — to a ``(text, unix mode)`` pair. The mode is recorded
+    verbatim, which is the point for the world-writable case: a real
+    ``0o777`` entry cannot be produced by archiving a file the test wrote,
+    because the process umask clips it.
+
+    ``hard_links`` maps an entry name to the name of an earlier entry it hard
+    links to. Tar only: the zip format has no hard-link entry type, so asking
+    for one raises rather than silently writing a copy.
+
+    The format comes from ``target``'s suffix: ``.zip``, ``.tar``, and ``.tar``
+    with ``gz``/``xz``/``bz2``/``zst`` compression.
+    """
+    name = target.name
+    if name.endswith(".zip"):
+        if hard_links:
+            raise ValueError("zip has no hard-link entry type; use a tar archive")
+        return _build_zip(target, files)
+    return _build_tar(target, files, hard_links or {})
+
+
+def _build_zip(target: Path, files: dict[str, tuple[str, int]]) -> Path:
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        for arcname, (text, mode) in files.items():
+            info = zipfile.ZipInfo(arcname)
+            # The unix mode lives in the high 16 bits of the external
+            # attributes; 0o100000 is S_IFREG, which readers expect beside it.
+            info.external_attr = ((0o100000 | mode) & 0xFFFF) << 16
+            archive.writestr(info, text)
+    return target
+
+
+def _build_tar(
+    target: Path,
+    files: dict[str, tuple[str, int]],
+    hard_links: dict[str, str],
+) -> Path:
+    def write_entries(archive: tarfile.TarFile) -> None:
+        for arcname, (text, mode) in files.items():
+            payload = text.encode()
+            info = tarfile.TarInfo(arcname)
+            info.size = len(payload)
+            info.mode = mode
+            archive.addfile(info, io.BytesIO(payload))
+        for arcname, link_target in hard_links.items():
+            info = tarfile.TarInfo(arcname)
+            info.type = tarfile.LNKTYPE
+            info.linkname = link_target
+            info.size = 0
+            archive.addfile(info)
+
+    name = target.name
+    if name.endswith(".tar.zst"):
+        # Requires Python 3.14; the caller guards with `pytest.importorskip`.
+        from compression import zstd
+
+        with zstd.ZstdFile(target, "wb") as raw, tarfile.open(fileobj=raw, mode="w|") as archive:
+            write_entries(archive)
+        return target
+
+    for suffix, mode in _TAR_WRITE_MODES.items():
+        if name.endswith(suffix):
+            with tarfile.open(target, mode) as archive:
+                write_entries(archive)
+            return target
+    raise ValueError(f"unsupported archive suffix: {name}")
+
+
+def bundle_members(bundle: Path) -> dict[str, tarfile.TarInfo]:
+    """Every regular-file member of an ``ocx package create`` bundle, by name.
+
+    The bundle is the ``.tar.xz`` `create` wrote; reading it back is how a test
+    asserts on what actually got packaged (contents, unix mode) rather than on
+    the temporary tree that produced it.
+    """
+    with tarfile.open(bundle, "r:xz") as archive:
+        return {member.name: member for member in archive.getmembers() if member.isfile()}
+
+
+def bundle_text(bundle: Path, name: str) -> str:
+    """The decoded contents of one file member of a bundle."""
+    with tarfile.open(bundle, "r:xz") as archive:
+        extracted = archive.extractfile(name)
+        assert extracted is not None, f"{name} is not a readable file member of {bundle}"
+        return extracted.read().decode()
 
 
 # ---------------------------------------------------------------------------

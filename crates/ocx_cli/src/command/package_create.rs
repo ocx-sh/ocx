@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::{compression, log, oci, package, package::metadata::authoring::AuthoringMetadata, prelude::*};
+use ocx_lib::{archive, compression, log, oci, package, package::metadata::authoring::AuthoringMetadata, prelude::*};
 
 use crate::options;
 
@@ -86,6 +86,29 @@ pub struct PackageCreate {
     /// for what the check does.
     #[clap(long)]
     no_libc_lint: bool,
+    /// Treat PATH as an archive and bundle what it extracts to
+    ///
+    /// The format is taken from the file name - tar, tar with gzip, xz, zstd
+    /// or bzip2 compression, or zip. The archive is unpacked into a temporary
+    /// directory that is removed when the command exits, and that tree, not
+    /// the archive file, is what everything else sees: the metadata sidecar,
+    /// the binaries scan, the libc check and the bundle all behave exactly as
+    /// they do for a directory input.
+    ///
+    /// Without this flag an archive is bundled as the single file it is.
+    /// Implied by `--strip-components`. An archive that extracts to nothing
+    /// is refused (exit 65).
+    #[clap(long)]
+    extract: bool,
+    /// Drop the leading N path components of every extracted entry
+    ///
+    /// Implies `--extract`. `--strip-components 1` turns the usual
+    /// `hello-1.2.3/bin/hello` release layout into `bin/hello`, so the bundle
+    /// has no version-named directory at its root. An entry whose whole path
+    /// the strip consumes is dropped, and a depth that drops every entry is
+    /// refused (exit 65) rather than bundling an empty tree.
+    #[clap(long, value_name = "N")]
+    strip_components: Option<usize>,
 }
 
 impl PackageCreate {
@@ -121,6 +144,20 @@ impl PackageCreate {
             );
         }
 
+        // Under `--extract`/`--strip-components` the content tree is what the
+        // archive unpacks to, not the argument itself. The `TempDir` is bound
+        // for the rest of `execute` — dropping it deletes the tree, and every
+        // consumer below reads `content_root`, so there is one place where the
+        // archive and directory forms diverge. D9: the scratch tree lives under
+        // `$OCX_HOME/temp/create/`, beside the digest-keyed `TempStore`, not in
+        // the system temp dir — one owned, GC-visible root for OCX scratch.
+        let create_root = context.file_structure().temp.root().join("create");
+        let extracted = match self.extract || self.strip_components.is_some() {
+            true => Some(self.extract_archive(&create_root).await?),
+            false => None,
+        };
+        let content_root = extracted.as_ref().map_or(self.path.as_path(), tempfile::TempDir::path);
+
         // Resolve + validate the sidecar BEFORE writing the output bundle:
         // dependency resolution can fail (network / policy / missing tag /
         // empty platform intersection), and a failure must leave no orphan
@@ -130,7 +167,7 @@ impl PackageCreate {
             Some((metadata_source, platform)) => {
                 let metadata = AuthoringMetadata::read_json(metadata_source).await?;
                 let metadata = self.resolve_dependency_pins(metadata, &context, &platform).await?;
-                let metadata = self.resolve_binaries(metadata, &platform).await?;
+                let metadata = self.resolve_binaries(content_root, metadata, &platform).await?;
                 // Project to the published form and run the publish-time
                 // env/entrypoint checks over it. This projection is what gets
                 // written beside the bundle: push and test read the compiled
@@ -184,7 +221,7 @@ impl PackageCreate {
                         ));
                     }
                 } else {
-                    package::libc_lint::check_declared_libc(&self.path, &metadata, &platform).await?;
+                    package::libc_lint::check_declared_libc(content_root, &metadata, &platform).await?;
                 }
                 Some(valid)
             }
@@ -205,7 +242,7 @@ impl PackageCreate {
         );
         {
             let _spin = context.progress().spinner(format!("Bundling {}", self.path.display()));
-            package::bundle::BundleBuilder::from_path(&self.path)
+            package::bundle::BundleBuilder::from_path(content_root)
                 .with_compression(compression_options)
                 .create(&output)
                 .await?;
@@ -246,6 +283,88 @@ impl PackageCreate {
         }
 
         Ok(ExitCode::SUCCESS)
+    }
+
+    /// Unpacks `--extract`'s archive into a temporary directory and hands the
+    /// directory back, so the caller decides how long the tree lives.
+    ///
+    /// An extraction that leaves the directory empty is refused rather than
+    /// bundled: the usual cause is a `--strip-components` deeper than the
+    /// archive, and the alternative is publishing a package that installs no
+    /// files. The directory answers that question directly - no entry count is
+    /// threaded out of the extractor for it.
+    async fn extract_archive(&self, create_root: &std::path::Path) -> anyhow::Result<tempfile::TempDir> {
+        // H8: --extract/--strip-components treat PATH as an archive. A directory
+        // has no archive format to unpack; refuse it by name (exit 64) rather
+        // than letting the extractor fail deep with "Is a directory".
+        let is_dir = tokio::fs::metadata(&self.path)
+            .await
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false);
+        if is_dir {
+            return Err(ocx_lib::cli::UsageError::new(format!(
+                "--extract needs an archive file, but {} is a directory; drop --extract to bundle a directory",
+                self.path.display()
+            ))
+            .into());
+        }
+        // Map an unrecognised suffix to UnsupportedFormat (exit 65) up front,
+        // rather than attempting a plain-tar read that fails deep in the extractor.
+        if !archive_format_recognized(&self.path) {
+            return Err(archive::Error::UnsupportedFormat(self.path.display().to_string()).into());
+        }
+
+        let strip_components = self.strip_components.unwrap_or(0);
+        tokio::fs::create_dir_all(create_root)
+            .await
+            .map_err(|error| ocx_lib::error::file_error(create_root, error))?;
+        let target = tempfile::Builder::new()
+            .prefix("create-")
+            .tempdir_in(create_root)
+            .map_err(|error| ocx_lib::error::file_error(create_root, error))?;
+        log::info!(
+            "Extracting {} with strip_components {strip_components}",
+            self.path.display()
+        );
+        archive::Archive::extract_with_options(
+            &self.path,
+            target.path(),
+            Some(archive::ExtractOptions {
+                algorithm: None,
+                strip_components,
+            }),
+        )
+        .await?;
+        let first_entry = tokio::fs::read_dir(target.path())
+            .await
+            .map_err(|error| ocx_lib::error::file_error(target.path(), error))?
+            .next_entry()
+            .await
+            .map_err(|error| ocx_lib::error::file_error(target.path(), error))?;
+        if first_entry.is_none() {
+            return Err(self.empty_extraction_error(strip_components));
+        }
+        Ok(target)
+    }
+
+    /// The empty-extraction refusal (exit 65).
+    ///
+    /// W2: this is a CLI policy — an archive that unpacks to nothing must not
+    /// become an empty package — so it lives here rather than in `archive::Error`,
+    /// whose other extract caller (local blob materialization) extracts with
+    /// strip 0, where an empty layer is legitimate. W10: the `--strip-components`
+    /// clause is emitted only when the operator passed a non-zero strip, so the
+    /// message never invents a `--strip-components 0` the operator never typed.
+    fn empty_extraction_error(&self, strip_components: usize) -> anyhow::Error {
+        let message = if strip_components == 0 {
+            format!("archive '{}' extracted no entries", self.path.display())
+        } else {
+            format!(
+                "archive '{}' extracted no entries with --strip-components {strip_components}",
+                self.path.display()
+            )
+        };
+        crate::app::CommandError::new(message, ocx_lib::cli::ExitCode::DataError).into()
     }
 
     /// Rejects an explicit `--bin-scan` given without `--metadata` (`-m`):
@@ -302,10 +421,11 @@ impl PackageCreate {
     }
 
     /// Runs the create-time interface-binaries scan/fill/verify step
-    /// against `self.path`'s content tree, per `self.bin_scan`'s resolved
+    /// against `content_root`'s content tree, per `self.bin_scan`'s resolved
     /// mode (`adr_declared_binaries_metadata.md` §2 / §2.1 ordering block).
     async fn resolve_binaries(
         &self,
+        content_root: &std::path::Path,
         metadata: AuthoringMetadata,
         platform: &oci::Platform,
     ) -> anyhow::Result<AuthoringMetadata> {
@@ -314,25 +434,72 @@ impl PackageCreate {
             options::BinScanMode::Verify => package::bin_scan::ScanMode::Verify,
             options::BinScanMode::Off => package::bin_scan::ScanMode::Off,
         };
-        Ok(package::bin_scan::resolve_binaries(&self.path, metadata, platform, mode).await?)
+        Ok(package::bin_scan::resolve_binaries(content_root, metadata, platform, mode).await?)
     }
 
     /// Infers a filename for the package bundle based on the identifier and platform, or the input path if no identifier is provided.
     fn infer_filename(&self, identifier: Option<&oci::Identifier>) -> String {
         let mut name = match identifier {
             Some(identifier) => format!("{}-{}", identifier.name(), identifier.tag_or_latest()),
-            None => self
-                .path
-                .file_prefix()
-                .and_then(|str| str.to_str())
-                .unwrap_or("package")
-                .to_string(),
+            None => self.inferred_stem(),
         };
         if let Some(platform) = &self.platform {
             name.push_str(&format!("-{}", platform.ascii_segments().join("-")));
         }
         format!("{}.tar.xz", name)
     }
+
+    /// The bundle-name stem derived from the input path when no identifier is
+    /// given.
+    ///
+    /// W11: under `--extract` the input is an archive, so strip the whole
+    /// recognized suffix as a unit (`hello-1.2.3.tar.gz` → `hello-1.2.3`).
+    /// `file_prefix` stops at the first dot (`hello-1`), which is wrong for a
+    /// versioned archive name. Without `--extract` the input is bundled as a
+    /// single file, and the historical `file_prefix` stem is unchanged.
+    fn inferred_stem(&self) -> String {
+        if (self.extract || self.strip_components.is_some())
+            && let Some(name) = self.path.file_name().and_then(|name| name.to_str())
+        {
+            return strip_archive_suffix(name).to_string();
+        }
+        self.path
+            .file_prefix()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("package")
+            .to_string()
+    }
+}
+
+/// Whether `path`'s suffix names an archive format `--extract` can unpack: zip,
+/// plain tar, or tar with a supported compression. `compression`'s `from_file`
+/// is the single source of truth for the compressed suffixes.
+fn archive_format_recognized(path: &std::path::Path) -> bool {
+    if compression::CompressionAlgorithm::from_file(path).is_some() {
+        return true;
+    }
+    matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("zip" | "tar")
+    )
+}
+
+/// Strips a recognized archive suffix as a unit, so `hello-1.2.3.tar.gz` yields
+/// `hello-1.2.3`. Longest compound suffixes are tried first, case-insensitively.
+fn strip_archive_suffix(name: &str) -> &str {
+    const SUFFIXES: &[&str] = &[
+        ".tar.gz", ".tar.xz", ".tar.zst", ".tar.bz2", ".tgz", ".tzst", ".tar", ".zip",
+    ];
+    let lower = name.to_ascii_lowercase();
+    for suffix in SUFFIXES {
+        if lower.ends_with(suffix) {
+            return &name[..name.len() - suffix.len()];
+        }
+    }
+    name
 }
 
 #[cfg(test)]
