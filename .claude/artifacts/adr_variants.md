@@ -309,6 +309,8 @@ pub enum InternalTag {
 1. `pgo.lto-3.12.5`, `pgo.lto-3.12`, `pgo.lto-3`, `pgo.lto` (variant track)
 2. `3.12.5`, `3.12`, `3`, `latest` (default variant aliases)
 
+> **Amendment (2026-09-12).** Row 2 is opt-in, not an automatic consequence of "is this the default variant" — the CLI's `ocx package push --default` flag is the channel a mirror's `default: true` variant declaration flows through, and it is the mirror pipeline, not the cascade algebra itself, that decides to pass it on the default variant's own push. The mechanism producing row 2 is also not a second `push_cascade()` call (superseded below): it is `Client::merge_platform_into_index`, a tag-only re-tag of the manifest digest the variant-prefixed push already landed — no blob or manifest re-upload, one index write per aliased tag. See the amendment under "Phase 3 implementation notes" below for the mechanism this replaced.
+
 ### Cascade Changes
 
 ```
@@ -408,7 +410,7 @@ Fields that variants **cannot** override: `name`, `target`, `source`, `cascade`,
 
 If no `variants` key exists, the spec behaves as today (single implicit variant, backward-compatible).
 
-**Exactly one variant must be `default: true`** when variants are declared. The default variant's builds produce both prefixed and unprefixed tags.
+**Exactly one variant must be `default: true`** when variants are declared. The default variant's builds produce both prefixed and unprefixed tags, by passing `ocx package push --default` on that variant's own push (Amendment, 2026-09-12) — the mirror spec's `default: true` is the declaration, `--default` is the mechanism that acts on it.
 
 ### CLI Changes
 
@@ -467,6 +469,8 @@ No changes to `FileStructure`, `ObjectStore`, or `InstallStore`. Variant informa
 - Already-mirrored check constructs variant-prefixed version for `VersionPlatformMap.has()` while min/max bounds use bare source version (avoids `Ord` issues with variant-first sorting)
 - Default variant alias cascade: `push_and_cascade()` performs a second `push_cascade()` with `without_variant()` tag, producing unadorned tags (`3.12.5`, `3.12`, `3`, `latest`)
 - OCI registries handle duplicate blob uploads as no-ops (content-addressed), so the second push only creates tag aliases
+
+> **Amendment (2026-09-12).** The two notes above describe the mechanism as it stood at Phase 3. It is now superseded: the alias tags are written by `ocx package push --default` (a boolean CLI flag, replacing the mirror-only path above) through `write_default_variant_aliases` (`crates/ocx_lib/src/package/cascade.rs`), which calls `Client::merge_platform_into_index` once per aliased tag — a tag-only re-tag of the already-pushed platform manifest digest, never a second `push_cascade()` and never a blob or manifest re-upload. `ocx package push --default` on a tag with no variant is refused (exit 64) rather than silently no-op'd, which the original mirror-only path had no occasion to consider since the mirror always knows which variant is `default: true`. The mirror pipeline passes `--default` on the declared default variant's own push; it does not implement the aliasing itself.
 
 ### Phase 3: Mirror Variant Support ✅
 1. [x] Add `variants` field to `MirrorSpec` (with `name`, `default`, overrides)
@@ -538,3 +542,4 @@ For OCX's target audience (CI/CD, Bazel, GitHub Actions), deterministic tag iden
 | 2026-03-22 | mherwig | Added cross-ecosystem research, OCI spec analysis, rejected options 4-5, variant-only tag handling, `variant-latest` rejection, `Tag::VariantRolling`, Ord/cascade/parent refinements, mirror spec override boundaries, design rationale |
 | 2026-03-22 | mherwig | Phase 3: Mirror variant support — `VariantSpec`, `EffectiveVariant`, variant-aware filter, default alias cascade, `Version::without_variant()` |
 | 2026-03-22 | mherwig | Phase 4: `--variants` and `--platforms` flags on `index list`, acceptance tests, user guide Variants section. Annotations deferred (no consumer). |
+| 2026-09-12 | wp6-docs | Amended in place: default-variant aliasing is now `ocx package push --default` (boolean flag, usage error on a variant-less tag) acting via `Client::merge_platform_into_index`, superseding the `push_and_cascade()` second-`push_cascade()` mechanism the Phase 3 notes originally described. |

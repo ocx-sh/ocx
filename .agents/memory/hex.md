@@ -58,6 +58,13 @@ research-axes:
 
 ## Memory
 
+- Review pending: `.claude/artifacts/plan_ci_integration_review_fixes.md` — the
+  `/hex-execute` run for #449–#453 finished 2026-09-13 at `sion` @ `df8d33bb`
+  (`State: review`, not pushed). Every Block/High from the prior `/hex-review`
+  and both cross-model gates is fixed and mutation-proven; three owner
+  decisions are listed in its last Schedule entry. `Next: /hex-review` on that
+  path. Pointer left beside the toolchain plan below rather than replacing it —
+  both live on `sion`.
 - Active plan: `.claude/artifacts/plan_toolchain_tree_layout.md` (toolchain tree
   layout — the closed depth-1 set). **Moved out of `.claude/state/plans/` on
   2026-09-08 — that tree is gitignored (`.gitignore:39`) and this plan must ship

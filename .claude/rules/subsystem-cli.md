@@ -124,9 +124,10 @@ distinguishing a local resource from a registry identifier belongs in the domain
 (`--companion-archive`), not tacked on as a `-file` suffix.
 
 **One exception: a shared file with two ends.** A `-file` flag may also *read* the file another
-OCX command wrote, when both ends deliberately carry one spelling — `push --tags-file` writes the
-tag list that `announce --tags-file` and `sign --tags-file` read. The symmetry is the point: two
-names for one file is the worse failure, so the writer's spelling wins on the read side too.
+OCX command wrote, when both ends deliberately carry one spelling — `push --tags-file` and
+`cascade repair --tags-file` write the tag list that `announce --tags-file` and `sign --tags-file`
+read. The symmetry is the point: two names for one file is the worse failure, so the writer's
+spelling wins on the read side too, and every writer of the same file spells it the same way.
 
 ## `--shell` Flag Convention
 
@@ -265,6 +266,15 @@ discriminator and the `--shell` trade are in that helper's `ponytail:` comment.
 - **GitLab** (`--ci=gitlab`): JSON-lines `{"name","value"}`, one per key, to
   `--export-file` or stdout. No path channel: `PATH` and every path var are
   flattened (prepend package values to existing, join with `PATH_SEPARATOR`).
+
+**Not to be confused with `package push --ci-annotations[=PROVIDER]`** (`package_push.rs`) —
+a same-shaped flag (`Option<Option<CiFlavor>>`, `num_args=0..=1, require_equals=true`, bare
+form autodetects) on a different command, deriving OCI annotations
+(`org.opencontainers.image.{source,revision,created,version}`) from the CI environment onto
+the pushed index rather than emitting a composed env. It reads its own variable set
+(`ocx_lib::ci::annotations`) — `$GITHUB_SERVER_URL`/`$GITHUB_REPOSITORY`/`$GITHUB_SHA` and
+`$CI_PROJECT_URL`/`$CI_COMMIT_SHA`/`$CI_PIPELINE_CREATED_AT`, plus `$SOURCE_DATE_EPOCH` on
+either provider — none of which the `--ci` flag above touches.
 
 ## `ContextOptions.format` — flattened `options::Format` (single format authority)
 

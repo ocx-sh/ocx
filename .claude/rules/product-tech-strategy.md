@@ -30,7 +30,7 @@
 
 | Component | Choice |
 |-----------|--------|
-| Runtime | Python 3.13+ |
+| Runtime | Python 3.14+ |
 | Tooling | uv (Manager), Ruff (Linter) |
 | Testing | pytest |
 
