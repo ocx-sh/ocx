@@ -1249,20 +1249,22 @@ mod tests {
 
     // ── announce error classification (design register C13) ─────────────────
 
-    /// `AnnounceError::Ssrf` is `#[error(transparent)]`, which makes
-    /// `Error::source()` skip past the wrapped `SsrfError` — so this only
-    /// classifies correctly because `AnnounceError` is registered in the
-    /// ladder AND its own `classify()` delegates explicitly (see
-    /// `announce/error.rs`), not via a source-chain walk.
+    /// `AnnounceError::Ssrf` classifies through `AnnounceError`'s own
+    /// `classify()`, which delegates to the wrapped `SsrfError` explicitly (see
+    /// `announce/error.rs`) — this pins that the registration in the ladder
+    /// and that delegation agree, not a source-chain walk.
     #[test]
     fn announce_ssrf_forbidden_target_maps_to_config_error() {
         use crate::announce::AnnounceError;
         use crate::oci::ssrf::SsrfError;
 
-        let err = AnnounceError::Ssrf(SsrfError::ForbiddenTarget {
-            host: "169.254.169.254".to_string(),
-            ip: "169.254.169.254".parse().unwrap(),
-        });
+        let err = AnnounceError::Ssrf {
+            namespace: "ocx.sh".to_string(),
+            source: SsrfError::ForbiddenTarget {
+                host: "169.254.169.254".to_string(),
+                ip: "169.254.169.254".parse().unwrap(),
+            },
+        };
         assert_eq!(classify(err), ExitCode::ConfigError);
     }
 
@@ -1271,10 +1273,13 @@ mod tests {
         use crate::announce::AnnounceError;
         use crate::oci::ssrf::SsrfError;
 
-        let err = AnnounceError::Ssrf(SsrfError::Resolution {
-            host: "registry.invalid".to_string(),
-            source: std::io::Error::other("dns lookup failed"),
-        });
+        let err = AnnounceError::Ssrf {
+            namespace: "ocx.sh".to_string(),
+            source: SsrfError::Resolution {
+                host: "registry.invalid".to_string(),
+                source: std::io::Error::other("dns lookup failed"),
+            },
+        };
         assert_eq!(classify(err), ExitCode::Unavailable);
     }
 

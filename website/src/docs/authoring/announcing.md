@@ -451,7 +451,7 @@ Codes marked *claim* or *announce* are reachable from that command only; the res
 | 74 | writing under `--out` failed, or `--tags-file` could not be read | Check the path's permissions. Parent directories are created for you; a parent that is a regular file is not |
 | 75 | rate-limited (429), or a concurrent run kept winning the branch | Retry with backoff |
 | 77 | the push was refused by the forge's own policy | A protected branch or a push rule on the index project. Its administrator has to relax it, or use `--transport api` with a token that may push |
-| 78 | *announce* — a curated tag's physical host resolves to a private, loopback, link-local or metadata address | Add it to that namespace's [`trusted_hosts`][config-registries-trusted-hosts] to allow it |
+| 78 | *announce* — a curated tag's physical host resolves to a private, loopback, link-local or metadata address | Add it to that namespace's [`trusted_hosts`][config-registries-trusted-hosts] — the entry is keyed on the package name's domain, not the registry host: `[registries."ocx.corp.example"] trusted_hosts = ["gitlab.corp.example"]`. The error names the exact key |
 | 79 | *announce* — a curated tag does not resolve on the registry, or the package is unclaimed | Check the tag for a typo; for the second, run [`ocx package claim`][cmd-package-claim] first |
 | 79 | *claim* — `unknown owner …: the forge has no such account` | Check the spelling, or pass `LOGIN:ID` to skip the lookup |
 | 80 | no credential, a rejected one, or one that cannot push to `--index-repo` | Set [`OCX_ANNOUNCE_TOKEN`][env-ocx-announce-token]. Without `--fork` the credential also needs push access, which ocx checks up front and names |

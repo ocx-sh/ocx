@@ -19,11 +19,11 @@
 //! [`ClassifyExitCode`] is implemented here (rather than left to source-chain
 //! walking) for two independent reasons:
 //!
-//! - [`Self::Ssrf`] and [`Self::Forge`] are `#[error(transparent)]`:
-//!   thiserror's transparent forwarding makes `Error::source()` skip straight
-//!   past the wrapped [`SsrfError`] / [`ForgeError`](crate::forge::ForgeError)
-//!   to *its own* source, so the generic chain walker in `cli::classify_error`
-//!   would never see it.
+//! - [`Self::Forge`] is `#[error(transparent)]`: thiserror's transparent
+//!   forwarding makes `Error::source()` skip straight past the wrapped
+//!   [`ForgeError`](crate::forge::ForgeError) to *its own* source, so the
+//!   generic chain walker in `cli::classify_error` would never see it.
+//!   [`Self::Ssrf`] delegates the same way for symmetry.
 //! - [`Self::Observe`]'s `#[source]` field is `Box<ClientError>` (a concrete
 //!   boxed type, not `Box<dyn Error>`): thiserror's generated `source()`
 //!   exposes it through the blanket `AsDynError` impl keyed on the field's
@@ -88,8 +88,19 @@ pub enum AnnounceError {
 
     /// The physical host resolved to a forbidden address or could not be
     /// resolved (design register X1-X3, SSRF pre-flight).
-    #[error(transparent)]
-    Ssrf(#[from] crate::oci::ssrf::SsrfError),
+    ///
+    /// Names the `[registries."<ns>"]` entry the fix goes into: the exemption is
+    /// keyed on the package's *logical* namespace, not on the physical host it
+    /// points at, and an operator who keys it on the host sees the inner
+    /// refusal with no way to tell which entry it is reading (ocx#455).
+    #[error(
+        "the physical host of {namespace}/… was refused; list it (bare host, no port) under [registries.\"{namespace}\"].trusted_hosts"
+    )]
+    Ssrf {
+        namespace: String,
+        #[source]
+        source: crate::oci::ssrf::SsrfError,
+    },
 
     /// A curated tag does not resolve on the physical repository — a publisher
     /// typo, never silently dropped (reference parity).
@@ -228,7 +239,7 @@ impl crate::cli::ClassifyExitCode for AnnounceError {
         match self {
             // Delegated explicitly — see the module doc for why the generic
             // source-chain walker cannot reach any of these on its own.
-            Self::Ssrf(inner) => inner.classify(),
+            Self::Ssrf { source, .. } => source.classify(),
             Self::Forge(inner) => inner.classify(),
             Self::Observe { source, .. } => source.classify(),
             Self::ObserveDesc { source, .. } => source.classify(),
@@ -293,11 +304,20 @@ mod tests {
 
     #[test]
     fn ssrf_variant_classifies_via_the_inner_error() {
-        let error = AnnounceError::Ssrf(crate::oci::ssrf::SsrfError::ForbiddenTarget {
-            host: "127.0.0.1".to_string(),
-            ip: "127.0.0.1".parse().expect("valid ip literal"),
-        });
+        let error = AnnounceError::Ssrf {
+            namespace: "ocx.sh".to_string(),
+            source: crate::oci::ssrf::SsrfError::ForbiddenTarget {
+                host: "127.0.0.1".to_string(),
+                ip: "127.0.0.1".parse().expect("valid ip literal"),
+            },
+        };
         assert_eq!(error.classify(), Some(ExitCode::ConfigError));
+        // ocx#455: the message names the exact config entry, so an operator
+        // who keyed the exemption on the physical host learns which key to use.
+        assert!(
+            error.to_string().contains("[registries.\"ocx.sh\"].trusted_hosts"),
+            "got: {error}"
+        );
     }
 
     #[test]

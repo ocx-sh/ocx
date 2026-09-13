@@ -198,6 +198,10 @@ When `[registry]` is declared at the system scope (`/etc/ocx/config.toml`), it i
 
 Per-registry settings, keyed by the registry's identifier prefix — the same `host[:port]` string your package identifiers carry, matched exactly (`ocx.sh`, `ghcr.io`, `registry.corp:5000`). This is not a free-form alias: a key that matches no registry name configures nothing.
 
+::: warning The key is the package name's domain, not the host the bytes live on
+For an index-bearing namespace the two differ: a package named `ocx.corp.example/tools/adrs` whose index root points at `oci://gitlab.corp.example:5050/…` is configured under `[registries."ocx.corp.example"]` — the domain in the package name. An entry keyed on `gitlab.corp.example:5050` matches no package name and configures nothing, so its [`trusted_hosts`](#keys-registries-trusted-hosts) never applies.
+:::
+
 The plural form (`registries`, not `registry`) is deliberate: it mirrors [Cargo's convention][cargo-registries] and avoids a TOML collision with the singular [`[registry]`](#keys-registry) global-settings section.
 
 ::: info v1 scope
@@ -316,13 +320,23 @@ over HTTPS, and every object is still verified against its recorded digest.
 
 The SSRF escape hatch for this namespace's physical hosts. Before OCX dereferences an index root's `oci://<host>/<repository>` pointer into a physical registry fetch, it refuses any host that resolves to a private, loopback, link-local, or cloud-metadata address — that pointer is remote-controlled data, and a compromised or mirrored index could otherwise aim it at an internal service. A private registry legitimately lives on such an address, so listing its host or network here restores access for exactly this namespace without weakening the guard anywhere else.
 
-Each entry is either an exact hostname or a CIDR block; a listed target skips the address check.
+Each entry is either an exact hostname or a CIDR block; a listed target skips the address check. Hostnames are matched without a port — the guard splits `host:port` before it looks, so `"registry.corp:5000"` never matches; write `"registry.corp"`.
 
 ```toml
 [registries."corp"]
 index = "https://index.corp.example"
 trusted_hosts = ["10.0.0.0/8", "registry.corp"]
 ```
+
+The entry lives under the *namespace* the package name carries, and its `trusted_hosts` names the *physical* hosts that namespace's roots may point at. A private GitLab registry serving packages announced under a separate catalog domain is therefore:
+
+```toml
+[registries."ocx.corp.example"]                 # the domain in the package name
+index = "https://ocx.corp.example"
+trusted_hosts = ["gitlab.corp.example"]          # where the roots point; no port
+```
+
+A refusal names this key: `list it (bare host, no port) under [registries."ocx.corp.example"].trusted_hosts`.
 
 The guard is default-on and needs no configuration for public registries. There is no command-line flag to widen the trust set — the exemption lives only on the config entry, so a [system-locked](#keys-registries-system-lock) entry's `trusted_hosts` cannot be broadened by a lower tier or a CLI override. A refused host exits with a configuration error that names the host and points back to `trusted_hosts`.
 

@@ -313,3 +313,6 @@ def test_a_forbidden_ip_literal_is_refused_even_on_a_proxied_route(
         f"expected exit 78 (ForbiddenTarget), got rc={result.returncode}\n{result.stderr}"
     )
     assert "resolves to a forbidden address 127.0.0.1" in result.stderr
+    # ocx#455: the refusal names the exact entry the fix goes into, keyed on the
+    # package's logical namespace — not on the physical host it refused.
+    assert '[registries."ocx.sh"].trusted_hosts' in result.stderr, result.stderr
