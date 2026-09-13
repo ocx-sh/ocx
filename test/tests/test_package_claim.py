@@ -591,6 +591,10 @@ def test_existing_root_refused_65(
     assert "ocx package announce" in result.stderr, (
         f"the refusal must point at the other command: {result.stderr!r}"
     )
+    # #458: the envelope names the refusal, so an SDK branches on `detail`
+    # rather than on the message text.
+    envelope = json.loads(result.stdout)
+    assert envelope["error"]["detail"] == "package_already_claimed", envelope
 
 
 def test_disclaimer_reaches_root_not_request_body(

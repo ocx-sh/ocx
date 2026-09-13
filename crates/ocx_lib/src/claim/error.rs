@@ -24,7 +24,7 @@
 //!   control from day one: every variant is listed, and adding one without a
 //!   decision is an `E0004` build failure rather than a shipped exit 1.
 
-use crate::cli::{ClassifyExitCode, ExitCode};
+use crate::cli::{ClassifyErrorKind, ClassifyExitCode, ExitCode};
 use crate::forge::ForgeError;
 
 /// Failures raised by [`claim`](super::claim).
@@ -176,6 +176,37 @@ impl ClassifyExitCode for ClaimError {
     }
 }
 
+impl ClassifyErrorKind for ClaimError {
+    /// The one mapping, read through [`ClassifyExitCode`]; the three
+    /// unclassified variants surface as the generic exit 1 they already are.
+    fn exit_code(&self) -> ExitCode {
+        self.classify().unwrap_or(ExitCode::Failure)
+    }
+
+    /// Frozen contract C-S1-1: the snake_case parallel of the variant name.
+    /// Exhaustive — adding a variant forces a new arm here. `Forge` is one
+    /// slug, not the wrapped error's: `#[error(transparent)]` hides the
+    /// `ForgeError` node from the envelope's chain walk, so nothing finer
+    /// is reachable there.
+    fn kind_detail(&self) -> &'static str {
+        match self {
+            Self::ForgeRequired => "forge_required",
+            Self::MalformedRepository { .. } => "malformed_repository",
+            Self::PackageAlreadyClaimed { .. } => "package_already_claimed",
+            Self::NoActingIdentity => "no_acting_identity",
+            Self::InvalidOwnerLogin { .. } => "invalid_owner_login",
+            Self::DuplicateOwner { .. } => "duplicate_owner",
+            Self::OwnerUnknown { .. } => "owner_unknown",
+            Self::OwnerIdMismatch { .. } => "owner_id_mismatch",
+            Self::BotIdentity { .. } => "bot_identity",
+            Self::MissingBaseRef { .. } => "missing_base_ref",
+            Self::MissingHeadRoot { .. } => "missing_head_root",
+            Self::OutputWrite { .. } => "output_write",
+            Self::Forge(_) => "forge",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -227,6 +258,46 @@ mod tests {
             },
             ClaimError::Forge(ForgeError::UsersApiUnavailable),
         ]
+    }
+
+    /// C-S1-1 — the `detail` slugs ship in JSON envelopes and SDKs dispatch
+    /// on them, so each string is pinned here; the exhaustive match in
+    /// `kind_detail` is what forces a slug for a variant added later, and the
+    /// arity pin is what catches a row dropped from this table.
+    ///
+    /// Reds on: renaming any slug, or a variant whose exit code disagrees
+    /// with `classify()`.
+    #[test]
+    fn kind_detail_values_are_stable() {
+        let expected = [
+            "forge_required",
+            "malformed_repository",
+            "package_already_claimed",
+            "no_acting_identity",
+            "invalid_owner_login",
+            "duplicate_owner",
+            "owner_unknown",
+            "owner_id_mismatch",
+            "bot_identity",
+            "missing_base_ref",
+            "missing_head_root",
+            "output_write",
+            "forge",
+        ];
+        let variants = every_variant();
+        assert_eq!(
+            variants.len(),
+            expected.len(),
+            "one slug per variant, in `every_variant` order"
+        );
+        for (error, slug) in variants.iter().zip(expected) {
+            assert_eq!(error.kind_detail(), slug, "{error}");
+            assert_eq!(
+                error.exit_code(),
+                error.classify().unwrap_or(ExitCode::Failure),
+                "{error}"
+            );
+        }
     }
 
     /// C-052 — the three deliberately **unclassified** variants answer `None`,
