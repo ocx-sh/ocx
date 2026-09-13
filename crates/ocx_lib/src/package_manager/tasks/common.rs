@@ -155,9 +155,9 @@ pub async fn load_config_metadata(
     //
     // `crate::Error::UnsupportedMediaType` already classifies as `DataError`
     // (65), matching every sibling artifact-type gate. Carry it straight
-    // through: wrapping it in `ClientError::internal` would classify as the
-    // terminal `Failure` (1) and end the chain walk before the inner error is
-    // ever consulted.
+    // through rather than boxing it under `ClientError::internal` — that
+    // carrier now defers to its source, but a wrapper that adds no provenance
+    // is still one more node for the chain walker to cross for nothing.
     media_type_select(&manifest.config.media_type, &[MEDIA_TYPE_PACKAGE_METADATA_V1])
         .map_err(PackageErrorKind::Internal)?;
 
