@@ -304,6 +304,7 @@ fn canonical_command_name(command: &command::Command) -> &'static str {
             PackageCmd::Install(_) => "package install",
             PackageCmd::Pull(_) => "package pull",
             PackageCmd::Push(_) => "package push",
+            PackageCmd::Receipt(_) => "package receipt",
             PackageCmd::Sbom(_) => "package sbom",
             PackageCmd::Select(_) => "package select",
             PackageCmd::Deselect(_) => "package deselect",

@@ -25,6 +25,7 @@ pub mod package_cascade_repair;
 pub mod package_copy;
 pub mod package_description;
 pub mod package_inspect;
+pub mod package_receipt;
 pub mod patch_freeze;
 pub mod patch_publish;
 pub mod patch_sync;

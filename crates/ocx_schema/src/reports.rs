@@ -100,6 +100,7 @@ pub fn reports_schema() -> String {
         ocx::api::data::package_description::PackageDescriptions,
         ocx::api::data::package_inspect::InspectReport,
         ocx::api::data::package_inspect::PackageInspect,
+        ocx::api::data::package_receipt::PackageReceipt,
         ocx::api::data::patch_freeze::PatchFreezeReport,
         ocx::api::data::patch_publish::PatchPublishReport,
         ocx::api::data::patch_sync::PatchSyncReport,
