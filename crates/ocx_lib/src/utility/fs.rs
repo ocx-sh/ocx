@@ -33,7 +33,7 @@ pub use locked_file::{LockedFile, LockedJsonFile, LockedTomlFile};
 pub use same_dir::same_dir;
 pub use same_filesystem::{SameFilesystemError, same_filesystem};
 pub use scoped_lock::lock_scoped;
-pub use symlink_walk::{SymlinkWalkError, refuse_if_symlink_in_path};
+pub use symlink_walk::{SymlinkWalkError, refuse_if_symlink_in_path, refuse_if_symlink_in_path_sync};
 
 /// Returns whether `path` exists, swallowing any I/O error as `false`.
 ///

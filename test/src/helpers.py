@@ -357,6 +357,7 @@ def build_archive(
     files: dict[str, tuple[str, int]],
     *,
     hard_links: dict[str, str] | None = None,
+    symlinks: dict[str, str] | None = None,
 ) -> Path:
     """Write an archive at ``target`` holding exactly the entries described.
 
@@ -365,21 +366,26 @@ def build_archive(
     ``bin/hello`` — to a ``(text, unix mode)`` pair. The mode is recorded
     verbatim, which is the point for the world-writable case: a real
     ``0o777`` entry cannot be produced by archiving a file the test wrote,
-    because the process umask clips it.
+    because the process umask clips it. An entry name may traverse the root
+    (``"../evil"``, ``"/etc/evil"``); the archive records it verbatim, which is
+    how a containment test feeds the extractor a hostile path.
 
     ``hard_links`` maps an entry name to the name of an earlier entry it hard
-    links to. Tar only: the zip format has no hard-link entry type, so asking
-    for one raises rather than silently writing a copy.
+    links to. ``symlinks`` maps an entry name to its raw symlink target, which
+    may point outside the root (``"../../../../etc"``) — the containment guard
+    is what a test asserts on. Both are tar only: the zip format has no
+    hard-link entry type here, so asking for either raises rather than silently
+    writing a copy.
 
     The format comes from ``target``'s suffix: ``.zip``, ``.tar``, and ``.tar``
     with ``gz``/``xz``/``bz2``/``zst`` compression.
     """
     name = target.name
     if name.endswith(".zip"):
-        if hard_links:
-            raise ValueError("zip has no hard-link entry type; use a tar archive")
+        if hard_links or symlinks:
+            raise ValueError("zip link entries are not supported by this helper; use a tar archive")
         return _build_zip(target, files)
-    return _build_tar(target, files, hard_links or {})
+    return _build_tar(target, files, hard_links or {}, symlinks or {})
 
 
 def _build_zip(target: Path, files: dict[str, tuple[str, int]]) -> Path:
@@ -397,8 +403,18 @@ def _build_tar(
     target: Path,
     files: dict[str, tuple[str, int]],
     hard_links: dict[str, str],
+    symlinks: dict[str, str],
 ) -> Path:
     def write_entries(archive: tarfile.TarFile) -> None:
+        # Symlinks first, so a later file entry can be authored to traverse
+        # through one (the B1 chain: symlink lands in-root, file walks `..`
+        # through it).
+        for arcname, link_target in symlinks.items():
+            info = tarfile.TarInfo(arcname)
+            info.type = tarfile.SYMTYPE
+            info.linkname = link_target
+            info.size = 0
+            archive.addfile(info)
         for arcname, (text, mode) in files.items():
             payload = text.encode()
             info = tarfile.TarInfo(arcname)

@@ -41,18 +41,60 @@ pub fn validate_target(root: &Path, link_path: &Path, target: &Path) -> Result<(
         return Err(escape());
     }
 
-    // 2. Express the link's parent *relative to root*, so the target (which may
-    //    contain `..`) is validated as a relative path from that parent. A
-    //    parent outside root is a defensive rejection — in practice the link is
-    //    always inside the package/layer content.
+    // 2. Resolve where the target points — from the link's own directory — and
+    //    require it to land inside `root`. The resolution must be PHYSICAL, not
+    //    lexical: an intermediate component of the target (not just of the link's
+    //    parent) may be a symlink an earlier archive entry planted, and a lexical
+    //    fold of the target's `..`/components would disagree with the kernel and
+    //    accept a target that escapes THROUGH that planted link (`a -> .`, then
+    //    `e -> a/..` folds to the root lexically but physically climbs one level
+    //    up). `resolve_within_root` canonicalizes the longest existing prefix of
+    //    `parent/target` — following every symlink already on disk — and folds
+    //    only the not-yet-existing tail lexically (a path that does not exist
+    //    cannot be a symlink, so lexical and physical agree there). When `root`
+    //    itself is not on disk (a hypothetical / unit-test path) nothing can
+    //    redirect and this reduces to a plain lexical containment check.
     let parent = link_path.parent().unwrap_or(root);
-    let rel_parent = parent.strip_prefix(root).map_err(|_| escape())?;
+    let full = parent.join(target);
+    match dunce::canonicalize(root) {
+        Ok(canonical_root) => resolve_within_root(&canonical_root, &full)
+            .map(|_| ())
+            .ok_or_else(escape),
+        Err(_) => {
+            let rel = full.strip_prefix(root).map_err(|_| escape())?;
+            crate::utility::fs::path::join_under_root(root, rel).map_err(|_| escape())?;
+            Ok(())
+        }
+    }
+}
 
-    // 3-4. Join the target onto the relative parent and validate containment via
-    //      the shared primitive (host-independent Windows-prefix + `..` checks).
-    let candidate = rel_parent.join(target);
-    crate::utility::fs::path::join_under_root(root, &candidate).map_err(|_| escape())?;
-    Ok(())
+/// Physically resolves `path` and returns it only when it lands inside
+/// `canonical_root` (an already-[`dunce::canonicalize`]d root).
+///
+/// Canonicalizes the LONGEST EXISTING textual prefix of `path` — following any
+/// symlink on disk — verifies it is under the canonical root, then re-appends
+/// the not-yet-existing tail and rejects any lexical escape via
+/// [`join_under_root`](crate::utility::fs::path::join_under_root). A tail
+/// component cannot be a symlink (it does not exist), so folding it lexically is
+/// exact; a planted symlink in the existing prefix that redirects outside the
+/// root is caught because its canonicalized location fails the `strip_prefix`.
+/// Returns `None` on escape or when no prefix (not even the root) resolves.
+fn resolve_within_root(canonical_root: &Path, path: &Path) -> Option<std::path::PathBuf> {
+    let components: Vec<_> = path.components().collect();
+    for split in (0..=components.len()).rev() {
+        let mut prefix = std::path::PathBuf::new();
+        for component in &components[..split] {
+            prefix.push(component.as_os_str());
+        }
+        if let Ok(canonical) = dunce::canonicalize(&prefix) {
+            let mut candidate = canonical.strip_prefix(canonical_root).ok()?.to_path_buf();
+            for component in &components[split..] {
+                candidate.push(component.as_os_str());
+            }
+            return crate::utility::fs::path::join_under_root(canonical_root, &candidate).ok();
+        }
+    }
+    None
 }
 
 /// Returns `true` if `path` is a symlink or (on Windows) a junction point.
@@ -402,10 +444,23 @@ fn create_link(target: &std::path::Path, link_path: &std::path::Path) -> std::io
     // Use NTFS junction points on Windows. They behave like directory
     // symlinks but do not require elevated privileges or Developer Mode.
     // Junction targets must be absolute paths.
+    //
+    // A relative target resolves against the LINK's own directory, not the
+    // process CWD: a symlink is `link -> target` interpreted relative to where
+    // the link lives, and `validate_target` (the archive trust boundary) checks
+    // containment on exactly that basis. Resolving against `current_dir()`
+    // instead would land an archive's `link -> .` as a junction to `$CWD`, so a
+    // later `link/newdir/file` mkdirs outside the extraction root even though the
+    // validator judged the link contained. Fall back to the CWD only when the
+    // link has no parent component and the join is still not absolute.
     let abs_target = if target.is_absolute() {
         target.to_path_buf()
     } else {
-        std::env::current_dir()?.join(target)
+        let joined = link_path.parent().map(|parent| parent.join(target));
+        match joined {
+            Some(joined) if joined.is_absolute() => joined,
+            _ => std::env::current_dir()?.join(target),
+        }
     };
     // `junction::create` is a single reparse-point write, so a transient
     // `ERROR_ACCESS_DENIED`/`ERROR_SHARING_VIOLATION` (a peer or Defender holding
@@ -542,6 +597,70 @@ mod tests {
                 Err(crate::Error::Archive(crate::archive::Error::SymlinkEscape { .. }))
             ),
             "an absolute target must be rejected as SymlinkEscape, got {absolute:?}"
+        );
+    }
+
+    /// R2: the physical predicate closes the symlink-chain escape at the shared
+    /// function itself, not only at the extraction call sites. An in-root hop
+    /// `a -> .` collapses the *lexical* parent of `a/evil` onto the root; a
+    /// component-counting predicate would grant `a/evil` a one-level `..` budget
+    /// and accept `../out`, but the canonical parent resolves to the root
+    /// (physical depth 0), so the escaping target is refused. Uses on-disk
+    /// symlinks — the pre-fix lexical `strip_prefix` returned `Ok` here.
+    #[cfg(unix)]
+    #[test]
+    fn validate_target_rejects_symlink_chain_collapse() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        // `a -> .` — an in-root hop that physically resolves back to the root.
+        std::os::unix::fs::symlink(".", root.join("a")).unwrap();
+
+        let escaping = validate_target(&root, &root.join("a/evil"), Path::new("../out"));
+        assert!(
+            matches!(
+                escaping,
+                Err(crate::Error::Archive(crate::archive::Error::SymlinkEscape { .. }))
+            ),
+            "the chain-collapsed escaping target must be refused, got {escaping:?}"
+        );
+
+        // Control: a genuine in-root parent-relative target through the same hop
+        // is still accepted, so the predicate is not simply refusing everything.
+        assert!(
+            validate_target(&root, &root.join("a/evil"), Path::new("sibling")).is_ok(),
+            "an in-root parent-relative target through the hop must still be accepted"
+        );
+    }
+
+    /// R2 residual: the collapse must be caught even when the link's own leaf
+    /// (and intermediate directories) do not exist on disk yet. `a -> .` is a
+    /// real hop, `a/b/c` is absent. The physical parent of `a/b/c/evil` is
+    /// `root/b/c` (depth 2, `a` folds away), so a 3-`..` target escapes — but a
+    /// predicate that only canonicalizes the parent when it *fully* exists (the
+    /// prior fix) falls back to a lexical count of `a/b/c` = 3 and accepts it.
+    /// Resolving the longest existing prefix (`root/a` → root) and counting the
+    /// absent `b/c` tail lexically gives the true depth and refuses it.
+    #[cfg(unix)]
+    #[test]
+    fn validate_target_rejects_collapse_through_absent_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        // `a -> .`; `b`/`c` are never created, so the parent `a/b/c` is absent.
+        std::os::unix::fs::symlink(".", root.join("a")).unwrap();
+
+        let escaping = validate_target(&root, &root.join("a/b/c/evil"), Path::new("../../../out"));
+        assert!(
+            matches!(
+                escaping,
+                Err(crate::Error::Archive(crate::archive::Error::SymlinkEscape { .. }))
+            ),
+            "a target escaping the true physical depth through an absent tail must be refused, got {escaping:?}"
+        );
+
+        // Control: two `..` from the physical depth-2 parent lands back in root.
+        assert!(
+            validate_target(&root, &root.join("a/b/c/evil"), Path::new("../../sibling")).is_ok(),
+            "an in-root target within the true physical depth must still be accepted"
         );
     }
 

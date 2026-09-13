@@ -131,6 +131,16 @@ pub(super) fn verify_symlink_containment(root: &Path, resolved: &Path) -> Result
         if std::fs::symlink_metadata(&current).is_err() {
             // Does not exist yet (e.g. a not-yet-written file) — nothing to
             // traverse; later components cannot exist either.
+            //
+            // LOAD-BEARING: this break stops the walk at the first absent
+            // component, so `validate_target` below is only ever called on a
+            // `current` whose parent exists on disk. That is exactly the
+            // precondition under which `validate_target` resolves the true
+            // physical parent depth (it canonicalizes the longest existing
+            // prefix). Deleting this break would feed it a `current` past a
+            // non-existent component, collapsing it back to a lexical
+            // component count — the very budget miscount the chain-planting
+            // escape exploited. Keep it.
             break;
         }
         // Junction-aware: `Metadata::file_type().is_symlink()` misses Windows
