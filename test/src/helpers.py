@@ -524,6 +524,7 @@ def make_package(
     bin_exec: dict[str, bool] | None = None,
     no_bin_scan: bool = False,
     extra_push_args: list[str] | None = None,
+    push_env: dict[str, str] | None = None,
     integrations: dict[str, object] | None = None,
 ) -> PackageInfo:
     """Create, bundle, push, and index a test package.
@@ -589,6 +590,12 @@ def make_package(
         Extra flags appended to the ``ocx package push`` invocation (e.g.
         ``["--no-keep-tag"]``), after ``-n``/``--cascade`` and before
         ``-i``.
+    push_env:
+        Environment entries added to the ``ocx package push`` invocation
+        alone -- ``create`` and ``index update`` still run in the runner's
+        isolated environment.  The runner strips ambient environment, so
+        this is how a test fakes the CI variables ``--ci-annotations``
+        reads.
     integrations:
         Sets the metadata sidecar's ``integrations`` map (namespace ->
         opaque JSON payload, `adr_package_integrations.md`). Omit entirely
@@ -740,7 +747,7 @@ def make_package(
     if extra_push_args:
         push_args += extra_push_args
     push_args += ["-i", fq] + [str(b) for b in all_bundles]
-    ocx.plain(*push_args)
+    ocx.plain(*push_args, env_overrides=push_env)
 
     # Update local index so install/find can discover the package.
     # When cascade is enabled, use bare repo name to index all cascaded tags;

@@ -328,15 +328,113 @@ pub fn resolve_shell_arg(shell: Option<Option<Shell>>) -> anyhow::Result<Option<
 /// Shared by `ocx env` and `ocx package env` so the bare-`--ci` autodetect and
 /// its identical undetectable-provider `UsageError` exist exactly once.
 pub fn resolve_ci_arg(ci: Option<Option<CiFlavor>>) -> anyhow::Result<Option<CiFlavor>> {
+    resolve_ci_flavor(ci, "--ci")
+}
+
+/// Resolve a `--ci-annotations` clap argument to an explicit [`CiFlavor`], or
+/// `None` when the flag is absent and the push should annotate nothing.
+///
+/// Same three states as [`resolve_ci_arg`], and the same autodetect — the two
+/// flags answer "which CI am I in" identically, and a second detector would be
+/// a second answer. Only the flag named in the usage error differs, which is
+/// the whole reason this is not just [`resolve_ci_arg`]: a user told to pass
+/// `--ci=gitlab` by `ocx package push` would be told to pass a flag push does
+/// not have.
+pub fn resolve_ci_annotations_arg(ci: Option<Option<CiFlavor>>) -> anyhow::Result<Option<CiFlavor>> {
+    resolve_ci_flavor(ci, "--ci-annotations")
+}
+
+/// The shared body of the `--ci`-shaped resolvers; `flag` names the caller's
+/// spelling in the undetectable-provider [`UsageError`] (exit 64).
+fn resolve_ci_flavor(ci: Option<Option<CiFlavor>>, flag: &str) -> anyhow::Result<Option<CiFlavor>> {
+    resolve_ci_flavor_with(ci, flag, CiFlavor::detect())
+}
+
+/// The body of [`resolve_ci_flavor`] with the detected provider injected, so a
+/// test can drive the bare-`--ci` autodetect-failure branch without depending
+/// on the ambient CI environment — which `CiFlavor::detect` reads, and which
+/// the gate itself may run inside.
+fn resolve_ci_flavor_with(
+    ci: Option<Option<CiFlavor>>,
+    flag: &str,
+    detected: Option<CiFlavor>,
+) -> anyhow::Result<Option<CiFlavor>> {
     match ci {
         None => Ok(None),
         Some(Some(provider)) => Ok(Some(provider)),
         Some(None) => {
-            let provider = CiFlavor::detect()
-                .ok_or_else(|| UsageError::new("could not autodetect CI provider; pass --ci=github or --ci=gitlab"))?;
+            let provider = detected.ok_or_else(|| undetectable_ci_provider(flag))?;
             Ok(Some(provider))
         }
     }
+}
+
+/// The usage error (exit 64) a bare `--ci`-shaped flag raises when no provider
+/// can be autodetected. `flag` names the caller's spelling (`--ci` /
+/// `--ci-annotations`).
+///
+/// The trailing clause is what a user who typed `--ci-annotations github`
+/// (space, no `=`) needs: `require_equals` means the space form leaves the flag
+/// bare and hands `github` to the positional parser, so the value silently did
+/// not attach and autodetect ran instead. Shared by `env --ci` and
+/// `push --ci-annotations`, so it stays correct for both spellings.
+fn undetectable_ci_provider(flag: &str) -> UsageError {
+    UsageError::new(format!(
+        "could not autodetect CI provider; {}",
+        ci_value_needs_equals(flag)
+    ))
+}
+
+/// The `=`-requirement clause, in one spelling. Both refusals a `--ci`-shaped
+/// flag can raise — the undetectable provider above and the spaced value below
+/// — state the same rule, and two phrasings of one rule is one phrasing too
+/// many.
+fn ci_value_needs_equals(flag: &str) -> String {
+    format!("pass {flag}=github or {flag}=gitlab; the value must be attached with `=`")
+}
+
+/// Refuses a `--ci`-shaped flag whose value was written with a space instead of
+/// `=`, which the grammar silently reads as a bare flag plus a positional.
+///
+/// `require_equals` means `--ci-annotations gitlab` never attaches `gitlab` to
+/// the flag: the flag stays bare and `gitlab` falls through to the command's
+/// own positional parser. Outside CI that surfaces as
+/// [`undetectable_ci_provider`], which at least says something — but *inside*
+/// CI the bare flag autodetects successfully, and the value the user typed is
+/// consumed as a layer path with nothing said at all. `positionals` carries the
+/// command's positional arguments as argv saw them.
+///
+/// ponytail: a heuristic, deliberately. It fires on any positional that the
+/// `CiFlavor` grammar would have accepted as a value, so a layer path literally
+/// named `github` or `gitlab` is refused too — such a path is implausible, and
+/// an operator who has one writes `./gitlab`. Do not "fix" this by deleting the
+/// guard: the alternative is the silent misparse above, on a real runner, where
+/// nobody is reading stderr.
+pub fn refuse_spaced_ci_value(
+    flag: &str,
+    ci: Option<Option<CiFlavor>>,
+    positionals: impl IntoIterator<Item = String>,
+) -> Result<(), UsageError> {
+    use clap::ValueEnum as _;
+
+    // Only a *bare* flag can have lost its value to the positional parser: an
+    // absent flag has no value to lose, and `--ci-annotations=gitlab` attached.
+    if !matches!(ci, Some(None)) {
+        return Ok(());
+    }
+    // Case-sensitively, exactly as clap would have parsed the value, so the
+    // guard refuses only what the `=` form would have accepted.
+    let Some(token) = positionals
+        .into_iter()
+        .find(|token| CiFlavor::from_str(token, false).is_ok())
+    else {
+        return Ok(());
+    };
+    Err(UsageError::new(format!(
+        "{flag} was given `{token}` as a separate argument, so `{token}` parsed as a positional \
+         argument and not as the flag's value; {}",
+        ci_value_needs_equals(flag)
+    )))
 }
 
 /// Splits tag-list bytes on commas and newlines into trimmed, non-empty tag
@@ -715,6 +813,43 @@ mod tests {
             resolve_ci_arg(Some(Some(CiFlavor::GitLab))).expect("explicit is ok"),
             Some(CiFlavor::GitLab)
         );
+    }
+
+    /// A bare `--ci`/`--ci-annotations` with no detectable provider must reach
+    /// the real resolver's autodetect-failure arm and surface the `=` requirement
+    /// naming the caller's own flag. Driven through `resolve_ci_flavor_with` with
+    /// `detected = None` injected, so the arm is reached deterministically without
+    /// the ambient CI env `CiFlavor::detect` would otherwise read (which would pass
+    /// vacuously inside CI). Both callers are covered — the message must name
+    /// whichever flag the user actually typed, not a hardcoded one.
+    #[test]
+    fn a_bare_ci_flag_with_no_detected_provider_names_the_equals_requirement() {
+        for flag in ["--ci", "--ci-annotations"] {
+            let error = super::resolve_ci_flavor_with(Some(None), flag, None)
+                .expect_err("an undetectable provider must be a usage error");
+            assert!(
+                error.downcast_ref::<UsageError>().is_some(),
+                "the failure must be a UsageError (exit 64), got: {error:#}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("attached with `=`"),
+                "the message must name the `=` requirement: {message}"
+            );
+            assert!(
+                message.contains(&format!("{flag}=github")),
+                "the message must show the correct spelling for the caller's flag: {message}"
+            );
+        }
+    }
+
+    /// A provider supplied explicitly (`--ci=github`) never consults autodetect,
+    /// so it resolves regardless of the injected `detected` value.
+    #[test]
+    fn an_explicit_provider_resolves_without_autodetect() {
+        let resolved = super::resolve_ci_flavor_with(Some(Some(CiFlavor::GitHubActions)), "--ci", None)
+            .expect("an explicit provider must resolve");
+        assert_eq!(resolved, Some(CiFlavor::GitHubActions));
     }
 
     #[test]
