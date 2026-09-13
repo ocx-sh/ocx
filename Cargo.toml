@@ -164,6 +164,16 @@ lzma-rust2 = "0.16.3"
 # parallelism parity with the xz `XzWriterMt` path. Decode stays single-threaded
 # (matches the xz decode path). BSD-3-Clause + MIT/Apache — in the allowlist.
 zstd = { version = "0.13", features = ["zstdmt"] }
+# bzip2 DECODE for `ocx package create --extract` on a `.tar.bz2` (#283). Default
+# features on purpose: `bzip2`'s default backend is `libbz2-rs-sys`, the pure-Rust
+# implementation, and it is the only way to select it (`default = ["dep:libbz2-rs-sys"]`).
+# The C backend lives behind the opt-in `bzip2-sys` feature and must stay unselected:
+# `crates/ocx_cli/tests/linux_self_contained.rs` bans a `libbz2` NEEDED entry from the
+# shipped binary. Neither crate has a build script, and `bzip2` pins its backend with
+# `default-features = false, features = ["rust-allocator"]`, so no `libc` edge either -
+# two crates, no C, no cc. `libbz2-rs-sys` is `bzip2-1.0.6`-licensed (allowlisted in
+# deny.toml); `bzip2` itself is MIT OR Apache-2.0.
+bzip2 = "0.6.1"
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 # Async XZ/gzip decoding for the streaming pull pipeline (Phase 3).
 # Requires `tokio` feature for AsyncRead-based decoders.

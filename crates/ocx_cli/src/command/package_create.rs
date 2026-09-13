@@ -500,9 +500,14 @@ fn archive_format_recognized(path: &std::path::Path) -> bool {
 
 /// Strips a recognized archive suffix as a unit, so `hello-1.2.3.tar.gz` yields
 /// `hello-1.2.3`. Longest compound suffixes are tried first, case-insensitively.
+///
+/// Every tar spelling [`archive_format_recognized`] accepts must appear here, or
+/// the inferred bundle name keeps the input's own archive suffix (W11) —
+/// `hello-1.2.3.tbz2` would bundle as `hello-1.2.3.tbz2.tar.xz`. The two lists
+/// are held in step by `tar_archive_suffixes_are_recognized_and_stripped`.
 fn strip_archive_suffix(name: &str) -> &str {
     const SUFFIXES: &[&str] = &[
-        ".tar.gz", ".tar.xz", ".tar.zst", ".tar.bz2", ".tgz", ".tzst", ".tar", ".zip",
+        ".tar.gz", ".tar.xz", ".tar.zst", ".tar.bz2", ".tgz", ".tzst", ".tbz2", ".tbz", ".tar", ".zip",
     ];
     let lower = name.to_ascii_lowercase();
     for suffix in SUFFIXES {
@@ -516,6 +521,33 @@ fn strip_archive_suffix(name: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two suffix lists in this file answer for the same inputs: a name
+    /// `archive_format_recognized` accepts is a name `--extract` will unpack, and
+    /// `inferred_stem` then has to strip that suffix to name the bundle. `.tgz`
+    /// and `.tzst` were in both lists; `.tbz2`/`.tbz` reached only the first when
+    /// `CompressionAlgorithm::from_file` learned bzip2.
+    ///
+    /// The input set is hand-written, so a brand-new alias still needs a row —
+    /// what this catches is one list gaining a spelling the other already had a
+    /// place for.
+    #[test]
+    fn tar_archive_suffixes_are_recognized_and_stripped() {
+        for suffix in [
+            ".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.zst", ".tzst", ".tar.bz2", ".tbz2", ".tbz", ".zip",
+        ] {
+            let name = format!("hello-1.2.3{suffix}");
+            assert!(
+                archive_format_recognized(std::path::Path::new(&name)),
+                "{name} should be a recognized archive format"
+            );
+            assert_eq!(
+                strip_archive_suffix(&name),
+                "hello-1.2.3",
+                "{name} should strip to its stem"
+            );
+        }
+    }
 
     /// `--bin-scan` without `--metadata` has nothing to verify — Cluster 2
     /// (arch-Warn) flagged the prior behavior as a silent no-op that exits 0

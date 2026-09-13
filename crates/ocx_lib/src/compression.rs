@@ -12,6 +12,11 @@ pub enum CompressionAlgorithm {
     Lzma,
     Gzip,
     Zstd,
+    /// Decode only. `.tar.bz2` is an accepted *input* to `ocx package create
+    /// --extract`; nothing in OCX writes bzip2, and no layer media type spells
+    /// it, so [`write_file`] refuses this variant rather than producing a
+    /// bundle that could never be published.
+    Bzip2,
 }
 
 impl CompressionAlgorithm {
@@ -22,6 +27,7 @@ impl CompressionAlgorithm {
             "xz" => Some(CompressionAlgorithm::Lzma),
             "gz" | "tgz" => Some(CompressionAlgorithm::Gzip),
             "zst" | "zstd" | "tzst" => Some(CompressionAlgorithm::Zstd),
+            "bz2" | "tbz2" | "tbz" => Some(CompressionAlgorithm::Bzip2),
             _ => None,
         }
     }
@@ -44,6 +50,7 @@ impl std::fmt::Display for CompressionAlgorithm {
             CompressionAlgorithm::Lzma => write!(f, "lzma"),
             CompressionAlgorithm::Gzip => write!(f, "gzip"),
             CompressionAlgorithm::Zstd => write!(f, "zstd"),
+            CompressionAlgorithm::Bzip2 => write!(f, "bzip2"),
         }
     }
 }
@@ -224,6 +231,13 @@ pub async fn write_file(
         Some(algorithm) => algorithm,
         None => CompressionAlgorithm::from_file(file).ok_or_else(|| error::Error::UnknownFormat(file.to_path_buf()))?,
     };
+    // bzip2 is decode-only (see `read_file`). Refused here, *before* the output
+    // file below is created and truncated, so a `--output pkg.tar.bz2` leaves
+    // nothing behind. The match arm below repeats the refusal rather than
+    // `unreachable!()`, so reordering this guard can never turn it into a panic.
+    if matches!(algorithm, CompressionAlgorithm::Bzip2) {
+        return Err(error::Error::DecodeOnly(algorithm).into());
+    }
     let level = options.level;
     let threads = options.threads_or_default();
     let output = std::fs::OpenOptions::new()
@@ -272,6 +286,7 @@ pub async fn write_file(
             // writer is erased to `Box<dyn Write>`.
             Box::new(encoder.auto_finish())
         }
+        CompressionAlgorithm::Bzip2 => return Err(error::Error::DecodeOnly(algorithm).into()),
         CompressionAlgorithm::None => Box::new(output),
     };
     Ok(writer)
@@ -330,6 +345,25 @@ pub async fn read_file(
             let decoder = zstd::stream::read::Decoder::with_buffer(buffered)
                 .map_err(|e| error::Error::EngineInit(Box::new(e)))?;
             Ok(Box::new(decoder))
+        }
+        CompressionAlgorithm::Bzip2 => {
+            let handle = std::fs::File::open(file).map_err(|e| error::Error::Open {
+                path: file.to_path_buf(),
+                source: e,
+            })?;
+            let buffered = std::io::BufReader::with_capacity(READ_FILE_BUF_CAPACITY, handle);
+            // `MultiBzDecoder`, not `BzDecoder`: pbzip2 and lbzip2 write
+            // concatenated bzip2 streams, and `BzDecoder` stops at the end of
+            // the first one — which would silently truncate such a tarball to
+            // its first block instead of failing. `bzip2 -d` and `tar -xj`
+            // decode every stream, so this matches what the operator's own
+            // tools do with the same file.
+            //
+            // The `bufread` decoder takes the `BufRead` above as-is; its
+            // `read` sibling would wrap it in a second, 8 KiB `BufReader` —
+            // the same double buffering the zstd arm avoids with
+            // `Decoder::with_buffer`.
+            Ok(Box::new(bzip2::bufread::MultiBzDecoder::new(buffered)))
         }
         CompressionAlgorithm::None => {
             let handle = std::fs::File::open(file).map_err(|e| error::Error::Open {
@@ -407,5 +441,126 @@ mod tests {
     #[tokio::test]
     async fn round_trip_zstd_multi_thread() {
         round_trip_zstd(4, 512 * 1024).await;
+    }
+
+    #[test]
+    fn from_file_infers_bzip2() {
+        for name in ["pkg.tar.bz2", "pkg.tbz2", "pkg.tbz"] {
+            assert!(
+                matches!(CompressionAlgorithm::from_file(name), Some(CompressionAlgorithm::Bzip2)),
+                "{name} should infer bzip2"
+            );
+        }
+    }
+
+    /// `bzip2` must stay on its pure-Rust `libbz2-rs-sys` backend, and the
+    /// lockfile is the only place that can be checked: the C backend
+    /// (`bzip2-sys`) vendors libbz2 and *static*-links it through `cc`, so it
+    /// emits no NEEDED entry and `ocx_cli/tests/linux_self_contained.rs` — which
+    /// bans a dynamic `libbz2` — passes either way.
+    ///
+    /// The live footgun this guards: `zip`, already a dependency, has a feature
+    /// named `bzip2-rs` that maps to `bzip2/bzip2-sys`, i.e. the C path under the
+    /// name a reader would take for the Rust one. Enabling it unifies this crate's
+    /// `bzip2` onto that backend silently. `deny.toml [bans]` cannot hold this
+    /// line — nothing in the taskfiles runs `cargo deny check bans`.
+    #[test]
+    fn bzip2_stays_on_the_pure_rust_backend() {
+        let lockfile = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock");
+        let lock = std::fs::read_to_string(&lockfile).unwrap_or_else(|e| panic!("reading {}: {e}", lockfile.display()));
+
+        // Positive control: without it, a moved or emptied lockfile would make
+        // the refusal below pass for the wrong reason.
+        assert!(
+            lock.contains(r#"name = "libbz2-rs-sys""#),
+            "{} does not lock libbz2-rs-sys — bzip2 is no longer on the pure-Rust backend",
+            lockfile.display()
+        );
+        assert!(
+            !lock.contains(r#"name = "bzip2-sys""#),
+            "{} locks bzip2-sys: some feature (e.g. zip/bzip2-rs, which means bzip2/bzip2-sys) \
+             pulled in the C libbz2 backend",
+            lockfile.display()
+        );
+    }
+
+    #[test]
+    fn display_bzip2() {
+        assert_eq!(CompressionAlgorithm::Bzip2.to_string(), "bzip2");
+    }
+
+    /// One bzip2 stream over `data`.
+    ///
+    /// The encoder is deliberately test-only: the linked implementation can
+    /// compress, and `write_file` refuses to expose it (no layer media type
+    /// spells bzip2), so this is how a decode test gets genuine bzip2 bytes
+    /// without a committed binary fixture. Externally produced bytes are
+    /// covered end-to-end by `test/tests/test_package_create_extract.py`,
+    /// whose `.tar.bz2` rows come out of CPython's `tarfile`.
+    fn bzip2_stream(data: &[u8]) -> Vec<u8> {
+        let mut encoder = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// `read_file` decodes a `.tar.bz2` with the algorithm inferred from the
+    /// extension — the `from_file` arm and the decoder in one pass, which is
+    /// exactly what `ocx package create --extract` drives.
+    #[tokio::test]
+    async fn read_file_decodes_bzip2() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.tar.bz2");
+        let data = payload(64 * 1024);
+        std::fs::write(&path, bzip2_stream(&data)).unwrap();
+
+        let mut reader = read_file(&path, None).await.unwrap();
+        let mut decoded = Vec::new();
+        reader.read_to_end(&mut decoded).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    /// pbzip2 and lbzip2 emit back-to-back bzip2 streams in one file, and
+    /// `bzip2 -d`/`tar -xj` decode all of them. `BzDecoder` would stop after
+    /// the first and report a clean EOF, silently handing a truncated tar to
+    /// the extractor; `MultiBzDecoder` is what keeps that from happening.
+    #[tokio::test]
+    async fn read_file_decodes_concatenated_bzip2_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.tar.bz2");
+        let first = payload(4096);
+        let second: Vec<u8> = payload(4096).iter().map(|b| b ^ 0xFF).collect();
+        let mut file_bytes = bzip2_stream(&first);
+        file_bytes.extend_from_slice(&bzip2_stream(&second));
+        std::fs::write(&path, &file_bytes).unwrap();
+
+        let mut reader = read_file(&path, Some(CompressionAlgorithm::Bzip2)).await.unwrap();
+        let mut decoded = Vec::new();
+        reader.read_to_end(&mut decoded).unwrap();
+        assert_eq!(decoded, [first, second].concat(), "both streams must be decoded");
+    }
+
+    /// The compress path refuses bzip2 with a typed error (exit 65) and, since
+    /// the refusal precedes the open, leaves no truncated output file behind.
+    #[tokio::test]
+    async fn write_file_refuses_bzip2() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.tar.bz2");
+
+        // `expect_err` is unavailable here: the Ok type is `Box<dyn Write + Send>`,
+        // which is not `Debug`.
+        let error = match write_file(&path, &CompressionOptions::new(CompressionAlgorithm::Bzip2)).await {
+            Ok(_) => panic!("bzip2 is decode-only, but write_file handed back a writer"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(
+                error,
+                crate::Error::Compression(error::Error::DecodeOnly(CompressionAlgorithm::Bzip2))
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(error.to_string(), "bzip2 archives can be extracted but not written");
+        assert!(!path.exists(), "a refused compression must not create the output file");
     }
 }

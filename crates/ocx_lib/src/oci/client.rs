@@ -1279,6 +1279,18 @@ impl Client {
                 .await
                 .map_err(ClientError::internal)?
             }
+            // Unreachable today: `from_media_type` (which produced
+            // `blob_compression` above) has no bzip2 arm, because no layer media
+            // type spells bzip2. bzip2 is an accepted *input* format for `ocx
+            // package create --extract`, not a layer format — adding one would be
+            // a wire-format change. Refused like `None` so the day a manifest
+            // claims it, the refusal names it.
+            compression::CompressionAlgorithm::Bzip2 => {
+                return Err(ClientError::InvalidManifest(format!(
+                    "bzip2 layers are not supported (media type: {})",
+                    layer.media_type
+                )));
+            }
             compression::CompressionAlgorithm::None => {
                 return Err(ClientError::InvalidManifest(format!(
                     "uncompressed layers are not supported (media type: {})",

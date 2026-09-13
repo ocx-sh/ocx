@@ -48,6 +48,14 @@ allow = [
   # starlark family: starlark → debugserver-types → schemafy → Inflector.
   # REMOVE when 'cargo tree -i inflector' is empty after a starlark family bump.
   "BSD-2-Clause",
+  # Permissive, zlib-style: retain the notice, do not misrepresent the origin,
+  # mark altered versions, no endorsement. No copyleft and no advertising clause;
+  # condition 1 is satisfied by shipping LICENSE-THIRD-PARTY.md. Required by
+  # libbz2-rs-sys, the pure-Rust bzip2 implementation `bzip2` links by default —
+  # which is the whole reason bzip2 support can exist here at all, since
+  # crates/ocx_cli/tests/linux_self_contained.rs bans a libbz2 NEEDED entry.
+  # REMOVE when 'cargo tree -i libbz2-rs-sys' is empty.
+  "bzip2-1.0.6",
 ]
 confidence-threshold = 0.8
 
