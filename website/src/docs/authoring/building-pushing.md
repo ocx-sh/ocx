@@ -85,6 +85,21 @@ Cascade is a publisher convention, not a registry-enforced rule. The registry se
 
 <Terminal src="/casts/authoring/package-cascade.cast" title="Cascading rolling tags across releases" collapsed />
 
+### Naming a Default Variant {#default-variant}
+
+A [variant][in-depth-versioning-variants] is a tag prefix — `full-1.2.3`, `slim-1.2.3` — and each variant cascades in its own track. A package whose every build is a named variant therefore publishes no bare `1.2.3` at all, and `ocx package install acme/mytool` with no variant resolves nothing. `--default-variant` names the one variant that also owns the un-prefixed track:
+
+```shell
+ocx package push -c -p linux/amd64 --default-variant full \
+  -i ghcr.io/acme/tools/mytool:full-1.2.3 mytool-full-1.2.3-linux-amd64.tar.xz
+```
+
+That push writes `full-1.2.3`, `full-1.2`, `full-1`, `full` as any variant push does, and additionally `1.2.3`, `1.2`, `1`, `latest` pointing at the *same* manifest. Only the index of each extra tag is written — no blob and no manifest is uploaded twice, so the bare track costs one small request per tag rather than a second publish.
+
+The bare track is a track like any other: a published bare `2.0.0` keeps this push off `latest` exactly as it would keep `full-1.2.3` off `full`, while a newer `slim-2.0.0` has no say over it. Without `--cascade` only the bare version is written, since there are no rolling tags to mirror.
+
+A pipeline that pushes every variant passes the same flag to each: a push whose version carries a different variant, or none, writes no alias and says so on stderr. `--tags-file` receives both tag sets, and `--format json` reports the bare track under `aliases_written`.
+
 ## Linking the Source Repository {#source-annotation}
 
 A published package tells a consumer nothing about where it came from. Registries do not infer it: the path `ghcr.io/acme/tools/widget` names a package, not a repository, and a registry that guessed otherwise would be wrong the moment a publisher mirrors someone else's software under their own namespace — which is exactly what a mirror repository does.
@@ -215,6 +230,7 @@ For command flags, token-source precedence, and exit codes see the
 <!-- in-depth -->
 [in-depth-storage-layers]: ../in-depth/storage.md#layers
 [in-depth-versioning-cascades]: ../in-depth/versioning.md#cascades
+[in-depth-versioning-variants]: ../in-depth/versioning.md#variants
 [in-depth-signing]: ../in-depth/signing.md
 
 <!-- authoring -->

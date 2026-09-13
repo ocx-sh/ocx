@@ -270,6 +270,10 @@ pub struct CascadePushOutcome {
     /// `None` only when the merged index carries no entry for this platform:
     /// the row is omitted rather than faked, matching `keep_tag`.
     pub platform_digest: Option<oci::Digest>,
+    /// The un-prefixed track tags `--default` aliased this push onto, bare
+    /// version first. Empty unless `default` is set and the pushed version
+    /// carries a variant.
+    pub aliases: Vec<String>,
     /// Layer-push counts for this platform's push.
     pub layer_counts: oci::LayerCounts,
 }
@@ -286,6 +290,14 @@ pub struct CascadePushOutcome {
 ///
 /// `annotations` land on the primary tag's index and on every cascade tag's
 /// index alike.
+///
+/// `default` re-tags the pushed version's own variant onto the un-prefixed
+/// track — see [`write_default_variant_aliases`]. It is a no-op for a version
+/// that carries no variant.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one push: what to publish, which tracks it moves, and what to stamp on every index it writes"
+)]
 pub async fn push_with_cascade(
     client: &oci::Client,
     package_info: package::info::Info,
@@ -293,6 +305,7 @@ pub async fn push_with_cascade(
     other_versions: BTreeSet<Version>,
     version: &Version,
     keep_tag: bool,
+    default: bool,
     annotations: &BTreeMap<String, String>,
 ) -> Result<CascadePushOutcome> {
     let (cascade_tags, _) = resolve_cascade_tags(
@@ -313,6 +326,18 @@ pub async fn push_with_cascade(
     // input and must be reported under `--no-keep-tag` as well.
     let platform_digest = oci::manifest::platform_manifest_digest(&merged, &package_info.platform);
 
+    let aliases = write_default_variant_aliases(
+        client,
+        &package_info.identifier,
+        &package_info.platform,
+        &merged,
+        version,
+        default,
+        Some(&other_versions),
+        annotations,
+    )
+    .await?;
+
     let keep_tag_written = if keep_tag {
         client
             .push_keep_tag(&package_info.identifier, &merged, &package_info.platform)
@@ -326,8 +351,97 @@ pub async fn push_with_cascade(
         cascade_tags,
         keep_tag: keep_tag_written,
         platform_digest,
+        aliases,
         layer_counts,
     })
+}
+
+/// Re-tags the platform manifest this push just landed under the un-prefixed
+/// version track, when `default` is set and the pushed version carries a
+/// variant.
+///
+/// Returns the tags written, bare version first — empty for a version that
+/// carries no variant, which is the library no-op behind the CLI's exit-64
+/// refusal of `--default` on a variant-less tag.
+///
+/// `other_versions` carries the registry's existing versions when the caller
+/// is cascading, and is `None` for a plain push: the bare track then gets the
+/// version tag alone, exactly as the variant track did.
+///
+/// # Why the cascade resolution is reused verbatim
+///
+/// [`resolve_cascade_tags`] is called against `version.without_variant()`, and
+/// that scopes the blocker scan to the bare track by construction rather than
+/// by a filter: `Version`'s ordering keys on the variant first with `None`
+/// sorting **above** every `Some`, so a level's blocker range between two
+/// variant-less endpoints can only contain variant-less versions, and
+/// `latest`'s `take_while` on `variant()` stops at the first prefixed one. A
+/// newer bare `2.0.0` therefore blocks `latest` exactly as it should, while a
+/// newer `slim-2.0.0` does not.
+///
+/// # The write
+///
+/// Each alias is a [`Client::merge_platform_into_index`] against the digest the
+/// variant push already produced — the index at the target tag is pulled or
+/// synthesized, this platform's entry swapped, and the index JSON alone is
+/// PUT. No blob and no manifest is uploaded a second time.
+///
+/// # Errors
+///
+/// Any registry failure resolving the bare track or writing an alias index. A
+/// merged index carrying no entry for this platform writes nothing and returns
+/// empty, the same no-op
+/// [`Client::push_keep_tag`](crate::oci::Client::push_keep_tag) makes.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the manifest this push landed, the tag it landed under, and what the bare track has to clear"
+)]
+pub(crate) async fn write_default_variant_aliases(
+    client: &oci::Client,
+    identifier: &oci::Identifier,
+    platform: &oci::Platform,
+    merged: &oci::Manifest,
+    version: &Version,
+    default: bool,
+    other_versions: Option<&BTreeSet<Version>>,
+    annotations: &BTreeMap<String, String>,
+) -> Result<Vec<String>> {
+    // The flag is off: write nothing.
+    if !default {
+        return Ok(Vec::new());
+    }
+    // A variant-less version has no default to declare. The CLI refuses
+    // `--default` on such a tag with exit 64; this is the matching library
+    // no-op for any other caller.
+    if version.variant().is_none() {
+        return Ok(Vec::new());
+    }
+    let Some(entry) = oci::manifest::platform_manifest_entry(merged, platform) else {
+        log::debug!("Skipping default-variant aliases for {identifier}: merged index carries no {platform} entry");
+        return Ok(Vec::new());
+    };
+
+    let bare = version.without_variant();
+    let mut tags = vec![bare.to_string()];
+    if let Some(others) = other_versions {
+        let (cascade_tags, _) = resolve_cascade_tags(client, identifier, &bare, others, platform).await?;
+        tags.extend(cascade_tags);
+    }
+
+    for tag in &tags {
+        log::debug!("Aliasing default variant onto {tag}");
+        client
+            .merge_platform_into_index(
+                identifier,
+                tag.clone(),
+                platform,
+                &entry.digest,
+                entry.size,
+                annotations,
+            )
+            .await?;
+    }
+    Ok(tags)
 }
 
 /// Checks blockers sequentially, returning `true` on first platform match.
@@ -1197,9 +1311,18 @@ mod tests {
             let info = test_info("3.28.1", "linux/amd64");
             let version = Version::new_patch(3, 28, 1);
 
-            let outcome = push_with_cascade(&client, info, &[], BTreeSet::new(), &version, true, &BTreeMap::new())
-                .await
-                .expect("cascade push succeeds");
+            let outcome = push_with_cascade(
+                &client,
+                info,
+                &[],
+                BTreeSet::new(),
+                &version,
+                true,
+                false,
+                &BTreeMap::new(),
+            )
+            .await
+            .expect("cascade push succeeds");
             let keep_tag_written = outcome.keep_tag;
 
             let inner = data.read();
@@ -1229,9 +1352,18 @@ mod tests {
             let info = test_info("3.28.1", "linux/amd64");
             let version = Version::new_patch(3, 28, 1);
 
-            let outcome = push_with_cascade(&client, info, &[], BTreeSet::new(), &version, false, &BTreeMap::new())
-                .await
-                .expect("cascade push succeeds");
+            let outcome = push_with_cascade(
+                &client,
+                info,
+                &[],
+                BTreeSet::new(),
+                &version,
+                false,
+                false,
+                &BTreeMap::new(),
+            )
+            .await
+            .expect("cascade push succeeds");
 
             assert_eq!(outcome.keep_tag, None, "keep_tag=false must report no tag");
             // The independence claim, at the seam that could break it: the
@@ -1250,6 +1382,249 @@ mod tests {
                 inner.manifests.keys().all(|key| !key.contains(":__ocx.keep.")),
                 "keep_tag=false must not push the extra tag: {:?}",
                 inner.manifests.keys().collect::<Vec<_>>()
+            );
+        }
+
+        // ── push_with_cascade default-variant aliasing ───────
+
+        /// The tags this push wrote, in no particular order. A leaf manifest is
+        /// pushed to a digest reference and is deliberately excluded — the
+        /// caller counts those separately.
+        fn written_tags(data: &StubTransportData) -> Vec<String> {
+            let inner = data.read();
+            inner
+                .manifests
+                .keys()
+                .filter(|key| !key.contains('@'))
+                .filter_map(|key| key.rsplit_once(':').map(|(_, tag)| tag.to_string()))
+                .collect()
+        }
+
+        /// How many leaf manifests this push uploaded. Every index write goes
+        /// to a tag; only `push_multi_layer_manifest` addresses a digest.
+        fn manifest_uploads(data: &StubTransportData) -> usize {
+            let inner = data.read();
+            inner.manifests.keys().filter(|key| key.contains('@')).count()
+        }
+
+        #[tokio::test]
+        async fn default_variant_aliases_the_bare_track_with_one_manifest_upload() {
+            let data = StubTransportData::new();
+            data.write().capture_pushes = true;
+            let client = test_client(&data);
+
+            let outcome = push_with_cascade(
+                &client,
+                test_info("full-1.2.3", "linux/amd64"),
+                &[],
+                BTreeSet::new(),
+                &v("full-1.2.3"),
+                false,
+                true,
+                &BTreeMap::new(),
+            )
+            .await
+            .expect("cascade push succeeds");
+
+            assert_eq!(
+                outcome.aliases,
+                vec!["1.2.3", "1.2", "1", "latest"],
+                "the bare track is the variant's own cascade with the prefix stripped"
+            );
+            let mut tags = written_tags(&data);
+            tags.sort();
+            assert_eq!(
+                tags,
+                vec![
+                    "1",
+                    "1.2",
+                    "1.2.3",
+                    "full",
+                    "full-1",
+                    "full-1.2",
+                    "full-1.2.3",
+                    "latest"
+                ],
+                "both tag sets must be on the wire"
+            );
+            // The whole point of the feature: eight tags, one upload. A second
+            // `push --identifier` would make this two.
+            assert_eq!(
+                manifest_uploads(&data),
+                1,
+                "aliasing must re-tag the manifest this push already produced, never upload a second one"
+            );
+            // The map-based helper above cannot witness a second upload of the
+            // SAME digest (idempotent key); the monotonic counter can.
+            assert_eq!(
+                data.read().digest_manifest_writes,
+                1,
+                "exactly one leaf-manifest upload, counted rather than deduped by digest key"
+            );
+        }
+
+        #[tokio::test]
+        async fn default_on_a_variant_less_version_writes_no_alias() {
+            let data = StubTransportData::new();
+            data.write().capture_pushes = true;
+            let client = test_client(&data);
+
+            // The CLI refuses `--default` on a variant-less tag (exit 64); this
+            // is the library no-op that backs that refusal. A version with no
+            // variant has no default track to alias onto.
+            let outcome = push_with_cascade(
+                &client,
+                test_info("1.2.3", "linux/amd64"),
+                &[],
+                BTreeSet::new(),
+                &v("1.2.3"),
+                false,
+                true,
+                &BTreeMap::new(),
+            )
+            .await
+            .expect("cascade push succeeds");
+
+            assert!(
+                outcome.aliases.is_empty(),
+                "a variant-less version aliases nothing even with default set: {:?}",
+                outcome.aliases
+            );
+            // The variant track *is* the bare track here, so a leaked self-alias
+            // would re-tag `1.2.3` and its rolling tags a second time. The
+            // `manifests` map is keyed on the tag and would swallow that, so the
+            // discriminating proof is the write COUNT against the distinct-tag
+            // count: every tag written exactly once.
+            let mut written = written_tags(&data);
+            written.sort();
+            assert_eq!(
+                written,
+                vec!["1", "1.2", "1.2.3", "latest"],
+                "the version's own cascade tags: {:?}",
+                written
+            );
+            assert_eq!(
+                data.read().tag_manifest_writes,
+                written.len(),
+                "each cascade tag must be written exactly once — a self-alias would re-write them: \
+                 {} writes for {} distinct tags",
+                data.read().tag_manifest_writes,
+                written.len()
+            );
+        }
+
+        #[tokio::test]
+        async fn without_the_flag_a_variant_push_leaves_the_bare_track_alone() {
+            let data = StubTransportData::new();
+            data.write().capture_pushes = true;
+            let client = test_client(&data);
+
+            let outcome = push_with_cascade(
+                &client,
+                test_info("full-1.2.3", "linux/amd64"),
+                &[],
+                BTreeSet::new(),
+                &v("full-1.2.3"),
+                false,
+                false,
+                &BTreeMap::new(),
+            )
+            .await
+            .expect("cascade push succeeds");
+
+            assert!(outcome.aliases.is_empty(), "no flag, no aliases: {:?}", outcome.aliases);
+            assert!(
+                written_tags(&data).iter().all(|tag| tag.starts_with("full")),
+                "no bare-track tag may appear: {:?}",
+                written_tags(&data)
+            );
+        }
+
+        #[tokio::test]
+        async fn without_the_flag_a_variant_less_push_writes_no_self_alias() {
+            let data = StubTransportData::new();
+            data.write().capture_pushes = true;
+            let client = test_client(&data);
+
+            // The flag is off, so nothing is aliased even though this version
+            // carries no variant — the `!default` early return handles it
+            // before the variant is ever inspected.
+            let outcome = push_with_cascade(
+                &client,
+                test_info("1.2.3", "linux/amd64"),
+                &[],
+                BTreeSet::new(),
+                &v("1.2.3"),
+                false,
+                false,
+                &BTreeMap::new(),
+            )
+            .await
+            .expect("cascade push succeeds");
+
+            assert!(
+                outcome.aliases.is_empty(),
+                "an absent flag must not read as a match: {:?}",
+                outcome.aliases
+            );
+        }
+
+        #[tokio::test]
+        async fn a_newer_bare_version_blocks_the_aliased_latest() {
+            let data = StubTransportData::new();
+            data.write().capture_pushes = true;
+            seed_index(&data, "2.0.0", &["linux/amd64"]);
+            let client = test_client(&data);
+
+            let outcome = push_with_cascade(
+                &client,
+                test_info("full-1.2.3", "linux/amd64"),
+                &[],
+                BTreeSet::from([v("2.0.0")]),
+                &v("full-1.2.3"),
+                false,
+                true,
+                &BTreeMap::new(),
+            )
+            .await
+            .expect("cascade push succeeds");
+
+            assert_eq!(
+                outcome.aliases,
+                vec!["1.2.3", "1.2", "1"],
+                "a published bare 2.0.0 must keep this push off `latest`"
+            );
+            // The variant's own track is judged against its own blockers and is
+            // untouched by the bare release.
+            assert_eq!(outcome.cascade_tags, vec!["full-1.2", "full-1", "full"]);
+        }
+
+        #[tokio::test]
+        async fn a_newer_other_variant_does_not_block_the_aliased_latest() {
+            let data = StubTransportData::new();
+            data.write().capture_pushes = true;
+            // Seeded carrying the very platform being pushed: what keeps it
+            // from blocking is the track it is on, not its absence.
+            seed_index(&data, "slim-2.0.0", &["linux/amd64"]);
+            let client = test_client(&data);
+
+            let outcome = push_with_cascade(
+                &client,
+                test_info("full-1.2.3", "linux/amd64"),
+                &[],
+                BTreeSet::from([v("slim-2.0.0")]),
+                &v("full-1.2.3"),
+                false,
+                true,
+                &BTreeMap::new(),
+            )
+            .await
+            .expect("cascade push succeeds");
+
+            assert_eq!(
+                outcome.aliases,
+                vec!["1.2.3", "1.2", "1", "latest"],
+                "a newer version on a different variant track has no say over the bare `latest`"
             );
         }
     }

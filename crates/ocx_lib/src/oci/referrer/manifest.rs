@@ -350,13 +350,14 @@ mod tests {
         assert_eq!(created_from_epoch(""), None);
     }
 
-    /// [`pinned_instant`] is the one reader of `SOURCE_DATE_EPOCH`, so a blank
-    /// or malformed value must return `None` (warn-and-fall-back) on every
-    /// path that stamps an instant — the sign bundle and the CI annotations
-    /// alike. The empty case is the W21 divergence: it used to warn on the sign
-    /// path and stay silent on the annotate path.
+    /// Locks [`pinned_instant`]'s contract — the one reader of
+    /// `SOURCE_DATE_EPOCH` after W21 — for every non-warn observable: unset,
+    /// blank and malformed all pin no instant; a valid epoch pins exactly that
+    /// instant. W21's divergence was in *which path warns* on a blank value,
+    /// and this test asserts nothing about logs, so it does not witness that
+    /// half (the crate has no log-capture harness — see the WP report).
     #[test]
-    fn pinned_instant_rejects_a_blank_or_malformed_source_date_epoch() {
+    fn pinned_instant_locks_its_source_date_epoch_contract() {
         let lock = crate::test::env::lock();
 
         lock.remove("SOURCE_DATE_EPOCH");
@@ -370,7 +371,7 @@ mod tests {
         );
 
         lock.set("SOURCE_DATE_EPOCH", "");
-        assert_eq!(pinned_instant(), None, "an empty value pins no instant (W21)");
+        assert_eq!(pinned_instant(), None, "an empty value pins no instant");
 
         lock.set("SOURCE_DATE_EPOCH", "yesterday");
         assert_eq!(pinned_instant(), None, "a malformed value pins no instant");

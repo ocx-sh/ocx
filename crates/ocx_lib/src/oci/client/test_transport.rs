@@ -118,6 +118,16 @@ pub(crate) struct StubTransportInner {
     /// supporting registry answering "no referrers"; conflating the two is the
     /// bug the hard error exists to prevent.
     pub referrers_unsupported: bool,
+    /// Monotonic count of successful captured manifest PUTs to a *tag*
+    /// reference. `manifests` is keyed on the reference, so a second write of
+    /// the same tag is idempotent and invisible — this counts every write, the
+    /// only way a test can witness a tag re-tagged twice (e.g. a
+    /// default-variant self-alias re-writing a track the cascade already wrote).
+    pub tag_manifest_writes: usize,
+    /// Monotonic count of successful captured manifest PUTs to a *digest*
+    /// reference — a leaf-manifest upload. Same idempotence blind spot in
+    /// `manifests`, so a "one upload, many tags" claim needs this to be real.
+    pub digest_manifest_writes: usize,
 }
 
 /// Keys [`StubTransportInner::blob_locations`].
@@ -413,7 +423,14 @@ impl OciTransport for StubTransport {
             }
         };
         if outcome.is_ok() && self.data.read().capture_pushes {
-            self.data.write().manifests.insert(image.to_string(), (data, digest));
+            let key = image.to_string();
+            let mut inner = self.data.write();
+            if key.contains('@') {
+                inner.digest_manifest_writes += 1;
+            } else {
+                inner.tag_manifest_writes += 1;
+            }
+            inner.manifests.insert(key, (data, digest));
         }
         outcome
     }

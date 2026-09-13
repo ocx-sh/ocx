@@ -82,6 +82,15 @@ pub struct PushOutcome {
     /// [`keep_tags`](Self::keep_tags) already follows, and from the same
     /// descriptor lookup.
     pub platform_digests: Vec<(oci::Platform, oci::Digest)>,
+    /// Un-prefixed track tags this push aliased onto the variant it landed, in
+    /// write order (bare version first), deduped across platforms. Populated
+    /// only under `--default`, and only when the pushed version carries a
+    /// variant; empty otherwise.
+    ///
+    /// These name the *same* manifests `platform_digests` does: the aliases are
+    /// index writes over the digests this push already produced, never a second
+    /// upload.
+    pub aliases_written: Vec<String>,
     /// Counts of layer-push outcomes (mounted/uploaded/verified), summed over
     /// every platform this push fanned out to. Layer blobs only — the config
     /// blob and manifest are not layers and are excluded. An `uploaded` count
@@ -98,6 +107,7 @@ impl PushOutcome {
         cascade_tags: Vec<String>,
         keep_tags: Vec<String>,
         platform_digests: Vec<(oci::Platform, oci::Digest)>,
+        aliases_written: Vec<String>,
         layer_counts: oci::LayerCounts,
     ) -> Self {
         Self {
@@ -105,6 +115,7 @@ impl PushOutcome {
             cascade_tags,
             keep_tags,
             platform_digests,
+            aliases_written,
             layer_counts,
         }
     }
@@ -152,18 +163,25 @@ impl Publisher {
     /// `annotations` are publisher-stated OCI annotations (`ocx package push
     /// --annotation`) written onto the image index of every tag this push
     /// touches. An empty map writes nothing at all.
+    ///
+    /// `default` re-tags the pushed version's own variant onto the un-prefixed
+    /// version track. Without cascading there are no rolling tags to mirror, so
+    /// it re-tags the bare version alone; a version carrying no variant writes
+    /// no alias.
     pub async fn push(
         &self,
         infos: Vec<Info>,
         layers: &[LayerRef],
         build_meta: Option<&str>,
         keep_tag: bool,
+        default: bool,
         annotations: &BTreeMap<String, String>,
     ) -> Result<PushOutcome> {
         let infos = apply_build_meta_all(infos, build_meta)?;
         let mut manifest_digest: Option<oci::Digest> = None;
         let mut keep_tags: Vec<String> = Vec::new();
         let mut platform_digests: Vec<(oci::Platform, oci::Digest)> = Vec::new();
+        let mut aliases_written: Vec<String> = Vec::new();
         let mut layer_counts = oci::LayerCounts::default();
         for info in infos {
             log::info!(
@@ -181,6 +199,26 @@ impl Publisher {
             if let Some(platform_digest) = oci::manifest::platform_manifest_digest(&manifest, &platform) {
                 platform_digests.push((platform.clone(), platform_digest));
             }
+            // A tag that is not a version carries no variant to match, so it
+            // is the flag's no-op rather than a push-time refusal.
+            if let Some(version) = Version::parse(identifier.tag_or_latest()) {
+                let aliases = package::cascade::write_default_variant_aliases(
+                    &self.client,
+                    &identifier,
+                    &platform,
+                    &manifest,
+                    &version,
+                    default,
+                    None,
+                    annotations,
+                )
+                .await?;
+                for tag in aliases {
+                    if !aliases_written.contains(&tag) {
+                        aliases_written.push(tag);
+                    }
+                }
+            }
             if keep_tag
                 && let Some(tag) = self.client.push_keep_tag(&identifier, &manifest, &platform).await?
                 && !keep_tags.contains(&tag)
@@ -194,6 +232,7 @@ impl Publisher {
             cascade_tags: Vec::new(),
             keep_tags,
             platform_digests,
+            aliases_written,
             layer_counts,
         })
     }
@@ -207,6 +246,14 @@ impl Publisher {
     /// semantics as [`Self::push`] apply. The outcome's `cascade_tags` is the
     /// ordered union across platforms. `keep_tag` and `annotations` have
     /// the same meaning as in [`Self::push`].
+    ///
+    /// `default` also has the meaning it has there, with the bare track
+    /// additionally cascading: it writes the un-prefixed version plus whatever
+    /// rolling tags that version's own cascade clears.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one push: what to publish, which tracks it moves, and what to stamp on every index it writes"
+    )]
     pub async fn push_cascade(
         &self,
         infos: Vec<Info>,
@@ -214,6 +261,7 @@ impl Publisher {
         existing_versions: BTreeSet<Version>,
         build_meta: Option<&str>,
         keep_tag: bool,
+        default: bool,
         annotations: &BTreeMap<String, String>,
     ) -> Result<PushOutcome> {
         let infos = apply_build_meta_all(infos, build_meta)?;
@@ -221,6 +269,7 @@ impl Publisher {
         let mut cascade_tags: Vec<String> = Vec::new();
         let mut keep_tags: Vec<String> = Vec::new();
         let mut platform_digests: Vec<(oci::Platform, oci::Digest)> = Vec::new();
+        let mut aliases_written: Vec<String> = Vec::new();
         let mut layer_counts = oci::LayerCounts::default();
         for info in infos {
             log::info!(
@@ -239,6 +288,7 @@ impl Publisher {
                 existing_versions.clone(),
                 &version,
                 keep_tag,
+                default,
                 annotations,
             )
             .await?;
@@ -247,6 +297,11 @@ impl Publisher {
             for tag in outcome.cascade_tags {
                 if !cascade_tags.contains(&tag) {
                     cascade_tags.push(tag);
+                }
+            }
+            for tag in outcome.aliases {
+                if !aliases_written.contains(&tag) {
+                    aliases_written.push(tag);
                 }
             }
             if let Some(tag) = outcome.keep_tag
@@ -263,6 +318,7 @@ impl Publisher {
             cascade_tags,
             keep_tags,
             platform_digests,
+            aliases_written,
             layer_counts,
         })
     }
@@ -444,7 +500,7 @@ mod tests {
             StubTransportData::new(),
         ))));
         let err = publisher
-            .push(Vec::new(), &[], None, false, &BTreeMap::new())
+            .push(Vec::new(), &[], None, false, false, &BTreeMap::new())
             .await
             .expect_err("empty set");
         assert!(err.to_string().contains("at least one target platform"), "got: {err}");
@@ -461,7 +517,7 @@ mod tests {
         let mut mac = test_info("1.0.0");
         mac.platform = "darwin/arm64".parse().expect("platform parses");
         let outcome = publisher
-            .push(vec![test_info("1.0.0"), mac], &[], None, false, &BTreeMap::new())
+            .push(vec![test_info("1.0.0"), mac], &[], None, false, false, &BTreeMap::new())
             .await
             .expect("fan-out push succeeds");
 
@@ -505,7 +561,7 @@ mod tests {
         let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
 
         let outcome = publisher
-            .push(vec![test_info("1.0.0")], &[], None, true, &BTreeMap::new())
+            .push(vec![test_info("1.0.0")], &[], None, true, false, &BTreeMap::new())
             .await
             .expect("push succeeds");
 
@@ -548,7 +604,7 @@ mod tests {
         bundle.strip_components = Some(1);
 
         let outcome = publisher
-            .push(vec![test_info("1.0.0"), mac], &[], None, true, &BTreeMap::new())
+            .push(vec![test_info("1.0.0"), mac], &[], None, true, false, &BTreeMap::new())
             .await
             .expect("fan-out push succeeds");
 
@@ -588,7 +644,14 @@ mod tests {
         alias.platform = "darwin/arm64".parse().expect("platform parses");
 
         let outcome = publisher
-            .push(vec![test_info("1.0.0"), alias], &[], None, true, &BTreeMap::new())
+            .push(
+                vec![test_info("1.0.0"), alias],
+                &[],
+                None,
+                true,
+                false,
+                &BTreeMap::new(),
+            )
             .await
             .expect("fan-out push succeeds");
 
@@ -621,6 +684,7 @@ mod tests {
                 BTreeSet::new(),
                 None,
                 true,
+                false,
                 &BTreeMap::new(),
             )
             .await
@@ -653,7 +717,7 @@ mod tests {
         let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
 
         let outcome = publisher
-            .push(vec![test_info("1.0.0")], &[], None, false, &BTreeMap::new())
+            .push(vec![test_info("1.0.0")], &[], None, false, false, &BTreeMap::new())
             .await
             .expect("push succeeds");
 
@@ -667,6 +731,119 @@ mod tests {
             inner.manifests.keys().all(|key| !key.contains(":__ocx.keep.")),
             "keep_tag=false must not push the extra tag: {:?}",
             inner.manifests.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // ── default-variant aliasing (D4) ───────────────────────────────
+
+    /// `--default` without `--cascade`: the pushed version's own variant
+    /// re-tags the bare version alone (no rolling tags), and the manifest is
+    /// re-tagged, not uploaded a second time. `cascade.rs` covers the cascade
+    /// arm; this is the plain-`push` arm the deleted no-op block left untested.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn default_without_cascade_aliases_the_bare_version() {
+        use crate::oci::client::test_transport::{StubTransport, StubTransportData};
+
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
+
+        let outcome = publisher
+            .push(vec![test_info("full-1.2.3")], &[], None, false, true, &BTreeMap::new())
+            .await
+            .expect("push succeeds");
+
+        assert_eq!(
+            outcome.aliases_written,
+            vec!["1.2.3".to_string()],
+            "a non-cascade default push re-tags the bare version alone: {:?}",
+            outcome.aliases_written
+        );
+
+        let inner = data.read();
+        assert!(
+            inner.manifests.keys().any(|key| key.ends_with(":1.2.3")),
+            "the bare 1.2.3 tag must be on the wire: {:?}",
+            inner.manifests.keys().collect::<Vec<_>>()
+        );
+        // Counted, not deduped by digest key: a HashMap keyed on the digest
+        // could not witness a second upload of the same manifest.
+        assert_eq!(
+            inner.digest_manifest_writes, 1,
+            "aliasing re-tags the manifest this push produced, never uploads a second"
+        );
+    }
+
+    /// Two platforms both alias the same bare version, and the report carries
+    /// it once — the `if !aliases_written.contains` dedup in the push loop.
+    /// Without it the vector would read `["1.0.0", "1.0.0"]`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fan_out_dedupes_default_aliases_across_platforms() {
+        use crate::oci::client::test_transport::{StubTransport, StubTransportData};
+
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
+
+        let mut mac = test_info("full-1.0.0");
+        mac.platform = "darwin/arm64".parse().expect("platform parses");
+
+        let outcome = publisher
+            .push(
+                vec![test_info("full-1.0.0"), mac],
+                &[],
+                None,
+                false,
+                true,
+                &BTreeMap::new(),
+            )
+            .await
+            .expect("fan-out push succeeds");
+
+        assert_eq!(
+            outcome.aliases_written,
+            vec!["1.0.0".to_string()],
+            "both platforms alias the same bare version; it must appear once: {:?}",
+            outcome.aliases_written
+        );
+    }
+
+    /// The same dedup on the cascade path (`push_cascade` alias loop): two
+    /// platforms each clear the full bare track, and every alias appears once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cascade_fan_out_dedupes_default_aliases_across_platforms() {
+        use crate::oci::client::test_transport::{StubTransport, StubTransportData};
+
+        let data = StubTransportData::new();
+        data.write().capture_pushes = true;
+        let publisher = Publisher::new(oci::Client::with_transport(Box::new(StubTransport::new(data.clone()))));
+
+        let mut mac = test_info("full-1.2.3");
+        mac.platform = "darwin/arm64".parse().expect("platform parses");
+
+        let outcome = publisher
+            .push_cascade(
+                vec![test_info("full-1.2.3"), mac],
+                &[],
+                BTreeSet::new(),
+                None,
+                false,
+                true,
+                &BTreeMap::new(),
+            )
+            .await
+            .expect("cascade fan-out push succeeds");
+
+        assert_eq!(
+            outcome.aliases_written,
+            vec![
+                "1.2.3".to_string(),
+                "1.2".to_string(),
+                "1".to_string(),
+                "latest".to_string()
+            ],
+            "each aliased bare-track tag must appear once across the fan-out: {:?}",
+            outcome.aliases_written
         );
     }
 }

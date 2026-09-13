@@ -41,6 +41,25 @@ pub struct PackagePush {
     #[clap(long = "cascade", short = 'c')]
     cascade: bool,
 
+    /// Let the pushed tag's variant also own the un-prefixed version track
+    ///
+    /// A package whose every build is a named variant (`full-1.2.3`,
+    /// `slim-1.2.3`) publishes no bare `1.2.3`, so `ocx package install <ref>`
+    /// with no variant resolves nothing. Pushing a named variant with this flag
+    /// additionally tags the same manifest under the version with the prefix
+    /// stripped - one upload, two tag sets.
+    ///
+    /// With `--cascade` the bare track cascades too (`1.2.3`, `1.2`, `1`,
+    /// `latest`), blocked by newer bare versions exactly as any other track is;
+    /// without it only the bare version is written. Only the index of each
+    /// alias tag is written - no blob and no manifest is uploaded twice.
+    ///
+    /// The pushed tag must carry a variant; `--default` on a tag with no
+    /// variant is a usage error. In a pipeline that pushes every variant, pass
+    /// this flag only on the build whose variant should own the bare track.
+    #[clap(long = "default")]
+    default: bool,
+
     /// Push a `__ocx.keep.sha256-<hex>` tag pointing at each pushed platform
     /// manifest (default). A stray delete of a rolling or cascade tag can then
     /// never orphan a digest something else still pins, since the keep tag
@@ -317,6 +336,20 @@ impl PackagePush {
         // receipt is the fallback rather than the host platform.
         let platform = crate::build_receipt::resolve_target_platform(self.platform.clone(), receipt.as_ref())?;
 
+        // `--default` makes the pushed tag's own variant own the un-prefixed
+        // track. A tag that carries no variant has no default to declare, so it
+        // is a usage error (exit 64) rather than a silent no-op — and it is
+        // resolved here, before auth or any upload, so the refusal costs no
+        // network round-trip.
+        if self.default && Version::parse(identifier.tag_or_latest()).is_none_or(|version| version.variant().is_none())
+        {
+            return Err(ocx_lib::cli::UsageError::new(format!(
+                "--default requires a variant-prefixed tag, but {} carries no variant",
+                identifier.tag_or_latest()
+            ))
+            .into());
+        }
+
         // `--sbom` work that must happen BEFORE the push, because a push is
         // not undoable. The offline refusal is first so it beats the generic
         // `OfflineMode` (81) `remote_client()` would raise: an offline attest
@@ -416,21 +449,31 @@ impl PackagePush {
                     existing_versions,
                     build_meta.as_deref(),
                     keep_tag,
+                    self.default,
                     &annotations,
                 )
                 .await?
         } else {
             publisher
-                .push(infos, &self.layers, build_meta.as_deref(), keep_tag, &annotations)
+                .push(
+                    infos,
+                    &self.layers,
+                    build_meta.as_deref(),
+                    keep_tag,
+                    self.default,
+                    &annotations,
+                )
                 .await?
         };
 
-        // The primary version tag plus the rolling cascade tags. The
-        // `__ocx.keep.*` tags are deliberately left out: announce drops them
-        // downstream, so recording one in a file named "announce" would state
-        // something that never gets announced.
+        // The primary version tag plus the rolling cascade tags, and the bare
+        // track `--default` aliased onto them. The `__ocx.keep.*` tags
+        // are deliberately left out: announce drops them downstream, so
+        // recording one in a file named "announce" would state something that
+        // never gets announced.
         let mut pushed_tags = vec![identifier.tag_or_latest().to_string()];
         pushed_tags.extend(outcome.cascade_tags.iter().cloned());
+        pushed_tags.extend(outcome.aliases_written.iter().cloned());
 
         // Emit the structured push report BEFORE the tags-file append. The
         // push itself already succeeded and is not undoable, so an I/O failure
