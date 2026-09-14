@@ -4,15 +4,11 @@
   "owners": [
     {
       "login": "alice",
-      "id": 1,
-      "github": "alice",
-      "github_id": 1
+      "id": 1
     },
     {
       "login": "bob",
-      "id": 2,
-      "github": "bob",
-      "github_id": 2
+      "id": 2
     }
   ],
   "status": "deprecated",
