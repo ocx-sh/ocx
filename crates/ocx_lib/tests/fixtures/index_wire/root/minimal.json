@@ -4,9 +4,7 @@
   "owners": [
     {
       "login": "alice",
-      "id": 1,
-      "github": "alice",
-      "github_id": 1
+      "id": 1
     }
   ],
   "status": "active",
