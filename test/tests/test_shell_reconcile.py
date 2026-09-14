@@ -3144,6 +3144,11 @@ def test_prompt_hook_coexists_with_a_third_party_prompt_framework(tool: str, are
     elif tool == "oh-my-zsh":
         env["ZSH"] = location
         env["ZSH_DISABLE_COMPFIX"] = "true"
+        # The periodic update prompt ("Would you like to update? [Y/n]") reads
+        # the next typed line, which here is the `eval "$(ocx self activate)"`
+        # — on a host whose omz stamp is older than 13 days the hook never
+        # installs and the assertion below reads `__OCX_ABSENT__`.
+        env["DISABLE_AUTO_UPDATE"] = "true"
         preamble = ["ZSH_THEME=''", 'source "$ZSH/oh-my-zsh.sh"']
         launch = [shell_abs, "--no-rcs", "-i"]
     else:
