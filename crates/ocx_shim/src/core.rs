@@ -202,7 +202,7 @@ pub(super) fn strips_tier_selectors(sidecar: &Sidecar) -> bool {
 /// The order is a tie-break for a state that cannot arise from ocx's own
 /// writes — the three sidecars are produced into different trees
 /// (`entrypoints/` by the launcher generator, a shim tree's `bin/` by
-/// `prepare_lazy`, `<home>/toolchain/bin/` by the toolchain renderer) and never
+/// `prepare_lazy`, `<home>/toolchain/active/bin/` by the toolchain renderer) and never
 /// into the same directory. If more than one is somehow present, the installed
 /// package wins: it is the state that needs no download and no re-resolution,
 /// so preferring it is the fail-safe reading. `.exec` is last for the same
@@ -382,7 +382,7 @@ pub(super) fn parse_shimref_sidecar(raw: &[u8]) -> Result<Sidecar, ShimError> {
 ///
 /// Without it the shim resolves the literal `ocx` and spawns with
 /// `lpApplicationName = NULL` — and that search begins at the directory the
-/// calling image loaded from, i.e. `<home>/toolchain/bin` itself. A package
+/// calling image loaded from, i.e. `<home>/toolchain/active/bin` itself. A package
 /// claiming the name `ocx` is admitted by design (ADR D-4 removed
 /// `ShimNameShadowsOcx`), so `bin\ocx.exe` lands beside every other
 /// trampoline and captures all of their spawns. This line is the Windows half
@@ -397,7 +397,7 @@ pub(super) fn parse_shimref_sidecar(raw: &[u8]) -> Result<Sidecar, ShimError> {
 /// checked either, and for a stronger reason: it is the program the sidecar
 /// exists to name, so a check would only re-ask the question its own writer
 /// answered. What bounds it is the same thing that bounds every other byte
-/// here — write access to `<home>/toolchain/bin`, which is owner-only at
+/// here — write access to `<home>/toolchain/active/bin`, which is owner-only at
 /// create time.
 ///
 /// Anything rejected is [`ShimError::MalformedSidecar`], exit 78 (E2).
@@ -599,7 +599,7 @@ impl ResolvedProgram {
     /// SECURITY (V-9): `None` is also the *dangerous* answer, which is why
     /// only [`resolve_program`]'s last rung produces it. With a NULL
     /// `lpApplicationName`, `CreateProcessW` searches **the directory the
-    /// calling image loaded from first** — `<home>/toolchain/bin` for every
+    /// calling image loaded from first** — `<home>/toolchain/active/bin` for every
     /// rendered trampoline — then the working directory, the system
     /// directories, and only then `PATH`. A co-resident `bin\ocx.exe`
     /// therefore wins before `PATH` is consulted at all.
