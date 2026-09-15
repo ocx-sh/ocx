@@ -6,3 +6,7 @@
 	path = external/docker_credential
 	url = https://github.com/ocx-sh/docker_credential.git
 	branch = ocx/integration
+[submodule "external/sigstore-rs"]
+	path = external/sigstore-rs
+	url = https://github.com/ocx-sh/sigstore-rs.git
+	branch = ocx/integration

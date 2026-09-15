@@ -1771,8 +1771,8 @@ Applies to:
 
 Applies to:
 
-- lzma-rust2
 - sigstore
+- lzma-rust2
 
 ````text
                                  Apache License

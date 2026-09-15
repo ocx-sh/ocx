@@ -185,5 +185,10 @@ tokio = { workspace = true, features = ["test-util"] }
 # Test-only on purpose: production speaks h2 through `reqwest`, never directly.
 h2.workspace = true
 
+# The in-process TLS server behind `tls`'s extra-CA-roots handshake
+# proof (ocx#448) — see the root `Cargo.toml` comment. Test-only:
+# production never terminates TLS, only dials out via `reqwest`.
+tokio-rustls = { workspace = true, default-features = false }
+
 [lints]
 workspace = true

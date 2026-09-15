@@ -4,7 +4,7 @@ members = ["crates/ocx_cli", "crates/ocx_lib", "crates/ocx_schema", "crates/ocx_
 # The submodule is pulled in via [patch.crates-io] below; excluding it here
 # lets `cargo` commands run directly inside `external/rust-oci-client/` (for
 # the fork's own test suite) without the outer workspace claiming ownership.
-exclude = ["external/rust-oci-client", "external/docker_credential"]
+exclude = ["external/rust-oci-client", "external/docker_credential", "external/sigstore-rs"]
 
 [workspace.package]
 version = "0.6.1"
@@ -16,6 +16,7 @@ homepage = "https://ocx.sh"
 [patch.crates-io]
 oci-client = { path = "external/rust-oci-client" }
 docker_credential = { path = "external/docker_credential" }
+sigstore = { path = "external/sigstore-rs" }
 
 # The profile that 'dist' will build with
 [profile.dist]
@@ -123,6 +124,15 @@ hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system
 # crate to the dependency graph and none to the shipped binary.
 h2 = "0.4.15"
 http = "1.5"
+# Test-only (ocx_lib `[dev-dependencies]`). An in-process TLS server for the
+# extra-CA-roots handshake proof (ocx#448): a leaf certificate signed by
+# a minted test root, served over `tokio-rustls`, so a `reqwest` client seeded
+# with that root's DER succeeds and the same client without it fails with
+# `UnknownIssuer` — the one cross-OS test that exercises a real TLS handshake
+# rather than a certificate-parsing unit test. `default-features = false`:
+# only the server half is needed, and it is already in the tree transitively
+# via `reqwest`'s rustls feature, so this direct edge adds no new crate.
+tokio-rustls = { version = "0.26", default-features = false }
 
 # Crypto / encoding
 sha2 = "0.11.0"
