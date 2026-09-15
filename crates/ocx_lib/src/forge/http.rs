@@ -25,17 +25,24 @@ const USER_AGENT_VALUE: &str = concat!("ocx/", env!("CARGO_PKG_VERSION"));
 /// endpoints never legitimately redirect; a non-2xx surfaces as an error, never
 /// chased. Embedded Mozilla roots are seeded so TLS works with no system trust
 /// store (minimal CI runner), mirroring the index HTTP client's hardening
-/// (`oci/index/ocx_index.rs`).
+/// (`oci/index/ocx_index.rs`). `extra_roots` chains operator-supplied CA roots
+/// (ocx#448, C-007) on top — `ForgeKind::client` resolves the CLI's merged
+/// view and hands it to the forge's `new`, so a configured host builds its
+/// client once.
 ///
 /// # Errors
 ///
 /// Returns [`ForgeError::ClientBuild`] when reqwest cannot build the client.
-pub fn build_forge_http_client(timeout: Duration) -> Result<reqwest::Client, ForgeError> {
+pub fn build_forge_http_client(
+    timeout: Duration,
+    extra_roots: &crate::tls::ExtraRoots,
+) -> Result<reqwest::Client, ForgeError> {
     let builder = reqwest::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(USER_AGENT_VALUE);
-    crate::utility::tls::seed_embedded_roots(builder)
+    extra_roots
+        .seed(crate::utility::tls::seed_embedded_roots(builder))
         .build()
         .map_err(|source| ForgeError::ClientBuild { source })
 }
@@ -78,5 +85,39 @@ mod tests {
             1,
             "exactly one redirect policy may be configured on the forge client"
         );
+    }
+
+    /// C-007 / DX-5 / S-002 (unit tier): `build_forge_http_client` with a
+    /// non-empty set succeeds, and the client it returns trusts that set — a
+    /// 200 from an in-process server signed by a minted root; the same build
+    /// with the default (empty) set ends in `UnknownIssuer`. Dialed by IP so
+    /// no resolver is involved.
+    #[tokio::test]
+    async fn extra_ca_forge_client_builds_with_and_trusts_a_non_empty_root_set() {
+        use crate::tls::ExtraRoots;
+        use crate::tls::test_pki::{TestPki, assert_untrusted_root, error_chain, serve_https};
+
+        let pki = TestPki::mint();
+        let addr = serve_https(&pki).await;
+        let url = format!("https://{addr}/repos/ocx-sh/ocx/releases");
+
+        let seeded = super::build_forge_http_client(std::time::Duration::from_secs(5), &pki.roots())
+            .expect("a non-empty root set builds");
+        let response = seeded
+            .get(&url)
+            .send()
+            .await
+            .expect("the seeded forge client trusts the minted root");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let unseeded = super::build_forge_http_client(std::time::Duration::from_secs(5), &ExtraRoots::default())
+            .expect("the default set builds");
+        let error = unseeded
+            .get(&url)
+            .send()
+            .await
+            .expect_err("without the root the forge client must refuse the handshake");
+        let chain = error_chain(&error);
+        assert_untrusted_root(&chain);
     }
 }

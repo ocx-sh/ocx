@@ -109,9 +109,18 @@ pub(super) struct TransportRecipe {
     /// Hosts to contact over plain HTTP; `None` is HTTPS everywhere.
     plain_http_registries: Option<Vec<String>>,
     dns_resolver: Option<std::sync::Arc<dyn reqwest::dns::Resolve>>,
+    /// Operator-supplied extra CA roots (ocx#448, C-006), appended by
+    /// [`Self::config`] after the bundled set. Empty unless
+    /// `Context::try_init` resolved a source.
+    extra_roots: crate::tls::ExtraRoots,
 }
 
 impl TransportRecipe {
+    /// The operator roots [`Self::config`] will append (C-006).
+    pub(super) fn extra_roots(&self) -> &crate::tls::ExtraRoots {
+        &self.extra_roots
+    }
+
     /// The config the transport is built from — the whole of what deferring
     /// costs, materialised. `ClientConfig::default()` is where the ~150 bundled
     /// roots get copied, so calling this is already most of the price.
@@ -129,6 +138,20 @@ impl TransportRecipe {
             config.protocol = oci::native::ClientProtocol::HttpsExcept(registries.clone());
         }
         config.dns_resolver = self.dns_resolver.clone();
+        // Operator roots go after the bundled set, never instead of it (D-2);
+        // every DER here already passed `ExtraRoots::parse_pem`'s probe build,
+        // so the fork's `convert_certificates` cannot fail on it (C-004).
+        config
+            .extra_root_certificates
+            .extend(
+                self.extra_roots
+                    .der()
+                    .iter()
+                    .map(|der| oci::native::oci_client::client::Certificate {
+                        encoding: oci::native::oci_client::client::CertificateEncoding::Der,
+                        data: der.to_vec(),
+                    }),
+            );
         config
     }
 
@@ -207,6 +230,25 @@ impl ClientBuilder {
         self
     }
 
+    /// Operator-supplied extra CA roots (ocx#448), appended to the transport's
+    /// own certificate list alongside the bundled Mozilla set — never a
+    /// replacement (D-2).
+    pub fn extra_roots(mut self, extra_roots: crate::tls::ExtraRoots) -> Self {
+        self.recipe.extra_roots = extra_roots;
+        self
+    }
+
+    /// The `ClientConfig` [`build`](Self::build) would hand the transport —
+    /// the one composition of timeouts, plain-HTTP hosts, resolver and CA
+    /// roots, materialised. The production path holds none: the recipe
+    /// composes it on demand, so this is how the `ocx login` probe (which
+    /// drives the fork's `Client` directly to send one explicit credential)
+    /// and the tests get the real, shipped config without a second
+    /// construction path.
+    pub(crate) fn config(&self) -> oci::native::ClientConfig {
+        self.recipe.config()
+    }
+
     /// Returns a client whose transport is **not built yet** — see
     /// [`TransportRecipe`] for why, and [`Client::transport`] for where it is.
     pub fn build(self) -> Client {
@@ -251,14 +293,6 @@ impl ClientBuilder {
     pub(crate) fn root_certificate_count(&self) -> usize {
         self.config().extra_root_certificates.len()
     }
-
-    /// Test-only: the `ClientConfig` [`build`](Self::build) would hand the
-    /// transport. The production path no longer holds one — the recipe composes
-    /// it on demand — so this is how a test drives the real, shipped config
-    /// (and overrides one field of it) without a second construction path.
-    pub(crate) fn config(&self) -> oci::native::ClientConfig {
-        self.recipe.config()
-    }
 }
 
 #[cfg(test)]
@@ -282,6 +316,15 @@ mod tests {
     /// config the whole builder funnels through carries the complete root set,
     /// which forces reqwest onto the `Verifier::new_with_extra_roots` branch that
     /// never errors on an empty store.
+    ///
+    /// Verified against the vendored source (`rustls-native-certs 0.8.4`,
+    /// `openssl-probe 0.2.1`): `ProbeResult::from_env` (`openssl-probe`'s
+    /// `lib.rs`) filters `SSL_CERT_FILE`/`SSL_CERT_DIR` through `Path::exists`,
+    /// so a var naming a path that is not there is dropped, never trusted
+    /// verbatim; `probe()` then unconditionally walks `candidate_cert_dirs()`
+    /// and appends every system directory that exists (`/etc/ssl/certs` and
+    /// its platform siblings) regardless of what the env vars held. A test
+    /// host cannot set those vars to make the discovered store empty.
     #[test]
     fn new_seeds_full_der_encoded_ca_root_set() {
         let builder = ClientBuilder::new();
@@ -304,6 +347,44 @@ mod tests {
         // proves they are valid DER. A wrong encoding tag (PEM over DER bytes)
         // would fail conversion and trip the very `Client::new` panic under test.
         let _client = builder.build();
+    }
+
+    /// C-006 / D-2: `.extra_roots(..)` appends the operator's roots onto the
+    /// transport's certificate list *after* the bundled Mozilla set — the count
+    /// is Mozilla + N, each carried as DER — never replacing it.
+    ///
+    /// Mutation: drop the append in `TransportRecipe::config` — the count
+    /// equals the Mozilla set and this reds.
+    #[test]
+    fn extra_ca_roots_are_appended_after_the_mozilla_set() {
+        use crate::tls::test_pki::{TestPki, mint_root, pem_block};
+        use crate::tls::{ExtraRoots, ExtraRootsSource};
+        use oci::native::oci_client::client::CertificateEncoding;
+
+        let pki = TestPki::mint();
+        let (_, second) = mint_root("CN=ocx-test-ca-2");
+        let bundle = format!("{}{}", pki.root_pem(), pem_block("CERTIFICATE", &second));
+        let roots = ExtraRoots::parse_pem(bundle.as_bytes(), &ExtraRootsSource::Env).expect("two minted roots parse");
+
+        let builder = ClientBuilder::new().extra_roots(roots);
+
+        let mozilla = webpki_root_certs::TLS_SERVER_ROOT_CERTS.len();
+        assert_eq!(
+            builder.root_certificate_count(),
+            mozilla + 2,
+            "the operator's roots are added to the bundled set, not swapped in for it"
+        );
+        let config = builder.config();
+        let appended = &config.extra_root_certificates[mozilla..];
+        assert_eq!(appended.len(), 2);
+        assert!(
+            appended
+                .iter()
+                .all(|certificate| matches!(certificate.encoding, CertificateEncoding::Der)),
+            "extra roots ride the DER encoding"
+        );
+        assert_eq!(appended[0].data, pki.root_der);
+        assert_eq!(appended[1].data, second);
     }
 
     /// `http://` mirror host flows to `plain_http_registries`.

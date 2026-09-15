@@ -76,7 +76,16 @@ const SIGSTORE_MAX_IDLE_PER_HOST: usize = 2;
 /// short `read_timeout`: nothing on `reqwest::Client` exposes its configured
 /// timeouts, so proving the bound exists means exercising it, and exercising
 /// the shipped 15 s value is not a unit test.
-fn sigstore_client_builder(read_timeout: Duration, rules: Arc<crate::oci::ssrf::ProxyRules>) -> reqwest::ClientBuilder {
+///
+/// `extra_roots` chains operator-supplied CA roots (ocx#448, C-007) on top of
+/// the bundled set -- a pure function over its arguments, so a test can pass
+/// an explicit value without touching the process-wide
+/// [`crate::tls::install_sigstore_roots`] `OnceLock`.
+fn sigstore_client_builder(
+    read_timeout: Duration,
+    rules: Arc<crate::oci::ssrf::ProxyRules>,
+    extra_roots: &crate::tls::ExtraRoots,
+) -> reqwest::ClientBuilder {
     // Bundled roots, exactly as `forge::github` and `oci::index::ocx_index`
     // do it: reqwest's rustls path falls back to the OS trust store and
     // panics where that store is empty (minimal container, CI runner with
@@ -84,7 +93,8 @@ fn sigstore_client_builder(read_timeout: Duration, rules: Arc<crate::oci::ssrf::
     // `oci_client` transport seeds its own roots in the fork -- while
     // `ocx package verify` panics on the same host, and auto-verify carries
     // that panic into every covered install.
-    crate::utility::tls::seed_embedded_roots(reqwest::Client::builder())
+    extra_roots
+        .seed(crate::utility::tls::seed_embedded_roots(reqwest::Client::builder()))
         .connect_timeout(SIGSTORE_CONNECT_TIMEOUT)
         .timeout(SIGSTORE_REQUEST_TIMEOUT)
         .read_timeout(read_timeout)
@@ -108,7 +118,8 @@ fn sigstore_client_builder(read_timeout: Duration, rules: Arc<crate::oci::ssrf::
 pub fn sigstore_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        match sigstore_client_builder(SIGSTORE_READ_TIMEOUT, crate::oci::ssrf::proxy_rules()).build() {
+        let roots = crate::tls::sigstore_roots();
+        match sigstore_client_builder(SIGSTORE_READ_TIMEOUT, crate::oci::ssrf::proxy_rules(), roots).build() {
             Ok(client) => client,
             // Only a TLS-backend init failure reaches here, and it fails every
             // HTTPS request that follows anyway. Retry the same fully-bounded
@@ -116,8 +127,13 @@ pub fn sigstore_http_client() -> &'static reqwest::Client {
             // out a client missing the timeouts, the redirect refusal or the
             // pinned resolver. The bare-client terminal is unreachable in
             // practice: the retry fails identically, and `Client::new()`
-            // panics under the same TLS-init failure.
-            Err(_) => sigstore_client_builder(SIGSTORE_READ_TIMEOUT, crate::oci::ssrf::proxy_rules())
+            // panics under the same TLS-init failure. Operator roots cannot
+            // make it reachable either: `ExtraRoots::parse_pem` probe-builds a
+            // client from the same set and refuses the set when that fails
+            // (C-004), so no `ExtraRoots` exists that this build rejects, and
+            // the terminal never hands out a client trusting fewer roots than
+            // configured (D-9).
+            Err(_) => sigstore_client_builder(SIGSTORE_READ_TIMEOUT, crate::oci::ssrf::proxy_rules(), roots)
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
@@ -599,6 +615,7 @@ mod tests {
             Arc::new(crate::oci::ssrf::ProxyRules::new(
                 hyper_util::client::proxy::matcher::Matcher::builder().build(),
             )),
+            &crate::tls::ExtraRoots::default(),
         )
         .no_proxy()
         .build()
@@ -617,6 +634,86 @@ mod tests {
             source = cause.source();
         }
         text
+    }
+
+    /// C-007 / S-002 (unit tier): the Sigstore builder is the pure seam — a
+    /// set handed to `sigstore_client_builder` is what the built client trusts.
+    /// One in-process TLS server presenting a leaf signed by a minted root, dialed
+    /// by IP so the pinned resolver (names only) stays out of the picture; the
+    /// seeded client gets a 200, the default-set client ends in `UnknownIssuer`.
+    /// Both in one function per the Unchecked-Green rule.
+    #[tokio::test]
+    async fn extra_ca_sigstore_client_builder_trusts_the_seeded_root_and_only_then() {
+        use crate::tls::test_pki::{TestPki, assert_untrusted_root, serve_https};
+
+        let pki = TestPki::mint();
+        let addr = serve_https(&pki).await;
+        let url = format!("https://{addr}/api/v1/log/publicKey");
+        let rules = || {
+            Arc::new(crate::oci::ssrf::ProxyRules::new(
+                hyper_util::client::proxy::matcher::Matcher::builder().build(),
+            ))
+        };
+
+        let seeded = sigstore_client_builder(Duration::from_secs(5), rules(), &pki.roots())
+            .no_proxy()
+            .build()
+            .expect("the seeded builder produces a client");
+        let response = seeded
+            .get(&url)
+            .send()
+            .await
+            .expect("the seeded Sigstore client trusts the minted root");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let error = hermetic_sigstore_client()
+            .get(&url)
+            .send()
+            .await
+            .expect_err("the default set does not know the minted root");
+        let chain = error_chain(&error);
+        assert_untrusted_root(&chain);
+    }
+
+    /// C-007 (review r1): the SHIPPED client — `sigstore_http_client()`, the
+    /// one every Fulcio/Rekor/TUF call site uses — consumes the roots
+    /// `install_sigstore_roots` installed, not only the pure builder the seam
+    /// test above feeds. Dialed by IP so the pinned resolver stays out of it.
+    ///
+    /// Process-global state twice over (`SIGSTORE_ROOTS`, the client
+    /// `OnceLock`): this test installs, so under plain `cargo test` it
+    /// collides with `tls`'s installer test and with any earlier
+    /// caller of the shared client in the same process — nextest's one
+    /// process per test is what makes it sound, as `context.rs`'s
+    /// `try_init` tests already rely on. Observed-condition skip when the
+    /// ambient environment proxies loopback: the shared client honours the
+    /// process's proxy rules, and a proxied dial never reaches the fixture.
+    ///
+    /// Mutation: replace `sigstore_roots()` at the `get_or_init` with
+    /// `&ExtraRoots::default()` — the dial ends in `UnknownIssuer` and this
+    /// reds.
+    #[tokio::test]
+    async fn extra_ca_the_shared_sigstore_client_trusts_the_installed_roots() {
+        use crate::tls::test_pki::{TestPki, error_chain, serve_https};
+
+        let pki = TestPki::mint();
+        let addr = serve_https(&pki).await;
+        if !matches!(
+            crate::oci::ssrf::proxy_rules().dial_route(crate::oci::ssrf::DialScheme::Https, "127.0.0.1", addr.port()),
+            crate::oci::ssrf::Route::Direct
+        ) {
+            eprintln!("skipped: the ambient proxy configuration routes loopback through a proxy");
+            return;
+        }
+        crate::tls::install_sigstore_roots(pki.roots());
+        let url = format!("https://{addr}/api/v1/log/publicKey");
+
+        let response = sigstore_http_client()
+            .get(&url)
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("the shared client trusts the installed root: {}", error_chain(&error)));
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
     }
 
     /// A host no guard approved is never dialed.
@@ -1142,6 +1239,7 @@ mod tests {
             Arc::new(crate::oci::ssrf::ProxyRules::new(
                 hyper_util::client::proxy::matcher::Matcher::builder().build(),
             )),
+            &crate::tls::ExtraRoots::default(),
         )
         .no_proxy()
         .build()
@@ -1263,7 +1361,7 @@ mod tests {
                 .all(proxy_url.clone())
                 .build(),
         ));
-        let client = sigstore_client_builder(Duration::from_secs(5), rules)
+        let client = sigstore_client_builder(Duration::from_secs(5), rules, &crate::tls::ExtraRoots::default())
             .proxy(reqwest::Proxy::all(&proxy_url).expect("the proxy URL is well-formed"))
             .build()
             .expect("the shared builder produces a client");

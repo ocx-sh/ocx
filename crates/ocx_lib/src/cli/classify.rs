@@ -145,6 +145,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::publisher::{CopyError, LayerRefParseError, PublishGateError};
     use crate::record::RecordsError;
     use crate::setup::error::Error as SetupError;
+    use crate::tls::TlsError;
     use crate::utility::fs::path::PathEscapeError;
     use crate::utility::fs::{EmptyOrAbsentError, SameFilesystemError, SymlinkWalkError};
     use crate::utility::singleflight::Error as SingleflightError;
@@ -225,6 +226,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(PathEscapeError);
     try_downcast!(SignError);
     try_downcast!(VerifyError);
+    try_downcast!(TlsError);
 
     // `std::io::Error` is not OCX-owned, so we cannot impl `ClassifyExitCode`
     // for it (orphan rule). Only `PermissionDenied` maps to a specific code;

@@ -236,6 +236,22 @@ pub mod keys {
     /// launcher-spawned child install.
     pub const OCX_NO_VERIFY: &str = "OCX_NO_VERIFY";
 
+    /// Operator-supplied extra CA root material — a path, or inline PEM text
+    /// (a value containing `-----BEGIN`), for the registry, index, forge and
+    /// Sigstore TLS clients (ocx#448). `OCX_EXTRA_CA_CERTS=""` is treated as
+    /// unset, matching [`OCX_CONFIG`].
+    ///
+    /// **Not** forwarded to child processes — deliberately absent from
+    /// [`OcxConfigView`] and [`Env::apply_ocx_config`]: an env-only CA does not
+    /// survive `ocx exec --clean` or reach the launcher it spawns, though the
+    /// `config.toml` form of the same setting does, because the child re-reads
+    /// disk for itself. Forwarding an inline PEM would also exceed Windows'
+    /// 32,767-character per-variable limit and land in every launched tool's
+    /// environment; a CA is public material, so scrubbing it like a credential
+    /// would be the wrong posture too. See `crate::tls::ExtraRoots`
+    /// for the validated value this resolves to.
+    pub const OCX_EXTRA_CA_CERTS: &str = "OCX_EXTRA_CA_CERTS";
+
     /// Short-lived OIDC bearer token for keyless Sigstore signing, read once by
     /// `ocx package sign` (lowest precedence, after `--identity-token-file` /
     /// `--identity-token-stdin`). A bearer credential: read directly via

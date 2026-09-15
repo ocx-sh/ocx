@@ -14,17 +14,23 @@ amendment); plan ``.claude/state/plans/plan_managed_config_v2.md`` Phase 1.
 from __future__ import annotations
 
 import json
+import tomllib
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-from src.helpers import push_managed_config
+from src.helpers import SIGSTORE_DIR, push_managed_config
 from src.registry import fetch_manifest_from_registry, push_raw_config_package
 from src.runner import OcxRunner
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# A real self-signed CA (the test stack's Fulcio root): the positive case needs
+# material the certificate parser accepts, not a placeholder string.
+_CA_PEM = (SIGSTORE_DIR / "keys" / "fulcio-ca.crt.pem").read_text()
 
 
 def _write_payload(tmp_path: Path, content: str, name: str = "corp-config.toml") -> Path:
@@ -120,6 +126,65 @@ def test_config_push_rejects_oversize_payload_exit_78(
     payload = _write_payload(tmp_path, "# padding\n" * 7_000)  # ~70 KiB > 64 KiB cap
     result = ocx.run("config", "push", "-i", f"{unique_repo}:1.0.0", str(payload), check=False)
     assert result.returncode == 78, result.stderr
+
+
+def test_config_push_inlines_extra_ca_certs_path(
+    ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
+) -> None:
+    """C-003/S-003: a path-form `extra_ca_certs` is read at publish time and
+    inlined as `extra_ca_certs_pem` in the published payload.
+
+    The published bytes are what a fleet consumer receives, so they are read
+    back through the real product path (`config update` persists the payload
+    verbatim) and parsed — a text grep would pass on a file no parser accepts.
+    """
+    (tmp_path / "corp-ca.pem").write_text(_CA_PEM)
+    pushed_digest = push_managed_config(ocx, unique_repo, "user", 'extra_ca_certs = "corp-ca.pem"\n', tmp_path)
+
+    ref = f"{registry}/{unique_repo}:user"
+    update = ocx.json("config", "update", env_overrides={"OCX_MANAGED_CONFIG": ref})
+    assert update["digest"] == pushed_digest
+
+    published = tomllib.loads(
+        (Path(ocx.env["OCX_HOME"]) / "state" / "managed-config" / "config.toml").read_text()
+    )
+    assert "extra_ca_certs" not in published, (
+        f"the operator's path names a file on the operator's disk and must not be published: {published}"
+    )
+    assert published["extra_ca_certs_pem"] == _CA_PEM, (
+        "the bundle the path named replaces it, byte-for-byte, at the document root"
+    )
+
+
+def test_config_push_missing_extra_ca_certs_path_exits_79(
+    ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
+) -> None:
+    """S-003: `ocx config push` with a missing `extra_ca_certs` path exits 79,
+    naming the path — and, like every other refusal, publishes nothing."""
+    payload = _write_payload(tmp_path, 'extra_ca_certs = "absent-ca.pem"\n')
+
+    result = ocx.run("config", "push", "-i", f"{unique_repo}:1.0.0", str(payload), check=False)
+
+    assert result.returncode == 79, result.stderr
+    assert "absent-ca.pem" in result.stderr, f"the refusal must name the missing path: {result.stderr}"
+    assert _list_tags(registry, unique_repo) == set(), "a refused payload must leave the repository absent"
+
+
+def test_config_push_garbage_extra_ca_certs_pem_exits_78(
+    ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
+) -> None:
+    """C-003 (inline form): an `extra_ca_certs_pem` authored directly in the
+    payload is validated at push — garbage exits 78 (the loader's verdict on
+    inline text, delivered to the operator instead of every consumer's every
+    command) and publishes nothing. The path-form sibling above covers the
+    positive case through the real inlining path."""
+    payload = _write_payload(tmp_path, 'extra_ca_certs_pem = "not a pem"\n')
+
+    result = ocx.run("config", "push", "-i", f"{unique_repo}:1.0.0", str(payload), check=False)
+
+    assert result.returncode == 78, result.stderr
+    assert "extra_ca_certs_pem" in result.stderr, f"the refusal must name the key: {result.stderr}"
+    assert _list_tags(registry, unique_repo) == set(), "a refused payload must leave the repository absent"
 
 
 def test_config_push_rejected_payload_pushes_nothing(

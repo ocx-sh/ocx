@@ -11,6 +11,7 @@ use ocx_lib::{
     log,
     oci::{self, index},
     package_manager,
+    tls::{ExtraRoots, TlsError, resolve_extra_roots, sigstore_extra_roots},
 };
 
 use crate::api;
@@ -119,6 +120,19 @@ pub struct Context {
     /// The `OCX_RECORDS_*` tier, read once so every frame of one invocation
     /// folds the same values.
     records_env: ocx_lib::record::RecordsOptions,
+    /// The tiered view (env ▸ every `config.toml` tier, C-005): pre-applied
+    /// by [`Self::client_builder`] to every registry client, and passed to
+    /// the index transport and every forge client. Whether the merged and
+    /// local-only configs agree on the extra-CA keys decides which of this
+    /// and [`Self::extra_roots_local`] the Sigstore client gets (D-7) — that
+    /// view is installed process-wide by [`Self::try_init`]
+    /// ([`ocx_lib::tls::install_sigstore_roots`]) and never stored here.
+    extra_roots_merged: ExtraRoots,
+    /// The local-only view (env ▸ system/user/`$OCX_HOME` — never a managed
+    /// payload, D-6): passed to [`build_managed_config_client`] so the channel
+    /// that fetches the managed tier can never be secured by material it just
+    /// delivered.
+    extra_roots_local: ExtraRoots,
 }
 
 /// The two `[managed]` tier gates `Context::try_init` needs, wrapped in a named
@@ -262,6 +276,59 @@ impl Context {
         // divergence).
         let api = options.build_api(color_config);
 
+        // C-005: the three extra-CA-roots views (`ocx_lib::tls`'s ladder),
+        // computed once, ahead of every client builder that threads one of
+        // them. `merged` feeds the registry/index/forge clients; `local` feeds
+        // [`build_managed_config_client`] (D-6); `sigstore` is installed
+        // process-wide (D-9: fail-closed before any client is built) via
+        // `install_sigstore_roots`, ahead of the first Sigstore-capable client
+        // constructed below.
+        //
+        // One `spawn_blocking` for both walks (DX-11): each reads a file and
+        // runs `parse_pem`'s probe build, and the two configs travel in and
+        // back out rather than being cloned for the pool. A `JoinError` is a
+        // panicking pool task — an I/O-class failure, never `NotFound`.
+        //
+        // The hop is skipped when there is nothing to walk (no env value, no
+        // config key — every process that never configured a CA, trampolines
+        // included), and the local walk is skipped when it could only repeat
+        // the merged one: the env var set (it outranks every tier in both
+        // views), or no managed payload having set a key (the loader's tier
+        // record, DX-16 — the same predicate `sigstore_extra_roots` folds on).
+        // That is every run but "unpinned managed payload sets a CA", so the
+        // configured case pays one probe build, not two.
+        let extra_ca_env = env::var(env::keys::OCX_EXTRA_CA_CERTS).filter(|value| !value.is_empty());
+        let (extra_ca_tier_merged, extra_ca_tier_local) = (
+            loaded_config.extra_ca_certs_tier,
+            loaded_config.extra_ca_certs_tier_local,
+        );
+        let needs_walk =
+            extra_ca_env.is_some() || config.extra_ca_certs.is_some() || config.extra_ca_certs_pem.is_some();
+        let (config, local_only_config, extra_roots_merged, extra_roots_local) = if needs_walk {
+            tokio::task::spawn_blocking(move || {
+                let merged = resolve_extra_roots(&config, extra_ca_env.as_deref(), extra_ca_tier_merged)?;
+                let views_agree = extra_ca_env.is_some() || extra_ca_tier_merged != Some(ocx_lib::ConfigTier::Managed);
+                let local = if views_agree {
+                    merged.clone()
+                } else {
+                    resolve_extra_roots(&local_only_config, extra_ca_env.as_deref(), extra_ca_tier_local)?
+                };
+                Ok::<_, TlsError>((config, local_only_config, merged, local))
+            })
+            .await
+            .map_err(|join| std::io::Error::other(format!("extra CA roots resolution task panicked: {join}")))??
+        } else {
+            (config, local_only_config, ExtraRoots::default(), ExtraRoots::default())
+        };
+        ocx_lib::tls::install_sigstore_roots(sigstore_extra_roots(
+            &extra_roots_merged,
+            &extra_roots_local,
+            extra_ca_tier_merged,
+            resolved_managed_config
+                .as_ref()
+                .is_some_and(|resolved| resolved.source.digest().is_some()),
+        ));
+
         // Explicit builder so the config-derived
         // `MirrorMap` is threaded in; `OCX_MIRRORS` env precedence is already
         // folded into `mirror_map` by `resolve_mirrors`. A plain-HTTP mirror
@@ -283,7 +350,7 @@ impl Context {
             (None, None)
         } else {
             let client = registry_client_cell
-                .get_or_init(|| build_registry_client(&mirror_map, &progress, &insecure_hosts))
+                .get_or_init(|| client_builder(&mirror_map, &progress, &insecure_hosts, &extra_roots_merged).build())
                 .clone();
             (
                 Some(client.clone()),
@@ -341,6 +408,7 @@ impl Context {
             &mirror_map,
             &insecure_hosts,
             &progress,
+            &extra_roots_merged,
         )?;
         let (mode, sources) = Self::chain_mode_and_sources(oci_index.as_ref(), &index_sources, online_mode);
         // Attach the machine-global blob store so an installed tool's leaf
@@ -463,6 +531,7 @@ impl Context {
                 env::mirrors()?,
                 &env::insecure_registries(),
                 &progress,
+                &extra_roots_local,
             )?)
         };
 
@@ -549,7 +618,7 @@ impl Context {
             None
         } else {
             let client = registry_client_cell
-                .get_or_init(|| build_registry_client(&mirror_map, &progress, &insecure_hosts))
+                .get_or_init(|| client_builder(&mirror_map, &progress, &insecure_hosts, &extra_roots_merged).build())
                 .clone();
             build_auto_verify(
                 operator_policies,
@@ -667,6 +736,8 @@ impl Context {
             patch_snapshot_digest,
             records_config,
             records_env,
+            extra_roots_merged,
+            extra_roots_local,
         })
     }
 
@@ -943,6 +1014,10 @@ impl Context {
     /// This is the only seam that can see both halves: the compiled-in tier is
     /// folded in `ConfigLoader`, but the mirror map is not resolved until
     /// `try_init`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the resolved inputs one invocation settles once: the mode, both mirror views, the two trust sets and the progress sink"
+    )]
     fn build_index_sources(
         online: bool,
         config: &ocx_lib::Config,
@@ -951,6 +1026,7 @@ impl Context {
         registry_mirrors: &oci::MirrorMap,
         insecure_hosts: &[String],
         progress: &ocx_lib::cli::progress::ProgressManager,
+        extra_roots: &ExtraRoots,
     ) -> ocx_lib::Result<Vec<index::OcxIndex>> {
         // Offline or no `[registries]` table ⇒ no sources.
         if !online {
@@ -984,16 +1060,14 @@ impl Context {
                 .get(namespace)
                 .and_then(|entry| entry.trusted_hosts.clone())
                 .unwrap_or_default();
-            let client = oci::ClientBuilder::new()
-                .plain_http_registries(insecure_hosts.to_vec())
-                .mirrors(registry_mirrors.clone())
-                .progress(progress.clone())
+            let client = client_builder(registry_mirrors, progress, insecure_hosts, extra_roots)
                 .ssrf_guard(trusted_hosts.clone())
                 .build();
             // The base URL and its transport are one decision, taken inside
             // `resolve_base_url` — picking a transport here would re-derive the
             // scheme the gate there already settled.
-            let base = index::OcxIndex::resolve_base_url(config, namespace, mirrors_index, insecure_hosts)?;
+            let base =
+                index::OcxIndex::resolve_base_url(config, namespace, mirrors_index, insecure_hosts, extra_roots)?;
             sources.push(index::OcxIndex::new(index::OcxIndexConfig {
                 transport: base.transport,
                 base_url: base.url,
@@ -1032,6 +1106,36 @@ impl Context {
     /// re-deriving it, so every path agrees on the same set.
     pub fn insecure_hosts(&self) -> &[String] {
         &self.insecure_hosts
+    }
+
+    /// The tiered extra-CA-roots view (C-005) — pass to a hand-rolled client
+    /// this invocation builds outside [`Self::try_init`] itself (the forge
+    /// clients, `ForgeKind::client`'s `extra_roots` parameter).
+    pub fn extra_roots_merged(&self) -> &ExtraRoots {
+        &self.extra_roots_merged
+    }
+
+    /// The local-only extra-CA-roots view (D-6) — the managed-config fetch
+    /// client's trust set, never the managed payload's own.
+    pub fn extra_roots_local(&self) -> &ExtraRoots {
+        &self.extra_roots_local
+    }
+
+    /// The one recipe every registry client of this invocation is built
+    /// from: the resolved mirror map, plain-HTTP set, progress sink and merged
+    /// extra-CA view (C-006) pre-applied, so a command that needs its own
+    /// client — `ocx package announce`'s SSRF-pinned publisher — adds only
+    /// what differs and cannot drift from [`Self::remote_client`] on the rest.
+    /// The managed-config fetch client is the one deliberate exception and is
+    /// built from the local view by [`build_managed_config_client`] (D-6).
+    #[must_use]
+    pub fn client_builder(&self) -> oci::ClientBuilder {
+        client_builder(
+            &self.mirror_map,
+            &self.progress,
+            &self.insecure_hosts,
+            &self.extra_roots_merged,
+        )
     }
 
     pub fn file_structure(&self) -> &file_structure::FileStructure {
@@ -1129,8 +1233,7 @@ impl Context {
     /// it with [`Self::is_offline`], which the verify pipeline uses to forbid
     /// trust-services network and require cached/supplied trust material.
     pub fn verify_client(&self) -> &oci::Client {
-        self.registry_client_cell
-            .get_or_init(|| build_registry_client(&self.mirror_map, &self.progress, &self.insecure_hosts))
+        self.registry_client_cell.get_or_init(|| self.client_builder().build())
     }
 }
 
@@ -1158,25 +1261,6 @@ fn trusted_hosts_by_namespace(config: &ocx_lib::Config) -> std::collections::Has
         .collect()
 }
 
-/// Builds the registry client backing [`Context::registry_client_cell`].
-///
-/// Extracted so the lazy on-demand build ([`Context::verify_client`]) and the
-/// two eager call sites in [`Context::try_init`] that already need a network
-/// client (the online `remote_client`/`oci_index` pair, and policy-gated
-/// auto-verify) share one construction — no drift between "built lazily" and
-/// "built eagerly" client shapes.
-fn build_registry_client(
-    mirror_map: &oci::MirrorMap,
-    progress: &ocx_lib::cli::progress::ProgressManager,
-    insecure_hosts: &[String],
-) -> oci::Client {
-    oci::ClientBuilder::new()
-        .plain_http_registries(insecure_hosts.to_vec())
-        .mirrors(mirror_map.clone())
-        .progress(progress.clone())
-        .build()
-}
-
 /// Builds the client that FETCHES the managed-config payload.
 ///
 /// Every input is the LOCAL-ONLY view or the raw environment — the merged
@@ -1201,15 +1285,38 @@ fn build_managed_config_client(
     env_mirrors: Vec<(String, ocx_lib::MirrorConfig)>,
     env_insecure_registries: &[String],
     progress: &ocx_lib::cli::progress::ProgressManager,
+    extra_roots: &ExtraRoots,
 ) -> anyhow::Result<oci::Client> {
     let insecure_hosts = ocx_lib::insecure_hosts(local_only_config, env_insecure_registries);
     let mirrors =
         ocx_lib::resolve_mirror_map(local_only_config, env_mirrors, &insecure_hosts).map_err(anyhow::Error::new)?;
-    Ok(oci::ClientBuilder::new()
-        .plain_http_registries(insecure_hosts)
-        .mirrors(oci::MirrorMap::new(mirrors.registry))
+    // C-006: `extra_roots` is the `local` view (D-6) — the one input here
+    // that is not a local-only *mirror* input, threaded by the caller.
+    Ok(client_builder(
+        &oci::MirrorMap::new(mirrors.registry),
+        progress,
+        &insecure_hosts,
+        extra_roots,
+    )
+    .build())
+}
+
+/// The one `oci::ClientBuilder` recipe behind every registry client of an
+/// invocation: plain-HTTP hosts, mirror map, progress sink and extra-CA roots
+/// (C-006). [`Context::client_builder`] applies it to the merged view for
+/// commands; [`Context::try_init`] and [`build_managed_config_client`] call it
+/// directly, before a `Context` exists, the latter with the local view (D-6).
+fn client_builder(
+    mirror_map: &oci::MirrorMap,
+    progress: &ocx_lib::cli::progress::ProgressManager,
+    insecure_hosts: &[String],
+    extra_roots: &ExtraRoots,
+) -> oci::ClientBuilder {
+    oci::ClientBuilder::new()
+        .plain_http_registries(insecure_hosts.to_vec())
+        .mirrors(mirror_map.clone())
         .progress(progress.clone())
-        .build())
+        .extra_roots(extra_roots.clone())
 }
 
 /// Build the shared policy-gated auto-verify inputs, or `None` when no operator
@@ -1622,6 +1729,7 @@ mod tests {
             &oci::MirrorMap::default(),
             &[],
             &ocx_lib::cli::progress::ProgressManager::disabled(),
+            &ExtraRoots::default(),
         )
     }
 
@@ -1743,6 +1851,43 @@ mod tests {
             ["10.0.0.0/8".to_string(), "192.168.0.0/16".to_string()].as_slice(),
             "ns-b's trusted_hosts must never be the union with ns-a's"
         );
+    }
+
+    /// C-006 / C-007 at the index seam: the per-namespace physical-fetch
+    /// client `build_index_sources` stores on each `OcxIndex` — the one
+    /// `fetch_manifest` / `fetch_blob` pull a resolved package through —
+    /// carries the merged extra-CA view, not only the index HTTP transport
+    /// beside it. `ocx index update` reaches the transport alone, so an
+    /// `install` of an index-resolved package from a corp-CA registry is the
+    /// dial this pins.
+    ///
+    /// Mutation: drop `.extra_roots(..)` from that builder — the count reads
+    /// 0 and this reds.
+    #[test]
+    fn build_index_sources_threads_the_merged_extra_roots_into_the_physical_client() {
+        let roots = ExtraRoots::parse_pem(EXTRA_CA_PEM.as_bytes(), &ocx_lib::tls::ExtraRootsSource::Env)
+            .expect("the fixture root parses");
+        let config = config_with_registries(&[("corp.example", Some("https://index.corp.example"))]);
+
+        let sources = Context::build_index_sources(
+            true,
+            &config,
+            None,
+            &std::collections::BTreeMap::new(),
+            &oci::MirrorMap::default(),
+            &[],
+            &ocx_lib::cli::progress::ProgressManager::disabled(),
+            &roots,
+        )
+        .unwrap();
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            sources[0].client().extra_root_count(),
+            roots.len(),
+            "the physical-fetch client must carry every root of the merged view"
+        );
+        assert_eq!(roots.len(), 1, "positive control: the view is not empty");
     }
 
     #[test]
@@ -1883,7 +2028,7 @@ mod tests {
         );
 
         // Ground truth: the exact call `build_index_sources` makes internally.
-        let direct = index::OcxIndex::resolve_base_url(&config, "ns", &mirrors_index, &[])
+        let direct = index::OcxIndex::resolve_base_url(&config, "ns", &mirrors_index, &[], &ExtraRoots::default())
             .expect_err("ground truth: resolve_base_url itself must gate this http override");
 
         // `OcxIndex` carries no `Debug` impl (only `Clone`), so `expect_err`
@@ -1978,6 +2123,7 @@ mod tests {
             &registry_mirrors,
             &[],
             &ocx_lib::cli::progress::ProgressManager::disabled(),
+            &ExtraRoots::default(),
         )
         .unwrap()
     }
@@ -2218,17 +2364,243 @@ mod tests {
         };
         let progress = ocx_lib::cli::progress::ProgressManager::disabled();
 
-        let refused = build_managed_config_client(&with_allowance(false), mirrors(), &[], &progress);
+        let refused = build_managed_config_client(
+            &with_allowance(false),
+            mirrors(),
+            &[],
+            &progress,
+            &ExtraRoots::default(),
+        );
         assert!(
             refused.is_err(),
             "the payload's own allowance is not in scope for the tier that fetches it"
         );
 
-        let allowed = build_managed_config_client(&with_allowance(true), mirrors(), &[], &progress);
+        let allowed =
+            build_managed_config_client(&with_allowance(true), mirrors(), &[], &progress, &ExtraRoots::default());
         assert!(
             allowed.is_ok(),
             "the same mirror IS allowed once the view actually handed to the builder grants it: {:?}",
             allowed.err()
+        );
+    }
+
+    // ── ocx#448: extra CA roots — C-005 ladder, S-006, D-7 ───────────────────
+
+    /// A real self-signed CA (the test stack's Fulcio root, `basicConstraints
+    /// CA:TRUE`) — the parser runs a real X.509 parse and a probe build, so
+    /// only real material passes it.
+    const EXTRA_CA_PEM: &str = include_str!("../../../../test/sigstore/keys/fulcio-ca.crt.pem");
+
+    fn config_with_pem(pem: &str) -> ocx_lib::Config {
+        ocx_lib::Config {
+            extra_ca_certs_pem: Some(pem.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// S-006 (D-6): the managed-config fetch client is built from
+    /// [`Context::extra_roots_local`], never [`Context::extra_roots_merged`] —
+    /// the refresh channel must not be secured by material it just delivered.
+    ///
+    /// Modelled as the tier, not "a key exists": a managed payload's
+    /// `extra_ca_certs_pem` is present in the MERGED view and absent from the
+    /// local-only one, and the two views resolve differently — `merged` carries
+    /// the payload's root, `local` carries nothing. `build_managed_config_client`
+    /// is then handed the local set; the pair is what makes "which view was
+    /// consulted" observable rather than assumed.
+    #[test]
+    fn extra_ca_managed_config_client_gets_local_view_roots() {
+        let merged_config = config_with_pem(EXTRA_CA_PEM);
+        let local_config = ocx_lib::Config::default();
+
+        let merged = resolve_extra_roots(&merged_config, None, Some(ocx_lib::ConfigTier::Home))
+            .expect("the managed payload's root parses");
+        let local = resolve_extra_roots(&local_config, None, Some(ocx_lib::ConfigTier::Home))
+            .expect("no local key resolves to the empty set");
+        assert_eq!(merged.len(), 1, "the managed payload's root is in the merged view");
+        assert!(local.is_empty(), "the managed payload's root is NOT in the local view");
+
+        let progress = ocx_lib::cli::progress::ProgressManager::disabled();
+        let client = build_managed_config_client(&local_config, Vec::new(), &[], &progress, &local);
+        assert!(
+            client.is_ok(),
+            "the managed fetch client builds from the local set: {:?}",
+            client.err()
+        );
+    }
+
+    /// `Context::try_init` over a fixture `$OCX_HOME` (`ocx index catalog`,
+    /// `--offline` unless `online`), the `toolchain_env.rs` precedent. Nothing
+    /// dials at init either way — every client is built lazily. One call per
+    /// test: the log subscriber and the process-wide Sigstore root install
+    /// are both first-wins, which nextest's one-process-per-test honours.
+    async fn context_over_home(home: &Path, online: bool) -> Context {
+        use clap::Parser as _;
+
+        use crate::app::{Cli, ManagedConfigGate};
+
+        // SAFETY: `OCX_HOME` and the four config-shaping variables are read
+        // through `ocx_lib::env::var`, whose `#[cfg(test)]` override seam is
+        // internal to `ocx_lib` and unavailable from this crate; the process
+        // environment is the only seam. nextest runs one test per process, so
+        // this cannot race a sibling.
+        unsafe {
+            std::env::set_var("OCX_HOME", home);
+            for key in [
+                "OCX_EXTRA_CA_CERTS",
+                "OCX_CONFIG",
+                "OCX_NO_CONFIG",
+                "OCX_MANAGED_CONFIG",
+            ] {
+                std::env::remove_var(key);
+            }
+        }
+        let argv: &[&str] = if online {
+            &["ocx", "index", "catalog"]
+        } else {
+            &["ocx", "--offline", "index", "catalog"]
+        };
+        let cli = Cli::parse_from(argv);
+        let context = Context::try_init(
+            &cli.context,
+            ocx_lib::cli::ColorModeConfig {
+                stdout: false,
+                stderr: false,
+                relayed: false,
+            },
+            ManagedConfigGate {
+                enforce_required: false,
+                onboarding: false,
+            },
+        )
+        .await
+        .expect("a context over the fixture home");
+        assert_eq!(
+            context.file_structure().root(),
+            home,
+            "the context must resolve the tempdir as its home, or this reads someone else's config"
+        );
+        context
+    }
+
+    /// A managed-config snapshot on disk at `source` carrying `payload`,
+    /// shaped as `persist_managed_config` writes it (`snapshot.json` plus the
+    /// sibling `config.toml`), so the loader's identity gate folds it.
+    fn write_managed_snapshot(home: &Path, source: &str, payload: &str) {
+        let path = ocx_lib::file_structure::StateStore::managed_config_snapshot_path(home);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let snapshot = serde_json::json!({
+            "source": source,
+            "digest": format!("sha256:{}", "a".repeat(64)),
+            "fetched_at": "2026-09-14T00:00:00Z",
+        });
+        std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        std::fs::write(
+            ocx_lib::file_structure::StateStore::managed_config_toml_path_for_snapshot(&path),
+            payload,
+        )
+        .unwrap();
+    }
+
+    /// `$OCX_HOME` seeded with an UNPINNED `[managed]` source whose on-disk
+    /// payload sets `extra_ca_certs_pem` — the one fixture where the merged
+    /// and local-only views differ.
+    fn home_with_unpinned_managed_root() -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[managed]\nsource = \"registry.test/managed-config:v1\"\nrequired = false\n",
+        )
+        .unwrap();
+        write_managed_snapshot(
+            home.path(),
+            "registry.test/managed-config:v1",
+            &format!("extra_ca_certs_pem = '''\n{EXTRA_CA_PEM}'''\n"),
+        );
+        home
+    }
+
+    /// D-6 / D-7 end to end: an UNPINNED managed payload's `extra_ca_certs_pem`
+    /// reaches the merged view only — the local view (the managed-fetch
+    /// client's, S-006) stays empty, and so does the set `try_init` installs
+    /// process-wide for the Sigstore client (the fold's `local` arm, not the
+    /// merged view).
+    #[tokio::test]
+    async fn extra_ca_try_init_keeps_an_unpinned_managed_root_out_of_the_local_and_sigstore_views() {
+        let home = home_with_unpinned_managed_root();
+        let context = context_over_home(home.path(), false).await;
+
+        assert_eq!(
+            context.extra_roots_merged().len(),
+            1,
+            "the payload's root is in the merged view"
+        );
+        assert!(
+            context.extra_roots_local().is_empty(),
+            "the payload's root must never reach the local view (D-6)"
+        );
+        assert!(
+            ocx_lib::tls::sigstore_roots().is_empty(),
+            "an unpinned managed root must not reach the Sigstore view (D-7)"
+        );
+        // merged = 1 / local = 0 is what makes the recipe's view observable:
+        // swapping `extra_roots_merged` for `extra_roots_local` or a default
+        // in `Context::client_builder` reds here, and `verify_client` is the
+        // one consumer that builds through it under `--offline`.
+        assert_eq!(
+            context.verify_client().extra_root_count(),
+            1,
+            "Context::client_builder pre-applies the merged view (C-006)"
+        );
+    }
+
+    /// C-005 / C-007 end to end: a `$OCX_HOME/config.toml` `extra_ca_certs_pem`
+    /// resolves into all three views, and `try_init` installs it process-wide
+    /// for the Sigstore client — an install that never ran reads as empty here.
+    #[tokio::test]
+    async fn extra_ca_try_init_installs_a_home_tier_root_for_sigstore() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            format!("extra_ca_certs_pem = '''\n{EXTRA_CA_PEM}'''\n"),
+        )
+        .unwrap();
+
+        let context = context_over_home(home.path(), false).await;
+
+        assert_eq!(context.extra_roots_merged().len(), 1);
+        assert_eq!(context.extra_roots_local().len(), 1);
+        assert_eq!(
+            ocx_lib::tls::sigstore_roots().der(),
+            context.extra_roots_merged().der(),
+            "try_init must install the Sigstore view before any client is built"
+        );
+    }
+
+    /// S-006 (D-6) at the client boundary: the managed-config fetch client
+    /// `try_init` builds carries the LOCAL view's roots (none — the payload's
+    /// root is managed material), while the registry client built beside it
+    /// carries the merged view's. The pair is what makes a swap of the two
+    /// views at the `build_managed_config_client` call site observable.
+    #[tokio::test]
+    async fn extra_ca_try_init_builds_the_managed_client_from_the_local_view() {
+        let home = home_with_unpinned_managed_root();
+        let context = context_over_home(home.path(), true).await;
+
+        let managed = context
+            .manager()
+            .managed_config_client()
+            .expect("an online init with a [managed] source builds the fetch client");
+        assert_eq!(
+            managed.extra_root_count(),
+            0,
+            "the managed-fetch client must never trust the root the payload delivered (D-6)"
+        );
+        assert_eq!(
+            context.remote_client().expect("online").extra_root_count(),
+            1,
+            "positive control: the registry client beside it does carry the merged root"
         );
     }
 }

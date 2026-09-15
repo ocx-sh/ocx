@@ -278,7 +278,15 @@ impl PackageClaim {
             index_repo: self.forge.index_repo.clone(),
         };
 
-        let forge = kind.client(self.forge.transport, credentials.clone(), &self.forge.index_repo, git)?;
+        // The merged extra-CA view (C-007): a forge dial trusts what every
+        // other client of this invocation trusts.
+        let forge = kind.client(
+            self.forge.transport,
+            credentials.clone(),
+            &self.forge.index_repo,
+            git,
+            context.extra_roots_merged(),
+        )?;
         let outcome = claim::claim(Some(forge.as_ref()), request).await?;
 
         context.api().report(&ClaimReport::from_outcome(

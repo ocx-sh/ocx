@@ -145,10 +145,12 @@ impl Login {
         // `--no-verify` swaps in the no-op Ping to store without a round-trip.
         // Either way the security invariant ("Ping failure ⇒ no put") holds,
         // proven by `MockPing` unit tests in `auth/login.rs`.
-        // The probe must reach the registry over the same scheme every other
-        // command would, so it takes the resolved plain-HTTP set rather than
-        // deciding for itself.
-        let verifying_ping = OciClientPing::new(context.insecure_hosts().to_vec());
+        // The probe must reach the registry over the same scheme, trusting
+        // the same CA roots, as every other command would — so it takes the
+        // resolved plain-HTTP set and the merged extra-CA view (C-006) rather
+        // than deciding for itself.
+        let verifying_ping =
+            OciClientPing::new(context.insecure_hosts().to_vec(), context.extra_roots_merged().clone());
         let ping: &dyn RegistryPing = if self.verify.enabled() {
             &verifying_ping
         } else {

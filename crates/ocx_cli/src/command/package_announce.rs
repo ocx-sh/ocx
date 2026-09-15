@@ -20,7 +20,6 @@ use ocx_lib::cli::UsageError;
 use ocx_lib::forge::ForgeCredentials;
 use ocx_lib::{
     announce::{self, AnnounceRequest, AnnounceTarget, TagSelection},
-    oci,
     publisher::Publisher,
 };
 
@@ -232,7 +231,7 @@ impl PackageAnnounce {
             unyank: self.unyank.clone(),
             yank_reason: self.yank_reason.clone().unwrap_or_default(),
             trusted_hosts: trusted_hosts.clone(),
-            // The same allowance `announce_client` passes as
+            // The same allowance `Context::client_builder` passes as
             // `plain_http_registries`, so the pre-flight decides the dial
             // scheme — and hence which proxy variable applies (ocx#407) —
             // from what the client will actually dial.
@@ -276,9 +275,27 @@ impl PackageAnnounce {
         // state — see `options::ForgeWriteOptions::warn_push_identity`.
         self.forge.warn_push_identity(context.ui(), &credentials);
 
-        let forge = kind.client(self.forge.transport, credentials.clone(), &self.forge.index_repo, git)?;
+        // The merged extra-CA view (C-007): a forge dial trusts what every
+        // other client of this invocation trusts.
+        let forge = kind.client(
+            self.forge.transport,
+            credentials.clone(),
+            &self.forge.index_repo,
+            git,
+            context.extra_roots_merged(),
+        )?;
 
-        let publisher = Publisher::new(announce_client(&context, trusted_hosts)?);
+        // The OCI client the `Publisher` observes tags with: the invocation's
+        // shared recipe (mirror map, plain-HTTP set, merged extra-CA view —
+        // the physical registry a curated tag is read from sits behind the
+        // same corporate proxy as everything else this invocation dials),
+        // pinned through the same `oci::ssrf::GuardedResolver` seam the
+        // index read path uses (`ClientBuilder::ssrf_guard`) — the
+        // physical registry a curated tag resolves against is
+        // remote-controlled data (a root `repository` pointer), so the
+        // connect-time pin must be wired here too, not only the pre-flight
+        // `resolve_and_validate` the announce pipeline already runs.
+        let publisher = Publisher::new(context.client_builder().ssrf_guard(trusted_hosts).build());
 
         let outcome = announce::announce(&publisher, Some(forge.as_ref()), request).await?;
 
@@ -316,26 +333,6 @@ impl PackageAnnounce {
             (None, None) => AnnounceTarget::Direct,
         }
     }
-}
-
-/// Builds the OCI client the announce `Publisher` observes tags with, pinned
-/// through the same [`oci::ssrf::GuardedResolver`](ocx_lib::oci::ssrf::GuardedResolver)
-/// seam the index read path uses (`ClientBuilder::ssrf_guard`) — the physical
-/// registry a curated tag resolves against is remote-controlled data (a root
-/// `repository` pointer), so the connect-time pin must be wired here too, not
-/// only the pre-flight `resolve_and_validate` the announce pipeline already
-/// runs. Mirrors and reuses the same mirror-map / plain-HTTP resolution the
-/// CLI's own remote client goes through.
-fn announce_client(context: &crate::app::Context, trusted_hosts: Vec<String>) -> anyhow::Result<oci::Client> {
-    let insecure_hosts = context.insecure_hosts().to_vec();
-    let resolved_mirrors = ocx_lib::resolve_mirror_map(context.config(), ocx_lib::env::mirrors()?, &insecure_hosts)?;
-    let mirrors = oci::MirrorMap::new(resolved_mirrors.registry);
-    Ok(oci::ClientBuilder::new()
-        .plain_http_registries(insecure_hosts)
-        .mirrors(mirrors)
-        .progress(context.progress().clone())
-        .ssrf_guard(trusted_hosts)
-        .build())
 }
 
 #[cfg(test)]

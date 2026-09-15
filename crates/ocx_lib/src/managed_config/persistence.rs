@@ -166,6 +166,23 @@ pub enum ManagedConfigPersistError {
         #[source]
         source: std::io::Error,
     },
+
+    /// The payload's `extra_ca_certs_pem` is one THIS host's TLS verifier
+    /// cannot load (C-004, run at adoption with the managed tier as origin).
+    /// `ocx config push` proves the bundle on the publisher's platform only —
+    /// a root CryptoAPI accepts and webpki refuses would otherwise be
+    /// persisted here and refuse `Context::try_init` on every command of
+    /// this host, `ocx config update` included, until the snapshot was
+    /// deleted by hand. Refused before the write, so the previous snapshot
+    /// stays in force. Classifies as the inner verdict does (78: the
+    /// payload's own text is what is wrong).
+    #[error("managed config payload carries an extra CA bundle this host cannot load; the previous snapshot is kept")]
+    ExtraCaCertsInvalid {
+        /// What the certificate parser or the platform verifier rejected —
+        /// names the block, never the bytes (D-11).
+        #[source]
+        source: crate::tls::TlsError,
+    },
 }
 
 impl crate::cli::ClassifyExitCode for ManagedConfigPersistError {
@@ -173,6 +190,7 @@ impl crate::cli::ClassifyExitCode for ManagedConfigPersistError {
         match self {
             Self::InvalidToml { .. } => Some(crate::cli::ExitCode::DataError),
             Self::SnapshotWriteFailed { .. } => Some(crate::cli::ExitCode::IoError),
+            Self::ExtraCaCertsInvalid { source } => source.classify(),
         }
     }
 }
@@ -437,7 +455,9 @@ pub async fn probe_managed_config_digest(
 
 // ── Pure persistence primitive ────────────────────────────────────────────────
 
-/// Parses the fetched payload as TOML, strips any `[managed]` section (WARN if
+/// Parses the fetched payload as TOML, proves its `extra_ca_certs_pem` (if
+/// any) loads on this host ([`ManagedConfigPersistError::ExtraCaCertsInvalid`]
+/// otherwise — nothing written), strips any `[managed]` section (WARN if
 /// present — ADR Decision I, a remote payload can never redirect the tier that
 /// fetched it), and writes the resulting [`ManagedConfigSnapshot`] as two
 /// sibling files under
@@ -468,6 +488,23 @@ pub async fn persist_managed_config(
     // path).
     let parsed: crate::config::Config =
         toml::from_str(&text).map_err(|source| ManagedConfigPersistError::InvalidToml { source })?;
+
+    // The consumer's own verdict on the bundle, before it can become the
+    // snapshot every later `try_init` fails closed on. `parse_pem` is
+    // blocking (its probe build loads the platform trust store, DX-11).
+    if let Some(pem) = parsed.extra_ca_certs_pem.clone() {
+        tokio::task::spawn_blocking(move || {
+            crate::tls::ExtraRoots::parse_pem(
+                pem.as_bytes(),
+                &crate::tls::ExtraRootsSource::ConfigInline(crate::config::ConfigTier::Managed),
+            )
+        })
+        .await
+        .map_err(|join| ManagedConfigPersistError::SnapshotWriteFailed {
+            source: std::io::Error::other(format!("extra CA roots validation task panicked: {join}")),
+        })?
+        .map_err(|source| ManagedConfigPersistError::ExtraCaCertsInvalid { source })?;
+    }
 
     let config = if parsed.managed.is_some() {
         crate::log::warn!(
@@ -1158,6 +1195,56 @@ mod tests {
             on_disk, existing,
             "a failed persist must leave the existing snapshot byte-for-byte untouched"
         );
+    }
+
+    /// H1 (review r2): a payload whose `extra_ca_certs_pem` this host cannot
+    /// load is refused at adoption — the previous snapshot stays byte-for-byte
+    /// in force, the verdict names the managed tier and the block (never the
+    /// bytes) and classifies 78 — while the same payload with a loadable
+    /// bundle persists.
+    ///
+    /// Mutation: delete the `parse_pem` call in `persist_managed_config` —
+    /// the red half persists the unusable bundle and this reds.
+    #[tokio::test]
+    async fn persist_managed_config_refuses_an_extra_ca_bundle_this_host_cannot_load() {
+        use crate::cli::ClassifyExitCode as _;
+        use crate::tls::test_pki::{TestPki, pem_block};
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateStore::new(dir.path());
+        std::fs::create_dir_all(state.managed_config_dir()).unwrap();
+        let existing = format!(
+            "{{\"source\":\"corp.example.com/ocx-config:user\",\"digest\":\"sha256:{}\",\"fetched_at\":\"old\"}}",
+            "a".repeat(64)
+        );
+        std::fs::write(state.managed_config_snapshot_file(), &existing).unwrap();
+
+        let unusable = format!(
+            "extra_ca_certs_pem = '''\n{}'''\n",
+            pem_block("CERTIFICATE", b"this is not DER at all")
+        );
+        let result = persist_managed_config(&state, &identifier(), fetched(&unusable)).await;
+        let Err(error @ ManagedConfigPersistError::ExtraCaCertsInvalid { .. }) = result else {
+            panic!("an unusable extra_ca_certs_pem must be refused at adoption, got {result:?}");
+        };
+        assert_eq!(error.classify(), Some(crate::cli::ExitCode::ConfigError));
+        let chain = crate::tls::test_pki::error_chain(&error);
+        assert!(
+            chain.contains("extra_ca_certs_pem (managed config)") && chain.contains("block 1 does not parse"),
+            "the verdict names the tier and the block: {chain}"
+        );
+        assert!(!chain.contains("this is not DER"), "never the bytes (D-11): {chain}");
+        assert_eq!(
+            std::fs::read_to_string(state.managed_config_snapshot_file()).unwrap(),
+            existing,
+            "the previous snapshot stays in force"
+        );
+
+        let usable = format!("extra_ca_certs_pem = '''\n{}'''\n", TestPki::mint().root_pem());
+        let snapshot = persist_managed_config(&state, &identifier(), fetched(&usable))
+            .await
+            .expect("positive control: a loadable bundle persists");
+        assert_eq!(snapshot.config, usable);
     }
 
     /// S2: the full fetch-then-persist path over a package whose `config.toml`

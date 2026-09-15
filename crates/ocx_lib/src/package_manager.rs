@@ -427,6 +427,12 @@ impl PackageManager {
         self
     }
 
+    /// The dedicated managed-config-fetch client, if one was injected — the
+    /// client whose trust set must be the local-only view (D-6, S-006).
+    pub fn managed_config_client(&self) -> Option<&oci::Client> {
+        self.managed_config_client.as_ref()
+    }
+
     /// Whether a managed-config fetch can even be attempted: `false` when the
     /// dedicated managed-config client is absent (offline).
     ///

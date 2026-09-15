@@ -305,6 +305,18 @@ impl PackageManager {
                             digest: snapshot.digest,
                         }
                     }
+                    // A bundle this host cannot load is a publisher-side
+                    // defect the operator must see (the tier stays on the
+                    // previous snapshot until the payload is fixed); every
+                    // other persist failure is transient and stays at debug.
+                    Err(error @ crate::managed_config::ManagedConfigPersistError::ExtraCaCertsInvalid { .. }) => {
+                        log::warn!(
+                            "managed-config apply-on-drift refused '{}': {}",
+                            resolved.source,
+                            crate::error::render_chain(&error)
+                        );
+                        ManagedConfigRefreshOutcome::Unreachable
+                    }
                     Err(error) => {
                         log::debug!("managed-config apply-on-drift persist failed: {error}");
                         ManagedConfigRefreshOutcome::Unreachable

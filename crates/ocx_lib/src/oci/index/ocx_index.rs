@@ -217,6 +217,10 @@ pub struct ReqwestIndexTransport {
     hardening: TransportHardening,
     policy: RetryPolicy,
     budget: RetryBudget,
+    /// Operator-supplied extra CA roots (ocx#448, C-007). Defaults to
+    /// [`ExtraRoots::default`](crate::tls::ExtraRoots::default)
+    /// (empty); set via [`ReqwestIndexTransport::with_extra_roots`].
+    extra_roots: crate::tls::ExtraRoots,
 }
 
 /// Builds the index HTTP client with the bundled Mozilla CA roots, under
@@ -231,8 +235,10 @@ pub struct ReqwestIndexTransport {
 /// same set from the `oci-client` fork's `ClientConfig::default()` (a
 /// different client type, so it cannot share a builder with this one); the
 /// root-seeding loop itself is shared with `forge::github`'s bare-`reqwest`
-/// client via [`crate::utility::tls::seed_embedded_roots`].
-fn build_index_http_client(hardening: &TransportHardening) -> reqwest::Client {
+/// client via [`crate::utility::tls::seed_embedded_roots`]. `extra_roots`
+/// chains operator-supplied CA roots (ocx#448, C-007) on top of that set —
+/// the default (empty) value changes nothing.
+fn build_index_http_client(hardening: &TransportHardening, extra_roots: &crate::tls::ExtraRoots) -> reqwest::Client {
     // Transport hardening applied to every build this function can return, so
     // no unhardened client can escape it: bounded connect, a per-frame idle
     // bound and a per-attempt outer cap (CWE-400, all three composed — see
@@ -247,12 +253,17 @@ fn build_index_http_client(hardening: &TransportHardening) -> reqwest::Client {
             .timeout(hardening.outer_cap)
             .redirect(reqwest::redirect::Policy::none())
     };
-    let builder = crate::utility::tls::seed_embedded_roots(harden(reqwest::Client::builder()));
+    let builder = extra_roots.seed(crate::utility::tls::seed_embedded_roots(harden(
+        reqwest::Client::builder(),
+    )));
     builder.build().unwrap_or_else(|error| {
         // The bundled-roots build cannot hit the empty-store panic (roots are
-        // non-empty). A different init failure is not expected; fall back so
-        // construction stays infallible, logging so it is not silent — the
-        // fallback keeps the same timeout + no-redirect hardening.
+        // non-empty), and an operator root cannot fail it either: every
+        // `ExtraRoots` survived `parse_pem`'s probe build of the same set
+        // (C-004), so this arm never trades away a configured root (D-9). A
+        // different init failure is not expected; fall back so construction
+        // stays infallible, logging so it is not silent — the fallback keeps
+        // the same timeout + no-redirect hardening.
         //
         // There is deliberately no third arm. It used to be a bare
         // `reqwest::Client::new()`, which carries reqwest's defaults — no
@@ -330,6 +341,25 @@ impl ReqwestIndexTransport {
         Self::with_hardening(&testing_hardening_override().unwrap_or(shipped), RetryPolicy::default())
     }
 
+    /// Sets the operator-supplied extra CA roots (ocx#448) this transport's
+    /// client trusts in addition to the bundled Mozilla set (C-006/C-007).
+    ///
+    /// **Must be called before the first request.** `client()` builds
+    /// and caches the `reqwest::Client` lazily on first use, into a
+    /// `OnceLock` shared by every clone; a client already built keeps
+    /// whatever roots it was built with, and this setter has no effect on
+    /// it once that has happened. [`OcxIndex::resolve_base_url`] calls this
+    /// once, right after construction, before the transport is handed to
+    /// [`OcxIndex::new`].
+    pub fn with_extra_roots(mut self, extra_roots: crate::tls::ExtraRoots) -> Self {
+        debug_assert!(
+            self.client.get().is_none(),
+            "with_extra_roots after the client was built"
+        );
+        self.extra_roots = extra_roots;
+        self
+    }
+
     /// Construction with the bounds injected — the seam D-011 keeps so a
     /// fixture can assert the same semantics in milliseconds rather than
     /// waiting out the shipped minutes against a real socket.
@@ -339,12 +369,16 @@ impl ReqwestIndexTransport {
             hardening: *hardening,
             policy,
             budget: RetryBudget::new(),
+            // Empty by default; `resolve_base_url` sets the resolved
+            // `ExtraRoots` via `with_extra_roots` before any request.
+            extra_roots: crate::tls::ExtraRoots::default(),
         }
     }
 
     /// The HTTP client, built on first use. Every request goes through here.
     fn client(&self) -> &reqwest::Client {
-        self.client.get_or_init(|| build_index_http_client(&self.hardening))
+        self.client
+            .get_or_init(|| build_index_http_client(&self.hardening, &self.extra_roots))
     }
 
     /// One attempt at `url`: everything from dispatching the request to the
@@ -919,6 +953,15 @@ impl OcxIndex {
         &self.trusted_hosts
     }
 
+    /// The physical-fetch client this source pulls resolved packages through
+    /// ([`OcxIndexConfig::client`]) — read-only accessor over construction
+    /// input, like [`Self::trusted_hosts`], so a caller can confirm the
+    /// client a built source carries (its extra CA roots, ocx#448) without a
+    /// dial.
+    pub fn client(&self) -> &oci::Client {
+        &self.client
+    }
+
     /// The authorities this source dials over plain HTTP, or empty when none
     /// were configured — see [`OcxIndexConfig::insecure_hosts`]. Decides which
     /// proxy setting applies to a physical dial, and nothing else.
@@ -947,6 +990,10 @@ impl OcxIndex {
     /// | `file` | [`FileIndexTransport`](super::FileIndexTransport), as a **configured base only** — empty authority, absolute path, and no `[mirrors]` override (which is host-keyed, and a `file` base has no host) |
     /// | anything else | refused |
     ///
+    /// `extra_roots` is the caller's merged extra-CA view (C-007), threaded
+    /// into the `https`/`http` arm's [`ReqwestIndexTransport`]; the `file://`
+    /// arm ignores it — a local path has no TLS handshake to trust.
+    ///
     /// # Errors
     ///
     /// [`Error::PlainHttpIndexNotAllowed`](super::error::Error::PlainHttpIndexNotAllowed)
@@ -959,6 +1006,7 @@ impl OcxIndex {
         namespace: &str,
         mirrors_index: &BTreeMap<String, crate::config::mirror::ParsedMirror>,
         insecure_hosts: &[String],
+        extra_roots: &crate::tls::ExtraRoots,
     ) -> Result<IndexBase> {
         let base = config
             .registries
@@ -1054,7 +1102,7 @@ impl OcxIndex {
 
         Ok(IndexBase {
             url,
-            transport: Box::new(ReqwestIndexTransport::new()),
+            transport: Box::new(ReqwestIndexTransport::new().with_extra_roots(extra_roots.clone())),
         })
     }
 
@@ -2472,7 +2520,7 @@ mod tests {
     fn resolve_base_url_defaults_and_honors_registries_index() {
         let empty = crate::config::Config::default();
         assert_eq!(
-            OcxIndex::resolve_base_url(&empty, "ocx.sh", &no_mirrors(), &[])
+            OcxIndex::resolve_base_url(&empty, "ocx.sh", &no_mirrors(), &[], &crate::tls::ExtraRoots::default())
                 .unwrap()
                 .url,
             DEFAULT_INDEX_BASE_URL,
@@ -2482,16 +2530,28 @@ mod tests {
         let config: crate::config::Config =
             toml::from_str("[registries.\"ocx.sh\"]\nindex = \"https://artifactory.corp/ocx-index/\"").unwrap();
         assert_eq!(
-            OcxIndex::resolve_base_url(&config, "ocx.sh", &no_mirrors(), &[])
-                .unwrap()
-                .url,
+            OcxIndex::resolve_base_url(
+                &config,
+                "ocx.sh",
+                &no_mirrors(),
+                &[],
+                &crate::tls::ExtraRoots::default()
+            )
+            .unwrap()
+            .url,
             "https://artifactory.corp/ocx-index",
             "[registries.\"<ns>\"] index must replace the base URL (trailing slash trimmed)"
         );
         assert_eq!(
-            OcxIndex::resolve_base_url(&config, "other.sh", &no_mirrors(), &[])
-                .unwrap()
-                .url,
+            OcxIndex::resolve_base_url(
+                &config,
+                "other.sh",
+                &no_mirrors(),
+                &[],
+                &crate::tls::ExtraRoots::default()
+            )
+            .unwrap()
+            .url,
             DEFAULT_INDEX_BASE_URL,
             "an unlisted namespace falls back to the default"
         );
@@ -2503,8 +2563,14 @@ mod tests {
             toml::from_str("[registries.\"ocx.sh\"]\nindex = \"http://mirror.corp/ocx-index\"").unwrap();
 
         // http base without the host in the insecure list → hard config error.
-        let error = OcxIndex::resolve_base_url(&config, "ocx.sh", &no_mirrors(), &[])
-            .expect_err("an http index base must be refused without an insecure-host listing");
+        let error = OcxIndex::resolve_base_url(
+            &config,
+            "ocx.sh",
+            &no_mirrors(),
+            &[],
+            &crate::tls::ExtraRoots::default(),
+        )
+        .expect_err("an http index base must be refused without an insecure-host listing");
         assert!(
             matches!(
                 error,
@@ -2517,18 +2583,30 @@ mod tests {
         // Same base allowed once the host is listed.
         let insecure = vec!["mirror.corp".to_string()];
         assert_eq!(
-            OcxIndex::resolve_base_url(&config, "ocx.sh", &no_mirrors(), &insecure)
-                .unwrap()
-                .url,
+            OcxIndex::resolve_base_url(
+                &config,
+                "ocx.sh",
+                &no_mirrors(),
+                &insecure,
+                &crate::tls::ExtraRoots::default()
+            )
+            .unwrap()
+            .url,
             "http://mirror.corp/ocx-index",
             "an http base is allowed when its host is in the resolved plain-HTTP set"
         );
 
         // The default https base URL is never gated.
         assert_eq!(
-            OcxIndex::resolve_base_url(&crate::config::Config::default(), "ocx.sh", &no_mirrors(), &[])
-                .unwrap()
-                .url,
+            OcxIndex::resolve_base_url(
+                &crate::config::Config::default(),
+                "ocx.sh",
+                &no_mirrors(),
+                &[],
+                &crate::tls::ExtraRoots::default()
+            )
+            .unwrap()
+            .url,
             DEFAULT_INDEX_BASE_URL,
             "https must pass the gate untouched"
         );
@@ -2558,13 +2636,26 @@ mod tests {
         );
 
         assert_eq!(
-            OcxIndex::resolve_base_url(&config, "ocx.sh", &no_mirrors(), &licensed)
-                .expect("a config-licensed plain-HTTP index base must resolve")
-                .url,
+            OcxIndex::resolve_base_url(
+                &config,
+                "ocx.sh",
+                &no_mirrors(),
+                &licensed,
+                &crate::tls::ExtraRoots::default()
+            )
+            .expect("a config-licensed plain-HTTP index base must resolve")
+            .url,
             "http://index.corp:8080/ocx-index",
         );
         assert!(
-            OcxIndex::resolve_base_url(&config, "ocx.sh", &no_mirrors(), &[]).is_err(),
+            OcxIndex::resolve_base_url(
+                &config,
+                "ocx.sh",
+                &no_mirrors(),
+                &[],
+                &crate::tls::ExtraRoots::default()
+            )
+            .is_err(),
             "and it must still be refused when nothing licenses it"
         );
     }
@@ -2578,8 +2669,14 @@ mod tests {
         let config: crate::config::Config =
             toml::from_str("[registries.\"ocx.sh\"]\nindex = \"HTTP://mirror.corp/ocx-index\"").unwrap();
 
-        let error = OcxIndex::resolve_base_url(&config, "ocx.sh", &no_mirrors(), &[])
-            .expect_err("a mixed-case HTTP:// index base must be refused without an insecure-host listing");
+        let error = OcxIndex::resolve_base_url(
+            &config,
+            "ocx.sh",
+            &no_mirrors(),
+            &[],
+            &crate::tls::ExtraRoots::default(),
+        )
+        .expect_err("a mixed-case HTTP:// index base must be refused without an insecure-host listing");
         assert!(
             matches!(
                 error,
@@ -2602,9 +2699,15 @@ mod tests {
         );
 
         assert_eq!(
-            OcxIndex::resolve_base_url(&crate::config::Config::default(), "ocx.sh", &mirrors_index, &[])
-                .unwrap()
-                .url,
+            OcxIndex::resolve_base_url(
+                &crate::config::Config::default(),
+                "ocx.sh",
+                &mirrors_index,
+                &[],
+                &crate::tls::ExtraRoots::default()
+            )
+            .unwrap()
+            .url,
             "https://artifactory.corp/ocx-index",
             "a mirrors index-role override for the base's traffic host must replace the base URL"
         );
@@ -2617,9 +2720,15 @@ mod tests {
             crate::config::mirror::parse_url("https://artifactory.corp/ocx-index").unwrap(),
         );
         assert_eq!(
-            OcxIndex::resolve_base_url(&crate::config::Config::default(), "ocx.sh", &unrelated_mirror, &[])
-                .unwrap()
-                .url,
+            OcxIndex::resolve_base_url(
+                &crate::config::Config::default(),
+                "ocx.sh",
+                &unrelated_mirror,
+                &[],
+                &crate::tls::ExtraRoots::default()
+            )
+            .unwrap()
+            .url,
             DEFAULT_INDEX_BASE_URL,
             "a mirror keyed by an unrelated host must not affect this base URL"
         );
@@ -2653,6 +2762,7 @@ mod tests {
             "ocx.sh",
             &no_mirrors(),
             &[],
+            &crate::tls::ExtraRoots::default(),
         )
         .expect_err("ftp is outside the closed scheme set");
         let rendered = error.to_string();
@@ -2669,8 +2779,14 @@ mod tests {
         // `parse_url` and fails later as a transport error — wrong class,
         // wrong moment.
         for base in ["ftp://mirror.corp/ocx-index", "gopher://mirror.corp"] {
-            let error = OcxIndex::resolve_base_url(&index_config(base), "ocx.sh", &no_mirrors(), &[])
-                .expect_err("a scheme outside the closed set must be refused");
+            let error = OcxIndex::resolve_base_url(
+                &index_config(base),
+                "ocx.sh",
+                &no_mirrors(),
+                &[],
+                &crate::tls::ExtraRoots::default(),
+            )
+            .expect_err("a scheme outside the closed set must be refused");
             expect_invalid_index_url(&error, super::super::error::INDEX_URL_FROM_REGISTRIES);
         }
     }
@@ -2688,8 +2804,14 @@ mod tests {
             ("index.corp.example", "https://index.corp.example"),
             ("srv/ocx-index", "https://srv/ocx-index"),
         ] {
-            let resolved = OcxIndex::resolve_base_url(&index_config(base), "ocx.sh", &no_mirrors(), &[])
-                .expect("a value with no `file://` names a host, not a path");
+            let resolved = OcxIndex::resolve_base_url(
+                &index_config(base),
+                "ocx.sh",
+                &no_mirrors(),
+                &[],
+                &crate::tls::ExtraRoots::default(),
+            )
+            .expect("a value with no `file://` names a host, not a path");
             assert_eq!(
                 resolved.url, expected,
                 "`{base}` must resolve over https; a file base would read `file://…`"
@@ -2702,18 +2824,36 @@ mod tests {
         // C-018 `file` row: empty authority + absolute path, yielding a
         // `file://<abs>` base. The scheme of the returned URL is what proves
         // the `FileIndexTransport` branch was taken — the two are one decision.
-        let base = OcxIndex::resolve_base_url(&index_config("file:///srv/ocx-index"), "ocx.sh", &no_mirrors(), &[])
-            .expect("a file:// base with an empty authority and an absolute path is permitted");
+        let base = OcxIndex::resolve_base_url(
+            &index_config("file:///srv/ocx-index"),
+            "ocx.sh",
+            &no_mirrors(),
+            &[],
+            &crate::tls::ExtraRoots::default(),
+        )
+        .expect("a file:// base with an empty authority and an absolute path is permitted");
         assert_eq!(base.url, "file:///srv/ocx-index");
 
-        let trimmed = OcxIndex::resolve_base_url(&index_config("file:///srv/ocx-index/"), "ocx.sh", &no_mirrors(), &[])
-            .expect("a trailing slash is trimmed, matching every other base");
+        let trimmed = OcxIndex::resolve_base_url(
+            &index_config("file:///srv/ocx-index/"),
+            "ocx.sh",
+            &no_mirrors(),
+            &[],
+            &crate::tls::ExtraRoots::default(),
+        )
+        .expect("a trailing slash is trimmed, matching every other base");
         assert_eq!(trimmed.url, "file:///srv/ocx-index");
 
         // A drive with a directory under it stays valid — the bare-drive
         // refusal must not swallow the Windows form C-018's table admits.
-        let drive = OcxIndex::resolve_base_url(&index_config("file:///C:/srv/x"), "ocx.sh", &no_mirrors(), &[])
-            .expect("a drive-qualified path is a valid file base");
+        let drive = OcxIndex::resolve_base_url(
+            &index_config("file:///C:/srv/x"),
+            "ocx.sh",
+            &no_mirrors(),
+            &[],
+            &crate::tls::ExtraRoots::default(),
+        )
+        .expect("a drive-qualified path is a valid file base");
         assert_eq!(drive.url, "file:///C:/srv/x");
     }
 
@@ -2723,8 +2863,14 @@ mod tests {
         // it read as schemeless, defaulted to https, and `parse_url` split it
         // into host `file:` + path `srv/x` — an `IndexBase` pointed at a host
         // named `file`, failing much later as a DNS lookup.
-        let error = OcxIndex::resolve_base_url(&index_config("file:/srv/x"), "ocx.sh", &no_mirrors(), &[])
-            .expect_err("a file base written with one slash must be refused");
+        let error = OcxIndex::resolve_base_url(
+            &index_config("file:/srv/x"),
+            "ocx.sh",
+            &no_mirrors(),
+            &[],
+            &crate::tls::ExtraRoots::default(),
+        )
+        .expect_err("a file base written with one slash must be refused");
         let rendered = error.to_string();
         assert!(
             rendered.contains("file:///srv/x"),
@@ -2739,8 +2885,14 @@ mod tests {
         // `FILE:` is the same mistake shouted, and `file:` alone names no
         // directory at all. Neither may reach the https default.
         for base in ["FILE:/srv/x", "file:", "file:srv/x"] {
-            let error = OcxIndex::resolve_base_url(&index_config(base), "ocx.sh", &no_mirrors(), &[])
-                .expect_err("a single-colon file base must be refused whatever follows it");
+            let error = OcxIndex::resolve_base_url(
+                &index_config(base),
+                "ocx.sh",
+                &no_mirrors(),
+                &[],
+                &crate::tls::ExtraRoots::default(),
+            )
+            .expect_err("a single-colon file base must be refused whatever follows it");
             assert!(
                 error.to_string().contains("file://"),
                 "the refusal must name the spelling that works: {error}"
@@ -2749,8 +2901,14 @@ mod tests {
 
         // A relative tail gets the shape, not a literal: `file://srv/x` names a
         // non-empty authority, which `resolve_file_base` refuses in turn.
-        let error = OcxIndex::resolve_base_url(&index_config("file:srv/x"), "ocx.sh", &no_mirrors(), &[])
-            .expect_err("a relative file tail is still refused");
+        let error = OcxIndex::resolve_base_url(
+            &index_config("file:srv/x"),
+            "ocx.sh",
+            &no_mirrors(),
+            &[],
+            &crate::tls::ExtraRoots::default(),
+        )
+        .expect_err("a relative file tail is still refused");
         assert!(
             !error.to_string().contains("file://srv/x"),
             "a suggested spelling that is itself refused is worse than none: {error}"
@@ -2766,8 +2924,14 @@ mod tests {
             ("index.corp.example", "https://index.corp.example"),
             ("profile.corp.example/ocx", "https://profile.corp.example/ocx"),
         ] {
-            let resolved = OcxIndex::resolve_base_url(&index_config(base), "ocx.sh", &no_mirrors(), &[])
-                .expect("a schemeless base defaults to https");
+            let resolved = OcxIndex::resolve_base_url(
+                &index_config(base),
+                "ocx.sh",
+                &no_mirrors(),
+                &[],
+                &crate::tls::ExtraRoots::default(),
+            )
+            .expect("a schemeless base defaults to https");
             assert_eq!(resolved.url, expected);
         }
     }
@@ -2779,8 +2943,14 @@ mod tests {
         // (WP4's regression guard pins that), so this gate is the only refusal.
         // `file://srv` has no `/` at all, so `srv` is the authority.
         for base in ["file://localhost/srv/x", "file://host.example/srv/x", "file://srv"] {
-            let error = OcxIndex::resolve_base_url(&index_config(base), "ocx.sh", &no_mirrors(), &[])
-                .expect_err("a file:// base needs an empty authority");
+            let error = OcxIndex::resolve_base_url(
+                &index_config(base),
+                "ocx.sh",
+                &no_mirrors(),
+                &[],
+                &crate::tls::ExtraRoots::default(),
+            )
+            .expect_err("a file:// base needs an empty authority");
             expect_invalid_index_url(&error, super::super::error::INDEX_URL_FROM_REGISTRIES);
         }
     }
@@ -2791,8 +2961,14 @@ mod tests {
         // all have an EMPTY authority and are refused for naming no directory.
         // `file:///C:/` is the dangerous one — see the assertion below.
         for base in ["file://", "file:///", "file:///C:/", "file:///c:"] {
-            let error = OcxIndex::resolve_base_url(&index_config(base), "ocx.sh", &no_mirrors(), &[])
-                .expect_err("a file:// base must name a directory");
+            let error = OcxIndex::resolve_base_url(
+                &index_config(base),
+                "ocx.sh",
+                &no_mirrors(),
+                &[],
+                &crate::tls::ExtraRoots::default(),
+            )
+            .expect_err("a file:// base must name a directory");
             expect_invalid_index_url(&error, super::super::error::INDEX_URL_FROM_REGISTRIES);
         }
     }
@@ -2824,8 +3000,14 @@ mod tests {
             crate::config::mirror::parse_url("file://localhost/srv/x").unwrap(),
         );
 
-        let error = OcxIndex::resolve_base_url(&index_config("https://up.example"), "ocx.sh", &mirrors_index, &[])
-            .expect_err("a [mirrors] index-role override may not route index traffic to file://");
+        let error = OcxIndex::resolve_base_url(
+            &index_config("https://up.example"),
+            "ocx.sh",
+            &mirrors_index,
+            &[],
+            &crate::tls::ExtraRoots::default(),
+        )
+        .expect_err("a [mirrors] index-role override may not route index traffic to file://");
         expect_invalid_index_url(&error, &super::super::error::index_url_from_mirrors("up.example"));
     }
 
@@ -2840,8 +3022,14 @@ mod tests {
             crate::config::mirror::parse_url("https://artifactory.corp").unwrap(),
         );
 
-        let base = OcxIndex::resolve_base_url(&index_config("file:///srv/x"), "ocx.sh", &mirrors_index, &[])
-            .expect("a file base resolves without consulting the host-keyed mirror map");
+        let base = OcxIndex::resolve_base_url(
+            &index_config("file:///srv/x"),
+            "ocx.sh",
+            &mirrors_index,
+            &[],
+            &crate::tls::ExtraRoots::default(),
+        )
+        .expect("a file base resolves without consulting the host-keyed mirror map");
         assert_eq!(base.url, "file:///srv/x");
     }
 
@@ -4353,6 +4541,45 @@ mod transport_wire_tests {
             cap: Duration::from_millis(1),
             ..RetryPolicy::default()
         }
+    }
+
+    // ── ocx#448 C-007 / DX-4 — extra CA roots reach the index client ─────────
+
+    /// C-007 / DX-4 / S-002 (unit tier): `with_extra_roots` before the first
+    /// request makes the lazily built client trust the operator's root — the
+    /// seeded transport completes the handshake against an in-process server
+    /// signed by a minted root (200); a transport without the call ends in
+    /// `UnknownIssuer`. Dialed by IP: no resolver, no proxy in the path.
+    ///
+    /// Goes through `client()` rather than `get()` so the negative half reads
+    /// the raw reqwest chain instead of a retry ladder's wrapped verdict.
+    #[tokio::test]
+    async fn extra_ca_index_transport_trusts_a_root_set_before_the_first_request() {
+        use crate::tls::test_pki::{TestPki, assert_untrusted_root, error_chain, serve_https};
+
+        let pki = TestPki::mint();
+        let addr = serve_https(&pki).await;
+        let url = format!("https://{addr}/index.json");
+
+        let seeded =
+            ReqwestIndexTransport::with_hardening(&quick_bounds(), quick_ladder()).with_extra_roots(pki.roots());
+        let response = seeded
+            .client()
+            .get(&url)
+            .send()
+            .await
+            .expect("the seeded index client trusts the minted root");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let unseeded = ReqwestIndexTransport::with_hardening(&quick_bounds(), quick_ladder());
+        let error = unseeded
+            .client()
+            .get(&url)
+            .send()
+            .await
+            .expect_err("without the root the index client must refuse the handshake");
+        let chain = error_chain(&error);
+        assert_untrusted_root(&chain);
     }
 
     // ── C-016 — a retryable status is retried; a terminal one is not ─────────

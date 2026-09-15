@@ -91,9 +91,18 @@ impl GitHubForge {
     ///
     /// Returns [`ForgeError::ClientBuild`] when the hardened HTTP client cannot
     /// be constructed.
-    pub fn new(credentials: ForgeCredentials, host: Option<&str>) -> Result<Self, ForgeError> {
+    ///
+    /// The client is built with `extra_roots` already trusted (ocx#448,
+    /// C-007): [`super::ForgeKind::client`], the one caller, always has the
+    /// operator's merged root set in hand before a client is needed, so
+    /// there is no default-then-rebuild.
+    pub fn new(
+        credentials: ForgeCredentials,
+        host: Option<&str>,
+        extra_roots: &crate::tls::ExtraRoots,
+    ) -> Result<Self, ForgeError> {
         let base_url = testing_base_url_override().unwrap_or_else(|| api_base_url(host));
-        Self::build(credentials, base_url)
+        Self::build(credentials, base_url, extra_roots)
     }
 
     /// Build a client against an explicit base URL (acceptance fake-forge seam).
@@ -104,12 +113,16 @@ impl GitHubForge {
     /// be constructed.
     #[cfg(any(test, feature = "__testing"))]
     pub fn with_base_url(credentials: ForgeCredentials, base_url: String) -> Result<Self, ForgeError> {
-        Self::build(credentials, base_url)
+        Self::build(credentials, base_url, &crate::tls::ExtraRoots::default())
     }
 
-    fn build(credentials: ForgeCredentials, base_url: String) -> Result<Self, ForgeError> {
+    fn build(
+        credentials: ForgeCredentials,
+        base_url: String,
+        extra_roots: &crate::tls::ExtraRoots,
+    ) -> Result<Self, ForgeError> {
         Ok(Self {
-            client: build_forge_http_client(REQUEST_TIMEOUT)?,
+            client: build_forge_http_client(REQUEST_TIMEOUT, extra_roots)?,
             credentials,
             base_url: base_url.trim_end_matches('/').to_string(),
         })
@@ -1156,6 +1169,44 @@ mod tests {
 
     use super::super::{CapabilityCheck, ForgeToken};
     use super::*;
+
+    /// C-007 / DX-5: the roots handed to `build` are what make the forge
+    /// trust the operator's root — a client built with the default set does
+    /// not. One in-process HTTPS server signed by a minted root: the forge
+    /// built with no roots ends in `UnknownIssuer`, the one built with the
+    /// root gets a 200. Both halves in one test so the seam cannot pass by
+    /// never threading the roots.
+    ///
+    /// Mutation: have `build` pass `&ExtraRoots::default()` to
+    /// `build_forge_http_client` — the second half reds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extra_ca_build_threads_the_roots_into_the_private_client() {
+        use crate::tls::test_pki::{TestPki, assert_untrusted_root, error_chain, serve_https};
+
+        let pki = TestPki::mint();
+        let addr = serve_https(&pki).await;
+        let credentials = || ForgeCredentials::new(ForgeToken::new("token".to_string()));
+        let forge = GitHubForge::with_base_url(credentials(), format!("https://{addr}")).expect("the forge builds");
+
+        let error = forge
+            .client
+            .get(forge.url("/user"))
+            .send()
+            .await
+            .expect_err("a client built with the default roots does not know the minted root");
+        let chain = error_chain(&error);
+        assert_untrusted_root(&chain);
+
+        let forge =
+            GitHubForge::build(credentials(), format!("https://{addr}"), &pki.roots()).expect("the forge builds");
+        let response = forge
+            .client
+            .get(forge.url("/user"))
+            .send()
+            .await
+            .expect("a client built with the root trusts it");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
 
     /// One recorded request against [`FakeForge`].
     #[derive(Clone)]
