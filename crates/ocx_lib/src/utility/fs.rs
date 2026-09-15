@@ -18,7 +18,7 @@ pub use assemble::{
     AssemblyError, AssemblyStats, LayerPlacement, assemble_from_layer, assemble_from_layers,
     assemble_from_layers_with_layouts,
 };
-pub use bounded_read::{BoundedReadError, read_bounded};
+pub use bounded_read::{BoundedReadError, read_bounded, read_bounded_async};
 pub use dir_walker::{DirWalker, WalkDecision};
 pub use drop_file::DropFile;
 pub use empty_or_absent::{EmptyOrAbsentError, ensure_empty_or_absent};

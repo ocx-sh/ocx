@@ -53,6 +53,44 @@ pub enum BoundedReadError {
     },
 }
 
+impl BoundedReadError {
+    /// The refusal as the `std::io::Error` a caller's own read-failure variant
+    /// carries: the OS error itself for [`Self::Io`], and for the two refusals
+    /// an `InvalidInput` naming only the rule (`not a regular file`, `over the
+    /// <N>-byte cap`) — never the path, which the caller's variant names once
+    /// itself, and which may be a pasted secret the caller redacts (D-11).
+    pub fn into_io_error(self) -> std::io::Error {
+        match self {
+            Self::Io { source, .. } => source,
+            Self::NotRegularFile { .. } => std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"),
+            Self::TooLarge { cap, .. } => {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("over the {cap}-byte cap"))
+            }
+        }
+    }
+}
+
+/// [`read_bounded`] from an async caller: the blocking read goes to the pool
+/// rather than growing an async twin of the guard.
+///
+/// A `JoinError` becomes [`BoundedReadError::Io`] carrying `ErrorKind::Other`,
+/// never `NotFound`, so a panicking pool task can never be mistaken for an
+/// absent file by a caller that treats absence as a fall-through.
+///
+/// # Errors
+///
+/// As [`read_bounded`].
+pub async fn read_bounded_async(path: &Path, cap: u64) -> Result<Vec<u8>, BoundedReadError> {
+    let target = path.to_path_buf();
+    match tokio::task::spawn_blocking(move || read_bounded(&target, cap)).await {
+        Ok(result) => result,
+        Err(join) => Err(BoundedReadError::Io {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(format!("bounded read task panicked: {join}")),
+        }),
+    }
+}
+
 /// Read all of `path`, refusing a non-regular file and anything over `cap`
 /// bytes.
 ///
@@ -199,5 +237,31 @@ mod tests {
             panic!("a missing file is an I/O failure, not a refusal");
         };
         assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// A FIFO with no writer blocks `open(2)` until one appears — with a bare
+    /// `std::fs::read`, forever. Two guards keep that from happening (the
+    /// pre-open metadata check, then `O_NONBLOCK` on the open itself), so
+    /// this only reds once *both* are gone; the `recv_timeout` is what turns
+    /// that red into a failure rather than a hung test.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_without_blocking_the_open() {
+        let dir = tempfile::tempdir().expect("scratch dir");
+        let fifo = dir.path().join("pipe");
+        crate::test::fifo::mkfifo(&fifo);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let target = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(read_bounded(&target, 64));
+        });
+        let outcome = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the read must return promptly, not block in open(2) waiting for a writer");
+        assert!(
+            matches!(outcome, Err(BoundedReadError::NotRegularFile { .. })),
+            "a FIFO is refused as not a regular file, got {outcome:?}"
+        );
     }
 }

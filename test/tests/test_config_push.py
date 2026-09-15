@@ -14,10 +14,14 @@ amendment); plan ``.claude/state/plans/plan_managed_config_v2.md`` Phase 1.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import tomllib
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from src.helpers import SIGSTORE_DIR, push_managed_config
 from src.registry import fetch_manifest_from_registry, push_raw_config_package
@@ -126,6 +130,40 @@ def test_config_push_rejects_oversize_payload_exit_78(
     payload = _write_payload(tmp_path, "# padding\n" * 7_000)  # ~70 KiB > 64 KiB cap
     result = ocx.run("config", "push", "-i", f"{unique_repo}:1.0.0", str(payload), check=False)
     assert result.returncode == 78, result.stderr
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX")
+def test_config_push_fifo_candidate_exits_74_promptly(
+    ocx: OcxRunner, unique_repo: str, registry: str, tmp_path: Path
+) -> None:
+    """A candidate that is a FIFO exits 74 promptly — the bounded reader
+    refuses a non-regular file before ever opening it, rather than blocking
+    forever on `open(2)` with no writer on the other end — and publishes
+    nothing."""
+    fifo = tmp_path / "corp-config.fifo"
+    os.mkfifo(fifo)
+
+    try:
+        result = subprocess.run(
+            [str(ocx.binary), "--format", "json", "config", "push", "-i", f"{unique_repo}:1.0.0", str(fifo)],
+            env=ocx.env,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("ocx config push hung on a FIFO candidate instead of refusing it")
+
+    assert result.returncode == 74, (
+        f"a FIFO candidate must exit IoError(74); rc={result.returncode}\nstderr:\n{result.stderr}"
+    )
+    assert "corp-config.fifo" in result.stderr, f"the refusal must name the path: {result.stderr}"
+    assert "not a regular file" in result.stderr, (
+        f"the refusal must state why the FIFO is refused: {result.stderr}"
+    )
+    assert _list_tags(registry, unique_repo) == set(), "a refused payload must leave the repository absent"
 
 
 def test_config_push_inlines_extra_ca_certs_path(

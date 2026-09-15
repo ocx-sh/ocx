@@ -19,6 +19,7 @@
 //! | [`declared_extra_ca_certs`] | Pure: the path-form `extra_ca_certs` a payload declares, if any | Unit-testable with synthetic text |
 //! | [`inline_extra_ca_certs`] | Pure: rewrite a path-form `extra_ca_certs` into `extra_ca_certs_pem` | Unit-testable with synthetic text |
 //! | [`guard_inlined_payload_size`] | Pure: re-check the post-inline payload against [`crate::managed_config::MAX_MANAGED_CONFIG_BYTES`] | Unit-testable with synthetic bytes |
+//! | [`read_candidate_payload`] | I/O: the bounded candidate read `config push` and `config test` share | Unit-testable with a FIFO and an oversize file |
 //! | [`publish_managed_config`] | I/O + network: read the trust root and the CA bundle, stage, bundle, push (cascade-aware) | Acceptance test |
 //!
 //! ## Why the trust root is inlined at publish time
@@ -41,6 +42,7 @@ use crate::package::metadata::{Metadata, bundle};
 use crate::publisher::{LayerRef, Publisher, PushOutcome};
 use crate::tls::{ExtraRoots, ExtraRootsSource, TlsError};
 use crate::utility::fs::path::FileReference;
+use crate::utility::fs::{BoundedReadError, read_bounded_async};
 
 // ── Options ───────────────────────────────────────────────────────────────────
 
@@ -200,8 +202,9 @@ pub enum ManagedConfigPublishError {
     /// at adoption (`persistence.rs`, `ExtraCaCertsInvalid`) and keeps its
     /// previous snapshot when that one refuses. Config (78), like the
     /// loader's verdict on the same inline text: the payload's own content is
-    /// what is wrong, not a file it names.
-    #[error("extra_ca_certs_pem in the payload is not usable")]
+    /// what is wrong, not a file it names. The key is named once, by the
+    /// inner verdict's origin, never here as well.
+    #[error("the extra CA certificate bundle inlined in the payload is not usable")]
     ExtraCaCertsPemInvalid {
         /// What the certificate parser rejected.
         #[source]
@@ -213,7 +216,10 @@ pub enum ManagedConfigPublishError {
     /// lossy expansion could push a bundle that fits the 32 KiB read cap past
     /// the same 32 KiB inline cap on every consumer. Data (65), like
     /// [`Self::ExtraCaCertsInvalid`]: the file's bytes are what is wrong.
-    #[error("{origin} is not UTF-8 and cannot be inlined")]
+    #[error(
+        "{origin} is not UTF-8 and cannot be inlined; strip the non-UTF-8 label lines outside the \
+         -----BEGIN/-----END blocks"
+    )]
     ExtraCaCertsNotUtf8 {
         /// The resolved path, as the runtime door renders it.
         origin: ExtraRootsSource,
@@ -593,6 +599,35 @@ async fn validate_extra_ca_certs_pem(pem: String) -> Result<(), ManagedConfigPub
     })?
 }
 
+/// Reads the candidate payload `ocx config push` and `ocx config test`
+/// share, bounded at [`crate::managed_config::MAX_MANAGED_CONFIG_BYTES`] and
+/// refusing anything that is not a regular file before `open(2)` — a FIFO
+/// named as the candidate would otherwise block forever waiting for a writer,
+/// and `/dev/zero` would be read until memory ran out (CWE-400).
+///
+/// # Errors
+///
+/// [`ManagedConfigPublishError::PayloadTooLarge`] (78) over the cap — `actual`
+/// is the file's length from its metadata, since the bounded read stopped one
+/// byte past the cap; [`ManagedConfigPublishError::ReadFailed`] otherwise —
+/// `NotFound` (79), `PermissionDenied` (77), any other I/O failure or a
+/// non-regular file (74: `InvalidInput`, naming the rule).
+pub async fn read_candidate_payload(path: &Path) -> Result<Vec<u8>, ManagedConfigPublishError> {
+    let maximum = crate::managed_config::MAX_MANAGED_CONFIG_BYTES;
+    let read_failed = |source| ManagedConfigPublishError::ReadFailed {
+        path: path.to_path_buf(),
+        source,
+    };
+    match read_bounded_async(path, maximum).await {
+        Ok(bytes) => Ok(bytes),
+        Err(BoundedReadError::TooLarge { .. }) => {
+            let actual = tokio::fs::metadata(path).await.map_err(read_failed)?.len();
+            Err(ManagedConfigPublishError::PayloadTooLarge { actual, maximum })
+        }
+        Err(refused) => Err(read_failed(refused.into_io_error())),
+    }
+}
+
 // ── Publish orchestration ─────────────────────────────────────────────────────
 
 /// Publishes `config_path` as a managed-config package under `identifier`.
@@ -621,12 +656,7 @@ pub async fn publish_managed_config(
     config_path: &Path,
     options: ManagedConfigPublishOptions,
 ) -> Result<PushOutcome, ManagedConfigPublishError> {
-    let bytes = tokio::fs::read(config_path)
-        .await
-        .map_err(|source| ManagedConfigPublishError::ReadFailed {
-            path: config_path.to_path_buf(),
-            source,
-        })?;
+    let bytes = read_candidate_payload(config_path).await?;
     let text = validate_managed_config_payload(&bytes)?;
     let text = match declared_trusted_root(text) {
         None => text.to_string(),
@@ -641,13 +671,17 @@ pub async fn publish_managed_config(
             // writing `file:///x` would otherwise send the operator's own publish
             // run looking for a file named `file:///x`.
             let path = anchor_declared_path(&declared, config_path);
-            let json =
-                tokio::fs::read(&path)
-                    .await
-                    .map_err(|source| ManagedConfigPublishError::TrustedRootReadFailed {
-                        path: path.clone(),
-                        source,
-                    })?;
+            // Bounded at the same ceiling verification puts on the same
+            // document, so the transport an operator chose does not change
+            // how large a trust root may be; a FIFO is refused before the
+            // open, and a file over the cap is a read failure (74), not a
+            // parse failure (78).
+            let json = read_bounded_async(&path, crate::oci::verify::MAX_TRUSTED_ROOT_BYTES)
+                .await
+                .map_err(|refused| ManagedConfigPublishError::TrustedRootReadFailed {
+                    path: path.clone(),
+                    source: refused.into_io_error(),
+                })?;
             // Prove it loads before a whole fleet adopts it. `load_trusted_root_json`
             // is the same entry point verification uses, so "publish succeeded"
             // means "every consumer can build a trust root from this".
@@ -778,6 +812,9 @@ pub async fn publish_managed_config(
 mod tests {
     use super::*;
     use crate::cli::{ClassifyExitCode, ExitCode};
+    // `catch_unwind` on the FIFO rows, which only exist where `mkfifo` does.
+    #[cfg(unix)]
+    use futures::FutureExt as _;
 
     #[test]
     fn validate_accepts_plain_config() {
@@ -1170,17 +1207,143 @@ trusted_root_json = "{}"
     ) -> Result<PushOutcome, ManagedConfigPublishError> {
         let config_path = directory.path().join("corp-config.toml");
         std::fs::write(&config_path, payload).expect("write the payload");
+        publish_path(&config_path).await
+    }
+
+    /// Publishes whatever `config_path` names — a FIFO, an oversize file —
+    /// against the stub publisher, bounded at five seconds: the reads on
+    /// this path used to be unbounded, and a red here is "it hung", which
+    /// the timeout turns into a failure instead.
+    async fn publish_path(config_path: &Path) -> Result<PushOutcome, ManagedConfigPublishError> {
         let identifier: Identifier = "registry.test/acme/config:v1".parse().expect("identifier parses");
-        publish_managed_config(
-            &stub_publisher(),
+        let publisher = stub_publisher();
+        let publish = publish_managed_config(
+            &publisher,
             &identifier,
-            &config_path,
+            config_path,
             ManagedConfigPublishOptions {
                 cascade: false,
                 platform: Platform::Any,
             },
-        )
-        .await
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(5), publish).await {
+            Ok(outcome) => outcome,
+            Err(_elapsed) => panic!("publish of {} hung instead of refusing", config_path.display()),
+        }
+    }
+
+    /// The candidate itself is a FIFO: refused as 74 before the open, not a
+    /// hang on `open(2)` waiting for a writer that never comes.
+    ///
+    /// Mutation: restore `tokio::fs::read` in `read_candidate_payload` — the
+    /// timeout fires. The FIFO is released afterwards so the pool thread the
+    /// mutation left in `open(2)` lets the runtime shut down, and the red is
+    /// a panic rather than a hang.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_refuses_a_fifo_candidate_without_blocking() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let fifo = directory.path().join("corp-config.fifo");
+        crate::test::fifo::mkfifo(&fifo);
+
+        let outcome = std::panic::AssertUnwindSafe(publish_path(&fifo)).catch_unwind().await;
+        crate::test::fifo::release_blocked_reader(&fifo);
+        let error = outcome
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            .expect_err("a FIFO is not a payload");
+        assert!(
+            matches!(&error, ManagedConfigPublishError::ReadFailed { path, source }
+                if *path == fifo && source.kind() == std::io::ErrorKind::InvalidInput),
+            "got {error:?}"
+        );
+        assert_eq!(error.classify(), Some(ExitCode::IoError));
+        assert!(
+            error.to_string().contains("corp-config.fifo"),
+            "the refusal names the path: {error}"
+        );
+    }
+
+    /// A candidate over the 64 KiB cap is 78 with the file's real length —
+    /// from its metadata, not from a buffer the bounded read stopped filling
+    /// one byte past the cap.
+    ///
+    /// What this row pins is the code and the reported length, **not** the
+    /// boundedness of the read: an unbounded `tokio::fs::read` of this
+    /// fixture returns the same 78 with the same length (the size check ran
+    /// on the whole payload before the fold too), so restoring it leaves
+    /// this row green. The read's boundedness is
+    /// [`publish_refuses_a_fifo_candidate_without_blocking`]'s guard.
+    ///
+    /// Mutation: report `cap + 1` as `actual` — the length assertion reds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_oversize_candidate_is_78() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let maximum = crate::managed_config::MAX_MANAGED_CONFIG_BYTES;
+        let payload = "# padding\n".repeat(maximum as usize / 10 + 1);
+        assert!(
+            payload.len() as u64 > maximum + 1,
+            "the fixture must exceed the cap by more than one byte"
+        );
+        let candidate = directory.path().join("huge-config.toml");
+        std::fs::write(&candidate, &payload).expect("write the payload");
+
+        let error = publish_path(&candidate)
+            .await
+            .expect_err("an oversize candidate is refused");
+        assert!(
+            matches!(&error, ManagedConfigPublishError::PayloadTooLarge { actual, maximum: reported }
+                if *actual == payload.len() as u64 && *reported == maximum),
+            "the refusal carries the file's own length; got {error:?}"
+        );
+        assert_eq!(error.classify(), Some(ExitCode::ConfigError));
+    }
+
+    /// A `trusted_root` file over the 1 MiB read ceiling is a read failure
+    /// (74), the same door a FIFO or `/dev/zero` takes — never read whole and
+    /// handed to the parser for a 78.
+    ///
+    /// Mutation: restore `tokio::fs::read` for the trusted root — the whole
+    /// file is read and refused by the parser as `TrustedRootInvalid` (78).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_trusted_root_over_the_read_ceiling_is_74() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cap = crate::oci::verify::MAX_TRUSTED_ROOT_BYTES as usize;
+        std::fs::write(directory.path().join("root.json"), vec![b' '; cap + 1]).expect("write the root");
+
+        let error = publish_from_tempdir(&directory, "[trust.sigstore]\ntrusted_root = \"root.json\"\n")
+            .await
+            .expect_err("an over-cap trust root is refused");
+        assert!(
+            matches!(&error, ManagedConfigPublishError::TrustedRootReadFailed { source, .. }
+                if source.kind() == std::io::ErrorKind::InvalidInput),
+            "size is a read failure, not a parse failure; got {error:?}"
+        );
+        assert_eq!(error.classify(), Some(ExitCode::IoError));
+    }
+
+    /// A `trusted_root` naming a FIFO is refused promptly (74), not a hang.
+    ///
+    /// Mutation: restore `tokio::fs::read` for the trusted root — the
+    /// timeout fires; the FIFO is released so the red is a panic, not a hang.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_trusted_root_fifo_is_refused_promptly() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let fifo = directory.path().join("root.fifo");
+        crate::test::fifo::mkfifo(&fifo);
+
+        let publish = publish_from_tempdir(&directory, "[trust.sigstore]\ntrusted_root = \"root.fifo\"\n");
+        let outcome = std::panic::AssertUnwindSafe(publish).catch_unwind().await;
+        crate::test::fifo::release_blocked_reader(&fifo);
+        let error = outcome
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            .expect_err("a FIFO is not a trust root");
+        assert!(
+            matches!(&error, ManagedConfigPublishError::TrustedRootReadFailed { path, source }
+                if *path == fifo && source.kind() == std::io::ErrorKind::InvalidInput),
+            "got {error:?}"
+        );
+        assert_eq!(error.classify(), Some(ExitCode::IoError));
     }
 
     /// `extra_ca_certs = "<name>"` relative to the payload's own directory.
@@ -1312,8 +1475,6 @@ trusted_root_json = "{}"
     /// the chain carries `-----BEGIN` and this reds.
     #[tokio::test(flavor = "multi_thread")]
     async fn publish_extra_ca_certs_pathological_path_is_redacted_through_the_chain() {
-        use std::error::Error as _;
-
         let directory = tempfile::tempdir().expect("tempdir");
         let body_probe = EXTRA_CA_CERTS_FIXTURE_PEM
             .lines()
@@ -1324,13 +1485,7 @@ trusted_root_json = "{}"
             .await
             .expect_err("PEM text is not a readable path");
 
-        let mut chain = error.to_string();
-        let mut source = error.source();
-        while let Some(cause) = source {
-            chain.push_str(": ");
-            chain.push_str(&cause.to_string());
-            source = cause.source();
-        }
+        let chain = crate::error::render_chain(&error);
         assert!(
             matches!(error, ManagedConfigPublishError::ExtraCaCertsReadFailed { .. }),
             "got {error:?}"
@@ -1431,6 +1586,15 @@ trusted_root_json = "{}"
                 "`{name}` got {error:?}"
             );
             assert_eq!(error.classify(), Some(ExitCode::DataError), "`{name}`");
+            // Named once, by the inner verdict's origin — the wrapper adds no
+            // second copy of it.
+            let chain = crate::error::render_chain(&error);
+            let path = directory.path().join(name).display().to_string();
+            assert_eq!(
+                chain.matches(&path).count(),
+                1,
+                "`{name}`: the path is named once: {chain}"
+            );
         }
     }
 
@@ -1452,6 +1616,12 @@ trusted_root_json = "{}"
             "got {error:?}"
         );
         assert_eq!(error.classify(), Some(ExitCode::DataError));
+        assert!(
+            error
+                .to_string()
+                .contains("strip the non-UTF-8 label lines outside the -----BEGIN/-----END blocks"),
+            "the refusal names the remedy: {error}"
+        );
     }
 
     /// C-003 (inline form): an `extra_ca_certs_pem` authored directly in the
@@ -1475,6 +1645,13 @@ trusted_root_json = "{}"
             "got {error:?}"
         );
         assert_eq!(error.classify(), Some(ExitCode::ConfigError));
+        // The key is named once, by the inner verdict's origin.
+        let chain = crate::error::render_chain(&error);
+        assert_eq!(
+            chain.matches("extra_ca_certs_pem").count(),
+            1,
+            "the key is named once: {chain}"
+        );
 
         // Positive control: a usable bundle passes validation and publishes.
         let valid = format!("extra_ca_certs_pem = '''\n{EXTRA_CA_CERTS_FIXTURE_PEM}'''\n");

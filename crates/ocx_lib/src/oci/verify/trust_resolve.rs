@@ -42,7 +42,7 @@ use super::trust_cache::TrustRootCache;
 use super::trust_root::TrustRoot;
 use crate::file_structure::StateStore;
 use crate::trust::SigstoreTrust;
-use crate::utility::fs::{BoundedReadError, read_bounded};
+use crate::utility::fs::BoundedReadError;
 
 /// The largest a trusted-root JSON document may be.
 ///
@@ -53,7 +53,7 @@ use crate::utility::fs::{BoundedReadError, read_bounded};
 /// ceiling `MAX_SIGSTORE_RESPONSE_BYTES` puts on the *same document* arriving
 /// over the network, so the transport an operator chose does not change how
 /// large a trust root may be.
-const MAX_TRUSTED_ROOT_BYTES: u64 = 1024 * 1024;
+pub const MAX_TRUSTED_ROOT_BYTES: u64 = 1024 * 1024;
 
 /// Resolve the trust root from the supplied overrides, then the configured
 /// `[trust.sigstore]` material, the `$OCX_HOME` convention path, the trust-root
@@ -171,22 +171,13 @@ fn enforce_offline_rekor_key(root: TrustRoot, offline: bool) -> Result<TrustRoot
 /// Read a trusted-root document, bounded at [`MAX_TRUSTED_ROOT_BYTES`] and
 /// refusing anything that is not a regular file.
 ///
-/// Both guards live in [`read_bounded`], which is blocking — so it goes to the
-/// pool rather than growing an async twin of the guard: one bounded reader, not
-/// two (the `options::tags` precedent).
-///
-/// A `JoinError` becomes [`BoundedReadError::Io`] carrying `ErrorKind::Other`,
-/// never `NotFound`, so a panicking pool task can never be mistaken for an
-/// absent file by rung 4's fall-through.
+/// A thin wrapper over [`crate::utility::fs::read_bounded_async`] — same
+/// spawn-to-the-pool, same `JoinError`-to-`BoundedReadError::Io` mapping, so a
+/// panicking pool task can never be mistaken for an absent file by rung 4's
+/// fall-through. Named for this call site rather than inlined at each of the
+/// three callers below.
 async fn read_trusted_root(path: &Path) -> Result<Vec<u8>, BoundedReadError> {
-    let target = path.to_path_buf();
-    match tokio::task::spawn_blocking(move || read_bounded(&target, MAX_TRUSTED_ROOT_BYTES)).await {
-        Ok(result) => result,
-        Err(join) => Err(BoundedReadError::Io {
-            path: path.to_path_buf(),
-            source: std::io::Error::other(format!("trusted-root read task panicked: {join}")),
-        }),
-    }
+    crate::utility::fs::read_bounded_async(path, MAX_TRUSTED_ROOT_BYTES).await
 }
 
 /// Resolve a trusted-root override to the JSON file itself: the path as given

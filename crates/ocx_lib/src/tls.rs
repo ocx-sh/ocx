@@ -352,21 +352,10 @@ impl ExtraRoots {
     /// [`TlsError::Unreadable`] when the path cannot be read as a bounded
     /// regular file.
     pub fn read_path(path: &Path, origin: ExtraRootsSource) -> Result<(Vec<u8>, ExtraRootsSource), TlsError> {
-        use crate::utility::fs::BoundedReadError;
-
         let bytes = crate::utility::fs::read_bounded(path, MAX_EXTRA_CA_CERTS_BYTES as u64).map_err(|refused| {
-            let io = match refused {
-                BoundedReadError::Io { source, .. } => source,
-                BoundedReadError::NotRegularFile { .. } => {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file")
-                }
-                BoundedReadError::TooLarge { cap, .. } => {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("over the {cap}-byte cap"))
-                }
-            };
             TlsError::Unreadable {
                 origin: origin.clone(),
-                io,
+                io: refused.into_io_error(),
             }
         })?;
         Ok((bytes, origin))
