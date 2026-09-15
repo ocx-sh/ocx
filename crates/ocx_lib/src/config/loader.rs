@@ -23,7 +23,7 @@ use crate::log;
 /// Upper bound for a single config file. Config files are expected to be
 /// well under 1 KiB; 64 KiB is a generous safety cap that also rules out
 /// accidentally pointing `--config` at a multi-megabyte file.
-const MAX_CONFIG_SIZE: u64 = 64 * 1024;
+pub(crate) const MAX_CONFIG_SIZE: u64 = 64 * 1024;
 
 /// The project file's literal name, as the CWD walk looks for it and as an
 /// explicit `--project <directory>` resolves to (RUL-55).
@@ -120,6 +120,16 @@ pub struct LoadedConfig {
     /// that did not exist becoming present is a change, which is why absent
     /// candidates are recorded too.
     pub config_tier_paths: Vec<PathBuf>,
+
+    /// The tier whose `extra_ca_certs` / `extra_ca_certs_pem` survived the
+    /// fold into `merged` (ocx#448, DX-16) — recorded as each tier folds in,
+    /// never inferred from the value afterwards, so the origin a refusal
+    /// names is the file that actually set it. `None` when no tier set either
+    /// key.
+    pub extra_ca_certs_tier: Option<crate::config::ConfigTier>,
+    /// The same record for `local_only` — identical to
+    /// [`Self::extra_ca_certs_tier`] unless the managed payload set a key.
+    pub extra_ca_certs_tier_local: Option<crate::config::ConfigTier>,
 }
 
 /// Configuration loader. Stateless namespace for the discovery and loading
@@ -202,13 +212,21 @@ impl ConfigLoader {
         // tier is not ambient host state, so `OCX_NO_CONFIG` does not prune it
         // (see `builtin_defaults`) — and its entry is unlocked, so folding it in
         // first would hand it to the filter to drop.
-        let mut discovered_config = Self::load_and_merge(&discovered).await?;
+        // Under the flag `discovered` is the system file alone, so its recorded
+        // extra-CA tier is `System` exactly when the pair is locked — which is
+        // exactly when the filter keeps it (ocx#469). No reset needed.
+        let (mut discovered_config, discovered_extra_ca_tier) = Self::load_and_merge_recording(&discovered).await?;
         if no_config {
             Self::retain_system_locked_sections(&mut discovered_config);
         }
         let mut base = Self::builtin_defaults();
         base.merge(discovered_config);
-        let overlay = Self::load_and_merge(&explicit_paths).await?;
+        let (overlay, overlay_extra_ca_tier) = Self::load_and_merge_recording(&explicit_paths).await?;
+        // The overlay folds from its own empty accumulator, so the lock is
+        // consulted here, against `base`, where the system tier already sits.
+        let overlay_extra_ca_tier = overlay_extra_ca_tier
+            .filter(|_| !Self::system_lock_drops_extra_ca(&base, &overlay, crate::config::ConfigTier::Explicit));
+        let extra_ca_certs_tier_local = overlay_extra_ca_tier.or(discovered_extra_ca_tier);
 
         let mut local_only = base.clone();
         local_only.merge(overlay.clone());
@@ -219,9 +237,17 @@ impl ConfigLoader {
         // `fold_managed_tier`'s doc comment. Merge order is unchanged: the
         // payload folds onto `base`, and `overlay` is applied on top of that
         // afterward, so explicit tiers still beat payload values.
-        let (mut merged, managed_config_snapshot, resolved_managed_config, managed_snapshot_state) =
-            Self::fold_managed_tier(base.clone(), &local_only).await?;
+        let (
+            mut merged,
+            managed_config_snapshot,
+            resolved_managed_config,
+            managed_snapshot_state,
+            managed_extra_ca_tier,
+        ) = Self::fold_managed_tier(base.clone(), &local_only).await?;
         merged.merge(overlay.clone());
+        let extra_ca_certs_tier = overlay_extra_ca_tier
+            .or(managed_extra_ca_tier)
+            .or(discovered_extra_ca_tier);
 
         // A-13: the candidate list, not the surviving one — `discover_paths`
         // filtered out every tier file that does not exist, and a grant added
@@ -248,6 +274,8 @@ impl ConfigLoader {
             resolved_managed_config,
             managed_snapshot_state,
             config_tier_paths,
+            extra_ca_certs_tier,
+            extra_ca_certs_tier_local,
         })
     }
 
@@ -357,6 +385,9 @@ impl ConfigLoader {
     ///
     /// The target is resolved FIRST so a non-managed user never pays the
     /// `snapshot.json` stat: the file is read only once a source resolves.
+    ///
+    /// The fifth element is `Some(ConfigTier::Managed)` when the payload that
+    /// folded in set an extra-CA key (ocx#448, DX-16), else `None`.
     async fn fold_managed_tier(
         accumulator: Config,
         local_only: &Config,
@@ -365,6 +396,7 @@ impl ConfigLoader {
         Option<crate::config::managed::ManagedConfigSnapshot>,
         Option<crate::config::managed::ResolvedManagedConfig>,
         crate::config::managed::ManagedSnapshotState,
+        Option<crate::config::ConfigTier>,
     )> {
         use crate::config::managed::ManagedSnapshotState;
 
@@ -392,18 +424,18 @@ impl ConfigLoader {
             .ok()
             .flatten()
         else {
-            return Ok((accumulator, None, None, ManagedSnapshotState::Unmatched));
+            return Ok((accumulator, None, None, ManagedSnapshotState::Unmatched, None));
         };
 
         // A source resolved — read the snapshot from local state only now, so a
         // non-managed user never pays the stat above.
         let Some(candidate) = Self::managed_snapshot_candidate() else {
-            return Ok((accumulator, None, Some(resolved), ManagedSnapshotState::Unmatched));
+            return Ok((accumulator, None, Some(resolved), ManagedSnapshotState::Unmatched, None));
         };
         let Some(snapshot) = crate::managed_config::read_managed_config_snapshot_at(&candidate).await else {
             // Absent, unreadable, or malformed JSON — treated as absent
             // (benign-state rule, no per-invocation WARN).
-            return Ok((accumulator, None, Some(resolved), ManagedSnapshotState::Unmatched));
+            return Ok((accumulator, None, Some(resolved), ManagedSnapshotState::Unmatched, None));
         };
 
         // Canonical `oci::Identifier` equality (tag/digest significant) —
@@ -422,6 +454,7 @@ impl ConfigLoader {
                 Some(snapshot),
                 Some(resolved),
                 ManagedSnapshotState::Unmatched,
+                None,
             ));
         }
 
@@ -445,6 +478,7 @@ impl ConfigLoader {
                     Some(snapshot),
                     Some(resolved),
                     ManagedSnapshotState::PayloadUnusable,
+                    None,
                 ));
             }
         };
@@ -461,6 +495,9 @@ impl ConfigLoader {
         Self::guard_managed_sigstore_trust(&mut parsed, &resolved.source);
         Self::guard_managed_shell_consent(&mut parsed, &resolved.source);
         Self::stamp_shell_tier(&mut parsed, crate::config::ConfigTier::Managed);
+        let extra_ca_certs_tier = (Self::sets_extra_ca_certs(&parsed)
+            && !Self::system_lock_drops_extra_ca(&accumulator, &parsed, crate::config::ConfigTier::Managed))
+        .then_some(crate::config::ConfigTier::Managed);
 
         let mut accumulator = accumulator;
         accumulator.merge(parsed);
@@ -469,6 +506,7 @@ impl ConfigLoader {
             Some(snapshot),
             Some(resolved),
             ManagedSnapshotState::Applied,
+            extra_ca_certs_tier,
         ))
     }
 
@@ -501,7 +539,26 @@ impl ConfigLoader {
     /// sent. `ocx package push --sbom` has no `--fulcio-url` flag to oppose a
     /// config value, so an unpinned payload that could set it would name the
     /// server a signing identity is handed to.
+    ///
+    /// **`extra_ca_certs` sibling (C-002).** The root-level `extra_ca_certs`
+    /// (path form) is a plain `Config` field, not nested under
+    /// `[trust.sigstore]`, but the same reasoning as `trusted_root` applies:
+    /// a path on the publisher's disk names nothing on a fleet machine.
+    /// `extra_ca_certs_pem`, by contrast, is honoured **regardless of
+    /// pinning** (D-7) — unlike `trusted_root_json`, admitting it bypasses no
+    /// signature verification (TLS roots are never consulted there) and its
+    /// worst case needs an on-path network attacker to matter at all. See the
+    /// `adr_managed_config_tier.md` amendment of 2026-09-13 (C-013). A later
+    /// reviewer tightening this arm to match the Sigstore-only pin rule would
+    /// silently regress every unpinned fleet's registry/index CA rollout.
     fn guard_managed_sigstore_trust(parsed: &mut Config, source: &crate::oci::Identifier) {
+        if parsed.extra_ca_certs.take().is_some() {
+            log::warn!(
+                "managed-config payload for '{source}' set extra_ca_certs to a local path; ignored (a remote payload \
+                 cannot name a path on this machine — publish with `ocx config push`, which inlines the file as \
+                 extra_ca_certs_pem)"
+            );
+        }
         let Some(trust) = parsed.trust.as_mut() else {
             return;
         };
@@ -947,7 +1004,49 @@ impl ConfigLoader {
     /// Returns an error if any file is missing, unreadable, exceeds
     /// [`MAX_CONFIG_SIZE`], or contains invalid TOML.
     pub async fn load_and_merge<P: AsRef<Path>>(paths: &[P]) -> Result<Config> {
+        Ok(Self::load_and_merge_recording(paths).await?.0)
+    }
+
+    /// Whether `contribution` sets either extra-CA key — the pair
+    /// [`Config::merge`] replaces wholesale, so the tier that supplied it is
+    /// the merged value's true provenance (ocx#448, DX-16).
+    fn sets_extra_ca_certs(contribution: &Config) -> bool {
+        contribution.extra_ca_certs.is_some() || contribution.extra_ca_certs_pem.is_some()
+    }
+
+    /// Whether `accumulator`'s system lock (ocx#469) drops the extra-CA pair
+    /// `contribution` sets — warning once, by tier, when it does. Consulted at
+    /// every tier-record site, so a dropped pair is neither recorded as the
+    /// provenance nor silently lost: `Config::merge` enforces, this explains.
+    /// Names the tier, the system file that holds the lock and the remedy —
+    /// never a value (D-11): a pasted bundle is not for the log, and the two
+    /// files are what the operator needs to find.
+    fn system_lock_drops_extra_ca(
+        accumulator: &Config,
+        contribution: &Config,
+        tier: crate::config::ConfigTier,
+    ) -> bool {
+        let dropped = accumulator.extra_ca_certs_system_locked && Self::sets_extra_ca_certs(contribution);
+        if dropped {
+            log::warn!(
+                "ignoring extra_ca_certs / extra_ca_certs_pem from {tier}: the pair is locked by {}; edit the system \
+                 tier or ask its owner",
+                Self::system_path().display()
+            );
+        }
+        dropped
+    }
+
+    /// [`Self::load_and_merge`], also recording the last tier in `paths` that
+    /// set `extra_ca_certs` / `extra_ca_certs_pem` (DX-16).
+    ///
+    /// # Errors
+    /// Same as [`Self::load_and_merge`].
+    async fn load_and_merge_recording<P: AsRef<Path>>(
+        paths: &[P],
+    ) -> Result<(Config, Option<crate::config::ConfigTier>)> {
         let mut config = Config::default();
+        let mut extra_ca_certs_tier = None;
         for path in paths {
             let path = path.as_ref();
             // Reject a non-regular path (e.g. a directory) with a consistent
@@ -1038,10 +1137,35 @@ impl ConfigLoader {
                 Self::apply_system_locks(&mut parsed);
             }
             Self::anchor_relative_paths(&mut parsed, path);
-            Self::stamp_shell_tier(&mut parsed, Self::tier_for_path(path));
+            Self::guard_extra_ca_certs_ambiguity(&parsed, path)?;
+            let tier = Self::tier_for_path(path);
+            Self::stamp_shell_tier(&mut parsed, tier);
+            if Self::sets_extra_ca_certs(&parsed) && !Self::system_lock_drops_extra_ca(&config, &parsed, tier) {
+                extra_ca_certs_tier = Some(tier);
+            }
             config.merge(parsed);
         }
-        Ok(config)
+        Ok((config, extra_ca_certs_tier))
+    }
+
+    /// Refuse a single config file declaring both `extra_ca_certs` and
+    /// `extra_ca_certs_pem` (S-005) — same-file ambiguity, distinct from the
+    /// cross-tier XOR [`Config::merge`] applies (C-001, D-1). Runs per file,
+    /// before `Config::merge` folds the parsed tier into the accumulator —
+    /// the XOR merge then guarantees the merged `Config` never carries both
+    /// fields, so [`Error::AmbiguousExtraCaCerts`] is the permanent home for
+    /// this refusal, not a stand-in for a later resolve-time check.
+    ///
+    /// # Errors
+    /// Returns [`Error::AmbiguousExtraCaCerts`] when `parsed` sets both keys.
+    fn guard_extra_ca_certs_ambiguity(parsed: &Config, path: &Path) -> Result<()> {
+        if parsed.extra_ca_certs.is_some() && parsed.extra_ca_certs_pem.is_some() {
+            return Err(Error::AmbiguousExtraCaCerts {
+                path: path.to_path_buf(),
+            }
+            .into());
+        }
+        Ok(())
     }
 
     /// C7 enforcement: lock every lockable section of a system-scope config
@@ -1067,9 +1191,14 @@ impl ConfigLoader {
     /// (unconditional, and binary per block — a system-scope section clamps
     /// `dir`, `name` and `required` together, which is what makes recording a
     /// fleet property rather than a wrapper-script convention; a system file
-    /// with no `[records]` clamps nothing). Extracted so the section coverage
-    /// is unit-testable without writing to `/etc`.
+    /// with no `[records]` clamps nothing). Plus the root-level
+    /// `extra_ca_certs` / `extra_ca_certs_pem` pair (ocx#469, locked as one
+    /// unit iff the system file sets either key — absent locks nothing, so an
+    /// operator who never declared a root does not freeze every lower tier
+    /// and `OCX_EXTRA_CA_CERTS` out of adding one). Extracted so the section
+    /// coverage is unit-testable without writing to `/etc`.
     fn apply_system_locks(parsed: &mut Config) {
+        parsed.extra_ca_certs_system_locked = Self::sets_extra_ca_certs(parsed);
         if let Some(patches) = parsed.patches.as_mut() {
             patches.lock_as_system();
         }
@@ -1470,13 +1599,14 @@ impl ConfigLoader {
     /// process working directory — a config read by a daemon, a CI runner and
     /// an interactive shell must name the same file.
     ///
-    /// Three keys participate today: `[trust.sigstore] trusted_root`, each
-    /// `[[trust.policy]]` signer's `file:`-form `key`, and `[records] dir`. Each
-    /// names a location the operator chose beside their own config, so all three
-    /// anchor the same way and through the same seam — a second anchoring site
-    /// is how they would drift into resolving differently. Every other
-    /// path-valued key in the tree is either already absolute by contract or
-    /// resolved by its own consumer.
+    /// Four keys participate today: `[trust.sigstore] trusted_root`, each
+    /// `[[trust.policy]]` signer's `file:`-form `key`, `[records] dir`, and
+    /// the root-level `extra_ca_certs` (C-001). Each names a location the
+    /// operator chose beside their own config, so all four anchor the same
+    /// way and through the same seam — a second anchoring site is how they
+    /// would drift into resolving differently. Every other path-valued key
+    /// in the tree is either already absolute by contract or resolved by its
+    /// own consumer.
     ///
     /// `--records-dir` and `OCX_RECORDS_DIR` stay **CWD-relative** and never
     /// reach here: a flag and an env var are typed by whoever is standing in a
@@ -1498,6 +1628,7 @@ impl ConfigLoader {
         {
             records.dir = Some(dir.join(sink));
         }
+        parsed.anchor_relative_extra_ca_certs(dir);
         let Some(trust) = parsed.trust.as_mut() else {
             return;
         };
@@ -1550,6 +1681,9 @@ impl ConfigLoader {
             shell,
             records,
             toolchain_dir,
+            extra_ca_certs,
+            extra_ca_certs_pem,
+            extra_ca_certs_system_locked,
         } = config;
 
         *patches = patches.take().filter(|patches| patches.system_locked);
@@ -1569,6 +1703,15 @@ impl ConfigLoader {
         // child still lands its trees where its parent did, without reading an
         // ambient file to find out.
         *toolchain_dir = None;
+        // `extra_ca_certs` / `extra_ca_certs_pem` (C-001) lock as one unit
+        // (ocx#469): a system-declared root is operator policy — a CI job
+        // setting the flag for hermeticity must not drop out of the corporate
+        // CA with exit 69 — and an unlocked pair never reaches here (the flag
+        // prunes the tiers that could set one).
+        if !*extra_ca_certs_system_locked {
+            *extra_ca_certs = None;
+            *extra_ca_certs_pem = None;
+        }
         if let Some(entries) = registries.as_mut() {
             entries.retain(|_, entry| entry.system_locked);
         }
@@ -4010,7 +4153,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, _snapshot, _resolved, _state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, _snapshot, _resolved, _state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
             .await
             .expect("fold must succeed even against a locked accumulator");
         assert_eq!(
@@ -4064,7 +4207,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, snapshot, _resolved, _state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, snapshot, _resolved, _state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
             .await
             .expect("fold must succeed");
         assert!(
@@ -4105,7 +4248,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, snapshot, _resolved, state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, snapshot, _resolved, state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
             .await
             .expect("a broken payload must not fail the load");
         assert!(
@@ -4151,7 +4294,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, _snapshot, _resolved, state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, _snapshot, _resolved, state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
             .await
             .expect("fold must succeed");
         assert_eq!(
@@ -4183,9 +4326,16 @@ mod tests {
             "[records]\ndir = \"/var/log/ocx/records\"\nrequired = true\n",
         ))
         .unwrap();
+        // A root-level scalar has to precede every table header, so it is
+        // spliced in rather than appended (ocx#469).
+        config.extra_ca_certs_pem = Some("system".to_string());
 
         ConfigLoader::apply_system_locks(&mut config);
 
+        assert!(
+            config.extra_ca_certs_system_locked,
+            "extra_ca_certs / extra_ca_certs_pem must lock when the system file sets either key"
+        );
         assert!(
             config.patches.unwrap().system_locked,
             "[patches] (required=true) must lock"
@@ -4454,10 +4604,16 @@ mod tests {
         // A root-level scalar has to precede every table header, so it is
         // spliced in rather than appended (C-016).
         config.toolchain_dir = Some(PathBuf::from("/home/operator/tc"));
+        config.extra_ca_certs_pem = Some("system".to_string());
 
         ConfigLoader::apply_system_locks(&mut config);
         ConfigLoader::retain_system_locked_sections(&mut config);
 
+        assert_eq!(
+            config.extra_ca_certs_pem.as_deref(),
+            Some("system"),
+            "a locked extra_ca_certs_pem must survive (ocx#469)"
+        );
         assert!(config.patches.is_some(), "locked [patches] must survive");
         assert!(config.registry.is_some(), "locked [registry] must survive");
         assert!(config.registries.is_some(), "locked [registries.<name>] must survive");
@@ -4493,9 +4649,14 @@ mod tests {
         ))
         .unwrap();
         config.toolchain_dir = Some(PathBuf::from("/home/operator/tc"));
+        config.extra_ca_certs = Some(PathBuf::from("/home/operator/corp-ca.pem"));
 
         ConfigLoader::retain_system_locked_sections(&mut config);
 
+        assert!(
+            config.extra_ca_certs.is_none(),
+            "an unlocked extra_ca_certs is pruned too (ocx#469)"
+        );
         assert!(config.patches.is_none());
         assert!(config.registry.is_none());
         assert!(config.registries.is_none(), "an emptied table collapses to None");
@@ -4520,6 +4681,21 @@ mod tests {
         assert!(
             config.records.is_none(),
             "a system file with no [records] must not synthesize a locked section"
+        );
+    }
+
+    /// The same "absent locks nothing" half for the extra-CA pair (ocx#469): a
+    /// system file that declares neither key leaves every lower tier and
+    /// `OCX_EXTRA_CA_CERTS` free to add a root.
+    #[test]
+    fn apply_system_locks_leaves_absent_extra_ca_certs_unlocked() {
+        let mut config: crate::config::Config = toml::from_str("[registry]\ndefault = \"corp\"\n").unwrap();
+
+        ConfigLoader::apply_system_locks(&mut config);
+
+        assert!(
+            !config.extra_ca_certs_system_locked,
+            "a system file with neither extra-CA key must not lock the pair"
         );
     }
 
@@ -4565,7 +4741,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, _snapshot, _resolved, _state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, _snapshot, _resolved, _state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
             .await
             .expect("fold must succeed even against a locked accumulator");
 
@@ -4888,6 +5064,381 @@ mod tests {
             Some("{}"),
             "a digest-pinned seed breaks the circularity, so the payload is honoured"
         );
+    }
+
+    // ── `extra_ca_certs` / `extra_ca_certs_pem` — C-001, C-002, S-004, S-005 ──
+
+    /// A real self-signed CA (the test stack's Fulcio root), so the inline form
+    /// under test is material a fleet consumer could actually seed a client
+    /// from — not a placeholder the guard would strip by spelling anyway.
+    const EXTRA_CA_CERTS_FIXTURE_PEM: &str = include_str!("../../../../test/sigstore/keys/fulcio-ca.crt.pem");
+
+    /// The root-level `extra_ca_certs_pem` line carrying the fixture above.
+    /// Literal multi-line string: no escapes, and TOML trims the newline
+    /// right after the opening quotes, so the parsed value is byte-identical
+    /// to the fixture.
+    fn extra_ca_certs_pem_line() -> String {
+        format!("extra_ca_certs_pem = '''\n{EXTRA_CA_CERTS_FIXTURE_PEM}'''\n")
+    }
+
+    /// `extra_ca_certs = <path>`, quoted by the TOML serializer so a Windows
+    /// tempdir (`C:\Users\…`) does not turn into a unicode escape.
+    fn extra_ca_certs_path_line(path: &Path) -> String {
+        format!("extra_ca_certs = {}\n", toml::Value::from(path.display().to_string()))
+    }
+
+    fn managed_config_after_guard(payload: &str, source: &str) -> Config {
+        let mut parsed: Config = toml::from_str(payload).expect("payload parses");
+        let source: crate::oci::Identifier = source.parse().expect("identifier parses");
+        ConfigLoader::guard_managed_sigstore_trust(&mut parsed, &source);
+        parsed
+    }
+
+    const UNPINNED_SOURCE: &str = "ghcr.io/acme/config:v1";
+
+    /// C-002, S-004: a managed payload's path-form `extra_ca_certs` names a
+    /// file on the *publisher's* disk, so the consumer drops it — behind a
+    /// digest pin or not, pinning is about provenance and this key is inert
+    /// either way — and the rest of the payload applies unchanged. The
+    /// "publish with `ocx config push`" warning that accompanies the strip is
+    /// not observable here (the crate has no log capture), exactly as for the
+    /// `trusted_root` twin above; the strip is what is asserted.
+    #[test]
+    fn managed_tier_drops_a_path_form_extra_ca_certs_and_keeps_its_siblings() {
+        for source in [PINNED_SOURCE, UNPINNED_SOURCE] {
+            let config = managed_config_after_guard(
+                "extra_ca_certs = \"/home/operator/corp-ca.pem\"\n\n[registry]\ndefault = \"corp.example\"\n",
+                source,
+            );
+            assert_eq!(
+                config.extra_ca_certs, None,
+                "the path form is stripped from a managed payload ({source})"
+            );
+            assert_eq!(
+                config.registry.as_ref().and_then(|r| r.default.as_deref()),
+                Some("corp.example"),
+                "the rest of the payload still applies ({source})"
+            );
+        }
+    }
+
+    /// C-002, D-7: `extra_ca_certs_pem` is honoured from a managed payload
+    /// WITHOUT a digest pin — the opposite of `trusted_root_json` a few tests
+    /// up, and deliberately so: a CA root never bypasses signature
+    /// verification and does nothing without network position, so the
+    /// pin rule that guards the Sigstore material does not apply. (The
+    /// Sigstore client's own pin-gating of managed roots lives at C-005, not
+    /// in this guard.) Asserted unpinned, so a later "fix" that widens the
+    /// pin rule to this key reds here.
+    #[test]
+    fn managed_tier_keeps_extra_ca_certs_pem_from_an_unpinned_source() {
+        let config = managed_config_after_guard(&extra_ca_certs_pem_line(), UNPINNED_SOURCE);
+        assert_eq!(
+            config.extra_ca_certs_pem.as_deref(),
+            Some(EXTRA_CA_CERTS_FIXTURE_PEM),
+            "inline material travels with the payload and is kept regardless of pinning"
+        );
+    }
+
+    /// C-001: a relative `extra_ca_certs` resolves against the directory of
+    /// the file that declares it, never the process working directory — the
+    /// same `FileReference::anchored_at` rule as `trusted_root`. The tempdir
+    /// is deliberately NOT the CWD, or the test would pass either way.
+    #[tokio::test]
+    async fn relative_extra_ca_certs_anchors_to_the_declaring_config_dir_not_the_cwd() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = write_config(&dir, "config.toml", "extra_ca_certs = \"certs/corp-ca.pem\"\n");
+
+        let config = ConfigLoader::load_and_merge(&[path]).await.expect("load");
+        let anchored = config.extra_ca_certs.expect("extra_ca_certs");
+        assert!(
+            anchored.is_absolute(),
+            "anchored to an absolute path: {}",
+            anchored.display()
+        );
+        assert_eq!(anchored, dir.path().join("certs").join("corp-ca.pem"));
+    }
+
+    /// C-001: anchoring must not rewrite what the operator fully specified.
+    #[tokio::test]
+    async fn absolute_extra_ca_certs_survives_loading_unchanged() {
+        let dir = TempDir::new().expect("tempdir");
+        let absolute = dir.path().join("elsewhere").join("corp-ca.pem");
+        let path = write_config(&dir, "config.toml", &extra_ca_certs_path_line(&absolute));
+
+        let config = ConfigLoader::load_and_merge(&[path]).await.expect("load");
+        assert_eq!(config.extra_ca_certs.as_deref(), Some(absolute.as_path()));
+    }
+
+    /// S-005, D-3: the path key is an ordinary replace across tiers — the
+    /// highest tier that sets it wins, and a tier that sets neither key
+    /// leaves the lower tier's value standing.
+    #[tokio::test]
+    async fn extra_ca_certs_path_takes_the_highest_tier_that_sets_it() {
+        let dir = TempDir::new().expect("tempdir");
+        let low = write_config(&dir, "low.toml", "extra_ca_certs = \"low-ca.pem\"\n");
+        let high = write_config(&dir, "high.toml", "extra_ca_certs = \"high-ca.pem\"\n");
+        let silent = write_config(&dir, "silent.toml", "[registry]\ndefault = \"corp.example\"\n");
+
+        let config = ConfigLoader::load_and_merge(&[low, high, silent])
+            .await
+            .expect("three-file merge should succeed");
+        assert_eq!(
+            config.extra_ca_certs.as_deref(),
+            Some(dir.path().join("high-ca.pem").as_path()),
+            "the highest tier that SETS the key wins; a silent tier above it changes nothing"
+        );
+        assert_eq!(config.extra_ca_certs_pem, None);
+    }
+
+    /// S-005, D-3: the inline key follows the same ordinary-replace rule.
+    #[tokio::test]
+    async fn extra_ca_certs_pem_takes_the_highest_tier_that_sets_it() {
+        let dir = TempDir::new().expect("tempdir");
+        let low = write_config(&dir, "low.toml", "extra_ca_certs_pem = \"low\"\n");
+        let high = write_config(&dir, "high.toml", &extra_ca_certs_pem_line());
+        let silent = write_config(&dir, "silent.toml", "[registry]\ndefault = \"corp.example\"\n");
+
+        let config = ConfigLoader::load_and_merge(&[low, high, silent])
+            .await
+            .expect("three-file merge should succeed");
+        assert_eq!(
+            config.extra_ca_certs_pem.as_deref(),
+            Some(EXTRA_CA_CERTS_FIXTURE_PEM),
+            "the highest tier that SETS the key wins; a silent tier above it changes nothing"
+        );
+        assert_eq!(config.extra_ca_certs, None);
+    }
+
+    /// C-001, D-1 (XOR on merge): a higher tier setting `extra_ca_certs_pem`
+    /// takes BOTH keys from that tier, so a lower tier's path does not survive
+    /// beside it — the merged config never carries both spellings.
+    #[tokio::test]
+    async fn a_higher_tier_extra_ca_certs_pem_clears_a_lower_tiers_path() {
+        let dir = TempDir::new().expect("tempdir");
+        let low = write_config(&dir, "low.toml", "extra_ca_certs = \"low-ca.pem\"\n");
+        let high = write_config(&dir, "high.toml", &extra_ca_certs_pem_line());
+
+        let config = ConfigLoader::load_and_merge(&[low, high]).await.expect("merge");
+        assert_eq!(config.extra_ca_certs_pem.as_deref(), Some(EXTRA_CA_CERTS_FIXTURE_PEM));
+        assert_eq!(
+            config.extra_ca_certs, None,
+            "the lower tier's path must not linger beside the inline form"
+        );
+    }
+
+    /// The other direction of the XOR, or the test above would be
+    /// indistinguishable from "the inline key always wins".
+    #[tokio::test]
+    async fn a_higher_tier_extra_ca_certs_path_clears_a_lower_tiers_pem() {
+        let dir = TempDir::new().expect("tempdir");
+        let low = write_config(&dir, "low.toml", &extra_ca_certs_pem_line());
+        let high = write_config(&dir, "high.toml", "extra_ca_certs = \"high-ca.pem\"\n");
+
+        let config = ConfigLoader::load_and_merge(&[low, high]).await.expect("merge");
+        assert_eq!(
+            config.extra_ca_certs.as_deref(),
+            Some(dir.path().join("high-ca.pem").as_path())
+        );
+        assert_eq!(
+            config.extra_ca_certs_pem, None,
+            "the lower tier's inline form must not linger beside the path"
+        );
+    }
+
+    /// D-1, DX-3, DX-6: one file declaring both spellings is ambiguous and is
+    /// refused at load — `Error::AmbiguousExtraCaCerts` naming the file, exit
+    /// 78. Asserted through `classify()` and, separately, the message text
+    /// that tells the operator which key means what.
+    #[tokio::test]
+    async fn a_file_declaring_both_extra_ca_certs_keys_is_refused_as_ambiguous() {
+        use crate::cli::{ClassifyExitCode, ExitCode};
+
+        let dir = TempDir::new().expect("tempdir");
+        let path = write_config(
+            &dir,
+            "config.toml",
+            &format!("extra_ca_certs = \"corp-ca.pem\"\n{}", extra_ca_certs_pem_line()),
+        );
+
+        let err = ConfigLoader::load_and_merge(std::slice::from_ref(&path))
+            .await
+            .expect_err("both spellings in one file must be refused");
+        assert!(
+            matches!(&err, crate::Error::Config(Error::AmbiguousExtraCaCerts { path: named }) if *named == path),
+            "the refusal names the ambiguous file; got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("extra_ca_certs names a local file"),
+            "the refusal explains which key means what: {err}"
+        );
+        assert_eq!(err.classify(), Some(ExitCode::ConfigError));
+    }
+
+    /// The premise for the refusal above: one spelling alone loads at every
+    /// file tier — including the explicit `--config` / `OCX_CONFIG` tier — or
+    /// the ambiguity test could pass on a loader that refuses the keys outright.
+    #[tokio::test]
+    async fn either_extra_ca_certs_key_alone_loads_at_a_file_tier() {
+        let dir = TempDir::new().expect("tempdir");
+        let by_path = write_config(&dir, "path.toml", "extra_ca_certs = \"corp-ca.pem\"\n");
+        let inline = write_config(&dir, "inline.toml", &extra_ca_certs_pem_line());
+
+        let config = ConfigLoader::load_and_merge(&[by_path]).await.expect("path form loads");
+        assert_eq!(
+            config.extra_ca_certs.as_deref(),
+            Some(dir.path().join("corp-ca.pem").as_path())
+        );
+        let config = ConfigLoader::load_and_merge(&[inline])
+            .await
+            .expect("inline form loads");
+        assert_eq!(config.extra_ca_certs_pem.as_deref(), Some(EXTRA_CA_CERTS_FIXTURE_PEM));
+    }
+
+    /// S-005 through the shipped fold, not a hand-rolled merge: a managed
+    /// payload's `extra_ca_certs_pem` (unpinned — D-7) beats the home tier's
+    /// own path, the explicit `OCX_CONFIG` overlay beats the managed tier, and
+    /// the local-only view — what the managed-config fetch client is built
+    /// from (D-6) — never sees the managed payload's material.
+    #[tokio::test]
+    async fn a_managed_extra_ca_certs_pem_beats_the_home_tier_and_yields_to_the_explicit_tier() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+        without_system_config(&env);
+
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "extra_ca_certs = \"home-ca.pem\"\n\n[managed]\nsource = \"registry.test/managed-config:v1\"\nrequired = \
+             false\n",
+        )
+        .unwrap();
+        write_managed_snapshot(
+            dir.path(),
+            "registry.test/managed-config:v1",
+            &extra_ca_certs_pem_line(),
+        );
+
+        let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
+            explicit_path: None,
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load must succeed");
+        assert_eq!(
+            loaded.merged.extra_ca_certs_pem.as_deref(),
+            Some(EXTRA_CA_CERTS_FIXTURE_PEM),
+            "the managed tier folds above the home tier"
+        );
+        assert_eq!(
+            loaded.merged.extra_ca_certs, None,
+            "XOR: the home tier's path does not survive beside the managed inline form"
+        );
+        assert_eq!(
+            loaded.local_only.extra_ca_certs.as_deref(),
+            Some(dir.path().join("home-ca.pem").as_path()),
+            "the local-only view keeps the home tier's own root (D-6: the fetch client's trust set)"
+        );
+        assert_eq!(
+            loaded.local_only.extra_ca_certs_pem, None,
+            "the local-only view must never carry the managed payload's own CA"
+        );
+
+        let overlay_dir = TempDir::new().unwrap();
+        let overlay = write_config(&overlay_dir, "overlay.toml", "extra_ca_certs = \"override-ca.pem\"\n");
+        let loaded = ConfigLoader::load_with_local_view(ConfigInputs {
+            explicit_path: Some(&overlay),
+            explicit_project_path: None,
+            cwd: None,
+        })
+        .await
+        .expect("load must succeed");
+        assert_eq!(
+            loaded.merged.extra_ca_certs.as_deref(),
+            Some(overlay_dir.path().join("override-ca.pem").as_path()),
+            "--config / OCX_CONFIG merges above the managed tier"
+        );
+        assert_eq!(
+            loaded.merged.extra_ca_certs_pem, None,
+            "XOR against the managed inline form"
+        );
+    }
+
+    /// S-005, edge case: `OCX_NO_CONFIG=1` prunes an UNLOCKED pair — the home
+    /// tier's — like any ambient configuration. The discriminator for the
+    /// lock (`extra_ca_certs_system_lock_beats_every_lower_tier` pins the
+    /// surviving half): without this, a loader that stopped honouring the
+    /// flag for the pair would pass the lock test. The flag-off premise is
+    /// asserted first, or "no root" would be indistinguishable from a fixture
+    /// that never set one.
+    #[tokio::test]
+    async fn no_config_prunes_an_unlocked_extra_ca_certs_pair() {
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+        without_system_config(&env);
+        std::fs::write(dir.path().join("config.toml"), "extra_ca_certs = \"home-ca.pem\"\n").unwrap();
+
+        let load = || async {
+            ConfigLoader::load_with_local_view(ConfigInputs {
+                explicit_path: None,
+                explicit_project_path: None,
+                cwd: None,
+            })
+            .await
+            .expect("load must succeed")
+            .merged
+        };
+
+        env.remove("OCX_NO_CONFIG");
+        let merged = load().await;
+        assert_eq!(
+            merged.extra_ca_certs.as_deref(),
+            Some(dir.path().join("home-ca.pem").as_path()),
+            "premise: without the flag the home tier's path is loaded"
+        );
+        assert!(!merged.extra_ca_certs_system_locked, "premise: nothing locked it");
+
+        env.set("OCX_NO_CONFIG", "1");
+        let merged = load().await;
+        assert_eq!(
+            merged.extra_ca_certs, None,
+            "OCX_NO_CONFIG=1 prunes the home tier's path"
+        );
+        assert_eq!(merged.extra_ca_certs_pem, None);
+    }
+
+    /// C-001, DX-7: the project tier (`ocx.toml`, a different type) carries
+    /// neither key — a cloned repository can never add a trust root. Written
+    /// here against `ProjectConfig` rather than beside its own unknown-key
+    /// tests because `project/config.rs` is outside this work package's file
+    /// set. Refused as an unknown key: `ProjectErrorKind::TomlParse`, exit 78.
+    #[test]
+    fn ocx_toml_carrying_an_extra_ca_certs_key_is_refused() {
+        use crate::cli::{ClassifyExitCode, ExitCode};
+
+        for payload in [
+            "extra_ca_certs = \"corp-ca.pem\"\n\n[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n",
+            &format!(
+                "{}\n[tools]\ncmake = \"ocx.sh/cmake:3.28\"\n",
+                extra_ca_certs_pem_line()
+            ),
+        ] {
+            let err = crate::project::ProjectConfig::from_toml_str(payload)
+                .expect_err("ocx.toml must refuse either extra_ca_certs spelling");
+            let crate::project::Error::Project(project_error) = &err;
+            assert!(
+                matches!(project_error.kind, crate::project::ProjectErrorKind::TomlParse(_)),
+                "refused as an unknown key, not accepted-and-ignored; got {err:?}"
+            );
+            assert_eq!(err.classify(), Some(ExitCode::ConfigError));
+        }
     }
 
     // ── C-033 — the project tier can never contribute `[shell]` ─────────────
@@ -5475,7 +6026,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, _snapshot, _resolved, state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, _snapshot, _resolved, state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
             .await
             .expect("fold must succeed");
 
@@ -5659,6 +6210,195 @@ mod tests {
             Some(ConfigTier::Explicit),
             "`ocx shell state` must name the deciding tier, never assert \"managed\""
         );
+    }
+
+    /// DX-16 (review r1): `LoadedConfig::extra_ca_certs_tier` is the loader's
+    /// own record of which tier's key survived the fold, and
+    /// `extra_ca_certs_tier_local` the same for the local-only view — TRUE
+    /// provenance, never a guess from the value. One `$OCX_HOME`, four
+    /// loads through the shipped fold: the home tier alone (the system tier
+    /// would lock, ocx#469 — `extra_ca_certs_system_lock_beats_every_lower_tier`
+    /// owns that) → `Home` in both views; a managed payload setting the key →
+    /// `Managed` in the merged view while the local view still names the
+    /// discovered tier; an `OCX_CONFIG` overlay on top → `Explicit` in both;
+    /// and (ocx#471) a system `_pem` under a managed payload whose only key
+    /// is the PATH form → `System`: C-002 drops the path before the record
+    /// is taken, so a dropped key never stamps `Managed` over the tier whose
+    /// root actually resolves.
+    ///
+    /// Red states: record the tier unconditionally in
+    /// `load_and_merge_recording` (a silent tier stamps itself over the
+    /// home tier → the first load reds); return `None` from
+    /// `fold_managed_tier` (the second load's merged tier reds); drop the
+    /// overlay's `.or(..)` precedence (the third reds); take the managed
+    /// record before `guard_managed_sigstore_trust` (the fourth reds).
+    #[tokio::test]
+    async fn extra_ca_certs_tier_records_the_tier_that_actually_set_the_key() {
+        use crate::config::ConfigTier;
+
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_CONFIG");
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+        without_system_config(&env);
+        let load = || async {
+            ConfigLoader::load_with_local_view(ConfigInputs {
+                explicit_path: None,
+                explicit_project_path: None,
+                cwd: None,
+            })
+            .await
+            .expect("load must succeed")
+        };
+
+        // Home tier alone.
+        std::fs::write(dir.path().join("config.toml"), extra_ca_certs_pem_line()).unwrap();
+        let loaded = load().await;
+        assert_eq!(
+            loaded.merged.extra_ca_certs_pem.as_deref(),
+            Some(EXTRA_CA_CERTS_FIXTURE_PEM)
+        );
+        assert_eq!(loaded.extra_ca_certs_tier, Some(ConfigTier::Home));
+        assert_eq!(loaded.extra_ca_certs_tier_local, Some(ConfigTier::Home));
+
+        // An unpinned managed payload sets the key: merged names it, local
+        // still names the tier the discovered chain folded.
+        let source = "registry.test/managed-config:stable";
+        std::fs::write(
+            dir.path().join("config.toml"),
+            format!(
+                "{}[managed]\nsource = \"{source}\"\nrequired = false\n",
+                extra_ca_certs_pem_line()
+            ),
+        )
+        .unwrap();
+        write_managed_snapshot(dir.path(), source, "extra_ca_certs_pem = \"managed\"\n");
+        let loaded = load().await;
+        assert_eq!(loaded.merged.extra_ca_certs_pem.as_deref(), Some("managed"));
+        assert_eq!(loaded.extra_ca_certs_tier, Some(ConfigTier::Managed));
+        assert_eq!(
+            loaded.local_only.extra_ca_certs_pem.as_deref(),
+            Some(EXTRA_CA_CERTS_FIXTURE_PEM),
+            "the local view never carries the payload's key"
+        );
+        assert_eq!(loaded.extra_ca_certs_tier_local, Some(ConfigTier::Home));
+
+        // `OCX_CONFIG` outranks the managed fold, in both views.
+        let explicit = write_config(&dir, "chosen.toml", "extra_ca_certs_pem = \"explicit\"\n");
+        env.set("OCX_CONFIG", explicit.to_str().unwrap());
+        let loaded = load().await;
+        assert_eq!(loaded.merged.extra_ca_certs_pem.as_deref(), Some("explicit"));
+        assert_eq!(loaded.extra_ca_certs_tier, Some(ConfigTier::Explicit));
+        assert_eq!(loaded.extra_ca_certs_tier_local, Some(ConfigTier::Explicit));
+
+        // ocx#471: a managed payload whose only key is the path form sets
+        // nothing once C-002 drops it — the record stays with the system
+        // tier, whose `_pem` is what resolves. The home tier is silent so the
+        // ocx#469 lock is not what decides this load.
+        env.remove("OCX_CONFIG");
+        let system = write_config(&dir, "system.toml", &extra_ca_certs_pem_line());
+        env.set(SYSTEM_CONFIG_OVERRIDE, system.to_str().unwrap());
+        std::fs::write(
+            dir.path().join("config.toml"),
+            format!("[managed]\nsource = \"{source}\"\nrequired = false\n"),
+        )
+        .unwrap();
+        write_managed_snapshot(dir.path(), source, "extra_ca_certs = \"/publisher/corp-ca.pem\"\n");
+        let loaded = load().await;
+        assert_eq!(
+            loaded.merged.extra_ca_certs_pem.as_deref(),
+            Some(EXTRA_CA_CERTS_FIXTURE_PEM)
+        );
+        assert_eq!(
+            loaded.merged.extra_ca_certs, None,
+            "the path form never survives a payload"
+        );
+        assert_eq!(
+            loaded.extra_ca_certs_tier,
+            Some(ConfigTier::System),
+            "a dropped path form must not record the managed tier as the provenance"
+        );
+        assert_eq!(loaded.extra_ca_certs_tier_local, Some(ConfigTier::System));
+    }
+
+    /// ocx#469: the system tier's pair is locked — it beats the home tier
+    /// (switching to the PATH form, so a merge that honoured it would clear
+    /// the system `_pem` rather than only replace it), an unpinned managed
+    /// payload and `OCX_CONFIG`, in both views, with the tier recorded as
+    /// `System` throughout; and it survives `OCX_NO_CONFIG=1`, which prunes
+    /// ambient configuration, not operator policy. The lock flag itself
+    /// reaches both views, which is what `tls::resolve_extra_roots` reads to
+    /// ignore `OCX_EXTRA_CA_CERTS`.
+    ///
+    /// Red states: drop the `Config::merge` guard → the merged `_pem` reads
+    /// "explicit"; drop the `retain_system_locked_sections` guard → the
+    /// `OCX_NO_CONFIG` load's `_pem` is `None`.
+    #[tokio::test]
+    async fn extra_ca_certs_system_lock_beats_every_lower_tier() {
+        use crate::config::ConfigTier;
+
+        let env = crate::test::env::lock();
+        let dir = TempDir::new().unwrap();
+        env.set("OCX_HOME", dir.path().to_str().unwrap());
+        env.remove("OCX_NO_CONFIG");
+        env.remove("OCX_MANAGED_CONFIG");
+        with_system_config(&env, &dir, &extra_ca_certs_pem_line());
+        let source = "registry.test/managed-config:stable";
+        std::fs::write(
+            dir.path().join("config.toml"),
+            format!("extra_ca_certs = \"home-ca.pem\"\n[managed]\nsource = \"{source}\"\nrequired = false\n"),
+        )
+        .unwrap();
+        write_managed_snapshot(dir.path(), source, "extra_ca_certs_pem = \"managed\"\n");
+        let explicit = write_config(&dir, "chosen.toml", "extra_ca_certs_pem = \"explicit\"\n");
+        env.set("OCX_CONFIG", explicit.to_str().unwrap());
+        let load = || async {
+            ConfigLoader::load_with_local_view(ConfigInputs {
+                explicit_path: None,
+                explicit_project_path: None,
+                cwd: None,
+            })
+            .await
+            .expect("load must succeed")
+        };
+
+        let loaded = load().await;
+        for (view, config) in [("merged", &loaded.merged), ("local_only", &loaded.local_only)] {
+            assert!(
+                config.extra_ca_certs_system_locked,
+                "{view}: the lock must reach the view"
+            );
+            assert_eq!(
+                config.extra_ca_certs_pem.as_deref(),
+                Some(EXTRA_CA_CERTS_FIXTURE_PEM),
+                "{view}: the system root must be the one that resolves"
+            );
+            assert_eq!(
+                config.extra_ca_certs, None,
+                "{view}: the home tier's path form must not clear the locked pair"
+            );
+        }
+        assert_eq!(loaded.extra_ca_certs_tier, Some(ConfigTier::System));
+        assert_eq!(loaded.extra_ca_certs_tier_local, Some(ConfigTier::System));
+
+        // The flag prunes the home tier and the snapshot; the locked pair and
+        // its record stay, and `OCX_CONFIG` still cannot outbid them.
+        env.set("OCX_NO_CONFIG", "1");
+        let loaded = load().await;
+        assert!(loaded.merged.extra_ca_certs_system_locked);
+        assert_eq!(
+            loaded.merged.extra_ca_certs_pem.as_deref(),
+            Some(EXTRA_CA_CERTS_FIXTURE_PEM),
+            "a system-locked pair must survive OCX_NO_CONFIG=1"
+        );
+        assert_eq!(
+            loaded.extra_ca_certs_tier,
+            Some(ConfigTier::System),
+            "the record must survive with the pair — a refusal still names the system file"
+        );
+        assert_eq!(loaded.extra_ca_certs_tier_local, Some(ConfigTier::System));
     }
 
     /// A-33, EC-CFG-007: `OCX_CONFIG` is a third consent-bearing channel, and
@@ -5911,7 +6651,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, _snapshot, _resolved, _state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, _snapshot, _resolved, _state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
             .await
             .expect("fold must succeed even against a locked accumulator");
 
@@ -5964,7 +6704,7 @@ mod tests {
         };
         let local_only = accumulator.clone();
 
-        let (folded, _snapshot, _resolved, _state) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
+        let (folded, _snapshot, _resolved, _state, _) = ConfigLoader::fold_managed_tier(accumulator, &local_only)
             .await
             .expect("fold must succeed");
 

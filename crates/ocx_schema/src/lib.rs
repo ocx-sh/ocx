@@ -490,6 +490,21 @@ mod tests {
                 "`{runtime_only}` is runtime provenance and must never be published as a config key"
             );
         }
+
+        // The same rule at the root: the extra-CA pair is published, its
+        // system-lock flag (ocx#469) is loader-set and is not.
+        let root_properties = value
+            .pointer("/properties")
+            .and_then(|properties| properties.as_object())
+            .expect("the config schema has root properties");
+        assert!(
+            root_properties.contains_key("extra_ca_certs_pem"),
+            "positive control: the extra-CA pair itself is a published key"
+        );
+        assert!(
+            !root_properties.contains_key("extra_ca_certs_system_locked"),
+            "`extra_ca_certs_system_locked` is runtime provenance and must never be published as a config key"
+        );
     }
 
     /// The execution-record schema is the published half of a two-channel

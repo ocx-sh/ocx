@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 use crate::cli::ClassifyExitCode;
 use crate::cli::ExitCode;
+use crate::utility::fs::path::FileReference;
 
 pub use self::managed::ManagedConfig;
 pub use self::mirror::MirrorConfig;
@@ -214,6 +215,56 @@ pub struct Config {
     /// chosen volume.
     #[serde(default)]
     pub toolchain_dir: Option<PathBuf>,
+
+    // C-001 — the extra CA roots field pair, and the ADR amendment it
+    // forwards to: `adr_managed_config_tier.md` "Amendment (2026-09-13)"
+    // records the residual TLS-impersonation risk an unpinned managed
+    // publisher gains by setting this key. Lives here, not in the `///`
+    // block below, for the same reason `toolchain_dir`'s neighbour comment
+    // above does: schemars copies that block verbatim into the published
+    // schema, where an intra-doc link renders as literal brackets and an
+    // artifact filename means nothing to the reader.
+    /// Extra CA certificate(s) trusted for OCI registry, index and forge
+    /// traffic, as a path to a PEM file (a bundle of one or more
+    /// concatenated `CERTIFICATE` blocks is accepted) additional to the
+    /// platform trust store.
+    ///
+    /// A relative path resolves against the directory of the `config.toml`
+    /// that declared it — rewritten to absolute at load time, so the same
+    /// value means the same file regardless of the process working
+    /// directory. Mutually exclusive with `extra_ca_certs_pem`: declaring
+    /// both in one file is refused. A managed payload never carries this
+    /// form: a path on the publisher's disk means nothing on a consumer's, so
+    /// the managed tier drops it with a warning — publish with `ocx config
+    /// push`, which inlines the file as `extra_ca_certs_pem`.
+    #[serde(default)]
+    pub extra_ca_certs: Option<PathBuf>,
+
+    /// The extra CA certificate bundle inlined verbatim (PEM text).
+    ///
+    /// This is the form a fleet receives: `ocx config push` reads a
+    /// path-form `extra_ca_certs` at publish time and inlines it here,
+    /// because a path on the operator's disk means nothing on a consumer's.
+    /// Mutually exclusive with `extra_ca_certs`. From the managed tier it is
+    /// honoured for registry, index and forge traffic as published; Sigstore
+    /// traffic honours a managed-tier root set only behind a digest-pinned
+    /// `[managed] source`.
+    #[serde(default)]
+    pub extra_ca_certs_pem: Option<String>,
+
+    /// Runtime provenance marker (ocx#469): the extra-CA pair above was
+    /// declared at the SYSTEM config scope (`/etc/ocx/config.toml`), so it is
+    /// NON-OVERRIDABLE — every lower tier's pair and `OCX_EXTRA_CA_CERTS` are
+    /// ignored with a warning, and the pair survives `OCX_NO_CONFIG`. Mirrors
+    /// [`RegistryDefaults::system_locked`], but for a pair of root-level
+    /// scalars rather than a table, so it lives on `Config` itself.
+    ///
+    /// Never serialized — set by the loader's `apply_system_locks` iff the
+    /// system file sets either key ("absent locks nothing"), never read from
+    /// disk.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub extra_ca_certs_system_locked: bool,
 }
 
 /// Global registry-subsystem settings (`[registry]` section).
@@ -342,6 +393,47 @@ impl Config {
             .is_some_and(|value| !value.as_os_str().is_empty())
         {
             self.toolchain_dir = other.toolchain_dir;
+        }
+        // Two spellings of one CA-trust decision (C-001, D-1): the XOR
+        // mirrors `SigstoreTrust::merge`'s handling of `trusted_root` /
+        // `trusted_root_json` (`trust.rs:225-228`) one-for-one. Taking
+        // either field from `other` must drop the other, or a tier that
+        // switches from a path to an inline bundle would leave both set on
+        // the MERGED `Config` for the resolver to trip over.
+        // That is a different case from the per-file ambiguity refusal
+        // (S-005, `ConfigLoader::guard_extra_ca_certs_ambiguity`), which runs
+        // before this merge and can never see the accumulator — it catches
+        // both keys in ONE file, not a switch introduced across tiers.
+        //
+        // A system-locked pair (ocx#469) ignores every lower tier's, and the
+        // lock is ADOPTED from `other` for the reason `RegistryConfig::merge`
+        // gives: the loader folds the system tier into a default accumulator,
+        // so the system tier is `other`, never `self`, on the fold that first
+        // carries it in. The loader warns for the dropped tier
+        // (`system_lock_drops_extra_ca`); this arm only enforces.
+        if !self.extra_ca_certs_system_locked && (other.extra_ca_certs.is_some() || other.extra_ca_certs_pem.is_some())
+        {
+            self.extra_ca_certs = other.extra_ca_certs;
+            self.extra_ca_certs_pem = other.extra_ca_certs_pem;
+            self.extra_ca_certs_system_locked = other.extra_ca_certs_system_locked;
+        }
+    }
+
+    /// Resolve [`Self::extra_ca_certs`] against `config_dir` — the directory
+    /// of the `config.toml` that declared it — through the shared
+    /// [`FileReference`] grammar.
+    ///
+    /// Called by [`crate::config::loader::ConfigLoader`]'s per-tier anchoring
+    /// pass, mirroring
+    /// [`SigstoreTrust::anchor_relative_root`](crate::trust::SigstoreTrust::anchor_relative_root)
+    /// one-for-one (C-001): same grammar, same relative rule, so `extra_ca_certs`
+    /// never resolves differently depending on which subsystem reads it.
+    pub fn anchor_relative_extra_ca_certs(&mut self, config_dir: &Path) {
+        if let Some(path) = self.extra_ca_certs.as_ref() {
+            // `to_string_lossy` is exact here: the value is deserialized from
+            // a TOML string, so it is UTF-8 by construction.
+            let written = path.to_string_lossy().into_owned();
+            self.extra_ca_certs = Some(FileReference::parse(&written).anchored_at(config_dir));
         }
     }
 
@@ -2148,6 +2240,23 @@ mod tests {
                 system.system_locked
                     && system.dir == Some(PathBuf::from("/var/log/ocx/records"))
                     && system.required == Some(true)
+            }),
+            // The root-level pair (ocx#469): locked on `Config` itself. The
+            // lower tier switches to the OTHER spelling, so a merge that
+            // honoured it would show as a cleared `_pem`, not only a changed one.
+            ("extra_ca_certs / extra_ca_certs_pem", || {
+                let mut system = Config {
+                    extra_ca_certs_pem: Some("system".to_string()),
+                    extra_ca_certs_system_locked: true,
+                    ..Config::default()
+                };
+                system.merge(Config {
+                    extra_ca_certs: Some(PathBuf::from("/tmp/lower-evil.pem")),
+                    ..Config::default()
+                });
+                system.extra_ca_certs_system_locked
+                    && system.extra_ca_certs_pem.as_deref() == Some("system")
+                    && system.extra_ca_certs.is_none()
             }),
         ];
 

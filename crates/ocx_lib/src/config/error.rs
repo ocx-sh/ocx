@@ -108,6 +108,24 @@ pub enum Error {
     /// `ToolchainRootError` to `crate::Error` is two conversions, not one.
     #[error(transparent)]
     Toolchain(#[from] crate::config::ToolchainRootError),
+
+    /// A single config file declares both `extra_ca_certs` and
+    /// `extra_ca_certs_pem` (S-005) — same-file ambiguity, distinct from the
+    /// cross-tier XOR [`crate::config::Config::merge`] applies.
+    ///
+    /// The permanent load-side carrier for this refusal. The loader checks
+    /// this at LOAD time, per file, before `Config::merge` folds the parsed
+    /// tier into the accumulator; the XOR merge then guarantees the merged
+    /// `Config` can never carry both fields at once, so there is no
+    /// equivalent resolve-time check to make — unlike `[trust.sigstore]`'s
+    /// sibling ambiguity, which is refused at resolve time on the merged
+    /// config (`oci/verify/trust_resolve.rs:102-106`).
+    #[error(
+        "{} declares both extra_ca_certs and extra_ca_certs_pem: keep one (extra_ca_certs names a local file; \
+         extra_ca_certs_pem is the inline text `ocx config push` publishes)",
+        path.display()
+    )]
+    AmbiguousExtraCaCerts { path: PathBuf },
 }
 
 impl ClassifyExitCode for Error {
@@ -117,7 +135,10 @@ impl ClassifyExitCode for Error {
             // `SystemConfig` is 78, not the 74 its sibling `Io` takes: the
             // operator fixes it by editing (or un-symlinking) a policy file,
             // the same remediation a malformed one needs.
-            Self::FileTooLarge { .. } | Self::Parse { .. } | Self::SystemConfig { .. } => ExitCode::ConfigError,
+            Self::FileTooLarge { .. }
+            | Self::Parse { .. }
+            | Self::SystemConfig { .. }
+            | Self::AmbiguousExtraCaCerts { .. } => ExitCode::ConfigError,
             Self::Io { .. } => ExitCode::IoError,
             Self::InvalidBooleanString { .. } => ExitCode::DataError,
             // Delegated, not restated: every `toolchain_dir` refusal is 78
