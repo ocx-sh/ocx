@@ -221,6 +221,42 @@ pub struct SetupOutcome {
     /// encoding refusal, and that never reaches this field because it is an
     /// `Err` from [`run`].
     pub session_path: Vec<(PathBuf, SessionPathOutcome)>,
+    /// Result of persisting an installer-exported `OCX_EXTRA_CA_CERTS` value
+    /// into `config.toml` (phase 0.5, C-008, ocx#448).
+    pub extra_ca_certs: ExtraCaCertsOutcome,
+}
+
+/// Outcome of `ocx self setup` phase 0.5 (C-008, ocx#448): persisting an
+/// installer-exported `OCX_EXTRA_CA_CERTS` value into the home-tier
+/// `config.toml` as `extra_ca_certs_pem`, so the corp CA an installer used to
+/// bootstrap survives past the `mktemp` file the installer deletes on exit
+/// (D-5). `ocx config setup` does not run this phase.
+#[derive(Debug, Clone)]
+pub enum ExtraCaCertsOutcome {
+    /// `OCX_EXTRA_CA_CERTS` was unset or `""` — nothing to do, zero I/O.
+    NotConfigured,
+    /// The resolved value equals what `config.toml` already carries —
+    /// compared as the parsed TOML string, not file bytes (C-008) — so no
+    /// write.
+    Unchanged {
+        /// Number of certificates the resolved bundle carries.
+        certificates: usize,
+    },
+    /// The resolved, validated value was written.
+    Persisted {
+        /// Number of certificates the persisted bundle carries.
+        certificates: usize,
+    },
+    /// `--dry-run`: a value resolved and validated, but nothing was written.
+    WouldPersist {
+        /// Number of certificates the resolved bundle carries.
+        certificates: usize,
+    },
+    /// `OCX_EXTRA_CA_CERTS` was set, but the pair is system-locked
+    /// (ocx#469): nothing was validated or written, since the loader takes
+    /// the pair from `/etc/ocx/config.toml` alone and would ignore the
+    /// home-tier value on every later invocation.
+    SystemLocked,
 }
 
 /// Result of the managed-config adoption phase (1.5) inside `ocx self setup`.
@@ -294,7 +330,10 @@ pub enum ManagedConfigSetupOutcome {
 /// touched. It sits there rather than beside the registration it guards
 /// because it is the only refusal that would otherwise fire after four
 /// writing phases. `--no-modify-path` suppresses it along with the whole
-/// session-PATH arm.
+/// session-PATH arm. Phase 0.5, `OCX_EXTRA_CA_CERTS` persistence (C-008,
+/// ocx#448), is a second pre-write refusal in the same spirit: a refused or
+/// oversized extra-CA value is caught before bootstrap ever fetches, leaving
+/// the machine byte-identical.
 ///
 /// Bootstrap runs first among the **writing** phases. If it fails, `run` returns the error immediately,
 /// having written **zero shims and touched zero profiles** — there is no partial
@@ -308,7 +347,10 @@ pub enum ManagedConfigSetupOutcome {
 /// # Errors
 ///
 /// Returns [`error::Error`] if the bootstrap fails (zero shims written, zero
-/// profiles touched), or if a shim / profile write fails.
+/// profiles touched), or if a shim / profile write fails; also
+/// [`error::Error::ExtraCaCerts`], [`error::Error::ExtraCaCertsNotUtf8`] or
+/// [`error::Error::RenderedConfigTooLarge`] if phase 0.5's
+/// `OCX_EXTRA_CA_CERTS` persistence refuses before bootstrap runs.
 pub async fn run(
     options: &SetupOptions,
     config: &crate::config::Config,
@@ -325,6 +367,19 @@ pub async fn run(
     if options.touches_session_path() {
         session_path::refuse_unencodable(&session_path_directories(file_structure))?;
     }
+
+    // ── Phase 0.5: persist OCX_EXTRA_CA_CERTS (C-008, ocx#448) ────────────────
+    // Before bootstrap and no network: a later fetch failure must still leave
+    // the CA persisted, since the whole point is that the corp registry
+    // bootstrap below can trust it.
+    let extra_ca_certs = persist_extra_ca_certs(
+        &file_structure.locks,
+        file_structure.root(),
+        crate::env::var(crate::env::keys::OCX_EXTRA_CA_CERTS).as_deref(),
+        options.dry_run,
+        config.extra_ca_certs_system_locked,
+    )
+    .await?;
 
     // ── Phase 1: bootstrap (hard gate, runs first) ────────────────────────────
     // On `Err`, propagate now — zero shims written, zero profiles touched.
@@ -439,6 +494,121 @@ pub async fn run(
         reload_hint,
         managed_config,
         session_path,
+        extra_ca_certs,
+    })
+}
+
+/// Phase 0.5 of [`run`] (C-008, ocx#448): resolve `OCX_EXTRA_CA_CERTS` as
+/// C-005's env arm ([`crate::tls::ExtraRoots::from_env_value`]: a
+/// value containing `-----BEGIN` is inline PEM, D-4; else a path read via
+/// [`crate::utility::fs::read_bounded`]), validate it through
+/// [`crate::tls::ExtraRoots::parse_pem`] (C-004, the single choke
+/// point), and persist it as root-level `extra_ca_certs_pem` in
+/// `<home>/config.toml` through [`crate::config::edit::edit`] — the one
+/// locked read-modify-write every `config.toml` writer shares (ocx#468) —
+/// removing a root `extra_ca_certs` key if present (XOR: `ocx self setup`
+/// persists inline PEM only, D-5, never a path). Diff-gated on the parsed
+/// TOML string, so a byte-identical re-run and a CRLF-escaped re-render both
+/// count as unchanged. Refuses (before any write) when the rendered document
+/// would exceed the config loader's 64 KiB ceiling.
+///
+/// `env_value` is `None` or `""` for "unset" (matching every other
+/// `=""`-is-unset `OCX_*` variable in this crate) — a no-op with zero I/O.
+/// `system_locked` is [`crate::config::Config::extra_ca_certs_system_locked`]
+/// (ocx#469): a set value under the lock is
+/// [`ExtraCaCertsOutcome::SystemLocked`], also with zero I/O — the loader
+/// would ignore whatever was persisted, and the same loader skips the env
+/// value unvalidated, so setup neither validates nor writes it.
+///
+/// `home` is `file_structure.root()` (`$OCX_HOME`), never
+/// `ConfigLoader::user_path()` — the same write target `shell_config::set`
+/// uses; `locks_root` is `file_structure.locks`.
+///
+/// The validation (the bounded file read and
+/// [`crate::tls::ExtraRoots::parse_pem`]'s probe build, DX-11) runs on the
+/// blocking pool ahead of the edit, so the lock is never held for it.
+///
+/// # Errors
+///
+/// [`error::Error::ExtraCaCerts`] for a path value the bounded read refuses
+/// and for anything [`crate::tls::ExtraRoots::parse_pem`] refuses
+/// (C-004); [`error::Error::ExtraCaCertsNotUtf8`] for a valid bundle that is
+/// not UTF-8 and so cannot be a TOML string;
+/// [`error::Error::Io`] for a `config.toml` read/parse/write failure;
+/// [`error::Error::RenderedConfigTooLarge`] when the document is, or would
+/// render, over the size ceiling.
+async fn persist_extra_ca_certs(
+    locks_root: &Path,
+    home: &Path,
+    env_value: Option<&str>,
+    dry_run: bool,
+    system_locked: bool,
+) -> Result<ExtraCaCertsOutcome, error::Error> {
+    use crate::config::edit::{self, EditError, EditOutcome};
+    use crate::tls::ExtraRoots;
+
+    const PEM_KEY: &str = "extra_ca_certs_pem";
+    const PATH_KEY: &str = "extra_ca_certs";
+
+    let Some(value) = env_value.filter(|value| !value.is_empty()) else {
+        return Ok(ExtraCaCertsOutcome::NotConfigured);
+    };
+    if system_locked {
+        return Ok(ExtraCaCertsOutcome::SystemLocked);
+    }
+    let config_path = home.join("config.toml");
+    let io_error = |source: std::io::Error| error::Error::Io {
+        path: config_path.clone(),
+        source,
+    };
+
+    // C-005's env arm: a path is read now (D-5 — the installer's file is gone
+    // on exit) and the text kept as read, so what lands in `config.toml` is
+    // the operator's bundle, not a re-encoding of it.
+    let value = value.to_owned();
+    let (pem, certificates) = tokio::task::spawn_blocking(move || -> Result<_, error::Error> {
+        let (pem, origin) = ExtraRoots::from_env_value(&value)?;
+        let certificates = ExtraRoots::parse_pem(&pem, &origin)?.len();
+        // Validated first, decoded second: only this phase needs text (a TOML
+        // string is UTF-8 by definition), so a bundle every client already
+        // trusts is refused here alone, and as data — the file's bytes are
+        // what is wrong.
+        let pem = String::from_utf8(pem).map_err(|error| error::Error::ExtraCaCertsNotUtf8 {
+            bytes: error.as_bytes().len(),
+        })?;
+        Ok((pem, certificates))
+    })
+    .await
+    .map_err(|join| io_error(std::io::Error::other(join.to_string())))??;
+
+    let outcome = edit::edit(locks_root, &config_path, dry_run, move |document| {
+        // The diff gate compares the PARSED string, so a CRLF bundle whose
+        // `\r`s render escaped still counts as the same value on the next run.
+        let already_persisted = document.get(PEM_KEY).and_then(toml_edit::Item::as_str) == Some(pem.as_str())
+            && !document.contains_key(PATH_KEY);
+        if already_persisted {
+            return Ok(());
+        }
+        // Root-level values render ahead of every `[table]` regardless of
+        // insertion order, so the key never lands inside a `[managed]` fence;
+        // the XOR removal keeps the file loadable (the loader refuses both
+        // keys).
+        document.remove(PATH_KEY);
+        document[PEM_KEY] = toml_edit::value(pem);
+        Ok(())
+    })
+    .await
+    .map_err(|error| match error {
+        // Re-homed for its remedy (shrink the file, or use the path form);
+        // every other refusal reads best in the edit's own words.
+        EditError::TooLarge { path, bytes } => error::Error::RenderedConfigTooLarge { path, bytes },
+        other => error::Error::ConfigEdit(other),
+    })?;
+
+    Ok(match (outcome, dry_run) {
+        (EditOutcome::Unchanged, _) => ExtraCaCertsOutcome::Unchanged { certificates },
+        (EditOutcome::Written, true) => ExtraCaCertsOutcome::WouldPersist { certificates },
+        (EditOutcome::Written, false) => ExtraCaCertsOutcome::Persisted { certificates },
     })
 }
 
@@ -689,8 +859,9 @@ pub async fn apply_managed_config(
         Err(error) => {
             // Best-effort ONLY behind an identity-matching snapshot, and ONLY
             // for errors proven to fire before any snapshot write: a registry
-            // blip or a bad published payload must not fail a re-run, because
-            // the tier stays usable on the content already on disk. A
+            // blip or a bad published payload (invalid TOML, a CA bundle this
+            // host cannot load) must not fail a re-run, because the tier
+            // stays usable on the content already on disk. A
             // `SnapshotWriteFailed` can fire AFTER the payload rename (the
             // metadata write is a separate atomic rename), leaving the new
             // payload live under the old provenance — reporting "kept the
@@ -701,6 +872,7 @@ pub async fn apply_managed_config(
                     | crate::managed_config::ManagedConfigUpdateError::SourceNotFound { .. }
                     | crate::managed_config::ManagedConfigUpdateError::Persist(
                         crate::managed_config::ManagedConfigPersistError::InvalidToml { .. }
+                            | crate::managed_config::ManagedConfigPersistError::ExtraCaCertsInvalid { .. }
                     )
             );
             let Some(previous) = adopted.filter(|_| pre_write_failure) else {
@@ -1550,45 +1722,52 @@ mod tests {
         assert!(snapshot.config.contains("adopted"), "the payload is kept verbatim");
     }
 
-    /// A published payload that fails validation (`Persist(InvalidToml)`) is a
-    /// pre-write fault — nothing on disk has moved — so behind a matching
-    /// snapshot it stays best-effort, exactly like a fetch fault.
+    /// A published payload that fails validation (`Persist(InvalidToml)`, or
+    /// `Persist(ExtraCaCertsInvalid)` — a CA bundle this host cannot load,
+    /// DX-20) is a pre-write fault — nothing on disk has moved — so behind a
+    /// matching snapshot it stays best-effort, exactly like a fetch fault.
     #[tokio::test]
     async fn apply_managed_config_refresh_invalid_payload_stays_best_effort() {
         let env = crate::test::env::lock();
         env.remove("OCX_MANAGED_CONFIG");
-        let home = tempfile::TempDir::new().unwrap();
-        let reference = "corp.example.com/ocx-config:user";
-        let identifier = crate::oci::Identifier::parse(reference).unwrap();
-        let file_structure = FileStructure::with_root(home.path().to_path_buf());
-
-        let first_digest = adopt(
-            home.path(),
-            &file_structure,
-            reference,
-            "[registry]\ndefault = \"adopted\"\n",
-        )
-        .await;
-
-        let invalid = manager_with_stub(home.path(), &identifier, "not = [valid toml");
-        let second = apply_managed_config(
-            &crate::config::Config::default(),
-            Some(reference),
-            false,
-            false,
-            &invalid,
-            &file_structure,
-        )
-        .await
-        .expect("an invalid published payload must not fail a re-run behind a matching snapshot");
-        assert!(
-            matches!(second, ManagedConfigSetupOutcome::RefreshUnavailable { .. }),
-            "expected RefreshUnavailable, got {second:?}"
+        let unusable_pem = format!(
+            "extra_ca_certs_pem = '''\n{}'''\n",
+            crate::tls::test_pki::pem_block("CERTIFICATE", b"this is not DER at all")
         );
-        let snapshot = crate::managed_config::read_managed_config_snapshot(&file_structure.state)
+        for payload in ["not = [valid toml", unusable_pem.as_str()] {
+            let home = tempfile::TempDir::new().unwrap();
+            let reference = "corp.example.com/ocx-config:user";
+            let identifier = crate::oci::Identifier::parse(reference).unwrap();
+            let file_structure = FileStructure::with_root(home.path().to_path_buf());
+
+            let first_digest = adopt(
+                home.path(),
+                &file_structure,
+                reference,
+                "[registry]\ndefault = \"adopted\"\n",
+            )
+            .await;
+
+            let invalid = manager_with_stub(home.path(), &identifier, payload);
+            let second = apply_managed_config(
+                &crate::config::Config::default(),
+                Some(reference),
+                false,
+                false,
+                &invalid,
+                &file_structure,
+            )
             .await
-            .expect("the snapshot must survive");
-        assert_eq!(snapshot.digest, first_digest, "the snapshot is kept, not replaced");
+            .expect("an invalid published payload must not fail a re-run behind a matching snapshot");
+            assert!(
+                matches!(second, ManagedConfigSetupOutcome::RefreshUnavailable { .. }),
+                "expected RefreshUnavailable for {payload:?}, got {second:?}"
+            );
+            let snapshot = crate::managed_config::read_managed_config_snapshot(&file_structure.state)
+                .await
+                .expect("the snapshot must survive");
+            assert_eq!(snapshot.digest, first_digest, "the snapshot is kept, not replaced");
+        }
     }
 
     /// A snapshot-WRITE failure is never downgraded to `RefreshUnavailable`:
@@ -1971,9 +2150,14 @@ mod tests {
         let home = tempfile::TempDir::new().unwrap();
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let config_path = home.path().join("config.toml");
-        let content = rc_block::apply("", "[managed]\nsource = \"corp.example.com/ocx-config:user\"\n", false, rc_block::MANAGED_LABEL)
-            .expect("apply infallible")
-            .expect("fresh append produces content");
+        let content = rc_block::apply(
+            "",
+            "[managed]\nsource = \"corp.example.com/ocx-config:user\"\n",
+            false,
+            rc_block::MANAGED_LABEL,
+        )
+        .expect("apply infallible")
+        .expect("fresh append produces content");
         std::fs::write(&config_path, &content).unwrap();
         let held = crate::utility::fs::lock_scoped(
             &file_structure.locks,
@@ -1990,7 +2174,10 @@ mod tests {
             async move { clear_managed_config(&config_path, &file_structure).await }
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert!(!task.is_finished(), "the clear must wait behind a held config-edit lock");
+        assert!(
+            !task.is_finished(),
+            "the clear must wait behind a held config-edit lock"
+        );
 
         drop(held);
         let outcome = task.await.unwrap().expect("the clear lands once the lock is released");
@@ -2491,5 +2678,408 @@ mod tests {
         let ocx_home = Path::new("/tmp/ocx-home");
         let env = home_env_from_environment(ocx_home);
         assert_eq!(env.ocx_home, ocx_home);
+    }
+
+    // ── persist_extra_ca_certs (phase 0.5, C-008, ocx#448) ──────────────────
+
+    mod extra_ca {
+        use super::*;
+        use crate::tls::test_pki::{TestPki, mint_root, pem_block};
+
+        /// Parsed root-level `extra_ca_certs_pem` of `<home>/config.toml`, or
+        /// `None` when the file or the key is absent.
+        fn persisted_pem(home: &Path) -> Option<String> {
+            let text = std::fs::read_to_string(home.join("config.toml")).ok()?;
+            let doc: toml::Value = toml::from_str(&text).expect("config.toml must stay parseable");
+            doc.get("extra_ca_certs_pem")?.as_str().map(str::to_owned)
+        }
+
+        fn config_text(home: &Path) -> String {
+            std::fs::read_to_string(home.join("config.toml")).expect("config.toml exists")
+        }
+
+        /// A pre-existing table, so "renders above the first `[table]`" is a
+        /// real position and a surgical edit has something to preserve.
+        const PRESEEDED: &str = "[registries.\"corp.example\"]\nindex = \"https://index.corp.example\"\n";
+
+        /// C-008: env unset (`None`) and `""` are both "not configured" — a
+        /// no-op with no file created.
+        #[tokio::test]
+        async fn extra_ca_persist_unset_or_empty_is_not_configured() {
+            let dir = tempfile::tempdir().unwrap();
+            for value in [None, Some("")] {
+                let outcome = persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), value, false, false)
+                    .await
+                    .expect("no-op");
+                assert!(
+                    matches!(outcome, ExtraCaCertsOutcome::NotConfigured),
+                    "{value:?}: {outcome:?}"
+                );
+            }
+            assert!(
+                !dir.path().join("config.toml").exists(),
+                "a no-op must not create config.toml"
+            );
+        }
+
+        /// C-008 / D-5: a path value is read now and persisted INLINE as the
+        /// root `extra_ca_certs_pem`, above a pre-existing table which survives.
+        #[tokio::test]
+        async fn extra_ca_persist_path_value_writes_inline_pem_at_root() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("config.toml"), PRESEEDED).unwrap();
+            let pki = TestPki::mint();
+            let ca_path = dir.path().join("corp-ca.pem");
+            std::fs::write(&ca_path, pki.root_pem()).unwrap();
+
+            let outcome = persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), ca_path.to_str(), false, false)
+                .await
+                .expect("persists");
+            assert!(
+                matches!(outcome, ExtraCaCertsOutcome::Persisted { certificates: 1 }),
+                "{outcome:?}"
+            );
+
+            assert_eq!(persisted_pem(dir.path()).as_deref(), Some(pki.root_pem().as_str()));
+            let text = config_text(dir.path());
+            assert!(
+                text.find("extra_ca_certs_pem").unwrap() < text.find("[registries").unwrap(),
+                "root key must render above the first table:\n{text}"
+            );
+            assert!(
+                !text.contains(ca_path.to_str().unwrap()),
+                "the path is never persisted (D-5)"
+            );
+            let doc: toml::Value = toml::from_str(&text).unwrap();
+            assert_eq!(
+                doc["registries"]["corp.example"]["index"].as_str(),
+                Some("https://index.corp.example"),
+                "the pre-existing table survives the surgical edit"
+            );
+        }
+
+        /// C-008 / D-4: inline PEM text (a value containing `-----BEGIN`) persists the
+        /// same way; the file is created when absent.
+        #[tokio::test]
+        async fn extra_ca_persist_inline_value_creates_config_when_absent() {
+            let dir = tempfile::tempdir().unwrap();
+            let pki = TestPki::mint();
+            let pem = pki.root_pem();
+
+            let outcome = persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), Some(&pem), false, false)
+                .await
+                .expect("persists");
+            assert!(
+                matches!(outcome, ExtraCaCertsOutcome::Persisted { certificates: 1 }),
+                "{outcome:?}"
+            );
+            assert_eq!(persisted_pem(dir.path()).as_deref(), Some(pem.as_str()));
+        }
+
+        /// C-008: an identical re-run is `Unchanged` and rewrites nothing —
+        /// byte-identical file.
+        #[tokio::test]
+        async fn extra_ca_persist_rerun_is_unchanged_and_byte_identical() {
+            let dir = tempfile::tempdir().unwrap();
+            let pem = TestPki::mint().root_pem();
+            persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), Some(&pem), false, false)
+                .await
+                .expect("first run persists");
+            let first = std::fs::read(dir.path().join("config.toml")).unwrap();
+
+            let outcome = persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), Some(&pem), false, false)
+                .await
+                .expect("re-run");
+            assert!(
+                matches!(outcome, ExtraCaCertsOutcome::Unchanged { certificates: 1 }),
+                "{outcome:?}"
+            );
+            assert_eq!(std::fs::read(dir.path().join("config.toml")).unwrap(), first);
+        }
+
+        /// C-008 edge case: a CRLF bundle persists (the TOML string carries
+        /// escaped `\r`), and the second run compares PARSED strings, not file
+        /// bytes — so the same CRLF value is `Unchanged`, not re-persisted.
+        #[tokio::test]
+        async fn extra_ca_persist_crlf_pem_rerun_compares_parsed_strings() {
+            let dir = tempfile::tempdir().unwrap();
+            let (_, root) = mint_root("CN=ocx-test-ca");
+            let crlf = pem::encode_config(
+                &pem::Pem::new("CERTIFICATE", root.as_slice()),
+                pem::EncodeConfig::new().set_line_ending(pem::LineEnding::CRLF),
+            );
+            assert!(crlf.contains("\r\n"), "fixture must carry CRLF");
+
+            let outcome = persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), Some(&crlf), false, false)
+                .await
+                .expect("CRLF persists");
+            assert!(
+                matches!(outcome, ExtraCaCertsOutcome::Persisted { certificates: 1 }),
+                "{outcome:?}"
+            );
+            assert_eq!(
+                persisted_pem(dir.path()).as_deref(),
+                Some(crlf.as_str()),
+                "CRLF round-trips"
+            );
+            let first = std::fs::read(dir.path().join("config.toml")).unwrap();
+
+            let outcome = persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), Some(&crlf), false, false)
+                .await
+                .expect("re-run");
+            assert!(matches!(outcome, ExtraCaCertsOutcome::Unchanged { .. }), "{outcome:?}");
+            assert_eq!(std::fs::read(dir.path().join("config.toml")).unwrap(), first);
+        }
+
+        /// ocx#469 (review D2): a value set under the system lock is reported
+        /// `SystemLocked` and nothing is validated or written — not even the
+        /// lock file — in either mode. The value is a private key on purpose:
+        /// a validating path would refuse it, so the `Ok` proves the skip.
+        #[tokio::test]
+        async fn a_value_under_the_system_lock_is_reported_and_not_persisted() {
+            let dir = tempfile::tempdir().unwrap();
+            let key = pem_block("PRIVATE KEY", &TestPki::mint().leaf_key_pkcs8);
+
+            for dry_run in [false, true] {
+                let outcome = persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), Some(&key), dry_run, true)
+                    .await
+                    .expect("a locked pair is an outcome, not a refusal");
+                assert!(matches!(outcome, ExtraCaCertsOutcome::SystemLocked), "{outcome:?}");
+            }
+            assert!(
+                !dir.path().join("config.toml").exists(),
+                "nothing is written under the lock"
+            );
+            assert!(!dir.path().join("locks").exists(), "nothing is locked under the lock");
+        }
+
+        /// C-008 / C-009: `dry_run` reports `WouldPersist` and writes nothing;
+        /// over an already-persisted identical value it reports `Unchanged`.
+        #[tokio::test]
+        async fn extra_ca_persist_dry_run_writes_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("config.toml"), PRESEEDED).unwrap();
+            let pem = TestPki::mint().root_pem();
+
+            let outcome = persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), Some(&pem), true, false)
+                .await
+                .expect("dry run");
+            assert!(
+                matches!(outcome, ExtraCaCertsOutcome::WouldPersist { certificates: 1 }),
+                "{outcome:?}"
+            );
+            assert_eq!(
+                config_text(dir.path()),
+                PRESEEDED,
+                "dry-run must leave config.toml byte-identical"
+            );
+
+            persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), Some(&pem), false, false)
+                .await
+                .expect("real run");
+            let outcome = persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), Some(&pem), true, false)
+                .await
+                .expect("dry run over persisted");
+            assert!(
+                matches!(outcome, ExtraCaCertsOutcome::Unchanged { certificates: 1 }),
+                "{outcome:?}"
+            );
+        }
+
+        /// C-008 (XOR): a root `extra_ca_certs` path key is removed when
+        /// `extra_ca_certs_pem` is written — the loader refuses both together.
+        #[tokio::test]
+        async fn extra_ca_persist_removes_root_path_key() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("config.toml"),
+                format!("extra_ca_certs = \"/etc/ssl/old-corp.pem\"\n{PRESEEDED}"),
+            )
+            .unwrap();
+            let pem = TestPki::mint().root_pem();
+
+            persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), Some(&pem), false, false)
+                .await
+                .expect("persists");
+
+            let doc: toml::Value = toml::from_str(&config_text(dir.path())).unwrap();
+            assert!(
+                doc.get("extra_ca_certs").is_none(),
+                "the path key must be removed: {doc}"
+            );
+            assert_eq!(doc["extra_ca_certs_pem"].as_str(), Some(pem.as_str()));
+        }
+
+        /// C-008 / edge case: a two-root bundle persists whole, `certificates: 2`.
+        #[tokio::test]
+        async fn extra_ca_persist_two_root_bundle_counts_two() {
+            let dir = tempfile::tempdir().unwrap();
+            let (_, first) = mint_root("CN=ocx-test-ca-1");
+            let (_, second) = mint_root("CN=ocx-test-ca-2");
+            let bundle = format!(
+                "{}{}",
+                pem_block("CERTIFICATE", &first),
+                pem_block("CERTIFICATE", &second)
+            );
+
+            let outcome = persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), Some(&bundle), false, false)
+                .await
+                .expect("persists");
+            assert!(
+                matches!(outcome, ExtraCaCertsOutcome::Persisted { certificates: 2 }),
+                "{outcome:?}"
+            );
+            assert_eq!(persisted_pem(dir.path()).as_deref(), Some(bundle.as_str()));
+        }
+
+        /// C-004 / C-008: a refused value (a `PRIVATE KEY` block) surfaces as
+        /// `Error::ExtraCaCerts` BEFORE any write — the file is untouched.
+        #[tokio::test]
+        async fn extra_ca_persist_refused_value_writes_nothing() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("config.toml"), PRESEEDED).unwrap();
+            let pki = TestPki::mint();
+            let key = pem_block("PRIVATE KEY", &pki.leaf_key_pkcs8);
+
+            match persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), Some(&key), false, false).await {
+                Err(error::Error::ExtraCaCerts(crate::tls::TlsError::NotACertificate { tag, .. })) => {
+                    assert_eq!(tag, "PRIVATE KEY");
+                }
+                other => panic!("expected ExtraCaCerts(NotACertificate), got {other:?}"),
+            }
+            assert_eq!(
+                config_text(dir.path()),
+                PRESEEDED,
+                "a refusal must leave config.toml byte-identical"
+            );
+        }
+
+        /// C-008: a bundle that validates but is not UTF-8 (a Latin-1
+        /// `subject=` label ahead of the block) cannot be a TOML string —
+        /// refused as data (65) after validation, nothing written, and the
+        /// message carries the byte count only (D-11).
+        #[tokio::test]
+        async fn extra_ca_persist_non_utf8_bundle_is_a_data_refusal_before_write() {
+            use crate::cli::{ClassifyExitCode as _, ExitCode};
+
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("config.toml"), PRESEEDED).unwrap();
+            let mut on_disk = b"subject=CN=corp caf\xe9\n".to_vec();
+            on_disk.extend_from_slice(TestPki::mint().root_pem().as_bytes());
+            let ca_path = dir.path().join("latin1-ca.pem");
+            std::fs::write(&ca_path, &on_disk).unwrap();
+
+            let error = persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), ca_path.to_str(), false, false)
+                .await
+                .expect_err("not UTF-8");
+            match &error {
+                error::Error::ExtraCaCertsNotUtf8 { bytes } => assert_eq!(*bytes, on_disk.len()),
+                other => panic!("expected ExtraCaCertsNotUtf8, got {other:?}"),
+            }
+            assert_eq!(error.classify(), Some(ExitCode::DataError));
+            assert!(
+                !error.to_string().contains("caf"),
+                "the bytes are never echoed: {error}"
+            );
+            assert!(
+                error.to_string().contains("strip the non-UTF-8 label lines"),
+                "the message names the remedy: {error}"
+            );
+            assert_eq!(
+                config_text(dir.path()),
+                PRESEEDED,
+                "a refusal must leave config.toml byte-identical"
+            );
+        }
+
+        /// C-008 / D-10: a path to a non-regular file is refused through the
+        /// bounded read — `Unreadable`, nothing written, no hang.
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn extra_ca_persist_dev_zero_path_is_unreadable() {
+            let dir = tempfile::tempdir().unwrap();
+            match persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), Some("/dev/zero"), false, false).await {
+                Err(error::Error::ExtraCaCerts(crate::tls::TlsError::Unreadable { .. })) => {}
+                other => panic!("expected ExtraCaCerts(Unreadable), got {other:?}"),
+            }
+            assert!(!dir.path().join("config.toml").exists());
+        }
+
+        /// C-008: a rendered document over `MAX_CONFIG_SIZE` is refused before
+        /// any write. Positive control first — the same bundle persists into a
+        /// small file — so the refusal is the rendered size, not the bundle's.
+        #[tokio::test]
+        async fn extra_ca_persist_oversize_rendered_config_is_refused_before_write() {
+            use crate::tls::MAX_EXTRA_CA_CERTS_BYTES;
+
+            const MAX_CONFIG_SIZE: usize = crate::config::loader::MAX_CONFIG_SIZE as usize;
+
+            let mut bundle = String::new();
+            let mut index = 0;
+            while bundle.len() < MAX_EXTRA_CA_CERTS_BYTES - 2048 {
+                let (_, root) = mint_root(&format!("CN=ocx-test-ca-{index}"));
+                bundle.push_str(&pem_block("CERTIFICATE", &root));
+                index += 1;
+            }
+            assert!(
+                bundle.len() < MAX_EXTRA_CA_CERTS_BYTES,
+                "fixture must sit under the value cap"
+            );
+
+            let control = tempfile::tempdir().unwrap();
+            let outcome = persist_extra_ca_certs(
+                &control.path().join("locks"),
+                control.path(),
+                Some(&bundle),
+                false,
+                false,
+            )
+            .await
+            .expect("control persists");
+            assert!(matches!(outcome, ExtraCaCertsOutcome::Persisted { .. }), "{outcome:?}");
+
+            let dir = tempfile::tempdir().unwrap();
+            let padding: String = std::iter::repeat_n(format!("# {}\n", "x".repeat(98)), 410).collect();
+            let seeded = format!("{padding}{PRESEEDED}");
+            assert!(
+                seeded.len() < MAX_CONFIG_SIZE,
+                "the seeded file must itself be loadable"
+            );
+            assert!(
+                seeded.len() + bundle.len() > MAX_CONFIG_SIZE,
+                "seeded + bundle must exceed the ceiling"
+            );
+            std::fs::write(dir.path().join("config.toml"), &seeded).unwrap();
+
+            match persist_extra_ca_certs(&dir.path().join("locks"), dir.path(), Some(&bundle), false, false).await {
+                Err(error @ error::Error::RenderedConfigTooLarge { .. }) => {
+                    let error::Error::RenderedConfigTooLarge { path, bytes } = &error else {
+                        unreachable!()
+                    };
+                    assert_eq!(*path, dir.path().join("config.toml"));
+                    assert!(
+                        *bytes > MAX_CONFIG_SIZE,
+                        "reported size {bytes} must exceed the ceiling"
+                    );
+                    // The message names the bound and a remedy (review r1).
+                    let rendered = error.to_string();
+                    assert!(
+                        rendered.contains(&format!("would leave {} at {bytes} bytes", path.display())),
+                        "{rendered}"
+                    );
+                    assert!(
+                        rendered.contains(&format!("over the {MAX_CONFIG_SIZE}-byte config limit")),
+                        "{rendered}"
+                    );
+                    assert!(rendered.contains("extra_ca_certs = \"<path>\""), "{rendered}");
+                }
+                other => panic!("expected RenderedConfigTooLarge, got {other:?}"),
+            }
+            assert_eq!(
+                config_text(dir.path()),
+                seeded,
+                "a refusal must leave config.toml byte-identical"
+            );
+        }
     }
 }

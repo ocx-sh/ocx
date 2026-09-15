@@ -54,7 +54,11 @@ pub enum SelfGroup {
     ///
     /// `--no-modify-path` and `--profile` / `--no-profile` persist as `[shell]
     /// modify_path` and `[shell] profiles` in config.toml, so the choice
-    /// applies to every later run too - not only this one.
+    /// applies to every later run too - not only this one. A corporate CA
+    /// handed in as OCX_EXTRA_CA_CERTS (a path or the PEM text) is persisted
+    /// as `extra_ca_certs_pem` in config.toml before the bootstrap downloads
+    /// anything, so the bootstrap itself and every later command already
+    /// trust it.
     ///
     /// https://ocx.sh/docs/user-guide#install-bare-binary
     Setup(setup::SelfSetup),

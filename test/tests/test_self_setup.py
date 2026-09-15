@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -1774,3 +1775,583 @@ def test_digest_only_pin_no_downgrade_warning(
     assert not _emits_downgrade_warning(result.stderr), (
         f"digest-only pin (no tag) must not emit a downgrade warning; got:\n{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# OCX_EXTRA_CA_CERTS persistence (phase 0.5, C-008, ocx#448, S-001)
+#
+# Shared shape: seed a candidate (so bootstrap is ``already_present`` and the
+# run stays offline), export ``OCX_EXTRA_CA_CERTS`` on top of ``_setup``'s env,
+# and read ``$OCX_HOME/config.toml`` (root-level ``extra_ca_certs_pem`` / the
+# removed ``extra_ca_certs``, never the ``[shell]`` table) for the persisted
+# value. The CA is a fresh minted root per test (``src.tls_index``), so the
+# persisted bytes are never a fixture constant another test could have left.
+# ---------------------------------------------------------------------------
+
+
+# A pre-existing table in `config.toml`, so "the key renders ABOVE the first
+# `[table]`" is a real position rather than a vacuous one on an empty file.
+_PRESEEDED_TABLE = '[registries."corp.example"]\nindex = "https://index.corp.example"\n'
+
+
+def _config_toml(ocx: OcxRunner) -> Path:
+    return Path(ocx.env["OCX_HOME"]) / "config.toml"
+
+
+def _lock_files(ocx: OcxRunner) -> set[Path]:
+    """Every ``*.lock`` under ``$OCX_HOME/locks`` — the scoped-lock root is
+    append-only (lock files are never unlinked), so a new entry is a lock that
+    was taken."""
+    return set((Path(ocx.env["OCX_HOME"]) / "locks").rglob("*.lock"))
+
+
+def _wait_for_new_lock_file(ocx: OcxRunner, before: set[Path], timeout: float = 30.0) -> Path:
+    """Block until a lock file that was not in ``before`` appears — the
+    readiness signal that a spawned ``ocx`` has taken its first scoped lock."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        new = _lock_files(ocx) - before
+        if new:
+            return next(iter(new))
+        time.sleep(0.02)
+    raise AssertionError(f"no new lock file appeared under $OCX_HOME/locks within {timeout}s")
+
+
+def _mint_ca_pem() -> str:
+    from src.tls_index import mint_ca_and_leaf
+
+    return mint_ca_and_leaf().ca_cert_pem.decode()
+
+
+def _mint_private_key_pem() -> str:
+    from src.tls_index import mint_ca_and_leaf
+
+    return mint_ca_and_leaf().leaf_key_pem.decode()
+
+
+def _home_tree(ocx: OcxRunner) -> dict[str, str]:
+    """Every file under ``$OCX_HOME`` with its content hash — except ``state/``,
+    which ``Context::try_init`` refreshes (host-capabilities cache, update-check
+    stamp) on every invocation regardless of what the command then does."""
+    home = Path(ocx.env["OCX_HOME"])
+    tree: dict[str, str] = {}
+    for path in home.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(home)
+        if relative.parts[0] == "state":
+            continue
+        tree[str(relative)] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return tree
+
+
+def _setup_with_ca(
+    ocx: OcxRunner,
+    value: str,
+    *extra_args: str,
+    profile: Path | None = None,
+    home: Path | None = None,
+    fmt_json: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """``ocx --offline self setup`` with ``OCX_EXTRA_CA_CERTS=<value>``."""
+    ocx.env["OCX_EXTRA_CA_CERTS"] = value
+    return _setup(ocx, *extra_args, profile=profile, home=home, fmt_json=fmt_json)
+
+
+def _assert_pem_persisted_at_root(config_text: str, ca_pem: str) -> None:
+    """The parsed document carries ``extra_ca_certs_pem`` == the CA at the
+    ROOT, no ``extra_ca_certs`` beside it, and the key's text precedes the
+    first ``[table]`` header (D-5 / C-008 — root-level values render before
+    every table)."""
+    doc = tomllib.loads(config_text)
+    assert doc.get("extra_ca_certs_pem") == ca_pem, (
+        f"extra_ca_certs_pem must hold the CA PEM verbatim at the document root; got:\n{config_text}"
+    )
+    assert "extra_ca_certs" not in doc, (
+        f"self setup persists inline PEM only — no root extra_ca_certs path may remain:\n{config_text}"
+    )
+    key_at = config_text.index("extra_ca_certs_pem")
+    table_at = config_text.index("\n[") if "\n[" in config_text else len(config_text)
+    if config_text.startswith("["):
+        table_at = 0
+    assert key_at < table_at, (
+        f"extra_ca_certs_pem must render above the first [table] header, not inside one:\n{config_text}"
+    )
+
+
+def test_setup_extra_ca_certs_path_value_persisted_inline(ocx: OcxRunner, tmp_path: Path) -> None:
+    """S-001 / D-5: a path-valued ``OCX_EXTRA_CA_CERTS`` is read now and
+    persisted as inline ``extra_ca_certs_pem`` above the first ``[table]`` —
+    never as a persisted path. Report: ``extra_ca_certs.status = "persisted"``,
+    ``certificates = 1``. A pre-existing table survives untouched.
+    """
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    _config_toml(ocx).write_text(_PRESEEDED_TABLE)
+    ca_pem = _mint_ca_pem()
+    ca_path = tmp_path / "corp-ca.pem"
+    ca_path.write_text(ca_pem)
+
+    result = _setup_with_ca(ocx, str(ca_path), profile=profile)
+    assert result.returncode == 0, f"setup with a CA path must exit 0; rc={result.returncode}\n{result.stderr}"
+
+    payload = json.loads(result.stdout)
+    assert payload["extra_ca_certs"] == {"status": "persisted", "certificates": 1}, (
+        f"report must carry persisted + certificates=1; got: {payload.get('extra_ca_certs')!r}"
+    )
+    config_text = _config_toml(ocx).read_text()
+    _assert_pem_persisted_at_root(config_text, ca_pem)
+    assert str(ca_path) not in config_text, "the path itself must never be persisted (D-5)"
+    doc = tomllib.loads(config_text)
+    assert doc["registries"]["corp.example"]["index"] == "https://index.corp.example", (
+        "the pre-existing table must survive the surgical edit"
+    )
+
+
+def test_setup_extra_ca_certs_rerun_is_unchanged(ocx: OcxRunner, tmp_path: Path) -> None:
+    """S-001 / C-008: re-running with the same ``OCX_EXTRA_CA_CERTS`` value
+    reports ``extra_ca_certs.status = "unchanged"`` (``certificates`` still
+    reported) and leaves ``config.toml`` byte-identical — the parsed-TOML-string
+    diff gate, so an idempotent re-run never rewrites the file."""
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    ca_path = tmp_path / "corp-ca.pem"
+    ca_path.write_text(_mint_ca_pem())
+
+    first = _setup_with_ca(ocx, str(ca_path), profile=profile)
+    assert first.returncode == 0, first.stderr
+    assert json.loads(first.stdout)["extra_ca_certs"]["status"] == "persisted"
+    after_first = _config_toml(ocx).read_bytes()
+
+    second = _setup_with_ca(ocx, str(ca_path), profile=profile)
+    assert second.returncode == 0, second.stderr
+    assert json.loads(second.stdout)["extra_ca_certs"] == {"status": "unchanged", "certificates": 1}, (
+        f"a re-run with the same value must report unchanged; got: {json.loads(second.stdout)['extra_ca_certs']!r}"
+    )
+    assert _config_toml(ocx).read_bytes() == after_first, "an unchanged re-run must not rewrite config.toml"
+
+
+def test_setup_extra_ca_certs_crlf_rerun_is_unchanged(ocx: OcxRunner, tmp_path: Path) -> None:
+    """S-001 / C-008 edge case: a CRLF-line-ended bundle persists (the
+    ``\"\"\"`` string carries escaped ``\\r``) and a re-run with the SAME CRLF
+    value is ``unchanged`` — the diff gate compares parsed TOML strings, not
+    file bytes, so escaping never makes an identical value look new."""
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    crlf_pem = _mint_ca_pem().replace("\n", "\r\n")
+    ca_path = tmp_path / "corp-ca-crlf.pem"
+    ca_path.write_bytes(crlf_pem.encode())
+
+    first = _setup_with_ca(ocx, str(ca_path), profile=profile)
+    assert first.returncode == 0, first.stderr
+    assert json.loads(first.stdout)["extra_ca_certs"]["status"] == "persisted"
+    assert tomllib.loads(_config_toml(ocx).read_text())["extra_ca_certs_pem"] == crlf_pem, (
+        "the CRLF bundle must round-trip through TOML verbatim"
+    )
+    after_first = _config_toml(ocx).read_bytes()
+
+    second = _setup_with_ca(ocx, str(ca_path), profile=profile)
+    assert second.returncode == 0, second.stderr
+    assert json.loads(second.stdout)["extra_ca_certs"]["status"] == "unchanged", second.stdout
+    assert _config_toml(ocx).read_bytes() == after_first
+
+
+def test_setup_extra_ca_certs_inline_value_persisted(ocx: OcxRunner, tmp_path: Path) -> None:
+    """S-001 / D-4: an ``OCX_EXTRA_CA_CERTS`` value that is already inline PEM
+    text (sniffed on a leading ``-----BEGIN``, not a path) persists the same
+    way a path value does."""
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    _config_toml(ocx).write_text(_PRESEEDED_TABLE)
+    ca_pem = _mint_ca_pem()
+
+    result = _setup_with_ca(ocx, ca_pem, profile=profile)
+    assert result.returncode == 0, f"setup with inline PEM must exit 0; rc={result.returncode}\n{result.stderr}"
+    assert json.loads(result.stdout)["extra_ca_certs"] == {"status": "persisted", "certificates": 1}
+    _assert_pem_persisted_at_root(_config_toml(ocx).read_text(), ca_pem)
+
+
+def test_setup_extra_ca_certs_two_cert_bundle_reports_two(ocx: OcxRunner, tmp_path: Path) -> None:
+    """S-001 / C-009 / edge case "bundle with 2+ certificates → all appended":
+    a two-root bundle persists whole and the report says ``certificates = 2``."""
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    bundle = _mint_ca_pem() + _mint_ca_pem()
+    ca_path = tmp_path / "corp-bundle.pem"
+    ca_path.write_text(bundle)
+
+    result = _setup_with_ca(ocx, str(ca_path), profile=profile)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["extra_ca_certs"] == {"status": "persisted", "certificates": 2}
+    assert tomllib.loads(_config_toml(ocx).read_text())["extra_ca_certs_pem"] == bundle
+
+
+def test_setup_extra_ca_certs_replaces_a_root_path_key(ocx: OcxRunner, tmp_path: Path) -> None:
+    """S-001 / C-008 (XOR): a pre-existing root ``extra_ca_certs`` path key is
+    REMOVED when ``extra_ca_certs_pem`` is written — the loader refuses a file
+    carrying both, so leaving it would make the very file setup just wrote
+    unloadable."""
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    old_path = tmp_path / "old-ca.pem"
+    old_path.write_text(_mint_ca_pem())
+    _config_toml(ocx).write_text(f'extra_ca_certs = "{old_path}"\n' + _PRESEEDED_TABLE)
+    ca_pem = _mint_ca_pem()
+
+    result = _setup_with_ca(ocx, ca_pem, profile=profile)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["extra_ca_certs"]["status"] == "persisted"
+    _assert_pem_persisted_at_root(_config_toml(ocx).read_text(), ca_pem)
+
+
+def test_setup_extra_ca_certs_garbage_exits_78_and_writes_nothing(ocx: OcxRunner, tmp_path: Path) -> None:
+    """S-001 / D-10 / D-11: an inline value with no ``CERTIFICATE`` block (a
+    pasted ``PRIVATE KEY``) exits 78 BEFORE any phase writes — ``config.toml``
+    byte-identical, no shims, the profile pristine, the home tree unchanged —
+    and the diagnostic names ``OCX_EXTRA_CA_CERTS`` without echoing the value.
+
+    An inline value carrying ``-----BEGIN`` is the only shape D-4's sniff
+    routes to the inline arm, so "no CERTIFICATE block" here is a block with
+    another tag; a value with no ``-----BEGIN`` at all is read as a path.
+    """
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    _config_toml(ocx).write_text(_PRESEEDED_TABLE)
+    before = _home_tree(ocx)
+    key_pem = _mint_private_key_pem()
+
+    result = _setup_with_ca(ocx, key_pem, profile=profile)
+    assert result.returncode == 78, (
+        f"a value with no CERTIFICATE block must exit ConfigError(78); rc={result.returncode}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "OCX_EXTRA_CA_CERTS" in result.stderr, f"the refusal must name the variable: {result.stderr}"
+    assert key_pem.splitlines()[1] not in result.stderr, "the pasted value must never be echoed (D-11)"
+    assert _config_toml(ocx).read_text() == _PRESEEDED_TABLE, "config.toml must be byte-identical on refusal"
+    assert profile.read_text() == "# pristine\n", "no profile edit may follow a phase-0.5 refusal"
+    ocx_home = Path(ocx.env["OCX_HOME"])
+    for shim in _ENV_SHIMS:
+        assert not (ocx_home / shim).exists(), f"no {shim} may be written after a phase-0.5 refusal"
+    assert _home_tree(ocx) == before, "a refused value must leave the home tree untouched"
+
+
+def test_setup_extra_ca_certs_dev_zero_path_exits_74(ocx: OcxRunner, tmp_path: Path) -> None:
+    """S-001 / D-10: ``OCX_EXTRA_CA_CERTS=/dev/zero`` exits 74 promptly (the
+    bounded read refuses a non-regular file) rather than persisting or
+    hanging — and, like every refusal, writes nothing."""
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    _config_toml(ocx).write_text(_PRESEEDED_TABLE)
+    before = _home_tree(ocx)
+
+    started = time.monotonic()
+    result = _setup_with_ca(ocx, "/dev/zero", profile=profile)
+    elapsed = time.monotonic() - started
+    assert result.returncode == 74, (
+        f"/dev/zero must exit IoError(74); rc={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert elapsed < 5, f"the refusal must be prompt (bounded read), took {elapsed:.1f}s"
+    assert "/dev/zero" in result.stderr, f"the refusal must name the path: {result.stderr}"
+    assert _config_toml(ocx).read_text() == _PRESEEDED_TABLE
+    assert _home_tree(ocx) == before, "a refused value must leave the home tree untouched"
+
+
+def test_setup_extra_ca_certs_dry_run_reports_would_persist_writes_nothing(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """S-001 / C-009: ``--dry-run`` reports ``extra_ca_certs.status =
+    "would_persist"`` with the resolved ``certificates`` count and writes
+    nothing to ``config.toml``."""
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    _config_toml(ocx).write_text(_PRESEEDED_TABLE)
+    ca_path = tmp_path / "corp-ca.pem"
+    ca_path.write_text(_mint_ca_pem())
+
+    locks_before = _lock_files(ocx)
+
+    result = _setup_with_ca(ocx, str(ca_path), "--dry-run", profile=profile)
+    assert result.returncode == 0, f"--dry-run must exit 0; rc={result.returncode}\n{result.stderr}"
+    assert json.loads(result.stdout)["extra_ca_certs"] == {"status": "would_persist", "certificates": 1}, (
+        f"dry-run must report would_persist; got: {json.loads(result.stdout)['extra_ca_certs']!r}"
+    )
+    assert _config_toml(ocx).read_text() == _PRESEEDED_TABLE, "--dry-run must write nothing to config.toml"
+    assert _lock_files(ocx) == locks_before, (
+        "--dry-run must not take the config-edit lock (a lock file is a write): "
+        f"{sorted(_lock_files(ocx) - locks_before)}"
+    )
+
+
+def test_setup_extra_ca_certs_dry_run_over_persisted_is_unchanged(ocx: OcxRunner, tmp_path: Path) -> None:
+    """S-001 / C-009: ``--dry-run`` over an already-persisted identical value
+    reports ``unchanged`` — the dry-run convention keeps ``unchanged`` /
+    ``not_configured`` and only replaces ``persisted`` with ``would_persist``."""
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    ca_path = tmp_path / "corp-ca.pem"
+    ca_path.write_text(_mint_ca_pem())
+    assert _setup_with_ca(ocx, str(ca_path), profile=profile).returncode == 0
+    persisted = _config_toml(ocx).read_bytes()
+
+    result = _setup_with_ca(ocx, str(ca_path), "--dry-run", profile=profile)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["extra_ca_certs"] == {"status": "unchanged", "certificates": 1}
+    assert _config_toml(ocx).read_bytes() == persisted
+
+
+def test_setup_extra_ca_certs_unset_reports_not_configured(ocx: OcxRunner, tmp_path: Path) -> None:
+    """S-001 / C-008 / C-009: with the variable unset (and again with it set
+    to ``""``) the phase is a no-op — ``extra_ca_certs = {"status":
+    "not_configured"}`` with no ``certificates`` field, and ``config.toml``
+    gains no extra-CA key."""
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    _config_toml(ocx).write_text(_PRESEEDED_TABLE)
+
+    for value in (None, ""):
+        ocx.env.pop("OCX_EXTRA_CA_CERTS", None)
+        if value is not None:
+            ocx.env["OCX_EXTRA_CA_CERTS"] = value
+        result = _setup(ocx, profile=profile)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["extra_ca_certs"] == {"status": "not_configured"}, (
+            f"value={value!r}: got {json.loads(result.stdout)['extra_ca_certs']!r}"
+        )
+        doc = tomllib.loads(_config_toml(ocx).read_text())
+        assert "extra_ca_certs_pem" not in doc and "extra_ca_certs" not in doc, (
+            f"value={value!r}: nothing may be persisted when the variable is unset/empty"
+        )
+
+
+def test_setup_extra_ca_certs_oversize_rendered_config_exits_78(ocx: OcxRunner, tmp_path: Path) -> None:
+    """S-001 / C-008 / D-10: a bundle under the 32 KiB value cap whose rendered
+    ``config.toml`` would still exceed the loader's 64 KiB ceiling exits 78
+    before any write. Positive control first: the SAME bundle persists into a
+    small config, so the refusal is the rendered-document size, not the
+    bundle's own."""
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    bundle = ""
+    while len(bundle) < 28 * 1024:
+        bundle += _mint_ca_pem()
+    assert len(bundle) < 32 * 1024, f"fixture must sit under MAX_EXTRA_CA_CERTS_BYTES; got {len(bundle)}"
+    ca_path = tmp_path / "corp-bundle.pem"
+    ca_path.write_text(bundle)
+
+    control = _setup_with_ca(ocx, str(ca_path), profile=profile)
+    assert control.returncode == 0, f"control: the bundle alone must persist; rc={control.returncode}\n{control.stderr}"
+    assert json.loads(control.stdout)["extra_ca_certs"]["status"] == "persisted"
+
+    # ~40 KiB of comment, which toml_edit preserves verbatim: 28 KiB + 40 KiB
+    # renders past 64 KiB. Loadable on its own (under the ceiling).
+    padding = "".join(f"# {'x' * 98}\n" for _ in range(410))
+    seeded = padding + _PRESEEDED_TABLE
+    assert len(seeded) < 64 * 1024, "the seeded config must itself be loadable"
+    assert len(seeded) + len(bundle) > 64 * 1024, "seeded + bundle must exceed MAX_CONFIG_SIZE"
+    _config_toml(ocx).write_text(seeded)
+    before = _home_tree(ocx)
+
+    # No `--profile` on the refusing run: that flag is its own `[shell]
+    # profiles` write into config.toml, landed by the command BEFORE
+    # `setup::run` (a registry failure must not drop a toggle the user asked
+    # for — the same ordering the session-PATH preflight sits behind), so it
+    # would be the one edit a phase-0.5 refusal cannot keep the file clean of.
+    result = _setup_with_ca(ocx, str(ca_path), home=tmp_path / "home")
+    assert result.returncode == 78, (
+        f"a rendered config over 64 KiB must exit ConfigError(78); rc={result.returncode}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+    assert "config.toml" in result.stderr, f"the refusal must name the config file: {result.stderr}"
+    assert _config_toml(ocx).read_text() == seeded, "config.toml must be byte-identical on refusal"
+    assert _home_tree(ocx) == before, "a refused value must leave the home tree untouched"
+
+
+def test_setup_extra_ca_certs_preexisting_managed_fence_stays_clean(
+    ocx: OcxRunner, tmp_path: Path, unique_repo: str, registry: str
+) -> None:
+    """S-001 / C-008: persisting ``extra_ca_certs_pem`` beside an existing,
+    unedited ``[managed]`` fence does not disturb it — a following ``ocx config
+    setup`` still classifies the fence ``Clean`` (does not exit 82) and the
+    fence text is byte-identical. Also pins that ``ocx config setup`` itself
+    does NOT run phase 0.5: with the variable set, adoption persists no
+    ``extra_ca_certs_pem``."""
+    from src.registry import push_raw_config_package
+
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    ca_pem = _mint_ca_pem()
+    ocx.env["OCX_EXTRA_CA_CERTS"] = ca_pem
+
+    push_raw_config_package(registry, unique_repo, "v1", b'[registry]\ndefault = "fence-stays-clean.example"\n')
+    ref = f"{registry}/{unique_repo}:v1"
+    adopt = ocx.run("config", "setup", "--managed-config", ref, check=False)
+    assert adopt.returncode == 0, f"adopting the managed seed must succeed: {adopt.stderr}"
+    fenced = _config_toml(ocx).read_text()
+    assert "[managed]" in fenced and "# <<< ocx managed <<<" in fenced, fenced
+    assert "extra_ca_certs_pem" not in tomllib.loads(fenced), (
+        "`ocx config setup` must not run the OCX_EXTRA_CA_CERTS persistence phase"
+    )
+    fence_block = fenced[fenced.index("# >>> ocx managed") : fenced.index("# <<< ocx managed <<<")]
+
+    result = _setup(ocx, profile=profile)
+    assert result.returncode == 0, f"self setup beside a clean fence must exit 0; rc={result.returncode}\n{result.stderr}"
+    assert json.loads(result.stdout)["extra_ca_certs"]["status"] == "persisted", result.stdout
+    after = _config_toml(ocx).read_text()
+    _assert_pem_persisted_at_root(after, ca_pem)
+    assert fence_block in after, f"the managed fence must be byte-identical after the write:\n{after}"
+
+    follow_up = ocx.run("--offline", "config", "setup", check=False)
+    assert follow_up.returncode != 82, (
+        f"the fence must still classify Clean after persisting extra_ca_certs_pem; rc={follow_up.returncode}\n"
+        f"stdout:\n{follow_up.stdout}\nstderr:\n{follow_up.stderr}"
+    )
+    assert follow_up.returncode == 0, f"a bare config setup over a clean fence must exit 0: {follow_up.stderr}"
+
+
+def test_setup_extra_ca_certs_plain_report_row(ocx: OcxRunner, tmp_path: Path) -> None:
+    """C-009: the plain-text report carries an ``Extra CA certs`` row once a
+    value resolved, and suppresses it when ``not_configured`` (the
+    ``managed_config`` row's convention)."""
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+
+    silent = _setup(ocx, profile=profile, fmt_json=False)
+    assert silent.returncode == 0, silent.stderr
+    assert "Extra CA certs" not in silent.stdout, f"not_configured must print no row:\n{silent.stdout}"
+
+    ca_path = tmp_path / "corp-ca.pem"
+    ca_path.write_text(_mint_ca_pem())
+    ocx.env["OCX_EXTRA_CA_CERTS"] = str(ca_path)
+    shown = _setup(ocx, profile=profile, fmt_json=False)
+    assert shown.returncode == 0, shown.stderr
+    assert "Extra CA certs" in shown.stdout and "persisted (1 certificate)" in shown.stdout, (
+        f"a persisted value must print its row with a certificate count:\n{shown.stdout}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ocx#468: every config.toml read-modify-write shares one cross-process lock
+# ---------------------------------------------------------------------------
+
+
+def test_setup_concurrent_shell_flag_and_extra_ca_edits_both_land(ocx: OcxRunner, tmp_path: Path) -> None:
+    """ocx#468: two ``ocx self setup`` invocations editing ``$OCX_HOME/config.toml``
+    at the same time — one persisting ``[shell] hook`` (before its bootstrap),
+    one persisting ``OCX_EXTRA_CA_CERTS`` (phase 0.5) — must both land: the
+    second editor waits for the first instead of reading the pre-edit file and
+    publishing over the first's write.
+
+    The overlap is forced, not hoped for: the ``__OCX_TESTING_CONFIG_EDIT_HOLD_MS``
+    seam makes the first invocation hold the edit lock for 1.5 s between each
+    read and its write (``--profile`` is itself a ``[shell] profiles`` write,
+    so it holds twice — under the 5 s lock timeout in total), and the second
+    is started the moment the first's lock file appears under
+    ``$OCX_HOME/locks`` — the first scoped lock the run takes is the
+    ``[shell]`` edit's, before any bootstrap — so the racer reaches its own
+    edit inside the hold window rather than after a guessed sleep. Without
+    the lock the second reads an absent file, writes its key, and the first
+    then publishes a document that never saw it — red by keying the lock per
+    call (see the builder's report).
+    """
+    _seed_candidate(ocx)
+    home = tmp_path / "home"
+    home.mkdir()
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    config = _config_toml(ocx)
+    ca_pem = _mint_ca_pem()
+    command = [str(ocx.binary), "--format", "json", "--offline", "self", "setup", "--profile", str(profile)]
+    locks_before = _lock_files(ocx)
+
+    holder = subprocess.Popen(
+        [*command, "--hook"],
+        env={**ocx.env, "HOME": str(home), "__OCX_TESTING_CONFIG_EDIT_HOLD_MS": "1500"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for_new_lock_file(ocx, locks_before)
+        racer = subprocess.run(
+            command,
+            env={**ocx.env, "HOME": str(home), "OCX_EXTRA_CA_CERTS": ca_pem},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    finally:
+        _, holder_stderr = holder.communicate(timeout=60)
+
+    assert holder.returncode == 0, f"the `--hook` invocation must exit 0; stderr:\n{holder_stderr}"
+    assert racer.returncode == 0, f"the OCX_EXTRA_CA_CERTS invocation must exit 0; stderr:\n{racer.stderr}"
+    assert json.loads(racer.stdout)["extra_ca_certs"]["status"] == "persisted", racer.stdout
+
+    document = tomllib.loads(config.read_text())
+    assert document.get("shell", {}).get("hook") is True, (
+        f"the [shell] hook edit must survive the concurrent extra-CA edit; config.toml holds:\n{config.read_text()}"
+    )
+    assert document.get("extra_ca_certs_pem") == ca_pem, (
+        f"the extra-CA edit must survive the concurrent [shell] edit; config.toml holds:\n{config.read_text()}"
+    )
+
+
+def test_setup_extra_ca_certs_under_the_system_lock_is_reported_and_not_persisted(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """ocx#469: when the SYSTEM scope (reached through the
+    ``__OCX_TESTING_SYSTEM_CONFIG`` seam) sets the extra-CA pair, ``ocx self
+    setup`` does not persist ``OCX_EXTRA_CA_CERTS`` — the loader would ignore
+    the home-tier value on every later invocation — and reports
+    ``extra_ca_certs.status = "system_locked"`` (no ``certificates``) with a
+    stderr line naming the locking file and the remedy, the way the
+    ``[shell]`` C-034 warning names the tier that keeps deciding. The plain
+    row reads ``system-locked (not persisted)``. Control first: without the
+    system pair the same run persists silently, so the line is the lock's and
+    not the phase's."""
+    _seed_candidate(ocx)
+    profile = tmp_path / "profile"
+    profile.write_text("# pristine\n")
+    ca_pem = _mint_ca_pem()
+    system = tmp_path / "system-config.toml"
+    advisory = (
+        f"OCX_EXTRA_CA_CERTS was not persisted: extra_ca_certs / extra_ca_certs_pem are locked by {system}; "
+        "edit the system tier or ask its owner"
+    )
+
+    control = _setup_with_ca(ocx, ca_pem, profile=profile)
+    assert control.returncode == 0, control.stderr
+    assert json.loads(control.stdout)["extra_ca_certs"]["status"] == "persisted", control.stdout
+    assert advisory not in control.stderr, f"no system pair, no advisory:\n{control.stderr}"
+    _config_toml(ocx).write_text(_PRESEEDED_TABLE)  # drop the control's persisted pair
+
+    system_ca = tmp_path / "system-ca.pem"
+    system_ca.write_text(_mint_ca_pem())
+    system.write_text(f'extra_ca_certs = "{system_ca}"\n')
+    ocx.env["__OCX_TESTING_SYSTEM_CONFIG"] = str(system)
+
+    locked = _setup_with_ca(ocx, ca_pem, profile=profile)
+    assert locked.returncode == 0, locked.stderr
+    assert json.loads(locked.stdout)["extra_ca_certs"] == {"status": "system_locked"}, locked.stdout
+    assert advisory in locked.stderr, f"the system lock must be named on stderr:\n{locked.stderr}"
+    assert "extra_ca_certs_pem" not in tomllib.loads(_config_toml(ocx).read_text()), (
+        f"nothing is persisted under a system lock; config.toml holds:\n{_config_toml(ocx).read_text()}"
+    )
+
+    plain = _setup_with_ca(ocx, ca_pem, profile=profile, fmt_json=False)
+    assert plain.returncode == 0, plain.stderr
+    assert "system-locked (not persisted)" in plain.stdout, f"the plain row must say so:\n{plain.stdout}"
