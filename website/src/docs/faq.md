@@ -257,7 +257,7 @@ This caveat is about a packaged binary that ships as a `.bat`/`.cmd` script — 
 [bazel-rules]: https://bazel.build/extending/rules
 
 <!-- internal -->
-[fs-objects]: ./user-guide.md#file-structure-objects
+[fs-objects]: ./in-depth/storage.md#packages
 [ug-dependencies]: ./user-guide.md#dependencies
 
 <!-- versioning -->
@@ -266,7 +266,7 @@ This caveat is about a packaged binary that ships as a `.bat`/`.cmd` script — 
 [oci-dist-issue]: https://github.com/opencontainers/distribution-spec/issues/154
 [helm-oci]: https://helm.sh/docs/topics/registries/
 [helm-issue]: https://github.com/helm/helm/issues/10250
-[ug-versioning]: ./user-guide.md#versioning-tags
+[ug-versioning]: ./in-depth/versioning.md#tags
 
 <!-- external -->
 [mach-o]: https://en.wikipedia.org/wiki/Mach-O

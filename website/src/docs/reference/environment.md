@@ -1279,9 +1279,9 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [reference-env-list]: ./metadata.md#env-list
 
 <!-- internal -->
-[fs-objects]: ../user-guide.md#file-structure-objects
-[fs-index]: ../user-guide.md#file-structure-index
-[fs-symlinks]: ../user-guide.md#file-structure-symlinks
+[fs-objects]: ../in-depth/storage.md#packages
+[fs-index]: ../in-depth/storage.md#index
+[fs-symlinks]: ../in-depth/storage.md#symlinks
 [faq-codesign]: ../faq.md#macos-codesign
 
 <!-- authoring -->

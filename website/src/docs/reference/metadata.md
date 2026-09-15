@@ -535,7 +535,9 @@ Surface gating: `has_private()` returns `true` for `private` and `public`; `has_
 returns `true` for `public` and `interface`. The [composer][env-composition-edge-filter] uses
 these accessors to gate TC entry emission per surface at exec time.
 
-::: details Transitive Propagation via `through_edge` {#dependencies-through-edge}
+<span id="dependencies-through-edge"></span>
+
+::: details Transitive Propagation via `through_edge`
 
 When dependencies form a chain (Root → Dep → Transitive), visibility propagates using
 `Visibility::through_edge(child_eff)`: if the child's effective visibility does not export
@@ -1144,5 +1146,5 @@ If you published packages before the visibility-default flip, their untagged env
 [authoring-libc]: ../authoring/multi-platform.md#libc
 
 <!-- internal -->
-[fs-objects]: ../user-guide.md#file-structure-packages
+[fs-objects]: ../in-depth/storage.md#packages
 [ug-dependencies]: ../user-guide.md#dependencies

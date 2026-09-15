@@ -104,5 +104,5 @@ A shim directory is kept alive by the same lock-pinned root set that keeps an ea
 [config-project-groups]: ../reference/configuration.md#project-config-groups
 
 <!-- internal -->
-[fs-packages]: ../user-guide.md#file-structure-packages
-[fs-symlinks]: ../user-guide.md#file-structure-symlinks
+[fs-packages]: ./storage.md#packages
+[fs-symlinks]: ./storage.md#symlinks

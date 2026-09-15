@@ -113,6 +113,7 @@ tasks:
       - task: ci:verify
       - task: claude:verify
       - task: test:lint
+      - task: website:lint:links
 
   .verify:build-test:
     internal: true

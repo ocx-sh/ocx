@@ -237,5 +237,5 @@ No re-sourcing dotfiles. The `ocx package env --shell` output is stable — it e
 
 <!-- user guide -->
 [install]: ../installation.md
-[fs-packages]: ../user-guide.md#file-structure-packages
-[fs-symlinks]: ../user-guide.md#file-structure-symlinks
+[fs-packages]: ./storage.md#packages
+[fs-symlinks]: ./storage.md#symlinks

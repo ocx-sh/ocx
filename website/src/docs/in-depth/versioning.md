@@ -179,7 +179,7 @@ The full pattern — bundled snapshots, [`OCX_INDEX`][env-ocx-index], `--remote`
 [reference-platforms]: ../reference/platforms.md
 
 <!-- internal -->
-[user-versioning]: ../user-guide.md#versioning
+[user-versioning]: ../user-guide.md#versions
 [in-depth-storage]: ./storage.md
 [in-depth-storage-packages]: ./storage.md#packages
 [in-depth-indices]: ./indices.md

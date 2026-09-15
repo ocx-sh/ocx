@@ -159,7 +159,7 @@ See [Pin a project's packages][user-guide-project] in the User Guide for groups,
 
 The sections above cover the everyday workflow. For deeper topics:
 
-- **[User Guide][user-guide]** — the [three-store architecture][fs-objects], [versioning and tag hierarchy][versioning-tags], [locking strategies][versioning-locking], and [authentication][auth] for private registries.
+- **[User Guide][user-guide]** — the [three-store architecture][fs-stores], [versioning and tag hierarchy][versioning-tags], [locking strategies][versioning-locking], and [authentication][auth] for private registries.
 - **[Command Reference][cmd-ref]** — full documentation for every flag and option. Covers global flags ([`--offline`][arg-offline], [`--remote`][arg-remote], [`--index`][arg-index]), output formats, and all subcommands.
 - **[Environment Reference][env-ref]** — every environment variable ocx reads, including auth configuration for private registries.
 
@@ -232,10 +232,11 @@ Environment variables and CLI flags always override config values. For full deta
 [env-ocx-home]: ./reference/environment.md#ocx-home
 
 <!-- user guide sections -->
-[fs-objects]: ./user-guide.md#file-structure-objects
-[fs-symlinks]: ./user-guide.md#file-structure-symlinks
-[fs-index]: ./user-guide.md#file-structure-index
-[path-resolution]: ./user-guide.md#path-resolution
-[versioning-tags]: ./user-guide.md#versioning-tags
-[versioning-locking]: ./user-guide.md#versioning-locking
+[fs-objects]: ./in-depth/storage.md#packages
+[fs-stores]: ./in-depth/storage.md#stores
+[fs-symlinks]: ./in-depth/storage.md#symlinks
+[fs-index]: ./in-depth/storage.md#index
+[path-resolution]: ./reference/command-line.md#path-resolution
+[versioning-tags]: ./in-depth/versioning.md#tags
+[versioning-locking]: ./in-depth/versioning.md#locking
 [auth]: ./user-guide.md#authentication

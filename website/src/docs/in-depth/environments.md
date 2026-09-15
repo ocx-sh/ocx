@@ -288,4 +288,4 @@ Example: a package that sets `JAVA_HOME` with default (`private`) visibility wil
 
 <!-- user guide -->
 [ug-conflicts]: ../user-guide.md#conflict-warnings
-[ug-visibility]: ../user-guide.md#dependencies-visibility
+[ug-visibility]: ./dependencies.md#visibility

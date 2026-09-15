@@ -19,6 +19,23 @@ tasks:
   install:
     cmd: bun install
 
+  lint:links:
+    desc: Check markdown cross-references and section anchors under src/docs (offline)
+    # `--root-dir src/public` because VitePress serves that directory at the
+    # site root; without it every `<Terminal src="/casts/…">` reads as missing.
+    # `.cast` files are gitignored build output (`task recordings:build`), so
+    # they are excluded rather than demanded: this gate is for prose links.
+    # No `--include-verbatim`, deliberately: code samples document URL *shapes*
+    # (`file:///srv/ocx-index/corp`, `https://…`) and are correct as written —
+    # eight false positives, zero real links, in the tree that motivated
+    # this gate (#417). No `sources:`, for the reason `test:lint` gives.
+    dir: '{{.TASKFILE_DIR}}'
+    cmd: >-
+      lychee --offline --no-progress --include-fragments
+      --root-dir {{.TASKFILE_DIR}}/src/public
+      --exclude '\.cast$'
+      src/docs
+
   serve:
     interactive: true
     deps:

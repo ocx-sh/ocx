@@ -603,7 +603,7 @@ required = true
 #### `registry` {#keys-patches-registry}
 
 **Type**: string  
-**Required**: no — omitting `registry` (or the whole `[patches]` section) simply leaves the patch tier inactive. Only a *present-but-empty* `registry = ""` is a hard error at config resolve time — same footgun-guard as an empty [`[mirrors]` `url`](#keys-mirrors-url).  
+**Required**: no — omitting `registry` (or the whole `[patches]` section) simply leaves the patch tier inactive. Only a *present-but-empty* `registry = ""` is a hard error at config resolve time — same footgun-guard as an empty [`[mirrors]` `url`](#keys-mirrors-value).  
 **Overridden by**: [`OCX_PATCHES`][env-ocx-patches] (JSON wire format forwarded to subprocesses)
 
 The OCI registry root that hosts patch descriptors. The global descriptor (`__ocx.patch`
@@ -842,7 +842,7 @@ flow.
 #### `source` {#keys-managed-source}
 
 **Type**: string  
-**Required**: yes, at resolve time — omitting `source` (or the whole `[managed]` section) leaves the tier inactive. A present-but-empty `source = ""` is a hard error, the same footgun guard as [`[patches]` `registry`](#keys-patches-registry) and [`[mirrors]` `url`](#keys-mirrors-url).  
+**Required**: yes, at resolve time — omitting `source` (or the whole `[managed]` section) leaves the tier inactive. A present-but-empty `source = ""` is a hard error, the same footgun guard as [`[patches]` `registry`](#keys-patches-registry) and [`[mirrors]` `url`](#keys-mirrors-value).  
 **Overridden by**: [`OCX_MANAGED_CONFIG`][env-ocx-managed-config] — invocation-only, never written back to the seed
 
 The OCI reference for the managed-config package: `<registry>/<repository>[:<tag>][@<digest>]`, parsed with the same [`Identifier`](#keys-registry-default) grammar as any other package reference. A registry-less `source` resolves against the **built-in** default registry (`ocx.sh`), never a configured `[registry] default` — the managed tier's trust root can not be redirected by the very config it is about to replace. Use a fully qualified reference in corporate seeds.
@@ -2088,7 +2088,7 @@ Retention policy configuration will live under `[clean]`. Deferred to the retent
 
 ### Project-level `ocx.toml` {#future-project}
 
-A project-level `ocx.toml` is now shipped — see the [Project Toolchain section in the user guide](../user-guide.md#project-toolchain) for the schema, locking model, and activation hooks. The file name is deliberately different from `config.toml` so the data-directory tier and project tier are never confused: `ocx.toml` is loaded by a distinct API and never participates in the ambient config chain described above.
+A project-level `ocx.toml` is now shipped — see the [Project Toolchain section in the user guide](../user-guide.md#project) for the schema, locking model, and activation hooks. The file name is deliberately different from `config.toml` so the data-directory tier and project tier are never confused: `ocx.toml` is loaded by a distinct API and never participates in the ambient config chain described above.
 :::
 
 <!-- external -->

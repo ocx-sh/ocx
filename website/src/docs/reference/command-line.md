@@ -359,9 +359,9 @@ Every mode returns a **package root** — the directory that contains the packag
 files. The mode controls only the *shape* of the path that names that root.
 
 By default these commands return the content-addressed path in the
-[object store](../user-guide.md#file-structure-packages) — a hash-derived directory that changes
+[object store](../in-depth/storage.md#packages) — a hash-derived directory that changes
 whenever the package is reinstalled at a different version. Use `--candidate` or `--current` to
-resolve via a [stable install symlink](../user-guide.md#path-resolution) instead, whose path never
+resolve via a [stable install symlink](#path-resolution) instead, whose path never
 changes regardless of the underlying object. This is useful for paths embedded in editor configs,
 Makefiles, or shell profiles that should survive package updates.
 
@@ -1642,7 +1642,7 @@ ocx init [OPTIONS]
 
 Downloads and installs one or more OCI-tier packages into the local object store.
 
-Installs packages into the [object store](../user-guide.md#file-structure-packages) and creates a [candidate symlink](../user-guide.md#path-resolution) for each package, making them available for use by other commands. If a package declares [dependencies][ug-dependencies], all transitive dependencies are downloaded to the object store automatically — only the explicitly requested packages receive install symlinks.
+Installs packages into the [object store](../in-depth/storage.md#packages) and creates a [candidate symlink](#path-resolution) for each package, making them available for use by other commands. If a package declares [dependencies][ug-dependencies], all transitive dependencies are downloaded to the object store automatically — only the explicitly requested packages receive install symlinks.
 
 **Usage**
 
@@ -1657,7 +1657,7 @@ ocx package install [OPTIONS] <PACKAGE>...
 **Options**
 
 - `-p`, `--platform`: Target platform to consider.
-- `-s`, `--select`: After installing, update the [current symlink](../user-guide.md#path-resolution) for each package to point to the newly installed version. Required before using `ocx env --current`.
+- `-s`, `--select`: After installing, update the [current symlink](#path-resolution) for each package to point to the newly installed version. Required before using `ocx env --current`.
 - `-h`, `--help`: Print help information.
 
 
@@ -2093,7 +2093,7 @@ Pass `--global` **before** the subcommand: `ocx --global remove ripgrep`. See [`
 
 > **Moved to `ocx package select`** — exits 64 if invoked as bare `ocx select`. See [`package select`](#package-select) for the current form.
 
-Selects one or more packages as the current version by updating the [current symlink](../user-guide.md#path-resolution).
+Selects one or more packages as the current version by updating the [current symlink](#path-resolution).
 
 Each package is resolved using the [selected index](../user-guide.md#indices-selected).
 No downloading is performed — the package must already be installed.
@@ -2118,7 +2118,7 @@ ocx package select [OPTIONS] <PACKAGE>...
 `ocx package install --select` installs and selects in one step.
 :::
 
-See [path resolution modes](../user-guide.md#path-resolution) for how the `current` symlink is used downstream.
+See [path resolution modes](#path-resolution) for how the `current` symlink is used downstream.
 
 #### Entry-point name collisions {#select-entry-point-collision}
 
@@ -2797,7 +2797,7 @@ Same lookup, no installation. Exits 0 when the lookup completes (including "alre
 
 Removes the installed candidate for one or more packages.
 
-Removes the [candidate symlink](../user-guide.md#path-resolution) and its back-reference. Object-store content is preserved unless `--purge` is given. To also remove the current symlink, pass `--deselect` or run [`package deselect`](#package-deselect) separately. To remove all unreferenced objects at once, use [`clean`](#clean).
+Removes the [candidate symlink](#path-resolution) and its back-reference. Object-store content is preserved unless `--purge` is given. To also remove the current symlink, pass `--deselect` or run [`package deselect`](#package-deselect) separately. To remove all unreferenced objects at once, use [`clean`](#clean).
 
 **Usage**
 
@@ -2811,7 +2811,7 @@ ocx package uninstall [OPTIONS] <PACKAGE>...
 
 **Options**
 
-- `-d`, `--deselect`: Also remove the [current symlink](../user-guide.md#path-resolution). Equivalent to running `ocx package deselect` after uninstall — see [`package deselect`](#package-deselect) for the full cleanup behavior.
+- `-d`, `--deselect`: Also remove the [current symlink](#path-resolution). Equivalent to running `ocx package deselect` after uninstall — see [`package deselect`](#package-deselect) for the full cleanup behavior.
 - `--purge`: Delete the object from the store when no other references remain after uninstall.
 - `-h`, `--help`: Print help information.
 
@@ -3705,7 +3705,7 @@ ocx package push [OPTIONS] <LAYERS>...
 
 - `-i`, `--identifier <IDENTIFIER>`: Package identifier including the tag, e.g. `kitware/cmake:3.28.1_20260216120000`. Omit it to publish under the identifier the [build receipt](#package-create-receipt) beside the bundle recorded; with neither, exit 64.
 - `-p`, `--platform <PLATFORM>`: Target platform to publish — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Omit it to publish for the platform the [build receipt](#package-create-receipt) beside the bundle recorded; a value given here is used as given, and the receipt is not consulted for it. With neither, exit 64. Every dependency is projected for this platform (see the gate table above).
-- `-c`, `--cascade`: Cascade rolling releases. When set, pushing `kitware/cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`kitware/cmake:3.28.1`, `kitware/cmake:3.28`, `kitware/cmake:3`, and `kitware/cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../user-guide.md#versioning-cascade).
+- `-c`, `--cascade`: Cascade rolling releases. When set, pushing `kitware/cmake:3.28.1_20260216120000` automatically re-points the rolling ancestors (`kitware/cmake:3.28.1`, `kitware/cmake:3.28`, `kitware/cmake:3`, and `kitware/cmake:latest` if applicable) to the new build — only if this is genuinely the latest at each specificity level. See [tag cascades](../in-depth/versioning.md#cascades).
 - `-m`, `--metadata <PATH>`: Path to the metadata file. If omitted, ocx looks for a sidecar file next to the first file layer (e.g. `pkg.tar.gz` → `pkg-metadata.json`). Required when no file layers are provided (all layers are digest references, or the layer list is empty).
 - `--build-timestamp [<FORMAT>]`: Append a UTC build-metadata segment to the published tag. `datetime` (default when flag passed bare) appends `_YYYYMMDDhhmmss`, `date` appends `_YYYYMMDD`, `none` is a no-op. The identifier's tag must already be `X.Y.Z` (optionally with a variant prefix or pre-release suffix) and must not already carry build metadata. Use this in continuous-deploy pipelines that publish rolling pre-release versions like `dev.ocx.sh/ocx/cli:0.3.0-dev_20260514120000`. The wire-format tag uses `_` (OCI tags forbid `+`); semver `+` is accepted on input and normalized. When the flag is omitted entirely, no build-metadata segment is appended. Passing `--build-timestamp=none` is the explicit equivalent.
 - `--keep-tag` / `--no-keep-tag`: `--keep-tag` (default) also pushes a digest-named `__ocx.keep.<algorithm>-<hex>` tag for each platform manifest pushed in this invocation; `--no-keep-tag` skips it. This is a pure registry-side deletion safety net — a stray tag delete cannot orphan a digest still referenced by a lock, since the keep tag itself keeps the manifest reachable. A digest whose keep tag would exceed the OCI 128-character tag limit (`sha512`, at 146) gets none, rather than a truncated one two digests could collide on. It has no effect on [`index.ocx.sh`][in-depth-indices-public] resolution, which ignores keep tags entirely.
@@ -3725,7 +3725,7 @@ ocx package push [OPTIONS] <LAYERS>...
 **Output** — `--format json` reports `identifier`, `status` (always `"pushed"`), `manifest_digest`, `cascade_tags_written`, `keep_tags_written`, and `layers` (`{mounted, uploaded, verified}`). It also reports five additive keys, omitted when empty: `platform_digests` (keyed by platform, the per-platform manifest digests `--sign` needs — distinct from `manifest_digest`, which names the tag's image index and is rewritten on every platform merge), `annotations_written` (what `--ci-annotations`/`--annotation` actually landed), `aliases_written` (the `--default` bare-track tags), `signatures` (one row per platform `--sign` signed), and `attestation` (`--sbom`'s outcome). The plain table stays a five-column summary — `Identifier`, `Digest`, `Tags`, `Keep Tags`, `Layers`.
 
 ::: tip Layer reuse
-Digest-referenced layers are not re-uploaded — ocx only HEADs the registry to verify they exist. This is the foundation of the [layer dedup model](../user-guide.md#file-structure-layers): a base layer pushed once can be referenced from any number of subsequent packages by digest.
+Digest-referenced layers are not re-uploaded — ocx only HEADs the registry to verify they exist. This is the foundation of the [layer dedup model](../in-depth/storage.md#layers): a base layer pushed once can be referenced from any number of subsequent packages by digest.
 
 ```shell
 # Push a fresh base + tool combination
@@ -6260,7 +6260,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [in-depth-storage-toolchain]: ../in-depth/storage.md#toolchain-location
 [fs-index]: ../in-depth/indices.md#local
 [ug-dependencies]: ../user-guide.md#dependencies
-[ug-deps-env]: ../user-guide.md#dependencies-environment
+[ug-deps-env]: ../in-depth/dependencies.md#composition
 [patches-user-guide]: ../user-guide/patches.md
 [guide-auto-verify]: ../user-guide.md#supply-chain-auto-verify
 [ug-attestations-attach]: ../user-guide/attestations.md#attestations-attach

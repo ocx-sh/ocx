@@ -297,7 +297,7 @@ Every command that resolves a package identifier — [`ocx package install`][cmd
 
 **`--remote`** forces tag and catalog lookups to query the registry directly for a single command,
 and the two shapes that can take it differ in what happens to the local index. A **query**
-([`index list --remote`](#index-list), [`index catalog --remote`](#index-catalog),
+([`index list --remote`][cmd-index-list], [`index catalog --remote`][cmd-index-catalog],
 [`package description pull --remote`][cmd-package-info]) reads the registry and reports — the local index is
 **not** updated. A **resolve** (`package install --remote`, `package exec --remote`, and similar)
 still writes, despite the flag's name: it re-fetches the tag it resolved and rewrites the local copy
