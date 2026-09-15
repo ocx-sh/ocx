@@ -17,10 +17,15 @@
 //! **not** apply here: there is no fence, so there is no dirty state. A user's
 //! hand-written `[shell] hook = false` is simply overwritten by an explicit
 //! `--hook`, which is what the flag means. A write failure is 74 `IoError`.
+//!
+//! The read-modify-write itself is [`crate::config::edit::edit`] (ocx#468):
+//! this module owns only the `[shell]` closure.
 
 use std::path::{Path, PathBuf};
 
 use toml_edit::{Array, DocumentMut, Item, Table};
+
+use crate::config::edit::{self, EditError};
 
 /// Which `[shell]` key a write targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,7 +72,9 @@ pub enum ShellValue<'a> {
 /// `config_path` is `file_structure.root().join("config.toml")` — i.e.
 /// `$OCX_HOME/config.toml`, **not** `ConfigLoader::user_path()`
 /// (`config_dir()/ocx/config.toml`). `--config` / `OCX_CONFIG` name a **read**
-/// override and never redirect this write.
+/// override and never redirect this write. `locks_root` is
+/// `file_structure.locks`, where [`edit::edit`] takes the cross-process lock
+/// every `config.toml` writer shares (ocx#468).
 ///
 /// A **missing file is created** with just the one section.
 ///
@@ -91,50 +98,32 @@ pub enum ShellValue<'a> {
 ///
 /// # Errors
 ///
-/// Propagates the read/parse/atomic-write failure — classified 74 `IoError`.
-pub fn set(config_path: &Path, key: ShellKey, value: ShellValue<'_>) -> crate::Result<()> {
-    let original = match std::fs::read_to_string(config_path) {
-        Ok(text) => text,
-        // A missing file is the create case, not a failure. Every other read
-        // error is real and must not be papered over with an empty document —
-        // that would silently replace a file we could not read.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(crate::error::file_error(config_path, error)),
-    };
-
-    let mut document: DocumentMut = original
-        .parse()
-        .map_err(|error| malformed(config_path, &format!("config.toml does not parse as TOML: {error}")))?;
-
-    let created = !document.contains_key("shell");
-    let table = document
-        .entry("shell")
-        .or_insert_with(|| Item::Table(Table::new()))
-        .as_table_like_mut()
-        .ok_or_else(|| malformed(config_path, "`shell` is present but is not a table"))?;
-
-    match value {
-        ShellValue::Bool(flag) => {
-            table.insert(key.key(), toml_edit::value(flag));
-        }
+/// [`EditError`] — the read/parse/atomic-write failure, classified 74
+/// `IoError`; a document over the config size ceiling is 78.
+pub async fn set(locks_root: &Path, config_path: &Path, key: ShellKey, value: ShellValue<'_>) -> Result<(), EditError> {
+    // Rendered ahead of the closure so it owns nothing borrowed.
+    let value = match value {
+        ShellValue::Bool(flag) => toml_edit::value(flag),
         ShellValue::Paths(paths) => {
             let array: Array = paths.iter().map(|path| path.to_string_lossy().into_owned()).collect();
-            table.insert(key.key(), toml_edit::value(array));
+            toml_edit::value(array)
         }
-    }
-
-    if created {
-        hoist_above_every_table(&mut document);
-    }
-
-    let rendered = document.to_string();
-    if let Some(parent) = config_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).map_err(|error| crate::error::file_error(parent, error))?;
-    }
-    crate::utility::fs::write_bytes_atomic(config_path, rendered.as_bytes())
-        .map_err(|error| crate::error::file_error(config_path, error))
+    };
+    edit::edit(locks_root, config_path, false, move |document| {
+        let created = !document.contains_key("shell");
+        let table = document
+            .entry("shell")
+            .or_insert_with(|| Item::Table(Table::new()))
+            .as_table_like_mut()
+            .ok_or("`shell` is present but is not a table")?;
+        table.insert(key.key(), value);
+        if created {
+            hoist_above_every_table(document);
+        }
+        Ok(())
+    })
+    .await
+    .map(drop)
 }
 
 /// Render a freshly created `[shell]` table **before** every table already in
@@ -165,24 +154,12 @@ fn hoist_above_every_table(document: &mut DocumentMut) {
     }
 }
 
-/// A `config.toml` this writer cannot edit surgically.
-///
-/// Classified 74 `IoError` like the read and the write it sits between: the
-/// contract for this command is one code for "the `[shell]` write did not
-/// happen", and 78 `ConfigError` is already spoken for by the loader, which
-/// refuses the same file earlier and louder on the read path.
-fn malformed(config_path: &Path, reason: &str) -> crate::Error {
-    crate::error::file_error(config_path, std::io::Error::other(reason.to_owned()))
-}
-
+/// A `config.toml` a person wrote: a header comment, an unrelated table
+/// with odd spacing and a trailing comment, and a `[shell]` table carrying
+/// a comment plus a key this binary does not know. Shared with the
+/// [`crate::config::edit`] tests, which prove the same bytes survive there.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A `config.toml` a person wrote: a header comment, an unrelated table
-    /// with odd spacing and a trailing comment, and a `[shell]` table carrying
-    /// a comment plus a key this binary does not know.
-    const HAND_WRITTEN: &str = "\
+pub(crate) const HAND_WRITTEN: &str = "\
 # a user's own header comment
 [registry]
 default   =   \"ghcr.io\"   # trailing note
@@ -193,6 +170,14 @@ future_key = 1
 completions = true
 ";
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn locks(dir: &std::path::Path) -> std::path::PathBuf {
+        dir.join("locks")
+    }
+
     fn write(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
         let path = dir.join("config.toml");
         std::fs::write(&path, content).unwrap();
@@ -201,12 +186,14 @@ completions = true
 
     /// C-040 / S-016: a missing `$OCX_HOME/config.toml` is created carrying
     /// only the one section — no scaffold, no other table.
-    #[test]
-    fn missing_file_is_created_with_just_the_one_section() {
+    #[tokio::test]
+    async fn missing_file_is_created_with_just_the_one_section() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("config.toml");
 
-        set(&path, ShellKey::Hook, ShellValue::Bool(false)).unwrap();
+        set(&locks(home.path()), &path, ShellKey::Hook, ShellValue::Bool(false))
+            .await
+            .unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -219,12 +206,14 @@ completions = true
     /// unknown key survive the write byte-for-byte. A whole-file
     /// parse→serialize rewrite discards both, which is the named red state for
     /// this work package.
-    #[test]
-    fn comments_and_unknown_keys_survive_the_write() {
+    #[tokio::test]
+    async fn comments_and_unknown_keys_survive_the_write() {
         let home = tempfile::tempdir().unwrap();
         let path = write(home.path(), HAND_WRITTEN);
 
-        set(&path, ShellKey::Hook, ShellValue::Bool(true)).unwrap();
+        set(&locks(home.path()), &path, ShellKey::Hook, ShellValue::Bool(true))
+            .await
+            .unwrap();
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -247,13 +236,22 @@ completions = true
     /// the parsed one in place) and this test fails — the comment and
     /// `future_key` are gone. Demonstrated by hand for this work package: see
     /// the builder's report for the red output.
-    #[test]
-    fn writes_compose_and_preserve_bytes() {
+    #[tokio::test]
+    async fn writes_compose_and_preserve_bytes() {
         let home = tempfile::tempdir().unwrap();
         let path = write(home.path(), HAND_WRITTEN);
 
-        set(&path, ShellKey::ModifyPath, ShellValue::Bool(false)).unwrap();
-        set(&path, ShellKey::Profiles, ShellValue::Paths(&[])).unwrap();
+        set(
+            &locks(home.path()),
+            &path,
+            ShellKey::ModifyPath,
+            ShellValue::Bool(false),
+        )
+        .await
+        .unwrap();
+        set(&locks(home.path()), &path, ShellKey::Profiles, ShellValue::Paths(&[]))
+            .await
+            .unwrap();
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -269,15 +267,17 @@ completions = true
 
     /// C-040: an existing key is set in place — the surrounding decor, and any
     /// key declared after it, keep their position.
-    #[test]
-    fn an_existing_key_is_set_in_place() {
+    #[tokio::test]
+    async fn an_existing_key_is_set_in_place() {
         let home = tempfile::tempdir().unwrap();
         let path = write(
             home.path(),
             "[shell]\nhook = false\n# tail comment\ncompletions = true\n",
         );
 
-        set(&path, ShellKey::Hook, ShellValue::Bool(true)).unwrap();
+        set(&locks(home.path()), &path, ShellKey::Hook, ShellValue::Bool(true))
+            .await
+            .unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -288,13 +288,22 @@ completions = true
 
     /// C-040: each variant targets its own key name, and two successive writes
     /// compose instead of replacing each other.
-    #[test]
-    fn each_flag_targets_its_own_key_and_writes_compose() {
+    #[tokio::test]
+    async fn each_flag_targets_its_own_key_and_writes_compose() {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join("config.toml");
 
-        set(&path, ShellKey::Hook, ShellValue::Bool(false)).unwrap();
-        set(&path, ShellKey::Completions, ShellValue::Bool(true)).unwrap();
+        set(&locks(home.path()), &path, ShellKey::Hook, ShellValue::Bool(false))
+            .await
+            .unwrap();
+        set(
+            &locks(home.path()),
+            &path,
+            ShellKey::Completions,
+            ShellValue::Bool(true),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -313,8 +322,8 @@ completions = true
     /// standing in for the parent would return `ENOTDIR` from the *read* and
     /// never reach the write at all.
     #[cfg(unix)]
-    #[test]
-    fn a_failed_publish_is_exit_74() {
+    #[tokio::test]
+    async fn a_failed_publish_is_exit_74() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let home = tempfile::tempdir().unwrap();
@@ -333,8 +342,14 @@ completions = true
             return;
         }
 
-        let error = set(&directory.join("config.toml"), ShellKey::Hook, ShellValue::Bool(true))
-            .expect_err("publishing into a directory this process cannot write must fail");
+        let error = set(
+            &locks(home.path()),
+            &directory.join("config.toml"),
+            ShellKey::Hook,
+            ShellValue::Bool(true),
+        )
+        .await
+        .expect_err("publishing into a directory this process cannot write must fail");
         std::fs::set_permissions(&directory, writable).unwrap();
 
         assert_eq!(
@@ -345,18 +360,51 @@ completions = true
     }
 
     /// C-051: a read that fails for any reason other than "not there" is 74 as
-    /// well, and stops before anything is published.
-    #[test]
-    fn an_unreadable_config_is_exit_74() {
-        let home = tempfile::tempdir().unwrap();
-        // A regular file standing in for the parent directory: the read of
-        // `<file>/config.toml` fails with `ENOTDIR`, which is not `NotFound`
-        // and so is not the create case.
-        std::fs::write(home.path().join("not-a-dir"), b"").unwrap();
-        let path = home.path().join("not-a-dir").join("config.toml");
+    /// well, and stops before anything is published. A FIFO at the config
+    /// path: the parent exists and the lock is taken, so the failure is the
+    /// bounded read's own `NotRegularFile` — the read arm, not the directory
+    /// arm a `<file>/config.toml` path hits first.
+    ///
+    /// **Red-state** (review W2 / mutation M5): swallow the read error into
+    /// an empty document and the edit renders `[shell]`, renames a regular
+    /// file over the FIFO, and returns `Ok` — the FIFO is gone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_config_is_exit_74() {
+        use std::os::unix::fs::FileTypeExt as _;
 
-        let error = set(&path, ShellKey::Hook, ShellValue::Bool(true)).expect_err("the read cannot succeed");
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("config.toml");
+        crate::test::fifo::mkfifo(&path);
+
+        let error = set(&locks(home.path()), &path, ShellKey::Hook, ShellValue::Bool(true))
+            .await
+            .expect_err("the read cannot succeed");
         assert_eq!(crate::cli::classify_error(&error), crate::cli::ExitCode::IoError);
+        assert!(
+            std::fs::symlink_metadata(&path).unwrap().file_type().is_fifo(),
+            "a refused read must publish nothing over the path"
+        );
+    }
+
+    /// C-051: a `shell` key that is not a table cannot take the edit — the
+    /// closure refuses, that is [`EditError::Malformed`] (74), and the file
+    /// is left byte-identical (review W3).
+    #[tokio::test]
+    async fn a_shell_key_that_is_not_a_table_is_refused_as_exit_74() {
+        let home = tempfile::tempdir().unwrap();
+        let path = write(home.path(), "shell = 1\n");
+
+        let error = set(&locks(home.path()), &path, ShellKey::Hook, ShellValue::Bool(true))
+            .await
+            .expect_err("a scalar `shell` cannot hold a key");
+
+        assert!(
+            matches!(&error, EditError::Malformed { reason, .. } if reason.contains("not a table")),
+            "{error:?}"
+        );
+        assert_eq!(crate::cli::classify_error(&error), crate::cli::ExitCode::IoError);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "shell = 1\n");
     }
 
     /// C-051: the `[shell]` write must not disturb the **other** fence that
@@ -368,8 +416,8 @@ completions = true
     /// `ocx self setup --hook` exits **82** — the one code C-051 says this
     /// write must never produce. `--force` then collapses the fence and
     /// deletes the toggle with it.
-    #[test]
-    fn a_new_table_lands_outside_the_managed_fence() {
+    #[tokio::test]
+    async fn a_new_table_lands_outside_the_managed_fence() {
         use crate::setup::rc_block::{self, BlockState, MANAGED_LABEL};
 
         const BODY: &str = "[managed]\nsource = \"ghcr.io/acme/cfg:1\"\nrequired = false";
@@ -381,7 +429,9 @@ completions = true
             .expect("a file with no fence gets a fresh one");
         let path = write(home.path(), &fenced);
 
-        set(&path, ShellKey::Hook, ShellValue::Bool(true)).unwrap();
+        set(&locks(home.path()), &path, ShellKey::Hook, ShellValue::Bool(true))
+            .await
+            .unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
 
         assert_eq!(
@@ -415,8 +465,8 @@ completions = true
     /// body, inside the fence, and `[shell]` and `[managed]` swap places in
     /// the byte comparison below. Demonstrated by hand for this work package:
     /// see the builder's report for the red output.
-    #[test]
-    fn new_table_lands_outside_the_managed_fence() {
+    #[tokio::test]
+    async fn new_table_lands_outside_the_managed_fence() {
         use crate::setup::rc_block::{self, MANAGED_LABEL};
 
         const BODY: &str = "[managed]\nsource = \"ghcr.io/acme/cfg:1\"\nrequired = false";
@@ -427,7 +477,9 @@ completions = true
             .expect("a file with no fence gets a fresh one");
         let path = write(home.path(), &fenced);
 
-        set(&path, ShellKey::Profiles, ShellValue::Paths(&[])).unwrap();
+        set(&locks(home.path()), &path, ShellKey::Profiles, ShellValue::Paths(&[]))
+            .await
+            .unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
 
         assert_eq!(
@@ -441,14 +493,21 @@ completions = true
     /// empty slice renders as an explicitly empty array — not an absent key.
     /// That distinction is the whole point of the key: absent means
     /// auto-detect, empty means write no profile blocks.
-    #[test]
-    fn profiles_renders_as_an_array_of_strings() {
+    #[tokio::test]
+    async fn profiles_renders_as_an_array_of_strings() {
         let home = tempfile::tempdir().unwrap();
         let path_a = home.path().join("config.toml");
         let a = home.path().join("a").join(".bashrc");
         let b = home.path().join("b").join(".zshrc");
 
-        set(&path_a, ShellKey::Profiles, ShellValue::Paths(&[a.clone(), b.clone()])).unwrap();
+        set(
+            &locks(home.path()),
+            &path_a,
+            ShellKey::Profiles,
+            ShellValue::Paths(&[a.clone(), b.clone()]),
+        )
+        .await
+        .unwrap();
 
         // Parse, do not grep: `toml_edit` picks a literal string (`'…'`) when
         // the value carries backslashes and a basic string (`"…"`) otherwise,
@@ -469,7 +528,9 @@ completions = true
         );
 
         let path_b = home.path().join("empty.toml");
-        set(&path_b, ShellKey::Profiles, ShellValue::Paths(&[])).unwrap();
+        set(&locks(home.path()), &path_b, ShellKey::Profiles, ShellValue::Paths(&[]))
+            .await
+            .unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&path_b).unwrap(),
@@ -480,13 +541,15 @@ completions = true
 
     /// C-051: a `config.toml` that does not parse is reported, not silently
     /// replaced — the file on disk is left exactly as it was.
-    #[test]
-    fn an_unparseable_file_is_reported_and_left_alone() {
+    #[tokio::test]
+    async fn an_unparseable_file_is_reported_and_left_alone() {
         let home = tempfile::tempdir().unwrap();
         let broken = "[shell\nhook = ";
         let path = write(home.path(), broken);
 
-        let error = set(&path, ShellKey::Hook, ShellValue::Bool(true)).expect_err("broken TOML cannot be edited");
+        let error = set(&locks(home.path()), &path, ShellKey::Hook, ShellValue::Bool(true))
+            .await
+            .expect_err("broken TOML cannot be edited");
         assert_eq!(crate::cli::classify_error(&error), crate::cli::ExitCode::IoError);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),

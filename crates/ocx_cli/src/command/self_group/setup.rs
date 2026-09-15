@@ -174,7 +174,7 @@ impl SelfSetup {
         // deterministic edit that does not depend on the install succeeding,
         // and running it first means a registry failure cannot silently drop
         // the toggle the user asked for.
-        self.apply_shell_flags(&context)?;
+        self.apply_shell_flags(&context).await?;
         self.apply_toolchain_activate(&context).await?;
 
         let managed_config = resolve_managed_config_arg(
@@ -217,7 +217,7 @@ impl SelfSetup {
     /// The target is `$OCX_HOME/config.toml` — `--config` / `OCX_CONFIG` name a
     /// **read** override and never redirect this write. The write is not
     /// fenced, so a failure is 74 `IoError`, never 82 `DirtyRcBlock`.
-    fn apply_shell_flags(&self, context: &crate::app::Context) -> anyhow::Result<()> {
+    async fn apply_shell_flags(&self, context: &crate::app::Context) -> anyhow::Result<()> {
         let writes = shell_writes(self);
         if writes.is_empty() {
             return Ok(());
@@ -236,7 +236,13 @@ impl SelfSetup {
                     ),
                 );
             } else {
-                shell_config::set(&config_path, key, value.as_shell_value())?;
+                shell_config::set(
+                    &context.file_structure().locks,
+                    &config_path,
+                    key,
+                    value.as_shell_value(),
+                )
+                .await?;
             }
 
             // Above the dry-run guard on purpose: which tier decides is a

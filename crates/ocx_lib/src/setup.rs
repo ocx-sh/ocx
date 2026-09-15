@@ -582,13 +582,16 @@ pub async fn apply_managed_config(
     check_locked_managed_override(config, flag_value)?;
 
     let config_path = file_structure.root().join("config.toml");
+    // The decision read: which state the fence is in decides the outcome and
+    // whether a fetch runs at all. The write below re-reads under the edit
+    // lock, so an edit that lands during the fetch is not overwritten.
     let content = read_to_string_or_empty(&config_path).await?;
 
     if flag_value.is_empty() {
         if dry_run {
             return Ok(ManagedConfigSetupOutcome::WouldAdopt);
         }
-        return clear_managed_config(&config_path, &content, file_structure).await;
+        return clear_managed_config(&config_path, file_structure).await;
     }
 
     let identifier = crate::oci::Identifier::parse_with_default_registry(flag_value, crate::oci::DEFAULT_REGISTRY)
@@ -719,10 +722,20 @@ pub async fn apply_managed_config(
         }
     };
 
-    // Fence written only after the fetch+persist above succeeded.
-    if let Some(new_content) = rc_block::apply(&content, &body, force, rc_block::MANAGED_LABEL)? {
-        write_profile(&config_path, &new_content).await?;
-    }
+    // Fence written only after the fetch+persist above succeeded — through
+    // the one `config.toml` edit lock (ocx#468), never across the fetch: the
+    // state machine re-runs on the text as it is now, so a `[shell]` or
+    // extra-CA edit that landed meanwhile is carried, not overwritten. The
+    // dry-run gates above already returned, so this is never a dry run.
+    crate::config::edit::edit_text(&file_structure.locks, &config_path, false, move |current| {
+        // `rc_block::apply` is infallible today and documents its `Result`
+        // as a signature reservation; a refusal, should one arrive, is the
+        // file's shape and lands as `Malformed` (74) with the file untouched.
+        let rewritten = rc_block::apply(current, &body, force, rc_block::MANAGED_LABEL)
+            .map_err(|_| "the [managed] fence could not be rewritten")?;
+        Ok(rewritten.unwrap_or_else(|| current.to_owned()))
+    })
+    .await?;
 
     Ok(match (adopted, result) {
         (Some(previous), ManagedConfigUpdateResult::Updated { digest }) => ManagedConfigSetupOutcome::Refreshed {
@@ -773,13 +786,17 @@ fn refresh_skip_reason(identifier: &crate::oci::Identifier, can_fetch: bool, pau
 /// next command.
 async fn clear_managed_config(
     config_path: &Path,
-    content: &str,
     file_structure: &FileStructure,
 ) -> Result<ManagedConfigSetupOutcome, error::Error> {
-    let stripped = crate::setup::rc_block::remove_block(content, crate::setup::rc_block::MANAGED_LABEL);
-    if stripped != content {
-        write_profile(config_path, &stripped).await?;
-    }
+    // Under the one `config.toml` edit lock (ocx#468); an unchanged strip
+    // writes nothing.
+    crate::config::edit::edit_text(&file_structure.locks, config_path, false, |content| {
+        Ok(crate::setup::rc_block::remove_block(
+            content,
+            crate::setup::rc_block::MANAGED_LABEL,
+        ))
+    })
+    .await?;
 
     let managed_dir = file_structure.state.managed_config_dir();
     if crate::utility::fs::path_exists_lossy(&managed_dir).await {
@@ -1930,7 +1947,7 @@ mod tests {
         std::fs::create_dir_all(&managed_dir).unwrap();
         std::fs::write(managed_dir.join("snapshot.json"), b"{}").unwrap();
 
-        let outcome = clear_managed_config(&config_path, &content, &file_structure)
+        let outcome = clear_managed_config(&config_path, &file_structure)
             .await
             .expect("clear must succeed");
         assert!(matches!(outcome, ManagedConfigSetupOutcome::Cleared));
@@ -1939,6 +1956,46 @@ mod tests {
         assert!(!after.contains("[managed]"), "the fence must be removed: {after:?}");
         assert!(after.contains("keep.me"), "content outside the fence survives");
         assert!(!managed_dir.exists(), "the snapshot directory must be deleted");
+    }
+
+    /// ocx#468 (review D1): the fence writers take the same `config-edit`
+    /// lock the surgical writers do — a clear waits behind a held lock and
+    /// lands once it is released. Same shape as `edit.rs`'s own proof.
+    ///
+    /// **Red-state**: write the fence through `write_profile` again (or key
+    /// the lock differently) and the clear finishes inside the 50 ms.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clear_managed_config_waits_behind_the_config_edit_lock() {
+        let env = crate::test::env::lock();
+        env.remove("OCX_MANAGED_CONFIG");
+        let home = tempfile::TempDir::new().unwrap();
+        let file_structure = FileStructure::with_root(home.path().to_path_buf());
+        let config_path = home.path().join("config.toml");
+        let content = rc_block::apply("", "[managed]\nsource = \"corp.example.com/ocx-config:user\"\n", false, rc_block::MANAGED_LABEL)
+            .expect("apply infallible")
+            .expect("fresh append produces content");
+        std::fs::write(&config_path, &content).unwrap();
+        let held = crate::utility::fs::lock_scoped(
+            &file_structure.locks,
+            "config-edit",
+            home.path(),
+            "config.toml",
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+        let task = tokio::spawn({
+            let (config_path, file_structure) = (config_path.clone(), file_structure.clone());
+            async move { clear_managed_config(&config_path, &file_structure).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!task.is_finished(), "the clear must wait behind a held config-edit lock");
+
+        drop(held);
+        let outcome = task.await.unwrap().expect("the clear lands once the lock is released");
+        assert!(matches!(outcome, ManagedConfigSetupOutcome::Cleared));
+        assert!(!read(&config_path).contains("[managed]"), "the fence must be removed");
     }
 
     /// Clearing when nothing exists (no fence, no dir) is a no-op success —
@@ -1951,7 +2008,7 @@ mod tests {
         let file_structure = FileStructure::with_root(home.path().to_path_buf());
         let config_path = home.path().join("config.toml");
 
-        let outcome = clear_managed_config(&config_path, "", &file_structure)
+        let outcome = clear_managed_config(&config_path, &file_structure)
             .await
             .expect("an empty clear must succeed");
         assert!(matches!(outcome, ManagedConfigSetupOutcome::Cleared));
@@ -1973,7 +2030,7 @@ mod tests {
         std::fs::create_dir_all(&managed_dir).unwrap();
         std::fs::write(managed_dir.join("snapshot.json"), b"{}").unwrap();
 
-        let outcome = clear_managed_config(&config_path, "", &file_structure)
+        let outcome = clear_managed_config(&config_path, &file_structure)
             .await
             .expect("clear with a lingering env override must still succeed");
         assert!(matches!(outcome, ManagedConfigSetupOutcome::Cleared));

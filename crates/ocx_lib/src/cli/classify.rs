@@ -110,6 +110,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     use crate::claim::ClaimError;
     use crate::cli::error::{MetadataResolutionError, UsageError};
     use crate::compression::error::Error as CompressionError;
+    use crate::config::edit::EditError;
     use crate::config::error::Error as ConfigError;
     use crate::config::managed::ManagedConfigError;
     use crate::config::mirror::MirrorConfigError;
@@ -169,6 +170,7 @@ fn try_classify(cause: &(dyn std::error::Error + 'static)) -> Option<ExitCode> {
     try_downcast!(crate::Error);
     try_downcast!(SessionError);
     try_downcast!(ConfigError);
+    try_downcast!(EditError);
     try_downcast!(ForwardedEnvError);
     try_downcast!(ListSeparatorError);
     try_downcast!(CommandResolutionError);

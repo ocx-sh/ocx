@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+pub mod edit;
 pub mod error;
 pub mod insecure;
 pub mod loader;
