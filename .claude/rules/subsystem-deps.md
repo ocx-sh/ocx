@@ -108,12 +108,13 @@ Renovate groups: `actions` (GitHub Actions) prefixes `ci(deps)`; `rust-deps` (Ca
 
 ## Patched Dependencies
 
-Two deps are `[patch.crates-io]`'d to local git submodules under `external/`:
+Three deps are `[patch.crates-io]`'d to local git submodules under `external/`:
 
 | Crate(s) | Submodule | Why |
 |---|---|---|
 | `oci-client` | `external/rust-oci-client` | OCX-specific fixes; changes need upstream PRs (see `feedback_submodule_upstream_pr.md`) |
 | `docker_credential` | `external/docker_credential` | Credential-helper fixes |
+| `sigstore` | `external/sigstore-rs` | `SigstoreTrustRoot::new_with_client` — the TUF fetch takes the shared Sigstore `reqwest::Client` so extra CA roots, proxy and timeouts reach it (ocx#470). Based on tag `v0.14.0`; one upstreamable, DCO-signed commit per change, formatted at `max_width=100` |
 
 Each submodule is also in the root `[workspace] exclude` (so cargo can run each fork's own test suite without the outer workspace claiming ownership) and registered in `.gitmodules`.
 

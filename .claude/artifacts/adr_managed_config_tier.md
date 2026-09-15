@@ -387,6 +387,87 @@ that fetched it, one-hop. That invariant is unchanged by this amendment: the man
 fetch client's transport allowance must still derive from the local-only view, never the
 merged view `insecure` now travels on for everything else.
 
+## Amendment (2026-09-13) — `extra_ca_certs` / `extra_ca_certs_pem` widen the managed tier's TLS-impersonation reach
+
+Records what the extra CA roots pair (`plan_extra_ca_certs.md`, #448) adds to the managed tier's
+reach. Where this conflicts with earlier text, this amendment governs.
+
+**What changed.** `extra_ca_certs_pem` (`crates/ocx_lib/src/config.rs`) is a root-level key every
+`config.toml` tier accepts, the managed tier included, and it is honoured from a managed payload
+**without** a digest-pinned `[managed] source`. The path form `extra_ca_certs` is stripped from a
+managed payload with a warning, exactly as `trusted_root` is (`config/loader.rs`,
+`guard_managed_sigstore_trust`), and `ocx config push` inlines it as `extra_ca_certs_pem` at publish
+time so the path form never has to be honoured. The inline form appends to the platform trust store
+for the registry, index and forge clients on every consumer at the next `ocx config update` — so a
+managed-config publisher, compromised or malicious, can add a trust root fleet-wide by moving a tag.
+
+**Decision: honour `extra_ca_certs_pem` from an unpinned managed source for the registry, index and
+forge clients; the Sigstore client takes managed-tier roots only behind a digest pin.**
+
+- *Considered and rejected* — gate `extra_ca_certs_pem` behind the digest pin, as `trusted_root_json`,
+  `fulcio_url` and `rekor_url` are. Those three are gated because a tag-mover gains something from them
+  with no other capability: a swapped trust root or a repointed Fulcio bypasses signature verification,
+  or names the server an OIDC identity token is handed to. A CA root bypasses nothing by itself —
+  signature verification never consults TLS roots — and does nothing at all without network position.
+  Gating it would cost the tier's own target user: a corporate fleet behind a TLS-inspecting proxy is
+  exactly who `[managed]` exists to serve, and a rule that makes the CA rollout depend on a digest pin
+  the operator re-seeds on every host at every payload change defeats the point of centralising it.
+- *Chosen* — honour it unpinned, and keep the one client whose traffic it could turn into a bypass
+  behind the pin. The Sigstore client (`oci/verify`) reaches Fulcio and Rekor, and Fulcio is where the
+  OIDC identity token goes: an on-path party holding a managed root could terminate that connection
+  and take the token. So the Sigstore client receives managed-tier roots only behind a digest-pinned
+  `[managed] source`; roots from the local tiers and the environment reach it whenever the loader
+  admits them at all — under the system-scope lock of the 2026-09-15 amendment below, only the
+  system pair does.
+
+**Residual exposure — recorded, not softened.** An unpinned managed publisher combined with an
+on-path party — a corporate CONNECT proxy included, since it already sits on every connection — can
+impersonate every TLS endpoint ocx dials except the Sigstore client: registry, index and forge
+traffic terminates at whoever holds the key behind the added root. For registry and index traffic
+this is strictly weaker than what the `insecure = true` amendment above already accepts for an
+unpinned publisher (plaintext needs no on-path key at all), and it is a deliberate acceptance for
+the same reason: `[managed]` is sold on fleet-wide policy distribution, and a fleet that needs a
+private CA on every host is the case this key exists for. The hard guarantee is a digest-pinned
+`[managed] source`, which makes the payload — root included — the one the operator seeded and
+nothing a tag-mover can swap; for the local tiers it is OS-level control of `$OCX_HOME`, the
+user config directory and the process environment. That is one lever fewer than `insecure` has:
+the CA pair has **no system-scope lock** — it merges as an ordinary replace (D-3, system weakest),
+and `retain_system_locked_sections` prunes both keys under `OCX_NO_CONFIG` — so a platform engineer
+who can pin every host's plaintext set from `/etc/ocx/config.toml` cannot pin its trust set the
+same way. Recorded as a deliberate non-feature for this round: the ask was one additive host-wide
+root, and a lock is a second merge rule for a key that has one. A system-scope lock in the
+`insecure = false` shape is a candidate follow-up if a fleet asks for it.
+
+**Residual on the redaction side (D-11).** A short, single-line `OCX_EXTRA_CA_CERTS` value with no
+`-----BEGIN` in it is read as a path and, when absent, echoed in the not-found message like any
+misnamed path — only a value over 256 bytes or carrying a newline is withheld — so a secret
+exported into the variable by mistake is redacted only when it has the shape of PEM text.
+
+**Residual on the usability side.** The Sigstore pin rule cuts the other way for an unpinned fleet
+behind an intercepting proxy: a payload that also enables `[[trust.policy]]` auto-verify makes every
+install, verify, sign and ambient-OIDC call exit 69 (`UnknownIssuer`), because the Sigstore client
+reads only the local view. The remedies are the two levers above — pin the `[managed] source` by
+digest, or supply the CA through a local tier or `OCX_EXTRA_CA_CERTS`.
+
+**Scope note — the fetch client is unchanged.** The managed-config refresh client
+(`build_managed_config_client`, "Mirror posture (AMENDED)" above) is built from the local-only view
+and never takes a managed-tier CA: the channel that delivers the payload cannot be secured by
+material the payload carried, one-hop, the same C6 invariant `insecure` preserves.
+
+## Amendment (2026-09-15) — the extra-CA pair gains the system-scope lock (ocx#469)
+
+Supersedes the "no system-scope lock … deliberate non-feature" sentence in the amendment above. A
+pair set in `/etc/ocx/config.toml` is now **system-locked**, in the `[registry]` shape rather than
+the `insecure = false` one: the loader sets `Config::extra_ca_certs_system_locked` iff the system
+file sets either key (absent locks nothing), `Config::merge` then ignores every lower tier's pair —
+user, `$OCX_HOME`, the managed payload, `OCX_CONFIG`/`--config` — and `tls::resolve_extra_roots`
+ignores `OCX_EXTRA_CA_CERTS` too, each with a warning naming the tier or variable and never a
+value (D-11). `retain_system_locked_sections` keeps a locked pair under `OCX_NO_CONFIG`, so a
+hermetic CI job does not drop out of the corporate CA with exit 69 (the `[records]` precedent). The
+lever the 2026-09-13 text said was missing now exists: a platform engineer who pins a host's
+plaintext set from `/etc/ocx/config.toml` pins its trust set the same way, and an unpinned managed
+publisher can no longer widen it on a locked host.
+
 ## Links
 
 - Plan: `.claude/state/plans/plan_managed_config.md`

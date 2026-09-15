@@ -17,7 +17,7 @@ Auto-load on every Rust file edit. Provide stable architectural context — "why
 | (mirror tool) | Moved to own repo [ocx-sh/ocx-mirror](https://github.com/ocx-sh/ocx-mirror) — vendors ocx as submodule, `ocx_lib` path dep | — |
 | `ocx_schema` | JSON schema gen (build-only) | Depend `ocx_lib` |
 
-Patched dep: `oci-client` at `external/rust-oci-client` (local git submodule).
+Patched deps: `oci-client` at `external/rust-oci-client`, `docker_credential` at `external/docker_credential`, `sigstore` at `external/sigstore-rs` (local git submodules).
 
 ## Core vs Plugin Boundary (owner doctrine, 2026-07-16)
 
@@ -161,6 +161,7 @@ Project-wide conventions enforced by reviewer:
 | Per-prompt shell-env reconciliation — the **sequencing** | `crates/ocx_lib/src/activation.rs` (`crate::activation`) | The order that binds the pure pieces into one answer — resolve the global tier, evaluate consent over the walk's project, compose only what consent authorized, diff, record. Driven by `ocx self activate --reconcile` (applies) and `ocx shell state` (reports), so both share one derivation. `Context`-free: every input is a plain field on `SessionInput`. **At the crate root, never under `shell/`** — `project::consent` reads `shell`, so sequencing under `shell/` closes a `use` cycle that does not compile across a crate boundary and blocks the `ocx_lib` split (addendum A-45) |
 | Project activation consent | `crates/ocx_lib/src/project/consent.rs` | `evaluate()` — the stamp/paths/namespaces predicate gating whether a project's `ocx.toml` may compose at all; stamp lives at `state/projects/<key>/consent.json` |
 | JUnit XML report writer | `crates/ocx_cli/src/api/junit.rs` | `ocx package test --junit` sidecar; depends on `quick-junit`, kept off `ocx_lib` (the crate slated to split — see Core vs Plugin Boundary above); output-channel exception documented in `subsystem-cli-api.md`'s Output architecture section |
+| TLS trust material (extra CA roots, `extra_ca_certs`/`extra_ca_certs_pem`, the Sigstore trust-services root view) | `crates/ocx_lib/src/tls.rs` | The resolution ladder (`resolve_extra_roots`), the Sigstore fold (`sigstore_extra_roots`/`install_sigstore_roots`), and `ExtraRoots` parsing/probing (ocx#448). Distinct from `trust.rs`'s `[[trust.policy]]` signer-identity pinning — see that module's doc |
 
 ## Cross-Cutting Modules
 
