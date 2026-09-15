@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-09-15
+
+### Added
+
+- Let [shell] record whether setup may touch PATH, and which profiles *(config)*
+- Tell an explicitly given setup opt-out apart from an unspoken one *(cli)*
+- Remember the setup opt-outs a machine was set up with *(setup)*
+- Add ocx package receipt to print a bundle's build receipt *(package)*
+- Cascade repair writes --tags-file, the one spelling push and announce use *(cascade)* **BREAKING**
+- Name each cascade repair entry's tag list "tags" in the JSON report *(cascade)* **BREAKING**
+- Create a bundle straight from an archive with --extract *(package)*
+- --ci-annotations stamps source, revision, created and version from the CI environment *(push)*
+- Write a JUnit report for a scripted test with package test --junit *(cli)*
+- --default publishes the un-prefixed version track without a second push *(push)*
+- Extract .tar.bz2 archives with a pure-Rust bzip2 decoder *(archive)*
+- --quiet and OCX_QUIET suppress progress bars as well as the stdout report *(cli)*
+- Accept extra_ca_certs and extra_ca_certs_pem in every config.toml tier, locked from the system tier *(config)*
+- Trust extra CA roots from config.toml or OCX_EXTRA_CA_CERTS on every registry, index, forge, Sigstore and TUF client *(tls)*
+- Ocx self setup persists OCX_EXTRA_CA_CERTS as an inline extra_ca_certs_pem before the bootstrap downloads anything, or reports it system_locked *(setup)*
+
+### Changed
+
+- Spell the toolchain root key toolchain_dir, like every other key *(config)* **BREAKING**
+
+### Documentation
+
+- Document the update hand-off and the persisted setup opt-outs *(self)*
+- Document create --extract, push --ci-annotations and --default, test --junit, and cascade repair --tags-file *(cli)*
+- Document extra CA roots — the config keys, the system-scope lock, OCX_EXTRA_CA_CERTS, the corporate-CA install one-liners, the TUF fetch and the exit codes *(tls)*
+- Document that a nested project switches the toolchain instead of stacking on the enclosing one *(shell)*
+- Say package, binary or binding where "tool" blurred the three
+- Retarget 54 stale section anchors and gate every docs link in task verify
+
+### Fixed
+
+- Scaffold $OCX_HOME/ocx.toml when init runs under --global *(cli)*
+- Stop the acceptance suite handing its children the developer's terminal *(test)*
+- Run the new binary's own setup after an update, not the old one's *(self)*
+- Publish SlotRow.source as the package version string, not the bundle format version *(schema)*
+- Emit package_already_claimed and the other claim slugs in the JSON envelope detail *(claim)*
+- --tags-file lists the tags a run left in the registry, never a plan *(cascade)* **BREAKING**
+- Refuse a space-separated --ci or --build-timestamp value instead of taking it as a package or a layer *(cli)*
+- A concurrent `ocx clean` can no longer sweep the scratch directory out from under `create --extract` *(package)*
+- A hostile layer refused during install exits 65 instead of 1 *(oci)*
+- Extraction stays inside its root against symlink ladders, hard links, archive modes, GNU sparse entries and empty-entry floods *(archive)*
+- Reconcile at the next prompt when OCX_CONSENT_PATHS or OCX_CONSENT_NAMESPACES is exported mid-session *(shell)*
+- Name the [registries."&lt;ns&gt;"].trusted_hosts entry an SSRF refusal points at *(oci)*
+- Lazy-report governs the download bar, and a cached shim invocation opens no terminal *(launcher)*
+- Render a bar only while a transfer is in flight — a cached exec, offline run or shim re-entry draws nothing *(progress)*
+- Bound the config push and config test candidate reads and the trusted_root read before the size check *(config)*
+- Serialize every config.toml read-modify-write behind one scoped lock so concurrent ocx invocations cannot drop each other's edits *(setup)*
+- Classify a TLS certificate refusal on a registry or index dial as unavailable (69) with the extra-CA remedy, never as a retried transient failure *(oci)*
+- `--project &lt;dir&gt;` holding no ocx.toml names that directory, not the cwd of a walk that never ran *(cli)*
+- `ocx init` scaffolds the `--project` / `OCX_PROJECT` directory instead of the cwd *(cli)*
+- Help text and project errors name bindings, packages and binaries instead of "tool" *(cli)*
+- Error::InternalFile's message names its io cause, so every `to_string()` reason and warn line says why a file operation failed *(error)*
+- `ocx self activate` says why it refused an undetectable shell instead of exiting 64 in silence *(cli)*
+
 ## [0.6.1] - 2026-09-08
 
 ### Added
@@ -80,6 +138,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Re-judge the toolchain `links/` directory at the moment a link is written *(toolchain)*
 - Read a signal-killed push's verdict from the remote, not from the corpse *(forge)*
 - Stop linting docs-quality's fixtures, which are checker inputs *(tasks)*
+
+### Release
+
+- V0.6.1
 
 ## [0.6.0] - 2026-08-30
 
@@ -1064,6 +1126,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.1.0
+[0.6.2]: https://github.com/ocx-sh/ocx/compare/v0.6.1..v0.6.2
 [0.6.1]: https://github.com/ocx-sh/ocx/compare/v0.6.0..v0.6.1
 [0.6.0]: https://github.com/ocx-sh/ocx/compare/v0.5.8..v0.6.0
 [0.5.8]: https://github.com/ocx-sh/ocx/compare/v0.5.7..v0.5.8
