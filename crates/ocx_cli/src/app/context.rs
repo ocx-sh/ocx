@@ -151,9 +151,10 @@ impl Context {
         // Created before the subscriber so its `MultiProgress` backs the
         // fmt log writer (log lines flush inside `suspend`, never tearing
         // bars). Threaded into the OCI client (transfer bars) and the
-        // package manager (task spinners). Disabled when stderr is not a
-        // TTY so non-interactive runs pay no cost.
-        let progress = if ocx_lib::cli::ProgressMode::detect().stderr {
+        // package manager. Disabled when stderr is not a TTY so
+        // non-interactive runs pay no cost, and under `--quiet`, which is the
+        // one switch a wrapper has to silence a bar on a terminal stderr.
+        let progress = if ocx_lib::cli::ProgressMode::detect().stderr && !options.quiet {
             ocx_lib::cli::progress::ProgressManager::stderr()
         } else {
             ocx_lib::cli::progress::ProgressManager::disabled()

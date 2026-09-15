@@ -789,8 +789,8 @@ Precedence: `--project` > `OCX_PROJECT` > CWD walk. [`OCX_NO_PROJECT=1`](#ocx-no
 
 When set to a [truthy value](#truthy-values), OCX suppresses the structured
 stdout report that every command emits — tables in plain mode, the JSON
-document in `--format json` mode. Errors, warnings, and progress on stderr are
-unaffected.
+document in `--format json` mode — and the transfer progress bars it renders
+when stderr is a terminal. Errors and warnings on stderr are unaffected.
 
 The command line option [`--quiet`][arg-quiet] takes precedence over this
 variable.

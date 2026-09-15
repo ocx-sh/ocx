@@ -97,9 +97,10 @@ pub struct ContextOptions {
     #[clap(flatten)]
     pub format: options::Format,
 
-    /// Suppress stdout report output (errors and progress on stderr remain).
+    /// Suppress the stdout report and progress bars (errors and warnings remain).
     ///
-    /// When set, the CLI's structured report (table or JSON) is not printed.
+    /// When set, the CLI's structured report (table or JSON) is not printed
+    /// and no transfer progress is rendered on stderr.
     /// Equivalent env var: `OCX_QUIET`.
     #[arg(short = 'q', long, default_value_t = env::flag("OCX_QUIET", false))]
     pub quiet: bool,
