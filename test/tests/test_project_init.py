@@ -14,12 +14,15 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from src.runner import OcxRunner
 
 # Exit codes per quality-rust-exit_codes.md / error.rs ClassifyExitCode:
 # ConfigAlreadyExists → UsageError = 64
 EXIT_SUCCESS = 0
 EXIT_USAGE_ERROR = 64
+EXIT_NOT_FOUND = 79
 
 
 def _run_init(
@@ -336,3 +339,87 @@ def test_init_global_refuses_an_existing_global_manifest(ocx: OcxRunner, tmp_pat
     assert global_manifest.read_text() == original_content, (
         "ocx --global init must not overwrite an existing $OCX_HOME/ocx.toml"
     )
+
+
+# ---------------------------------------------------------------------------
+# ocx-sh/ocx#475 — `init` honours the explicit project selection
+# ---------------------------------------------------------------------------
+
+
+def _selected_init(
+    ocx: OcxRunner, cwd: Path, selected: Path, spelling: str
+) -> subprocess.CompletedProcess[str]:
+    if spelling == "flag":
+        return _run_init(ocx, cwd, "--no-consent", root=("--project", str(selected)))
+    return _run_init(ocx, cwd, "--no-consent", extra_env={"OCX_PROJECT": str(selected)})
+
+
+@pytest.mark.parametrize("spelling", ["flag", "env"])
+def test_init_scaffolds_the_selected_directory_not_the_cwd(
+    ocx: OcxRunner, tmp_path: Path, spelling: str
+) -> None:
+    """``ocx --project <dir> init`` / ``OCX_PROJECT=<dir> ocx init`` writes
+    ``<dir>/ocx.toml`` and leaves the working directory alone
+    (`ocx-sh/ocx#475 <https://github.com/ocx-sh/ocx/issues/475>`_).
+
+    The CWD assertion is the half that reds on the shipped behaviour, which
+    scaffolds the cwd and exits 0.
+    """
+    selected = tmp_path / "probe-empty"
+    selected.mkdir()
+    elsewhere = tmp_path / "cwd"
+    elsewhere.mkdir()
+
+    result = _selected_init(ocx, elsewhere, selected, spelling)
+
+    assert result.returncode == EXIT_SUCCESS, (
+        f"rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert (selected / "ocx.toml").exists(), "the selected directory must be scaffolded"
+    assert not (elsewhere / "ocx.toml").exists(), "the working directory must be untouched"
+    assert str(selected / "ocx.toml") in result.stderr, (
+        f"the success line must name the created manifest; got {result.stderr!r}"
+    )
+
+
+def test_init_with_an_absent_selection_is_refused_like_every_other_command(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """``--project <path>`` naming nothing on disk is 79 from the shared
+    selection gate before ``init`` runs — same as ``status`` — and nothing is
+    scaffolded anywhere. Pins that ``init`` has no private reading of the flag.
+    """
+    absent = tmp_path / "proj" / "toolchain.toml"
+    elsewhere = tmp_path / "cwd"
+    elsewhere.mkdir()
+
+    result = _run_init(ocx, elsewhere, "--no-consent", root=("--project", str(absent)))
+
+    assert result.returncode == EXIT_NOT_FOUND, (
+        f"rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert not absent.exists(), "init must not create a manifest at an absent selection"
+    assert not (elsewhere / "ocx.toml").exists(), "a refusal must not fall back to the cwd"
+
+
+def test_init_refuses_a_selected_directory_that_already_has_a_manifest(
+    ocx: OcxRunner, tmp_path: Path
+) -> None:
+    """The ``ConfigAlreadyExists`` contract follows the selection: 64, and the
+    existing file is left byte-identical.
+    """
+    selected = tmp_path / "proj"
+    selected.mkdir()
+    existing = selected / "ocx.toml"
+    original = "# sentinel — must not be overwritten\n[tools]\n"
+    existing.write_text(original)
+    elsewhere = tmp_path / "cwd"
+    elsewhere.mkdir()
+
+    result = _run_init(ocx, elsewhere, "--no-consent", root=("--project", str(selected)))
+
+    assert result.returncode == EXIT_USAGE_ERROR, (
+        f"rc={result.returncode}, stderr={result.stderr!r}"
+    )
+    assert existing.read_text() == original, "the selected manifest must not be overwritten"
+    assert not (elsewhere / "ocx.toml").exists(), "a refusal must not fall back to the cwd"

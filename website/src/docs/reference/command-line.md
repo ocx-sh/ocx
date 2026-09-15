@@ -1601,11 +1601,13 @@ ocx --format json inspect -g all --closure | jq '.packages[] | select(.closure.c
 
 ### `init` {#init}
 
-Creates a minimal `ocx.toml` in the current directory, or in `$OCX_HOME` under `--global`.
+Creates a minimal `ocx.toml` in the selected project directory — [`--project <dir>`](#arg-project) or [`OCX_PROJECT`][env-project], else the current directory — or in `$OCX_HOME` under `--global`.
 
 The generated file contains a [`#:schema` directive][config-schemas] and an empty `[tools]` table — a non-interactive skeleton following the "backend-first, minimal output" design. Once the file exists, use [`ocx add`](#add) to append tool bindings or edit it directly; comments and declaration order in the file survive every mutation.
 
 The command is an idempotent failure: if `ocx.toml` already exists (or a symlink at that path exists), it exits with code 64 without overwriting the existing file.
+
+Pass `--project <dir>` **before** the subcommand to scaffold `<dir>/ocx.toml` from anywhere: `ocx --project "$CI_PROJECT_DIR" init`. The selection is read exactly as every other command reads it, so a path that does not exist exits 79 rather than being created, and a selected `ocx.toml` that already exists is the same exit-64 refusal as above.
 
 Pass `--global` **before** the subcommand to scaffold `$OCX_HOME/ocx.toml`: `ocx --global init`. See [`--global`][global-flag] for the full root-flag reference. That file is also auto-created by the global mutators (`ocx --global add` and its siblings), so `ocx --global init` is for scaffolding the global toolchain ahead of the first tool.
 
@@ -1630,6 +1632,7 @@ ocx init [OPTIONS]
 | 0 | `ocx.toml` created successfully. |
 | 64 | `ocx.toml` already exists at the target path, or `--global` was combined with `--project`. |
 | 74 | I/O error writing the new file. |
+| 79 | `--project` / `OCX_PROJECT` names a path that does not exist. |
 
 ### `install` {#install}
 

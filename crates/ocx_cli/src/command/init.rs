@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx init` — create a minimal `ocx.toml` in the current directory, or in
-//! `$OCX_HOME` under the root `--global` selector.
+//! `ocx init` — create a minimal `ocx.toml` in the selected project, in the
+//! current directory when nothing is selected, or in `$OCX_HOME` under the
+//! root `--global` selector.
 
 use std::process::ExitCode;
 
@@ -17,7 +18,8 @@ use crate::app::project_context::record_activation_consent_over;
 /// after initialisation.
 ///
 /// `ocx --global init` writes `$OCX_HOME/ocx.toml` instead — the same file
-/// every other `--global` command resolves.
+/// every other `--global` command resolves. `--project <dir>` (or
+/// `OCX_PROJECT`) scaffolds `<dir>/ocx.toml`.
 ///
 /// Records a shell-activation consent stamp for the new project, so the next
 /// shell prompt in this directory applies it. Pass `--no-consent` to create the
@@ -36,20 +38,33 @@ impl Init {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
         // `ocx init` bootstraps the project, so it must NOT use the context's
         // project-discovery path (which errors when ocx.toml is absent, and
-        // whose CWD walk would resolve a *parent* project). The two tiers are
-        // selected directly instead:
+        // whose CWD walk would resolve a *parent* project). The selectors are
+        // read directly instead, in the loader's own precedence:
         //
         // - `--global` / `OCX_GLOBAL` → `$OCX_HOME/ocx.toml`, via the one
         //   spelling every other global-tier site uses
         //   (`ProjectConfig::global_manifest_path`). Dropping the selector here
         //   made `ocx --global init` scaffold the CWD while `ocx --global add`
         //   and `ocx --global status` read `$OCX_HOME` (ocx-sh/ocx#443).
-        // - otherwise → `<cwd>/ocx.toml`, via the directory variant of the lib
-        //   API. `ocx init` does not yet expose a `--project=<custom>.toml`
-        //   ingress, and `--project` is exclusive with `--global` anyway.
+        // - `--project` / `OCX_PROJECT` → the loader's own reading of that
+        //   selection (`ConfigLoader::explicit_project`, so there is one
+        //   ladder, not two): a directory is the project it governs (RUL-55)
+        //   and gets `<dir>/ocx.toml`. The selection always exists by now —
+        //   `Context::try_init` already refused an absent one with 79 — so
+        //   the other arm is an existing file, which `init_project` refuses as
+        //   `ConfigAlreadyExists` (64), the same answer a bare `ocx init` gives
+        //   on a scaffolded directory. Dropping the selector here scaffolded
+        //   the CWD and exited 0 (ocx-sh/ocx#475).
+        // - otherwise → `<cwd>/ocx.toml`.
         let toml_path = if context.global() {
             let home = context.file_structure().root();
             ocx_lib::project::init_project(&ocx_lib::project::ProjectConfig::global_manifest_path(home))?
+        } else if let Some(selected) = ocx_lib::ConfigLoader::explicit_project(context.project_path()) {
+            if selected.is_dir() {
+                ocx_lib::project::init_project_at_default(&selected)?
+            } else {
+                ocx_lib::project::init_project(&selected)?
+            }
         } else {
             let cwd = ocx_lib::env::current_dir()?;
             ocx_lib::project::init_project_at_default(&cwd)?
