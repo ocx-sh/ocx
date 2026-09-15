@@ -14,11 +14,13 @@ output assertions operate on stdout text, not the file-system.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -248,6 +250,58 @@ def test_activate_autodetects_shell_when_omitted(
     assert "bash" in stdout.lower() or "PATH" in stdout, (
         "autodetected bash output must contain bash indicators or PATH export; "
         f"got:\n{stdout}"
+    )
+
+
+# The orphan runs `self activate` from a process whose ancestry holds no shell:
+# a double fork reparents it under init (or the nearest subreaper), and the
+# runner's environment carries no `$SHELL`. That is the one state in which
+# `Shell::detect` comes up empty, and it is not reachable from pytest's own
+# tree, where the harness is always some shell's descendant.
+_ORPHAN_ACTIVATE = """
+import json, os, subprocess, sys
+binary, out = sys.argv[1], sys.argv[2]
+if os.fork() != 0:
+    os._exit(0)
+os.setsid()
+if os.fork() != 0:
+    os._exit(0)
+env = {k: v for k, v in os.environ.items() if k != "SHELL"}
+result = subprocess.run(
+    [binary, "self", "activate", "--shell"],
+    stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env, check=False,
+)
+with open(out + ".part", "w") as f:
+    json.dump({"rc": result.returncode, "stdout": result.stdout, "stderr": result.stderr}, f)
+os.replace(out + ".part", out)
+"""
+
+
+def test_activate_undetectable_shell_exits_64_and_says_so(ocx: OcxRunner, tmp_path: Path) -> None:
+    """Bare ``--shell`` with no shell to detect refuses on both channels (#434).
+
+    Exit 64 is what the flag's own help documents. The stderr half is the
+    regression this pins: ``self activate`` dispatches before
+    ``Context::try_init``, which is where the log subscriber is installed, so
+    the ``main.rs`` error boundary had nothing to write through and the
+    refusal exited in silence.
+    """
+    out = tmp_path / "orphan.json"
+    subprocess.run(
+        [sys.executable, "-c", _ORPHAN_ACTIVATE, str(ocx.binary), str(out)],
+        env=ocx.env,
+        check=True,
+        timeout=30,
+    )
+    deadline = time.monotonic() + 30
+    while not out.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert out.exists(), "the orphaned `self activate` never reported back"
+    result = json.loads(out.read_text())
+    assert result["rc"] == 64, f"undetectable shell must exit 64, got {result['rc']}: {result}"
+    assert result["stdout"] == "", f"nothing to activate means nothing on stdout: {result}"
+    assert "could not autodetect shell" in result["stderr"], (
+        f"a refused activation must say why on stderr, not exit in silence: {result}"
     )
 
 

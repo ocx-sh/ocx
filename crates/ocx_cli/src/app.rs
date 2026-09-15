@@ -172,7 +172,23 @@ impl App {
                 return c.execute(&cli.context).await;
             }
             Some(command::Command::Self_(command::self_group::SelfGroup::Activate(ref a))) => {
-                return a.execute(&cli.context, color_config).await;
+                let result = a.execute(&cli.context, color_config).await;
+                // The `main.rs` boundary reports through `log::error!`, and
+                // the subscriber it needs is installed by `Context::try_init`,
+                // which this path skips — so a refused activation exited 64 in
+                // silence (#434). Installed only once the path has failed: the
+                // stream itself stays diagnostic-free (A-21), and a shell start
+                // still pays nothing for a subscriber it never writes through.
+                // `.ok()`: `--reconcile` reaches `Context::try_init` itself and
+                // already holds the global.
+                if result.is_err() {
+                    ocx_lib::cli::LogSettings::default()
+                        .with_console_level(cli.context.log_level)
+                        .with_stderr_color(color_config.stderr)
+                        .init()
+                        .ok();
+                }
+                return result;
             }
             Some(command::Command::External(argv)) => {
                 return plugin_dispatch::dispatch(argv, &cli.context).await;
