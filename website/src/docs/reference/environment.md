@@ -591,6 +591,32 @@ ocx package install kitware/cmake:3.28
 
 See [`[managed]`][config-managed] for the full tier semantics and [`ocx config update`][cmd-config-update] for the sync command.
 
+### `OCX_EXTRA_CA_CERTS` {#ocx-extra-ca-certs}
+
+A path to a corporate CA bundle, or the certificate PEM text itself, that OCX loads as an extra trust root for the registry, [ocx-index][in-depth-indices-public], forge, and Sigstore clients — on top of the [host's own trust store and the compiled-in Mozilla roots][external-ca-certificates], never replacing either. Equivalent to [`extra_ca_certs`/`extra_ca_certs_pem`][config-extra-ca-certs]; this variable wins over every `config.toml` tier when set and non-empty — unless the pair is [system-locked][config-extra-ca-certs-system-lock], in which case this variable is ignored too, with a warning on stderr naming the reason, never its own value. With the wrong CA, or none, a command against an intercepted host fails the same way it always has — an `UnknownIssuer` TLS error, exit `69` — this variable only adds trust, it never changes how a failure is reported. The public-good trust root's own [TUF][sigstore-tuf] fetch dials through the same shared Sigstore HTTP client Fulcio and Rekor already use, so this variable's roots reach it too; pin [`[trust.sigstore] trusted_root`][config-trust-sigstore] instead only for a fully offline host.
+
+One variable carries both forms: a value **containing** `-----BEGIN` is read as PEM text (accepting leading comment lines or a `subject=` label before it, the shape a Fedora/RHEL bundle already has), anything else is treated as a path — the same content sniff the [`install.sh`/`install.ps1`/`install.fish`/`install.nu`/`install.elv`][setup-home] scripts at `setup.ocx.sh` use. On Windows, threading an inline PEM value through a `.bat` file or a `cmd /c` wrapper also exposes it to cmd.exe's own 8,191-character ceiling — well below, and separate from, the 32,767-character Win32 per-variable limit — and cmd.exe applies it to command lines, to `%VAR%` expansions and to the variables it inherits: a `set` line that long is refused, an expansion is cut at the ceiling, and an inherited variable over it is dropped. What reaches ocx is then a truncated bundle (exit `78`) or no variable at all (`UnknownIssuer`, exit `69`), never a cmd.exe diagnostic; the path form sidesteps the limit.
+
+```sh
+export OCX_EXTRA_CA_CERTS=/etc/pki/corp-root.pem
+# or, inline:
+export OCX_EXTRA_CA_CERTS="-----BEGIN CERTIFICATE-----
+MIIB...
+-----END CERTIFICATE-----"
+```
+
+`OCX_EXTRA_CA_CERTS=""` is treated as unset, the same [`OCX_CONFIG`](#ocx-config) precedent every other empty-string override follows.
+
+A short, single-line value with no `-----BEGIN` in it is a path, and when that path does not exist it is echoed in the not-found message like any other misnamed path — only a value over 256 bytes or spanning lines is withheld — so do not put a secret in this variable.
+
+A path form is capped at 32 KiB and read the same bounded way `trusted_root` is; inline text carries the same cap. A value that is unreadable or oversized as a file exits `74`; oversized inline text exits `78`; a block whose tag is not `CERTIFICATE`, or no certificate block at all, exits `65` for a file and `78` for inline text; a block that does not parse as an X.509 certificate or that the platform's TLS stack itself rejects follows the same split, and so does a `-----BEGIN` line with no matching `-----END` (a bundle cut off mid-copy). See [`extra_ca_certs` / `extra_ca_certs_pem`][config-extra-ca-certs] for the full refusal table, including when validation runs, and this variable is classified identically to those keys, file or inline.
+
+On Windows the platform verifier consults extra roots only after the platform certificate chain fails; the same revocation policy applies as for any other root in that chain.
+
+**Not forwarded to a child launched under `ocx exec --clean`.** Unlike [`OCX_SIGNING_KEY`](#ocx-signing-key) or [`OCX_KEY_PASSWORD`](#ocx-key-password), this variable is not treated as a credential OCX actively strips — an ordinary child `ocx` under an inherited shell environment sees it the normal way. But [`ocx exec --clean`][cmd-run] and the launcher it spawns rebuild the child's environment from the composed package variables and OCX's own resolved `OCX_*` config set alone, and this variable is not part of that set — so a CA supplied only through `OCX_EXTRA_CA_CERTS` does not reach a `--clean` child. The [`extra_ca_certs`/`extra_ca_certs_pem`][config-extra-ca-certs] config form does survive `--clean`, because the child re-reads `config.toml` from disk itself rather than depending on anything forwarded from the parent's environment.
+
+[`ocx self setup`][cmd-self-setup] reads this variable in a dedicated phase before it bootstraps anything else — no network yet, so a later bootstrap or managed-config fetch can already trust the corporate CA — and persists inline PEM text into `extra_ca_certs_pem` in `$OCX_HOME/config.toml`; a path value is read at that moment rather than stored as a path, since the installer's own path is typically a temporary file. See [`self setup`][cmd-self-setup] for the phase, the JSON report's `extra_ca_certs` object, and the full exit-code table.
+
 ### `OCX_NO_CONFIG_REFRESH` {#ocx-no-config-refresh}
 
 When set to a [truthy value](#truthy-values), disables the background refresh tick for the [`[managed]`][config-managed] configuration tier — both the `apply` and `notify` [`refresh`][config-managed-refresh] postures are silenced. An explicit [`ocx config update`][cmd-config-update] still runs and still updates the snapshot; only the automatic per-command probe is suppressed. It does not gate the setup-time re-sync either: [`ocx self setup`][cmd-self-setup] and [`ocx config setup`][cmd-config-setup] still reconcile an already-adopted seed on every invocation regardless of this variable — use [`--offline`](#ocx-offline) to skip that re-sync instead.
@@ -624,7 +650,7 @@ If `OCX_LOG_CONSOLE` is set, it will take precedence over [`OCX_LOG`](#ocx-log) 
 
 When set to a [truthy value](#truthy-values), OCX skips the **discovered** [configuration][config-ref] chain — no user or `$OCX_HOME/config.toml` is loaded. It also suppresses the [`[managed]`][config-managed] snapshot candidate entirely and disables the [`OCX_MANAGED_CONFIG`](#ocx-managed-config) env-override read — hermetic means hermetic, so a managed tier cannot slip in through either the local snapshot or the env override while this variable is set. Explicit paths supplied via [`--config`][arg-config] or [`OCX_CONFIG`](#ocx-config) still load, because they represent deliberate intent rather than ambient environment.
 
-**A SYSTEM-scope policy is not ambient configuration, and this variable does not suppress it.** `/etc/ocx/config.toml` still loads under `OCX_NO_CONFIG=1` — and, on this path as on the ordinary one, a system file that exists and cannot be read aborts the invocation (exit 78) instead of being skipped, since skipping it would drop the very policy this paragraph is about. What loads is filtered down to only the sections an operator locked there — a locked [`[registry]`][config-registry], [`[registries.<name>]`][config-registries], [`[mirrors]`][config-mirrors], [`[patches]`][config-patches], or [`[records]`][config-records] section still applies. Only the `[managed]` tier is dropped unconditionally, since it is itself a mechanism for pulling in ambient state. The distinction is deliberate: `OCX_NO_CONFIG` exists so a caller can opt out of config that leaked in from a runner image or a mounted home directory, not so a caller can opt out of a policy the operator declared with root access to `/etc/ocx/config.toml`.
+**A SYSTEM-scope policy is not ambient configuration, and this variable does not suppress it.** `/etc/ocx/config.toml` still loads under `OCX_NO_CONFIG=1` — and, on this path as on the ordinary one, a system file that exists and cannot be read aborts the invocation (exit 78) instead of being skipped, since skipping it would drop the very policy this paragraph is about. What loads is filtered down to only the sections an operator locked there — a locked [`[registry]`][config-registry], [`[registries.<name>]`][config-registries], [`[mirrors]`][config-mirrors], [`[patches]`][config-patches], or [`[records]`][config-records] section still applies, and so does a locked [`extra_ca_certs` / `extra_ca_certs_pem`][config-extra-ca-certs-system-lock] pair. Only the `[managed]` tier is dropped unconditionally, since it is itself a mechanism for pulling in ambient state. The distinction is deliberate: `OCX_NO_CONFIG` exists so a caller can opt out of config that leaked in from a runner image or a mounted home directory, not so a caller can opt out of a policy the operator declared with root access to `/etc/ocx/config.toml`.
 
 Use this for CI reproducibility: locked workflows should ignore any ambient config that might leak in from the runner image or a mounted home directory.
 
@@ -1037,14 +1063,14 @@ OCX verifies registry TLS against a **compiled-in copy of the [Mozilla CA root s
 
 On top of those built-in roots, OCX **also** loads the host's own trust store and *merges* the two sets — it never replaces the public roots. Any certificate the operating system already trusts, including a privately installed corporate root, is honored alongside the bundled ones. Both a public registry and an internal one fronted by a TLS-intercepting proxy work in the same invocation, with no verification disabled.
 
-On Linux the host trust store is discovered through the platform's standard mechanism, overridable with two well-known variables read from the ambient environment (they are not OCX configuration and carry no `OCX_` prefix):
+On Linux the host trust store is discovered through the platform's standard mechanism — until either of these two well-known variables is set (they are not OCX configuration and carry no `OCX_` prefix), at which point the host store is read from the named path *instead of* the distribution's default location. The compiled-in Mozilla roots from the previous paragraph are unaffected either way; only which certificates count as "the host's own trust store" changes:
 
 | Variable | Meaning |
 |----------|---------|
 | `SSL_CERT_FILE` | Path to a single file containing one or more certificates in **PEM** format. |
 | `SSL_CERT_DIR` | One or more directories (`:`-separated) of PEM certificate files. |
 
-Point `SSL_CERT_FILE` at a bundle that includes your corporate root CA to pull from a proxy-fronted registry:
+Point `SSL_CERT_FILE` at a bundle that includes your corporate root CA to pull from a proxy-fronted registry — the bundle has to carry every root you still need, since it replaces host-store discovery rather than adding to it:
 
 ```sh
 SSL_CERT_FILE=/etc/pki/corp-root.pem ocx package install internal/tool:1.2
@@ -1052,6 +1078,10 @@ SSL_CERT_FILE=/etc/pki/corp-root.pem ocx package install internal/tool:1.2
 
 ::: warning PEM text, not DER
 These variables expect **PEM** armor (`-----BEGIN CERTIFICATE-----`), regardless of file extension — a `.crt` file is loaded only if its contents are PEM. A raw DER/binary certificate is ignored. Convert one with `openssl x509 -inform der -in corp.crt -out corp.pem`.
+:::
+
+::: tip A portable, additive alternative
+`SSL_CERT_FILE`/`SSL_CERT_DIR` replace host-store discovery on Linux only — Windows and macOS ignore both. [`OCX_EXTRA_CA_CERTS`](#ocx-extra-ca-certs) / [`extra_ca_certs`][config-extra-ca-certs] work the same way on every platform and only ever add a root, never replace one, and [`ocx self setup`][cmd-self-setup] persists the value into `config.toml` for you. Set both mechanisms at once and all three sets apply together: the compiled-in Mozilla roots, the host store wherever `SSL_CERT_FILE`/`SSL_CERT_DIR` point it, and the extra root.
 :::
 
 ::: tip Disabling TLS for a local registry
@@ -1127,6 +1157,7 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [cosign]: https://github.com/sigstore/cosign
 [sigstore-tuf]: https://docs.sigstore.dev/certificate_authority/overview/
 [mise]: https://mise.jdx.dev/cli/trust.html
+[setup-home]: https://setup.ocx.sh
 [git-safe-directory]: https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory
 [git-http-proxy]: https://git-scm.com/docs/git-config#Documentation/git-config.txt-httpproxy
 [curl-proxy-env]: https://curl.se/docs/manpage.html
@@ -1216,6 +1247,10 @@ The format for this variable is the same as for [`OCX_LOG`](#ocx-log).
 [config-registries-trusted-hosts]: ./configuration.md#keys-registries-trusted-hosts
 [config-patches]: ./configuration.md#keys-patches
 [config-managed]: ./configuration.md#keys-managed
+[config-extra-ca-certs]: ./configuration.md#keys-extra_ca_certs
+[config-extra-ca-certs-system-lock]: ./configuration.md#keys-extra_ca_certs-system-lock
+[config-trust-sigstore]: ./configuration.md#keys-trust-sigstore
+[external-ca-certificates]: #external-ca-certificates
 [config-managed-refresh]: ./configuration.md#keys-managed-refresh
 [config-keys-shell-modify-path]: ./configuration.md#keys-shell-modify-path
 [patches-no-patches-scope]: ./configuration.md#keys-patches-no-patches

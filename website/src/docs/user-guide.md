@@ -948,6 +948,7 @@ A plain `[mirrors]` string redirects both OCI registry traffic (manifests, layer
 ::: tip Learn more
 [Configuration reference → `[mirrors]`][config-mirrors] — full schema, the registry/index role split, auth, interaction table, plain-HTTP note.
 [Environment reference → `OCX_MIRRORS`][env-mirrors] — JSON encoding, per-host per-role precedence, subprocess forwarding.
+If the artifact manager in front of your mirror also intercepts TLS with an internal CA, see [Ship a corporate CA][managed-config-ca] rather than installing that CA system-wide.
 :::
 
 ## Configure OCX defaults {#configuration}
@@ -1080,6 +1081,48 @@ One redirection path is closed by construction rather than left to trust-policy 
 [`ocx config push` reference][cmd-config-push] — payload validation, cascade tags, exit codes.
 [`ocx config update` reference][cmd-config-update] — VERSION pins, `--pause`/`--resume`, `--check`, exit codes, JSON shape.
 [`ocx self setup --managed-config` reference][cmd-self-setup-managed-config] — onboarding flag, exit codes.
+:::
+
+### Ship a corporate CA {#managed-config-ca}
+
+The job, workstation, or fleet already runs ocx; the only thing standing between it and your registry is an internal CA that a [corporate CONNECT proxy or the artifact manager fronting your registry][mirrors] intercepts TLS with. OCX already merges the [host's own trust store on top of its compiled-in Mozilla roots][external-ca-certificates], but that means installing the CA system-wide on every workstation and CI image. [`extra_ca_certs` / `extra_ca_certs_pem`][config-extra-ca-certs] carry the root as an OCX-scoped trust anchor instead, additive to both of those, without touching the OS store. Which route to reach for depends on how many machines need it.
+
+**One CI job.** Export the variable for that invocation; nothing persists:
+
+```sh
+OCX_EXTRA_CA_CERTS=/etc/pki/corp-root.pem ocx package install internal/tool:1.2
+```
+
+**One workstation.** Set the key directly in `$OCX_HOME/config.toml`:
+
+```toml
+extra_ca_certs = "/etc/pki/corp-root.pem"
+```
+
+Or let [`ocx self setup`][cmd-self-setup] persist it for you: export [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] ahead of the command and it stores the certificate text as `extra_ca_certs_pem` in `config.toml` (replacing an `extra_ca_certs` path if one is set — the copy is a snapshot, so re-run setup after a CA rotation), during its own onboarding phase and before any network call.
+
+**A fleet.** A CA root can travel the same `[managed]` channel as your mirror map and patch registry: `extra_ca_certs` / `extra_ca_certs_pem` are ordinary `config.toml` keys, so they publish, cascade, and roll back exactly like [`[mirrors]`][config-mirrors] does — the same re-imaging problem [managed config][managed-config] exists to avoid for mirrors and patches. Add the key to the payload you already publish, right beside your `[mirrors]` table:
+
+```toml
+extra_ca_certs = "corp-ca.pem"
+
+[mirrors]
+"ghcr.io" = "https://artifactory.corp/ghcr-remote"
+```
+
+[`ocx config push`][cmd-config-push] reads that path at publish time and rewrites it into `extra_ca_certs_pem` before pushing — the same publish-time rewrite [`[trust.sigstore] trusted_root`][config-trust-sigstore] uses — so every host that adopts the payload gets the certificate inline, without ever seeing a path that only existed on the operator's machine.
+
+**A fleet you image.** Where you control `/etc`, set the pair in `/etc/ocx/config.toml` instead: a [system-scope pair is locked][config-extra-ca-certs-system-lock] — no lower tier, managed payload, or `OCX_EXTRA_CA_CERTS` can add or replace a root, and `OCX_NO_CONFIG` keeps it — so the trust set is pinned the way a locked `[registry]` is, and `ocx self setup` reports `system_locked` rather than persisting a second copy.
+
+On a machine with no ocx yet, the corporate installer script has its own knob: [`OCX_INSTALL_CA_BUNDLE`][env-ocx-install-ca-bundle] trusts the CA for the installer's own downloads; export `OCX_EXTRA_CA_CERTS` beside it so the corp registry is already trusted by the time [`ocx self setup`][cmd-self-setup] fetches anything, managed-config seed included.
+
+```sh
+export OCX_INSTALL_CA_BUNDLE=/etc/pki/corp-root.pem OCX_EXTRA_CA_CERTS=/etc/pki/corp-root.pem
+curl --cacert "$OCX_INSTALL_CA_BUNDLE" -fsSL https://setup.ocx.sh/sh | sh
+```
+
+::: warning An unpinned managed CA is weaker than a digest-pinned one, not equivalent to no guarantee
+`extra_ca_certs_pem` from an unpinned managed source is honored for registry, index, and forge traffic — a CA root alone bypasses no signature check, unlike a Sigstore trust root, so this is strictly weaker than the [`insecure = true`][config-registries-insecure] posture fleets already accept. The [`[trust.sigstore]`][config-trust-sigstore] client — [`ocx package verify`][cmd-package-verify], `ocx package sign`, and `ocx package push --sbom` — is held to the stricter rule: it accepts a managed CA only behind a digest-pinned `[managed] source`. See [`extra_ca_certs` / `extra_ca_certs_pem`][config-extra-ca-certs] for the full residual-risk statement.
 :::
 
 ## Update OCX {#update-ocx}
@@ -1501,6 +1544,13 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [config-mirrors]: ./reference/configuration.md#keys-mirrors
 [config-patches]: ./reference/configuration.md#keys-patches
 [config-managed]: ./reference/configuration.md#keys-managed
+[config-extra-ca-certs]: ./reference/configuration.md#keys-extra_ca_certs
+[config-extra-ca-certs-system-lock]: ./reference/configuration.md#keys-extra_ca_certs-system-lock
+[config-trust-sigstore]: ./reference/configuration.md#keys-trust-sigstore
+[config-registries-insecure]: ./reference/configuration.md#keys-registries-insecure
+[external-ca-certificates]: ./reference/environment.md#external-ca-certificates
+[env-ocx-extra-ca-certs]: ./reference/environment.md#ocx-extra-ca-certs
+[env-ocx-install-ca-bundle]: ./reference/environment.md#ocx-extra-ca-certs
 [config-keys-shell]: ./reference/configuration.md#keys-shell
 [config-managed-one-hop]: ./reference/configuration.md#keys-managed-one-hop
 [config-unknown-keys]: ./reference/configuration.md#unknown-keys
@@ -1517,6 +1567,9 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [user-guide-global-add]: #global-toolchain-add
 [authentication-storing]: #authentication-storing
 [managed-config-rollout]: #managed-config-rollout
+[managed-config-ca]: #managed-config-ca
+[managed-config]: #managed-config
+[mirrors]: #mirrors
 [config-registries-index]: ./reference/configuration.md#keys-registries-index
 [config-toolchain_dir]: ./reference/configuration.md#keys-toolchain_dir
 [config-project-activate]: ./reference/configuration.md#project-config-activate

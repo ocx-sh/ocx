@@ -171,6 +171,117 @@ interval = "1d"
 
 A refused value in a managed payload is still exit 78, and the message still reports it as `` config.toml `toolchain_dir` `` — the operator's remedy is to edit the payload, which is a `config.toml` like any other.
 
+### `extra_ca_certs` / `extra_ca_certs_pem` {#keys-extra_ca_certs}
+
+**Type**: string (path) / string (inline PEM)  
+**Default**: *(unset — no extra root beyond the platform trust store and the compiled-in Mozilla set)*  
+**Related**: [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] — the **stronger** tier, consulted before any `config.toml` at all
+
+A corporate CONNECT proxy or a TLS-intercepting gateway in front of a registry, [ocx-index][in-depth-indices-public], or forge presents a certificate signed by an internal CA. OCX already merges the [host's own trust store on top of the compiled-in Mozilla roots][env-external-ca-certificates] — but that means installing the CA system-wide, which a CI image or a locked-down workstation may not permit. `extra_ca_certs` and `extra_ca_certs_pem` let OCX carry that one root itself, without touching the OS trust store.
+
+```toml
+extra_ca_certs = "corp-ca.pem"    # path, relative to THIS config file
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `extra_ca_certs` | string | A path to a file holding one or more `CERTIFICATE`-tagged PEM blocks, read from disk each time a command resolves TLS trust. A **relative path resolves against the directory of the `config.toml` that declared it**, the same rule [`trusted_root`](#keys-trust-sigstore-fields) uses. Mutually exclusive with `extra_ca_certs_pem` |
+| `extra_ca_certs_pem` | string | The certificate PEM text inlined verbatim. This is the form a fleet receives — see [Rolling it out to a fleet](#keys-extra_ca_certs-managed). Mutually exclusive with `extra_ca_certs` |
+
+Setting both in the same file is a configuration error — exit `78`. Every root named this way is **appended** to the platform store and the bundled Mozilla set, never replacing either. That is a stronger guarantee than [`SSL_CERT_FILE`/`SSL_CERT_DIR`][env-external-ca-certificates] give: on Linux, setting either variable makes OCX read the host store from that path *instead of* the distribution's default location — the compiled-in Mozilla roots stay put either way, but these two keys never take over discovery like that, so a public registry and an internal one behind an intercepting proxy both work in the same invocation without one bundle having to name every root. Both keys sit at the root of `config.toml`, outside every section, beside [`toolchain_dir`](#keys-toolchain_dir) — and like it, neither is an `ocx.toml` key: `ocx.toml` rejects every key it does not recognize, so writing either one there is a parse error, exit 78, and a cloned repository can never add a trust root of its own. Two dials are outside their reach: an announce over the GitLab `git` write transport runs a spawned `git`, whose TLS trust is libcurl's — point `GIT_SSL_CAINFO` at the bundle for that push. And the public-good Sigstore trust root's own TUF fetch (rung 6 of the [`[trust.sigstore]` ladder](#keys-trust-sigstore-ladder)) dials through the same shared Sigstore HTTP client Fulcio and Rekor already use (`ocx#470`), so these roots reach it too — pin a [`trusted_root`](#keys-trust-sigstore-fields) instead only for a fully offline host, where even that shared client's TUF fetch has nowhere to go.
+
+#### Refused values {#keys-extra_ca_certs-refusals}
+
+| Condition | Exit |
+|---|---|
+| The path is unreadable, is not a regular file, or its content exceeds 32 KiB | 74 |
+| Inline text (`extra_ca_certs_pem`, or an `OCX_EXTRA_CA_CERTS` value sniffed as text) exceeds 32 KiB | 78 |
+| A PEM block's tag is not `CERTIFICATE` — including a `TRUSTED CERTIFICATE` or `X509 CERTIFICATE` block, the tag OpenSSL's `-trustout` option produces | 65 (file) / 78 (inline) |
+| No certificate block is found at all | 65 (file) / 78 (inline) |
+| A block that does not parse as an X.509 certificate, or that the platform's own TLS stack rejects | 65 (file) / 78 (inline) |
+| A `-----BEGIN` line with no matching `-----END` (a bundle cut off mid-copy) — paste the rest | 65 (file) / 78 (inline) |
+| Both `extra_ca_certs` and `extra_ca_certs_pem` are set in the same file | 78 |
+
+Every message names the source (the key, the path, or `OCX_EXTRA_CA_CERTS`) and, where one applies, a byte count or a block index — never the certificate's own content, so a value accidentally holding something else is never echoed into a log. A config-sourced refusal additionally names the tier whose file set the key — `extra_ca_certs=<path> (user config.toml)`, `extra_ca_certs_pem (system config.toml)`, `($OCX_HOME/config.toml)`, `(managed config)` or `(--config / OCX_CONFIG)` — never a guess from the value, so a host with three `config.toml` files knows which one to open. A `TRUSTED CERTIFICATE`/`X509 CERTIFICATE` block strips down to the plain form accepted here with `openssl x509 -in trusted.pem -out plain.pem`.
+
+Validation runs at startup for every command, `--offline` included — a refused value never produces a client with fewer roots than configured. On Windows the platform verifier consults extra roots only after the platform certificate chain fails; the same revocation policy applies as for any other root in that chain. The exclusive root store it builds for these roots anchors **only a self-signed certificate** — it is built without the `CERT_CHAIN_EXCLUSIVE_ENABLE_CA_FLAG` that would let an intermediate CA in the store anchor a chain on its own, so a bundle holding only an intermediate certificate (no root) anchors nothing on Windows, even though the identical bundle works on Linux and macOS. Publish the root, not just the intermediate.
+
+What validation does not check: it proves the bytes parse and that the platform's verifier accepts them as anchors; it tests neither `CA:TRUE` nor expiry, so a pasted leaf or an expired root installs as an anchor on every platform — the same as `NODE_EXTRA_CA_CERTS` and `SSL_CERT_FILE` behave. What the handshake then does differs: on Linux, webpki keeps only an anchor's subject and public key, so an expired root still verifies chains; on Windows and macOS the OS chain engine evaluates the anchor's own validity, so an expired root fails every dial with `Expired`.
+
+#### Where it sits {#keys-extra_ca_certs-precedence}
+
+Unlike [`toolchain_dir`](#keys-toolchain_dir), the environment variable here is not the weakest rung: [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs], when set and non-empty, wins over every `config.toml` tier — unless the pair is [system-locked](#keys-extra_ca_certs-system-lock), which outranks the env var too. Below it, the two keys follow the [ordinary precedence table](#precedence) like any other field — env, then `--config`/`OCX_CONFIG`, then `[managed]`, then `$OCX_HOME`, then user, then system — with no union special case (contrast [`insecure`](#keys-registries-insecure), which does union). The two keys are coupled across tiers the same way [`[trust.sigstore]`'s two spellings are](#keys-trust-sigstore-system-lock): if a higher tier sets *either* key, **both** are taken from that tier — a tier switching from `extra_ca_certs` to `extra_ca_certs_pem` drops the lower tier's path rather than leaving both set, so the cross-tier merge itself can never produce the both-keys ambiguity.
+
+[`ocx self setup`][cmd-self-setup] writes `extra_ca_certs_pem` and clears a hand-written `extra_ca_certs` path in the same tier — never both, for the same reason the cross-tier coupling above exists: a file that could carry both spellings is the ambiguity this key pair is built to rule out everywhere it appears. That write, like every other `ocx` edit of `$OCX_HOME/config.toml`, runs under one cross-process lock, so a concurrent `ocx self setup --hook` cannot publish over it.
+
+#### System-locked {#keys-extra_ca_certs-system-lock}
+
+Declared at the **system** scope (`/etc/ocx/config.toml`), the pair becomes
+non-overridable — the moment the system file sets *either* `extra_ca_certs` or
+`extra_ca_certs_pem`, both are taken from it and no lower tier, nor
+[`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs], can add or replace a root.
+Follows the same per-pair (not per-field) shape as
+[`[trust.sigstore]`'s lock](#keys-trust-sigstore-system-lock): a lower tier
+cannot supply `extra_ca_certs_pem` alongside a system `extra_ca_certs`, and a
+lower-tier attempt is dropped with a warning naming the tier, the locking
+file and the remedy — `ignoring extra_ca_certs / extra_ca_certs_pem from <tier>:
+the pair is locked by /etc/ocx/config.toml; edit the system tier or ask its
+owner` — never the value. `OCX_EXTRA_CA_CERTS` gets its own warning for the
+same reason: `ignoring OCX_EXTRA_CA_CERTS: extra_ca_certs / extra_ca_certs_pem
+are locked by /etc/ocx/config.toml; edit the system tier or ask its owner`.
+`--config` / `OCX_CONFIG` is a tier like any other here and is dropped the
+same way.
+
+[`ocx self setup`][cmd-self-setup] honours the lock too: with the pair locked it
+persists nothing from `OCX_EXTRA_CA_CERTS` and reports `system_locked` instead
+of `persisted`.
+
+A system file that sets neither key locks nothing — the lock is a consequence
+of the system tier actually declaring a root, not a standing policy an empty
+system file can express. The lock survives [`OCX_NO_CONFIG`][env-no-config]:
+that flag prunes every discovered tier except a system-scope lock, so a
+hermetic CI job cannot use the flag to drop out of a corporate CA the system
+tier pinned.
+
+#### Rolling it out to a fleet {#keys-extra_ca_certs-managed}
+
+Both files below are `config.toml`; only their lifecycle differs — the same split [`toolchain_dir`](#keys-toolchain_dir-managed) uses.
+
+::: code-group
+
+```toml [payload — published with ocx config push]
+extra_ca_certs = "corp-ca.pem"
+
+[mirrors]
+"ghcr.io" = "https://artifactory.corp/ghcr-remote"
+```
+
+```toml [$OCX_HOME/config.toml — the seed on each host]
+[managed]
+source   = "internal.company.com/ocx-config:user"
+required = true
+refresh  = "notify"
+interval = "1d"
+```
+
+:::
+
+Reaching every workstation needs the same two-step [`ocx config push`][cmd-config-push] runs for [`trusted_root`](#keys-trust-sigstore-publish): the operator's `corp-ca.pem` path means nothing on a consumer's disk, so publish rewrites the payload's `extra_ca_certs` into `extra_ca_certs_pem` — see [Publishing to a fleet](#keys-extra_ca_certs-publish). On the consuming side, a path-form `extra_ca_certs` arriving from the [`[managed]`](#keys-managed) tier is **ignored with a warning** (the same rule as a `trusted_root` path). Unlike `trusted_root_json`, though, `extra_ca_certs_pem` from a managed payload is honored for registry, index, and forge traffic **without** requiring a digest-pinned `[managed] source` — a certificate authority on its own grants no signature-verification bypass, unlike a Sigstore trust root. The [`[trust.sigstore]`](#keys-trust-sigstore) client — [`ocx package verify`][cmd-package-verify], [`ocx package sign`][cmd-package-sign], and `ocx package push --sbom` — is the one exception: it accepts managed-tier roots only behind a digest-pinned source, local tiers and the env var always. Both consumer-side rules apply symmetrically to [`trusted_root`](#keys-trust-sigstore-publish)'s sibling behavior.
+
+One client is deliberately excluded from all of this: the client that fetches the `[managed]` snapshot itself trusts only the local tiers (system, user, `$OCX_HOME`, `OCX_CONFIG`/`--config`) and [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] — never a CA the managed payload it is about to fetch would itself carry. The refresh channel can never be secured by material it delivers.
+
+The flip side of fail-closed validation is guarded at adoption: [`ocx config push`][cmd-config-push] proves the bundle on the *publisher's* platform (below), and every consumer re-runs the same check with its own TLS verifier before it persists a snapshot. A published `extra_ca_certs_pem` this host cannot load is refused there — [`ocx config update`][cmd-config-update] exits `78` naming the block, the background refresh warns — and the previous snapshot stays in force, so every command keeps running and a corrected payload is one more push away. A snapshot that already carries an unloadable bundle (adopted by an older ocx, or written by hand) still refuses every command of that host; recover with `OCX_EXTRA_CA_CERTS=<valid bundle> ocx config update` — the variable outranks every tier, including the managed one, for that invocation — or delete the snapshot under `$OCX_HOME/state/managed-config/` so the tier contributes nothing until the next `ocx config update` replaces it.
+
+::: warning An unpinned managed CA is not equivalent to `insecure = true`
+Without an on-path attacker, an unpinned `extra_ca_certs_pem` from a managed publisher grants nothing — TLS root material never enters OCI content or Sigstore signature verification. With an on-path attacker (a corporate CONNECT proxy included), that root can impersonate every TLS endpoint OCX dials except the [`[trust.sigstore]`](#keys-trust-sigstore) client, which is gated behind a digest-pinned source. For registry and index traffic this is strictly weaker than the already-accepted unpinned [`insecure = true`](#keys-registries-insecure) posture; for Sigstore it would otherwise reach the OIDC identity token `fulcio_url` is gated to protect, which is why that client is held to the stricter rule. The hard guarantee is a digest-pinned `[managed] source` — or a [system-scope lock](#keys-extra_ca_certs-system-lock) pinning the pair from `/etc/ocx/config.toml`, which excludes the unpinned managed tier from ever contributing a root at all, the same way it excludes every other lower tier. That same gate has a usability cost: a fleet running an unpinned `[managed] source` alongside [`[[trust.policy]]`](#keys-trust) auto-verify gets `UnknownIssuer`, exit `69`, on every install, verify, sign, or ambient-OIDC call behind an intercepting proxy — the Sigstore client never sees the managed CA. Pin `[managed] source` by digest, or supply the CA through a local config tier or [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] instead.
+:::
+
+#### Publishing to a fleet {#keys-extra_ca_certs-publish}
+
+[`ocx config push`][cmd-config-push] reads a path-form `extra_ca_certs` from the payload at publish time, validates it the same way a loaded config would (the [refusals table](#keys-extra_ca_certs-refusals) above), and rewrites it into `extra_ca_certs_pem` before pushing — comments, key order, and every other field survive. An `extra_ca_certs_pem` written into the payload directly gets the same validation without the rewrite. [`ocx config test`][cmd-config-test] refuses the both-keys ambiguity locally (78); the path is read, and either form validated, only at push time. A missing path exits `79`; permission denied exits `77`; another I/O failure exits `74`; path content that fails validation, or that is not UTF-8 and so cannot be stored as a TOML string, exits `65`; an inline `extra_ca_certs_pem` that fails validation exits `78`; both keys present in the payload exits `78` (`AmbiguousExtraCaCerts`, beside `AmbiguousTrustRoot`). After inlining, the payload's total size is re-checked against the 64 KiB managed-payload cap — a value that fits as a path but not once inlined is refused rather than silently truncated.
+
+`ocx self setup` also picks up [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] and persists it into this key during onboarding — see [`self setup`][cmd-self-setup] for the phase, the JSON report shape, and its exit codes.
+
 ### `[registry]` {#keys-registry}
 
 Global settings for the registry subsystem.
@@ -793,6 +904,11 @@ A `[managed]` section inside the fetched payload itself is stripped before merge
 #### System-lock interaction {#keys-managed-system-lock}
 
 `[managed]` merges through the same [`Config::merge`](#precedence-merge) fold as every other tier, so a system-scope lock on [`[registry]`](#keys-registry-system-lock), [`[registries.<name>]`](#keys-registries-system-lock), or [`[mirrors]`](#keys-mirrors-system-lock) is never overridable by a managed payload — the lock applies before the managed tier's content is folded in, the same as it applies to any lower tier. `[managed]` also carries its own lock: a system-scope `[managed]` declaration with `required = true` (the default) is itself non-overridable by any lower tier, mirroring [`[patches]`'s system-required posture](#keys-patches-scopes). [`[[trust.policy]]`](#keys-trust) locks differently, because it pools instead of replacing: a system-scope policy [governs the scopes it matches alone](#keys-trust-system-lock), so a managed payload can neither outbid it with a narrower scope nor enroll a signer alongside it — it can only pin scopes the system tier never mentions.
+
+#### Trust root posture {#keys-managed-trust-root}
+
+Two keys a managed payload carries reach TLS or signature trust, and the tier treats them differently. [`trusted_root_json`](#keys-trust-sigstore-publish) arriving from a source that is not digest-pinned is ignored with a warning — an unpinned publisher could otherwise hand [`ocx package verify`][cmd-package-verify] a Fulcio CA of its own choosing. [`extra_ca_certs_pem`](#keys-extra_ca_certs-managed) is honored from an unpinned source instead, because a TLS root alone grants no such bypass; only the [`[trust.sigstore]`](#keys-trust-sigstore) client is held to the stricter, digest-pinned rule. See [Rolling it out to a fleet](#keys-extra_ca_certs-managed) for the full residual-risk statement.
+
 ### `[[trust.policy]]` {#keys-trust}
 
 [`ocx package verify`][cmd-package-verify] checks a [Sigstore][sigstore] signature's
@@ -1262,6 +1378,10 @@ Verify resolves its trust root through six rungs, first hit wins:
 Rungs 1–3 are operator-named: a file that does not exist is an error, not a
 fall-through. Rung 4 is a convention: absent falls through, but present-and-unreadable
 fails. See [Self-hosted Sigstore][in-depth-self-hosted-sigstore] for choosing among them.
+Rung 6 dials `tuf-repo-cdn.sigstore.dev` through the shared Sigstore client and
+its address guard: a split-horizon DNS that answers that public name with a
+private address is refused (exit 78) rather than dialed — pin a `trusted_root`
+(rung 3) on such a host.
 
 #### System-locked {#keys-trust-sigstore-system-lock}
 
@@ -1660,6 +1780,7 @@ This table shows which OCX environment variables map to config file fields. Vari
 | [`OCX_MIRRORS`][env-mirrors] | `[mirrors]` | Env var wins per host, per role when both are set; roles/hosts absent from env var still come from config |
 | [`OCX_PATCHES`][env-ocx-patches] | `[patches] registry` / `path` / `required` | Forwarded JSON wire format; overrides the config-file tier on process boundaries |
 | [`OCX_MANAGED_CONFIG`][env-ocx-managed-config] | `[managed] source` | Invocation-only override, never written back; `=""` is treated as unset |
+| [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] | [`extra_ca_certs`](#keys-extra_ca_certs) / `extra_ca_certs_pem` | **Stronger tier, not weaker** — wins over every `config.toml` tier when set and non-empty (path or inline PEM, sniffed on `-----BEGIN`); `=""` reads as unset. Not forwarded to child processes — an env-only CA does not survive `ocx exec --clean`, the config form does |
 | [`OCX_LAZY_MODE`][env-ocx-lazy-mode] | toolchain-level `lazy-mode` in [`ocx.toml`](#project-config-toolchain-lazy) | Lowest tier of the five-level ladder — `--lazy-mode`, `[package."<id>"]`, and `[group.<name>]` all outrank both the config key and this variable; not forwarded to child processes |
 | [`OCX_LAZY_REPORT`][env-ocx-lazy-report] | toolchain-level `lazy-report` in [`ocx.toml`](#project-config-toolchain-lazy) | Lowest tier of the four-level ladder; not forwarded to child processes |
 | [`OCX_TOOLCHAIN_ACTIVATE`][env-ocx-toolchain-activate] | toolchain-level `activate` in [`ocx.toml`](#project-config-activate) | **Weakest tier, not an override** — a project that states `activate` wins over an exported value. An unrecognized value warns on stderr and falls through to the next tier rather than failing; not forwarded to child processes |
@@ -1669,7 +1790,7 @@ This table shows which OCX environment variables map to config file fields. Vari
 | [`OCX_RECORDS_NAME`][env-ocx-records-name] | `[records] name` | Same SYSTEM-scope lock as `dir` |
 | [`OCX_HOME`][env-ocx-home] | None | Determines where config is loaded from; cannot be in a config file |
 | [`OCX_CONFIG`][env-config] | None | Meta-variable pointing at the config file itself |
-| [`OCX_NO_CONFIG`][env-no-config] | None | Kill switch; also suppresses the [`[managed]`](#keys-managed) snapshot candidate and the `OCX_MANAGED_CONFIG` env-override read. A SYSTEM-scope [`[records]`][config-records] lock survives it — the system file still loads, filtered to its locked sections |
+| [`OCX_NO_CONFIG`][env-no-config] | None | Kill switch; also suppresses the [`[managed]`](#keys-managed) snapshot candidate and the `OCX_MANAGED_CONFIG` env-override read. A SYSTEM-scope [`[records]`][config-records] lock survives it — the system file still loads, filtered to its locked sections — and so does a SYSTEM-scope [`extra_ca_certs`/`extra_ca_certs_pem` lock](#keys-extra_ca_certs-system-lock) |
 | [`OCX_NO_CONFIG_REFRESH`][env-ocx-no-config-refresh] | None | Kill switch for the [`[managed]`](#keys-managed) background refresh tick only; explicit `ocx config update`, and the setup-time re-sync `ocx self setup` / `ocx config setup` run against an already-adopted seed, still work |
 | [`OCX_OFFLINE`][env-offline] | None | Per-invocation mode, not a persistent setting |
 | [`OCX_REMOTE`][env-remote] | None | Per-invocation debugging mode, not a persistent setting |
@@ -2046,6 +2167,8 @@ A project-level `ocx.toml` is now shipped — see the [Project Toolchain section
 [env-log]: ./environment.md#ocx-log
 [env-ocx-patches]: ./environment.md#ocx-patches
 [env-ocx-managed-config]: ./environment.md#ocx-managed-config
+[env-ocx-extra-ca-certs]: ./environment.md#ocx-extra-ca-certs
+[env-external-ca-certificates]: ./environment.md#external-ca-certificates
 [env-ocx-no-config-refresh]: ./environment.md#ocx-no-config-refresh
 [env-ocx-env]: ./environment.md#ocx-env
 [env-ocx-lazy-mode]: ./environment.md#ocx-lazy-mode

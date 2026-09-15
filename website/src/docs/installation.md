@@ -78,6 +78,22 @@ PowerShell needs the script compiled to a scriptblock so `-Version` binds to its
 
 **Track prereleases.** To follow the latest prerelease instead of stable, use the `next` channel on any per-shell prefix — `https://setup.ocx.sh/sh/next`, `https://setup.ocx.sh/pwsh/next`, and so on.
 
+**Behind a corporate CA.** The [`OCX_INSTALL_CA_BUNDLE`][env-ocx-install-ca-bundle] env knob points the installer at a corporate root for its own downloads; export [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] beside it and [`ocx self setup`][cmd-self-setup] persists the certificate text as [`extra_ca_certs_pem`][config-extra-ca-certs] in `config.toml`, so every later command trusts it too:
+
+::: code-group
+```sh [Shell]
+export OCX_INSTALL_CA_BUNDLE=/etc/pki/corp-root.pem OCX_EXTRA_CA_CERTS=/etc/pki/corp-root.pem
+curl --cacert "$OCX_INSTALL_CA_BUNDLE" -fsSL https://setup.ocx.sh/sh | sh
+```
+
+```powershell [PowerShell]
+$env:OCX_EXTRA_CA_CERTS = 'C:\pki\corp-root.pem'
+irm https://setup.ocx.sh/pwsh | iex
+```
+:::
+
+`install.ps1`'s own bootstrap download has no CA-bundle option of its own — unlike the POSIX installer's `--cacert` above, nothing on the PowerShell side hands the corporate root to the script's own HTTPS fetch of the release archive; an `OCX_INSTALL_CA_BUNDLE` set for it only draws a warning (the script forwards it as `SSL_CERT_FILE`, which no Windows client reads), so the block above does not set it. Behind an intercepting proxy, either install the root into the machine certificate store for that one download, or use [Manual Installation][manual] to fetch the binary yourself and run `ocx self setup` directly. `OCX_EXTRA_CA_CERTS` still reaches `ocx self setup` in either case, by ordinary environment inheritance: `Invoke-Expression`/`iex` runs the downloaded script in the current session, so a variable set with `$env:` beforehand is visible to it the same way it is to any other process the session launches ([ocx-sh/www-setup#23](https://github.com/ocx-sh/www-setup/issues/23)).
+
 ### Supported Shells {#shells}
 
 [setup.ocx.sh][setup-home] serves a separate installer per shell. Pipe each URL to its matching interpreter — `| sh`, `| nu`, `| fish`, `| elvish`, or `irm … | iex` for [PowerShell][powershell]. The POSIX `sh` installer covers every Bourne-family shell with one script.
@@ -306,6 +322,11 @@ This returns `"dev"` for dev builds and `null` (field absent) for stable release
 <!-- environment -->
 [env-home]: ./reference/environment.md#ocx-home
 [env-no-modify-path]: ./reference/environment.md#ocx-no-modify-path
+[env-ocx-install-ca-bundle]: ./reference/environment.md#ocx-extra-ca-certs
+[env-ocx-extra-ca-certs]: ./reference/environment.md#ocx-extra-ca-certs
+
+<!-- reference -->
+[config-extra-ca-certs]: ./reference/configuration.md#keys-extra_ca_certs
 
 <!-- internal -->
 [manual]: #manual
