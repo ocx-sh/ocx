@@ -63,8 +63,8 @@ impl Api {
     }
 
     /// Renders `item` to stdout in the configured format, unless quiet mode is
-    /// active — quiet suppresses every report type, leaving stderr (progress,
-    /// errors, warnings) untouched.
+    /// active — quiet suppresses every report type (and, at `Context::try_init`,
+    /// progress), leaving errors and warnings on stderr untouched.
     pub fn report(&self, item: &impl Printable) -> anyhow::Result<()> {
         if self.quiet {
             return Ok(());

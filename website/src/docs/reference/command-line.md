@@ -173,8 +173,9 @@ variable. The `--index` flag takes precedence when both are set.
 Alias: `-q`.
 
 Suppresses the structured stdout report that every command emits — tables in plain
-mode, the JSON document in `--format json` mode. Errors, warnings, and progress
-spinners continue to surface on stderr.
+mode, the JSON document in `--format json` mode — and the transfer progress bars
+ocx renders when stderr is a terminal. Errors and warnings continue to surface on
+stderr.
 
 Quiet is opt-in and orthogonal to [`--format`](#arg-format). Use it when calling
 ocx as a step in a larger pipeline that only cares about the exit code, or when
