@@ -46,9 +46,9 @@ For absolute reproducibility without any index, reference the digest directly: `
 
 ## Variants {#variants}
 
-A binary tool can be built multiple ways — different optimization profiles (`pgo`, `pgo.lto`), feature toggles (`freethreaded`), or size trade-offs (`slim`). Variants describe *how* a binary was built, not *where* it runs. All variants for a given platform execute on the same host; the user chooses the variant, it is not auto-detected.
+A binary can be built multiple ways — different optimization profiles (`pgo`, `pgo.lto`), feature toggles (`freethreaded`), or size trade-offs (`slim`). Variants describe *how* a binary was built, not *where* it runs. All variants for a given platform execute on the same host; the user chooses the variant, it is not auto-detected.
 
-Without variant support, publishers create separate packages (`python-pgo`, `python-debug`) to represent these build differences, which loses the semantic connection between builds of the same tool.
+Without variant support, publishers create separate packages (`python-pgo`, `python-debug`) to represent these build differences, which loses the semantic connection between builds of the same package.
 
 ::: details Why not Docker's tag-suffix convention?
 [Docker Hub][docker-images] encodes variants as tag suffixes (`python:3.12-slim`), but this creates a parsing ambiguity with [semver][semver] prereleases — `3.12-alpha` and `3.12-slim` are syntactically indistinguishable. [Concourse CI][concourse-registry]'s registry image resource documents this explicitly, resorting to a heuristic: only `alpha`, `beta`, and `rc` are treated as prereleases, everything else is a variant suffix. OCX avoids this ambiguity entirely with a variant-*prefix* format.

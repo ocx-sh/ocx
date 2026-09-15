@@ -24,7 +24,7 @@ it.
 
 :::info Analogy: promotion and patches
 Both tiers keep an upstream artifact intact rather than forking it. [`[patches]`][ug-patches]
-adapts what environment a tool *runs in* without touching the package; promotion moves a
+adapts what environment a binary *runs in* without touching the package; promotion moves a
 package *between registries* without touching its bytes. Neither rebuilds anything.
 :::
 

@@ -13,7 +13,7 @@
 
 </div>
 
-Install pre-built tools with a single command, switch versions instantly, and run with clean environments. Designed as a backend for GitHub Actions, Bazel rules, and CI/CD pipelines.
+Install pre-built binaries with a single command, switch versions instantly, and run with clean environments. Designed as a backend for GitHub Actions, Bazel rules, and CI/CD pipelines.
 
 ## Quick Start
 

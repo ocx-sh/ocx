@@ -2,7 +2,7 @@
 # state: setup:managed-config-ci
 # doc: user-guide/managed-config-ci
 # title: Sync managed config in a CI recipe
-# description: Point an ephemeral CI runner at the managed-config artifact via an environment variable, sync it explicitly, then install a locked tool -- no seed ever touches disk.
+# description: Point an ephemeral CI runner at the managed-config artifact via an environment variable, sync it explicitly, then install a locked package -- no seed ever touches disk.
 set -euo pipefail
 
 # The setup:managed-config-ci provider has already published the

@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$SCENARIO_TMP"
 
-# The setup:patches-maintainer provider has already published the base tool
+# The setup:patches-maintainer provider has already published the base package
 # and the corp-ca companion, configured the [patches] tier, written
 # descriptor.json into this work dir, and built (but never pushed) a
 # corp-ca:2.0.0 preview-companion.tar.xz archive with its own

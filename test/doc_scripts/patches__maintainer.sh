@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$SCENARIO_TMP"
 
-# The setup:patches-maintainer provider has already published the base tool
+# The setup:patches-maintainer provider has already published the base package
 # and the corp-ca companion, configured the [patches] tier, and written
 # descriptor.json into this work dir. The region below is the maintainer's
 # author -> test -> publish -> install -> freeze flow: publish makes the

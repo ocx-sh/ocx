@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # state: setup:basic
 # doc: entry-points/example-install
-# title: End-to-end example — install and select a tool
+# title: End-to-end example — install and select a package
 # description: Install a package with --select and print its resolved environment in eval-safe form.
 set -euo pipefail
 

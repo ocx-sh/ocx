@@ -115,7 +115,7 @@ A derived source carries no `config.json` or `c/index.json` of its own — its c
 
 `o/` holds **dispatch objects only** — the [OCI image index][oci-image-index] a tag resolved to, verbatim, for either provenance kind. A leaf platform manifest, the manifest that actually names a binary's layers, is never copied into the local index. The copy pins what a re-push can change — the tag→digest binding, the platform→digest map — and leaves everything below a digest to the [package store][in-depth-storage-packages], which fetches it on demand and is content-addressed anyway.
 
-Every tag's `content` digest in the root document names an image index present in `o/`: OCX decodes it, runs [platform selection][reference-platforms-compatibility] over the per-platform digest list it carries, then fetches the resulting leaf digest from the physical registry, checking the [package store][in-depth-storage-packages] first — an already-installed tool's leaf manifest was cached there at install time, so re-resolving it needs no network at all. A tag that resolves to a bare platform manifest instead of an index is refused when the source announces it and is never recorded; `ocx package push` always publishes an index, so this can only happen for a repository ocx did not publish.
+Every tag's `content` digest in the root document names an image index present in `o/`: OCX decodes it, runs [platform selection][reference-platforms-compatibility] over the per-platform digest list it carries, then fetches the resulting leaf digest from the physical registry, checking the [package store][in-depth-storage-packages] first — an already-installed package's leaf manifest was cached there at install time, so re-resolving it needs no network at all. A tag that resolves to a bare platform manifest instead of an index is refused when the source announces it and is never recorded; `ocx package push` always publishes an index, so this can only happen for a repository ocx did not publish.
 
 A digest-pinned reference (`pkg@sha256:…`) is content addressing, not dispatch — it is fetched directly by digest and never touches `o/`. A multi-platform package therefore holds exactly one dispatch object under `o/` per tag. Compared to copying the whole manifest chain, that is roughly a sixth the size for a typical multi-platform package.
 
@@ -374,7 +374,7 @@ for every name in registry 'ocx.sh'; announce it there with `ocx package announc
 the namespace off the index with `[registries."ocx.sh"] index = ""`
 ```
 
-The scope is the registry, not a name shape. `index.ocx.sh`'s own root schema pins a logical name to `ocx.sh/<namespace>/<package>`, so a flat `ocx.sh/<tool>` can never hold a root there — but that is the index operator's constraint, enforced when a package is announced, not a rule the client applies. An index that does serve a root for a flat name resolves it normally.
+The scope is the registry, not a name shape. `index.ocx.sh`'s own root schema pins a logical name to `ocx.sh/<namespace>/<package>`, so a flat `ocx.sh/<name>` can never hold a root there — but that is the index operator's constraint, enforced when a package is announced, not a rule the client applies. An index that does serve a root for a flat name resolves it normally.
 
 This is what makes the yank and deprecation gate reachable at all: a tag the index yanks cannot be obtained by asking the registry underneath instead. It also means **completeness matters** — a package missing from the index is unresolvable through it, by design.
 
@@ -506,7 +506,7 @@ Four OCX commands share the `update` verb. Each refreshes exactly one record, an
 
 A fifth command belongs to the family without carrying the verb: [`ocx index sync`][cmd-index-sync] refreshes the same record `ocx index update` does, over a whole registry's catalog rather than a named list of packages.
 
-`ocx update` never writes a **tag pointer** into the local index — `ocx.lock` is its only canonical record. It can still persist a resolved dispatch object into `o/`, content-addressed and pinning nothing, so that write moves no tag. Re-resolving a project's pinned tools therefore does not change what `kitware/cmake:3` resolves to for any other command on the same machine; that stays [`ocx index update`][cmd-index-update]'s job.
+`ocx update` never writes a **tag pointer** into the local index — `ocx.lock` is its only canonical record. It can still persist a resolved dispatch object into `o/`, content-addressed and pinning nothing, so that write moves no tag. Re-resolving a project's pinned packages therefore does not change what `kitware/cmake:3` resolves to for any other command on the same machine; that stays [`ocx index update`][cmd-index-update]'s job.
 
 ## See Also
 

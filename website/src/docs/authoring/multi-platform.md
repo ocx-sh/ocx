@@ -3,7 +3,7 @@ outline: deep
 ---
 # Multi-Platform Packages
 
-Most binary tools ship per-platform builds — different bytes for Linux/amd64, Linux/arm64, Darwin/arm64, Windows/amd64. The naive distribution approach is one tag per platform: `acme/mytool:1.0.0-linux-amd64`, `acme/mytool:1.0.0-darwin-arm64`. That works, but it pushes the platform-resolution problem onto every consumer's install script. OCX uses [OCI Image Indexes][oci-image-index] instead — one tag, multiple manifests, OCX picks the right one at install time based on the consumer's platform.
+Most binaries ship per-platform builds — different bytes for Linux/amd64, Linux/arm64, Darwin/arm64, Windows/amd64. The naive distribution approach is one tag per platform: `acme/mytool:1.0.0-linux-amd64`, `acme/mytool:1.0.0-darwin-arm64`. That works, but it pushes the platform-resolution problem onto every consumer's install script. OCX uses [OCI Image Indexes][oci-image-index] instead — one tag, multiple manifests, OCX picks the right one at install time based on the consumer's platform.
 
 This page covers the publisher view: how to assemble a multi-platform package, how `ocx package push` builds the index, and the digest-stability properties you can rely on.
 
@@ -65,7 +65,7 @@ Declaring the requirement is what avoids this, and OCX will not let you skip it:
 Pass `--no-libc-lint` only when the check itself refuses incorrectly — it exists so a bug in the check cannot block every `create` for a Linux target with no way through. It skips the check entirely, so the published tile's `os.features` claim goes unverified against the packaged binaries. See [`ocx package create`][cmd-package-create-libc-check].
 :::
 
-If your tool ships both a glibc build and a musl build, you can publish both under the same tag and let OCX pick the right one automatically. The mechanism is the [OCI `os.features` field][oci-image-index]: mark each manifest entry with `libc.glibc` or `libc.musl` and OCX's index resolution selects the one that matches the installing host.
+If your package ships both a glibc build and a musl build, you can publish both under the same tag and let OCX pick the right one automatically. The mechanism is the [OCI `os.features` field][oci-image-index]: mark each manifest entry with `libc.glibc` or `libc.musl` and OCX's index resolution selects the one that matches the installing host.
 
 ### Auto-resolution {#libc-auto-resolution}
 

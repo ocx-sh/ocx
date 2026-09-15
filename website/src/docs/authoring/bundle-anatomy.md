@@ -3,7 +3,7 @@ outline: deep
 ---
 # Bundle Anatomy
 
-A package on the registry is two artefacts that travel together: a tar archive holding the files your tool needs at runtime, and a sidecar `metadata.json` describing how to install and configure them. This page covers the publisher decisions that shape both — what to put in the archive, where to declare those choices, and how `ocx package create` produces a stable bundle ready to push.
+A package on the registry is two artefacts that travel together: a tar archive holding the files your package needs at runtime, and a sidecar `metadata.json` describing how to install and configure them. This page covers the publisher decisions that shape both — what to put in the archive, where to declare those choices, and how `ocx package create` produces a stable bundle ready to push.
 
 ## What Goes in the Archive {#what-goes-in}
 
@@ -11,7 +11,7 @@ Most upstream toolchains ship a single root directory inside their archive — `
 
 OCX leaves the choice in your hands. Either pre-flatten the tree before bundling, or keep the upstream layout and tell OCX to strip the wrapper at install time via [`strip_components`][strip-components]. Repackaging upstream archives unchanged — the [migration patterns guide][authoring-migration] walks the most common transformations — avoids re-bundling cost and keeps your release pipeline as a thin wrapper over the upstream artifact.
 
-OCX assembles every installed package under `content/` ([three-tier storage][in-depth-storage]) — that is the post-install layout, not a publisher-side archive requirement. What goes inside the archive is up to you. The convention most archive-based mirrors follow is `bin/` (executables) plus any data the tool reads at runtime; pair that with `strip_components: 1` for upstreams that ship a single wrapper directory. Pre-built single binaries can ship without any wrapper at all — set `strip_components: 0` so the binary lands at the archive root, or use [`type: binary`][reference-bundle-binary] for sidecar-style downloads.
+OCX assembles every installed package under `content/` ([three-tier storage][in-depth-storage]) — that is the post-install layout, not a publisher-side archive requirement. What goes inside the archive is up to you. The convention most archive-based mirrors follow is `bin/` (executables) plus any data the binary reads at runtime; pair that with `strip_components: 1` for upstreams that ship a single wrapper directory. Pre-built single binaries can ship without any wrapper at all — set `strip_components: 0` so the binary lands at the archive root, or use [`type: binary`][reference-bundle-binary] for sidecar-style downloads.
 
 ## Stable Archives {#stable}
 

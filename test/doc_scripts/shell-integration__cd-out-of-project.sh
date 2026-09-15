@@ -2,7 +2,7 @@
 # state: setup:basic
 # cast: true
 # doc: in-depth/shell-integration/cd-out-of-project
-# title: Leaving a project takes its tools back off PATH
+# title: Leaving a project takes its binaries back off PATH
 # description: cd out of a consented project and the next prompt reverts every entry it applied, restoring the environment the shell had before.
 set -euo pipefail
 

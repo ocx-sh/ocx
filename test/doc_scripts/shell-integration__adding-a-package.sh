@@ -2,8 +2,8 @@
 # state: setup:basic
 # cast: true
 # doc: in-depth/shell-integration/adding-a-package
-# title: Adding a tool applies it at the next prompt
-# description: ocx add writes the project's ocx.toml and ocx.lock, and both are on the hook's watch set; the tool lands on PATH at the next prompt with no eval step of your own.
+# title: Adding a package applies it at the next prompt
+# description: ocx add writes the project's ocx.toml and ocx.lock, and both are on the hook's watch set; its binaries land on PATH at the next prompt with no eval step of your own.
 set -euo pipefail
 
 cd "$SCENARIO_TMP"

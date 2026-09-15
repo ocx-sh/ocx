@@ -386,7 +386,7 @@ dependency's env propagates to its dependents.
 | Value | Interface surface (`--self` off) | Private surface (`--self` on) | Use case |
 |---|---|---|---|
 | `private` (default) | No | Yes | Internal paths the package's own launchers need; not part of the public contract. |
-| `public` | Yes | Yes | Variables consumers should see — `PATH`, `JAVA_HOME`, tool-specific prefix paths. Both surfaces. |
+| `public` | Yes | Yes | Variables consumers should see — `PATH`, `JAVA_HOME`, package-specific prefix paths. Both surfaces. |
 | `interface` | Yes | No | Values forwarded to consumers but not used by the package's own runtime — `PKG_CONFIG_PATH`, library include hints. |
 
 `"sealed"` is rejected at parse time on `env` entries — a declared entry that is invisible
@@ -478,7 +478,7 @@ pin against its registry and rejects the push (exit 65) if the resolved digest i
 rather than a manifest, naming the offending dependency.
 
 ::: info The same rule governs the project lock
-[`ocx.lock`][in-depth-project-lock] pins each tool to a **per-platform leaf manifest digest**, never
+[`ocx.lock`][in-depth-project-lock] pins each binding to a **per-platform leaf manifest digest**, never
 the index digest — see [Lock format][in-depth-project-lock-format]. Package dependencies follow the
 same rule, for the same reason: the index digest is a moving target across a publisher's release
 history; the leaf manifest digest is not.

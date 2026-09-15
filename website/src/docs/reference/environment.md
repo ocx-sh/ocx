@@ -255,9 +255,9 @@ Each token names one **source** — `<registry>/<first-path-segment>`, exactly t
 
 This answers a different question than `OCX_CONSENT_PATHS` does: *whose binaries may reach my `PATH`*, rather than *which checkout may activate at all*. See [Shell Integration → Consent grants][in-depth-shell-grants] for why both exist and how a project satisfies either one independently. Additive only, same rule as `OCX_CONSENT_PATHS`: unioned with `[shell.consent] namespaces` from `config.toml`, and an unset or empty value grants nothing.
 
-**The match is against the package store's record, not against the lock's text.** `ocx.lock` is project-supplied text, so a clone naming a listed organization proves nothing on its own. What is matched is the store's own record of the coordinate each locked digest was materialized under *on this machine* — so a lock that borrows a listed organization's name for content this machine never pulled under it is refused, and [`ocx shell state`][cmd-shell-state] names the disagreement. Writing that record takes an act of pulling here under that name: on a machine that has not cached the digest the bytes come off the wire under it, and where the layer cache already holds them one `ocx pull` naming the granted organization is enough. A project whose tools this machine has not fetched yet is simply inert until the first [`ocx pull`][cmd-pull], which writes a per-project consent stamp anyway — unless that pull declined to, under [`OCX_NO_CONSENT`](#ocx-no-consent) or `--no-consent`. What the grant still cannot confirm is *who* published the bytes: publishing into a listed organization needs that organization's publish credential and nothing more, and the recorded coordinate is the one you named rather than the endpoint your own `[mirrors]` or index routing dialled. See [Shell Integration → What consent does not cover][in-depth-shell-residual]. List organizations whose publish credentials you actually control, and no others.
+**The match is against the package store's record, not against the lock's text.** `ocx.lock` is project-supplied text, so a clone naming a listed organization proves nothing on its own. What is matched is the store's own record of the coordinate each locked digest was materialized under *on this machine* — so a lock that borrows a listed organization's name for content this machine never pulled under it is refused, and [`ocx shell state`][cmd-shell-state] names the disagreement. Writing that record takes an act of pulling here under that name: on a machine that has not cached the digest the bytes come off the wire under it, and where the layer cache already holds them one `ocx pull` naming the granted organization is enough. A project whose packages this machine has not fetched yet is simply inert until the first [`ocx pull`][cmd-pull], which writes a per-project consent stamp anyway — unless that pull declined to, under [`OCX_NO_CONSENT`](#ocx-no-consent) or `--no-consent`. What the grant still cannot confirm is *who* published the bytes: publishing into a listed organization needs that organization's publish credential and nothing more, and the recorded coordinate is the one you named rather than the endpoint your own `[mirrors]` or index routing dialled. See [Shell Integration → What consent does not cover][in-depth-shell-residual]. List organizations whose publish credentials you actually control, and no others.
 
-**This grant does not extend to a project's own `[env]` table.** It authorizes the tools `ocx.lock` resolved, never the `[env]` entries a project's own `ocx.toml` declares — that table has no publisher at all, so a relative `type = "path"` value works from clone content alone, with no registry served bytes to record. A namespace-granted project that also declares `[env]` still gets its tools; OCX withholds the table and prints a hint naming the fix: run [`ocx pull`][cmd-pull] there once (which also writes a consent stamp, unless [`OCX_NO_CONSENT`](#ocx-no-consent) or `--no-consent` declines it — in which case the pull leaves the project exactly as inert as it found it), or list this exact directory — not a subtree — in `[shell.consent] paths`, which authorizes the `[env]` table too. See [Shell Integration → What consent does not cover][in-depth-shell-residual].
+**This grant does not extend to a project's own `[env]` table.** It authorizes the packages `ocx.lock` resolved, never the `[env]` entries a project's own `ocx.toml` declares — that table has no publisher at all, so a relative `type = "path"` value works from clone content alone, with no registry served bytes to record. A namespace-granted project that also declares `[env]` still gets its packages; OCX withholds the table and prints a hint naming the fix: run [`ocx pull`][cmd-pull] there once (which also writes a consent stamp, unless [`OCX_NO_CONSENT`](#ocx-no-consent) or `--no-consent` declines it — in which case the pull leaves the project exactly as inert as it found it), or list this exact directory — not a subtree — in `[shell.consent] paths`, which authorizes the `[env]` table too. See [Shell Integration → What consent does not cover][in-depth-shell-residual].
 
 ### `OCX_DEFAULT_REGISTRY` {#ocx-default-registry}
 
@@ -281,7 +281,7 @@ This variable is **resolution-affecting**: it is forwarded to every subprocess `
 
 `OCX_GLOBAL` and [`OCX_PROJECT`](#ocx-project) are mutually exclusive — setting both is a usage error (exit 64).
 
-**Strict isolation**: the global toolchain never composes into project-tier resolution. `ocx exec` and `ocx package exec` are hermetic and never see global tools. Isolation is enforced by PATH precedence — project tools prepend before global tools when a project toolchain is active. See [Environment Composition — Strict isolation][env-composition-strict-isolation] for the full model.
+**Strict isolation**: the global toolchain never composes into project-tier resolution. `ocx exec` and `ocx package exec` are hermetic and never see global packages. Isolation is enforced by PATH precedence — project binaries prepend before global binaries when a project toolchain is active. See [Environment Composition — Strict isolation][env-composition-strict-isolation] for the full model.
 
 ::: warning
 This variable is mostly intended for testing.
@@ -374,7 +374,7 @@ export OCX_INDEX="/path/to/bundled/index"
 ```
 
 Setting this variable swaps the *whole* collection for a shipped one — never a partial overlay of
-the two. It is intended for environments where an index copy is bundled alongside a tool rather
+the two. It is intended for environments where an index copy is bundled alongside a consumer rather
 than stored in [`OCX_HOME`](#ocx-home) — for example inside a [GitHub Action][github-actions-docs],
 [Bazel Rule][bazel-rules], or [DevContainer Feature][devcontainer-features]. A project that commits
 its own `.ocx/index/` copy exports this variable for the project's shell, pointing at that
@@ -428,7 +428,7 @@ variable.
 
 ### `OCX_LAZY_MODE` {#ocx-lazy-mode}
 
-The lowest tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder] — whether a declared tool composes eagerly (content fetched before it reaches `PATH`) or as a shim that defers content until its first invocation.
+The lowest tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder] — whether a declared package composes eagerly (content fetched before it reaches `PATH`) or as a shim that defers content until its first invocation.
 
 ```sh
 export OCX_LAZY_MODE=always
@@ -436,7 +436,7 @@ export OCX_LAZY_MODE=always
 
 Accepts `never` (the default when nothing sets any tier) or `always`, parsed case-insensitively (`Always`, `ALWAYS`, and `always` are equivalent — unlike the [`--lazy-mode`][arg-lazy-mode] flag and the `ocx.toml` key, which are both case-sensitive lowercase). An unrecognized value is ignored with a warning, the same as an unset variable — this tier is simply absent and resolution continues to the ladder's floor.
 
-Four more-specific tiers can override this variable: the [`--lazy-mode`][arg-lazy-mode] flag, `[package."<id>"]`, `[group.<name>]`, and the toolchain-level `lazy-mode` key, all in `ocx.toml`. See [Deferred Tools][in-depth-lazy-loading] for the full ladder and [Project Configuration][config-project-package] for the `ocx.toml` keys.
+Four more-specific tiers can override this variable: the [`--lazy-mode`][arg-lazy-mode] flag, `[package."<id>"]`, `[group.<name>]`, and the toolchain-level `lazy-mode` key, all in `ocx.toml`. See [Deferred Packages][in-depth-lazy-loading] for the full ladder and [Project Configuration][config-project-package] for the `ocx.toml` keys.
 
 ::: warning Not forwarded to child processes
 Unlike the resolution-affecting variables listed in the box at the top of this section (binary path, offline, remote, config file, index), `OCX_LAZY_MODE` does **not** propagate from a parent `ocx` into a subprocess — it changes *when* content materializes, never *which* digest resolves, so it sits outside the forwarded set entirely. A child `ocx` invocation reads its own environment.
@@ -444,7 +444,7 @@ Unlike the resolution-affecting variables listed in the box at the top of this s
 
 ### `OCX_LAZY_REPORT` {#ocx-lazy-report}
 
-Whether a deferred tool's first-invocation download renders progress. Read inside the hidden `ocx launcher shim` subcommand — the process a generated shim launcher execs into — never by the command that composed the environment in the first place.
+Whether a deferred package's first-invocation download renders progress. Read inside the hidden `ocx launcher shim` subcommand — the process a generated shim launcher execs into — never by the command that composed the environment in the first place.
 
 ```sh
 export OCX_LAZY_REPORT=progress
@@ -452,7 +452,7 @@ export OCX_LAZY_REPORT=progress
 
 Accepts `silent` (the default) or `progress`, parsed case-insensitively like [`OCX_LAZY_MODE`](#ocx-lazy-mode) above. `progress` opens a channel on the controlling terminal for the download itself — an invocation that finds the package already in the store opens nothing; where no terminal is reachable — a Docker build, a CI runner, anything under `setsid` — it silently falls back to `silent` rather than erroring. Unrecognized values are ignored with a warning, same as unset.
 
-Three more-specific tiers can override this variable: the `--lazy-report` flag (declared only on `ocx launcher shim`; a user never types it directly), `[package."<id>"]`, and the toolchain-level `lazy-report` key, both in `ocx.toml`. There is no `[group.<name>]` tier for `lazy-report` — see [Deferred Tools][in-depth-lazy-loading] for why. Not forwarded to child processes, for the same reason as `OCX_LAZY_MODE` above.
+Three more-specific tiers can override this variable: the `--lazy-report` flag (declared only on `ocx launcher shim`; a user never types it directly), `[package."<id>"]`, and the toolchain-level `lazy-report` key, both in `ocx.toml`. There is no `[group.<name>]` tier for `lazy-report` — see [Deferred Packages][in-depth-lazy-loading] for why. Not forwarded to child processes, for the same reason as `OCX_LAZY_MODE` above.
 
 ### `OCX_INSECURE_REGISTRIES` {#ocx-insecure-registries}
 
@@ -529,7 +529,7 @@ export OCX_PATCHES='{"registry":"registry.corp.example/ocx-patches","path_templa
 [`ocx exec`][cmd-run] injects the opted-out `registry/repository` keys plus, for each opted-out
 base actually resolved that run, its content digest — a generated launcher resolves its own
 base via a synthetic content-addressed identifier with no real `registry/repository`, so the
-digest is what a launcher's re-entry (`ocx launcher exec`) matches against. This lets a tool
+digest is what a launcher's re-entry (`ocx launcher exec`) matches against. This lets a binary
 launched through `ocx exec` honor the project's `no-patches` opt-out even after it re-enters ocx
 through its own launcher. An empty (or absent) `no_patches` array is the byte-identical
 equivalent of no opt-out being forwarded at all.
@@ -550,7 +550,7 @@ opt-out), see the [`[patches]`][config-patches] configuration reference and the
 
 ### `OCX_ENV` {#ocx-env}
 
-A JSON payload encoding the composed project and group [`[env]`][config-project-env] entries plus any [`--env`][cmd-run] overrides — stages 4 through 6 of [project environment precedence][env-composition-project-env]. A `--env` override may carry any of the three kinds — `constant`, `path`, or [`list`][reference-env-list] — the same as a project- or group-declared entry; a `list` entry additionally carries the separator it settled on during composition. OCX forwards it to every subprocess it spawns, most importantly the inner `ocx launcher exec` call inside a generated [entrypoint launcher][entrypoints-ref], so a tool invoked through a launcher sees the same project-level overrides as the process that spawned it rather than silently reverting to the package's own values.
+A JSON payload encoding the composed project and group [`[env]`][config-project-env] entries plus any [`--env`][cmd-run] overrides — stages 4 through 6 of [project environment precedence][env-composition-project-env]. A `--env` override may carry any of the three kinds — `constant`, `path`, or [`list`][reference-env-list] — the same as a project- or group-declared entry; a `list` entry additionally carries the separator it settled on during composition. OCX forwards it to every subprocess it spawns, most importantly the inner `ocx launcher exec` call inside a generated [entrypoint launcher][entrypoints-ref], so a binary invoked through a launcher sees the same project-level overrides as the process that spawned it rather than silently reverting to the package's own values.
 
 ```sh
 # Managed by OCX; not set manually.
@@ -734,7 +734,7 @@ It is forwarded to child `ocx` processes, so a script run under [`ocx exec`][cmd
 `ocx exec --no-consent` sets this variable on the child environment too, so the flag reaches that nested `ocx pull` exactly as an exported variable would. A command line does not cross a spawn, so without it the explicit gesture would carry less far than the blanket one. The reverse is deliberately not true: `ocx exec --consent` does **not** clear a variable the child would otherwise inherit. `--consent` answers for the one project that invocation targets, not for whatever the child goes on to touch — refusal inherits downward, permission does not.
 
 ::: warning Exporting it in your own shell will make working projects go inert
-A stamp records the OCI sources its project's lock resolved against, and growing the lock past that set re-confirms by re-recording. With `OCX_NO_CONSENT` exported globally, that re-record never happens: [`ocx add`][cmd-add] pulls in a tool from a source the stamp does not cover, nothing re-stamps, and the project you were working in five minutes ago is inert at the next prompt. That is the fail-safe direction, and it is still surprising. Set the variable in the pipeline, the image or the build rule that needs it — not in your interactive profile. [`ocx shell state`][cmd-shell-state] names this state, and [`ocx shell allow`][cmd-shell-allow] clears it in one gesture.
+A stamp records the OCI sources its project's lock resolved against, and growing the lock past that set re-confirms by re-recording. With `OCX_NO_CONSENT` exported globally, that re-record never happens: [`ocx add`][cmd-add] pulls in a package from a source the stamp does not cover, nothing re-stamps, and the project you were working in five minutes ago is inert at the next prompt. That is the fail-safe direction, and it is still surprising. Set the variable in the pipeline, the image or the build rule that needs it — not in your interactive profile. [`ocx shell state`][cmd-shell-state] names this state, and [`ocx shell allow`][cmd-shell-allow] clears it in one gesture.
 :::
 
 ### `OCX_HOME` role in setup {#ocx-home-setup}
@@ -766,7 +766,7 @@ Reaching those is exactly what the [session-PATH registration][cmd-self-setup-se
 
 There is no `$OCX_HOME/bin`; the install directory is the symlink path above, derived from the store rather than joined from a literal.
 
-If you keep the opt-out and still need ocx tools visible to `cmd.exe` or GUI applications, put those two directories on `PATH` yourself — via System Properties or Group Policy on Windows, an [`environment.d`][systemd-environment-d] drop-in on Linux, a [LaunchAgent][launchd-agents] on macOS.
+If you keep the opt-out and still need ocx-managed binaries visible to `cmd.exe` or GUI applications, put those two directories on `PATH` yourself — via System Properties or Group Policy on Windows, an [`environment.d`][systemd-environment-d] drop-in on Linux, a [LaunchAgent][launchd-agents] on macOS.
 
 ### `OCX_NO_CODESIGN` {#ocx-no-codesign}
 
@@ -823,7 +823,7 @@ variable.
 
 ### `OCX_RECORDS_DIR` {#ocx-records-dir}
 
-Sink directory for the [exec-time resolution record][execution-records-ref] — a JSON file OCX writes immediately before starting a tool, naming every package digest that composed the child's environment. Equivalent to the `--records-dir` flag on [`ocx exec`][cmd-run] and [`ocx package exec`][cmd-package-exec], and to the [`[records]` `dir`][config-records-dir] config key, but injectable via environment for CI and container setups where the command line is not controlled.
+Sink directory for the [exec-time resolution record][execution-records-ref] — a JSON file OCX writes immediately before starting a binary, naming every package digest that composed the child's environment. Equivalent to the `--records-dir` flag on [`ocx exec`][cmd-run] and [`ocx package exec`][cmd-package-exec], and to the [`[records]` `dir`][config-records-dir] config key, but injectable via environment for CI and container setups where the command line is not controlled.
 
 ```sh
 export OCX_RECORDS_DIR=/var/log/ocx/records
@@ -880,7 +880,7 @@ export OCX_TOOLCHAIN_ACTIVATE=bin
 | Value | Behaviour |
 |-------|-----------|
 | `env` | Compose the toolchain environment on every prompt. The default when no tier sets the key. |
-| `bin` | Put the toolchain home's `active/bin` directory on `PATH` and compose nothing else — each tool is resolved by its launcher trampoline at the moment it runs. |
+| `bin` | Put the toolchain home's `active/bin` directory on `PATH` and compose nothing else — each binary is resolved by its launcher trampoline at the moment it runs. |
 | `none` | Neither. The reconciler withdraws whatever it owns and adds nothing. |
 
 Parsed case-insensitively (`Bin`, `BIN` and `bin` are equivalent), unlike the `ocx.toml` key, which is case-sensitive lowercase. Whitespace is **not** trimmed: `OCX_TOOLCHAIN_ACTIVATE=" bin"` is an unrecognized value, not `bin`. An empty value reads as unset.
@@ -1011,7 +1011,7 @@ Set to `true` by [GitHub Actions][github-actions-docs] runners. OCX reads this v
 
 ### `GITHUB_PATH` {#external-github-path}
 
-Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps append one directory per line to this file; each appended directory is **prepended** to `PATH` for all later steps. `ocx env --ci=github` and `ocx package env --ci=github` write only the literal `PATH` variable here — one directory per line, in prepend order — so OCX-installed tool directories land leftmost (highest priority) in `PATH` for every subsequent step, regardless of when the step runs.
+Set by [GitHub Actions][github-actions-docs] to a file path. Workflow steps append one directory per line to this file; each appended directory is **prepended** to `PATH` for all later steps. `ocx env --ci=github` and `ocx package env --ci=github` write only the literal `PATH` variable here — one directory per line, in prepend order — so OCX-composed package directories land leftmost (highest priority) in `PATH` for every subsequent step, regardless of when the step runs.
 
 All other path-type variables (such as `LD_LIBRARY_PATH`, `MANPATH`, `PKG_CONFIG_PATH`) are written to [`GITHUB_ENV`](#external-github-env) as `KEY=value`, not to this file.
 

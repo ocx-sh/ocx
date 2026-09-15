@@ -3,7 +3,7 @@
 # cast: true
 # title: Running packages with patch overlays
 # doc: user-guide/patches-consumer
-# description: Sync site patches for installed tools, inspect the composed environment with --show-patches, and run the tool with the overlay applied.
+# description: Sync site patches for installed packages, inspect the composed environment with --show-patches, and run the binary with the overlay applied.
 set -euo pipefail
 
 # The setup:patches-consumer provider has already configured the [patches]

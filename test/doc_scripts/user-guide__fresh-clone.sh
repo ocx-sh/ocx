@@ -2,7 +2,7 @@
 # state: setup:full-catalog
 # doc: user-guide/fresh-clone
 # title: Warm the store after a fresh clone
-# description: Pull every locked tool into the local object store so direnv can activate the environment without a registry round-trip.
+# description: Pull every locked package into the local object store so direnv can activate the environment without a registry round-trip.
 set -euo pipefail
 
 cd "$SCENARIO_TMP"

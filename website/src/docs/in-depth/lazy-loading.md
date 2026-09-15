@@ -1,11 +1,11 @@
 ---
 outline: deep
 ---
-# Deferred Tools {#deferred-tools}
+# Deferred Packages {#deferred-tools}
 
-A project toolchain can declare a dozen tools and use three of them in any given job — a monorepo's `ocx.toml` might list every compiler, linter, and formatter the team owns, while a single CI step runs `eslint` and nothing else. [`ocx env`][cmd-env-root] and [`ocx exec`][cmd-run] compose the whole declared set by default, which means every tool's content downloads before the job's first command even starts.
+A project toolchain can declare a dozen packages and use three of them in any given job — a monorepo's `ocx.toml` might list every compiler, linter, and formatter the team owns, while a single CI step runs `eslint` and nothing else. [`ocx env`][cmd-env-root] and [`ocx exec`][cmd-run] compose the whole declared set by default, which means every package's content downloads before the job's first command even starts.
 
-`lazy-mode` changes when a tool's content downloads, not what ends up composed. A tool set to `always` still lands on `PATH` immediately — its declared names resolve, `ocx package which` finds it, `ocx exec <name>` sees it in scope — but the bytes behind it stay unfetched until the first invocation of one of its names. A job that never calls `eslint` never pays for it.
+`lazy-mode` changes when a package's content downloads, not what ends up composed. A package set to `always` still lands on `PATH` immediately — its declared names resolve, `ocx package which` finds it, `ocx exec <name>` sees it in scope — but the bytes behind it stay unfetched until the first invocation of one of its names. A job that never calls `eslint` never pays for it.
 
 ## Composing a shim {#deferred-tools-compose}
 
@@ -18,7 +18,7 @@ Every [env-composing command][cmd-run] accepts `--lazy-mode`:
 Under `always`, OCX writes a small generated launcher per declared name into a shim directory and composes that directory onto `PATH` — the same PATH slot an eagerly-materialized [package root's `entrypoints/`][fs-packages] would occupy, just pointed at a directory with no `content/` yet. [`ocx package which`][cmd-which] and [`ocx pull`][cmd-pull]'s JSON report both say so explicitly: every entry carries a `kind` of `package` or `shim`, so a script can tell the two apart without probing the filesystem.
 
 ::: info Like containerd's lazy image pulls
-[containerd][containerd]'s [stargz-snapshotter][stargz-snapshotter] does the same trade for container images: an `eStargz`-formatted layer lets a container start running before its files finish downloading, fetching each file lazily the first time a process opens it. OCX applies the same idea one layer up — at the tool level instead of the file level, and driven by the first process invocation instead of a filesystem read.
+[containerd][containerd]'s [stargz-snapshotter][stargz-snapshotter] does the same trade for container images: an `eStargz`-formatted layer lets a container start running before its files finish downloading, fetching each file lazily the first time a process opens it. OCX applies the same idea one layer up — at the package level instead of the file level, and driven by the first process invocation instead of a filesystem read.
 :::
 
 ### Resolution ladder {#deferred-tools-ladder}
@@ -34,7 +34,7 @@ Under `always`, OCX writes a small generated launcher per declared name into a s
 | 5 | [`OCX_LAZY_MODE`][env-ocx-lazy-mode] |
 | — | Floor: `never` |
 
-Each tier is independently optional; an absent tier means *inherit from the next one down*, never *this tier said `never`*. Setting `lazy-mode = "always"` at the toolchain level and `lazy-mode = "never"` on one package's own entry composes that one package eagerly while every other declared tool defers — the package-tier entry is a decision, not a gap.
+Each tier is independently optional; an absent tier means *inherit from the next one down*, never *this tier said `never`*. Setting `lazy-mode = "always"` at the toolchain level and `lazy-mode = "never"` on one package's own entry composes that one package eagerly while every other declared package defers — the package-tier entry is a decision, not a gap.
 
 ## First invocation {#deferred-tools-materialize}
 
@@ -46,9 +46,9 @@ A shim's generated launcher is a small script, deliberately similar to the one a
 exec "${OCX_BINARY_PIN:-ocx}" launcher shim '<pinned-id>' -- "${0##*/}" "$@"
 ```
 
-It execs the hidden `ocx launcher shim` subcommand, passing the pinned identifier the shim was built for and the name the caller typed. That subcommand runs the ordinary pull — the same three-layer fetch, extract, and assemble pipeline an eager install uses — then resolves the requested name on the freshly materialized package's own `PATH` and executes it. Nothing about the pull is special-cased for laziness: a lazily materialized tool is byte-identical to the same tool installed eagerly.
+It execs the hidden `ocx launcher shim` subcommand, passing the pinned identifier the shim was built for and the name the caller typed. That subcommand runs the ordinary pull — the same three-layer fetch, extract, and assemble pipeline an eager install uses — then resolves the requested name on the freshly materialized package's own `PATH` and executes it. Nothing about the pull is special-cased for laziness: a lazily materialized package is byte-identical to the same package installed eagerly.
 
-Once materialized, the tool's real `entrypoints/` directory outranks the shim on `PATH` for every later invocation in that environment, so a second call never re-triggers the shim path. `ocx package which` reflects the same flip — its `kind` reports `shim` before the first use and `package` after.
+Once materialized, the package's real `entrypoints/` directory outranks the shim on `PATH` for every later invocation in that environment, so a second call never re-triggers the shim path. `ocx package which` reflects the same flip — its `kind` reports `shim` before the first use and `package` after.
 
 ### Progress during the download {#deferred-tools-report}
 
@@ -70,7 +70,7 @@ Some `metadata.json` shapes only substitute cleanly once a package's content is 
 
 ## Windows {#deferred-tools-windows}
 
-A deferred tool's shim slot on Windows is a `<name>.exe` — hardlinked from the same content-addressed shim-executable blob every generated Windows entrypoint launcher shares — paired with a `<name>.shimref` sidecar: one line naming the pinned identifier the shim was built for. `lazy-mode` resolves and composes the same way on Windows as on any other host; there is no platform floor that forces eager composition.
+A deferred package's shim slot on Windows is a `<name>.exe` — hardlinked from the same content-addressed shim-executable blob every generated Windows entrypoint launcher shares — paired with a `<name>.shimref` sidecar: one line naming the pinned identifier the shim was built for. `lazy-mode` resolves and composes the same way on Windows as on any other host; there is no platform floor that forces eager composition.
 
 First invocation reads the sidecar, materializes the package through the same `ocx launcher shim` pipeline described above, and resolves the requested name on the freshly materialized package's own `PATH` — exactly as the POSIX shim does.
 
@@ -78,7 +78,7 @@ First invocation reads the sidecar, materializes the package through the same `o
 
 A shim directory is kept alive by the same lock-pinned root set that keeps an eagerly-installed package alive — [`ocx clean`][cmd-clean] regenerates a collected shim on the next compose, exactly as it would re-pull a collected package.
 
-[`ocx clean --force`][cmd-clean] is the one case where this differs from an installed package. A deferred tool has no [install symlink][fs-symlinks] pointing at it — only the lock pins reference it — and `--force`'s entire purpose is to suppress the lock-pinned root set for the run. So `--force` collects every shim directory unconditionally, the same way it already collects an unsymlinked eager package. The next `ocx env` or `ocx exec` regenerates whatever shims that composition needs; nothing is lost, but the first post-`--force` invocation of a deferred tool re-materializes it from scratch.
+[`ocx clean --force`][cmd-clean] is the one case where this differs from an installed package. A deferred package has no [install symlink][fs-symlinks] pointing at it — only the lock pins reference it — and `--force`'s entire purpose is to suppress the lock-pinned root set for the run. So `--force` collects every shim directory unconditionally, the same way it already collects an unsymlinked eager package. The next `ocx env` or `ocx exec` regenerates whatever shims that composition needs; nothing is lost, but the first post-`--force` invocation of a deferred package re-materializes it from scratch.
 
 <!-- external -->
 [containerd]: https://containerd.io/

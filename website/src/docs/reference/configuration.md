@@ -590,7 +590,7 @@ exec time OCX composes matched companions' `interface` environment entries on to
 base package's entries without modifying the base package.
 
 The `[patches]` tier is the execution-environment twin of `[mirrors]`: `[mirrors]`
-adapts where bytes come from; `[patches]` adapts what environment a tool runs in. Both
+adapts where bytes come from; `[patches]` adapts what environment a binary runs in. Both
 are opt-in and configured here.
 
 ```toml
@@ -689,7 +689,7 @@ effect where a project's `ocx.toml` is directly in scope. That covers three comm
 [`ocx exec`][cmd-run], [`ocx env`][cmd-env-root], and [`ocx direnv export`][cmd-direnv-export] —
 each of which reads the project config and composes the environment itself.
 
-A fourth surface reaches the opt-out indirectly: a tool spawned by `ocx exec` that re-enters
+A fourth surface reaches the opt-out indirectly: a binary spawned by `ocx exec` that re-enters
 ocx through its own generated launcher (`ocx launcher exec`). `ocx exec` forwards the opt-out
 to that child process over [`OCX_PATCHES`][env-ocx-patches] — including, for each opted-out
 base actually resolved that run, its content digest, since a launcher resolves its base via a
@@ -706,9 +706,9 @@ See [Patch Opt-Out Scope][env-composition-patch-opt-out] for the full forwarding
 ### `[records]` section {#keys-records}
 
 The `[records]` tier turns on the [exec-time resolution record][execution-records-ref] — one
-JSON file written to an operator-designated directory immediately before OCX starts a tool,
+JSON file written to an operator-designated directory immediately before OCX starts a binary,
 naming the exact package digests that composed the environment. Where [`[patches]`](#keys-patches)
-adapts what environment a tool runs in, `[records]` answers, after the fact, exactly what ran.
+adapts what environment a binary runs in, `[records]` answers, after the fact, exactly what ran.
 Absent at every tier, nothing is written and the exec path gains no I/O.
 
 ```toml
@@ -1586,7 +1586,7 @@ that leaves the key unset never clears a list a lower tier set.
 The activation whitelist: which projects the per-prompt reconciler — and
 [`ocx self activate`][cmd-self-activate]'s login-shell pass — is permitted to compose an
 environment for at all, independent of whether `hook` / `completions` are on. A project
-outside every grant below stays inert, and none of the tools its `ocx.lock` names reach
+outside every grant below stays inert, and none of the packages its `ocx.lock` names reach
 `PATH`, until a consent stamp is written for it by an ordinary [`ocx add`][cmd-add] /
 [`ocx lock`][cmd-lock] / [`ocx pull`][cmd-pull] / [`ocx exec`][cmd-run] run against it. See
 [Consent grants][in-depth-shell-consent] for the full three-grant model and
@@ -1824,23 +1824,23 @@ One key that looks like it belongs here does not: [`toolchain_dir`](#keys-toolch
 Each named group is a table with exactly two optional sub-tables: `tools` (the same binding-name-to-identifier map the top-level `[tools]` table holds) and `env` (see the [value grammar](#project-config-env) below). A group with neither sub-table is a valid, empty group.
 
 ```toml
-[tools]                       # default group's tools
+[tools]                       # default group's bindings
 foo = "ocx.sh/foo:1"
 
 [env]                         # default group's env
 CI = "1"
 
-[group.ci.tools]              # named group's tools
+[group.ci.tools]              # named group's bindings
 bar = "ocx.sh/bar:1"
 
 [group.ci.env]                # named group's env
 SOURCE_DATE_EPOCH = "0"
 ```
 
-A tool binding declared directly under `[group.<name>]` — not inside its `tools` sub-table — is a parse error naming the group and pointing at the fix, `ExitCode::ConfigError` (78):
+A binding declared directly under `[group.<name>]` — not inside its `tools` sub-table — is a parse error naming the group and pointing at the fix, `ExitCode::ConfigError` (78):
 
 ```
-error: group `ci` declares tool bindings directly
+error: group `ci` declares bindings directly
   --> ocx.toml
    |
    |  [group.ci]
@@ -1852,7 +1852,7 @@ error: group `ci` declares tool bindings directly
 
 An unrecognized sub-table (a typo such as `[group.ci.tolos]`) is rejected the same way, naming the offending key. `[group.default]`, `[group.all]` and `[group.bin]` are reserved names, rejected at parse regardless of their contents — see [Names and reserved words](#project-config-names) below, and [`ocx exec`][cmd-run] for the full group-keyword semantics.
 
-A group also accepts an optional `lazy-mode` scalar, overriding the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder] for every tool declared under that group:
+A group also accepts an optional `lazy-mode` scalar, overriding the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder] for every binding declared under that group:
 
 ```toml
 [group.ci]
@@ -1870,7 +1870,7 @@ The `[tools]`, `[group.<name>]`, `[env]` and `[package."<id>"]` declarations par
 
 Group names and binding names both become **path components** of the rendered [toolchain tree][storage-toolchain] — `<home>/links/<group>/<entry>/` — and in link-following mode [`ocx env`][cmd-env-root] emits those paths as environment values. So the grammar is a validation rule, not a style preference.
 
-Every name you declare sits one level below the tree's own directory names, under `links/`, so no name you pick can collide with the tree's structure: a group named `links` renders at `links/links/<entry>`, and a tool named `bin` renders at `links/default/bin`.
+Every name you declare sits one level below the tree's own directory names, under `links/`, so no name you pick can collide with the tree's structure: a group named `links` renders at `links/links/<entry>`, and a binding named `bin` renders at `links/default/bin`.
 
 Every `[group.<name>]` name, every `[tools]` key, and every `[group.<name>.tools]` key must match:
 
@@ -1878,7 +1878,7 @@ Every `[group.<name>]` name, every `[tools]` key, and every `[group.<name>.tools
 ^[A-Za-z0-9][A-Za-z0-9._-]*$
 ```
 
-— at most 64 bytes. It is deliberately wider than an OCX slug by uppercase and `.`, because these names are yours to pick and read like the tools they bind (`MSBuild`, `python3.13`). A name that breaks either half is refused at parse, exit 78, and the message says which half:
+— at most 64 bytes. It is deliberately wider than an OCX slug by uppercase and `.`, because these names are yours to pick and read like the binaries they bind (`MSBuild`, `python3.13`). A name that breaks either half is refused at parse, exit 78, and the message says which half:
 
 ```
 error: [tools] name 'my tool' must match ^[A-Za-z0-9][A-Za-z0-9._-]*$ and be at most 64 bytes (the character set is wrong)
@@ -1914,9 +1914,9 @@ lazy-report = "progress"
 
 The match for every field in this table is by canonical `registry/repository` — tag and digest are stripped, so a `[package."<id>"]` entry follows every tag of that package, not just the one written in the key.
 
-`lazy-mode` and `lazy-report` are both **excluded from `declaration_hash`** — like `no-patches`, they change *when* or *how loudly* a tool materializes, never *which* digest resolves, so editing either does not invalidate `ocx.lock`.
+`lazy-mode` and `lazy-report` are both **excluded from `declaration_hash`** — like `no-patches`, they change *when* or *how loudly* a package materializes, never *which* digest resolves, so editing either does not invalidate `ocx.lock`.
 
-`lazy-report` is settable here even though there is no `[group.<name>]` tier for it. `lazy-mode` is resolved while composing, when the selected group is known; `lazy-report` is resolved later, inside the separate `ocx launcher shim` process a generated shim execs into on first invocation — a process that receives only a pinned identifier and a basename, with no way to learn which group composed the tool. See [Deferred Tools][in-depth-lazy-loading] for the full ladder and lifecycle.
+`lazy-report` is settable here even though there is no `[group.<name>]` tier for it. `lazy-mode` is resolved while composing, when the selected group is known; `lazy-report` is resolved later, inside the separate `ocx launcher shim` process a generated shim execs into on first invocation — a process that receives only a pinned identifier and a basename, with no way to learn which group composed the package. See [Deferred Packages][in-depth-lazy-loading] for the full ladder and lifecycle.
 
 ### Toolchain-level `lazy-mode` and `lazy-report` {#project-config-toolchain-lazy}
 
@@ -1930,7 +1930,7 @@ lazy-report = "silent"
 cmake = "ocx.sh/kitware/cmake:3.28"
 ```
 
-Both accept the same value sets as their `[package."<id>"]` counterparts and are excluded from `declaration_hash` for the same reason. Below both of these, [`OCX_LAZY_MODE`][env-ocx-lazy-mode] and [`OCX_LAZY_REPORT`][env-ocx-lazy-report] are the last tier before each ladder's floor (`never` / `silent`). See [Deferred Tools][in-depth-lazy-loading] for the full five-tier `lazy-mode` ladder and the four-tier `lazy-report` ladder.
+Both accept the same value sets as their `[package."<id>"]` counterparts and are excluded from `declaration_hash` for the same reason. Below both of these, [`OCX_LAZY_MODE`][env-ocx-lazy-mode] and [`OCX_LAZY_REPORT`][env-ocx-lazy-report] are the last tier before each ladder's floor (`never` / `silent`). See [Deferred Packages][in-depth-lazy-loading] for the full five-tier `lazy-mode` ladder and the four-tier `lazy-report` ladder.
 
 ### Toolchain-level `activate` {#project-config-activate}
 
@@ -1942,8 +1942,8 @@ activate = "bin"
 
 | Value | What reaches the shell |
 |---|---|
-| `"env"` *(default)* | The toolchain environment is composed on every prompt: each tool's own `PATH` entries and declared variables land in the shell. |
-| `"bin"` | Only `<home>/toolchain/active/bin` goes on `PATH`. Nothing else is composed — a tool is resolved by its [launcher trampoline][env-composition-activation] when it runs, and the trampoline composes the environment at that moment. |
+| `"env"` *(default)* | The toolchain environment is composed on every prompt: each package's own `PATH` entries and declared variables land in the shell. |
+| `"bin"` | Only `<home>/toolchain/active/bin` goes on `PATH`. Nothing else is composed — a binary is resolved by its [launcher trampoline][env-composition-activation] when it runs, and the trampoline composes the environment at that moment. |
 | `"none"` | Neither. The reconciler withdraws whatever it owns and adds nothing. |
 
 An unrecognized value in `ocx.toml` is a **parse error**, exit 78 — the same treatment `lazy-mode` gets — for every command that loads the file. [`OCX_TOOLCHAIN_ACTIVATE`][env-ocx-toolchain-activate] is deliberately not symmetric: an unrecognized value there warns `Environment variable 'OCX_TOOLCHAIN_ACTIVATE' ignored: invalid activate mode 'shim' (expected 'env', 'bin' or 'none')` on stderr and falls through to the next tier, exit 0. A file you own may fail loudly; an inherited variable may not break every prompt in every project.
@@ -1971,7 +1971,7 @@ That targets the ocx home's own `ocx.toml`, never the project in effect — `--p
 :::
 
 ::: tip Both halves of a shell honour the mode
-Two moments put a global environment into a shell, and both read this key: the login stream [`ocx self activate`][cmd-self-activate] emits at shell start, and the per-prompt reconciler runs at every prompt after that. In `env` mode the login stream carries an `ocx --global env` eval; under `bin` and `none` it does not, and the trampoline directory it always prepends is what resolves the tools instead. That matters most where no prompt ever runs — a script, an `ssh host cmd`, a git hook, a `sh` that registers no hook at all.
+Two moments put a global environment into a shell, and both read this key: the login stream [`ocx self activate`][cmd-self-activate] emits at shell start, and the per-prompt reconciler runs at every prompt after that. In `env` mode the login stream carries an `ocx --global env` eval; under `bin` and `none` it does not, and the trampoline directory it always prepends is what resolves the binaries instead. That matters most where no prompt ever runs — a script, an `ssh host cmd`, a git hook, a `sh` that registers no hook at all.
 :::
 
 `activate` governs how a toolchain reaches a shell **on its own**, never what a command you typed prints. [`ocx --global env`][cmd-env-root] and [`ocx --global exec`][cmd-run] are explicit requests and compose the global tier in full, whatever the key says.
@@ -2010,7 +2010,7 @@ cmake      = "ocx.sh/kitware/cmake:3.28"
 shellcheck = "ocx.sh/shellcheck:0.11"
 ```
 
-Both keys are **resolve-time policy, not tool declarations**, so both are excluded from `declaration_hash` — editing either does not invalidate `ocx.lock`. See [Toolchain activation][env-composition-activation] for the `activate` × `pinned` matrix and what each cell puts on `PATH`.
+Both keys are **resolve-time policy, not bindings**, so both are excluded from `declaration_hash` — editing either does not invalidate `ocx.lock`. See [Toolchain activation][env-composition-activation] for the `activate` × `pinned` matrix and what each cell puts on `PATH`.
 
 ### `[env]` value grammar {#project-config-env}
 

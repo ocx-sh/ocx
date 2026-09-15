@@ -3,7 +3,7 @@ outline: deep
 ---
 # Dependencies
 
-A binary tool rarely runs in isolation. A web application needs a JavaScript runtime; a build tool needs a compiler; a Maven build needs both Java and Maven on `PATH`. Most package managers solve this with version-range resolvers and project-level lockfiles — useful when source compilation produces unique builds, but heavyweight when the upstream is already a content-addressed binary in an OCI registry.
+A binary rarely runs in isolation. A web application needs a JavaScript runtime; a build tool needs a compiler; a Maven build needs both Java and Maven on `PATH`. Most package managers solve this with version-range resolvers and project-level lockfiles — useful when source compilation produces unique builds, but heavyweight when the upstream is already a content-addressed binary in an OCI registry.
 
 OCX takes a deliberately narrow approach. Every dependency is pinned to an exact <Tooltip term="OCI digest">A SHA-256 fingerprint that identifies a specific build of a package. The publisher records the exact digest they tested against — not a version range, not a "latest" tag. This means the dependency graph is fully determined by the package metadata alone.</Tooltip> by the publisher; there are no version ranges, no resolution algorithm, no auto-updates. The dependency graph is a flat list of digests baked into each package's metadata. This page explains *why* the surface is so small, *how* transitive resolution works, and where the related design — visibility, environment composition, GC — lives. The user-facing surface — auto-fetch, `ocx package exec`, `ocx package deps` — lives in the [Dependencies section of the user guide][user-deps].
 
@@ -14,7 +14,7 @@ A dependency's digest is not free to identify anything with the right bytes — 
 That reasoning breaks the moment the dependency's publisher pushes again. [Cascade publishing][in-depth-versioning-cascades] rewrites a tag's index on every platform push — the previous index digest becomes untagged and the registry's garbage collector reclaims it on its next sweep. A dependency pinned to that now-untagged index digest starts 404ing, permanently, the first time its publisher adds a platform or re-releases an existing one. The child platform manifests have no such problem: every successor index still references them, so they survive indefinitely.
 
 ::: info The same rule governs the project lock
-[`ocx.lock`][in-depth-project-lock] applies the identical rule to project toolchains: it records each tool's **per-platform leaf manifest digest**, deliberately never the index digest — see [Lock format][in-depth-project-lock-format]. Package dependencies follow the same rule, for the same reason: the index digest is a moving target across a publisher's release history, the leaf manifest digest is not.
+[`ocx.lock`][in-depth-project-lock] applies the identical rule to project toolchains: it records each binding's **per-platform leaf manifest digest**, deliberately never the index digest — see [Lock format][in-depth-project-lock-format]. Package dependencies follow the same rule, for the same reason: the index digest is a moving target across a publisher's release history, the leaf manifest digest is not.
 :::
 
 ## Create Resolves, Push Gates {#create-push-split}
@@ -55,7 +55,7 @@ The full algorithm — TC walk, edge filter, scalar vs. accumulator semantics, c
 
 ## Visibility {#visibility}
 
-Every package owns two environment surfaces: an **interface surface** (what consumers see by default) and a **private surface** (what the package's own launchers see at runtime). A build tool that wraps a compiler might need `CC` and `LD_LIBRARY_PATH` internally — those belong on the private surface. A shared Java runtime that every consumer needs goes on the interface surface.
+Every package owns two environment surfaces: an **interface surface** (what consumers see by default) and a **private surface** (what the package's own launchers see at runtime). A package that wraps a compiler might need `CC` and `LD_LIBRARY_PATH` internally — those belong on the private surface. A shared Java runtime that every consumer needs goes on the interface surface.
 
 Each dependency declares a `visibility` value (`sealed` / `private` / `public` / `interface`) controlling which surface it reaches. When dependencies form chains, visibility propagates inductively along edges; diamond resolution applies the most-open value per axis.
 

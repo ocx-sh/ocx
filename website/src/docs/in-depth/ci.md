@@ -5,22 +5,22 @@ outline: deep
 
 Running OCX in a CI pipeline has one core challenge: shell environment changes do not cross step boundaries.
 
-When a pipeline runs `eval "$(ocx env --shell=bash)"`, those exports live only in the current shell. The next step starts a fresh process — `PATH` is reset, variables are gone, and any tool installed in step one is invisible in step two.
+When a pipeline runs `eval "$(ocx env --shell=bash)"`, those exports live only in the current shell. The next step starts a fresh process — `PATH` is reset, variables are gone, and any package installed in step one is invisible in step two.
 
-`ocx env --ci` and `ocx package env --ci` solve this by writing the composed environment into the CI system's own persistence channel instead of printing shell export lines. The runner picks up that channel between steps, so later steps see the full tool environment without any extra glue code.
+`ocx env --ci` and `ocx package env --ci` solve this by writing the composed environment into the CI system's own persistence channel instead of printing shell export lines. The runner picks up that channel between steps, so later steps see the full composed environment without any extra glue code.
 
 :::info `--shell` vs `--ci` — which one to use
-`--shell` emits eval-safe export lines for the **current step only**. Use it inside a single step that sources the env and immediately runs commands. `--ci` writes to the runner's persistence channel so the env is available to **every subsequent step**. Use it whenever tools installed in one step must be reachable in later steps.
+`--shell` emits eval-safe export lines for the **current step only**. Use it inside a single step that sources the env and immediately runs commands. `--ci` writes to the runner's persistence channel so the env is available to **every subsequent step**. Use it whenever packages installed in one step must be reachable in later steps.
 :::
 
 ## GitHub Actions {#ci-github-actions}
 
 [GitHub Actions][github-actions-docs] runners provide two file-based channels for sharing state across steps:
 
-- [`$GITHUB_PATH`][github-actions-set-path] — each appended line is **prepended** to `PATH` for all later steps. OCX writes `PATH` entries here, so OCX-installed tools land leftmost (highest priority) in `PATH` regardless of when in the job `ocx env --ci=github` runs.
+- [`$GITHUB_PATH`][github-actions-set-path] — each appended line is **prepended** to `PATH` for all later steps. OCX writes `PATH` entries here, so OCX-composed package directories land leftmost (highest priority) in `PATH` regardless of when in the job `ocx env --ci=github` runs.
 - [`$GITHUB_ENV`][github-actions-set-env] — each `KEY=VALUE` line (or heredoc block for multiline values) is exported to all later steps.
 
-`ocx env --ci=github` reads the paths of those files from the runner's own `GITHUB_PATH` and `GITHUB_ENV` variables and appends the resolved tool paths and variables directly. No `jq`, no redirect.
+`ocx env --ci=github` reads the paths of those files from the runner's own `GITHUB_PATH` and `GITHUB_ENV` variables and appends the resolved package paths and variables directly. No `jq`, no redirect.
 
 Only the literal `PATH` variable goes to `$GITHUB_PATH`. All other path-type variables — `LD_LIBRARY_PATH`, `MANPATH`, `PKG_CONFIG_PATH`, and any others declared in package metadata — are written to `$GITHUB_ENV` as `KEY=value`, with OCX-provided directories prepended to the existing value. A [`list`][reference-env-list]-type variable (such as `JDK_JAVA_OPTIONS`) also goes to `$GITHUB_ENV`, but folds the opposite direction: OCX's contribution is *appended* to the existing value, joined by the key's separator, instead of prepended.
 
@@ -43,7 +43,7 @@ jobs:
         run: cmake --version && ninja --version
 ```
 
-After the [`setup-ocx`][setup-ocx] step, every subsequent step sees the project's resolved tool directories in `PATH` and any declared environment variables.
+After the [`setup-ocx`][setup-ocx] step, every subsequent step sees the project's resolved package directories in `PATH` and any declared environment variables.
 
 ::: details Without the action — install OCX manually
 If you prefer not to depend on the [`setup-ocx`][setup-ocx] action, install OCX with the [POSIX installer][setup-ocx-sh] and replay the toolchain yourself. The installer puts the `ocx` binary under `~/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin` — add that to `$GITHUB_PATH` so `ocx` resolves in later steps:
@@ -84,7 +84,7 @@ jobs:
           curl -fsSL https://setup.ocx.sh/sh | sh
           echo "$HOME/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin" >> "$GITHUB_PATH"
 
-      - name: Resolve tool environment
+      - name: Resolve project environment
         run: ocx package env --ci=github node:20 python:3.12
 
       - name: Run tests
@@ -119,7 +119,7 @@ Traditional `script:` jobs cannot consume this JSON format at all. For cross-job
 
 ### Toolchain-tier example {#ci-gitlab-toolchain}
 
-This example uses the GitLab step runner's `run:` keyword. Install OCX and set up the toolchain in two steps of the same job, then use the tools in a third step of the same job:
+This example uses the GitLab step runner's `run:` keyword. Install OCX and set up the toolchain in two steps of the same job, then use the binaries in a third step of the same job:
 
 ```yaml
 build:
@@ -136,7 +136,7 @@ build:
         ninja --version
 ```
 
-`${{ export_file }}` is a runner-provided path, not a user-defined variable. The step runner reads the JSON-lines written there and injects each entry into the environment of later steps within the same job. The "Build" step sees the full tool environment because it follows "Set up toolchain" in the same job.
+`${{ export_file }}` is a runner-provided path, not a user-defined variable. The step runner reads the JSON-lines written there and injects each entry into the environment of later steps within the same job. The "Build" step sees the full composed environment because it follows "Set up toolchain" in the same job.
 
 ### Redirect to stdout {#ci-gitlab-stdout}
 
@@ -160,7 +160,7 @@ test:
       script: |
         curl -fsSL https://setup.ocx.sh/sh | sh
         export PATH="$HOME/.ocx/symlinks/ocx.sh/ocx/cli/current/content/bin:$PATH"
-    - name: Resolve tool environment
+    - name: Resolve project environment
       script: ocx package env --ci=gitlab --export-file="${{ export_file }}" node:20 python:3.12
     - name: Run tests
       script: |

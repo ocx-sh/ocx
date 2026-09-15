@@ -3,7 +3,7 @@ outline: deep
 ---
 # Declaring Dependencies
 
-When your tool needs to find another tool on disk at runtime — a runtime, a shared toolchain, a configuration generator — declare it as a dependency. OCX resolves the graph at install time, hardlinks every dependency's content into the consumer's environment, and composes their env surfaces according to the visibility you choose. This page covers the publisher decisions: when to declare a dependency at all, how to pin it, and how visibility changes what propagates to consumers.
+When your package needs to find another package on disk at runtime — a runtime, a shared toolchain, a configuration generator — declare it as a dependency. OCX resolves the graph at install time, hardlinks every dependency's content into the consumer's environment, and composes their env surfaces according to the visibility you choose. This page covers the publisher decisions: when to declare a dependency at all, how to pin it, and how visibility changes what propagates to consumers.
 
 ## When to Declare {#when}
 
@@ -11,9 +11,9 @@ Bundle vs. depend is the first question. Bundling means shipping the dependency'
 
 Reach for a declared dependency when at least one of these is true:
 
-- **The dependency is large or commonly needed.** Bundling [Node.js][nodejs] inside every [npm][npm]-tool wrapper would mean re-shipping the same ~30 MB `node-vXX.x.x-linux-x64.tar.xz` (or ~57 MB Gzip equivalent) per tool. A declared `ocx.sh/nodejs/node:24` dependency means one cached install across all tools that pin the same digest.
+- **The dependency is large or commonly needed.** Bundling [Node.js][nodejs] inside every wrapper for an [npm][npm] package would mean re-shipping the same ~30 MB `node-vXX.x.x-linux-x64.tar.xz` (or ~57 MB Gzip equivalent) per package. A declared `ocx.sh/nodejs/node:24` dependency means one cached install across all packages that pin the same digest.
 - **You need a specific version of someone else's tool.** Wrapping [`terraform`][terraform] to add organisation defaults means pinning the upstream `terraform` build — a declared dependency captures that pin in metadata, so consumers can audit it without unpacking your archive.
-- **Your tool genuinely runs the dependency at runtime.** A wrapper that shells out to [`cmake`][cmake] needs `cmake` on disk in a known place — `${deps.cmake.installPath}` provides that.
+- **Your package genuinely runs the dependency at runtime.** A wrapper that shells out to [`cmake`][cmake] needs `cmake` on disk in a known place — `${deps.cmake.installPath}` provides that.
 
 Bundling stays the right call when the dependency is tiny, single-use, or version-coupled to your build (a vendored library you patched, for example).
 

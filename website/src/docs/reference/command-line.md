@@ -56,7 +56,7 @@ digest-pinned identifier.
 
 ::: warning
 `ocx index update <pkg>` writes the tag's dispatch object and root document into the local index,
-so a subsequent `ocx --offline package install <pkg>` can resolve the tool's per-platform digest
+so a subsequent `ocx --offline package install <pkg>` can resolve the package's per-platform digest
 with no network. The install itself still needs the actual manifest and layer archives, which the
 index does not carry — those are fetched into the [package store][fs-objects] only by an online
 `ocx package install` or `ocx package pull`. Run one of those online first if you need the binary
@@ -94,7 +94,7 @@ Use it in CI to assert every project dependency is digest-pinned:
 ocx --offline --remote exec -- my-build-script
 ```
 
-If any tool resolution falls back to a floating tag, the command fails — a
+If any package resolution falls back to a floating tag, the command fails — a
 hermetic-build sanity check without round-tripping to the registry.
 
 ### `--frozen` {#arg-frozen}
@@ -126,7 +126,7 @@ to *discover* a new tag→digest mapping. Use it in CI to assert a project never
 installs a version that was not already locked or indexed.
 
 ```sh
-ocx --frozen pull                 # succeeds when every tool is already locked
+ocx --frozen pull                 # succeeds when every binding is already locked
 ocx --frozen add some/tool:tag    # exit 81 if that tag is not in the index
 ```
 
@@ -154,7 +154,7 @@ ocx --index /path/to/bundled/index install cmake:3.28
 ```
 
 This flag swaps the *whole* collection for a shipped one — never a partial overlay of the two. It
-is intended for environments where an index copy is bundled alongside a tool rather than living
+is intended for environments where an index copy is bundled alongside a consumer rather than living
 inside `OCX_HOME` — for example inside a [GitHub Action][github-actions-docs],
 [Bazel Rule][bazel-rules], or [DevContainer Feature][devcontainer-features] that ships a frozen
 index copy as part of its release.
@@ -193,7 +193,7 @@ variable; the flag wins when both are set.
 
 Caps the number of root packages pulled in parallel. Applies to every command
 that fans out through `pull_all` — `package install`, `pull`, `package pull`, `package exec`
-(when it auto-installs missing tools), and the env-composition path of `env`.
+(when it auto-installs missing packages), and the env-composition path of `env`.
 
 The cap acts on the **outer dispatch only**: transitive dependencies and OCI
 layer extraction stay unbounded so a child pull never deadlocks waiting for a
@@ -385,12 +385,12 @@ consumers traverse into `<root>/entrypoints/`, and metadata readers open `<root>
 
 Available on the seven commands that compose or pre-warm an environment: [`env`](#env-root), [`exec`](#exec), [`pull`](#pull), [`direnv export`](#direnv-export), [`package env`](#env), [`package exec`](#package-exec), and [`package which`](#which). Not available on [`package install`](#package-install) or [`package select`](#package-select) — those are the only two commands that write the [candidate/current symlink namespace](#path-resolution), and a symlink must never point at a shim directory.
 
-Controls when a declared tool's content downloads: now, or on first use.
+Controls when a declared package's content downloads: now, or on first use.
 
 | Value | Behavior |
 |-------|----------|
-| `never` (default) | Compose eagerly — content is materialized before the tool reaches `PATH`. |
-| `always` | Compose a shim — the tool's declared names are on `PATH` immediately; content downloads the first time one of those names runs. |
+| `never` (default) | Compose eagerly — content is materialized before the package's binaries reach `PATH`. |
+| `always` | Compose a shim — the package's declared names are on `PATH` immediately; content downloads the first time one of those names runs. |
 
 `--lazy-mode` is the top tier of a five-level resolution ladder, most specific first:
 
@@ -403,15 +403,15 @@ Controls when a declared tool's content downloads: now, or on first use.
 | 5 | [`OCX_LAZY_MODE`][env-ocx-lazy-mode] |
 | — | Floor: `never` |
 
-An omitted flag leaves the CLI tier absent, letting the more general tiers speak — it never means `never`. See [Deferred Tools][in-depth-lazy-loading] for the full lifecycle, and [`ocx package which`](#which) below for how a deferred tool reports its on-disk `kind`.
+An omitted flag leaves the CLI tier absent, letting the more general tiers speak — it never means `never`. See [Deferred Packages][in-depth-lazy-loading] for the full lifecycle, and [`ocx package which`](#which) below for how a deferred package reports its on-disk `kind`.
 
 ::: info Windows defers like every other platform
-`lazy-mode` carries no platform floor. A tool the ladder resolves to `always` is deferred on Windows exactly as it is on Linux and macOS. The only difference is the shape of the slot: a deferred name occupies two files there — `<name>.exe`, a hardlink to the shared launcher shim, plus a `<name>.shimref` sidecar carrying the pinned identifier the shim reads back. See [Deferred Tools][in-depth-lazy-loading].
+`lazy-mode` carries no platform floor. A package the ladder resolves to `always` is deferred on Windows exactly as it is on Linux and macOS. The only difference is the shape of the slot: a deferred name occupies two files there — `<name>.exe`, a hardlink to the shared launcher shim, plus a `<name>.shimref` sidecar carrying the pinned identifier the shim reads back. See [Deferred Packages][in-depth-lazy-loading].
 :::
 
 ### `--lazy-report` {#arg-lazy-report}
 
-Controls whether a deferred tool's first-invocation download renders progress. Declared on exactly one subcommand in the whole CLI — the hidden `ocx launcher shim` verb that a generated shim launcher execs into, never one a user types directly.
+Controls whether a deferred package's first-invocation download renders progress. Declared on exactly one subcommand in the whole CLI — the hidden `ocx launcher shim` verb that a generated shim launcher execs into, never one a user types directly.
 
 | Value | Behavior |
 |-------|----------|
@@ -428,7 +428,7 @@ It cannot be a flag on any of the seven composing commands above: the process th
 | 4 | [`OCX_LAZY_REPORT`][env-ocx-lazy-report] |
 | — | Floor: `silent` |
 
-See [Deferred Tools][in-depth-lazy-loading] for why `lazy-report` has no `[group.<name>]` tier.
+See [Deferred Packages][in-depth-lazy-loading] for why `lazy-report` has no `[group.<name>]` tier.
 
 ### `--pinned`, `--no-pinned` {#arg-pinned}
 
@@ -467,7 +467,7 @@ One consequence is worth naming, because it is the one that surprises: two machi
 
 #### Only roots take the link lane {#arg-pinned-roots-only}
 
-A `links/<group>/<entry>` link points at a lock entry — a tool named in `[tools]` or a `[group.<name>]` table — and at nothing else. So a lock entry is the only thing the link lane can move. Everything a **dependency** contributes is a digest path in *both* lanes: the `PATH` directories a dependency adds to the composition, and every `${deps.<name>.installPath}` a package's `[env]` dereferences.
+A `links/<group>/<entry>` link points at a lock entry — a binding named in `[tools]` or a `[group.<name>]` table — and at nothing else. So a lock entry is the only thing the link lane can move. Everything a **dependency** contributes is a digest path in *both* lanes: the `PATH` directories a dependency adds to the composition, and every `${deps.<name>.installPath}` a package's `[env]` dereferences.
 
 The "no re-render" property is therefore a property of roots. After an [`ocx update`](#update), an already-composed environment picks the new root up through the root's link, while its dependency-contributed paths still name the packages the previous lock pinned, until something composes the environment again.
 
@@ -505,15 +505,15 @@ cmake = "ocx.sh/kitware/cmake:3.28"
 
 ### `add` {#add}
 
-Appends a tool binding to the nearest `ocx.toml`, resolves its digest into `ocx.lock`, and installs the package in one step.
+Appends a binding to the nearest `ocx.toml`, resolves its digest into `ocx.lock`, and installs the package in one step.
 
 The command locates the project `ocx.toml` by walking the directory tree from the current working directory upward (same discovery as [`ocx lock`](#lock) and [`ocx pull`](#pull)). It fails with exit code 64 if no `ocx.toml` is found — it does **not** scaffold one implicitly. To create a project file first, run [`ocx init`](#init).
 
-After mutating `ocx.toml`, `ocx add` resolves only the new bindings and carries every existing lock entry forward unchanged, then installs the newly added tools.
+After mutating `ocx.toml`, `ocx add` resolves only the new bindings and carries every existing lock entry forward unchanged, then installs the newly added packages.
 
 Multiple identifiers may be given in one invocation. They are staged together and committed atomically — if any identifier is invalid or its binding name already exists, nothing is written. `--group` applies to every identifier in the batch.
 
-The same binding name may coexist in the default `[tools]` table and in any named `[group.*]` table — binding identity is `(group, name)`. This lets a project carry different versions of the same tool in different contexts:
+The same binding name may coexist in the default `[tools]` table and in any named `[group.*]` table — binding identity is `(group, name)`. This lets a project carry different versions of the same package in different contexts:
 
 ```shell
 ocx add shfmt/shfmt:3.13              # adds to default [tools]
@@ -528,14 +528,14 @@ ocx add [OPTIONS] <[NAME=]IDENTIFIER>...
 
 **Arguments**
 
-- `<[NAME=]IDENTIFIER>...`: One or more fully-qualified tool identifiers to add (e.g. `ocx.sh/kitware/cmake:3.28` or `ghcr.io/acme/mytool:1.0`). Bare identifiers without a tag (e.g. `ocx.sh/kitware/cmake`) default to `:latest` — the written `ocx.toml` entry is always explicit (`cmake = "ocx.sh/kitware/cmake:latest"`), following the same convention as `docker pull`. See [the bare-identifier default][user-guide-toml] for the design rationale. Prefix an identifier with `NAME=` to bind it under an explicit key instead of the derived repository basename — see [Binding names](#add-binding-names) below.
+- `<[NAME=]IDENTIFIER>...`: One or more fully-qualified package identifiers to add (e.g. `ocx.sh/kitware/cmake:3.28` or `ghcr.io/acme/mytool:1.0`). Bare identifiers without a tag (e.g. `ocx.sh/kitware/cmake`) default to `:latest` — the written `ocx.toml` entry is always explicit (`cmake = "ocx.sh/kitware/cmake:latest"`), following the same convention as `docker pull`. See [the bare-identifier default][user-guide-toml] for the design rationale. Prefix an identifier with `NAME=` to bind it under an explicit key instead of the derived repository basename — see [Binding names](#add-binding-names) below.
 
 **Options**
 
 | Flag | Short | Description |
 |------|-------|-------------|
 | `--group <NAME>` | `-g` | Add the binding to a named group instead of the default `[tools]` table. Must be non-empty and contain only alphanumeric characters, `-`, or `_`. |
-| `--pull` | — | After writing the lock, materialise the newly added tool into the object store and create its candidate symlink. Default when `--no-pull` is absent. |
+| `--pull` | — | After writing the lock, materialise the newly added package into the object store and create its candidate symlink. Default when `--no-pull` is absent. |
 | `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx exec`. |
 | `--platform <PLATFORM>` | `-p` | Materialise the leaf for the named platform instead of the host — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. The lock already pins every shipped platform's leaf, so this only selects which to fetch — the lock stays host-agnostic (an amd64 host can pre-warm an arm64 leaf). Defaults to the current host. A platform the publisher does not ship exits 78. |
 | `--help` | `-h` | Print help information. |
@@ -549,20 +549,20 @@ See [`--global`][global-flag] for the full root-flag reference.
 
 | Code | Meaning |
 |------|---------|
-| 0 | Binding added, lock updated, tool installed. |
+| 0 | Binding added, lock updated, package installed. |
 | 1 | The in-place `ocx.toml` edit could not be expressed safely (rare); the command aborts rather than falling back to a lossy rewrite. |
 | 64 | No `ocx.toml` found, binding already exists, invalid `--group` name, invalid binding `NAME`, `--global` combined with `--project`, or more than one `--platform` value (single-valued flag). |
 | 65 | `ocx.toml` drifted from `ocx.lock` before this add — run `ocx lock` to reconcile. |
 | 69 | Registry unreachable while resolving the new tag. |
 | 74 | I/O error reading or writing `ocx.toml` or `ocx.lock`. |
 | 75 | Another `ocx` process holds the project lock on `ocx.toml`, or a transient registry failure (connect failure, timeout, 429/502/503/504) survived the resolve retries. Retry with backoff. |
-| 78 | `ocx.lock` uses an unsupported version — V1 and V2 locks are rejected; regenerate with `ocx lock`. Also: `ocx.toml` schema invalid or TOML parse error, or a requested `--platform` is not shipped by a tool. |
+| 78 | `ocx.lock` uses an unsupported version — V1 and V2 locks are rejected; regenerate with `ocx lock`. Also: `ocx.toml` schema invalid or TOML parse error, or a requested `--platform` is not shipped by a package. |
 | 79 | Tag not found in the registry. |
 | 80 | Authentication failure against the registry. |
 
 #### Binding names {#add-binding-names}
 
-Without `NAME=`, the binding key is the repository basename — `ocx add ocx.sh/kitware/cmake:3.28` binds under `cmake`. Two tools that share a basename in different namespaces collide under that default: `ocx.sh/gitlab/cli` and `ocx.sh/github/cli` both derive to `cli`, so adding the second fails with "binding already exists".
+Without `NAME=`, the binding key is the repository basename — `ocx add ocx.sh/kitware/cmake:3.28` binds under `cmake`. Two packages that share a basename in different namespaces collide under that default: `ocx.sh/gitlab/cli` and `ocx.sh/github/cli` both derive to `cli`, so adding the second fails with "binding already exists".
 
 Prefix either identifier with an explicit `NAME=` to bind it under a distinct key instead:
 
@@ -571,7 +571,7 @@ ocx add gh=ocx.sh/github/cli:2.40
 ocx add glab=ocx.sh/gitlab/cli:1.30
 ```
 
-Both tools now coexist under their own keys — `ocx exec gh`, `ocx exec glab`, `ocx remove glab`, and the `ocx.lock` entry all key on the name you gave, not the repository path. `NAME` must be non-empty and contain only `[A-Za-z0-9._-]`; an invalid name exits 64.
+Both bindings now coexist under their own keys — `ocx exec gh`, `ocx exec glab`, `ocx remove glab`, and the `ocx.lock` entry all key on the name you gave, not the repository path. `NAME` must be non-empty and contain only `[A-Za-z0-9._-]`; an invalid name exits 64.
 
 ### `clean` {#clean}
 
@@ -583,7 +583,7 @@ An object is unreferenced when nothing points to it — no candidate or current 
 Do not run `clean` concurrently with other OCX commands. A concurrent install may reference an object that `clean` is about to remove, causing the install to fail.
 :::
 
-The rendered toolchain tree is outside this graph entirely. `<home>/toolchain/` holds `shells/default/bin` trampolines and `links/<group>/<entry>` links — pure derived state that [`ocx pull`](#pull) rewrites from `ocx.lock` — so `clean` never walks it and never collects from it. The packages those links *point at* are ordinary object-store entries, held live by the project's own `ocx.lock` through the `$OCX_HOME/projects/` ledger like every other pinned tool.
+The rendered toolchain tree is outside this graph entirely. `<home>/toolchain/` holds `shells/default/bin` trampolines and `links/<group>/<entry>` links — pure derived state that [`ocx pull`](#pull) rewrites from `ocx.lock` — so `clean` never walks it and never collects from it. The packages those links *point at* are ordinary object-store entries, held live by the project's own `ocx.lock` through the `$OCX_HOME/projects/` ledger like every other pinned package.
 
 **Usage**
 
@@ -738,11 +738,11 @@ ocx package deselect <PACKAGE>...
 
 Export the composed toolchain environment for the active project or global toolchain.
 
-This is the **toolchain-tier** env exporter. It reads `ocx.toml` + `ocx.lock` and emits the combined environment for the resolved tool set. Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain` table). Use `--shell` to get eval-safe shell export lines — that is the only form safe to pass to `eval`.
+This is the **toolchain-tier** env exporter. It reads `ocx.toml` + `ocx.lock` and emits the combined environment for the resolved package set. Output format is controlled by the root [`--format`](#arg-format) flag (default: `plain` table). Use `--shell` to get eval-safe shell export lines — that is the only form safe to pass to `eval`.
 
-With `--format json`, the document carries `binaries`/`entrypoints`/`integrations` sibling arrays alongside `entries`, plus an `advisories` array for any [deferred tool][in-depth-lazy-loading] in the composition — see [`package env`'s JSON shape][cmd-package-env] for the full field reference; both commands report through the same envelope.
+With `--format json`, the document carries `binaries`/`entrypoints`/`integrations` sibling arrays alongside `entries`, plus an `advisories` array for any [deferred package][in-depth-lazy-loading] in the composition — see [`package env`'s JSON shape][cmd-package-env] for the full field reference; both commands report through the same envelope.
 
-A tool missing from the local object store is auto-installed as part of composition. Because it auto-installs, a tool covered by a [`[[trust.policy]]`][config-trust] is signature-verified first — the same gate as [`package install`](#package-install) (see its auto-verify contract). No `--verify`/`--no-verify` flag here; opt out via [`OCX_NO_VERIFY`][env-no-verify].
+A package missing from the local object store is auto-installed as part of composition. Because it auto-installs, a package covered by a [`[[trust.policy]]`][config-trust] is signature-verified first — the same gate as [`package install`](#package-install) (see its auto-verify contract). No `--verify`/`--no-verify` flag here; opt out via [`OCX_NO_VERIFY`][env-no-verify].
 
 `--shell` requires the equals-form (`--shell=bash`, not `--shell bash`) to prevent shell injection through unquoted positional tokens.
 
@@ -760,11 +760,11 @@ ocx env [OPTIONS]
 | `--shell[=NAME]` | — | Emit eval-safe shell export lines for the named shell dialect. `NAME` is one of `bash`, `zsh`, `fish`, `sh` (POSIX/Dash), `powershell`, `nushell`, `elvish`. The equals-form is required — passing `--shell NAME` as two tokens is rejected with exit 64. `--shell` bare (no `=NAME`) autodetects from `$SHELL`. Mutually exclusive with `--ci`. | *(unset — uses `--format`)* |
 | `--ci[=PROVIDER]` | — | Write the composed environment into the CI system's persistence channel so the exported variables and paths are available to **later pipeline steps**. `PROVIDER` is one of `github` (alias `github-actions`) or `gitlab` (alias `gitlab-ci`). The equals-form is required (`--ci=github`, not `--ci github`). Bare `--ci` (no `=PROVIDER`) auto-detects from [`GITHUB_ACTIONS`][env-github-actions] and [`GITLAB_CI`][env-gitlab-ci]; no provider detected exits 64. Mutually exclusive with `--shell`. | *(unset)* |
 | `--export-file=PATH` | — | Write GitLab CI/CD JSON-lines output to `PATH` instead of stdout. Requires `--ci=gitlab`. Rejected with exit 64 when combined with `--ci=github` (GitHub infers its sink from [`GITHUB_ENV`][env-github-env] and [`GITHUB_PATH`][env-github-path]) or when given without `--ci`. | *(unset — stdout for gitlab)* |
-| `--platform <PLATFORM>` | `-p` | Compose the environment for a single target platform instead of the host (cross-build export). Single-valued: passing more than one exits 64. A tool that ships no leaf for the target exits 78 (project tier) or is skipped (global tier, lenient). Defaults to the current host. | *(current host)* |
-| [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim for every tool the ladder resolves to `always`, instead of downloading its content up front. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
+| `--platform <PLATFORM>` | `-p` | Compose the environment for a single target platform instead of the host (cross-build export). Single-valued: passing more than one exits 64. A package that ships no leaf for the target exits 78 (project tier) or is skipped (global tier, lenient). Defaults to the current host. | *(current host)* |
+| [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim for every package the ladder resolves to `always`, instead of downloading its content up front. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
 | [`--pinned`](#arg-pinned), [`--no-pinned`](#arg-pinned) | — | Top tier of the [`pinned` resolution ladder](#arg-pinned-ladder). `--pinned` composes the digest roots `ocx.lock` names; `--no-pinned` composes the rendered `links/<group>/<entry>` links. Neither takes a value, and passing both is last-wins. | *(inherit from `ocx.toml` / `OCX_TOOLCHAIN_PINNED`)* |
-| `--pull` | — | Materialise missing tools into the object store before composing (single batched install, like `ocx exec`). A tool already present resolves locally with no network — only a genuine miss pulls. Last-wins with `--no-pull`. Ignored under `--global` — the global tier never installs. | **default** |
-| `--no-pull` | — | Skip the install fallback: resolve against local state only. A lock-pinned tool that is not materialised is reported on stderr with an `ocx pull` hint and omitted from the composed env; the command never contacts the registry and the exit code stays 0. | — |
+| `--pull` | — | Materialise missing packages into the object store before composing (single batched install, like `ocx exec`). A package already present resolves locally with no network — only a genuine miss pulls. Last-wins with `--no-pull`. Ignored under `--global` — the global tier never installs. | **default** |
+| `--no-pull` | — | Skip the install fallback: resolve against local state only. A lock-pinned package that is not materialised is reported on stderr with an `ocx pull` hint and omitted from the composed env; the command never contacts the registry and the exit code stays 0. | — |
 | `--show-patches` | — | Annotate each entry with its origin. When [`[patches]`][config-patches] is configured, companion overlay entries are appended after the toolchain's own entries; this flag adds a `Source` column to the plain table (a `"source"` object in JSON) naming the descriptor rule and companion that produced each overlay entry. No effect when `[patches]` is not configured. Mutually exclusive with `--shell` and `--ci`. | false |
 | `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Only the segment before that first `=` is checked for a `:TYPE[:SEP]` qualifier — an environment variable name can never contain `:`, so a Windows-style value with its own colon (`--env PATH:path=C:\tools\bin`) is read correctly, and `--env FOO:constant=a=b` sets `FOO` to `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends) — the same three kinds [`[env]`][config-project-env] uses. `SEP` qualifies `list` only: the string a `list` contribution is joined to the existing value with (`--env GODEBUG:list:,=gctrace=1`); omitted, the key inherits whatever separator another contributor already declared, or a single space if none did — see [Env Composition][env-composition-list]. A relative `path` value resolves against the **current directory** the flag was invoked from, not the project root [`[env]`][config-project-env] resolves against: a checked-in file must mean the same thing from any subdirectory, while a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). See the `PATH` override warning under [`ocx exec`](#exec). | — |
 | `-h`, `--help` | | Print help information. | — |
@@ -815,8 +815,8 @@ ocx env --ci=gitlab >> "${{ export_file }}"
 `ocx env` and `ocx --format json env` print an aligned table or JSON document — neither form is eval-safe. The only eval-safe channel is `--shell[=NAME]`.
 :::
 
-::: tip `ocx env` installs missing tools by default
-The exporter resolves each lock-pinned tool locally first — a tool already in the object store needs no network (its digest is content-addressed, nothing to look up). Only a genuine miss falls through to install it inline, like [`ocx exec`](#exec). Pass `--no-pull` to skip that fallback and stay strictly offline: unmaterialised tools are warned about on stderr and omitted (the deterministic-CI shape), and the command never downloads.
+::: tip `ocx env` installs missing packages by default
+The exporter resolves each lock-pinned package locally first — a package already in the object store needs no network (its digest is content-addressed, nothing to look up). Only a genuine miss falls through to install it inline, like [`ocx exec`](#exec). Pass `--no-pull` to skip that fallback and stay strictly offline: unmaterialised packages are warned about on stderr and omitted (the deterministic-CI shape), and the command never downloads.
 :::
 
 **Exit codes**
@@ -874,7 +874,7 @@ Alias: `x`.
 
 Spawns a child process whose environment is composed from the project's `ocx.lock`. This is the **project-tier** env-composition command — symbols are binding names from `ocx.toml`, not OCI identifiers. For OCI-identifier-based invocations, use [`package exec`](#package-exec).
 
-The project is the nearest `ocx.toml` above the current directory — the same walk [`--project`](#arg-project) describes — and only that file's lock is composed. Inside a project nested in another one, the enclosing project's tools are not part of the child environment; name it with `ocx --project <dir> exec` to run against it instead (see [Nested projects switch, they do not stack][in-depth-shell-integration-nested]).
+The project is the nearest `ocx.toml` above the current directory — the same walk [`--project`](#arg-project) describes — and only that file's lock is composed. Inside a project nested in another one, the enclosing project's packages are not part of the child environment; name it with `ocx --project <dir> exec` to run against it instead (see [Nested projects switch, they do not stack][in-depth-shell-integration-nested]).
 
 A binding missing from the local object store is auto-installed as part of composition. Because it auto-installs, a binding covered by a [`[[trust.policy]]`][config-trust] is signature-verified first — the same gate as [`package install`](#package-install) (see its auto-verify contract). No `--verify`/`--no-verify` flag here; opt out via [`OCX_NO_VERIFY`][env-no-verify].
 
@@ -888,7 +888,7 @@ ocx exec [OPTIONS] [NAME...] -- ARGV...
 
 **Arguments**
 
-- `[NAME...]`: Zero or more binding names to include in the composed environment. Each name must exist and be unambiguous in the selected scope. When omitted, every binding in the selected scope is composed. The `-g` scope only *selects the namespace* for name resolution — when you name a subset, only those tools must resolve and install; an unrelated tool in scope that ships no leaf for the current host (exit 78) does not block the run. When you omit `NAME`, the whole scope is the set and every tool must resolve.
+- `[NAME...]`: Zero or more binding names to include in the composed environment. Each name must exist and be unambiguous in the selected scope. When omitted, every binding in the selected scope is composed. The `-g` scope only *selects the namespace* for name resolution — when you name a subset, only those bindings must resolve and install; an unrelated binding in scope that ships no leaf for the current host (exit 78) does not block the run. When you omit `NAME`, the whole scope is the set and every binding must resolve.
 - `ARGV...`: Command to execute with arguments. The first token is the binary name; the rest are passed unchanged to the child. `--` is mandatory before `ARGV`.
 
 **Options**
@@ -897,7 +897,7 @@ ocx exec [OPTIONS] [NAME...] -- ARGV...
 |------|-------|-------------|---------|
 | `--group <NAME>` | `-g` | Scope env composition to the named group(s). Repeatable and comma-separated (`-g ci,lint -g release`). `default` selects `[tools]`; `all` expands to `default` + every declared `[group.*]`. | `[tools]` only |
 | `--clean` | — | Start with a clean environment containing only the composed package variables, instead of inheriting the current shell environment. | off |
-| [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim for every tool the ladder resolves to `always`; its content downloads the first time the child process invokes it. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
+| [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `always` composes a shim for every package the ladder resolves to `always`; its content downloads the first time the child process invokes it. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
 | [`--pinned`](#arg-pinned), [`--no-pinned`](#arg-pinned) | — | Top tier of the [`pinned` resolution ladder](#arg-pinned-ladder). `--pinned` composes the digest roots `ocx.lock` names; `--no-pinned` composes the rendered `links/<group>/<entry>` links. Neither takes a value, and passing both is last-wins. | *(inherit from `ocx.toml` / `OCX_TOOLCHAIN_PINNED`)* |
 | `--env <KEY[:TYPE[:SEP]]=VALUE>` | — | Set an environment variable for this invocation only. Repeatable; later occurrences win over earlier ones for the same key. Splits on the **first** `=`, so `--env FOO=a=b` yields `FOO` → `a=b`. Only the segment before that first `=` is checked for a `:TYPE[:SEP]` qualifier — an environment variable name can never contain `:`, so a Windows-style value with its own colon (`--env PATH:path=C:\tools\bin`) is read correctly, and `--env FOO:constant=a=b` sets `FOO` to `a=b`. `TYPE` is `constant` (replaces, the default when omitted), `path` (prepends), or `list` (appends) — the same three kinds [`[env]`][config-project-env] uses. `SEP` qualifies `list` only: the string a `list` contribution is joined to the existing value with (`--env GODEBUG:list:,=gctrace=1`); omitted, the key inherits whatever separator another contributor already declared, or a single space if none did — see [Env Composition][env-composition-list]. A relative `path` value resolves against the **current directory** the flag was invoked from, not the project root [`[env]`][config-project-env] resolves against: a checked-in file must mean the same thing from any subdirectory, while a flag is composed by whatever script invokes `ocx`, and the current directory is the one base that script can compute. Highest-precedence stage: wins over ambient, package, patch, and project/group [`[env]`][config-project-env] (see [Project Environment][env-composition-project-env]). A bare `--env FOO` with no `=`, a `TYPE` that names no modifier or is empty, a `SEP` that is empty, contains `=`, contains a newline or carriage return, qualifies a non-`list` type, or edges a `list` value, an invalid variable name, or an `OCX_*`/`__OCX_*` key is rejected (exit 64). | — |
 | `--records-dir <DIR>` | — | Sink directory for the [exec-time resolution record][execution-records-ref] — one JSON file written immediately before the child starts, naming every package digest that composed the environment plus the resolved executable. Overrides the [`[records]` `dir`][config-records-dir] config key and [`OCX_RECORDS_DIR`][env-ocx-records-dir]. Unset at every tier means no record is written. | *(unset — recording off)* |
@@ -938,7 +938,7 @@ The first token after `--` is resolved once, before the child starts: `exec` sea
 | 74 | The [exec-time resolution record][execution-records-ref] could not be written and [`[records] required`][config-records] is `true` — the child never starts. |
 | 75 | Transient registry failure during auto-install (connect failure, timeout, 429/502/503/504) — rerunning may succeed. |
 | 77 | A policy-covered binding's certificate identity or OIDC issuer does not match (auto-verify). |
-| 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error — including a tool binding declared directly under `[group.<name>]` instead of `[group.<name>.tools]`, or an `[env]`/`[group.<name>.env]` entry with an `OCX_*`/`__OCX_*` key (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <tool>` to re-resolve; or a policy-covered binding's trust root/policy is misconfigured (auto-verify). The host-leaf check fires only for tools actually composed: the named subset when `NAME` is given, or every tool in scope when it is omitted; or the `--records-name`/`OCX_RECORDS_NAME`/[`[records] name`][config-records-name] template names an unrecognized placeholder, carries no varying component (`{time}`, `{pid}`, or `{rand}`), or renders to something other than a single plain filename; or the `--records-dir`/`OCX_RECORDS_DIR`/[`[records] dir`][config-records-dir] sink resolves through a symlink to a different directory (see [Execution Records][execution-records-ref]). |
+| 78 | `ocx.lock` absent — run `ocx lock`; or `ocx.toml` parse error — including a binding declared directly under `[group.<name>]` instead of `[group.<name>.tools]`, or an `[env]`/`[group.<name>.env]` entry with an `OCX_*`/`__OCX_*` key (e.g. `[group.all]` declared); or no leaf digest for the host platform at the locked version (no `"any"` fallback key in `[tool.platforms]`) — run `ocx update <name>` to re-resolve; or a policy-covered binding's trust root/policy is misconfigured (auto-verify). The host-leaf check fires only for bindings actually composed: the named subset when `NAME` is given, or every binding in scope when it is omitted; or the `--records-name`/`OCX_RECORDS_NAME`/[`[records] name`][config-records-name] template names an unrecognized placeholder, carries no varying component (`{time}`, `{pid}`, or `{rand}`), or renders to something other than a single plain filename; or the `--records-dir`/`OCX_RECORDS_DIR`/[`[records] dir`][config-records-dir] sink resolves through a symlink to a different directory (see [Execution Records][execution-records-ref]). |
 | 79 | Package not found in registry during auto-install; or no signature found for a policy-covered binding (auto-verify). |
 | 80 | Authentication failure during auto-install. |
 
@@ -974,7 +974,7 @@ ocx exec --env PATH:path=node_modules/.bin -- eslint .
 `ocx exec` requires `ocx.toml` and `ocx.lock`. If you do not have a project file, use [`ocx package exec`](#package-exec) with an OCI identifier instead.
 :::
 
-See [Project Toolchain In Depth → Running tools][in-depth-project-running] for composition order, PATH precedence, the `all` keyword, and worked examples.
+See [Project Toolchain In Depth → Running binaries][in-depth-project-running] for composition order, PATH precedence, the `all` keyword, and worked examples.
 
 ### `which` (package-tier — `ocx package which`) {#which}
 
@@ -984,7 +984,7 @@ The package root is the directory containing the package's `content/` and `entry
 
 By default the content-addressed object-store package root is returned. The `--candidate` and `--current` modes return the stable install symlink path; those symlinks themselves target the package root, so traversal works the same through them. See [Path Resolution](#path-resolution) for the trade-off between modes.
 
-Never downloads anything, whether or not [`--lazy-mode`](#arg-lazy-mode) is passed — this command only reports what already exists on disk. Every entry also names which **kind** of directory it found: `package` for a materialized package root, or `shim` for a tool composed with `--lazy-mode always` whose content has not downloaded yet. Once such a tool has been used once, its content is on disk and the entry reports `package` again. `--candidate` and `--current` always report `package`, because the install symlinks they resolve are only ever written for materialized content. See [Deferred Tools][in-depth-lazy-loading] for the full lifecycle.
+Never downloads anything, whether or not [`--lazy-mode`](#arg-lazy-mode) is passed — this command only reports what already exists on disk. Every entry also names which **kind** of directory it found: `package` for a materialized package root, or `shim` for a package composed with `--lazy-mode always` whose content has not downloaded yet. Once such a package has been used once, its content is on disk and the entry reports `package` again. `--candidate` and `--current` always report `package`, because the install symlinks they resolve are only ever written for materialized content. See [Deferred Packages][in-depth-lazy-loading] for the full lifecycle.
 
 **Usage**
 
@@ -1000,7 +1000,7 @@ ocx package which [OPTIONS] <PACKAGE>...
 
 - `-p`, `--platform`: Platform to consider when resolving. Defaults to the current platform. Ignored when `--candidate` or `--current` is set.
 - `--candidate`, `--current`: Path resolution mode — see [Path Resolution](#path-resolution).
-- [`--lazy-mode`](#arg-lazy-mode): Report a deferred tool's shim directory instead of refusing it — see below. Has no effect together with `--candidate`/`--current`, which always report a materialized package.
+- [`--lazy-mode`](#arg-lazy-mode): Report a deferred package's shim directory instead of refusing it — see below. Has no effect together with `--candidate`/`--current`, which always report a materialized package.
 - `-h`, `--help`: Print help information.
 
 **JSON shape (breaking, pre-1.0):** the value under each requested identifier is now an object, `{"path": "...", "kind": "package"|"shim"}`, rather than a bare path string. Plain output gains a matching `Kind` column.
@@ -1052,11 +1052,11 @@ ocx direnv init [OPTIONS]
 
 #### `export` {#direnv-export}
 
-Stateless export generator for the project toolchain. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, resolves every default-group tool, and prints **bash** export lines for the resolved environment. It emits a fresh export block on every invocation, leaving the diffing/caching to the caller (typically [direnv](https://direnv.net/)). It is what the generated `.envrc` evaluates; you do not normally type it by hand.
+Stateless export generator for the project toolchain. Reads the nearest project `ocx.toml`, loads the matching `ocx.lock`, resolves every default-group binding, and prints **bash** export lines for the resolved environment. It emits a fresh export block on every invocation, leaving the diffing/caching to the caller (typically [direnv](https://direnv.net/)). It is what the generated `.envrc` evaluates; you do not normally type it by hand.
 
 Output is always bash. [direnv](https://direnv.net/) sources `.envrc` files in a bash sub-shell regardless of the user's interactive shell, then translates the resulting environment to the interactive shell internally via `direnv export <shell>`. Programs invoked via `eval` from `.envrc` therefore have to emit bash — there is no shell-dialect option on this command.
 
-By default a tool missing from the object store is materialised on miss (like [`ocx env`](#env)): a tool already present resolves locally with no network — its digest is content-addressed, nothing to look up — so only a genuine miss falls through to install it. The pull is best-effort and is skipped whenever no registry is reachable (`--offline` / no configured remote), so a missing tool never fails or blocks the prompt. Pass `--no-pull` to keep the hook strictly offline: missing tools then produce a one-line stderr note and are skipped. Either way a stale lock produces a stderr warning but the stale digests are still used, and when no project `ocx.toml` is found in scope the command exits 0 with no output.
+By default a package missing from the object store is materialised on miss (like [`ocx env`](#env)): a package already present resolves locally with no network — its digest is content-addressed, nothing to look up — so only a genuine miss falls through to install it. The pull is best-effort and is skipped whenever no registry is reachable (`--offline` / no configured remote), so a missing package never fails or blocks the prompt. Pass `--no-pull` to keep the hook strictly offline: missing packages then produce a one-line stderr note and are skipped. Either way a stale lock produces a stderr warning but the stale digests are still used, and when no project `ocx.toml` is found in scope the command exits 0 with no output.
 
 **Usage**
 
@@ -1069,7 +1069,7 @@ ocx direnv export [OPTIONS]
 - `--group <NAME>` / `-g`: Scope composition to the named group(s), same grammar as [`ocx exec -g`](#exec). Omitted, the scope is the top-level `[tools]` table and its `[env]` — a group's `[env]` is otherwise unreachable from an `.envrc`.
 - `--env <KEY[:TYPE[:SEP]]=VALUE>`: Set an environment variable for this invocation only, same grammar as [`ocx exec --env`](#exec). A relative `path` value resolves against the directory ocx runs in, which under direnv is the directory holding `.envrc`.
 - [`--lazy-mode <MODE>`](#arg-lazy-mode): Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. Without it, a project declaring `lazy-mode = "always"` in `ocx.toml` would still compose eagerly here even though [`ocx env`](#env-root) defers it — `ocx direnv export` composes through the same ladder as every other env-composing command, so the environment does not depend on which command opened the shell.
-- `--pull` / `--no-pull`: `--pull` (default) installs a missing tool on the object-store miss before exporting; `--no-pull` keeps the hook strictly offline and omits it. POSIX last-wins.
+- `--pull` / `--no-pull`: `--pull` (default) installs a missing package on the object-store miss before exporting; `--no-pull` keeps the hook strictly offline and omits it. POSIX last-wins.
 - `-h`, `--help`: Print help information.
 
 ::: tip Widening the scope
@@ -1081,7 +1081,7 @@ ocx direnv export [OPTIONS]
 | Code | Meaning |
 |------|---------|
 | 0 | Success (no project, or exports emitted). |
-| 64 | Malformed `--env` argument, empty `-g` comma segment, or a `-g` naming no declared group. Unlike a missing lock or an unmaterialised tool, these are argv faults in a file you edited — they fail loudly rather than exporting nothing. |
+| 64 | Malformed `--env` argument, empty `-g` comma segment, or a `-g` naming no declared group. Unlike a missing lock or an unmaterialised package, these are argv faults in a file you edited — they fail loudly rather than exporting nothing. |
 | 65 | `ocx.lock` is stale (declaration_hash mismatch — run `ocx lock`); or two contributors to one env key declared conflicting list separators (see [Separator agreement][env-composition-list-separator]). |
 | 74 | I/O error during resolution. |
 | 78 | Parse error reading `ocx.toml` or `ocx.lock`. |
@@ -1148,7 +1148,7 @@ Explicitly refresh the local index for one or more packages from the remote sour
 writes the tag's dispatch object plus its root document into the [local index collection][in-depth-indices-layout]
 — never a leaf platform manifest — in a fixed, crash-safe order, then upserts the package's
 catalog entry. This is what keeps a committed `.ocx/index/` self-contained for **version
-choice**: resolving a locked tool's platform-manifest digest from the index afterward needs no
+choice**: resolving a locked package's platform-manifest digest from the index afterward needs no
 other store or network access. The manifest bytes and layers themselves are content, still fetched
 on demand from the registry when actually installed.
 
@@ -1174,7 +1174,7 @@ A bare `ocx index update` with no `<PACKAGE>` is a usage error ([exit 64][exit-c
 `ocx index update` never writes to `$OCX_HOME/blobs/` or `$OCX_HOME/layers/` — those are populated
 only by an online `ocx package install` or `ocx package pull` that actually materializes a package.
 After running `ocx index update <pkg>`, an `ocx --offline package install <pkg>` resolves the
-tool's per-platform digest from the index but still fails to install, since the manifest and layer
+package's per-platform digest from the index but still fails to install, since the manifest and layer
 archives themselves are not part of the index.
 
 On the first successful update for a given published source, `ocx index update` also writes that
@@ -1455,7 +1455,7 @@ Honors the global [`--format`][arg-format] and [`--project`][arg-project] / [`--
 }
 ```
 
-`default` is a group like any other. The top-level `[tools]` and `[env]` tables in `ocx.toml` **are** its tools and env — which is why `default` is a reserved group name — so the report has no separate top-level env.
+`default` is a group like any other. The top-level `[tools]` and `[env]` tables in `ocx.toml` **are** its bindings and env — which is why `default` is a reserved group name — so the report has no separate top-level env.
 
 Each binding under `groups.<name>.tools` reports its state by which keys are present, the same convention [`binaries`][reference-binaries-none-vs-empty] uses:
 
@@ -1508,7 +1508,7 @@ ocx inspect [OPTIONS] [NAME]...
 - `-g`, `--group <GROUP>`: Restrict the selection to the named group(s). Repeatable and comma-separated. `default` selects the top-level `[tools]` table; `all` expands to `default` plus every declared `[group.*]`. Omitted means the default group, not everything — matching [`exec`](#exec) and [`env`](#env-root).
 - `-p`, `--platform <PLATFORM>`: Platform to resolve each binding's leaf against. Defaults to the host. Applies with `--resolve` and `--closure`; ignored in default mode, where the candidate list always shows every locked platform.
 - `--resolve`: Select this host's leaf and emit its metadata plus the OCI resolution chain. The lock already pins a platform manifest, so the chain starts there and carries no `index` entry.
-- `--closure`: Compute each binding's dependency closure from metadata alone, plus the `interface` / `private` surface projections. Because the walk sees the whole selection at once, it also reports collisions between two *different* tools before either is installed.
+- `--closure`: Compute each binding's dependency closure from metadata alone, plus the `interface` / `private` surface projections. Because the walk sees the whole selection at once, it also reports collisions between two *different* packages before either is installed.
 - `--env <KEY[:TYPE[:SEP]]=VALUE>`: Set an environment variable for this invocation. Repeatable; appended last in the report's `env` array, matching where it lands in composition.
 - `-h`, `--help`: Print help information.
 
@@ -1589,7 +1589,7 @@ ocx --format json inspect -g ci shellcheck
 # What would the whole toolchain put on PATH, without installing it?
 ocx --format json inspect -g all --closure | jq '.packages[].closure.surface.interface.binaries'
 
-# Does any pair of tools collide before I install them? (exits 65 if so)
+# Does any pair of packages collide before I install them? (exits 65 if so)
 ocx --format json inspect -g all --closure | jq '.packages[] | select(.closure.conflicts.entrypoints != [])'
 ```
 
@@ -1605,13 +1605,13 @@ ocx --format json inspect -g all --closure | jq '.packages[] | select(.closure.c
 
 Creates a minimal `ocx.toml` in the selected project directory — [`--project <dir>`](#arg-project) or [`OCX_PROJECT`][env-project], else the current directory — or in `$OCX_HOME` under `--global`.
 
-The generated file contains a [`#:schema` directive][config-schemas] and an empty `[tools]` table — a non-interactive skeleton following the "backend-first, minimal output" design. Once the file exists, use [`ocx add`](#add) to append tool bindings or edit it directly; comments and declaration order in the file survive every mutation.
+The generated file contains a [`#:schema` directive][config-schemas] and an empty `[tools]` table — a non-interactive skeleton following the "backend-first, minimal output" design. Once the file exists, use [`ocx add`](#add) to append bindings or edit it directly; comments and declaration order in the file survive every mutation.
 
 The command is an idempotent failure: if `ocx.toml` already exists (or a symlink at that path exists), it exits with code 64 without overwriting the existing file.
 
 Pass `--project <dir>` **before** the subcommand to scaffold `<dir>/ocx.toml` from anywhere: `ocx --project "$CI_PROJECT_DIR" init`. The selection is read exactly as every other command reads it, so a path that does not exist exits 79 rather than being created, and a selected `ocx.toml` that already exists is the same exit-64 refusal as above.
 
-Pass `--global` **before** the subcommand to scaffold `$OCX_HOME/ocx.toml`: `ocx --global init`. See [`--global`][global-flag] for the full root-flag reference. That file is also auto-created by the global mutators (`ocx --global add` and its siblings), so `ocx --global init` is for scaffolding the global toolchain ahead of the first tool.
+Pass `--global` **before** the subcommand to scaffold `$OCX_HOME/ocx.toml`: `ocx --global init`. See [`--global`][global-flag] for the full root-flag reference. That file is also auto-created by the global mutators (`ocx --global add` and its siblings), so `ocx --global init` is for scaffolding the global toolchain ahead of the first binding.
 
 It also records a [consent stamp][shell-consent] for the project it creates, so the next shell prompt in that directory applies it — creating an `ocx.toml` is at least as deliberate a gesture as the `ocx add` that already writes one. The stamp records an empty source set, because the project has no lock yet; the first `ocx add` re-records it. Pass `--no-consent` to skip it and consent later with [`ocx shell allow`](#shell-allow), or set [`OCX_NO_CONSENT`][env-ocx-no-consent] to make that the default for every command in a pipeline. The flag outranks the variable, so `--consent` stamps even where the variable is set. Under `--global` no stamp is written in any case — the ocx home toolchain is always consented.
 
@@ -1797,11 +1797,11 @@ ocx --format json logout ghcr.io
 
 ### `lock` {#lock}
 
-Resolves every tool tag in the nearest `ocx.toml` to per-platform leaf digests and writes the result to `ocx.lock` next to it. The command is a **whole-file reconcile**: when the lock is already current (its `declaration_hash` matches the config), every pin is carried forward verbatim — a byte-identical, idempotent no-op that never advances a moving tag, even if it has moved upstream. When the config drifted, every declared tag is re-resolved and a moving tag may advance to wherever it points today. To force-advance pins on a current lock, use [`ocx update`](#update).
+Resolves every binding's tag in the nearest `ocx.toml` to per-platform leaf digests and writes the result to `ocx.lock` next to it. The command is a **whole-file reconcile**: when the lock is already current (its `declaration_hash` matches the config), every pin is carried forward verbatim — a byte-identical, idempotent no-op that never advances a moving tag, even if it has moved upstream. When the config drifted, every declared tag is re-resolved and a moving tag may advance to wherever it points today. To force-advance pins on a current lock, use [`ocx update`](#update).
 
-For each tool, the lock records the bare registry/repository coordinates plus a `[tool.platforms]` table mapping every platform the publisher ships to its leaf manifest digest. The command records all shipped platforms regardless of which OS it runs on, so a lock committed on Linux is complete for macOS and Windows CI runners. The command is fully transactional — either every tool resolves successfully and the file is rewritten atomically, or nothing is written and the previous `ocx.lock` survives unchanged.
+For each binding, the lock records the bare registry/repository coordinates plus a `[tool.platforms]` table mapping every platform the publisher ships to its leaf manifest digest. The command records all shipped platforms regardless of which OS it runs on, so a lock committed on Linux is complete for macOS and Windows CI runners. The command is fully transactional — either every binding resolves successfully and the file is rewritten atomically, or nothing is written and the previous `ocx.lock` survives unchanged.
 
-The lock carries a `declaration_hash` over the canonicalized [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) of `ocx.toml`. Downstream commands ([`ocx pull`](#pull), [`ocx exec`](#exec)) consult this hash to detect when the lock is stale relative to the source declaration. When the resolved content of every tool is unchanged between two `ocx lock` runs, the file's `generated_at` timestamp is preserved verbatim — the byte-stable output keeps version-control diffs minimal.
+The lock carries a `declaration_hash` over the canonicalized [RFC 8785 JCS](https://www.rfc-editor.org/rfc/rfc8785) of `ocx.toml`. Downstream commands ([`ocx pull`](#pull), [`ocx exec`](#exec)) consult this hash to detect when the lock is stale relative to the source declaration. When the resolved content of every binding is unchanged between two `ocx lock` runs, the file's `generated_at` timestamp is preserved verbatim — the byte-stable output keeps version-control diffs minimal.
 
 After a successful write, the command checks whether the project's `.gitattributes` declares `ocx.lock merge=union` and emits a one-line stderr advisory when it does not, helping prevent merge conflicts on team projects.
 
@@ -1819,7 +1819,7 @@ ocx lock [OPTIONS]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--pull` | — | After writing the lock, materialise all resolved tools into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
+| `--pull` | — | After writing the lock, materialise all resolved packages into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
 | `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx exec`. | — |
 | `--check` | — | Verify `ocx.lock` is current relative to `ocx.toml` and exit. No re-resolution, no writes, no network calls. Exit 0 if the lock matches; 65 if stale; 78 if the lock file is absent. CI primitive for "is the lock committed and current?" verification. | off |
 | `--platform <PLATFORM>` | `-p` | Materialise the leaf for the named platform instead of the host — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Selects which already-locked leaf to fetch (the lock stays host-agnostic); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
@@ -1839,14 +1839,14 @@ Pass `--global` **before** the subcommand: `ocx --global lock`. See [`--global`]
 | 69 | Registry unreachable while resolving advisory tags. |
 | 74 | I/O error writing `ocx.lock`. |
 | 75 | Transient registry failure (connect failure, timeout, 429/502/503/504) survived the resolve retries — rerunning may succeed. |
-| 78 | Existing `ocx.lock` is malformed (parse error) or uses an unsupported version (V1/V2 are rejected; regenerate with `ocx lock`), `ocx.toml` schema-invalid, `--check` reported the lock is absent, or a requested `--platform` is not shipped by a tool. |
+| 78 | Existing `ocx.lock` is malformed (parse error) or uses an unsupported version (V1/V2 are rejected; regenerate with `ocx lock`), `ocx.toml` schema-invalid, `--check` reported the lock is absent, or a requested `--platform` is not shipped by a package. |
 | 79 | Tag unresolvable during resolution (package not found in registry after retries). |
 | 80 | Authentication failure against the registry. |
 | 81 | `--offline` or `--frozen` and a tag is not cached locally (policy blocked). |
 
 **JSON output** (`--format json`)
 
-`ocx --format json lock` emits an array of objects, one per resolved tool:
+`ocx --format json lock` emits an array of objects, one per resolved binding:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -1881,7 +1881,7 @@ ocx update [OPTIONS] [NAME...]
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--pull` | — | After writing the lock, materialise all resolved tools into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
+| `--pull` | — | After writing the lock, materialise all resolved packages into the object store and create their candidate symlinks. Default when `--no-pull` is absent. | on |
 | `--no-pull` | — | Write the lock only; skip materialisation. Defer the install to a later `ocx pull` or first `ocx exec`. | — |
 | `--group <NAME>` | `-g` | Advance every binding in one or more named groups; freeze the rest. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table; `all` expands to `default` plus every declared `[group.*]`. Combine with `NAME` arguments to advance only those bindings within the named groups. | *(whole file)* |
 | `NAME...` | — | Binding names to advance; every other pin is frozen. Each name is advanced in every group it appears in (narrow with `-g`). | *(whole file)* |
@@ -1904,7 +1904,7 @@ Pass `--global` **before** the subcommand: `ocx --global update`. See [`--global
 | 69 | Registry unreachable while resolving advisory tags. |
 | 74 | I/O error writing `ocx.lock`. |
 | 75 | Transient failure (rate limit, temporary network error) — retry. |
-| 78 | `ocx.toml` or existing `ocx.lock` malformed (parse error), an existing `ocx.lock` uses an unsupported version (V1/V2 are rejected; regenerate with `ocx lock`), `--check` invoked when the lock is absent, a requested `--platform` is not shipped by a tool, or a scoped update with no existing `ocx.lock` (there is no predecessor to carry untouched pins forward from) — run `ocx lock` first. |
+| 78 | `ocx.toml` or existing `ocx.lock` malformed (parse error), an existing `ocx.lock` uses an unsupported version (V1/V2 are rejected; regenerate with `ocx lock`), `--check` invoked when the lock is absent, a requested `--platform` is not shipped by a package, or a scoped update with no existing `ocx.lock` (there is no predecessor to carry untouched pins forward from) — run `ocx lock` first. |
 | 80 | Authentication failure against the registry. |
 | 81 | `--offline` or `--frozen` and a tag is not cached locally (policy blocked). |
 
@@ -1917,7 +1917,7 @@ ocx update
 # Advance just ripgrep to where its declared tag points today:
 ocx update ripgrep
 
-# Advance every tool in the ci group, freezing the rest:
+# Advance every binding in the ci group, freezing the rest:
 ocx update -g ci
 ```
 
@@ -1928,7 +1928,7 @@ Concurrent invocations of `ocx update` and `ocx lock` are serialised via an in-p
 Pre-warms the [object store][fs-objects] from the project `ocx.lock` without
 creating [install symlinks][fs-symlinks]. Distinct from
 [`package pull`](#package-pull): this is the **project-tier** entry point — every
-tool comes from the digest-pinned lock, never from the index — making it the
+package comes from the digest-pinned lock, never from the index — making it the
 recommended primitive for reproducible CI setups.
 
 `ocx pull` is read-only on `ocx.lock`. Re-resolution lives in `ocx update`;
@@ -1945,9 +1945,9 @@ ocx pull [OPTIONS]
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
 | `--group <NAME>` | `-g` | Restrict the pull to one or more named groups. Repeatable and comma-separated (`-g ci,lint -g release`). The reserved name `default` selects the top-level `[tools]` table; the reserved name `all` expands to `default` + every declared `[group.*]`. When omitted, every entry from the lock is pulled. | *(all groups)* |
-| `--dry-run` | — | Print which locked tools are already cached vs. would be fetched, then exit without writing to the store. | off |
+| `--dry-run` | — | Print which locked packages are already cached vs. would be fetched, then exit without writing to the store. | off |
 | `--platform <PLATFORM>` | `-p` | Pre-warm the leaf for the named platform instead of the host — see [Platforms][reference-platforms] for the grammar. Single-valued: passing more than one exits 64. Selects which already-locked leaf to fetch (the lock stays host-agnostic — an amd64 host can pre-warm an arm64 leaf); a target the publisher does not ship exits 78. Defaults to the current host. | *(current host)* |
-| [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `pull` composes nothing, so `always` changes *what* is pre-warmed instead of what reaches `PATH`: a tool the ladder resolves to `always` gets its metadata, its dependency closure's config blobs, and its generated shim launchers — no content. The content downloads the first time one of those launchers runs, in whatever environment a later `ocx exec` or `ocx env` composes. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
+| [`--lazy-mode <MODE>`](#arg-lazy-mode) | — | Top tier of the [`lazy-mode` resolution ladder][in-depth-lazy-loading-ladder]. `pull` composes nothing, so `always` changes *what* is pre-warmed instead of what reaches `PATH`: a package the ladder resolves to `always` gets its metadata, its dependency closure's config blobs, and its generated shim launchers — no content. The content downloads the first time one of those launchers runs, in whatever environment a later `ocx exec` or `ocx env` composes. | *(inherit from `ocx.toml` / `OCX_LAZY_MODE`)* |
 | `--consent` / `--no-consent` | — | Whether to record a [consent stamp][shell-consent] for the project. Running `pull` in a directory is normally consent, which is wrong when a build system drives it against a checkout nobody chose. Outranks [`OCX_NO_CONSENT`][env-ocx-no-consent], which sets the default for a whole pipeline. Suppressing the stamp never suppresses the pull. | `--consent` |
 | `--help` | `-h` | Print help information. | — |
 
@@ -1969,9 +1969,9 @@ Pass `--global` **before** the subcommand: `ocx --global pull`. See [`--global`]
 
 After a successful pull, `ocx pull` re-saves `ocx.lock` with byte-identical content so the file's mtime advances. This re-fires [`ocx direnv`](#direnv) `watch_file ocx.lock`, ensuring direnv refreshes the shell environment once the object store is warmed. The save is skipped under `--dry-run`.
 
-Outside `--dry-run`, plain output is a three-column `Package` / `Kind` / `Path` table, one row per pulled tool; `--format json` is a matching object keyed by pinned identifier, `{"path": "...", "kind": "package"|"shim"}`. A tool the `lazy-mode` ladder resolved to `never` reports its materialized package root and `kind: "package"`; a tool resolved to `always` reports the generated shim directory this run created and `kind: "shim"` — no package root exists for it yet. See [Deferred Tools][in-depth-lazy-loading].
+Outside `--dry-run`, plain output is a three-column `Package` / `Kind` / `Path` table, one row per pulled package; `--format json` is a matching object keyed by pinned identifier, `{"path": "...", "kind": "package"|"shim"}`. A package the `lazy-mode` ladder resolved to `never` reports its materialized package root and `kind: "package"`; a package resolved to `always` reports the generated shim directory this run created and `kind: "shim"` — no package root exists for it yet. See [Deferred Packages][in-depth-lazy-loading].
 
-One reserved key sits beside the identifier keys: `advisories`, the same array [`ocx env`](#env-root) and [`ocx package env`](#package-env) publish — `{"kind": "...", "package": "...", "key": "...", "message": "..."}` objects, one per deferred tool whose declared metadata could not be fully validated. Always present, empty unless a tool composed with `--lazy-mode always` raised one; warning-only, and written to stderr as well so the plain channel carries it too. No pinned identifier can collide with the key, since every other key is a `registry/repository@sha256:...` string.
+One reserved key sits beside the identifier keys: `advisories`, the same array [`ocx env`](#env-root) and [`ocx package env`](#package-env) publish — `{"kind": "...", "package": "...", "key": "...", "message": "..."}` objects, one per deferred package whose declared metadata could not be fully validated. Always present, empty unless a package composed with `--lazy-mode always` raised one; warning-only, and written to stderr as well so the plain channel carries it too. No pinned identifier can collide with the key, since every other key is a `registry/repository@sha256:...` string.
 
 #### Toolchain render {#pull-render}
 
@@ -2015,7 +2015,7 @@ The `active` link needs no such action. A copy that turned it into a real direct
 
 #### Dry-run preview {#pull-dry-run}
 
-`ocx pull --dry-run` resolves each locked tool through the local index
+`ocx pull --dry-run` resolves each locked package through the local index
 (cache-first, like the real pull does) and reports whether it is already in the
 store. The store is never modified. Combine with [`--offline`](#arg-offline) to
 forbid the cache-miss network probe entirely.
@@ -2043,7 +2043,7 @@ The output respects [`--format json`](#arg-format) and [`--quiet`](#arg-quiet).
 
 Alias: `rm`.
 
-Removes one or more tool bindings from `ocx.toml`, rewrites `ocx.lock`, and uninstalls the tools.
+Removes one or more bindings from `ocx.toml`, rewrites `ocx.lock`, and uninstalls their packages.
 
 Each argument accepts either a bare binding name (`cmake`), a name with a tag (`kitware/cmake:3.28`), or a fully-qualified identifier (`ocx.sh/kitware/cmake:3.28`). An identifier form is reduced to the repository basename — the tag and registry are used only to locate the correct entry and the installed package; the key match is against the TOML map key. A binding added under an explicit name ([`ocx add glab=ocx.sh/gitlab/cli`](#add-binding-names)) is matched only by that name — remove it with `ocx remove glab`, not its identifier. Fails with exit code 79 if any argument matches no binding; the removals are staged together, so a fail-fast leaves `ocx.toml` unchanged.
 
@@ -2250,11 +2250,11 @@ When none of these apply and a project is consented but not yet reflected in the
 
 #### `allow` {#shell-allow}
 
-Consent to a project's [shell integration][in-depth-shell-integration]: record the consent stamp that lets a shell prompt apply that project's tools and environment.
+Consent to a project's [shell integration][in-depth-shell-integration]: record the consent stamp that lets a shell prompt apply that project's binaries and environment.
 
 Six commands — `add`, `remove`, `lock`, `update`, `pull`, `exec` — already write this stamp as a side effect: running a mutating ocx command in a directory *is* consent. `allow` is the way to write one on purpose, without mutating anything.
 
-The stamp records the source set the project's `ocx.lock` resolves from at the moment it is written. Adding a tool from a new registry or organisation invalidates it (`state` reports *source-set drift*); run `allow` again to consent to the wider set.
+The stamp records the source set the project's `ocx.lock` resolves from at the moment it is written. Adding a binding from a new registry or organisation invalidates it (`state` reports *source-set drift*); run `allow` again to consent to the wider set.
 
 **Usage**
 
@@ -2281,7 +2281,7 @@ Grants that live in configuration instead — a directory under `[shell.consent]
 
 #### `revoke` {#shell-revoke}
 
-Withdraw a project's consent stamp. The next shell prompt stops applying that project's tools and environment.
+Withdraw a project's consent stamp. The next shell prompt stops applying that project's binaries and environment.
 
 Immediately effective: the activation predicate reads the stamp file on every prompt. It does **not** touch `[shell.consent]` grants — if a `paths` or `namespaces` entry still covers the directory, the project stays active and [`ocx shell state`](#shell-state) says which one.
 
@@ -2313,7 +2313,7 @@ A later `ocx add`, `ocx lock`, `ocx pull`, `ocx exec`, `ocx remove` or `ocx upda
 
 > **REMOVED** — exits 64. The `ocx shell init` command has been removed.
 >
-> Global toolchain activation at shell start is handled by `$OCX_HOME/env.sh`, written by the in-repo installer with a block-marker idempotent `.`-source line in the login profile; the file runs `eval "$(ocx --global env --shell=sh)"`. In bash, zsh, fish, PowerShell, and elvish (whose guard checks only the carrier and the working directory, not a watch-set stat), the same install also wires a per-prompt hook that keeps both the global toolchain and a consented project's tools converged after that — see [Shell Integration][in-depth-shell-integration]. nushell's directory-change hook keeps the global toolchain live the same way, without a full per-prompt reconcile. For the strict-POSIX shells (`ash`, `dash`, `ksh`) and Windows Batch, which have no append-safe hook point at all, use [`ocx direnv`](#direnv) for project toolchain activation.
+> Global toolchain activation at shell start is handled by `$OCX_HOME/env.sh`, written by the in-repo installer with a block-marker idempotent `.`-source line in the login profile; the file runs `eval "$(ocx --global env --shell=sh)"`. In bash, zsh, fish, PowerShell, and elvish (whose guard checks only the carrier and the working directory, not a watch-set stat), the same install also wires a per-prompt hook that keeps both the global toolchain and a consented project's binaries converged after that — see [Shell Integration][in-depth-shell-integration]. nushell's directory-change hook keeps the global toolchain live the same way, without a full per-prompt reconcile. For the strict-POSIX shells (`ash`, `dash`, `ksh`) and Windows Batch, which have no append-safe hook point at all, use [`ocx direnv`](#direnv) for project toolchain activation.
 
 ### `self` {#self}
 
@@ -5453,7 +5453,7 @@ Output format is controlled by the root [`--format`](#arg-format) flag (default:
 
 `integrations` is a fourth top-level sibling array of `{"namespace": "...", "package": "...", "payload": ...}` objects — one row per (declaring package, [integration namespace][reference-integrations]) pair, `payload` the interpolated block OCX never interprets or merges. Two packages declaring the same namespace produce two rows, never one merged row — a row count exceeding the distinct-namespace count is the visible proof nothing merged. The array is present, with attribution, even for a single root package — it is never collapsed to a bare object or omitted. Like `binaries`/`entrypoints`, it is always `[]` under `--self` (integrations reach only the interface surface a consumer sees) and never appears in `--shell`/`--ci` output. See [Integrations][reference-integrations] for the field's grammar, size caps, and interpolation rules.
 
-`advisories` is a fifth top-level sibling array of `{"kind": "...", "package": "...", "key": "...", "message": "..."}` objects, one per [deferred tool][in-depth-lazy-loading] whose declared metadata could not be fully validated at compose time (`key` is present only for the two variants that name an environment variable) — always present, empty unless a package composed with [`--lazy-mode always`](#arg-lazy-mode) triggered one; warning-only, never a compose failure.
+`advisories` is a fifth top-level sibling array of `{"kind": "...", "package": "...", "key": "...", "message": "..."}` objects, one per [deferred package][in-depth-lazy-loading] whose declared metadata could not be fully validated at compose time (`key` is present only for the two variants that name an environment variable) — always present, empty unless a package composed with [`--lazy-mode always`](#arg-lazy-mode) triggered one; warning-only, never a compose failure.
 
 Use `--shell[=NAME]` for eval-safe shell export lines — the only sourceable form.
 

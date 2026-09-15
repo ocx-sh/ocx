@@ -104,7 +104,7 @@ export default defineConfig({
             { text: "Environments", link: "/docs/in-depth/environments" },
             { text: "Shell Integration", link: "/docs/in-depth/shell-integration" },
             { text: "Entry Points", link: "/docs/in-depth/entry-points" },
-            { text: "Deferred Tools", link: "/docs/in-depth/lazy-loading" },
+            { text: "Deferred Packages", link: "/docs/in-depth/lazy-loading" },
             { text: "CI Integration", link: "/docs/in-depth/ci" },
             { text: "Signing", link: "/docs/in-depth/signing" },
             { text: "cosign Parity", link: "/docs/in-depth/cosign-parity" },

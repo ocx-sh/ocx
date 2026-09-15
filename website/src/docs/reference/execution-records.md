@@ -9,7 +9,7 @@ A team running a batch cluster needs to prove, after the fact, that a job's outp
 
 Today, closing that gap means a wrapper script that logs a resolved digest next to whatever a job produces — and the wrapper is the actual control point: it has to be trusted by every caller, which is the status quo teams are trying to leave.
 
-`[records]` closes it a different way. When configured, OCX writes one JSON file to an operator-designated directory immediately before it starts a tool, naming every package digest that composed the child's environment plus the resolved executable that is about to run. No caller can opt out of a sink the operator has locked at system scope — not through configuration, and not through the [maintainer-preview exemption][execution-records-frames], which a fail-closed policy refuses rather than grants. No wrapper script has to know the mechanism exists.
+`[records]` closes it a different way. When configured, OCX writes one JSON file to an operator-designated directory immediately before it starts a binary, naming every package digest that composed the child's environment plus the resolved executable that is about to run. No caller can opt out of a sink the operator has locked at system scope — not through configuration, and not through the [maintainer-preview exemption][execution-records-frames], which a fail-closed policy refuses rather than grants. No wrapper script has to know the mechanism exists.
 
 ## A policy check that works today {#execution-records-consumer}
 
@@ -99,7 +99,7 @@ A record describes what OCX was **about to run**, not what happened: it is writt
 }
 ```
 
-`process.user` carries two fields with different trust: `id` comes from the kernel and cannot be forged by the caller's environment, while `name` is read from `$USER`/`$LOGNAME` and can be — key on `id` for anything that must hold up under scrutiny, keep `name` for readability. `process.parent`, when the process that launched ocx is itself identifiable, names its pid: an `ocx exec` invoked from a Makefile records `make`'s pid there, so a consumer reconstructs `make → ocx exec → tool` call trees from records alone, with no minted correlation ID. All three of `process.user`, `process.parent`, and `process.arch` are best-effort — a scratch container with no passwd entry omits `user` entirely, and a bare shell invocation with no identifiable launcher omits `parent`.
+`process.user` carries two fields with different trust: `id` comes from the kernel and cannot be forged by the caller's environment, while `name` is read from `$USER`/`$LOGNAME` and can be — key on `id` for anything that must hold up under scrutiny, keep `name` for readability. `process.parent`, when the process that launched ocx is itself identifiable, names its pid: an `ocx exec` invoked from a Makefile records `make`'s pid there, so a consumer reconstructs `make → ocx exec → binary` call trees from records alone, with no minted correlation ID. All three of `process.user`, `process.parent`, and `process.arch` are best-effort — a scratch container with no passwd entry omits `user` entirely, and a bare shell invocation with no identifiable launcher omits `parent`.
 
 ::: warning Command-line arguments are never recorded
 `process` carries no `args` field. A command line routinely carries access tokens and passwords typed as flag values, and a record's sink is exactly the kind of destination that turns one leaked argv into many — operator-collected, and often fleet-aggregated into a central store with a wider audience than the invoking host. `process.executable` still records which binary ran; only its arguments are excluded. A config-gated opt-in for operators who accept that exposure may follow later; it is not available today.
@@ -190,7 +190,7 @@ Every borrowed field name is pinned by this page, not by the standard it came fr
 | `os.type` | [OTel][otel-host] | OTel's top-level attribute, member spelling `darwin`/`linux`/`windows`/…; [ECS][ecs-os] nests the field under `host.os.type` instead and expects `macos`, not `darwin` — OCX follows OTel's flat field and member spelling |
 | `process.parent.pid`, `process.user.name`, `process.executable` | [ECS][ecs-process] | [ECS][ecs-process] types `process.executable` as a flat string; [OTel][otel-host]'s object form would collide with the `sh.ocx.*` fields nested under it |
 | `process.arch` | [OTel][otel-host] | An OCX extension inside [ECS][ecs-process]'s `process` block — ECS has no process-level architecture field, only `host.architecture` — carrying [OTel][otel-host]'s `host.arch` value vocabulary (`amd64`, `arm32`, `arm64`, …; OTel permits values beyond this list) |
-| `schemaVersion`, `recordedAt`, `frame`, `scope`, `resolution` | OCX | No existing standard describes "a CLI invoked a tool with these packages" |
+| `schemaVersion`, `recordedAt`, `frame`, `scope`, `resolution` | OCX | No existing standard describes "a CLI invoked a binary with these packages" |
 | `sh.ocx.*` annotations (`role`, `binding`, `group`, `platform`, `visibility`, `kind`, `provenance`, `resolved-from`, `binaries`, `entrypoints`, `identity`) | OCX | Everything OCX-specific lives in this namespace so the standard-shaped fields stay standard-shaped |
 
 `process.arch` and `resolution.requestedPlatform` are not the same fact recorded twice. `process.arch` is the architecture of the **running ocx binary** — exactly true even under emulation, where an amd64 ocx executing via Rosetta or QEMU on an arm64 host still reports `amd64`, because that genuinely is the process's own architecture. It answers "what process is this", not "what is the host machine's native architecture" — recovering the latter reliably needs a per-OS native probe this module deliberately does not attempt, since a wrong answer here would be worse than an absent key. `resolution.requestedPlatform` answers a third question: what OCX **asked** resolution to find, in its own `os/arch[+libc.*]` grammar — the request, not the outcome. What a given package's manifest leaf actually resolved to is that package's own `sh.ocx.platform` annotation, and the two differ legitimately: a flat single-image package selects `any` under any request. All three fields can disagree, and the disagreement is itself the audit signal (Rosetta, `binfmt` emulation, an explicit cross-platform pull) — not noise to reconcile.
@@ -204,7 +204,7 @@ Stated plainly so nothing is promised that is not delivered:
 | **Does** | A stable, standardized identity string — the same shape [Trivy][trivy] emits — that joins across tools and forward-compatible if records ever feed an SBOM or attestation pipeline. |
 | **Does not** | Vulnerability lookup. [OSV][osv] has no OCI ecosystem and treats `purl` as informational rather than a query key; [Grype][grype] decomposes an image into its constituent packages and matches those, so a whole-artifact `pkg:oci` purl gets zero CVE matches. |
 
-If CVE visibility into a packaged tool is ever needed, that requires the tool's *upstream ecosystem* purl carried alongside — a separate feature, not a side effect of this one.
+If CVE visibility into a packaged binary is ever needed, that requires the package's *upstream ecosystem* purl carried alongside — a separate feature, not a side effect of this one.
 
 ## Chaining to an SBOM or attestation {#execution-records-sbom-chain}
 
@@ -238,7 +238,7 @@ An entrypoint launcher re-enters OCX (`ocx exec cmake -- cmake …` resolves `cm
 | `executable["sh.ocx.kind"]` | `launcher` — the resolved path is the launcher shim | `binary` — the actual leaf executable |
 | `packages[0].digest.sha256` | same content digest as the inner frame | same content digest as the outer frame |
 
-The join key is the package's content digest, identical in both records — no minted correlation ID, no environment propagation between the two frames. **A consumer that counts records to count invocations will over-count by 2× for every entrypoint invocation.** Filter on `frame.command` (or on `executable["sh.ocx.kind"] == "binary"`) to count actual tool runs.
+The join key is the package's content digest, identical in both records — no minted correlation ID, no environment propagation between the two frames. **A consumer that counts records to count invocations will over-count by 2× for every entrypoint invocation.** Filter on `frame.command` (or on `executable["sh.ocx.kind"] == "binary"`) to count actual binary runs.
 
 A package with no declared entry points resolves straight to its real binary on the composed `PATH`, so it produces exactly one record with `sh.ocx.kind: "binary"` — the split only happens when a launcher is in the chain.
 
@@ -273,9 +273,9 @@ A user who runs a generated launcher straight from `PATH`, with no ocx parent at
 
 ## The launcher shim frame {#execution-records-shim-frame}
 
-[Deferred tools][in-depth-lazy-loading] add a fourth launching frame beside `exec`, `package exec`, and `launcher exec`: the hidden [`ocx launcher shim`][in-depth-lazy-loading-materialize] subcommand. A tool composed with `lazy-mode = always` puts a generated shim on `PATH` instead of an eager install, and nothing about it exists on disk until that shim runs for the first time — the shim frame is the only place a deferred tool's content is downloaded.
+[Deferred packages][in-depth-lazy-loading] add a fourth launching frame beside `exec`, `package exec`, and `launcher exec`: the hidden [`ocx launcher shim`][in-depth-lazy-loading-materialize] subcommand. A package composed with `lazy-mode = always` puts a generated shim on `PATH` instead of an eager install, and nothing about it exists on disk until that shim runs for the first time — the shim frame is the only place a deferred package's content is downloaded.
 
-A lazy tool's first invocation therefore produces two records too, for a different reason than the entrypoint split above:
+A deferred package's first invocation therefore produces two records too, for a different reason than the entrypoint split above:
 
 | | Outer frame (`exec` / `package exec`) | Shim frame (`launcher shim`) |
 |---|---|---|
@@ -285,7 +285,7 @@ A lazy tool's first invocation therefore produces two records too, for a differe
 
 The join key is the same content digest used everywhere else in this record. Unlike [`ocx launcher exec`][cmd-launcher-exec]'s synthetic, digest-only identity — a package directory is content-shared and cannot recover its own registry or repository — a shim's generated launcher carries [the pinned identifier it was built for][in-depth-lazy-loading-materialize] as an argument, and `ocx launcher shim` reads that identifier directly. Its frame identity is `complete`, not `degraded`: the one re-entry frame that still knows its own logical name. `executable["sh.ocx.provenance"]` still reads `ocx-package` for a shim target — the generated shim directory is a store-adjacent namespace OCX created, not an externally supplied command.
 
-A later invocation of the same tool resolves straight to its now-real `entrypoints/`, which outranks the shim on `PATH` from then on, and produces exactly one record with no `sh.ocx.composition` key at all — the same shape as any package that was never deferred.
+A later invocation of the same binary resolves straight to its now-real `entrypoints/`, which outranks the shim on `PATH` from then on, and produces exactly one record with no `sh.ocx.composition` key at all — the same shape as any package that was never deferred.
 
 ## Patch companions in the record {#execution-records-patch}
 
@@ -309,7 +309,7 @@ The sink is always a **directory**, never a single file: OCX creates one self-na
 
 **OCX does not create the sink directory.** `dir` must already exist and be writable before the first invocation reaches it — a missing directory fails exactly like a permissions problem (an I/O error naming the path), not with a distinct "directory absent" message. Create the sink once, out of band (a provisioning script, a container image layer, a `mkdir -p` in the job that sets `OCX_RECORDS_DIR`), before pointing OCX at it.
 
-Publication is atomic but **not synced to disk**: OCX does not call `fsync` on the record before publishing it. What the no-clobber publish guarantees is that a completed record's bytes are never interleaved with another writer's — not that those bytes have survived a power loss. A host that loses power between the write and the platter catching up can lose the most recent records; on a network sink, a collector on another client can briefly observe a short, still-being-written file, and should retry rather than treat a JSON parse failure as corruption. Skipping `fsync` is deliberate: it is the only step in the write path that costs real, measured time (tens of milliseconds, versus microseconds without it) on a path that runs once per tool invocation.
+Publication is atomic but **not synced to disk**: OCX does not call `fsync` on the record before publishing it. What the no-clobber publish guarantees is that a completed record's bytes are never interleaved with another writer's — not that those bytes have survived a power loss. A host that loses power between the write and the platter catching up can lose the most recent records; on a network sink, a collector on another client can briefly observe a short, still-being-written file, and should retry rather than treat a JSON parse failure as corruption. Skipping `fsync` is deliberate: it is the only step in the write path that costs real, measured time (tens of milliseconds, versus microseconds without it) on a path that runs once per binary invocation.
 
 Each published file is created **owner-only** (mode `0600` on Unix) — readable and writable by the user OCX ran as, nobody else. A collector process running as a different account (a service user, a log-shipping daemon) cannot read the records unless it runs as the same user or is granted access explicitly; plan the collector's identity around this rather than discovering it when the collector's read comes back empty-handed.
 
@@ -334,7 +334,7 @@ The pattern is overridable via a template over a closed placeholder set:
 | Placeholder | Expands to |
 |---|---|
 | `{time}` | `20260726T140311482Z` — same basic UTC form as the default |
-| `{pid}` | the process ID of the process that runs the tool |
+| `{pid}` | the process ID of the process that runs the binary |
 | `{rand}` | 8 hex characters |
 | `{host}` | hostname, reduced to a filename-safe form |
 
@@ -374,7 +374,7 @@ Both exit codes share the same posture — `required` decides only whether OCX a
 **Writing `required = true` without a `dir` is a configuration error (exit `78`), not recording turned off.** A block carrying only that line is the plainest way to say "recording is mandatory here", and resolving it to a policy with nowhere to write would give every invocation on the host the exact opposite — silently, exit `0`, no warning. It is refused when the configuration is read, before any work. The one shape that is *not* an error is a SYSTEM-scope `[records]` block with neither `dir` nor `required`: that is an operator locking recording **off** for the host, and it keeps working.
 
 ::: warning `required = true` aborts before the child starts on Unix only
-On Unix the record is written before OCX replaces its own process image with the tool, so a failure to write means the tool never ran. On Windows there is no such moment: the pid the record names does not exist until the child is spawned, so OCX probes the sink beforehand and writes the record after. A sink that is writable at probe time and fails at write time — a mount that goes away, a disk that fills, a permission change in between — aborts after the child has already begun work. OCX stops and reaps that child, but it ran. Treat `required = true` on Windows as "refused up front if the sink was unwritable, recorded otherwise", not as proof that no unrecorded tool ever started.
+On Unix the record is written before OCX replaces its own process image with the binary, so a failure to write means the binary never ran. On Windows there is no such moment: the pid the record names does not exist until the child is spawned, so OCX probes the sink beforehand and writes the record after. A sink that is writable at probe time and fails at write time — a mount that goes away, a disk that fills, a permission change in between — aborts after the child has already begun work. OCX stops and reaps that child, but it ran. Treat `required = true` on Windows as "refused up front if the sink was unwritable, recorded otherwise", not as proof that no unrecorded binary ever started.
 :::
 
 A SYSTEM-scope `[records]` declaration locks the **whole block** — `dir`, `name`, and `required` together, not field by field. A collector downstream depends on the sink location *and* the filename pattern together, so a partial override would break collection exactly as surely as redirecting `dir` alone. See [`[records]`][config-records] in the Configuration reference for the full field list and the lock's interaction with the other config tiers.

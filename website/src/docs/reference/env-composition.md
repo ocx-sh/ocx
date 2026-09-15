@@ -11,32 +11,32 @@ This page is the reference-level specification for how OCX assembles environment
 
 OCX enforces a hard boundary between the global toolchain and project-tier resolution. The rule is unconditional:
 
-> **Global tools never compose into, supplement, or fall back into a project's resolved environment.**
+> **Global packages never compose into, supplement, or fall back into a project's resolved environment.**
 
 This applies without exception to:
 
-- [`ocx exec`][cmd-run] — project-tier env-composition command. Reads `ocx.toml` + `ocx.lock`. The global toolchain (`$OCX_HOME/ocx.toml`) is not consulted, not merged, and not used as a fallback for tools the project does not declare.
+- [`ocx exec`][cmd-run] — project-tier env-composition command. Reads `ocx.toml` + `ocx.lock`. The global toolchain (`$OCX_HOME/ocx.toml`) is not consulted, not merged, and not used as a fallback for packages the project does not declare.
 - [`ocx package exec`][cmd-exec] — OCI-tier env-composition command. Never reads any `ocx.toml`, whether project or global. Takes OCI identifiers directly.
 
-Both commands are hermetic: the environment they produce is determined entirely by their declared inputs. An undeclared tool is absent, never filled from the global set.
+Both commands are hermetic: the environment they produce is determined entirely by their declared inputs. An undeclared package is absent, never filled from the global set.
 
 :::info Why hard isolation instead of gap-fill?
 
-[Volta][volta] pioneered this model for Node.js: global tools are hidden when a project toolchain is active. The alternative — filling in tools the project does not declare from the global set — produces the reproducibility hole OCX is designed to close: collaborators without the same `$OCX_HOME/ocx.toml` get different resolved environments.
+[Volta][volta] pioneered this model for Node.js: global binaries are hidden when a project toolchain is active. The alternative — filling in packages the project does not declare from the global set — produces the reproducibility hole OCX is designed to close: collaborators without the same `$OCX_HOME/ocx.toml` get different resolved environments.
 
 :::
 
 ### PATH precedence model {#strict-isolation-shell-hook}
 
-OCX enforces isolation by **PATH precedence**, not PATH stripping. The global toolchain's `current/entrypoints/` directory sits on `PATH` at login time (via `$OCX_HOME/env.sh` sourced from the login profile). When a project toolchain is activated — via `ocx exec` or `ocx direnv` — the project tools are **prepended** to `PATH`, shadowing any global tools of the same name.
+OCX enforces isolation by **PATH precedence**, not PATH stripping. The global toolchain's `current/entrypoints/` directory sits on `PATH` at login time (via `$OCX_HOME/env.sh` sourced from the login profile). When a project toolchain is activated — via `ocx exec` or `ocx direnv` — the project's binaries are **prepended** to `PATH`, shadowing any global binaries of the same name.
 
-There is no PATH strip, no `# ocx: global toolchain suppressed` comment, and no `_OCX_APPLIED` fingerprint. The per-prompt shell hook (`ocx shell hook`) has been removed entirely. Isolation is a static consequence of PATH ordering: project tools appear earlier in `PATH` than global tools.
+There is no PATH strip, no `# ocx: global toolchain suppressed` comment, and no `_OCX_APPLIED` fingerprint. The per-prompt shell hook (`ocx shell hook`) has been removed entirely. Isolation is a static consequence of PATH ordering: project binaries appear earlier in `PATH` than global binaries.
 
-For `ocx direnv`, the `.envrc` evaluates [`ocx direnv export`][cmd-direnv-export] on every directory entry. This emits only the project tools' PATH entries, which [direnv](https://direnv.net/) prepends before the ambient `PATH` — global tools remain reachable for tools not declared by the project, but project-declared tools take priority.
+For `ocx direnv`, the `.envrc` evaluates [`ocx direnv export`][cmd-direnv-export] on every directory entry. This emits only the project's PATH entries, which [direnv](https://direnv.net/) prepends before the ambient `PATH` — global binaries remain reachable for names the project does not declare, but project-declared binaries take priority.
 
 ### Idempotent re-application {#strict-isolation-idempotent}
 
-Every `PATH` prepend OCX emits is **idempotent with move-to-front semantics**. Re-applying the same output — direnv re-evaluating `.envrc` on each directory change, a captured snippet re-read from a profile, or a tool re-running [`ocx env --shell`][cmd-env-root] — never grows `PATH`. A directory already present is removed from its old position and placed at the front, so the most recent activation wins lookup and the variable stays a fixed length.
+Every `PATH` prepend OCX emits is **idempotent with move-to-front semantics**. Re-applying the same output — direnv re-evaluating `.envrc` on each directory change, a captured snippet re-read from a profile, or a script re-running [`ocx env --shell`][cmd-env-root] — never grows `PATH`. A directory already present is removed from its old position and placed at the front, so the most recent activation wins lookup and the variable stays a fixed length.
 
 The emitted shell statements are **self-contained**: they depend on no `ocx` process, no guard variable, and no helper function. That makes them safe to capture into a profile —
 
@@ -52,11 +52,11 @@ All ten supported shells — bash, zsh, ash, ksh, dash, fish, PowerShell, elvish
 
 ### What "hermetic" means for `ocx exec` {#strict-isolation-exec}
 
-`ocx exec` reads exactly two files: `ocx.toml` and its sibling `ocx.lock`. The resolved environment consists of the tools those files declare — no more. If a tool is not in `ocx.toml`, it is not in the child environment, regardless of what is installed globally or what is on the parent shell's PATH.
+`ocx exec` reads exactly two files: `ocx.toml` and its sibling `ocx.lock`. The resolved environment consists of the packages those files declare — no more. If a package is not in `ocx.toml`, it is not in the child environment, regardless of what is installed globally or what is on the parent shell's PATH.
 
-Naming a binding subset (`ocx exec cmake -- …`) narrows composition further: only the named tools are resolved to a host leaf and installed. A `-g` group selects the *namespace* for name resolution, not a mandate that every tool in it be available — an unrelated tool in scope with no leaf for the current host does not block a narrowly-named run. Omit the names and the whole scope must resolve.
+Naming a binding subset (`ocx exec cmake -- …`) narrows composition further: only the named bindings are resolved to a host leaf and installed. A `-g` group selects the *namespace* for name resolution, not a mandate that every binding in it be available — an unrelated binding in scope with no leaf for the current host does not block a narrowly-named run. Omit the names and the whole scope must resolve.
 
-By default `ocx exec` **inherits** the spawning shell's environment and merely **prepends** the composed tool `bin/` directories to `PATH` — ambient parent-shell `PATH` entries remain reachable after the project tools. The default is *not* hermetic. Pass `--clean` for a hermetic environment that drops the inherited environment and exposes only the composed tool set, exactly like `exec --clean`.
+By default `ocx exec` **inherits** the spawning shell's environment and merely **prepends** the composed packages' `bin/` directories to `PATH` — ambient parent-shell `PATH` entries remain reachable after the project's. The default is *not* hermetic. Pass `--clean` for a hermetic environment that drops the inherited environment and exposes only the composed package set, exactly like `exec --clean`.
 
 One part of the spawning shell's environment is **not** inherited: whatever [shell integration][in-depth-shell-integration] applied to it. An explicit `ocx exec` names the environment it wants, so the toolchain the per-prompt reconciler folded into your shell is taken back out first, using the [`__OCX_ENV_STATE`][env-ocx-env-state] ledger as the revert set — the same set the reconciler itself would revert on leaving the directory. Your own variables and your own `PATH` entries are untouched; only what OCX put there is removed, and only where the value is still the one OCX wrote. Without shell integration there is no ledger and nothing is removed. The same applies to `ocx package exec`, `ocx package test` and `ocx patch test`.
 
@@ -103,7 +103,7 @@ OCX has two toolchain tiers. Selection is always explicit — there is no implic
 
 The two flags are mutually exclusive — combining `--global` with `--project` exits with code 64 (`UsageError`).
 
-**The walk stops at the first `ocx.toml` it meets.** A project nested inside another one *replaces* it: from inside the nested directory, only the nearer file and its lock are composed, and nothing the enclosing `ocx.toml` declares reaches the environment — the shell hook retires the enclosing project's tools on the way in and restores them on the way out. Two project files never layer. See [Nested projects switch, they do not stack][in-depth-shell-integration-nested] for the full walkthrough.
+**The walk stops at the first `ocx.toml` it meets.** A project nested inside another one *replaces* it: from inside the nested directory, only the nearer file and its lock are composed, and nothing the enclosing `ocx.toml` declares reaches the environment — the shell hook retires the enclosing project's binaries on the way in and restores them on the way out. Two project files never layer. See [Nested projects switch, they do not stack][in-depth-shell-integration-nested] for the full walkthrough.
 
 **No implicit home-tier discovery.** Earlier versions of OCX fell back to `$OCX_HOME/ocx.toml` when the CWD walk found nothing. That behavior has been removed. The global toolchain is only active when explicitly requested. A CWD walk that finds nothing means no project tier is active — the command operates without a project context.
 
@@ -125,14 +125,14 @@ The two flags are mutually exclusive — combining `--global` with `--project` e
 
 A tier being *selected* and a tier *reaching your shell* are two different things. Selection answers which `ocx.toml` is in effect; activation answers what that toolchain puts in the environment, and when.
 
-Recomposing a whole toolchain on every prompt costs a little work per prompt and rewrites `PATH` under you. Composing nothing and letting a launcher resolve each tool at invocation time costs nothing per prompt but gives a shell no declared variables. Neither is right for every toolchain, so two `ocx.toml` keys decide per toolchain: [`activate`][config-activate] picks the shape, and [`pinned`][config-pinned] picks whether composed paths follow the rendered `links/<group>/<entry>` links or name digest paths straight out of `ocx.lock`.
+Recomposing a whole toolchain on every prompt costs a little work per prompt and rewrites `PATH` under you. Composing nothing and letting a launcher resolve each binary at invocation time costs nothing per prompt but gives a shell no declared variables. Neither is right for every toolchain, so two `ocx.toml` keys decide per toolchain: [`activate`][config-activate] picks the shape, and [`pinned`][config-pinned] picks whether composed paths follow the rendered `links/<group>/<entry>` links or name digest paths straight out of `ocx.lock`.
 
 ### The `activate` × `pinned` matrix {#toolchain-activation-matrix}
 
 | [`activate`][config-activate] | [`pinned`][config-pinned] | What the project contributes to `PATH` | What a composing emitter composes | What [`ocx pull`][cmd-pull] renders |
 |---|---|---|---|---|
-| `env` | `false` | its composed entries — each tool's own `PATH` directories | through the `links/<group>/<entry>` links | the trampolines and the links |
-| `env` | `true` | its composed entries — each tool's own `PATH` directories | digest paths from `ocx.lock`, consulting no link | the trampolines only — the link pass writes and prunes nothing |
+| `env` | `false` | its composed entries — each package's own `PATH` directories | through the `links/<group>/<entry>` links | the trampolines and the links |
+| `env` | `true` | its composed entries — each package's own `PATH` directories | digest paths from `ocx.lock`, consulting no link | the trampolines only — the link pass writes and prunes nothing |
 | `bin` | `false` | `<home>/toolchain/active/bin`, and nothing else | through the `links/<group>/<entry>` links | the trampolines and the links |
 | `bin` | `true` | `<home>/toolchain/active/bin`, and nothing else | digest paths from `ocx.lock`, consulting no link | the trampolines only |
 | `none` | `false` | nothing | through the `links/<group>/<entry>` links | the trampolines and the links |
@@ -156,7 +156,7 @@ The `bin` rows carry one gate. The `<home>/toolchain/active/bin` entry is added 
 ocx: /home/dana/work/api: its toolchain has not been rendered for this lock; run `ocx pull` here
 ```
 
-Within one prompt the entries land front-to-back as: the project's composed entries, the project's `<home>/toolchain/active/bin`, `$OCX_HOME/toolchain/active/bin`, OCX's own install directory, then the global tier's composed entries. A globally installed tool therefore never shadows the project's own — the [tier inversion](#strict-isolation) this page opens with, enforced by ordering. `ocx` itself is no exception: the install directory is last, so a toolchain that pins `ocx` is the one that answers for the name.
+Within one prompt the entries land front-to-back as: the project's composed entries, the project's `<home>/toolchain/active/bin`, `$OCX_HOME/toolchain/active/bin`, OCX's own install directory, then the global tier's composed entries. A globally installed package therefore never shadows the project's own — the [tier inversion](#strict-isolation) this page opens with, enforced by ordering. `ocx` itself is no exception: the install directory is last, so a toolchain that pins `ocx` is the one that answers for the name.
 
 ::: info The same two positions mise and rustup take
 [mise][mise-shims] ships both shapes and names them the same way round: `mise activate` recomposes the environment on every prompt, `mise activate --shims` puts one shim directory on `PATH` instead. [rustup][rustup-proxies] only ever ships the second — `~/.cargo/bin/cargo` is a proxy that forwards to whichever toolchain is active. `env` and `bin` are those two positions, chosen per toolchain rather than once per install.
@@ -164,7 +164,7 @@ Within one prompt the entries land front-to-back as: the project's composed entr
 
 ### A trampoline composes at call time {#toolchain-activation-trampolines}
 
-The surprising part of `bin` mode is that a trampoline in `<home>/toolchain/active/bin/` carries **no frozen environment**. It re-enters `ocx exec` against its own home, so the environment is composed at the moment the tool runs — from `ocx.toml` and `ocx.lock`, project [`[env]`](#project-env) and sibling packages included, not just the one package the tool came from.
+The surprising part of `bin` mode is that a trampoline in `<home>/toolchain/active/bin/` carries **no frozen environment**. It re-enters `ocx exec` against its own home, so the environment is composed at the moment the binary runs — from `ocx.toml` and `ocx.lock`, project [`[env]`](#project-env) and sibling packages included, not just the one package the binary came from.
 
 The whole body is five lines, and what it bakes is the entire story:
 
@@ -180,14 +180,14 @@ Two baked values, and nothing else: the home selector (`--project <root>`, or a 
 
 Two consequences follow directly:
 
-- **A config edit takes effect with no re-render.** Change `[env]`, add a tool, flip [`pinned`][config-pinned] — the next invocation composes against the new file. The trampoline body is byte-identical either way.
-- **There is no baked value that can drift.** The tool a name resolves to is decided by the lock at call time, not by what the renderer saw.
+- **A config edit takes effect with no re-render.** Change `[env]`, add a binding, flip [`pinned`][config-pinned] — the next invocation composes against the new file. The trampoline body is byte-identical either way.
+- **There is no baked value that can drift.** The package a name resolves to is decided by the lock at call time, not by what the renderer saw.
 
 The absolute `ocx` path is baked rather than left as a bare `ocx` for a specific reason: in `bin` mode the interactive shell has `toolchain/active/bin` prepended, and a project may pin its own `ocx`. A bare-name fallback would make `/bin/sh` re-resolve the trampoline as itself — an infinite loop before any ocx process starts, which no in-process guard can see. [asdf hit exactly this][asdf-shim-loop] — a shim of `asdf` itself on `PATH`, re-resolving to the shim, hundreds of frames deep and hanging every command. [`OCX_BINARY_PIN`][env-ocx-binary-pin] still overrides the baked path.
 
 ### Name collisions {#toolchain-activation-collisions}
 
-Two packages in one closure can claim the same tool name. OCX resolves it and moves on: **the last one walked wins**, matching composed-`PATH` order, so the trampoline name and the name that wins a `PATH` lookup are decided by one rule rather than two.
+Two packages in one closure can claim the same binary name. OCX resolves it and moves on: **the last one walked wins**, matching composed-`PATH` order, so the trampoline name and the name that wins a `PATH` lookup are decided by one rule rather than two.
 
 There is no warning and no refusal. The collision is logged at **debug** level, and the losing claim is recorded against the winning name so it can be reported rather than lost. A refusal here would be wrong on its face: a project may legitimately pin its own `ocx`, or its own `python`, and shadowing that name for itself is the declared intent, not an accident.
 
@@ -197,7 +197,7 @@ A package that claims one name on both its `binaries` and its `entrypoints` axes
 
 Each OCX package declares two environment surfaces: the **interface surface** (what consumers see) and the **private surface** (what the package's own launchers see).
 
-The `--self` flag on `package env`, `package exec`, `package test`, and `package deps` switches which surface is emitted. It is OCI-tier only — the project-tier commands do not accept it, because a toolchain is a consumer of every tool it declares and the self view leaves those tools' `entrypoints/` off `PATH`:
+The `--self` flag on `package env`, `package exec`, `package test`, and `package deps` switches which surface is emitted. It is OCI-tier only — the project-tier commands do not accept it, because a toolchain is a consumer of every package it declares and the self view leaves those packages' `entrypoints/` off `PATH`:
 
 | `--self` | Surface emitted | Use case |
 |----------|----------------|----------|
@@ -272,7 +272,7 @@ Two packages declaring `com.microsoft.vscode` therefore produce two rows with id
 
 ### Ordering {#integrations-ordering}
 
-Rows follow the same admitted-set walk order [Composition Order](#composition-order) below uses for `entries`: for each root, its admitted dependencies first in topological order, then the root itself; roots in the order the tool set produced them. Within one package's own contribution, namespaces are ordered lexicographically. A dependency reached by two different roots (a diamond) contributes once, at its first-seen position — the same cross-root dedup `binaries` and `entrypoints` already apply.
+Rows follow the same admitted-set walk order [Composition Order](#composition-order) below uses for `entries`: for each root, its admitted dependencies first in topological order, then the root itself; roots in the order the package set produced them. Within one package's own contribution, namespaces are ordered lexicographically. A dependency reached by two different roots (a diamond) contributes once, at its first-seen position — the same cross-root dedup `binaries` and `entrypoints` already apply.
 
 ### Interface Surface Only {#integrations-interface-surface}
 
@@ -292,7 +292,7 @@ Neither [`--shell`][cmd-env-root] nor `--ci` output carries an `integrations` re
 
 ## Composition Order {#composition-order}
 
-When multiple packages contribute to an environment (via `ocx exec -g GROUP1,GROUP2` or `ocx package exec PKG1 PKG2`), env entries are **prepended** — the last tool walked has its `PATH` entries placed **first** in the resolved `PATH`. In `-g` argument order, groups listed **later** win PATH lookup.
+When multiple packages contribute to an environment (via `ocx exec -g GROUP1,GROUP2` or `ocx package exec PKG1 PKG2`), env entries are **prepended** — the last package walked has its `PATH` entries placed **first** in the resolved `PATH`. In `-g` argument order, groups listed **later** win PATH lookup.
 
 For `ocx exec`, the full order rule is:
 
@@ -368,7 +368,7 @@ The package tier still reads no `ocx.toml` — see the boundary note above. `--e
 `--clean` controls only stage 1 — what the child process inherits from the parent shell. It is not what makes the package-composed set (stage 2) reproducible. That comes from the resolver's scope: package env values are computed from `ocx.lock` and the resolved digests alone, identically with or without `--clean`. Project `[env]` (stage 4) is the opposite case by design — it is the user's own file, deliberately allowed to read ambient state, and is excluded from the lock's `declaration_hash` for exactly that reason.
 :::
 
-`--self` is package vocabulary and does not exist on the project tier. It selects a package's own private surface — which by construction leaves that package's `entrypoints/` off `PATH`, because launchers exist for a *consumer* to invoke the package while the package's own runtime calls `bin/` directly. A project toolchain is a consumer of every tool it declares, so the self view would compose a strictly worse toolchain, not a fuller one. The flag lives on [`ocx package exec`][cmd-package-exec] and [`ocx package env`][cmd-package-env], where a package's own surface is the thing being asked about; see [Visibility surfaces](#visibility-surfaces) above.
+`--self` is package vocabulary and does not exist on the project tier. It selects a package's own private surface — which by construction leaves that package's `entrypoints/` off `PATH`, because launchers exist for a *consumer* to invoke the package while the package's own runtime calls `bin/` directly. A project toolchain is a consumer of every package it declares, so the self view would compose a strictly worse toolchain, not a fuller one. The flag lives on [`ocx package exec`][cmd-package-exec] and [`ocx package env`][cmd-package-env], where a package's own surface is the thing being asked about; see [Visibility surfaces](#visibility-surfaces) above.
 
 Project and group `[env]` entries have no visibility axis at all — a project is never a dependency of anything, so there is no interface/private edge to gate.
 

@@ -196,7 +196,7 @@ When you run `ocx package install kitware/cmake:3.28`, how does OCX know which b
   </Node>
 </Tree>
 
-The index is a *collection*: each source's subtree reflects the state of that remote registry (or the [public index][in-depth-indices-public]) at the last time you refreshed it. It is dispatch-only — a leaf platform manifest is never copied into the index, only the tag → digest pointer and the platform → digest dispatch object it names, each verified against its own digest — so a package's *version choice* resolves offline from the index alone, with no other store or network access required. When the tag names a manifest directly (a single-platform package), OCX checks the [package store][fs-packages] before the registry: an already-installed tool's leaf manifest was cached there at install time, so re-resolving it needs no network. Only a genuinely cold digest reaches the registry. The full design — wire layout, refresh mechanics, `--remote`/`--offline` interaction, bundling a copy inside a GitHub Action or Bazel rule, and resolving packages published through `index.ocx.sh` — lives in [Indices][in-depth-indices].
+The index is a *collection*: each source's subtree reflects the state of that remote registry (or the [public index][in-depth-indices-public]) at the last time you refreshed it. It is dispatch-only — a leaf platform manifest is never copied into the index, only the tag → digest pointer and the platform → digest dispatch object it names, each verified against its own digest — so a package's *version choice* resolves offline from the index alone, with no other store or network access required. When the tag names a manifest directly (a single-platform package), OCX checks the [package store][fs-packages] before the registry: an already-installed package's leaf manifest was cached there at install time, so re-resolving it needs no network. Only a genuinely cold digest reaches the registry. The full design — wire layout, refresh mechanics, `--remote`/`--offline` interaction, bundling a copy inside a GitHub Action or Bazel rule, and resolving packages published through `index.ocx.sh` — lives in [Indices][in-depth-indices].
 
 The index is never walked by [`ocx clean`][cmd-clean] — see [Garbage Collection](#gc) below.
 
@@ -269,7 +269,7 @@ The stores above are keyed by digest, registry, or tag — none of them by the n
       </Node>
     </Node>
     <Node name="shells/default/bin/" icon="⚙️" open>
-      <Description>one launcher trampoline per exposed tool name — default group only; <code>default</code> is the only name this level takes</Description>
+      <Description>one launcher trampoline per exposed binary name — default group only; <code>default</code> is the only name this level takes</Description>
       <Node name="cmake" icon="🚀">
         <Description>POSIX: a five-line <code>/bin/sh</code> trampoline that re-enters ocx</Description>
       </Node>

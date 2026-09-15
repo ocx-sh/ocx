@@ -22,11 +22,11 @@ Most tools require a separate install step before you can use them for the first
 The binary is cached in the [object store][fs-objects], so subsequent calls with the same version skip the download. Nothing else persists: no [candidate symlink][fs-symlinks], no [current pointer][fs-symlinks].
 
 ::: tip
-Use [`ocx package exec`][cmd-exec] for one-off tasks or in CI where you want a reproducible, isolated invocation. For tools you reach for every day, read on.
+Use [`ocx package exec`][cmd-exec] for one-off tasks or in CI where you want a reproducible, isolated invocation. For packages you reach for every day, read on.
 :::
 
 ::: details Running multiple packages in a single invocation
-Pass multiple packages before `--`. Their environments are merged in declaration order so all tools are accessible inside the subprocess.
+Pass multiple packages before `--`. Their environments are merged in declaration order so every package's binaries are accessible inside the subprocess.
 
 A real-world example: [Bun][bun] is a JavaScript runtime that complements [Node.js][nodejs]. Bringing both runtimes together with a single command means both `node` and `bun` are on `PATH` without any manual setup:
 
@@ -37,7 +37,7 @@ A real-world example: [Bun][bun] is a JavaScript runtime that complements [Node.
 
 ## Installing {#installing}
 
-Running [`ocx package exec`][cmd-exec] re-resolves the package on every invocation. For tools you use across multiple sessions — compilers, interpreters, build utilities — you want a persistent, named install that is available offline and at a known, stable path.
+Running [`ocx package exec`][cmd-exec] re-resolves the package on every invocation. For packages you use across multiple sessions — compilers, interpreters, build utilities — you want a persistent, named install that is available offline and at a known, stable path.
 
 [`ocx package install`][cmd-install] downloads the package into the [content-addressed object store][fs-objects] and creates a [candidate symlink][fs-symlinks] at `~/.ocx/symlinks/{registry}/{repo}/candidates/{tag}`. That path never changes after installation. If two tags resolve to the same binary build, only one object lives on disk.
 
@@ -107,7 +107,7 @@ See the [object store][fs-objects] section of the user guide for how the `refs/`
 
 ## Environment {#environment}
 
-Tools are more than binaries. A compiler suite needs `CC`, `CXX`, and `LD_LIBRARY_PATH`. A runtime needs `JAVA_HOME` or `PYTHONHOME`. Keeping those variables in sync with installed paths manually is fragile and collision-prone when multiple tools share a shell.
+Packages are more than binaries. A compiler suite needs `CC`, `CXX`, and `LD_LIBRARY_PATH`. A runtime needs `JAVA_HOME` or `PYTHONHOME`. Keeping those variables in sync with installed paths manually is fragile and collision-prone when multiple packages share a shell.
 
 ocx packages declare their environment variables in `metadata.json`. [`ocx package env`][cmd-env] resolves those declarations relative to the installed path and prints them as a JSON document. [`ocx package exec`][cmd-exec] injects them into a clean child process automatically.
 
@@ -118,7 +118,7 @@ ocx packages declare their environment variables in `metadata.json`. [`ocx packa
 ::: tip Persistent shell environment
 OCX activation is handled by `$OCX_HOME/env.sh`, which is written by the installer and sourced from your login profile. At shell startup it invokes `ocx self activate --shell=sh` via the installer-written absolute path, so activation works even before `ocx` is on `PATH`. The command emits three blocks: PATH prepends for the global toolchain's launcher directory and the OCX binary directory in front of it, shell completions, and — in the default `env` mode — an `eval "$(ocx --global env --shell=sh)"` call that exports your global toolchain's environment. Because the PATH entry points at the `current` symlink, your profile stays valid across upgrades — no manual edit required.
 
-Populate that global toolchain with [`ocx --global add`][user-guide-global-add] — `ocx --global add uv:0.10` installs a tool and puts it on `PATH` in every new shell. See [global toolchain][project-global] for the tier model.
+Populate that global toolchain with [`ocx --global add`][user-guide-global-add] — `ocx --global add uv:0.10` installs a package and puts its binaries on `PATH` in every new shell. See [global toolchain][project-global] for the tier model.
 :::
 
 ::: details Composing environments from multiple packages
@@ -135,7 +135,7 @@ See the [`ocx package env` reference][cmd-env] for the full flag set, including 
 
 ## Project Toolchain {#project-toolchain}
 
-When a repository needs a fixed set of tools — a compiler, a formatter, a linter — you can declare them once and lock them to exact digests. Every contributor and every CI runner then gets the same binaries automatically.
+When a repository needs a fixed set of packages — a compiler, a formatter, a linter — you can declare them once and lock them to exact digests. Every contributor and every CI runner then gets the same binaries automatically.
 
 Three commands set up the toolchain:
 
@@ -143,7 +143,7 @@ Three commands set up the toolchain:
 
 [`ocx init`][cmd-init] writes a minimal `ocx.toml`. [`ocx add`][cmd-add] appends a binding, resolves the tag to per-platform digests, and writes `ocx.lock`. [`ocx exec`][cmd-run] reads `ocx.lock` and spawns the command with the locked toolchain's environment — no manual `export` or PATH manipulation needed.
 
-On bash, zsh, fish, PowerShell, and elvish, the toolchain lands on `PATH` automatically when you `cd` into the project — no extra setup beyond [`ocx self setup`][installation], which already wired the per-prompt hook (elvish's guard is narrower than the others' — details below). The `ocx add` above already wrote this project's [consent stamp][in-depth-shell-integration-consent], so it's ready: `cd` in and the locked tools are on `PATH` at the next prompt, `cd` out and they revert.
+On bash, zsh, fish, PowerShell, and elvish, the toolchain lands on `PATH` automatically when you `cd` into the project — no extra setup beyond [`ocx self setup`][installation], which already wired the per-prompt hook (elvish's guard is narrower than the others' — details below). The `ocx add` above already wrote this project's [consent stamp][in-depth-shell-integration-consent], so it's ready: `cd` in and the locked binaries are on `PATH` at the next prompt, `cd` out and they revert.
 
 nushell and the shells with no append-safe prompt-hook point — the strict-POSIX family (`ash`, `dash`, `ksh`) and Windows Batch — still need [direnv][direnv]. [`ocx direnv init`][cmd-direnv-init] drops a ready-made `.envrc` — run `direnv allow` once to enable it. The generated `.envrc` runs `eval "$(ocx direnv export)"` and re-evaluates whenever the lock changes (`watch_file ocx.toml ocx.lock`), so the toolchain is on `PATH` inside the project and gone when you leave.
 
@@ -153,7 +153,7 @@ See [Shell Integration][in-depth-shell-integration] for the full per-shell cover
 The [OCX VSCode extension][vscode-ext] (also on [Open VSX][openvsx-ext]) brings the project toolchain into your editor, so its terminal and tasks resolve the same locked binaries as [`ocx exec`][cmd-run].
 :::
 
-See [Pin a project's tools][user-guide-project] in the User Guide for groups, lifecycle commands, and CI setup.
+See [Pin a project's packages][user-guide-project] in the User Guide for groups, lifecycle commands, and CI setup.
 
 ## Next Steps {#next-steps}
 

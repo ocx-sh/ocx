@@ -3,33 +3,33 @@ outline: deep
 ---
 # Entry Points
 
-`entrypoints` are named launchers OCX generates at install time. Each entry becomes a tiny script in the package's `entrypoints/` directory; when the package is selected via `ocx package select`, those scripts land on the consumer's PATH as bare commands. The headline reason to declare them is **dependency encapsulation**: the launcher carries the package's own dep graph and runs in a clean environment, so two tools that share a runtime — Python, Node, the JVM — stop fighting over a single ambient version.
+`entrypoints` are named launchers OCX generates at install time. Each entry becomes a tiny script in the package's `entrypoints/` directory; when the package is selected via `ocx package select`, those scripts land on the consumer's PATH as bare commands. The headline reason to declare them is **dependency encapsulation**: the launcher carries the package's own dep graph and runs in a clean environment, so two packages that share a runtime — Python, Node, the JVM — stop fighting over a single ambient version.
 
 This page covers the publisher decisions: when to declare entrypoints at all, how to pick names that don't collide with the rest of the ecosystem, and how the composed `PATH` from the package's `env` block tells the launcher where each entry point's binary lives.
 
 ## Why Encapsulate Through a Launcher {#why}
 
-Imagine two tools you publish are JavaScript executables that depend on Node, and two more are Java tools that depend on a JDK. A consumer who installs all four and exposes their `bin/` directories ends up with four PATH entries and a single inherited `node` / `java` from the shell — whichever runtime the consumer happens to have first on PATH. The four tools now share one runtime. Upgrade Node and one tool breaks. Use the wrong JDK and another fails silently.
+Imagine two packages you publish are JavaScript executables that depend on Node, and two more are Java executables that depend on a JDK. A consumer who installs all four and exposes their `bin/` directories ends up with four PATH entries and a single inherited `node` / `java` from the shell — whichever runtime the consumer happens to have first on PATH. The four packages now share one runtime. Upgrade Node and one breaks. Use the wrong JDK and another fails silently.
 
-That conflict is structural, not a configuration mistake. Bare-binary exposure leaks a tool's private execution environment to the consumer's shell, and the consumer's shell is the one place where every package's deps collide.
+That conflict is structural, not a configuration mistake. Bare-binary exposure leaks a package's private execution environment to the consumer's shell, and the consumer's shell is the one place where every package's deps collide.
 
 Entry points cut the exposure surface to the binary alone. The launcher script that lands on PATH carries:
 
 - a baked path to this package's root,
 - a re-entry through [`ocx launcher exec`][cmd-exec], which reads `metadata.json` and composes the package's [private surface env][in-depth-environments] (its own env entries plus the env contributed by its declared dependencies) on top of the inherited shell environment, then resolves the entry-point name against that composed PATH.
 
-So when a JS tool's launcher runs, the dep's pinned [Node.js][nodejs] takes priority on the composed PATH for the process it launches — the digest declared in `dependencies[]`. A second JS tool with a different Node pin runs the same way, with its own pinned interpreter winning the resolver race. Neither launcher exposes its pinned Node as a bare PATH entry on the consumer's shell, so the two tools never fight over a single ambient interpreter.
+So when a JS package's launcher runs, the dep's pinned [Node.js][nodejs] takes priority on the composed PATH for the process it launches — the digest declared in `dependencies[]`. A second JS package with a different Node pin runs the same way, with its own pinned interpreter winning the resolver race. Neither launcher exposes its pinned Node as a bare PATH entry on the consumer's shell, so the two packages never fight over a single ambient interpreter.
 
 ::: tip Mental model
-Without entrypoints, packages publish *their environment* and consumers compose. With entrypoints, packages publish *executables*; the environment stays inside. That is the encapsulation dividend — and it is the only way two tools that share a runtime can coexist on one machine without a version manager arbitrating between them.
+Without entrypoints, packages publish *their environment* and consumers compose. With entrypoints, packages publish *executables*; the environment stays inside. That is the encapsulation dividend — and it is the only way two packages that share a runtime can coexist on one machine without a version manager arbitrating between them.
 :::
 
 ## When to Declare Entry Points {#when}
 
 Reach for `entrypoints` when one of these is true:
 
-- **Your tool depends on a runtime another tool also depends on.** [Python][python] scripts, [Node.js][nodejs] CLIs, [JVM][jvm] tools, [Ruby][ruby] gems — anything where the executable is meaningless without a specific interpreter version on PATH. The launcher pins the interpreter inside the package; consumers never see the conflict.
-- **Your tool needs to find a dependency at runtime.** Declare the dep in `dependencies[]` with `visibility: private` (or `public` if the consumer should also see it) and use `${deps.NAME.installPath}` in `env` values to put the dep's binaries on the composed PATH; the launcher then resolves the entry point's name against that PATH.
+- **Your package depends on a runtime another package also depends on.** [Python][python] scripts, [Node.js][nodejs] CLIs, [JVM][jvm] tools, [Ruby][ruby] gems — anything where the executable is meaningless without a specific interpreter version on PATH. The launcher pins the interpreter inside the package; consumers never see the conflict.
+- **Your package needs to find a dependency at runtime.** Declare the dep in `dependencies[]` with `visibility: private` (or `public` if the consumer should also see it) and use `${deps.NAME.installPath}` in `env` values to put the dep's binaries on the composed PATH; the launcher then resolves the entry point's name against that PATH.
 - **You want the package to run with the env it declared.** The launcher re-enters via [`ocx launcher exec`][cmd-exec], which composes the package's declared env (its own entries plus the env contributed by its declared dependencies) on top of the inherited shell. PATH-based exposure cannot do this — the launched binary just inherits whatever the consumer's shell carried in.
 - **Bare-binary exposure would leak too much.** A toolchain that ships fifty binaries but only wants three on PATH declares the three as entrypoints and leaves `bin/` private — consumers see exactly the public surface.
 
@@ -43,15 +43,15 @@ Entry-point names must match `^[a-z0-9][a-z0-9_-]*$` and stay under 64 character
 
 Collisions are the failure mode publishers underestimate. OCX checks for them at two distinct points — at install time (within the package being installed and its transitive deps) and at compose time (when `ocx package exec` or `ocx env` is given two or more roots) — and surfaces an `EntrypointCollision` error rather than silently picking one. `ocx package select` itself never picks owners; it only flips the candidate symlink. The avoid-collisions rules:
 
-- **Match the upstream binary name when wrapping a single tool.** If you ship [CMake][cmake], declare `cmake`, `ctest`, `cpack` — that's what users expect on PATH.
-- **Namespace internal launchers.** A wrapper for `myorg/build-tools` should declare `myorg-build` or `mbt` rather than a generic `build` that any other tool might also want.
-- **Look at the [package catalog][catalog]** before publishing public packages. Names already in use by upstream tools are the high-collision risk surface.
+- **Match the upstream binary name when wrapping a single upstream binary.** If you ship [CMake][cmake], declare `cmake`, `ctest`, `cpack` — that's what users expect on PATH.
+- **Namespace internal launchers.** A wrapper for `myorg/build-tools` should declare `myorg-build` or `mbt` rather than a generic `build` that any other package might also want.
+- **Look at the [package catalog][catalog]** before publishing public packages. Names already in use by upstream projects are the high-collision risk surface.
 
 The full collision-detection mechanic, error format, and the cross-platform launcher caveats live in [entry points in depth][in-depth-entry-points] (see also `select`'s [collision section][select-collision] for how detection relates to the candidate symlink).
 
 ## Name = Dispatch Key {#dispatch}
 
-`entrypoints` is a JSON object keyed by command name. The value object holds per-entry fields and is reserved for future additions (currently always `{}`) — there is no `target` template. At install time OCX writes one launcher per key; at exec time the launcher re-enters `ocx launcher exec`, which composes the package's env, then resolves the entry's name against the composed `PATH`. That inner resolution is a standard PATH search, `PATHEXT`-aware on Windows so a packaged tool shipped as `tool.bat`/`tool.cmd` is found by bare name. Declare the binary's location once via `env`, and every entry name picks it up from there.
+`entrypoints` is a JSON object keyed by command name. The value object holds per-entry fields and is reserved for future additions (currently always `{}`) — there is no `target` template. At install time OCX writes one launcher per key; at exec time the launcher re-enters `ocx launcher exec`, which composes the package's env, then resolves the entry's name against the composed `PATH`. That inner resolution is a standard PATH search, `PATHEXT`-aware on Windows so a packaged binary shipped as `tool.bat`/`tool.cmd` is found by bare name. Declare the binary's location once via `env`, and every entry name picks it up from there.
 
 A simple wrapper around a single bundled binary — declare `bin/` on the PATH, declare the entry points:
 
@@ -66,7 +66,7 @@ A simple wrapper around a single bundled binary — declare `bin/` on the PATH, 
 }
 ```
 
-A meta-package that exposes a tool from a dependency without re-bundling it — put the dep's `bin/` on the composed PATH and declare the name:
+A meta-package that exposes a binary from a dependency without re-bundling it — put the dep's `bin/` on the composed PATH and declare the name:
 
 ```json
 {
@@ -100,7 +100,7 @@ import sys
 print("mytool", "running on", sys.version)
 ```
 
-The shebang resolves `python3` from PATH at exec time. Without entrypoints — bare `bin/` exposed as `public` PATH — every consumer's PATH ends up with `python3` resolving to whichever Python was first on PATH (the consumer's system Python, a [`mise`][mise]-managed Python, another OCX package's Python). Two such tools installed side-by-side are one upgrade away from breaking.
+The shebang resolves `python3` from PATH at exec time. Without entrypoints — bare `bin/` exposed as `public` PATH — every consumer's PATH ends up with `python3` resolving to whichever Python was first on PATH (the consumer's system Python, a [`mise`][mise]-managed Python, another OCX package's Python). Two such packages installed side-by-side are one upgrade away from breaking.
 
 Entrypoints encapsulate by pinning Python *inside the launcher's environment*. Declare CPython as a `private` dependency, declare the script as an entry point, and demote `bin/` to private:
 
@@ -130,16 +130,16 @@ What happens at exec time:
 2. The launcher re-enters via `ocx launcher exec` with the package root baked in. OCX composes the *private* surface env: PATH from the cpython dep prepended, this package's `bin/` prepended on top.
 3. OCX exec's `bin/mytool`. The script's shebang triggers `/usr/bin/env python3`, which resolves `python3` against the composed PATH — finding the dep's pinned CPython, not the consumer's ambient one.
 
-The consumer never sees `python3` on their shell PATH. Two Python tools installed side-by-side each carry their own pinned interpreter inside their launcher; neither leaks. That is the encapsulation dividend, made concrete.
+The consumer never sees `python3` on their shell PATH. Two Python packages installed side-by-side each carry their own pinned interpreter inside their launcher; neither leaks. That is the encapsulation dividend, made concrete.
 
-`visibility: private` on the dep edge is the right choice here — your launcher needs `cpython`, but the consumer never wants to discover "this tool happens to use Python." Switch to `public` only if the consumer is supposed to compose the dep themselves (rare; that's what bare `cpython:3.13` is for).
+`visibility: private` on the dep edge is the right choice here — your launcher needs `cpython`, but the consumer never wants to discover "this package happens to use Python." Switch to `public` only if the consumer is supposed to compose the dep themselves (rare; that's what bare `cpython:3.13` is for).
 
 ::: tip Native binaries don't need any of this
 A statically-linked [Go][go] or [Rust][rust] binary has no interpreter to pin. `entrypoints` adds nothing — bare `bin/` on PATH works. Encapsulation only earns its keep when there's a runtime to encapsulate.
 :::
 
 ::: info Multi-platform launchers
-A single `entrypoints` declaration covers every platform of the package. OCX generates `.sh` launchers for Unix shells and, on Windows, a native `<name>.exe` shim with a one-line `<name>.shim` sidecar, all from the same metadata. The Git Bash and PowerShell caveats live in [entry points in depth][in-depth-entry-points]. Launcher discovery never needs `PATHEXT` (`.EXE` is always in the default Windows `PATHEXT`); `PATHEXT` only matters inside [`ocx package exec`][cmd-exec-pathext] when it resolves a packaged tool that ships as a `.bat`/`.cmd` child binary.
+A single `entrypoints` declaration covers every platform of the package. OCX generates `.sh` launchers for Unix shells and, on Windows, a native `<name>.exe` shim with a one-line `<name>.shim` sidecar, all from the same metadata. The Git Bash and PowerShell caveats live in [entry points in depth][in-depth-entry-points]. Launcher discovery never needs `PATHEXT` (`.EXE` is always in the default Windows `PATHEXT`); `PATHEXT` only matters inside [`ocx package exec`][cmd-exec-pathext] when it resolves a packaged binary that ships as a `.bat`/`.cmd` child.
 :::
 
 ## See Also {#see-also}

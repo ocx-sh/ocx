@@ -3,7 +3,7 @@
 # cast: true
 # doc: in-depth/shell-integration/cd-into-project
 # title: Landing inside a consented project
-# description: A shell that started outside the project resolves nothing; cd into it and the next prompt applies its tools.
+# description: A shell that started outside the project resolves nothing; cd into it and the next prompt applies its binaries.
 set -euo pipefail
 
 cd "$SCENARIO_TMP"

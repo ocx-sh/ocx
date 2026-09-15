@@ -3,7 +3,7 @@ outline: deep
 ---
 # Migration Patterns
 
-Most tools you will publish to OCX already ship binaries somewhere — a [Homebrew formula][homebrew], a [GitHub Release][gh-releases] zip, an [APT repository][apt-repos], or a vendor's signed installer. The publisher work is reformatting those artefacts into [OCI image manifests][oci-image-spec] without re-bundling content. This page covers the recurring migration patterns and points at the [`ocx_mirror`][in-tree-mirror-spec] tool that automates them.
+Most upstream projects you will publish to OCX already ship binaries somewhere — a [Homebrew formula][homebrew], a [GitHub Release][gh-releases] zip, an [APT repository][apt-repos], or a vendor's signed installer. The publisher work is reformatting those artefacts into [OCI image manifests][oci-image-spec] without re-bundling content. This page covers the recurring migration patterns and points at the [`ocx_mirror`][in-tree-mirror-spec] tool that automates them.
 
 ## The `ocx_mirror` Pipeline {#mirror}
 
@@ -11,7 +11,7 @@ Most tools you will publish to OCX already ship binaries somewhere — a [Homebr
 
 The advantage over running the commands manually: the pipeline batches `--cascade` resolution across platforms in one publisher invocation, runs the upstream → archive transformation deterministically, and exposes a `versions.new_per_run` knob (`Option<usize>`, unlimited when omitted) so a single CI run doesn't spam the registry with a backlog of upstream releases. The cross-release [layer-reuse][authoring-layer-reuse] pattern is a hand-publisher technique — `ocx_mirror` always uploads each platform's archive afresh.
 
-A minimal spec that wraps a single upstream tool:
+A minimal spec that wraps a single upstream project:
 
 ```yaml
 name: mytool
@@ -87,7 +87,7 @@ cascade: true
 
 ## Repackaging GitHub Releases {#github-releases}
 
-Most modern open-source binary tools ship via [GitHub Releases][gh-releases]. The mirror pipeline's `github_release` source type reads the release feed, downloads the assets matching the platform regex, and pushes them through the same `ocx_lib` publisher API used by `ocx package create` / `push`. Hand-driven publishers can mimic the same flow with a few [`curl`][curl] calls and a script — the wins from going through `ocx_mirror` are deterministic ordering across runs and the dedicated digest-verification slot (`verify.github_asset_digest`).
+Most modern open-source binaries ship via [GitHub Releases][gh-releases]. The mirror pipeline's `github_release` source type reads the release feed, downloads the assets matching the platform regex, and pushes them through the same `ocx_lib` publisher API used by `ocx package create` / `push`. Hand-driven publishers can mimic the same flow with a few [`curl`][curl] calls and a script — the wins from going through `ocx_mirror` are deterministic ordering across runs and the dedicated digest-verification slot (`verify.github_asset_digest`).
 
 The platform regex matrix is the part publishers usually re-derive every time. Two [CMake][cmake]-style worked examples covering the asset-naming-changed-mid-release case:
 

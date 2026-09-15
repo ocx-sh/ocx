@@ -3,11 +3,11 @@ outline: deep
 ---
 # Project Toolchain
 
-A repository's contributors and CI runners need the same tool versions — `cmake 3.28`, `shellcheck 0.11`, `goreleaser 2.0` — without arguing over chat or curl-piping installers. Earlier reproducibility mechanisms ([digest pin][in-depth-versioning-locking], [snapshot pin][in-depth-indices-local], [bundled snapshot][in-depth-indices-bundled]) describe how a *single* invocation freezes its inputs; none of them describe what the *project itself* expects.
+A repository's contributors and CI runners need the same package versions — `cmake 3.28`, `shellcheck 0.11`, `goreleaser 2.0` — without arguing over chat or curl-piping installers. Earlier reproducibility mechanisms ([digest pin][in-depth-versioning-locking], [snapshot pin][in-depth-indices-local], [bundled snapshot][in-depth-indices-bundled]) describe how a *single* invocation freezes its inputs; none of them describe what the *project itself* expects.
 
-A committed [`ocx.toml`][project-toml] plus its sibling [`ocx.lock`][project-lock] closes that gap. The pair makes "the tools this project needs" a piece of source code — reviewable in pull requests, mergeable across branches, reproducible across machines, and resolvable offline once the lock is fetched. The user-facing surface — `ocx init`, `ocx add`, `ocx lock`, `ocx pull`, `ocx exec` — lives in the [project section of the user guide][user-project]. This page explains the file formats, the locking contract, the group resolution model, and what reproducibility guarantees actually ship today.
+A committed [`ocx.toml`][project-toml] plus its sibling [`ocx.lock`][project-lock] closes that gap. The pair makes "the packages this project needs" a piece of source code — reviewable in pull requests, mergeable across branches, reproducible across machines, and resolvable offline once the lock is fetched. The user-facing surface — `ocx init`, `ocx add`, `ocx lock`, `ocx pull`, `ocx exec` — lives in the [project section of the user guide][user-project]. This page explains the file formats, the locking contract, the group resolution model, and what reproducibility guarantees actually ship today.
 
-## Declaring tools — `ocx.toml` {#toml}
+## Declaring bindings — `ocx.toml` {#toml}
 
 `ocx.toml` lives at the root of a repository (or anywhere up the directory tree from `cwd`). It is a [TOML][toml] file with a single `[tools]` table mapping local binding names to fully-qualified [OCI identifiers][oci-identifier]:
 
@@ -18,18 +18,18 @@ ripgrep  = "ocx.sh/ripgrep/ripgrep:14"
 mytool   = "ghcr.io/acme/mytool:1.0"
 ```
 
-Each value is `registry/repo[:tag][@digest]`. Bare-tag forms like `cmake = "3.28"` are rejected at parse time so the file is unambiguous regardless of which registry the user has configured as a default. The binding name on the left is independent of the repository path — `mytool = "ghcr.io/acme/mytool:1.0"` is fine and lets internal projects rename tools without touching the registry.
+Each value is `registry/repo[:tag][@digest]`. Bare-tag forms like `cmake = "3.28"` are rejected at parse time so the file is unambiguous regardless of which registry the user has configured as a default. The binding name on the left is independent of the repository path — `mytool = "ghcr.io/acme/mytool:1.0"` is fine and lets internal projects rename packages without touching the registry.
 
 A registry-qualified entry without a tag — `cmake = "ocx.sh/kitware/cmake"` — defaults to `:latest` at parse time, the same convention `docker pull` and OCI tooling apply to bare repository references. Digest-pinned entries (`tool = "ghcr.io/acme/tool@sha256:…"`) keep their canonical pin and never get a tag injected.
 
-The schema is published at [`https://ocx.sh/schemas/project/v1.json`][schema-project] and wired through [taplo][taplo] for editor auto-completion. With `taplo` installed and an `ocx.toml` open in [Helix][helix], [VSCode][vscode-taplo], or [Neovim][neovim-taplo-lsp], unknown fields surface as red squiggles and tool names complete as you type.
+The schema is published at [`https://ocx.sh/schemas/project/v1.json`][schema-project] and wired through [taplo][taplo] for editor auto-completion. With `taplo` installed and an `ocx.toml` open in [Helix][helix], [VSCode][vscode-taplo], or [Neovim][neovim-taplo-lsp], unknown fields surface as red squiggles and binding names complete as you type.
 
 ::: info Comparable tools, different scope
-[mise][mise] and [asdf][asdf] manage what is *installed on a developer's workstation*. `ocx.toml` plus `ocx.lock` cryptographically pins what a *repository requires* — including private OCI registry tools that mise/asdf have no plugin for. The two layers compose: a contributor may use mise for global Node/Python versions and `ocx.toml` for the repo-scoped binaries.
+[mise][mise] and [asdf][asdf] manage what is *installed on a developer's workstation*. `ocx.toml` plus `ocx.lock` cryptographically pins what a *repository requires* — including private OCI registry packages that mise/asdf have no plugin for. The two layers compose: a contributor may use mise for global Node/Python versions and `ocx.toml` for the repo-scoped binaries.
 :::
 
 ::: warning Avoid global state in `ocx.toml`
-The project file describes tools the project needs, not how a contributor's shell prompt should behave. Shell-profile state (`PATH` munging, sentinel env vars, "load on every prompt") stays in the user-tier mechanisms — see [activation](#activation) for how the project tier hooks into a developer's shell without spilling into `ocx.toml`.
+The project file describes packages the project needs, not how a contributor's shell prompt should behave. Shell-profile state (`PATH` munging, sentinel env vars, "load on every prompt") stays in the user-tier mechanisms — see [activation](#activation) for how the project tier hooks into a developer's shell without spilling into `ocx.toml`.
 :::
 
 ## Locking — `ocx.lock` {#lock}
@@ -66,7 +66,7 @@ Only the platforms the publisher ships are recorded: a platform absent from the 
 
 Every key in `[tool.platforms]` must be the canonical grammar spelling of the platform it parses to (`+a,a` or unsorted `+b,a` are rejected, not silently normalized) and no two keys may parse to the same platform — both checked on load and on every write, so the file's bytes stay the unique canonical form. Two distinct keys pointing at the *same* digest is fine and expected (see [Shared Digests][reference-platforms-shared-digests]); only key-level duplication is rejected.
 
-At install and run time, OCX resolves the host against `[tool.platforms]` through the same [directed compatibility relation][reference-platforms-compatibility] `Index::select` uses for a fresh install — a bare `linux/amd64` host can match a `linux/amd64+libc.glibc` entry, and a package that ships only `"any"` matches every host. A host with no compatible entry at all produces a clean pre-network error naming the missing platform and pointing to `ocx update <tool>` to re-lock if the publisher has since added support.
+At install and run time, OCX resolves the host against `[tool.platforms]` through the same [directed compatibility relation][reference-platforms-compatibility] `Index::select` uses for a fresh install — a bare `linux/amd64` host can match a `linux/amd64+libc.glibc` entry, and a package that ships only `"any"` matches every host. A host with no compatible entry at all produces a clean pre-network error naming the missing platform and pointing to `ocx update <name>` to re-lock if the publisher has since added support.
 
 ::: warning `ocx.lock` version 1 and 2 are rejected outright
 A lock written by an older OCX release fails to load with `unsupported ocx.lock version N;
@@ -76,7 +76,7 @@ regenerate with \`ocx lock\`` (exit 78) — there is no bridged read and no part
 
 ### Adding and dropping platforms {#lock-platforms-lifecycle}
 
-A newly-shipped platform becomes available after an explicit `ocx update <tool>`, which re-resolves the tag and adds the new platform key to the map. A dropped platform disappears as a removed key on the next re-lock. Both changes are visible as a plain-text diff to `ocx.lock` in pull-request review. There is no silent pickup at install time — the lock is the contract.
+A newly-shipped platform becomes available after an explicit `ocx update <name>`, which re-resolves the tag and adds the new platform key to the map. A dropped platform disappears as a removed key on the next re-lock. Both changes are visible as a plain-text diff to `ocx.lock` in pull-request review. There is no silent pickup at install time — the lock is the contract.
 
 ::: warning `ocx.lock` is machine-generated
 Do not hand-edit `ocx.lock`. The format is canonicalized — sort order, whitespace, and the file-level `declaration_hash` are computed by `ocx lock` and may evolve across OCX versions. Manual edits will be overwritten on the next `ocx lock` run and may be rejected by future schema versions.
@@ -100,7 +100,7 @@ Project-state writes (`ocx lock`, `ocx update`, `ocx add`, `ocx remove`) seriali
 
 ## Pin preservation {#pin-preservation}
 
-`ocx add` and `ocx remove` are **partial mutators** — they touch only the binding they name and carry every other lock entry forward unchanged. Neither command re-resolves a surviving tool's live tag. This is the guarantee that adding a new tool or dropping an old one never silently advances the versions of everything else.
+`ocx add` and `ocx remove` are **partial mutators** — they touch only the binding they name and carry every other lock entry forward unchanged. Neither command re-resolves a surviving binding's live tag. This is the guarantee that adding a new binding or dropping an old one never silently advances the versions of everything else.
 
 Every surviving entry is passed through byte-identical — no registry contact. Because `ocx.lock` is always the current V3 format (an older lock fails to load outright, per the warning above), there is nothing to transcribe: `ocx add` and `ocx remove` never touch the network for pins they are not adding or removing.
 
@@ -113,7 +113,7 @@ The two commands that intentionally advance version pins are:
 | `ocx lock` | Only when `ocx.toml` drifted (whole-file reconcile; a moving tag may advance) |
 | `ocx update` | Whole file by default; `-g GROUP` / `NAME` scopes it to a named subset (those advance, the rest stay frozen) |
 
-Groups are primarily a **composition concern** — they scope which tools `ocx exec`, `ocx env`, and `ocx pull` see. `ocx lock` ignores them and always reconciles the whole file. `ocx update` is the exception: passing `-g GROUP` or a binding `NAME` advances only that subset and carries every other pin forward verbatim, just like `ocx add` and `ocx remove` do for the bindings they touch.
+Groups are primarily a **composition concern** — they scope which bindings `ocx exec`, `ocx env`, and `ocx pull` see. `ocx lock` ignores them and always reconciles the whole file. `ocx update` is the exception: passing `-g GROUP` or a binding `NAME` advances only that subset and carries every other pin forward verbatim, just like `ocx add` and `ocx remove` do for the bindings they touch.
 
 ## Pulling and executing {#pull-exec}
 
@@ -121,9 +121,9 @@ Once `ocx.lock` exists, two commands cover the bulk of day-to-day use. [`ocx pul
 
 Both gate on the lock's `declaration_hash`: if `ocx.toml` has changed since the lock was generated, the command exits with a structured error pointing at [`ocx lock`][cmd-lock]. There is no implicit re-resolution — the project file is the input, the lock file is the contract, and registry round-trips happen only when you ask for them.
 
-## Running tools {#running}
+## Running binaries {#running}
 
-Once `ocx.lock` is current, [`ocx exec`][cmd-run] spawns a child process whose environment is composed from the lock's resolved tool set. It is the project-tier counterpart to the OCI-tier [`ocx package exec`][cmd-exec]: the same child-spawn mechanics, but symbols are binding names from `ocx.toml` rather than OCI identifiers.
+Once `ocx.lock` is current, [`ocx exec`][cmd-run] spawns a child process whose environment is composed from the lock's resolved package set. It is the project-tier counterpart to the OCI-tier [`ocx package exec`][cmd-exec]: the same child-spawn mechanics, but symbols are binding names from `ocx.toml` rather than OCI identifiers.
 
 ### Argument shape {#running-shape}
 
@@ -151,7 +151,7 @@ The scope controls which groups contribute to the composed environment.
 
 > First by group-selection order (the order of `-g` flags after `all` expansion, deduplicated); then alphabetical by binding name within each group.
 
-This rule determines iteration order through the resolved tool set. The composer applies env entries by **prepending**, so the **last tool walked** has its PATH entries placed **first** on the resolved PATH at runtime. In other words: in `-g` argument order, **groups listed later win** PATH lookup. This matches the load-bearing prepend invariant in `composer.rs` ([source][composer-source]) — entries pushed later in iteration land first on PATH.
+This rule determines iteration order through the resolved package set. The composer applies env entries by **prepending**, so the **last package walked** has its PATH entries placed **first** on the resolved PATH at runtime. In other words: in `-g` argument order, **groups listed later win** PATH lookup. This matches the load-bearing prepend invariant in `composer.rs` ([source][composer-source]) — entries pushed later in iteration land first on PATH.
 
 `all` expansion inserts groups alphabetically by group name in place of `all` in the `-g` argument list, after the default group. So `ocx exec -g ci,all,release` expands to `[ci, default, ci_alpha_ordered_named_groups..., release]` and then `compose_tool_set` deduplicates.
 
@@ -209,7 +209,7 @@ Exit codes 64 and 78 for clap-level failures: OCX remaps clap's default exit 2 t
 
 ## Groups {#groups}
 
-Not every contributor needs every tool. CI needs `shellcheck` and `shfmt`; the release pipeline needs `goreleaser`; daily development needs neither. Named groups let `ocx.toml` describe these subsets without forcing every workstation to download release tooling on first checkout:
+Not every contributor needs every package. CI needs `shellcheck` and `shfmt`; the release pipeline needs `goreleaser`; daily development needs neither. Named groups let `ocx.toml` describe these subsets without forcing every workstation to download release tooling on first checkout:
 
 ```toml
 [tools]
@@ -223,19 +223,19 @@ shfmt      = "ocx.sh/shfmt/shfmt:3.7"
 goreleaser = "ocx.sh/goreleaser/goreleaser:2.0"
 ```
 
-The top-level `[tools]` table is the implicit `default` group. Each named `[group.<name>]` holds exactly two optional sub-tables: `tools`, which adds to the default group's bindings, and `env` (see [Project and group `[env]`](#running-project-env)). A tool binding declared directly under `[group.<name>]` — outside its `tools` sub-table — is a parse error naming the group. `[group.default]` is reserved and produces a parse error regardless of contents — there is no ambiguity between "implicit default" and "named default."
+The top-level `[tools]` table is the implicit `default` group. Each named `[group.<name>]` holds exactly two optional sub-tables: `tools`, which adds to the default group's bindings, and `env` (see [Project and group `[env]`](#running-project-env)). A binding declared directly under `[group.<name>]` — outside its `tools` sub-table — is a parse error naming the group. `[group.default]` is reserved and produces a parse error regardless of contents — there is no ambiguity between "implicit default" and "named default."
 
 Pass `--group` (repeatable, comma-separated) to scope a command:
 
 ```shell
 ocx pull -g ci,lint               # CI runner — only what's needed for lint jobs
-ocx pull -g release               # release runner — only release tools
+ocx pull -g release               # release runner — only release packages
 ocx lock                          # workstation — every group resolved
 ```
 
 ### Per-group binding identity {#groups-binding-identity}
 
-The same binding name may appear in the default `[tools]` table and in any named `[group.*.tools]` table simultaneously — the identity of a binding is `(group, name)`, not `name` alone. This lets a project pin one version of a tool for daily workstation use and a different version in `ci` without conflict:
+The same binding name may appear in the default `[tools]` table and in any named `[group.*.tools]` table simultaneously — the identity of a binding is `(group, name)`, not `name` alone. This lets a project pin one version of a package for daily workstation use and a different version in `ci` without conflict:
 
 ```toml
 [tools]
@@ -257,11 +257,11 @@ Without `--group`, an ambiguous remove exits with code 64 and names every group 
 
 ## Activation {#activation}
 
-A project's tools should be on `PATH` whenever you `cd` into the project — without `eval`-ing anything on every shell startup, and without leaking into whatever else that shell does afterward.
+A project's binaries should be on `PATH` whenever you `cd` into the project — without `eval`-ing anything on every shell startup, and without leaking into whatever else that shell does afterward.
 
-On bash, zsh, fish, PowerShell, and elvish, the per-prompt shell hook does exactly that: once the project is [consented][in-depth-shell-integration-consent], `cd` in and its locked tools land on `PATH` at the next prompt; `cd` back out and they revert. Elvish's guard is narrower than the other four's — see [Shell Integration][in-depth-shell-integration] for the mechanism, the full per-shell coverage table, and the consent model that gates it.
+On bash, zsh, fish, PowerShell, and elvish, the per-prompt shell hook does exactly that: once the project is [consented][in-depth-shell-integration-consent], `cd` in and its locked binaries land on `PATH` at the next prompt; `cd` back out and they revert. Elvish's guard is narrower than the other four's — see [Shell Integration][in-depth-shell-integration] for the mechanism, the full per-shell coverage table, and the consent model that gates it.
 
-nushell and the shells with no append-safe prompt-hook point — the strict-POSIX family (`ash`, `dash`, `ksh`) and Windows Batch — need one of two explicit entry points instead. Neither installs missing tools, contacts the registry, or mutates the [package store][in-depth-storage-packages]; run [`ocx pull`][cmd-pull] first to materialize anything `ocx.lock` requires.
+nushell and the shells with no append-safe prompt-hook point — the strict-POSIX family (`ash`, `dash`, `ksh`) and Windows Batch — need one of two explicit entry points instead. Neither installs missing packages, contacts the registry, or mutates the [package store][in-depth-storage-packages]; run [`ocx pull`][cmd-pull] first to materialize anything `ocx.lock` requires.
 
 [`ocx direnv export`][cmd-direnv-export] is the [direnv][direnv] entry point. It is stateless — it emits a fresh export block on every invocation. [direnv][direnv] supplies the cache layer (one re-evaluation per `cd`, watched files re-trigger), so the export stays simple. Run [`ocx direnv init`][cmd-direnv-init] in a project directory to drop a ready-made `.envrc`, then `direnv allow`.
 
@@ -273,15 +273,15 @@ For scripted environments and CI, call [`ocx exec`][cmd-run] directly — it com
 
 ## Global toolchain {#global-toolchain}
 
-A user-wide `ocx.toml` at [`$OCX_HOME`][env-ocx-home]`/ocx.toml` (default `~/.ocx/ocx.toml`) holds tools that should be available in every shell — `ripgrep`, `cmake`, `shellcheck` — without being part of any specific project. This is the global toolchain tier, activated explicitly via the [`--global`][cmd-global-flag] flag or the [`OCX_GLOBAL`][env-ocx-global] environment variable.
+A user-wide `ocx.toml` at [`$OCX_HOME`][env-ocx-home]`/ocx.toml` (default `~/.ocx/ocx.toml`) holds packages that should be available in every shell — `ripgrep`, `cmake`, `shellcheck` — without being part of any specific project. This is the global toolchain tier, activated explicitly via the [`--global`][cmd-global-flag] flag or the [`OCX_GLOBAL`][env-ocx-global] environment variable.
 
 The global file uses the same [schema][schema-project] and lock semantics as a project file. The lock lives at `$OCX_HOME/ocx.lock`. Unlike the old home-tier fallback, the global toolchain is **never discovered implicitly** — the CWD walk does not activate it. You must pass `--global` or set `OCX_GLOBAL`.
 
-::: warning Global and project tools are isolated by PATH precedence
-`ocx exec` and `ocx package exec` are always hermetic: the global toolchain is never consulted during project-tier resolution. Global tools remain on `PATH` (there is no strip), but project-declared tools are **prepended** by the active hook, so they shadow any same-named global tools. See [Strict isolation][env-composition-strict-isolation] for the full model.
+::: warning Global and project binaries are isolated by PATH precedence
+`ocx exec` and `ocx package exec` are always hermetic: the global toolchain is never consulted during project-tier resolution. Global binaries remain on `PATH` (there is no strip), but project-declared binaries are **prepended** by the active hook, so they shadow any same-named global binaries. See [Strict isolation][env-composition-strict-isolation] for the full model.
 :::
 
-For managing global tools day-to-day, see [Keep everyday tools available everywhere][user-guide-global] in the user guide. To opt out of project-tier discovery entirely for a single invocation, set [`OCX_NO_PROJECT=1`][env-no-project].
+For managing global packages day-to-day, see [Keep everyday packages available everywhere][user-guide-global] in the user guide. To opt out of project-tier discovery entirely for a single invocation, set [`OCX_NO_PROJECT=1`][env-no-project].
 
 ## Multi-project retention {#multi-project-retention}
 
@@ -293,17 +293,17 @@ If you intentionally want to collect packages held only by other projects' lockf
 
 ## Reproducibility and SLSA {#reproducibility}
 
-OCX v1 ships digest-pinning reproducibility: every tool a project resolves is identified by its OCI manifest digest, and the lock file commits that digest under a hash of the source `ocx.toml`. Any consumer with the lock can verify they are pulling exactly the bytes the project committed to — no tag races, no silent registry rewrites.
+OCX v1 ships digest-pinning reproducibility: every package a project resolves is identified by its OCI manifest digest, and the lock file commits that digest under a hash of the source `ocx.toml`. Any consumer with the lock can verify they are pulling exactly the bytes the project committed to — no tag races, no silent registry rewrites.
 
-What is not yet shipped is a signed build attestation describing how each tool was produced. That capability — the kind of [SLSA build provenance][slsa-l1] producers can generate via [Sigstore][sigstore] or similar — is deferred to v2. Treat OCX v1 as solid input integrity, not as compliance with any [SLSA level][slsa-attestation].
+What is not yet shipped is a signed build attestation describing how each package was produced. That capability — the kind of [SLSA build provenance][slsa-l1] producers can generate via [Sigstore][sigstore] or similar — is deferred to v2. Treat OCX v1 as solid input integrity, not as compliance with any [SLSA level][slsa-attestation].
 
-In practice, the v1 contract is sufficient for the most common reproducibility needs: locking a CI matrix to known-good binaries, surviving registry mutability incidents, and ensuring contributors review tool upgrades the same way they review code changes. v2 will add the cryptographic chain that links published digests to verifiable build pipelines.
+In practice, the v1 contract is sufficient for the most common reproducibility needs: locking a CI matrix to known-good binaries, surviving registry mutability incidents, and ensuring contributors review package upgrades the same way they review code changes. v2 will add the cryptographic chain that links published digests to verifiable build pipelines.
 
 ## See Also
 
-- [User guide → Pin a project's tools][user-project] — task-driven overview.
-- [User guide → Run tools from your project][user-run] — quick-start examples for `ocx exec`.
-- [User guide → Keep everyday tools available everywhere][user-guide-global] — global toolchain use-case narrative.
+- [User guide → Pin a project's packages][user-project] — task-driven overview.
+- [User guide → Run binaries from your project][user-run] — quick-start examples for `ocx exec`.
+- [User guide → Keep everyday packages available everywhere][user-guide-global] — global toolchain use-case narrative.
 - [Environment Composition reference][env-composition-strict-isolation] — reference-level statement of the strict isolation rule.
 - [Indices In Depth][in-depth-indices] — how `ocx pull` reads the lock and where the registry round-trips happen.
 - [Storage In Depth → Garbage collection][in-depth-storage-gc] — how project-lock back-references protect packages.

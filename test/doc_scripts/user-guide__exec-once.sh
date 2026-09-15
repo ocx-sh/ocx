@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # state: setup:full-catalog
 # doc: user-guide/exec-once
-# title: Run a tool once without installing
+# title: Run a package once without installing
 # description: Execute a package on demand without creating a persistent candidate symlink.
 set -euo pipefail
 

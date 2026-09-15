@@ -40,7 +40,7 @@ A bare command name is resolved against the package's own directories before the
 
 That matters most when the file is there but cannot be executed. A binary that lost its executable bit — a common casualty of `zip`, of a `COPY` in a build image, or of a checkout on a filesystem that drops the bit — fails with exit code 65, naming the path and its mode. It is not passed over in favour of a same-named host binary: doing so would test something the package does not contain, and report a pass for a package nobody can run.
 
-Names your package does not ship are unaffected: `sh`, `grep`, `curl` and the rest still resolve on the host `PATH`, with a warning on stderr naming the package directories that were searched. So a typo'd tool name is visible in the log rather than silently testing a host binary. A name carrying a path separator (`./tool`, an absolute path) addresses a file directly and skips this entirely.
+Names your package does not ship are unaffected: `sh`, `grep`, `curl` and the rest still resolve on the host `PATH`, with a warning on stderr naming the package directories that were searched. So a typo'd binary name is visible in the log rather than silently testing a host binary. A name carrying a path separator (`./tool`, an absolute path) addresses a file directly and skips this entirely.
 
 To catch a missing executable bit before you even get here, pass `--bin-scan` to [`ocx package create`][cmd-package-create]: it verifies the `binaries` claim against the content tree at authoring time.
 
@@ -145,7 +145,7 @@ ocx package push -i acme/mytool:1.0.0 mytool-1.0.0.tar.xz
 
 ## Scripted tests {#scripted-tests}
 
-The `-- CMD` form works well when the package ships its own test runner. Tool packages — `cmake`, `shellcheck`, `goreleaser` — do not. They need `sh -c '...'` on the host, which breaks on Windows without WSL or Git Bash.
+The `-- CMD` form works well when the package ships its own test runner. Packages of standalone executables — `cmake`, `shellcheck`, `goreleaser` — do not. They need `sh -c '...'` on the host, which breaks on Windows without WSL or Git Bash.
 
 `--script PATH` solves this. Instead of exec'ing a command, OCX interprets a [Starlark][starlark-lang] script against the materialized package environment. The script has no access to the host shell or runtime. It runs identically on `linux/*`, `macos/*`, and `windows/*`.
 
@@ -249,7 +249,7 @@ The sandbox applies to the `ocx.*` host API only — file reads, writes, and pat
 
 Re-entrant `ocx` invocations are refused in v1. `ocx.run("ocx", ...)` exits with code 1 and a message explaining the limitation.
 
-`ocx.run` resolves a bare program name the same way the trailing-command form does — [against the package first][basic-resolution]. A name your package ships but cannot execute fails the script rather than running the host's copy of that tool, so a package with a 644 binary no longer passes its own smoke test. Names the package does not ship still resolve on the host `PATH`.
+`ocx.run` resolves a bare program name the same way the trailing-command form does — [against the package first][basic-resolution]. A name your package ships but cannot execute fails the script rather than running the host's copy of that binary, so a package with a 644 binary no longer passes its own smoke test. Names the package does not ship still resolve on the host `PATH`.
 
 ### Output format {#scripted-tests-output}
 

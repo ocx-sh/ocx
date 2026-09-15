@@ -52,7 +52,7 @@ The `-alpine` variant is the right source for this: its binary is fully statical
 
 ## Bake a Project Toolchain {#project-toolchain}
 
-A project that pins its tools in [`ocx.toml` and `ocx.lock`][project-indepth] wants those exact tools inside its image. The wrong way is to resolve them when the container starts: every cold start then depends on registry availability, needs credentials at runtime, and can drift from what was tested. The right way is to pull at build time and run offline afterwards.
+A project that pins its packages in [`ocx.toml` and `ocx.lock`][project-indepth] wants those exact packages inside its image. The wrong way is to resolve them when the container starts: every cold start then depends on registry availability, needs credentials at runtime, and can drift from what was tested. The right way is to pull at build time and run offline afterwards.
 
 ```dockerfile
 FROM ghcr.io/ocx-sh/ocx:0.9.2
@@ -66,7 +66,7 @@ COPY . .
 ENTRYPOINT ["ocx", "--offline", "exec", "--", "task", "serve"]
 ```
 
-[`ocx pull`][cmd-pull] walks the lockfile and downloads every digest-pinned tool for the image platform — it needs both files and touches nothing else, which makes it an ideal cache layer. [`ocx exec`][cmd-run] composes the project environment and replaces itself with the child process, so no wrapper lingers in the process tree. [`--offline`][arg-offline] turns any accidental network dependency into a hard error at start instead of a silent pull — if the image builds, it runs.
+[`ocx pull`][cmd-pull] walks the lockfile and downloads every digest-pinned package for the image platform — it needs both files and touches nothing else, which makes it an ideal cache layer. [`ocx exec`][cmd-run] composes the project environment and replaces itself with the child process, so no wrapper lingers in the process tree. [`--offline`][arg-offline] turns any accidental network dependency into a hard error at start instead of a silent pull — if the image builds, it runs.
 
 ## Reproducible Resolution {#frozen}
 
@@ -78,7 +78,7 @@ Swap in [`ocx --frozen pull`][arg-frozen] to close that gap. Frozen freezes tag�
 `--frozen pull` still reaches the registry for the digest-pinned blobs. For a build with no network at all, vendor a warm `OCX_HOME` into the build context — a directory populated by an earlier [`ocx pull`][cmd-pull] — and run the pull under [`--offline`][arg-offline], which resolves entirely from that local store and never touches the network.
 :::
 
-Resolving a bare tag like `kitware/cmake:3` deterministically *without* a lockfile — the [GitHub Actions][github-actions] and [Bazel][bazel] case — is a different tool: bundle a frozen index snapshot and point ocx at it with [`OCX_INDEX`][env-ocx-index]. See [Bundled Snapshots][indices-indepth].
+Resolving a bare tag like `kitware/cmake:3` deterministically *without* a lockfile — the [GitHub Actions][github-actions] and [Bazel][bazel] case — is a different mechanism: bundle a frozen index snapshot and point ocx at it with [`OCX_INDEX`][env-ocx-index]. See [Bundled Snapshots][indices-indepth].
 
 ## Private Registries {#build-auth}
 
@@ -96,9 +96,9 @@ docker build --secret id=ocx_token,env=REGISTRY_TOKEN .
 
 The variable name encodes the registry host with dots replaced by underscores (`registry.example.com` → `registry_example_com`); the auth type itself is not secret and can stay a plain `ENV`. See [`OCX_AUTH_<REGISTRY>_TOKEN`][env-auth-token] for the user/type companions.
 
-## Bootstrap Single Tools {#mini-project}
+## Bootstrap Single Packages {#mini-project}
 
-To bootstrap a few tools in a Dockerfile without an application project, the same pattern shrinks to a minimal project: two files declaring the tools, and the pull happens at build time with the identical caching behavior.
+To bootstrap a few packages in a Dockerfile without an application project, the same pattern shrinks to a minimal project: two files declaring the packages, and the pull happens at build time with the identical caching behavior.
 
 ```toml
 # ocx.toml
@@ -107,7 +107,7 @@ shellcheck = "ocx.sh/shellcheck/shellcheck:0.10"
 shfmt = "ocx.sh/shfmt/shfmt:3"
 ```
 
-Run [`ocx lock`][cmd-lock] locally, commit both files, and the [project toolchain pattern](#project-toolchain) applies unchanged — `ocx exec -- <cmd>` puts the tools on `PATH` for exactly that command. A more direct global-install story for Dockerfiles (persistent `PATH` without a project) is planned.
+Run [`ocx lock`][cmd-lock] locally, commit both files, and the [project toolchain pattern](#project-toolchain) applies unchanged — `ocx exec -- <cmd>` puts the binaries on `PATH` for exactly that command. A more direct global-install story for Dockerfiles (persistent `PATH` without a project) is planned.
 
 For CI pipelines that run *inside* these images — caching, matrix setups, and the full project-mode flow — see [CI Integration][ci-indepth].
 

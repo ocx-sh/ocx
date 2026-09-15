@@ -2,8 +2,8 @@
 # state: setup:full-catalog
 # cast: true
 # doc: lazy-loading/lifecycle
-# title: Defer a tool's content until first use
-# description: Compose two tools as shims with --lazy-mode always; only the one actually invoked materializes.
+# title: Defer a package's content until first use
+# description: Compose two packages as shims with --lazy-mode always; only the one actually invoked materializes.
 set -euo pipefail
 
 cd "$SCENARIO_TMP"
@@ -18,7 +18,7 @@ ocx package which --lazy-mode always "$PKG_KITWARE_CMAKE" "$PKG_ASTRAL_SH_UV"
 
 # cmake was invoked, so its shim materialized into a real package. uv was
 # composed but never invoked, so it is still a shim — proving the deferral
-# is per-tool, not an all-or-nothing property of the compose.
+# is per-package, not an all-or-nothing property of the compose.
 cmake_which=$(ocx --format json package which --lazy-mode always "$PKG_KITWARE_CMAKE")
 cmake_kind=$(grep -o -m1 '"kind":[[:space:]]*"[a-z]*"' <<<"$cmake_which")
 [[ "$cmake_kind" == *package* ]] || {

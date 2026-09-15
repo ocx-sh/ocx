@@ -17,7 +17,7 @@ maintenance.
 
 :::info Analogy: patches and mirrors
 The `[patches]` tier is the execution-environment twin of the `[mirrors]` tier.
-`[mirrors]` adapts *where bytes come from*; `[patches]` adapts *what environment a tool
+`[mirrors]` adapts *where bytes come from*; `[patches]` adapts *what environment a binary
 runs in*. Both are operator-controlled, opt-in, and configured in the same `config.toml`
 config file.
 :::
@@ -392,7 +392,7 @@ applies where that file is directly in scope: [`ocx exec`][cmd-run], [`ocx env`]
 and [`ocx direnv export`][cmd-direnv-export]. Each of these composes the environment itself
 after reading the project config.
 
-A tool that `ocx exec` launches can still reach the opt-out one hop further: if that tool
+A binary that `ocx exec` launches can still reach the opt-out one hop further: if that binary
 re-enters ocx through its own generated launcher, `ocx exec` forwards the opt-out to the child
 process over [`OCX_PATCHES`][env-ocx-patches], so the launcher honors the same suppression
 its parent did. A **direct** launcher invocation — one not spawned by an opt-out-forwarding
