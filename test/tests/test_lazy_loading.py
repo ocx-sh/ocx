@@ -42,7 +42,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pexpect
 import pytest
 
 from src import OcxRunner, PackageInfo
@@ -54,6 +53,7 @@ from src.helpers import (
     write_ocx_toml,
 )
 from src.shell_eval import run_after_sourcing
+from src.terminal import requires_pty, run_on_a_terminal
 from tests.test_patches import assert_no_index_footprint
 
 # Exit codes — mirror crates/ocx_lib/src/cli/exit_code.rs.
@@ -257,37 +257,6 @@ def _run_in_its_own_process_group(
         process.communicate()
         raise
     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
-
-
-def _trigger_on_a_terminal(
-    script: Path, cwd: Path, env: dict[str, str], timeout: int = 300
-) -> tuple[int, str]:
-    """Run `bash --norc <script>` attached to a pty, returning `(status, terminal)`.
-
-    `pexpect` puts the child in its own session with the pty as its
-    **controlling terminal**, which is the state a developer's shell is in.
-    The script is expected to redirect its own stdout and stderr into files, so
-    everything in the returned string was written to the terminal *directly* —
-    that separation is the entire assertion, because a shim runs inside another
-    tool's process tree and its standard streams belong to whatever invoked it.
-
-    A wide window keeps the terminal from truncating a rendered line before the
-    token the caller greps for; 24x80 would clip a long pinned identifier.
-    """
-    child = pexpect.spawn(
-        "bash",
-        ["--norc", str(script)],
-        cwd=str(cwd),
-        env=env,
-        timeout=timeout,
-        encoding="utf-8",
-        codec_errors="replace",
-        dimensions=(40, 200),
-    )
-    child.expect(pexpect.EOF)
-    terminal = child.before or ""
-    child.close()
-    return child.exitstatus, terminal
 
 
 # ---------------------------------------------------------------------------
@@ -1055,11 +1024,7 @@ def test_s012_errors_still_reach_stderr_under_progress_reporting(
     )
 
 
-@pytest.mark.skipif(
-    not hasattr(pexpect, "spawn"),
-    reason="the assertion is on bytes written to a controlling terminal; pexpect imports "
-    "here but defines no spawn, so there is no pty to attach the trigger to",
-)
+@requires_pty
 @pytest.mark.parametrize(
     ("report", "renders"),
     [("progress", True), ("silent", False)],
@@ -1082,8 +1047,8 @@ def test_s012_lazy_report_selects_the_controlling_terminal_channel(
     whichever value the fixture carries.
 
     The token grepped for is the package's own repository name, which the
-    materialization spinner (`Resolving '<pinned>'`) renders and which cannot
-    reach the pty by any other route — the tool's own output is in the files.
+    download bar (`Downloading '<pinned>'`) renders and which cannot reach the
+    pty by any other route — the tool's own output is in the files.
     """
     pkg = make_package(
         ocx, unique_repo, "1.0.0", tmp_path, bins=["hello"], binaries=["hello"], env=PUBLIC_BIN_PATH
@@ -1100,7 +1065,7 @@ def test_s012_lazy_report_selects_the_controlling_terminal_channel(
     script = tmp_path / "trigger.sh"
     script.write_text(f'{export.stdout}\nhello >"{out_log}" 2>"{err_log}"\n')
 
-    status, terminal = _trigger_on_a_terminal(script, cwd=project, env=_shell_env(ocx))
+    status, terminal = run_on_a_terminal(script, cwd=project, env=_shell_env(ocx))
 
     assert status == EXIT_SUCCESS, (
         f"S-012: the trigger must succeed under lazy-report={report}; status={status}\n"

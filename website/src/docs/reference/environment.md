@@ -450,7 +450,7 @@ Whether a deferred tool's first-invocation download renders progress. Read insid
 export OCX_LAZY_REPORT=progress
 ```
 
-Accepts `silent` (the default) or `progress`, parsed case-insensitively like [`OCX_LAZY_MODE`](#ocx-lazy-mode) above. `progress` opens a channel on the controlling terminal; where none is reachable — a Docker build, a CI runner, anything under `setsid` — it silently falls back to `silent` rather than erroring. Unrecognized values are ignored with a warning, same as unset.
+Accepts `silent` (the default) or `progress`, parsed case-insensitively like [`OCX_LAZY_MODE`](#ocx-lazy-mode) above. `progress` opens a channel on the controlling terminal for the download itself — an invocation that finds the package already in the store opens nothing; where no terminal is reachable — a Docker build, a CI runner, anything under `setsid` — it silently falls back to `silent` rather than erroring. Unrecognized values are ignored with a warning, same as unset.
 
 Three more-specific tiers can override this variable: the `--lazy-report` flag (declared only on `ocx launcher shim`; a user never types it directly), `[package."<id>"]`, and the toolchain-level `lazy-report` key, both in `ocx.toml`. There is no `[group.<name>]` tier for `lazy-report` — see [Deferred Tools][in-depth-lazy-loading] for why. Not forwarded to child processes, for the same reason as `OCX_LAZY_MODE` above.
 

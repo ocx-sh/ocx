@@ -30,7 +30,7 @@ use crate::lazy::LazyReport;
 use crate::package::metadata::BinaryName;
 use crate::package_manager::concurrency::Concurrency;
 use crate::package_manager::error::{Error, PackageError, PackageErrorKind};
-use crate::package_manager::tasks::find_or_install::FoundPackage;
+use crate::package_manager::tasks::find_or_install::{Arrival, FoundPackage};
 use crate::{log, oci};
 
 use super::super::PackageManager;
@@ -152,13 +152,22 @@ impl PackageManager {
     /// store, and only the [`Arrival`](super::find_or_install::Arrival) tells
     /// the two apart.
     ///
-    /// Neither arm inherits the ambient manager. A shim runs *inside* another
-    /// tool's process tree, so its stderr belongs to whatever invoked it —
-    /// `make`, a build step, a wrapper script — and is the wrong channel in
-    /// both directions: rendering there corrupts the caller's stream, and
-    /// suppressing because it is a pipe hides a multi-hundred-megabyte download
-    /// behind a silent hang. [`Progress`](LazyReport::Progress) therefore opens
-    /// the controlling terminal, degrading to silence when there is none.
+    /// The store is probed **before** any channel is chosen. A shim re-enters
+    /// on every invocation of a name the real `bin/` does not shadow, and most
+    /// of those find the package already materialized: opening the
+    /// controlling terminal for them would paint a frame on the user's screen
+    /// for a lookup that moved no bytes. Only a miss reaches the `report`
+    /// decision.
+    ///
+    /// Neither arm of that decision inherits the ambient manager. A shim runs
+    /// *inside* another tool's process tree, so its stderr belongs to whatever
+    /// invoked it — `make`, a build step, a wrapper script — and is the wrong
+    /// channel in both directions: rendering there corrupts the caller's
+    /// stream, and suppressing because it is a pipe hides a multi-hundred-
+    /// megabyte download behind a silent hang. [`Progress`](LazyReport::Progress)
+    /// therefore opens the controlling terminal, degrading to silence when
+    /// there is none; [`Silent`](LazyReport::Silent) renders nowhere, even
+    /// when fd 2 happens to be a terminal.
     ///
     /// # Errors
     ///
@@ -172,13 +181,25 @@ impl PackageManager {
         platform: oci::Platform,
         report: LazyReport,
     ) -> Result<FoundPackage, Error> {
+        let identifier = package.as_identifier().clone();
+        let view = self.read_only_view();
+        match view.find(&identifier, platform.clone()).await {
+            Ok(info) => {
+                return Ok(FoundPackage {
+                    info,
+                    arrival: Arrival::Cached,
+                });
+            }
+            Err(PackageErrorKind::NotFound) => {}
+            Err(kind) => return Err(Error::FindFailed(vec![PackageError::new(identifier, kind)])),
+        }
+
         let progress = match report {
             LazyReport::Silent => crate::cli::progress::ProgressManager::disabled(),
             LazyReport::Progress => crate::cli::progress::ProgressManager::controlling_terminal().await,
         };
-        let manager = self.read_only_view().with_progress(progress);
+        let manager = view.with_progress(progress);
 
-        let identifier = package.as_identifier().clone();
         let installed = manager
             .find_or_install_all(std::slice::from_ref(&identifier), platform, Concurrency::cores())
             .await?;

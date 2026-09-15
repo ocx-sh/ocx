@@ -259,6 +259,17 @@ impl Client {
         self.lock_timeout
     }
 
+    /// Replaces the progress manager the transfer bars render on.
+    ///
+    /// The builder sets one for the process; this is for a caller that
+    /// decides the channel later than construction — a shim's `lazy-report`
+    /// is resolved at materialization time, after the client exists, and the
+    /// download bar has to follow that decision rather than the ambient one.
+    pub fn with_progress(mut self, progress: crate::cli::progress::ProgressManager) -> Self {
+        self.progress = progress;
+        self
+    }
+
     /// Returns a reference to the inner transport.
     ///
     /// Crate-internal: the sign/verify pipelines take a `&Client` and derive

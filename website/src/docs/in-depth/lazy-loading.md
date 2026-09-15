@@ -62,7 +62,7 @@ Once materialized, the tool's real `entrypoints/` directory outranks the shim on
 | 4 | [`OCX_LAZY_REPORT`][env-ocx-lazy-report] |
 | — | Floor: `silent` |
 
-`progress` opens a channel on the controlling terminal; where none exists — a Docker build, a CI runner, anything under `setsid` — it silently degrades to `silent` rather than failing. Errors always reach stderr regardless of this setting.
+`progress` opens a channel on the controlling terminal for the download itself — an invocation that finds the package already in the store opens nothing; where no terminal exists — a Docker build, a CI runner, anything under `setsid` — it silently degrades to `silent` rather than failing. `silent` renders the download nowhere, even when the shim's stderr happens to be a terminal. Errors always reach stderr regardless of this setting.
 
 ## Advisories {#deferred-tools-advisories}
 
