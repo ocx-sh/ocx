@@ -310,12 +310,12 @@ The sysexits.h convention originates in BSD Unix and is documented at [man.freeb
 | 0 | Success | — | Successful completion | — |
 | 1 | Failure | — | Generic failure — only when no specific code applies | Inspect stderr |
 | 64 | UsageError | EX_USAGE | Bad CLI invocation: unknown flag, wrong argument count, invalid syntax; `package verify` given only one of `--certificate-identity` / `--certificate-oidc-issuer`, or given neither with no matching [`[[trust.policy]]`][config-trust] scope; also a `--fulcio-url`/`--rekor-url` the SSRF guard refuses because it points at a forbidden address (loopback, private, link-local), whether spelled as an IP literal or resolved from a name | Check the command syntax |
-| 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest, tampered Sigstore bundle; also a manifest fetch that got back something other than a manifest — an HTML page from a misconfigured [mirror][config-mirrors], for instance — refused by its content type before digest verification ever runs; also registry-served content whose digest does not match the descriptor; also a platform feature mismatch — the package ships for the host os/arch but no candidate's `os.features` are a subset of the host's (e.g. glibc vs musl), see [`--platform`](#package-install); also an ambiguous selection — a dual-libc host matched two equally-specific candidates (see [libc differentiation][authoring-libc]); also a registry-controlled redirect or auth realm that OCX refuses to follow during push or pull — a session URL or redirect naming a different registry host, a plaintext credential realm, a redirect that would drop TLS, or a redirect on an upload request at all (see [Redirect Refusals][authoring-building-pushing-redirect-refusals]) | Validate identifiers and file contents; for a mirror serving a non-manifest response, check the mirror's own health and its `[mirrors]` routing; for a feature mismatch or ambiguous selection, override with `--platform`; for a refused redirect or realm, see [Redirect Refusals][authoring-building-pushing-redirect-refusals] — it is a registry-side problem or a missing `insecure` entry, never one a rerun fixes |
-| 69 | Unavailable | EX_UNAVAILABLE | The registry answered, but not usefully — and a rerun will not change that. Also a local resource that cannot be reached; also a guarded registry or Sigstore endpoint host that fails to resolve at all — a proxied destination is unaffected, since the configured proxy resolves it instead of OCX (see [Proxies][env-external-proxies]) | Inspect stderr; fix the registry or the URL before retrying |
-| 74 | IoError | EX_IOERR | I/O error: filesystem permission denied, disk full, read/write failure | Check filesystem permissions and free space |
-| 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: registry connect failure or timeout, 429, 502, 503, 504, rate limit, transient network, or a layer blob that arrived short of its manifest-declared size | Retry with backoff |
+| 65 | DataError | EX_DATAERR | Input data malformed: bad identifier, invalid digest, corrupted manifest, tampered Sigstore bundle; also a manifest fetch that got back something other than a manifest — an HTML page from a misconfigured [mirror][config-mirrors], for instance — refused by its content type before digest verification ever runs; also registry-served content whose digest does not match the descriptor; also a platform feature mismatch — the package ships for the host os/arch but no candidate's `os.features` are a subset of the host's (e.g. glibc vs musl), see [`--platform`](#package-install); also an ambiguous selection — a dual-libc host matched two equally-specific candidates (see [libc differentiation][authoring-libc]); also a registry-controlled redirect or auth realm that OCX refuses to follow during push or pull — a session URL or redirect naming a different registry host, a plaintext credential realm, a redirect that would drop TLS, or a redirect on an upload request at all (see [Redirect Refusals][authoring-building-pushing-redirect-refusals]); also the startup [extra-CA-root check][config-extra-ca-certs-refusals] refusing a path-form `extra_ca_certs` bundle — or an [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] value read as a path — whose PEM block is tagged anything but `CERTIFICATE`, that does not parse as an X.509 certificate, or that is cut off before its `-----END` line | Validate identifiers and file contents; for a mirror serving a non-manifest response, check the mirror's own health and its `[mirrors]` routing; for a feature mismatch or ambiguous selection, override with `--platform`; for a refused redirect or realm, see [Redirect Refusals][authoring-building-pushing-redirect-refusals] — it is a registry-side problem or a missing `insecure` entry, never one a rerun fixes |
+| 69 | Unavailable | EX_UNAVAILABLE | The registry answered, but not usefully — and a rerun will not change that. Also a registry or index endpoint whose TLS certificate the verifier refused (`UnknownIssuer` behind an intercepting proxy — the message names the remedy, see [extra CA roots][config-extra-ca-certs]; the Sigstore legs keep their own codes for the same refusal: Fulcio 75, Rekor 83, the TUF fetch 78); also a local resource that cannot be reached; also a guarded registry or Sigstore endpoint host that fails to resolve at all — a proxied destination is unaffected, since the configured proxy resolves it instead of OCX (see [Proxies][env-external-proxies]) | Inspect stderr; fix the registry or the URL before retrying |
+| 74 | IoError | EX_IOERR | I/O error: filesystem permission denied, disk full, read/write failure; also a path-form [`extra_ca_certs`][config-extra-ca-certs-refusals] bundle that is unreadable, not a regular file, or over 32 KiB | Check filesystem permissions and free space |
+| 75 | TempFail | EX_TEMPFAIL | Temporary failure that may succeed on retry: registry connect failure (a refused or unanswered connection, never a refused certificate — that is 69) or timeout, 429, 502, 503, 504, rate limit, transient network, or a layer blob that arrived short of its manifest-declared size | Retry with backoff |
 | 77 | PermissionDenied | EX_NOPERM | Insufficient permissions: filesystem EPERM, offline sign refused, OIDC pre-check failed | Adjust filesystem permissions, or drop `--offline` to sign |
-| 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure, trust root unavailable, a registry host the SSRF guard refuses outright (see [`trusted_hosts`][config-registries-trusted-hosts]), a matched [`[[trust.policy]]`][config-trust] entry is malformed. Three carve-outs from that last one, each keyed on what was actually unusable: an unreadable or non-regular `key` path is 74, a key file whose bytes are not a key is 65, and an unimplemented key backend is 85. An inline `key_pem` that is not a key stays here — config text is what is wrong | Inspect the config file at the printed path |
+| 78 | ConfigError | EX_CONFIG | Configuration error: bad config file, missing required field, parse failure, trust root unavailable, a registry host the SSRF guard refuses outright (see [`trusted_hosts`][config-registries-trusted-hosts]), a matched [`[[trust.policy]]`][config-trust] entry is malformed. Three carve-outs from that last one, each keyed on what was actually unusable: an unreadable or non-regular `key` path is 74, a key file whose bytes are not a key is 65, and an unimplemented key backend is 85. An inline `key_pem` that is not a key stays here — config text is what is wrong; also inline `extra_ca_certs_pem`/`OCX_EXTRA_CA_CERTS` text that fails the same [extra-CA checks][config-extra-ca-certs-refusals] (a bundle cut off before its `-----END` line included), or a file with both `extra_ca_certs` and `extra_ca_certs_pem` set | Inspect the config file at the printed path |
 | 79 | NotFound | OCX | Resource not found: package 404, explicit config path absent, no signatures found for target | Pin a different version or correct the path |
 | 80 | AuthError | OCX | Authentication failure: registry 401 or 403, missing credentials, Fulcio OIDC token rejected | Refresh or set registry credentials |
 | 81 | PolicyBlocked | OCX | A deliberate local policy (`--offline` or `--frozen`) refused a network or resolution operation — not a fault. Includes an unpinned-tag resolve that the policy forbade | Loosen the flag, or populate the local index first with `ocx index update` — itself run without the flag |
@@ -2320,7 +2320,7 @@ Complete a bare-binary install: bootstrap OCX into the content store, write the 
 
 This is the answer to "I won't pipe `curl` into a shell": download the standalone `ocx` binary from [GitHub Releases][releases], run `ocx self setup`, and reach the same state the install script produces — no shell script involved. The loose binary bootstraps the managed copy, writes the shims, and wires shell profiles in one command.
 
-Setup runs phases in a hard order: **bootstrap first** (install the specified or latest published `ocx.sh/ocx/cli` so the shims have a `current` to point at — a no-op when the same version is already installed), then **[managed-config][config-managed] adoption** (resolve the ref from `--managed-config`, else [`OCX_MANAGED_CONFIG`][env-ocx-managed-config], else the existing seed; whichever one resolves is synchronously fetched and persisted, then the `[managed]` seed fence is written only on success — a fetch failure leaves no partial state; no source at any of the three levels reports `not_configured` and the phase is a no-op), then the five `env.*` shims, then the profile activation blocks. A failed bootstrap stops the run before any shim, profile, or managed-config write is touched.
+Setup runs phases in a hard order: **extra-CA persistence first** (reads [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs], validates it, and persists inline PEM text into [`extra_ca_certs_pem`][config-extra-ca-certs] in `config.toml` — no network yet, so the bootstrap and managed-config fetches below already trust the corporate CA once it runs; unset or empty is a no-op), then **bootstrap** (install the specified or latest published `ocx.sh/ocx/cli` so the shims have a `current` to point at — a no-op when the same version is already installed), then **[managed-config][config-managed] adoption** (resolve the ref from `--managed-config`, else [`OCX_MANAGED_CONFIG`][env-ocx-managed-config], else the existing seed; whichever one resolves is synchronously fetched and persisted, then the `[managed]` seed fence is written only on success — a fetch failure leaves no partial state; no source at any of the three levels reports `not_configured` and the phase is a no-op), then the five `env.*` shims, then the profile activation blocks. A refused `OCX_EXTRA_CA_CERTS` value stops the run before anything is written at all — the same posture as the [session-PATH](#self-setup-session-path) preflight. Every write to `$OCX_HOME/config.toml` — the `[shell]` toggles, the extra-CA persistence and the `[managed]` seed fence — is a read-modify-write under one cross-process lock (a scoped entry under `$OCX_HOME/locks`, since the file is replaced by rename), so two concurrent invocations serialize and both edits land; a holder that outlives the 5 s wait exits 75. `--dry-run` takes neither the lock nor creates `$OCX_HOME`. A failed bootstrap stops the run before any shim, profile, or managed-config write is touched. This first phase is exclusive to `ocx self setup`; [`ocx config setup`](#config-setup), which shares the managed-config adoption phase, does not run it.
 
 Re-running is safe. The shims and the managed block are diff-gated: an unchanged setup is a no-op. A stale ocx-authored block is rewritten in place (format upgrade); a legacy `# BEGIN ocx` block is migrated to the versioned fence. A block the user edited by hand is reported dirty and left untouched (exit 82) unless `--force` is passed.
 
@@ -2495,7 +2495,8 @@ A typical pinned run that pulled a new version:
     {"location": "/home/alice/.config/environment.d/ocx.conf", "outcome": "written"}
   ],
   "reload_hint": true,
-  "managed_config": {"status": "not_configured"}
+  "managed_config": {"status": "not_configured"},
+  "extra_ca_certs": {"status": "not_configured"}
 }
 ```
 
@@ -2513,6 +2514,7 @@ The root object is discriminated by `status`:
 | `conflicting_ocx` | string | Absolute path to a shadowing `ocx` binary found ahead of the shim directory on `PATH`. Omitted when absent. |
 | `reload_hint` | boolean | `true` when this run changed a PATH surface — a shim, a managed profile block, or a session-PATH store. A shim or profile change is applied by re-sourcing the shell; a session-PATH store reaches programs started outside a shell only after the next login. Omitted when `false`. |
 | `managed_config` | object | Result of adopting or clearing the `--managed-config` tier (see below). Always present, even when the flag was not passed. |
+| `extra_ca_certs` | object | Result of the extra-CA persistence phase (see below). Always present, even when [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] was not set. |
 
 Root-level `status` values:
 
@@ -2531,11 +2533,23 @@ Root-level `status` values:
 | `already_adopted` | Yes | The resolved ref matches the existing seed AND a matching snapshot is on disk. Either the registry was checked and still serves the same content (verified, not assumed), or the check was skipped outright — a digest-pinned seed (content-addressed, cannot drift), `--offline`, or an in-force [`config update --pause`](#config-update). The digest is the existing snapshot's digest. A wiped or mismatched snapshot self-heals instead: the run re-fetches and reports `adopted`. |
 | `adopted` | Yes | A new or changed ref was fetched, persisted, and the seed fence written. Also covers self-heal of a wiped or mismatched snapshot behind a fence that was already current. |
 | `refreshed` | Yes (+ `previous_digest`) | The resolved ref matched the existing seed, but the registry now serves newer content than the on-disk snapshot: the snapshot was replaced in place — the fence itself is untouched, only rewritten on an `adopted` transition. `digest` is the new content; `previous_digest` is what the snapshot carried going in. |
-| `refresh_unavailable` | Yes (+ `reason`) | The re-sync of an already-adopted seed could not reach the registry. The existing snapshot is kept and the run still exits 0 — `reason` carries the fetch error, and the same message is written to stderr as a warning. Re-run, or run [`ocx config update`](#config-update) directly, to retry. |
+| `refresh_unavailable` | Yes (+ `reason`) | The re-sync of an already-adopted seed could not reach the registry, or the registry served a payload this host refuses (not valid TOML, or an `extra_ca_certs_pem` its TLS verifier cannot load). The existing snapshot is kept and the run still exits 0 — `reason` carries the cause, and the same message is written to stderr as a warning. Re-run, or run [`ocx config update`](#config-update) directly, to retry. |
 | `cleared` | No | `--managed-config ""` removed the seed fence and deleted the snapshot. |
 | `dirty` | No | The `[managed]` fence carries user edits; left untouched without `--force` — drives root `status: skipped` (exit 82). |
 | `would_adopt` | No | `--dry-run`: a first adopt, a self-heal of a wiped or mismatched snapshot, or a clear would run, but nothing was fetched or written. |
 | `would_refresh` | Yes | `--dry-run` against an already-adopted seed: a re-sync would run, but nothing was fetched or written — dry-run never touches the network, so this does not confirm the registry actually has newer content. |
+
+**`extra_ca_certs` object** — result of the extra-CA persistence phase (the [phase order](#self-setup) above), discriminated by `extra_ca_certs.status`. No network access; unlike `managed_config` it never fails the run outright with a status of its own — an invalid value exits before this object would ever be reported.
+
+| Value | Carries `certificates`? | Meaning |
+|-------|---|---------|
+| `not_configured` | No | [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] was unset or empty; `config.toml` untouched. |
+| `persisted` | Yes | The variable resolved to one or more certificates and `extra_ca_certs_pem` was written (or a root `extra_ca_certs` path removed alongside it — see [Where it sits][config-extra-ca-certs-precedence] for why setup never leaves both spellings set). |
+| `unchanged` | Yes | The resolved certificate text matches what `extra_ca_certs_pem` already holds; `config.toml` untouched (diff-gated on the parsed TOML string, not file bytes). |
+| `would_persist` | Yes | `--dry-run`: a write would happen, but nothing was written. |
+| `system_locked` | No | The variable was set, but the pair is [system-locked][config-extra-ca-certs-system-lock]: nothing was validated or written, since the loader would ignore a home-tier value on every later invocation. A stderr line names the locking file and the remedy; the plain row reads `system-locked (not persisted)`. |
+
+`certificates` is the count of `CERTIFICATE` blocks resolved from the variable, present whenever `status` is neither `not_configured` nor `system_locked`.
 
 ::: warning `jq .status` returns the root discriminant, not the bootstrap status
 `jq .status` on a `self setup --format json` result returns `completed`, `no_op`, `skipped`, or `migrated` — the overall run outcome. The bootstrap-specific values (`pulled`, `already_present`, `would_pull`) are nested one level deeper under `bootstrap.status`. Use `jq .bootstrap.status` to inspect the binary install step.
@@ -2574,10 +2588,11 @@ digest=$(echo "$result" | jq -r '.bootstrap.digest // empty')  # sha256:<hex>, o
 |------|---------|
 | 0 | Setup completed, no-op, or migrated; or a dry-run (including over a dirty profile or fence). |
 | 64 | Malformed `VERSION` syntax (empty, short or uppercase hex, unknown algorithm, double `@`, trailing `@`). |
-| 65 | `tag@digest` immutability assertion failed — the tag resolved to a different digest than the one specified. Also returned when a `--managed-config` sync fetch succeeds but the package is malformed (no `any/any` entry, no `config.toml`, digest mismatch, over the 64 KiB cap, or not valid TOML). |
+| 65 | `tag@digest` immutability assertion failed — the tag resolved to a different digest than the one specified. Also returned when a `--managed-config` sync fetch succeeds but the package is malformed (no `any/any` entry, no `config.toml`, digest mismatch, over the 64 KiB cap, or not valid TOML). Also returned when [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] names a **path** whose PEM content fails validation — wrong block tag, no certificate block, a block that does not parse as an X.509 certificate or that the platform TLS stack rejects, or a block cut off before its `-----END` line — or whose content is valid but not UTF-8 and so cannot be stored as a TOML string. |
 | 69 | Registry unreachable while bootstrapping, or while syncing a `--managed-config` snapshot. |
-| 74 | I/O error writing a shim, shell profile, or `--managed-config` snapshot. |
-| 78 | The `--managed-config` value is not a valid OCI identifier. Also: `$OCX_HOME` cannot be spelled in this platform's [session-PATH](#self-setup-session-path) format (a `%` or `;` on Windows, a character `environment.d` cannot carry, a `"` the plist quoting cannot carry). Checked before anything is written, so a refused run leaves the machine byte-identical. A session-PATH *write* failure is **not** here — it warns and exits 0. |
+| 74 | I/O error writing a shim, shell profile, or `--managed-config` snapshot; a `$OCX_HOME/config.toml` that cannot be read, does not parse as TOML, or has a shape the edit cannot take (a scalar `shell` key) — the file is left as it was. Also: [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] names a path that is unreadable, not a regular file, or exceeds 32 KiB. |
+| 75 | Another `ocx` process held the `$OCX_HOME/config.toml` edit lock for longer than 5 s (`<path> is locked by another process`). Retry. |
+| 78 | The `--managed-config` value is not a valid OCI identifier. Also: `$OCX_HOME/config.toml` is already over the 64 KiB config-file cap, so no edit is attempted. Also: `$OCX_HOME` cannot be spelled in this platform's [session-PATH](#self-setup-session-path) format (a `%` or `;` on Windows, a character `environment.d` cannot carry, a `"` the plist quoting cannot carry). Checked before anything is written, so a refused run leaves the machine byte-identical. A session-PATH *write* failure is **not** here — it warns and exits 0. Also: [`OCX_EXTRA_CA_CERTS`][env-ocx-extra-ca-certs] carries **inline PEM text** that fails the same validation as the path case above, or exceeds 32 KiB; or the `config.toml` that would result from persisting it exceeds the 64 KiB config-file cap. Every extra-CA refusal here is checked before the extra-CA phase writes anything, let alone any later phase. Also: a first `--managed-config` adoption whose payload carries an `extra_ca_certs_pem` this host's TLS verifier cannot load — nothing is persisted; on a re-run behind an existing snapshot the same payload is kept out best-effort (`refresh_unavailable`, exit 0). |
 | 79 | The pinned tag or digest was not found in the registry. |
 | 80 | Authentication failed while syncing a `--managed-config` snapshot. |
 | 81 | A policy (`--offline` or `--frozen`) blocked resolution and the version was not cached locally. |
@@ -5907,7 +5922,7 @@ as written, which is what the transport compares against, so a mis-spelled
 | Code | Meaning |
 |------|---------|
 | 0 | Valid — report printed. Unknown keys are warnings and do not change this. |
-| 74 | Reading the candidate file failed for a reason other than not found or permission denied. |
+| 74 | Reading the candidate file failed for a reason other than not found or permission denied — including a candidate that is not a regular file (a FIFO, a device) — refused before it is opened, so it never blocks. |
 | 77 | The candidate file could not be read — permission denied. |
 | 78 | Payload rejected — not valid config TOML, contains a `[managed]` section, or exceeds 64 KiB (same rejection set as [`config push`](#config-push)); or the merged result fails a resolution gate — an invalid or plain-HTTP [`[mirrors]`][config-mirrors] entry, or `[patches] registry = ""`. |
 | 79 | The candidate file does not exist. |
@@ -5954,11 +5969,12 @@ every consumer's [`config update --check`](#config-update) compare against.
 | Code | Meaning |
 |------|---------|
 | 0 | Pushed. |
+| 65 | The payload declares a path-form `extra_ca_certs`, and the content at that path fails PEM validation — a block tagged other than `CERTIFICATE`, no certificate block at all, a block that does not parse as an X.509 certificate or that the platform TLS stack itself rejects, or a block cut off before its `-----END` line — or is valid but not UTF-8 and so cannot be inlined as a TOML string. |
 | 69 | Registry unreachable. |
-| 74 | I/O error reading the payload file (other than not found or permission denied), or staging it for the push. |
-| 77 | The payload file could not be read — permission denied. |
-| 78 | Payload rejected — not valid config TOML, contains a `[managed]` section, or exceeds 64 KiB. Nothing was pushed. |
-| 79 | The payload file does not exist. |
+| 74 | I/O error reading the payload file (other than not found or permission denied) — including a payload that is not a regular file (a FIFO, a device), refused before it is opened — or staging it for the push. Also: the `extra_ca_certs` path above is unreadable or exceeds 32 KiB, or the `[trust.sigstore] trusted_root` path is unreadable, not a regular file or exceeds 1 MiB, for a reason other than not found or permission denied. |
+| 77 | The payload file could not be read — permission denied. Also: the `extra_ca_certs` path above exists but cannot be read — permission denied. |
+| 78 | Payload rejected — not valid config TOML, contains a `[managed]` section, or exceeds 64 KiB. Nothing was pushed. Also: the payload sets both `extra_ca_certs` and `extra_ca_certs_pem` (`AmbiguousExtraCaCerts`) — [`ocx config test`](#config-test) catches this one locally before push, the same way it already catches `AmbiguousTrustRoot`; the payload's own `extra_ca_certs_pem` fails the same PEM validation as the path form above (the loader's verdict on inline text, delivered to the operator instead of the fleet — `config test` does not run it; each consumer re-checks the bundle with its own TLS verifier at adoption and keeps its previous snapshot if that one refuses); or the payload exceeds 64 KiB only once `extra_ca_certs` is inlined into `extra_ca_certs_pem`. |
+| 79 | The payload file does not exist. Also: the payload's `extra_ca_certs` path does not exist. |
 | 80 | Authentication failed. |
 
 #### `config update` {#config-update}
@@ -6068,7 +6084,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 | 65 | `tag@digest` immutability assertion failed (the tag resolved to a different digest — snapshot untouched), or the fetched payload is malformed (no `any/any` entry, no `config.toml`, digest mismatch, over the 64 KiB cap, or not valid TOML). |
 | 69 | Registry unreachable (full-update path — `--check` degrades to a local-state report instead of failing). |
 | 74 | I/O error writing the snapshot file. |
-| 78 | The effective managed-config source or interval is invalid (bad seed or `OCX_MANAGED_CONFIG` value). |
+| 78 | The effective managed-config source or interval is invalid (bad seed or `OCX_MANAGED_CONFIG` value). Also: the fetched payload carries an [`extra_ca_certs_pem`][config-extra-ca-certs] this host's TLS verifier cannot load — refused before anything is written, naming the block; the previous snapshot stays in force. |
 | 79 | The resolved managed-config source has no package in the registry (full-update path). |
 | 80 | Authentication failed against the registry (full-update path only). |
 
@@ -6184,6 +6200,10 @@ or a registry error) — the report then degrades to a local-state-only summary
 [config-patches]: ./configuration.md#keys-patches
 [config-managed]: ./configuration.md#keys-managed
 [config-managed-required]: ./configuration.md#keys-managed-required
+[config-extra-ca-certs]: ./configuration.md#keys-extra_ca_certs
+[config-extra-ca-certs-system-lock]: ./configuration.md#keys-extra_ca_certs-system-lock
+[config-extra-ca-certs-refusals]: ./configuration.md#keys-extra_ca_certs-refusals
+[config-extra-ca-certs-precedence]: ./configuration.md#keys-extra_ca_certs-precedence
 [config-keys-shell]: ./configuration.md#keys-shell
 [config-project-env]: ./configuration.md#project-config-env
 [config-project-package]: ./configuration.md#project-config-package
@@ -6196,6 +6216,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [config-schemas]: ./configuration.md#schemas
 [in-depth-versioning-cascades]: ../in-depth/versioning.md#cascades
 [env-ocx-managed-config]: ./environment.md#ocx-managed-config
+[env-ocx-extra-ca-certs]: ./environment.md#ocx-extra-ca-certs
 [env-ocx-no-hook]: ./environment.md#ocx-no-hook
 [env-ocx-no-consent]: ./environment.md#ocx-no-consent
 [shell-consent]: ../in-depth/shell-integration.md#consent
