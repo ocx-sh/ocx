@@ -13,6 +13,7 @@ use super::builder::MAX_UPLOAD_REQUEST_BYTES;
 use super::error::ClientError;
 use super::progress_reader::ProgressReader;
 use super::transport::{MountOutcome, OciTransport, ProgressFn, Result};
+use crate::oci::transport_policy;
 use crate::{auth, log, oci};
 
 /// Real OCI transport that delegates to the `oci_client` crate.
@@ -66,7 +67,12 @@ impl NativeTransport {
 /// will not, and [`ClientError::Authentication`] (exit 80) says the credentials
 /// are the problem. A connect that never completed and a request that timed out
 /// belong in the first: nothing about the request was ever answered, least of
-/// all the credentials.
+/// all the credentials. One connect failure is carved out of that: a connect
+/// that died on the verifier refusing the registry's certificate. The registry
+/// did answer -- with a certificate -- and the verdict on it does not change
+/// from one dial to the next, so it is 69, the code the index client gives the
+/// same handshake -- not 75, which tells `push_blob` to restart the upload
+/// twice and a CI wrapper to run the command again.
 ///
 /// # Two shapes carry the same status code
 ///
@@ -124,6 +130,17 @@ pub(crate) fn registry_error(e: oci_client::errors::OciDistributionError) -> Cli
     };
     use oci_client::errors::OciErrorCode;
     match &e {
+        // Before the connect arm, which it would otherwise match: a refused
+        // certificate is a connect failure to reqwest, and a terminal one
+        // here -- carrying the remedy (extra CA roots), which the verdict
+        // alone never names.
+        RequestError(request) if transport_policy::is_tls_certificate_refusal(request) => {
+            let url = request.url().cloned();
+            ClientError::Registry(Box::new(transport_policy::UntrustedCertificateHint::for_url(
+                url.as_ref(),
+                e,
+            )))
+        }
         // A connect that never completed against an `https://` URL is the shape
         // a plain-HTTP registry produces, and the scheme is itself the proof
         // that the host is NOT in the plain-HTTP allowance -- a host that were
@@ -1249,6 +1266,51 @@ mod tests {
         assert!(
             rendered.contains("OCX_INSECURE_REGISTRIES"),
             "the refusal must name the env spelling too: {rendered}"
+        );
+    }
+
+    /// A certificate the verifier refuses dies in the connector, the same
+    /// place the refused connect above dies -- and the two must part here:
+    /// that one stays 75, this one is 69, because no number of re-dials
+    /// changes a verifier's verdict, and 75 told `push_blob` to re-dial and a
+    /// CI wrapper to retry. Driven through the production transport recipe
+    /// against an in-process TLS server presenting a leaf from a root the
+    /// client was not seeded with, so the error is the one the transport really
+    /// builds (reqwest -> hyper-util connect -> `io::Error` -> rustls), not a
+    /// hand-made stand-in. The `assert_untrusted_root` precondition is what
+    /// keeps a dead server or a timeout from passing as the refusal.
+    ///
+    /// Mutation: point the `is_tls_certificate_refusal` arm in `registry_error`
+    /// at `RegistryTransient` and this reds.
+    #[tokio::test]
+    async fn a_refused_certificate_is_a_registry_fault_not_a_transient_one() {
+        use crate::tls::test_pki::{TestPki, assert_untrusted_root, error_chain, serve_https};
+
+        let pki = TestPki::mint();
+        let addr = serve_https(&pki).await;
+        let transport = NativeTransport::new(
+            oci::native::Client::new(super::super::builder::ClientBuilder::new().config()),
+            auth::Auth::default(),
+        );
+        let image: oci::native::Reference = format!("{addr}/test/blob:latest").parse().expect("reference");
+        let digest = crate::oci::Digest::Sha256("a".repeat(64));
+
+        let error = OciTransport::pull_blob(&transport, &image, &digest)
+            .await
+            .expect_err("the default root set does not know the minted root");
+        let chain = error_chain(&error);
+        assert_untrusted_root(&chain);
+        assert!(
+            matches!(error, ClientError::Registry(_)),
+            "a certificate the verifier refused is terminal (69), got {error:?}"
+        );
+        assert!(
+            chain.contains("extra_ca_certs") && chain.contains("OCX_EXTRA_CA_CERTS"),
+            "the refusal must name the remedy (review H3): {chain}"
+        );
+        assert!(
+            !chain.contains("insecure = true"),
+            "the plain-HTTP hint is the wrong remedy for a refused certificate: {chain}"
         );
     }
 

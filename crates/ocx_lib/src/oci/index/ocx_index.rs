@@ -488,13 +488,25 @@ impl ReqwestIndexTransport {
     }
 
     /// Wraps a `reqwest` failure as [`Error::IndexHttpFailed`], retryable only
-    /// for the transient transport class (connect, timeout, reset/close).
+    /// for the transient transport class (connect, timeout, reset/close). A
+    /// certificate the verifier refused is terminal and carries the extra-CA
+    /// remedy in its chain ([`transport_policy::UntrustedCertificateHint`]).
     fn transport_failure(url: &str, status: Option<u16>, source: reqwest::Error) -> Attempt<Result<IndexFetch>> {
         let retryable = transport_policy::is_retryable_transport_error(&source);
+        let source: Box<dyn std::error::Error + Send + Sync> = if transport_policy::is_tls_certificate_refusal(&source)
+        {
+            let url = source.url().cloned();
+            Box::new(transport_policy::UntrustedCertificateHint::for_url(
+                url.as_ref(),
+                source,
+            ))
+        } else {
+            Box::new(source)
+        };
         let failure: Result<IndexFetch> = Err(super::error::Error::IndexHttpFailed {
             url: redact_url(url),
             status,
-            source: Box::new(source),
+            source,
         }
         .into());
         if retryable {
@@ -4580,6 +4592,19 @@ mod transport_wire_tests {
             .expect_err("without the root the index client must refuse the handshake");
         let chain = error_chain(&error);
         assert_untrusted_root(&chain);
+
+        // Through the ladder: terminal, and the chain names the remedy the
+        // raw verdict does not (review H3).
+        let error = unseeded
+            .get(&url)
+            .await
+            .expect_err("the ladder must surface the refusal, not retry it away");
+        let chain = error_chain(&error);
+        assert_untrusted_root(&chain);
+        assert!(
+            chain.contains("extra_ca_certs") && chain.contains("OCX_EXTRA_CA_CERTS"),
+            "the index refusal must name the remedy: {chain}"
+        );
     }
 
     // ── C-016 — a retryable status is retried; a terminal one is not ─────────

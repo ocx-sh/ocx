@@ -53,7 +53,7 @@ pub fn honours_retry_after(status: u16) -> bool {
 
 /// Whether a `reqwest` transport failure is worth another attempt (D-010).
 ///
-/// **Everything except a builder error is.**
+/// **Everything except a builder error and a refused certificate is.**
 ///
 /// The narrow rule this replaces — `is_connect() || is_timeout()`, plus a walk
 /// of the source chain for a transient [`std::io::ErrorKind`] — is inert
@@ -87,9 +87,79 @@ pub fn honours_retry_after(status: u16) -> bool {
 /// affordable rather than an amplification risk.
 ///
 /// A builder error is that one class: raised from the request the caller
-/// constructed, before a byte leaves the process.
+/// constructed, before a byte leaves the process. A certificate the verifier
+/// refused ([`is_tls_certificate_refusal`]) is the other: the peer answered,
+/// with a certificate, and the verdict on it is the same on every dial — so
+/// D-010's "unless a second attempt provably cannot change the answer" names
+/// it, and re-dialing only spends the budget and repeats the handshake.
 pub fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
-    !error.is_builder()
+    !error.is_builder() && !is_tls_certificate_refusal(error)
+}
+
+/// Whether a failed request died in the TLS handshake on the verifier refusing
+/// the peer's certificate -- rustls's `InvalidCertificate`, whatever reason
+/// sits inside it: webpki's `UnknownIssuer` and `NotValidForName`, the
+/// platform verifier's `Other(..)` on macOS and Windows, an expired leaf.
+///
+/// Read off the `Display` rustls fixes for that variant, `"invalid peer
+/// certificate: {reason}"`, rather than downcast: `rustls` is not a direct
+/// dependency of this crate, so its error type is not nameable here. And
+/// read at every link rather than at a downcast `std::io::Error`, because the
+/// rustls error is not a link at all: tokio-rustls files it as the payload of
+/// an `io::Error` (`InvalidData`), reqwest's connector boxes that inside a
+/// second (`Other`), and `io::Error::source` answers with its payload's
+/// source -- `None` for rustls -- never the payload itself. What every one of
+/// those `io::Error`s does forward is `Display`, which is what the prefix
+/// test reads.
+///
+/// Shared by the two transports that classify a dial: the registry client
+/// (`native_transport::registry_error`, where it is exit 69 rather than 75)
+/// and the index client's retry ladder (above, where it is terminal).
+pub fn is_tls_certificate_refusal(error: &reqwest::Error) -> bool {
+    let mut source = std::error::Error::source(error);
+    while let Some(link) = source {
+        if link.to_string().starts_with("invalid peer certificate") {
+            return true;
+        }
+        source = link.source();
+    }
+    false
+}
+
+/// Carries the extra-CA remedy on a certificate the verifier refused.
+///
+/// The verdict alone (`invalid peer certificate: UnknownIssuer`) names the
+/// symptom; the cure is a root the operator has to hand ocx, and nothing in
+/// rustls's text says so. Wrapped *inside* the terminal classification each
+/// transport already makes -- `ClientError::Registry` (69) for the registry
+/// client, `Error::IndexHttpFailed` (69) for the index ladder -- so the exit
+/// code is untouched and only the chain gains a line: the
+/// `PlainHttpAllowanceHint` shape (`native_transport.rs`). Generic over the
+/// wrapped error because the two transports hold different types at the
+/// point of classification.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "the TLS certificate '{host}' presented is not trusted; to trust a private CA, set extra_ca_certs = \"<path>\" \
+     (or extra_ca_certs_pem) in config.toml or export OCX_EXTRA_CA_CERTS=<path>"
+)]
+pub struct UntrustedCertificateHint<E> {
+    /// The host whose certificate was refused -- the dial's authority, never
+    /// the full URL (an index base may embed credentials, CWE-532).
+    pub host: String,
+    /// The transport's own error, with the verdict in its chain.
+    #[source]
+    pub source: E,
+}
+
+impl<E> UntrustedCertificateHint<E> {
+    /// Wraps `source` for the dial of `url`; the host is the URL's, or the
+    /// whole redacted string when it has none (the hint still names a target).
+    pub fn for_url(url: Option<&reqwest::Url>, source: E) -> Self {
+        let host = url
+            .and_then(|url| url.host_str())
+            .map_or_else(|| "<unknown host>".to_owned(), str::to_owned);
+        Self { host, source }
+    }
 }
 
 /// Parses a `Retry-After` header value into the interval to wait, relative to
@@ -455,6 +525,65 @@ mod tests {
             !is_retryable_transport_error(&error),
             "a request the caller could not even construct is identical on every attempt; retrying \
              it spends the run's budget on an outcome that cannot change"
+        );
+    }
+
+    /// The second exclusion: a certificate the verifier refused is terminal,
+    /// where a refused TCP connect to the same loopback stays retryable —
+    /// both dials fail in the connector, and only the verdict tells them
+    /// apart. The green half dials an in-process TLS server presenting a leaf
+    /// from a root the client was not seeded with; the red half is a port the
+    /// OS just handed back. Both in one function per the Unchecked-Green rule.
+    ///
+    /// Mutation: drop `is_tls_certificate_refusal` from
+    /// [`is_retryable_transport_error`] and the first assertion reds.
+    #[tokio::test]
+    async fn a_refused_certificate_is_terminal_where_a_refused_connect_is_not() {
+        use crate::tls::test_pki::{TestPki, assert_untrusted_root, error_chain, serve_https};
+
+        let pki = TestPki::mint();
+        let addr = serve_https(&pki).await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("a stock client builds");
+
+        let refusal = client
+            .get(format!("https://{addr}/v2/"))
+            .send()
+            .await
+            .expect_err("the default root set does not know the minted root");
+        assert_untrusted_root(&error_chain(&refusal));
+        assert!(
+            is_tls_certificate_refusal(&refusal),
+            "precondition: the predicate must see the verdict in the chain: {}",
+            error_chain(&refusal)
+        );
+        assert!(
+            !is_retryable_transport_error(&refusal),
+            "a verifier's verdict is the same on every dial; re-dialing spends the budget on an \
+             outcome that cannot change"
+        );
+
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind a free port")
+            .local_addr()
+            .expect("local addr")
+            .port();
+        let refused = client
+            .get(format!("https://127.0.0.1:{port}/v2/"))
+            .send()
+            .await
+            .expect_err("a connect to a closed port must fail");
+        assert!(refused.is_connect(), "precondition: this must be a connect failure");
+        assert!(
+            !is_tls_certificate_refusal(&refused),
+            "no handshake happened, so there is no verdict to read: {}",
+            error_chain(&refused)
+        );
+        assert!(
+            is_retryable_transport_error(&refused),
+            "a refused connect is the common transient case D-010 exists for"
         );
     }
 
