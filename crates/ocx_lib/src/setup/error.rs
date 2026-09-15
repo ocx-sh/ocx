@@ -108,6 +108,13 @@ pub enum Error {
     /// left it as it was and is worth a warning, not an abort.
     #[error(transparent)]
     SessionPath(#[from] crate::setup::session_path::SessionPathError),
+    /// A `config.toml` read-modify-write ([`crate::config::edit`]) did not
+    /// land: the lock timed out (75), or the read, parse, shape check or
+    /// atomic write failed (74). Transparent and delegating like
+    /// [`Error::SessionPath`], so the edit's own message and code reach the
+    /// CLI unwrapped — the path is named once, by the edit.
+    #[error(transparent)]
+    ConfigEdit(#[from] crate::config::edit::EditError),
 }
 
 impl ClassifyExitCode for Error {
@@ -139,6 +146,7 @@ impl ClassifyExitCode for Error {
             // makes exit 78 reachable from `argv` at all — `SetupError` is
             // already registered in `cli::classify`, the inner type is not.
             Error::SessionPath(inner) => inner.classify(),
+            Error::ConfigEdit(inner) => inner.classify(),
         }
     }
 }
