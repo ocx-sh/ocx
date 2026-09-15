@@ -73,5 +73,5 @@ pub use pipeline::{
 };
 pub use simplesigning_read::{SidecarKind, SidecarScan, read_sidecar_manifest, read_sidecar_tag, sidecar_tag};
 pub use trust_cache::TrustRootCache;
-pub use trust_resolve::resolve_trust_root;
+pub use trust_resolve::{MAX_TRUSTED_ROOT_BYTES, resolve_trust_root};
 pub use trust_root::TrustRoot;

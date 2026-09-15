@@ -53,7 +53,8 @@ pub use persistence::{
 };
 pub use preview::{ManagedConfigPreview, preview_managed_config};
 pub use publish::{
-    ManagedConfigPublishError, ManagedConfigPublishOptions, publish_managed_config, validate_managed_config_payload,
+    ManagedConfigPublishError, ManagedConfigPublishOptions, publish_managed_config, read_candidate_payload,
+    validate_managed_config_payload,
 };
 
 /// Maximum allowed size (bytes) for the managed-config payload — enforced on

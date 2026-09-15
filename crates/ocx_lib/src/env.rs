@@ -5423,24 +5423,6 @@ mod tests {
         path
     }
 
-    /// `mkfifo(2)`, the one filesystem object `std::fs` cannot create.
-    ///
-    /// Copied from `oci/index/file_transport.rs`'s helper rather than shared:
-    /// two `#[cfg(test)]` modules in different subsystems, and the crate has no
-    /// test-support home for a three-line libc call.
-    #[cfg(unix)]
-    #[track_caller]
-    fn mkfifo(path: &std::path::Path) {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt as _;
-
-        let c_path = CString::new(path.as_os_str().as_bytes()).expect("a tempdir path holds no NUL");
-        // SAFETY: `c_path` is a NUL-terminated C string alive for the whole
-        // call, and `mkfifo` only reads it.
-        let created = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
-        assert_eq!(created, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
-    }
-
     // ── C-009: the fallible `resolve_command` ──────────────────────────────
 
     /// C-009: a bare name a composed `PATH` directory provides resolves to that
@@ -6326,7 +6308,7 @@ mod tests {
     fn a_fifo_is_not_a_trampoline_and_is_never_opened() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cmake");
-        mkfifo(&path);
+        crate::test::fifo::mkfifo(&path);
         assert!(
             std::fs::metadata(&path).is_ok_and(|m| !m.is_file()),
             "precondition: the fixture really is a FIFO, not a regular file"

@@ -917,7 +917,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(tmp.path().join("p/kitware")).expect("mkdir p/kitware");
-        mkfifo(&tmp.path().join("p/kitware/cmake.json"));
+        crate::test::fifo::mkfifo(&tmp.path().join("p/kitware/cmake.json"));
 
         let (transport, base) = transport_for(tmp.path());
         let url = format!("{base}/p/kitware/cmake.json");
@@ -980,7 +980,7 @@ mod tests {
         let regular = dir.join("staged-regular");
         let fifo = dir.join("staged-fifo");
         std::fs::write(&regular, BODY).expect("write the regular staging file");
-        mkfifo(&fifo);
+        crate::test::fifo::mkfifo(&fifo);
 
         // Prime the pipe buffer and keep it alive. `O_RDONLY | O_NONBLOCK` on a
         // FIFO returns immediately; the write end is opened, filled and dropped,
@@ -1035,19 +1035,5 @@ mod tests {
 
         swapping.store(false, Ordering::Relaxed);
         swapper.join().expect("swapper thread");
-    }
-
-    /// `mkfifo(2)`, the one filesystem object `std::fs` cannot create.
-    #[cfg(unix)]
-    #[track_caller]
-    fn mkfifo(path: &Path) {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt as _;
-
-        let c_path = CString::new(path.as_os_str().as_bytes()).expect("a tempdir path holds no NUL");
-        // SAFETY: `c_path` is a NUL-terminated C string alive for the whole
-        // call, and `mkfifo` only reads it.
-        let created = unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) };
-        assert_eq!(created, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
     }
 }

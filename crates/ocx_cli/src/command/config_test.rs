@@ -4,7 +4,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use ocx_lib::managed_config::preview_managed_config;
+use ocx_lib::managed_config::{preview_managed_config, read_candidate_payload};
 
 use crate::api::data::config_test::ConfigTestData;
 
@@ -17,12 +17,10 @@ pub struct ConfigTestArgs {
 
 impl ConfigTestArgs {
     pub async fn execute(&self, context: crate::app::Context) -> anyhow::Result<ExitCode> {
-        let bytes = tokio::fs::read(&self.config).await.map_err(|source| {
-            ocx_lib::managed_config::ManagedConfigPublishError::ReadFailed {
-                path: self.config.clone(),
-                source,
-            }
-        })?;
+        // The same bounded read `config push` does: a FIFO or a device named
+        // as the candidate is refused before the open, an oversize file at
+        // the size gate rather than after being read whole.
+        let bytes = read_candidate_payload(&self.config).await?;
 
         // The candidate takes the managed tier's place in this machine's own
         // fold: base tiers, then the candidate, then the explicit overlay.

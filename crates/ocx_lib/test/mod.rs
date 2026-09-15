@@ -3,4 +3,6 @@
 
 pub mod data;
 pub mod env;
+#[cfg(unix)]
+pub mod fifo;
 pub mod manifest_source;
