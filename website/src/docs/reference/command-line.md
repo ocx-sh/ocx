@@ -414,8 +414,8 @@ Controls whether a deferred tool's first-invocation download renders progress. D
 
 | Value | Behavior |
 |-------|----------|
-| `silent` (default) | No progress channel is opened. |
-| `progress` | Render progress on the controlling terminal; falls back to `silent` where none is reachable (a Docker build, a CI runner, anything under `setsid`). |
+| `silent` (default) | No progress channel is opened — not even when the shim's stderr is a terminal. |
+| `progress` | Render the download on the controlling terminal; falls back to `silent` where none is reachable (a Docker build, a CI runner, anything under `setsid`). An invocation that finds the package already in the store opens nothing. |
 
 It cannot be a flag on any of the seven composing commands above: the process that renders it is a separate one, spawned by the generated launcher long after the composing command exec'd away, so a value given at compose time has no route to the process that would use it. It resolves instead through its own four-tier ladder — one tier shorter than `--lazy-mode`'s, since there is no group to consult once composition is over:
 

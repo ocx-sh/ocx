@@ -491,7 +491,13 @@ impl PackageManager {
     /// Sets the shared span-free progress manager. The CLI injects its
     /// stderr manager here; library/test consumers keep the disabled
     /// no-op default from [`new`](Self::new).
+    ///
+    /// The client's transfer bars follow the same manager: a manager swapped
+    /// in after construction (`materialize_deferred`'s `lazy-report` channel)
+    /// would otherwise govern the task guards while the download bar kept
+    /// rendering on whatever the process was built with.
     pub fn with_progress(mut self, progress: crate::cli::progress::ProgressManager) -> Self {
+        self.client = self.client.map(|client| client.with_progress(progress.clone()));
         self.progress = progress;
         self
     }
