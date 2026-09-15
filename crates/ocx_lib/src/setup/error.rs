@@ -108,13 +108,57 @@ pub enum Error {
     /// left it as it was and is worth a warning, not an abort.
     #[error(transparent)]
     SessionPath(#[from] crate::setup::session_path::SessionPathError),
+    /// Phase 0.5 (C-008, ocx#448): `OCX_EXTRA_CA_CERTS` resolved to material
+    /// [`crate::tls::ExtraRoots::parse_pem`] refused (C-004) — the
+    /// single choke point every extra-CA-roots byte passes through before any
+    /// write. `#[error(transparent)]` forwards `source()` straight past this
+    /// variant to `TlsError`'s own cause, so `TlsError` is never itself a
+    /// chain link the walker can downcast — classification is delegated
+    /// inline instead, mirroring [`Error::SessionPath`] above (not
+    /// `Bootstrap`/`ManagedConfigUpdateFailed`, whose `#[from]` field carries
+    /// its own `#[error("...")]` message and so IS a walkable link).
+    #[error(transparent)]
+    ExtraCaCerts(#[from] crate::tls::TlsError),
     /// A `config.toml` read-modify-write ([`crate::config::edit`]) did not
     /// land: the lock timed out (75), or the read, parse, shape check or
     /// atomic write failed (74). Transparent and delegating like
-    /// [`Error::SessionPath`], so the edit's own message and code reach the
+    /// [`Error::ExtraCaCerts`], so the edit's own message and code reach the
     /// CLI unwrapped — the path is named once, by the edit.
     #[error(transparent)]
     ConfigEdit(#[from] crate::config::edit::EditError),
+    /// Phase 0.5: the bundle `OCX_EXTRA_CA_CERTS` names is valid PEM but not
+    /// UTF-8 (a Latin-1 label line ahead of a block), so it cannot be
+    /// persisted as a TOML string. The registry/index/forge clients still
+    /// trust it — `parse_pem` is bytes-native — only the persistence refuses,
+    /// and as data (65, the `ManagedConfigPublishError::ExtraCaCertsNotUtf8`
+    /// precedent): the file's bytes are what is wrong. Carries the byte count
+    /// only, never the bytes (D-11).
+    #[error(
+        "OCX_EXTRA_CA_CERTS names a bundle that is not UTF-8 ({bytes} bytes) and cannot be persisted; strip the \
+         non-UTF-8 label lines outside the -----BEGIN/-----END blocks, or set `extra_ca_certs = \"<path>\"` in \
+         config.toml instead (a path is read as bytes)"
+    )]
+    ExtraCaCertsNotUtf8 {
+        /// The bundle's length.
+        bytes: usize,
+    },
+    /// Phase 0.5: the `config.toml` document `extra_ca_certs_pem` would
+    /// render into is, or would be, over the loader's own size ceiling
+    /// (64 KiB, `config::loader::MAX_CONFIG_SIZE`) — refused before any
+    /// write, so a value that would make the file unloadable is never
+    /// persisted. "Would leave", not "would grow": a file already over the
+    /// ceiling is refused with its size on disk, before the bundle is added.
+    #[error(
+        "persisting OCX_EXTRA_CA_CERTS would leave {path} at {bytes} bytes, over the {}-byte config limit; shrink the \
+         file, or set `extra_ca_certs = \"<path>\"` in it instead",
+        crate::config::loader::MAX_CONFIG_SIZE
+    )]
+    RenderedConfigTooLarge {
+        /// The `config.toml` path the write was refused for.
+        path: PathBuf,
+        /// The size the document has, or would have had.
+        bytes: usize,
+    },
 }
 
 impl ClassifyExitCode for Error {
@@ -146,7 +190,16 @@ impl ClassifyExitCode for Error {
             // makes exit 78 reachable from `argv` at all — `SetupError` is
             // already registered in `cli::classify`, the inner type is not.
             Error::SessionPath(inner) => inner.classify(),
+            // Delegate to `TlsError::classify` (74/65/78 per C-010) directly —
+            // `#[error(transparent)]` makes `source()` skip this variant
+            // entirely, so returning `None` here (as `Bootstrap` /
+            // `ManagedConfigUpdateFailed` do) would leave the chain walker
+            // with no registered type to downcast and fall through to
+            // `ExitCode::Failure`. Same shape as `Error::SessionPath` above.
+            Error::ExtraCaCerts(inner) => inner.classify(),
             Error::ConfigEdit(inner) => inner.classify(),
+            Error::ExtraCaCertsNotUtf8 { .. } => Some(ExitCode::DataError),
+            Error::RenderedConfigTooLarge { .. } => Some(ExitCode::ConfigError),
         }
     }
 }

@@ -853,6 +853,45 @@ mod tests {
         assert_eq!(classify(err), ExitCode::PolicyBlocked);
     }
 
+    /// DX-15 / C-010: `setup::Error::ExtraCaCerts` is `#[error(transparent)]`,
+    /// so `source()` skips it and the chain walker never sees the `TlsError`;
+    /// the variant's own `classify()` arm must delegate inline. Inline-origin
+    /// content refusal (the env value holds no certificate) is 78.
+    #[test]
+    fn setup_extra_ca_certs_inline_refusal_maps_to_config_error() {
+        use crate::tls::{ExtraRootsSource, TlsError};
+
+        let err = crate::setup::error::Error::ExtraCaCerts(TlsError::Empty {
+            origin: ExtraRootsSource::Env,
+        });
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
+    /// DX-15 / C-010: the file-origin sibling — a path the operator named that
+    /// could not be read as a bounded regular file — is 74 through the same
+    /// transparent wrapper.
+    #[test]
+    fn setup_extra_ca_certs_unreadable_file_maps_to_io_error() {
+        use crate::tls::{ExtraRootsSource, TlsError};
+
+        let err = crate::setup::error::Error::ExtraCaCerts(TlsError::Unreadable {
+            origin: ExtraRootsSource::EnvPath(std::path::PathBuf::from("/dev/zero")),
+            io: std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"),
+        });
+        assert_eq!(classify(err), ExitCode::IoError);
+    }
+
+    /// C-010: the rendered-document ceiling refusal (setup's own, not a
+    /// `TlsError`) is a configuration fault — 78.
+    #[test]
+    fn setup_extra_ca_certs_rendered_config_too_large_maps_to_config_error() {
+        let err = crate::setup::error::Error::RenderedConfigTooLarge {
+            path: std::path::PathBuf::from("/home/x/.ocx/config.toml"),
+            bytes: 70_000,
+        };
+        assert_eq!(classify(err), ExitCode::ConfigError);
+    }
+
     // ── SignError (Slice 1 — referrers signing) ─────────────────────────────
 
     #[test]

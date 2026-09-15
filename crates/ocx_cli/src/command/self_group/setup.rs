@@ -10,7 +10,7 @@ use ocx_lib::activate::ActivateMode;
 use ocx_lib::cli::ExitCode as OcxExitCode;
 use ocx_lib::env;
 use ocx_lib::setup::shell_config::{self, ShellKey, ShellValue};
-use ocx_lib::setup::{self, SessionPathOutcome, SetupOptions, SetupOutcome, VersionSpec};
+use ocx_lib::setup::{self, ExtraCaCertsOutcome, SessionPathOutcome, SetupOptions, SetupOutcome, VersionSpec};
 use ocx_lib::utility::boolean_string::BooleanString;
 use ocx_lib::{ConfigTier, ShellConfig};
 
@@ -481,6 +481,17 @@ fn emit_advisories(context: &crate::app::Context, outcome: &SetupOutcome, dry_ru
             path.display()
         ));
     }
+    // The `[shell]` C-034 warning's sibling (ocx#469): the system scope
+    // decides, so phase 0.5 wrote nothing — the report row says so, this
+    // says where the lock is and what to do about it. Same wording as the
+    // loader's warning for a lower-tier pair.
+    if matches!(outcome.extra_ca_certs, ExtraCaCertsOutcome::SystemLocked) {
+        context.ui().warn(format!(
+            "OCX_EXTRA_CA_CERTS was not persisted: extra_ca_certs / extra_ca_certs_pem are locked by {}; edit the \
+             system tier or ask its owner",
+            ocx_lib::ConfigLoader::system_path().display(),
+        ));
+    }
     // One line per surface this run actually changed, because the remedy
     // differs per surface and a single sentence has to be wrong for one of
     // them. A shell profile is re-read by sourcing it; a session PATH is read
@@ -526,7 +537,9 @@ mod tests {
     use std::path::PathBuf;
 
     use clap::Parser as _;
-    use ocx_lib::setup::{BootstrapOutcome, BootstrapStatus, ManagedConfigSetupOutcome, ProfileOutcome, SetupOutcome};
+    use ocx_lib::setup::{
+        BootstrapOutcome, BootstrapStatus, ExtraCaCertsOutcome, ManagedConfigSetupOutcome, ProfileOutcome, SetupOutcome,
+    };
 
     use super::*;
 
@@ -914,6 +927,7 @@ mod tests {
             reload_hint: false,
             managed_config: ManagedConfigSetupOutcome::NotConfigured,
             session_path: Vec::new(),
+            extra_ca_certs: ExtraCaCertsOutcome::NotConfigured,
         }
     }
 

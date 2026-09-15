@@ -3,7 +3,8 @@
 
 use ocx_lib::cli::Cell;
 use ocx_lib::setup::{
-    BootstrapOutcome, BootstrapStatus, ManagedConfigSetupOutcome, ProfileOutcome, SessionPathOutcome, SetupOutcome,
+    BootstrapOutcome, BootstrapStatus, ExtraCaCertsOutcome, ManagedConfigSetupOutcome, ProfileOutcome,
+    SessionPathOutcome, SetupOutcome,
 };
 use serde::Serialize;
 
@@ -311,6 +312,78 @@ impl ManagedConfigEntry {
     }
 }
 
+// ── extra CA roots persistence outcome (phase 0.5, ocx#448) ─────────────────
+
+/// JSON-serialized `OCX_EXTRA_CA_CERTS` persistence outcome (C-009):
+/// `{"status":"…"}` or, once a value has been resolved,
+/// `{"status":"…","certificates":N}`. `status` is `persisted` / `unchanged` /
+/// `not_configured` normally, and `would_persist` / `unchanged` /
+/// `not_configured` under `--dry-run` — the same dry-run convention
+/// [`ManagedConfigEntry`] uses (`would_adopt` / `would_refresh`).
+/// `system_locked` (no count, in either mode) says the value was set but the
+/// system tier locks the pair, so nothing was validated or written (ocx#469).
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ExtraCaCertsEntry {
+    status: ExtraCaCertsStatusKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(extend("x-ocx-absent-when-none" = true))]
+    certificates: Option<usize>,
+}
+
+/// Serde-facing mirror of [`ExtraCaCertsOutcome`] (`snake_case` discriminant).
+#[derive(Serialize, schemars::JsonSchema, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum ExtraCaCertsStatusKind {
+    NotConfigured,
+    Unchanged,
+    Persisted,
+    WouldPersist,
+    SystemLocked,
+}
+
+impl ExtraCaCertsEntry {
+    pub fn from_outcome(outcome: &ExtraCaCertsOutcome) -> Self {
+        match outcome {
+            ExtraCaCertsOutcome::NotConfigured => Self {
+                status: ExtraCaCertsStatusKind::NotConfigured,
+                certificates: None,
+            },
+            ExtraCaCertsOutcome::Unchanged { certificates } => Self {
+                status: ExtraCaCertsStatusKind::Unchanged,
+                certificates: Some(*certificates),
+            },
+            ExtraCaCertsOutcome::Persisted { certificates } => Self {
+                status: ExtraCaCertsStatusKind::Persisted,
+                certificates: Some(*certificates),
+            },
+            ExtraCaCertsOutcome::WouldPersist { certificates } => Self {
+                status: ExtraCaCertsStatusKind::WouldPersist,
+                certificates: Some(*certificates),
+            },
+            ExtraCaCertsOutcome::SystemLocked => Self {
+                status: ExtraCaCertsStatusKind::SystemLocked,
+                certificates: None,
+            },
+        }
+    }
+
+    /// Plain-text summary for the key/value table — omitted entirely when
+    /// `not_configured` (mirrors [`ManagedConfigEntry`]'s row-suppression).
+    pub fn summary(&self) -> String {
+        // Every resolved outcome carries a count (`From<&ExtraCaCertsOutcome>`
+        // above), so the default is unreachable rather than a `?` to explain.
+        let count = self.certificates.unwrap_or_default();
+        let certificates = || format!("{count} certificate{}", if count == 1 { "" } else { "s" });
+        match self.status {
+            ExtraCaCertsStatusKind::NotConfigured => "not configured".to_string(),
+            ExtraCaCertsStatusKind::Unchanged => format!("unchanged ({})", certificates()),
+            ExtraCaCertsStatusKind::Persisted => format!("persisted ({})", certificates()),
+            ExtraCaCertsStatusKind::WouldPersist => format!("would persist ({})", certificates()),
+            ExtraCaCertsStatusKind::SystemLocked => "system-locked (not persisted)".to_string(),
+        }
+    }
+}
+
 // ── SelfSetupData ─────────────────────────────────────────────────────────────
 
 /// CLI wrapper around [`SetupOutcome`] for API reporting.
@@ -326,6 +399,9 @@ impl ManagedConfigEntry {
 ///   the adopt/refresh paths (`adopted` / `already_adopted` / `refreshed` /
 ///   `refresh_unavailable` / `would_refresh`), `"previous_digest"` on
 ///   `refreshed`, and `"reason"` on `refresh_unavailable`.
+/// - `extra_ca_certs` is always present: `{"status":"…"}`, plus
+///   `"certificates":N` once a value has resolved (`unchanged` / `persisted` /
+///   `would_persist`; never on `system_locked`).
 /// - `session_path` is always present, one entry per store this host owns:
 ///   `[{"location":"…","outcome":"written"}]`. Empty only where the platform
 ///   has no session-PATH facility at all.
@@ -366,6 +442,11 @@ pub struct SelfSetupData {
     reload_hint: bool,
     /// Result of adopting/clearing the `--managed-config` tier (phase 1.5).
     managed_config: ManagedConfigEntry,
+    /// Result of persisting `OCX_EXTRA_CA_CERTS` into `config.toml` (phase
+    /// 0.5, ocx#448). Always present; only `certificates` is omitted, on
+    /// `not_configured`. The plain table suppresses its row the same way
+    /// `managed_config`'s does, when `not_configured`.
+    extra_ca_certs: ExtraCaCertsEntry,
 }
 
 impl SelfSetupData {
@@ -408,6 +489,7 @@ impl SelfSetupData {
             conflicting_ocx: outcome.conflicting_ocx.as_ref().map(|path| path.display().to_string()),
             reload_hint: outcome.reload_hint,
             managed_config: ManagedConfigEntry::from_outcome(&outcome.managed_config),
+            extra_ca_certs: ExtraCaCertsEntry::from_outcome(&outcome.extra_ca_certs),
         }
     }
 }
@@ -481,6 +563,11 @@ impl Printable for SelfSetupData {
             values.push(Cell::from(self.managed_config.summary()));
         }
 
+        if !matches!(self.extra_ca_certs.status, ExtraCaCertsStatusKind::NotConfigured) {
+            fields.push("Extra CA certs".into());
+            values.push(Cell::from(self.extra_ca_certs.summary()));
+        }
+
         printer.print_table(&["Field".into(), "Value".into()], &[fields, values]);
     }
 }
@@ -490,7 +577,8 @@ mod tests {
     use std::path::PathBuf;
 
     use ocx_lib::setup::{
-        BootstrapOutcome, BootstrapStatus, ManagedConfigSetupOutcome, ProfileOutcome, SessionPathOutcome, SetupOutcome,
+        BootstrapOutcome, BootstrapStatus, ExtraCaCertsOutcome, ManagedConfigSetupOutcome, ProfileOutcome,
+        SessionPathOutcome, SetupOutcome,
     };
     use serde_json::json;
 
@@ -510,6 +598,7 @@ mod tests {
             reload_hint: false,
             managed_config: ManagedConfigSetupOutcome::NotConfigured,
             session_path: Vec::new(),
+            extra_ca_certs: ExtraCaCertsOutcome::NotConfigured,
         }
     }
 
