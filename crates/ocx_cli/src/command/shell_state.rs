@@ -494,7 +494,9 @@ impl Resolution {
 async fn resolve_project(context: &crate::app::Context, whitelist: &ShellConsent) -> Resolution {
     let (config_path, _) = match project_context::resolve_project_paths(context, None).await {
         Ok(paths) => paths,
-        Err(ProjectContextError::NoProject { .. }) => return Resolution::None,
+        Err(ProjectContextError::NoProject { .. } | ProjectContextError::NoProjectIn { .. }) => {
+            return Resolution::None;
+        }
         Err(e) => return Resolution::Failed(format!("{e}")),
     };
 

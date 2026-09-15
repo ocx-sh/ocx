@@ -76,10 +76,17 @@ pub struct ProjectContext {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ProjectContextError {
-    /// No `ocx.toml` was found in `cwd` or any parent directory (nor via the
-    /// `OCX_PROJECT` env override or `--project` flag).
+    /// No `ocx.toml` was found in `cwd` or any parent directory, and no
+    /// explicit selection was in effect.
     #[error("no ocx.toml found in {cwd} or any parent; run `ocx init` to create one")]
     NoProject { cwd: PathBuf },
+
+    /// `--project` / `OCX_PROJECT` named `dir`, and it holds no `ocx.toml`.
+    /// Its own variant because the walk's wording names the working
+    /// directory and claims a parent walk, neither of which happened
+    /// ([ocx-sh/ocx#457](https://github.com/ocx-sh/ocx/issues/457)).
+    #[error("no ocx.toml in {dir} (check --project or OCX_PROJECT); run `ocx init` in that directory to create one")]
+    NoProjectIn { dir: PathBuf },
 
     /// `ocx.toml` was found but its `ocx.lock` is absent, or exists and no
     /// longer describes it. Both states are the library's
@@ -112,7 +119,7 @@ impl ocx_lib::cli::ClassifyExitCode for ProjectContextError {
         match self {
             // Misuse: the user pointed a project-tier command at a tree with
             // no `ocx.toml`.
-            Self::NoProject { .. } => Some(ExitCode::UsageError),
+            Self::NoProject { .. } | Self::NoProjectIn { .. } => Some(ExitCode::UsageError),
             // 78 for an absent lock, 65 for a stale one — the mapping lives
             // with the wording it belongs to.
             Self::Lock(currency) => currency.classify(),
@@ -229,6 +236,15 @@ pub async fn ensure_global_project_initialized(context: &crate::app::Context) ->
     }
 }
 
+/// The error for a resolution that answered `None`: the explicit selection's
+/// directory when one was in effect, else the directory the walk started at.
+fn no_project(context: &crate::app::Context, walked_from: PathBuf) -> ProjectContextError {
+    match ocx_lib::ConfigLoader::explicit_project(context.project_path()) {
+        Some(dir) => ProjectContextError::NoProjectIn { dir },
+        None => ProjectContextError::NoProject { cwd: walked_from },
+    }
+}
+
 /// Resolve the in-scope `ocx.toml` and its sibling `ocx.lock` path, and stop.
 ///
 /// The path half of [`load_project_with_lock`], without the loads or the two
@@ -272,7 +288,7 @@ pub async fn resolve_project_paths(
     let home = context.file_structure().root().to_path_buf();
     let resolved = ProjectConfig::resolve(Some(&start), context.project_path(), Some(&home), context.global()).await?;
 
-    resolved.ok_or(ProjectContextError::NoProject { cwd: start })
+    resolved.ok_or_else(|| no_project(context, start))
 }
 
 pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<ProjectContext, ProjectContextError> {
@@ -293,9 +309,7 @@ pub async fn load_project_with_lock(context: &crate::app::Context) -> Result<Pro
 
     let (config_path, lock_path) = match resolved {
         Some(pair) => pair,
-        None => {
-            return Err(ProjectContextError::NoProject { cwd });
-        }
+        None => return Err(no_project(context, cwd)),
     };
 
     // Load the config so callers can validate `--group` names against real
@@ -743,7 +757,7 @@ pub async fn load_project_for_mutate(context: &crate::app::Context) -> Result<Mu
     let resolved = ProjectConfig::resolve(Some(&cwd), context.project_path(), Some(&home), context.global()).await?;
     let (config_path, lock_path) = match resolved {
         Some(pair) => pair,
-        None => return Err(ProjectContextError::NoProject { cwd }),
+        None => return Err(no_project(context, cwd)),
     };
 
     // Acquire the exclusive flock on the resolved config file BEFORE loading

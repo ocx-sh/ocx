@@ -18,6 +18,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from src.helpers import make_package
 from src.runner import OcxRunner
 
@@ -229,6 +231,46 @@ def test_status_outside_a_project_exits_64(ocx: OcxRunner, tmp_path: Path) -> No
 
     assert result.returncode == EXIT_USAGE, (
         f"expected 64, got {result.returncode}\nstderr: {result.stderr}"
+    )
+
+
+@pytest.mark.parametrize("spelling", ["flag", "env"])
+def test_status_names_the_selected_directory_when_it_holds_no_manifest(
+    ocx: OcxRunner, tmp_path: Path, spelling: str
+) -> None:
+    """``--project <dir>`` / ``OCX_PROJECT=<dir>`` naming a directory with no
+    ``ocx.toml`` still exits 64, but the error names *that* directory — not the
+    working directory, and not a parent walk that never ran
+    (`ocx-sh/ocx#457 <https://github.com/ocx-sh/ocx/issues/457>`_).
+    """
+    selected = tmp_path / "probe-empty"
+    selected.mkdir()
+    elsewhere = tmp_path / "cwd"
+    elsewhere.mkdir()
+
+    if spelling == "flag":
+        result = _run(ocx, elsewhere, "--project", str(selected), "status")
+    else:
+        result = subprocess.run(
+            [str(ocx.binary), "status"],
+            cwd=elsewhere,
+            capture_output=True,
+            text=True,
+            env={**ocx.env, "OCX_PROJECT": str(selected)},
+            check=False,
+        )
+
+    assert result.returncode == EXIT_USAGE, (
+        f"expected 64, got {result.returncode}\nstderr: {result.stderr}"
+    )
+    assert str(selected) in result.stderr, (
+        f"the error must name the selected directory:\n{result.stderr}"
+    )
+    assert str(elsewhere) not in result.stderr, (
+        f"the error must not name the working directory:\n{result.stderr}"
+    )
+    assert "any parent" not in result.stderr, (
+        f"no walk happened, so none may be claimed:\n{result.stderr}"
     )
 
 

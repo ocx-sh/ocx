@@ -760,11 +760,10 @@ impl ConfigLoader {
         cwd: Option<&Path>,
         explicit: Option<&Path>,
     ) -> std::result::Result<Option<PathBuf>, crate::config::error::Error> {
-        // Tier 1: explicit `--project` flag — highest priority. Follows
-        // symlinks (trusted caller intent). Missing file → FileNotFound.
-        // Not gated by `OCX_NO_PROJECT` (Amendment G3).
-        if let Some(path) = explicit {
-            return Self::resolve_explicit_project_path(path).await;
+        // Tiers 1–2: an explicit selection. Follows symlinks (trusted
+        // caller intent). Missing file → FileNotFound.
+        if let Some(path) = Self::explicit_project(explicit) {
+            return Self::resolve_explicit_project_path(&path).await;
         }
 
         // `OCX_NO_PROJECT=1` prunes BOTH env-var and CWD-walk lookups
@@ -772,19 +771,8 @@ impl ConfigLoader {
         // env-var tier-config behavior deliberately: the project file is
         // a single, unique source, not a composed tier chain — so "turn
         // project discovery off entirely" is the useful kill switch.
-        let no_project = crate::env::flag("OCX_NO_PROJECT", false);
-        if no_project {
+        if crate::env::flag("OCX_NO_PROJECT", false) {
             return Ok(None);
-        }
-
-        // Tier 2: `OCX_PROJECT` env var. Empty string is the escape
-        // hatch (matches `OCX_CONFIG=""` pattern in `load()` above).
-        let raw_env = crate::env::var("OCX_PROJECT");
-        if raw_env.as_deref() == Some("") {
-            log::debug!("OCX_PROJECT is set to empty string — skipped via escape hatch");
-        }
-        if let Some(env_path) = raw_env.filter(|s| !s.is_empty()) {
-            return Self::resolve_explicit_project_path(Path::new(&env_path)).await;
         }
 
         // Tier 3: CWD walk.
@@ -825,6 +813,31 @@ impl ConfigLoader {
         Ok(walk_result)
     }
 
+    /// The explicit project selection in effect, if any: the `--project`
+    /// flag outranks `OCX_PROJECT`, and `OCX_NO_PROJECT=1` prunes the env var
+    /// but never the flag (Amendment G3). `OCX_PROJECT=""` is the escape hatch
+    /// (matches `OCX_CONFIG=""` in `load()`).
+    ///
+    /// Public so a caller that turned a `None` from [`Self::project_path`]
+    /// into "no project" can say *where* it looked: a selection that named a
+    /// directory holding no `ocx.toml` is answered with that directory, not
+    /// with the working directory of a walk that never ran
+    /// ([ocx-sh/ocx#457](https://github.com/ocx-sh/ocx/issues/457)).
+    #[must_use]
+    pub fn explicit_project(flag: Option<&Path>) -> Option<PathBuf> {
+        if let Some(path) = flag {
+            return Some(path.to_path_buf());
+        }
+        if crate::env::flag("OCX_NO_PROJECT", false) {
+            return None;
+        }
+        let raw_env = crate::env::var("OCX_PROJECT");
+        if raw_env.as_deref() == Some("") {
+            log::debug!("OCX_PROJECT is set to empty string — skipped via escape hatch");
+        }
+        raw_env.filter(|s| !s.is_empty()).map(PathBuf::from)
+    }
+
     /// Resolve an explicit project-tier path (from `--project` or
     /// `OCX_PROJECT`). Explicit paths follow symlinks.
     ///
@@ -857,7 +870,7 @@ impl ConfigLoader {
                     Ok(meta) if meta.file_type().is_file() => Ok(Some(candidate)),
                     // No `ocx.toml` under a directory the caller named: this is
                     // "no project", not "file not found" — the caller turns it
-                    // into `NoProject` (exit 64).
+                    // into `NoProjectIn` (exit 64).
                     Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
                     Ok(_) => Err(Error::Io {
                         path: candidate,
@@ -3260,7 +3273,7 @@ mod tests {
     /// asserted `Error::Io` (exit 74) for the same input. That contract made
     /// `--project .` — and every rendered toolchain trampoline, which re-enters
     /// as `ocx --project '<project root>' exec` — fail before anything ran, and
-    /// put C-068's `NoProject` → exit 64 out of reach: only the directory branch
+    /// put C-068's `NoProjectIn` → exit 64 out of reach: only the directory branch
     /// can tell *this directory governs no project* from *this file is missing*.
     #[tokio::test]
     async fn project_path_explicit_directory_resolves_to_its_project_file() {
@@ -7017,7 +7030,7 @@ mod tests {
     /// whose `ocx.toml` is gone — the project was deleted or moved — resolves to
     /// **no project** rather than to an error.
     ///
-    /// That is what lets the caller answer `NoProject` → exit 64 instead of
+    /// That is what lets the caller answer `NoProjectIn` → exit 64 instead of
     /// `FileNotFound` → 79. Only the directory branch can tell *this directory
     /// governs no project* from *this file is missing*, which is why RUL-55 and
     /// C-068 are one change.

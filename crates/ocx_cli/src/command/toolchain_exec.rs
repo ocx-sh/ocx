@@ -187,7 +187,7 @@ impl ToolchainExec {
         // ── Phase B: project context ──────────────────────────────────────
         // Errors propagate to the `main.rs` boundary: logged once and
         // classified by `app::classify_error` from `ProjectContextError`'s
-        // `ClassifyExitCode` impl (NoProject→64, LockMissing→78, StaleLock→65).
+        // `ClassifyExitCode` impl (NoProjectIn→64, LockMissing→78, StaleLock→65).
         // Consent write seam (C-024, A-29): `run` is one of the commands
         // that opt in. `load_project_with_lock`, which four read-only callers
         // share, stamps nothing.
@@ -594,20 +594,21 @@ fn trampoline_lookup_exclusions(
 /// **selected**, rather than to the directory it happened to run from (C-068).
 ///
 /// A toolchain trampoline re-enters as `ocx --project '<baked home>' exec`, from
-/// whatever working directory the user was in. When the baked home no longer
-/// holds an `ocx.toml`, the shipped path answers about the wrong tier: an
-/// explicit `--project` that is missing is a `config::Error::FileNotFound`
-/// (exit 79) and one naming a directory is a `config::Error::Io` (exit 74),
+/// whatever working directory the user was in. When the baked home is gone
+/// altogether, the shipped path answers about the wrong tier: an explicit
+/// `--project` that is missing is a `config::Error::FileNotFound` (exit 79),
 /// while C-068 requires the three-way contract `ocx exec` already states —
-/// [`ProjectContextError::NoProject`] → **64**,
+/// [`ProjectContextError::NoProjectIn`] → **64**,
 /// [`LockCurrency::Missing`](ocx_lib::project::LockCurrency::Missing) → **78**,
 /// [`LockCurrency::Stale`](ocx_lib::project::LockCurrency::Stale) → **65** —
 /// with the baked path named in each.
 ///
-/// The two lock arms already classify correctly and already carry a path, so
-/// this maps only the first: an explicit selection that did not resolve becomes
-/// `NoProject` naming the selection. Everything else passes through unchanged —
-/// a parse error in a project file that *does* exist is not a missing project.
+/// The two lock arms already classify correctly and already carry a path, and
+/// a baked home that exists but holds no `ocx.toml` already arrives as
+/// `NoProjectIn` naming it, so this maps only the first: an absent selection
+/// becomes `NoProjectIn` naming the selection. Everything else passes through
+/// unchanged — a parse error in a project file that *does* exist is not a
+/// missing project.
 fn attribute_to_selected_project(
     selected: Option<&std::path::Path>,
     error: crate::app::project_context::ProjectContextError,
@@ -615,14 +616,7 @@ fn attribute_to_selected_project(
     use crate::app::project_context::ProjectContextError;
 
     let Some(selected) = selected else { return error };
-    let no_project = || ProjectContextError::NoProject {
-        cwd: selected.to_path_buf(),
-    };
     match error {
-        // The loader answers `NoProject` with the **working directory** it
-        // walked, which for a trampoline is wherever the user happened to be.
-        // The selection is what the invocation actually named.
-        ProjectContextError::NoProject { .. } => no_project(),
         // An explicit selection naming a path that is not there: `FileNotFound`,
         // exit 79. For `ocx exec` the baked home *is* the project, so its
         // absence is `no project` (64) — the same answer the directory branch
@@ -632,7 +626,9 @@ fn attribute_to_selected_project(
         // `ProjectConfig::resolve`, which resolves the project tier and nothing
         // else — the `--config` tier was resolved in `Context::try_init`, long
         // before this call.
-        ProjectContextError::Config(ocx_lib::ConfigError::FileNotFound { .. }) => no_project(),
+        ProjectContextError::Config(ocx_lib::ConfigError::FileNotFound { .. }) => ProjectContextError::NoProjectIn {
+            dir: selected.to_path_buf(),
+        },
         other => other,
     }
 }
@@ -915,7 +911,7 @@ mod tests {
     }
 
     /// **C-068** — an explicit selection that did not resolve becomes
-    /// `NoProject`, **naming the selection**, and classifies as **64**.
+    /// `NoProjectIn`, **naming the selection**, and classifies as **64**.
     ///
     /// This is the trampoline's own path: a rendered body re-enters as
     /// `ocx --project '<baked home>' exec`, from whatever directory the user
@@ -932,13 +928,13 @@ mod tests {
 
         let mapped = attribute_to_selected_project(Some(&baked), error);
         assert!(
-            matches!(&mapped, ProjectContextError::NoProject { cwd } if cwd == &baked),
+            matches!(&mapped, ProjectContextError::NoProjectIn { dir } if dir == &baked),
             "C-068 — the re-attributed error must name the *selected* home, got: {mapped:?}"
         );
         assert_eq!(
             code_of(&mapped),
             ExitCode::UsageError,
-            "C-068 — `NoProject` is exit 64, and the trampoline path inherits it"
+            "C-068 — `NoProjectIn` is exit 64, and the trampoline path inherits it"
         );
     }
 
@@ -955,7 +951,10 @@ mod tests {
 
         let passed_through = attribute_to_selected_project(None, error);
         assert!(
-            !matches!(passed_through, ProjectContextError::NoProject { .. }),
+            !matches!(
+                passed_through,
+                ProjectContextError::NoProject { .. } | ProjectContextError::NoProjectIn { .. }
+            ),
             "with no explicit selection there is no home to attribute the failure to"
         );
         assert_eq!(
@@ -968,7 +967,7 @@ mod tests {
     /// C-068 — a project file that **does exist** but does not parse is not a
     /// missing project, even under an explicit selection.
     ///
-    /// Mutation that reds it: a blanket `_ => NoProject { cwd: selection }`,
+    /// Mutation that reds it: a blanket `_ => NoProjectIn { dir: selection }`,
     /// which would answer 64 for a broken `ocx.toml` and send the user looking
     /// for a file that is right there.
     #[tokio::test]
@@ -988,8 +987,11 @@ mod tests {
 
         let mapped = attribute_to_selected_project(Some(&project), error);
         assert!(
-            !matches!(mapped, ProjectContextError::NoProject { .. }),
-            "a manifest that exists and does not parse is not `NoProject`"
+            !matches!(
+                mapped,
+                ProjectContextError::NoProject { .. } | ProjectContextError::NoProjectIn { .. }
+            ),
+            "a manifest that exists and does not parse is not `NoProjectIn`"
         );
         assert_eq!(
             code_of(&mapped),
