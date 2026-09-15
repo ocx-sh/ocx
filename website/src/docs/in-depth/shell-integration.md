@@ -44,6 +44,18 @@ The ledger is capped at 16 KiB. If it ever grows past that — an unlikely monor
 
 The four shells in the last row still activate correctly the moment the shell starts — the initial compose is unaffected — but nothing re-checks after that. If you add a global tool or `cd` into a newly consented project mid-session in one of those shells, open a new one to see it. nushell sits in between: its `env_change.PWD` hook keeps the global toolchain live on every directory change, but does not yet reconcile a project scope at all — no activation, no revert, no consent check. A nushell project still goes through [`ocx direnv export`][cmd-direnv-export] or [`ocx exec`][cmd-run]. elvish reconciles both scopes at every prompt, same as bash, zsh, fish, and PowerShell, but with a narrower guard — see [Elvish's guard](#activation-elvish-guard) below.
 
+### Nested projects switch, they do not stack {#activation-nested-projects}
+
+The ledger has exactly one project slot, because at any prompt exactly one project is in effect: the walk from your working directory upward stops at the **nearest** `ocx.toml` (or at the first `.git/` boundary it crosses). Whatever a farther ancestor declares is never read.
+
+That matters the moment a repository holds a second `ocx.toml` below its first — a `test/` tree that pins its own `uv` and `pytest`, a `website/` that pins its own `bun`, a vendored sub-repository with a toolchain of its own. Standing at the root, the root's tools are on `PATH`. `cd test/` and they are gone: the prompt reconciles this as a **switch** — the root's contributions are retired and `test/`'s applied in one pass — and the summary line names the project you landed in, `ocx: ~PATH (test)`. `cd ..` and the root's tools come back the same way. Nothing is pushed onto a stack, so nothing is ever popped out of order. Consent follows the same line: the inner project is its own project, so the outer one's [stamp](#consent) does not cover it — only a subtree [path grant](#consent) over the enclosing directory reaches both.
+
+If a nested project needs a tool the enclosing one declares, declare it there too: [`ocx add`][cmd-add] inside `test/` writes it into `test/ocx.toml`, and that file plus its `ocx.lock` is the whole answer for everything beneath it. [`ocx exec`][cmd-run] follows the same walk, so it composes the nearest file's lock alone; to run against the enclosing project from inside the nested one, name it — `ocx --project .. exec -- cmake --version` — rather than expecting the walk to reach past the nearer file.
+
+::: info direnv's shape, not mise's
+[direnv][direnv] loads the closest `.envrc` and nothing above it unless that file opts in with `source_up`. [mise][mise-config-hierarchy] does the opposite: every `mise.toml` up the tree is merged, nearest wins per tool. OCX follows direnv here, minus the opt-in — one file, one lock, one reproducible answer per directory, with no second file able to change what the lock says.
+:::
+
 ### A project created where you already are {#activation-project-created-in-place}
 
 The guard the hooked shells run on every prompt compares a freshness stamp against a set of file paths **baked in when the hook was last emitted** — the project file OCX resolved and the `ocx.lock` beside it, the global tier's pair, the config files that were read, and the project's consent stamp. That set carries the project entries only when a project was actually in effect, so a directory that had no `ocx.toml` gave the guard nothing to watch for one appearing: the carrier was set, the stamp was fresh and the directory had not changed, so [`ocx init`][cmd-init] (or a `git checkout` that brings a project in, or an editor writing the file) left the shell inert until the next `cd` or a new terminal.
@@ -283,6 +295,7 @@ With no `[[trust.policy]]` configured, automatic verification is a no-op — som
 [direnv]: https://direnv.net/
 [direnv-82]: https://github.com/direnv/direnv/issues/82
 [direnv-1249]: https://github.com/direnv/direnv/issues/1249
+[mise-config-hierarchy]: https://mise.jdx.dev/configuration.html#configuration-hierarchy
 [devcontainer-features]: https://containers.dev/implementors/features/
 [git-safe-directory]: https://git-scm.com/docs/git-config#Documentation/git-config.txt-safedirectory
 [p10k]: https://github.com/romkatv/powerlevel10k

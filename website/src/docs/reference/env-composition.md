@@ -103,6 +103,8 @@ OCX has two toolchain tiers. Selection is always explicit — there is no implic
 
 The two flags are mutually exclusive — combining `--global` with `--project` exits with code 64 (`UsageError`).
 
+**The walk stops at the first `ocx.toml` it meets.** A project nested inside another one *replaces* it: from inside the nested directory, only the nearer file and its lock are composed, and nothing the enclosing `ocx.toml` declares reaches the environment — the shell hook retires the enclosing project's tools on the way in and restores them on the way out. Two project files never layer. See [Nested projects switch, they do not stack][in-depth-shell-integration-nested] for the full walkthrough.
+
 **No implicit home-tier discovery.** Earlier versions of OCX fell back to `$OCX_HOME/ocx.toml` when the CWD walk found nothing. That behavior has been removed. The global toolchain is only active when explicitly requested. A CWD walk that finds nothing means no project tier is active — the command operates without a project context.
 
 ### Root `--global` affects these toolchain-tier commands {#tier-selection-commands}
@@ -389,6 +391,7 @@ Project and group `[env]` entries have no visibility axis at all — a project i
 [cmd-remove]: ./command-line.md#remove
 [cmd-run]: ./command-line.md#exec
 [in-depth-shell-integration]: ../in-depth/shell-integration.md
+[in-depth-shell-integration-nested]: ../in-depth/shell-integration.md#activation-nested-projects
 [env-ocx-env-state]: ./environment.md#ocx-env-state
 [cmd-update]: ./command-line.md#update
 [cmd-direnv-export]: ./command-line.md#direnv-export

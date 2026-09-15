@@ -874,6 +874,8 @@ Alias: `x`.
 
 Spawns a child process whose environment is composed from the project's `ocx.lock`. This is the **project-tier** env-composition command — symbols are binding names from `ocx.toml`, not OCI identifiers. For OCI-identifier-based invocations, use [`package exec`](#package-exec).
 
+The project is the nearest `ocx.toml` above the current directory — the same walk [`--project`](#arg-project) describes — and only that file's lock is composed. Inside a project nested in another one, the enclosing project's tools are not part of the child environment; name it with `ocx --project <dir> exec` to run against it instead (see [Nested projects switch, they do not stack][in-depth-shell-integration-nested]).
+
 A binding missing from the local object store is auto-installed as part of composition. Because it auto-installs, a binding covered by a [`[[trust.policy]]`][config-trust] is signature-verified first — the same gate as [`package install`](#package-install) (see its auto-verify contract). No `--verify`/`--no-verify` flag here; opt out via [`OCX_NO_VERIFY`][env-no-verify].
 
 `--` is mandatory and at least one token after it is required. A missing `--` or empty argv produces exit 64.
@@ -6156,6 +6158,7 @@ or a registry error) — the report then degrades to a local-state-only summary
 [in-depth-shell-integration]: ../in-depth/shell-integration.md
 [in-depth-shell-integration-commands]: ../in-depth/shell-integration.md#commands
 [in-depth-shell-integration-consent]: ../in-depth/shell-integration.md#consent
+[in-depth-shell-integration-nested]: ../in-depth/shell-integration.md#activation-nested-projects
 
 <!-- environment -->
 [env-ocx-global]: ./environment.md#ocx-global

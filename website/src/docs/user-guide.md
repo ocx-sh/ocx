@@ -638,7 +638,7 @@ Both compose identically, which is what makes the second useful for debugging th
 
 Project tools should land on `PATH` the moment you `cd` into the project, and leave again when you `cd` back out — without a separate `eval` step and without leaking into whatever else that shell does afterward.
 
-In bash, zsh, fish, PowerShell, and elvish, this rides the same per-prompt hook the [global toolchain](#global-toolchain-shell) uses: `cd` into a project OCX has been given consent to activate, and its locked tools land on `PATH` at the very next prompt — no `.envrc`, no `direnv allow`, no separate `eval`. `cd` back out and they revert. The same [`OCX_NO_HOOK`][env-ocx-no-hook] / `ocx self setup --no-hook` switch turns it off.
+In bash, zsh, fish, PowerShell, and elvish, this rides the same per-prompt hook the [global toolchain](#global-toolchain-shell) uses: `cd` into a project OCX has been given consent to activate, and its locked tools land on `PATH` at the very next prompt — no `.envrc`, no `direnv allow`, no separate `eval`. `cd` back out and they revert. A project nested inside another one is a *switch*, not a stack: only the nearest `ocx.toml` is in effect, so `cd` into the inner project and the outer one's tools leave `PATH` until you come back — see [Nested projects switch, they do not stack][in-depth-shell-integration-nested]. The same [`OCX_NO_HOOK`][env-ocx-no-hook] / `ocx self setup --no-hook` switch turns it off.
 
 [`ocx pull`][cmd-pull] renders the toolchain the lock describes, and from then on the tool answers to its own name — resolved through the project's toolchain rather than through whatever the machine happens to have installed. The recording below composes the environment explicitly with [`ocx env`][cmd-env-root], because a recorded shell has no prompt to hook; in your own shell the hook does that step at the next prompt and the rest is identical:
 
@@ -1605,6 +1605,7 @@ The `--project` flag and the [`OCX_PROJECT`][env-project] environment variable n
 [in-depth-environments-last-wins]: ./in-depth/environments.md#last-wins
 [in-depth-shell-integration]: ./in-depth/shell-integration.md
 [in-depth-shell-integration-consent]: ./in-depth/shell-integration.md#consent
+[in-depth-shell-integration-nested]: ./in-depth/shell-integration.md#activation-nested-projects
 [in-depth-shell-integration-session-path]: ./in-depth/shell-integration.md#session-path
 [in-depth-entry-points]: ./in-depth/entry-points.md
 [in-depth-configuration]: ./in-depth/configuration.md
