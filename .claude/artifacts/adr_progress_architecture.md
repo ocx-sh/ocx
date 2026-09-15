@@ -160,3 +160,20 @@ Rust integration test (or pytest acceptance): under multi-thread tokio runtime, 
 - Add ADR row to `arch-principles.md` "ADR Index".
 - Rewrite "Progress Pattern" in `subsystem-package-manager.md`; update `subsystem-oci.md` / `subsystem-mirror.md` progress mentions.
 - Research evidence captured inline in "Industry context" above (worker-researcher returned findings inline, not persisted as a separate artifact).
+
+## Amendment 2026-09-15 — a bar exists only while bytes move
+
+ocx's own task spinners (`Resolving`/`Pulling`/`Finding`/`Inspecting`/
+`Deselecting`/`Uninstalling`) are removed. Each wrapped an operation whose
+common case moves no bytes — a store hit, an index lookup, a symlink — and
+indicatif draws on `set_message` before the operation can return, so every
+cached `ocx exec` and every shim re-entry painted and cleared a frame. The
+Phase 6 `inherit_scope` helper went with them. `Spinner::scope` and the
+`PARENT_BAR` task-local stay: ocx-mirror nests its upload bars under its own
+prepare/push spinners, which do own a long-running parent.
+
+Two consequences the ADR did not state: `--quiet` now yields a `disabled()`
+manager (the only switch a wrapper has against a bar on a terminal stderr),
+and `PackageManager::with_progress` re-targets the `oci::Client`'s bars too,
+so `materialize_deferred`'s `lazy-report` channel governs the download bar
+rather than only the (now absent) task spinner.

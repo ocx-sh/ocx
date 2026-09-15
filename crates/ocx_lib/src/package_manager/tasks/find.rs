@@ -134,7 +134,6 @@ impl PackageManager {
             return Ok(Vec::new());
         }
         if packages.len() == 1 {
-            let _spin = self.progress().spinner(format!("Finding '{}'", packages[0]));
             let info = self.find(&packages[0], platform).await.map_err(|kind| {
                 package_manager::error::Error::FindFailed(vec![PackageError::new(packages[0].clone(), kind)])
             })?;
@@ -147,7 +146,6 @@ impl PackageManager {
             let package = package.clone();
             let platform = platform.clone();
             tasks.spawn(async move {
-                let _spin = mgr.progress().spinner(format!("Finding '{package}'"));
                 let result = mgr.find(&package, platform).await;
                 (package, result)
             });

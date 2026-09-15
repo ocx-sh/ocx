@@ -214,7 +214,6 @@ async fn locate_all(
         let package = package.clone();
         let platform = platform.clone();
         tasks.spawn(async move {
-            let _spinner = manager.progress().spinner(format!("Finding '{package}'"));
             let result = locate(&manager, &file_structure, &package, platform, mode).await;
             (index, result)
         });

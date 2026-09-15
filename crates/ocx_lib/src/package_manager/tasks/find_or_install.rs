@@ -106,13 +106,9 @@ impl PackageManager {
             return Ok(Vec::new());
         }
         if packages.len() == 1 {
-            let spin = self.progress().spinner(format!("Resolving '{}'", packages[0]));
-            let found = spin
-                .scope(self.find_or_install(&packages[0], platform))
-                .await
-                .map_err(|kind| {
-                    package_manager::error::Error::FindFailed(vec![PackageError::new(packages[0].clone(), kind)])
-                })?;
+            let found = self.find_or_install(&packages[0], platform).await.map_err(|kind| {
+                package_manager::error::Error::FindFailed(vec![PackageError::new(packages[0].clone(), kind)])
+            })?;
             return Ok(vec![found]);
         }
 
@@ -127,8 +123,7 @@ impl PackageManager {
 
             tasks.spawn(async move {
                 let _permit = super::super::concurrency::acquire_permit(&sem).await;
-                let spin = mgr.progress().spinner(format!("Resolving '{pkg}'"));
-                let result = spin.scope(mgr.find_or_install(&pkg, plat)).await;
+                let result = mgr.find_or_install(&pkg, plat).await;
                 (pkg, result)
             });
         }
